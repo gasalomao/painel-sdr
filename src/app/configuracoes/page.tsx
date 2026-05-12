@@ -104,6 +104,7 @@ export default function ConfiguracoesPage() {
   const [dbCopied, setDbCopied] = useState(false);
   // Alvo customizado (pra checar outro Supabase sem trocar o .env)
   const [customUrl, setCustomUrl] = useState("");
+  const [customAnonKey, setCustomAnonKey] = useState("");
   const [customServiceRole, setCustomServiceRole] = useState("");
 
   useEffect(() => {
@@ -662,10 +663,10 @@ export default function ConfiguracoesPage() {
               </details>
             </div>
 
-            {/* Opcional: checar outro Supabase (sem trocar o .env) */}
-            <details className="rounded-2xl border border-white/10 bg-white/[0.02] overflow-hidden">
+            {/* Formulário para vincular o Supabase definitivamente no .env.local */}
+            <details className="rounded-2xl border border-white/10 bg-white/[0.02] overflow-hidden" open>
               <summary className="cursor-pointer px-4 py-3 text-[11px] font-bold text-white/80 hover:text-white">
-                Vou trocar de Supabase — verificar outro projeto antes de apontar o app
+                Vincular sistema a um novo Supabase (Salvar credenciais)
               </summary>
               <div className="p-4 pt-2 space-y-3">
                 <div className="space-y-1">
@@ -674,6 +675,17 @@ export default function ConfiguracoesPage() {
                     value={customUrl}
                     onChange={e => setCustomUrl(e.target.value)}
                     placeholder="https://xxxxxx.supabase.co"
+                    className="bg-black/40 border-white/10 font-mono text-xs h-9"
+                    autoComplete="off"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[9px] font-black uppercase tracking-widest text-muted-foreground">Anon Key</label>
+                  <Input
+                    type="password"
+                    value={customAnonKey}
+                    onChange={e => setCustomAnonKey(e.target.value)}
+                    placeholder="eyJ... (role = anon)"
                     className="bg-black/40 border-white/10 font-mono text-xs h-9"
                     autoComplete="off"
                   />
@@ -690,18 +702,48 @@ export default function ConfiguracoesPage() {
                   />
                   <p className="text-[9px] text-muted-foreground">Dashboard → Project Settings → API → <strong>service_role secret</strong>.</p>
                 </div>
-                <Button
-                  onClick={() => checkDatabase(customUrl, customServiceRole)}
-                  disabled={!customUrl || !customServiceRole || dbCheckLoading}
-                  variant="outline"
-                  className="bg-white/5 border-white/10 text-white hover:bg-white/10 text-[11px] font-bold uppercase tracking-widest gap-2"
-                >
-                  {dbCheckLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
-                  Verificar este projeto
-                </Button>
+                
+                <div className="flex gap-2 pt-2">
+                  <Button
+                    onClick={() => checkDatabase(customUrl, customServiceRole)}
+                    disabled={!customUrl || !customServiceRole || dbCheckLoading}
+                    variant="outline"
+                    className="bg-white/5 border-white/10 text-white hover:bg-white/10 text-[11px] font-bold uppercase tracking-widest gap-2"
+                  >
+                    {dbCheckLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+                    Verificar apenas
+                  </Button>
+                  <Button
+                    onClick={async () => {
+                      if (!customUrl || !customAnonKey || !customServiceRole) {
+                        alert("Preencha todos os campos");
+                        return;
+                      }
+                      try {
+                        const res = await fetch("/api/setup-db", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ url: customUrl, anonKey: customAnonKey, serviceRole: customServiceRole })
+                        });
+                        const data = await res.json();
+                        if (data.success) {
+                          alert("✅ CREDENCIAIS SALVAS NO .ENV.LOCAL COM SUCESSO!\n\nPara o sistema passar a usar esse banco de dados agora, você PRECISA:\n1. Parar o terminal atual (Ctrl+C).\n2. Rodar 'npm run dev' novamente.");
+                        } else {
+                          alert("Erro ao salvar: " + data.error);
+                        }
+                      } catch (err: any) {
+                        alert("Erro ao salvar: " + err.message);
+                      }
+                    }}
+                    disabled={!customUrl || !customAnonKey || !customServiceRole}
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold uppercase tracking-widest gap-2 flex-1"
+                  >
+                    Salvar e Sobrescrever .env.local
+                  </Button>
+                </div>
                 <p className="text-[10px] text-muted-foreground leading-relaxed">
                   <Info className="w-3 h-3 inline mr-1 -mt-0.5" />
-                  Essa verificação apenas LÊ o schema remoto (não altera nada). Pra <em>apontar</em> o app pra esse Supabase, troque <span className="font-mono">NEXT_PUBLIC_SUPABASE_URL</span>, <span className="font-mono">NEXT_PUBLIC_SUPABASE_ANON_KEY</span> e <span className="font-mono">SUPABASE_SERVICE_ROLE_KEY</span> no Easypanel (aba Environment) e rebuilde.
+                  O botão salvar escreve as credenciais no arquivo <span className="font-mono">.env.local</span>. Como o Next.js carrega esse arquivo apenas no momento em que o servidor liga, você <strong>precisará reiniciar o terminal</strong> para que as alterações tenham efeito.
                 </p>
               </div>
             </details>

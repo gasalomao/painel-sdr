@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { SETUP_SQL } from "@/lib/setup-sql";
+import fs from "fs";
+import path from "path";
 
 export const dynamic = "force-dynamic";
 
@@ -83,4 +85,43 @@ export async function GET(req: NextRequest) {
       return m ? `https://supabase.com/dashboard/project/${m[1]}/sql/new` : null;
     })(),
   });
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const { url, anonKey, serviceRole } = await req.json();
+
+    if (!url || !anonKey || !serviceRole) {
+      return NextResponse.json({ success: false, error: "Preencha todos os campos." }, { status: 400 });
+    }
+
+    const envPath = path.join(process.cwd(), '.env.local');
+    
+    // Se o arquivo não existir, cria vazio
+    if (!fs.existsSync(envPath)) {
+      fs.writeFileSync(envPath, '', 'utf8');
+    }
+
+    let envContent = fs.readFileSync(envPath, 'utf8');
+
+    // Substitui as variáveis (ou adiciona se não existirem)
+    const updateOrAdd = (key: string, value: string) => {
+      const regex = new RegExp(`^${key}=.*`, 'm');
+      if (regex.test(envContent)) {
+        envContent = envContent.replace(regex, `${key}=${value}`);
+      } else {
+        envContent += `\n${key}=${value}`;
+      }
+    };
+
+    updateOrAdd('NEXT_PUBLIC_SUPABASE_URL', url);
+    updateOrAdd('NEXT_PUBLIC_SUPABASE_ANON_KEY', anonKey);
+    updateOrAdd('SUPABASE_SERVICE_ROLE_KEY', serviceRole);
+
+    fs.writeFileSync(envPath, envContent, 'utf8');
+
+    return NextResponse.json({ success: true, message: "Variáveis de ambiente atualizadas com sucesso no .env.local" });
+  } catch (err: any) {
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  }
 }
