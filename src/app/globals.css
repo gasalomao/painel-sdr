@@ -1,0 +1,359 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+:root {
+  /* PREMIUM DARK BLUE THEME (Unconditional) */
+  --background: 225 40% 6%; /* Deep Navy Blue #090e17 */
+  --foreground: 210 40% 98%; /* Pure white text */
+  --card: 225 35% 9%; /* Slightly raised card #0f1623 */
+  --card-foreground: 210 40% 98%;
+  --popover: 225 35% 12%; /* Noticeably raised popovers #141c2b */
+  --popover-foreground: 210 40% 98%;
+  
+  --primary: 215 90% 60%; /* Vibrant Royal Blue */
+  --primary-foreground: 0 0% 100%;
+  --secondary: 225 30% 14%;
+  --secondary-foreground: 210 40% 98%;
+  --muted: 225 30% 12%;
+  --muted-foreground: 215 20% 65%; /* Readable muted */
+  --accent: 215 90% 60%;
+  --accent-foreground: 0 0% 100%;
+  
+  --destructive: 0 84% 60%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 225 30% 14%; /* Clear border lines */
+  --input: 225 30% 14%;
+  --ring: 215 90% 60%;
+  --radius: 1rem;
+  
+  --chart-1: oklch(0.62 0.19 265);
+  --chart-2: oklch(0.7 0.18 160);
+  --chart-3: oklch(0.65 0.2 40);
+  --chart-4: oklch(0.7 0.15 300);
+  --chart-5: oklch(0.75 0.12 80);
+  
+  --sidebar: 225 40% 7%;
+  --sidebar-foreground: 210 40% 98%;
+  --sidebar-primary: 215 90% 60%;
+  --sidebar-primary-foreground: 0 0% 100%;
+  --sidebar-accent: 225 30% 12%;
+  --sidebar-accent-foreground: 210 40% 98%;
+  --sidebar-border: 225 30% 15%;
+  --sidebar-ring: 215 90% 60%;
+
+  /* Mobile safe area (iOS notch, Android gesture bar) */
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-top: env(safe-area-inset-top, 0px);
+  --bottom-nav-height: 64px;
+}
+
+.dark {
+  /* Fallback alias to fix Tailwind v4 variant targeting */
+  --background: 225 40% 6%;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+    /* Prevent 300ms tap delay on mobile */
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    @apply bg-background text-foreground antialiased selection:bg-primary/30 selection:text-white;
+    font-feature-settings: "rlig" 1, "calt" 1;
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    background-image: 
+      radial-gradient(circle at 10% 30%, rgba(30, 100, 255, 0.08) 0%, transparent 50%),
+      radial-gradient(circle at 90% 80%, rgba(0, 160, 255, 0.06) 0%, transparent 50%);
+    background-attachment: fixed;
+    /* Prevent overscroll bounce on iOS */
+    overscroll-behavior: none;
+  }
+
+  /* Mobile-specific inputs — prevent zoom on iOS */
+  @media (max-width: 767px) {
+    input, textarea, select {
+      font-size: 16px !important;
+    }
+  }
+}
+
+/* Custom Scrollbar (global) */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground));
+}
+
+/* Hide scrollbar on mobile — native is better */
+@media (max-width: 767px) {
+  ::-webkit-scrollbar {
+    display: none;
+  }
+  * {
+    scrollbar-width: none;
+  }
+}
+
+/* Scrollbar utility for specific containers */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 8px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: rgba(255,255,255,0.02);
+  border-radius: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.12);
+  border-radius: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(255,255,255,0.25);
+}
+/* Firefox scrollbar */
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.12) transparent;
+}
+
+/* Glow effects - Enhanced for Antigravity */
+.glow-primary {
+  box-shadow: 0 0 30px hsl(var(--primary) / 0.3), inset 0 0 20px hsl(var(--primary) / 0.1);
+}
+.glow-success {
+  box-shadow: 0 0 30px rgba(34, 197, 94, 0.3);
+}
+.glow-danger {
+  box-shadow: 0 0 30px rgba(239, 68, 68, 0.3);
+}
+
+/* Antigravity Glassmorphism (Premium) */
+.glass {
+  background: rgba(14, 21, 35, 0.65); /* Deep slate-blue tint */
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: 
+    0 4px 24px -2px rgba(0, 0, 0, 0.4),
+    inset 0 1px 1px rgba(255, 255, 255, 0.05);
+}
+
+.glass-card {
+  background: linear-gradient(145deg, rgba(20, 28, 45, 0.75) 0%, rgba(12, 18, 30, 0.85) 100%);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: 
+    0 20px 40px -10px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  transition: transform 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275), box-shadow 0.4s ease, border-color 0.4s ease;
+}
+
+/* Reduce glassmorphism on mobile for performance */
+@media (max-width: 767px) {
+  .glass {
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  .glass-card {
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    box-shadow: 0 8px 20px -6px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  }
+}
+
+/* Only apply hover effects on devices that support hover (not touch) */
+@media (hover: hover) {
+  .glass-card:hover {
+    border-color: rgba(255, 255, 255, 0.12);
+    box-shadow: 
+      0 30px 50px -12px rgba(0, 0, 0, 0.8),
+      0 0 25px rgba(50, 150, 255, 0.15),
+      inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  }
+}
+
+/* Active state for touch — replaces hover */
+@media (hover: none) {
+  .glass-card:active {
+    border-color: rgba(255, 255, 255, 0.12);
+    transform: scale(0.98);
+  }
+}
+
+/* Animations */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 10px currentColor; }
+  50% { opacity: 0.5; transform: scale(0.85); box-shadow: 0 0 0 currentColor; }
+}
+.animate-pulse-dot {
+  animation: pulse-dot 2.5s ease-in-out infinite;
+}
+
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-slide-up {
+  animation: slide-up 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Stagger classes helper */
+.delay-100 { animation-delay: 100ms; }
+.delay-200 { animation-delay: 200ms; }
+.delay-300 { animation-delay: 300ms; }
+.delay-400 { animation-delay: 400ms; }
+
+/* 3D Isometric / Spatial effects — only on hover-capable devices */
+@media (hover: hover) {
+  .hover-float:hover {
+    transform: translateY(-8px) scale(1.02);
+  }
+}
+
+.text-gradient {
+  background: linear-gradient(to right, #fff, hsl(var(--muted-foreground)));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ============================================================ */
+/* MOBILE UTILITIES                                              */
+/* ============================================================ */
+
+/* Horizontal scroll snap for mobile kanban / carousel */
+.mobile-scroll-snap {
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+}
+.mobile-scroll-snap > * {
+  scroll-snap-align: start;
+}
+
+/* Touch-friendly minimum button/target size */
+.touch-target {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+/* Mobile bottom nav safe padding — applies to scrollable content areas */
+@media (max-width: 1023px) {
+  .mobile-safe-bottom {
+    padding-bottom: calc(var(--bottom-nav-height) + var(--safe-bottom) + 16px);
+  }
+}
+
+/* When the chat is active (conversation open), hide the bottom nav
+   so the chat input stays accessible. Toggled via class on <body>. */
+@media (max-width: 1023px) {
+  html.chat-active .mobile-bottom-nav,
+  body.chat-active .mobile-bottom-nav,
+  .chat-active .mobile-bottom-nav {
+    display: none !important;
+    visibility: hidden !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+  }
+  html.chat-active main,
+  body.chat-active main {
+    padding-bottom: 0 !important;
+  }
+}
+
+/* Kanban horizontal scroll — prevent drag-and-drop from eating swipe gestures.
+   Cards inside use touch-action: none only when actually dragging. */
+@media (max-width: 1023px) {
+  .kanban-scroll-container {
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* Dialog / Sheet — full screen on mobile */
+@media (max-width: 767px) {
+  [data-radix-dialog-content],
+  [role="dialog"] {
+    max-width: 100vw !important;
+    max-height: 100dvh !important;
+    width: 100vw !important;
+    border-radius: 0 !important;
+    margin: 0 !important;
+  }
+  
+  /* Select dropdown — wider on mobile */
+  [data-radix-select-content],
+  [data-radix-popper-content-wrapper] {
+    max-width: calc(100vw - 32px) !important;
+    min-width: 200px !important;
+  }
+}
+
+/* Tabs scroll container for mobile */
+.mobile-tabs-scroll {
+  display: flex;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  gap: 2px;
+}
+.mobile-tabs-scroll::-webkit-scrollbar {
+  display: none;
+}
+.mobile-tabs-scroll > * {
+  flex-shrink: 0;
+}

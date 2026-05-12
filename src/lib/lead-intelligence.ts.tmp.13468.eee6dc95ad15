@@ -1,0 +1,958 @@
+/**
+ * lead-intelligence — gera briefing IA pra cada lead, reaproveitado em:
+ *   - /leads (modal "Analisar com IA")
+ *   - /disparo (enriquece personalização de cada msg)
+ *   - /automacao (mesmo, antes de criar a campanha)
+ *
+ * Filosofia: 1 análise por lead, cacheada em `leads_extraidos.intelligence`.
+ * Re-análise só se forçada OU se passou >30 dias (lead pode ter mudado).
+ *
+ * Custo por lead: ~1k tokens (input pequeno + output JSON). Em conta com
+ * 1000 leads, custo total ~R$ 1-3 dependendo do modelo.
+ */
+
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { supabaseAdmin } from "@/lib/supabase_admin";
+import { logTokenUsage, extractGeminiUsage } from "@/lib/token-usage";
+
+export interface LeadIntelligenceSources {
+  /** Trecho do site oficial que foi usado como contexto (até 1500 chars). */
+  site_excerpt?: string;
+  /** URL do site coletado. */
+  site_url?: string;
+  /** Se o site foi descoberto via busca (não estava cadastrado no lead). */
+  site_discovered?: boolean;
+  /** URL do Instagram detectado (se houver). */
+  instagram_url?: string;
+  /** Bio/descrição extraída do Instagram. */
+  instagram_excerpt?: string;
+  /** URL do Facebook detectado. */
+  facebook_url?: string;
+  /** Resultados da busca sobre o lead específico (já filtrados por relevância). */
+  search_lead: Array<{ title: string; snippet: string; url: string }>;
+  /** Resultados da busca sobre concorrentes/top players. */
+  search_competitors: Array<{ title: string; snippet: string; url: string }>;
+  /** Modelo usado na análise. */
+  model_used?: string;
+  /** Quando rodou. */
+  analyzed_at?: string;
+  /** Reflexão preliminar do "think pass" (raciocínio da IA antes do JSON). */
+  reflection?: string;
+}
+
+export interface LeadIntelligence {
+  icp_score: number;              // 0-100, fit com cliente ideal
+  lead_type: "b2b_recurring" | "b2c_oneshot" | "mixed" | "unknown";
+  dores: string[];                // 2-4 dores prováveis específicas do nicho
+  abordagem: string;              // 1 frase: como abordar (NÃO o copy final)
+  decisor: string;                // quem provavelmente decide a compra
+  alerta?: string;                // compliance/sazonalidade/risco que afeta abordagem
+  concorrente_local?: string;     // se identificável, nome de concorrente direto
+  briefing_md: string;            // markdown legível pra mostrar no modal
+  /** Fontes brutas que alimentaram a análise. Mostradas na UI pra
+   *  transparência ("a IA chegou nessa conclusão olhando ISTO"). */
+  sources?: LeadIntelligenceSources;
+}
+
+/** Estrutura mínima do lead que precisamos pra analisar. */
+export interface LeadInput {
+  id?: number | null;
+  remoteJid: string;
+  nome_negocio: string | null;
+  ramo_negocio: string | null;
+  categoria?: string | null;
+  endereco?: string | null;
+  website?: string | null;
+  avaliacao?: number | string | null;
+  reviews?: number | string | null;
+}
+
+/** TTL pra reanálise. 30 dias — lead pode ter mudado de status, contratado concorrente, etc. */
+const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Extrai cidade + estado de um endereço estilo Google Maps.
+ * Ex: "R. X, 123 - Bairro, São Paulo - SP, 01000-000" → { cidade: "São Paulo", estado: "SP" }
+ */
+function extractLocation(endereco: string | null | undefined): { cidade: string; estado: string; full: string } {
+  if (!endereco) return { cidade: "", estado: "", full: "" };
+  const parts = endereco.split(",").map(s => s.trim()).filter(Boolean);
+  let estado = "";
+  let cidade = "";
+  // Estado: token "XX - SP" ou só "SP" no final.
+  const ufRe = /\b(AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)\b/;
+  for (const p of parts) {
+    const m = p.match(ufRe);
+    if (m) { estado = m[1]; break; }
+  }
+  // Cidade: a parte que contém o UF, sem o UF e sem CEP.
+  for (const p of parts) {
+    if (ufRe.test(p)) {
+      cidade = p.replace(ufRe, "").replace(/[-–—]/g, " ").replace(/\d{5}-?\d{3}/, "").replace(/\s+/g, " ").trim();
+      break;
+    }
+  }
+  // Fallback: se não achou pelo UF, pega penúltima parte (heurística de Maps).
+  if (!cidade && parts.length >= 2) {
+    cidade = parts[parts.length - 2].replace(ufRe, "").replace(/\d{5}-?\d{3}/, "").trim();
+  }
+  return { cidade, estado, full: [cidade, estado].filter(Boolean).join(" - ") };
+}
+
+/** Domínios que NÃO devem ser tratados como "site oficial" do lead. */
+const NON_OFFICIAL_HOSTS = [
+  "google.", "maps.google", "g.co", "goo.gl",
+  "facebook.com", "fb.com", "instagram.com", "linkedin.com", "twitter.com", "x.com",
+  "youtube.com", "tiktok.com", "wa.me", "whatsapp.com", "t.me",
+  "yelp.", "tripadvisor.", "foursquare.", "ifood.", "uber",
+  "reclameaqui.", "consumidor.gov", "procon",
+  "guiamais.", "telelistas.", "apontador.", "encontraempresa.", "econodata.",
+  "cnpj.biz", "casadosdados.", "consultapublica.", "cadastrodeempresas.",
+  "olx.", "mercadolivre.", "americanas.", "magazineluiza.",
+  "wikipedia.", "wikimapia.",
+  "duckduckgo.", "bing.com",
+];
+function isOfficialCandidate(host: string): boolean {
+  const h = host.toLowerCase();
+  return !NON_OFFICIAL_HOSTS.some(bad => h.includes(bad));
+}
+function safeHost(url: string): string {
+  try { return new URL(url).hostname; } catch { return ""; }
+}
+
+/** Normaliza string pra comparação: minúsculo, sem acento, sem pontuação. */
+function norm(s: string): string {
+  return (s || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/\p{M}/gu, "")
+    .replace(/[^a-z0-9 ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Heurística: o snippet/título parece falar do MESMO negócio (mesmo nome) ou em outra cidade? */
+function isResultRelevant(
+  r: { title: string; snippet: string; url: string },
+  leadName: string,
+  cidade: string,
+): boolean {
+  const haystack = norm(`${r.title} ${r.snippet} ${r.url}`);
+  const nameTokens = norm(leadName).split(" ").filter(t => t.length >= 3).slice(0, 4);
+  // Pelo menos 1 token forte do nome precisa aparecer.
+  const nameHit = nameTokens.length === 0 || nameTokens.some(t => haystack.includes(t));
+  if (!nameHit) return false;
+  // Se o snippet menciona explicitamente OUTRA capital/cidade longe e a nossa cidade
+  // não aparece, descarta. (não tenta ser perfeito; só corta o lixo óbvio).
+  if (cidade) {
+    const cidadeNorm = norm(cidade);
+    const cidadeHit = haystack.includes(cidadeNorm) || cidadeNorm.split(" ").every(p => haystack.includes(p));
+    if (!cidadeHit) {
+      // Se algum outro estado/UF gritante aparece, descarta.
+      const otherUfMention = /\b(em|de|na|no) (rio de janeiro|sao paulo|belo horizonte|porto alegre|curitiba|salvador|recife|fortaleza|brasilia|manaus|belem|goiania)\b/.test(haystack);
+      if (otherUfMention) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Heurística: o texto extraído é majoritariamente boilerplate de privacidade/LGPD/cookies?
+ * Se sim, é lixo pra análise comercial — a IA ia inventar "dores de LGPD" pra qualquer
+ * negócio que tenha banner de cookie (ou seja, todos).
+ */
+function isPrivacyBoilerplate(text: string): boolean {
+  if (!text) return true;
+  const lower = text.toLowerCase();
+  const privacyTerms = [
+    "lgpd", "política de privacidade", "politica de privacidade",
+    "cookies", "cookie", "dados pessoais", "titular dos dados",
+    "consentimento", "anpd", "tratamento de dados", "termos de uso",
+    "encarregado de dados", "dpo",
+  ];
+  let hits = 0;
+  for (const t of privacyTerms) {
+    const matches = lower.match(new RegExp(t, "g"));
+    if (matches) hits += matches.length;
+  }
+  // Densidade alta de termos de privacidade num texto curto = página de política.
+  const density = hits / Math.max(1, text.split(/\s+/).length / 100); // hits por 100 palavras
+  return density > 2.5;
+}
+
+/**
+ * Extrai conteúdo principal do HTML — prioriza <main>/<article>, descarta nav/footer/aside,
+ * remove banners de cookie e seções de privacidade. Devolve texto limpo, focado no core
+ * comercial (sobre nós, serviços, home).
+ */
+function extractMainContent(html: string): string {
+  // Mata script/style/noscript primeiro.
+  let h = html
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[^>]*>[\s\S]*?<\/noscript>/gi, " ");
+
+  // Remove blocos de nav/footer/aside (geralmente menus + LGPD/cookies/redes).
+  h = h
+    .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, " ")
+    .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, " ")
+    .replace(/<aside[^>]*>[\s\S]*?<\/aside>/gi, " ")
+    .replace(/<form[^>]*>[\s\S]*?<\/form>/gi, " ");
+
+  // Remove blocos identificados como cookie banner / privacy notice (padrão comum).
+  h = h.replace(
+    /<(div|section)[^>]*(cookie|consent|privacy|lgpd|gdpr)[^>]*>[\s\S]*?<\/\1>/gi,
+    " ",
+  );
+
+  // Tenta capturar <main>/<article> primeiro — é onde está o conteúdo de verdade.
+  const mainMatch = h.match(/<main[^>]*>([\s\S]*?)<\/main>/i)
+    || h.match(/<article[^>]*>([\s\S]*?)<\/article>/i)
+    || h.match(/<(div|section)[^>]*(id|class)="[^"]*(content|home|hero|sobre|about|services|servic)[^"]*"[^>]*>([\s\S]*?)<\/\1>/i);
+  if (mainMatch) h = mainMatch[mainMatch.length === 5 ? 4 : 1];
+
+  // Strip de tags + meta description como bônus (geralmente é o pitch da empresa).
+  const text = h.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  return text;
+}
+
+/**
+ * Fetch + extração inteligente do site.
+ *
+ * Comportamento:
+ * 1. Se a URL aponta pra página de política/privacidade, tenta a homepage do mesmo domínio.
+ * 2. Extrai conteúdo principal (sem nav/footer/cookie banner).
+ * 3. Se o texto resultante ainda for boilerplate de LGPD, retorna "" (sinaliza pra IA
+ *    que o site não tem info comercial útil — melhor que envenenar a análise).
+ */
+async function scrapeWebsite(url: string | null): Promise<string> {
+  if (!url || !url.startsWith("http")) return "";
+  // Se a URL claramente é uma página de política, troca pela raiz do domínio.
+  let targetUrl = url;
+  if (/(politica|privac|cookie|lgpd|terms|termos)/i.test(url)) {
+    try { targetUrl = new URL(url).origin + "/"; } catch { /* mantém */ }
+  }
+  try {
+    const fetchHtml = async (u: string): Promise<string> => {
+      const r = await fetch(u, {
+        signal: AbortSignal.timeout(8000),
+        redirect: "follow",
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; LeadIntel/1.0)",
+          "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+        },
+      });
+      if (!r.ok) return "";
+      return r.text();
+    };
+
+    let html = await fetchHtml(targetUrl);
+    // Captura meta description (excelente pitch comercial em 1 linha).
+    const meta = html.match(/<meta[^>]*name="description"[^>]*content="([^"]+)"/i)?.[1]
+              || html.match(/<meta[^>]*property="og:description"[^>]*content="([^"]+)"/i)?.[1]
+              || "";
+    let main = extractMainContent(html);
+
+    // Se ainda parece página de privacidade, tenta a raiz uma única vez.
+    if (isPrivacyBoilerplate(main) && targetUrl !== url) {
+      // já tentamos — desiste
+    } else if (isPrivacyBoilerplate(main)) {
+      try {
+        const root = new URL(targetUrl).origin + "/";
+        if (root !== targetUrl) {
+          html = await fetchHtml(root);
+          main = extractMainContent(html);
+        }
+      } catch {}
+    }
+
+    // Se mesmo após retry continua sendo só LGPD/cookie, descarta.
+    if (isPrivacyBoilerplate(main)) {
+      // Mas se temos meta description que NÃO é privacy, usa ela como fallback.
+      if (meta && !isPrivacyBoilerplate(meta)) return `(meta) ${meta.slice(0, 600)}`;
+      return "";
+    }
+
+    const result = (meta ? `(meta) ${meta}\n\n` : "") + main;
+    return result.slice(0, 3000);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Busca via Tavily (LLM-native search). Free tier 1.000 queries/mês.
+ * Retorna snippets já curados pra contexto de IA — muito mais limpo que DDG.
+ * Requer env TAVILY_API_KEY. Retorna null se não configurado.
+ *
+ * Doc: https://docs.tavily.com/  | search_depth=advanced melhora ranking pra B2B.
+ */
+async function tavilySearch(
+  query: string,
+  maxResults = 5,
+): Promise<Array<{ title: string; snippet: string; url: string }> | null> {
+  const key = process.env.TAVILY_API_KEY;
+  if (!key) return null;
+  try {
+    const r = await fetch("https://api.tavily.com/search", {
+      method: "POST",
+      signal: AbortSignal.timeout(12000),
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
+      body: JSON.stringify({
+        query,
+        search_depth: "advanced",
+        max_results: maxResults,
+        include_answer: false,
+        include_raw_content: false,
+      }),
+    });
+    if (!r.ok) return null;
+    const data = await r.json();
+    if (!Array.isArray(data?.results)) return null;
+    return data.results.map((it: any) => ({
+      title: String(it.title || ""),
+      snippet: String(it.content || "").slice(0, 500),
+      url: String(it.url || ""),
+    }));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Busca via Brave Search API. Latência mais baixa do mercado (669ms média),
+ * índice independente. Free tier 2.000/mês. Requer env BRAVE_SEARCH_API_KEY.
+ *
+ * Doc: https://api-dashboard.search.brave.com/app/documentation/web-search/get-started
+ */
+async function braveSearch(
+  query: string,
+  maxResults = 5,
+): Promise<Array<{ title: string; snippet: string; url: string }> | null> {
+  const key = process.env.BRAVE_SEARCH_API_KEY;
+  if (!key) return null;
+  try {
+    const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${maxResults}&country=BR&search_lang=pt`;
+    const r = await fetch(url, {
+      signal: AbortSignal.timeout(10000),
+      headers: { "Accept": "application/json", "X-Subscription-Token": key },
+    });
+    if (!r.ok) return null;
+    const data = await r.json();
+    const items = data?.web?.results || [];
+    return items.slice(0, maxResults).map((it: any) => ({
+      title: String(it.title || ""),
+      snippet: String(it.description || "").replace(/<[^>]+>/g, "").slice(0, 500),
+      url: String(it.url || ""),
+    }));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Busca web com fallback em cascata: Tavily → Brave → DuckDuckGo HTML.
+ *
+ * Tavily é o melhor pra B2B research (LLM-native, snippets curados). Brave é
+ * #2 em qualidade. DDG HTML é o último recurso — sem API key, mas ruidoso.
+ *
+ * Configurar uma das APIs (TAVILY_API_KEY ou BRAVE_SEARCH_API_KEY) melhora
+ * dramaticamente a precisão das análises.
+ */
+async function webSearch(query: string, maxResults = 5): Promise<Array<{ title: string; snippet: string; url: string }>> {
+  if (!query?.trim()) return [];
+
+  // Provider 1: Tavily (melhor pra contexto de IA)
+  const tav = await tavilySearch(query, maxResults);
+  if (tav && tav.length > 0) return tav;
+
+  // Provider 2: Brave (rápido, índice independente)
+  const brave = await braveSearch(query, maxResults);
+  if (brave && brave.length > 0) return brave;
+
+  // Provider 3: DuckDuckGo HTML (sem key, fallback)
+  try {
+    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    const r = await fetch(url, {
+      signal: AbortSignal.timeout(8000),
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+      },
+    });
+    if (!r.ok) return [];
+    const html = await r.text();
+
+    // DDG HTML retorna `<a class="result__a" href="URL">TITLE</a>` + `<a class="result__snippet">SNIPPET</a>`.
+    // Regex simples — o markup é estável.
+    const results: Array<{ title: string; snippet: string; url: string }> = [];
+    const linkRe = /<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+    const snipRe = /<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+    const links: Array<{ url: string; title: string }> = [];
+    const snips: string[] = [];
+
+    let m: RegExpExecArray | null;
+    while ((m = linkRe.exec(html)) && links.length < maxResults * 2) {
+      // DDG mascara URL — descodifica `uddg=`
+      const raw = m[1];
+      const real = raw.match(/uddg=([^&]+)/);
+      const finalUrl = real ? decodeURIComponent(real[1]) : raw;
+      const title = m[2].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+      links.push({ url: finalUrl, title });
+    }
+    while ((m = snipRe.exec(html)) && snips.length < maxResults * 2) {
+      snips.push(m[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim());
+    }
+
+    for (let i = 0; i < Math.min(links.length, maxResults); i++) {
+      results.push({
+        title: links[i].title,
+        url: links[i].url,
+        snippet: snips[i] || "",
+      });
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Descobre site oficial / Instagram / Facebook do lead via busca web.
+ * Usado quando o lead não tem website cadastrado.
+ *
+ * Estratégia: 2 buscas direcionadas com cidade + nome. Classifica os resultados
+ * por tipo de domínio. Retorna o primeiro candidato de cada tipo que parece
+ * relevante (matching de nome + cidade).
+ */
+async function discoverPresence(
+  leadName: string,
+  cidade: string,
+  estado: string,
+): Promise<{ website?: string; instagram?: string; facebook?: string; raw: Array<{ title: string; snippet: string; url: string }> }> {
+  if (!leadName) return { raw: [] };
+  const loc = [cidade, estado].filter(Boolean).join(" ");
+  // 2 buscas: 1 ampla (qualquer canal) + 1 focada em Instagram (alta chance pra negócio pequeno).
+  const [generic, ig] = await Promise.all([
+    webSearch(`"${leadName}" ${loc} site oficial OR contato`, 8),
+    webSearch(`"${leadName}" ${loc} instagram`, 5),
+  ]);
+  const all = [...generic, ...ig].filter(r => isResultRelevant(r, leadName, cidade));
+
+  let website: string | undefined;
+  let instagram: string | undefined;
+  let facebook: string | undefined;
+
+  for (const r of all) {
+    const host = safeHost(r.url);
+    if (!host) continue;
+    const lower = host.toLowerCase();
+    if (!instagram && lower.includes("instagram.com")) {
+      // só perfil (instagram.com/handle), descarta /p/ /reel/ etc.
+      const path = (() => { try { return new URL(r.url).pathname; } catch { return ""; } })();
+      const seg = path.split("/").filter(Boolean)[0];
+      if (seg && !["p", "reel", "reels", "explore", "tags", "accounts"].includes(seg)) {
+        instagram = `https://www.instagram.com/${seg}/`;
+      }
+    } else if (!facebook && (lower.includes("facebook.com") || lower.includes("fb.com"))) {
+      facebook = r.url;
+    } else if (!website && isOfficialCandidate(host)) {
+      website = r.url;
+    }
+    if (website && instagram && facebook) break;
+  }
+
+  return { website, instagram, facebook, raw: all };
+}
+
+/**
+ * Raspa página pública do Instagram. Retorna bio/descrição extraída de meta tags.
+ * IG bloqueia muito; se cair, retorna "".
+ */
+async function scrapeInstagram(url: string | null): Promise<string> {
+  if (!url) return "";
+  try {
+    const r = await fetch(url, {
+      signal: AbortSignal.timeout(8000),
+      redirect: "follow",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; facebookexternalhit/1.1; +http://www.facebook.com/externalhit_uatext.php)",
+        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+      },
+    });
+    if (!r.ok) return "";
+    const html = await r.text();
+    // og:description tem "X seguidores, Y seguindo, Z posts - Veja fotos... de @user (Bio)".
+    const og = html.match(/<meta[^>]*property="og:description"[^>]*content="([^"]+)"/i);
+    const desc = html.match(/<meta[^>]*name="description"[^>]*content="([^"]+)"/i);
+    const title = html.match(/<meta[^>]*property="og:title"[^>]*content="([^"]+)"/i);
+    const parts = [title?.[1], og?.[1] || desc?.[1]].filter(Boolean).join(" — ");
+    return parts.replace(/\s+/g, " ").trim().slice(0, 800);
+  } catch {
+    return "";
+  }
+}
+
+/** Formata resultados de busca pra texto compacto pro prompt. */
+function searchResultsToText(results: Array<{ title: string; snippet: string; url: string }>): string {
+  if (results.length === 0) return "(nenhum resultado relevante encontrado)";
+  return results
+    .map((r, i) => `[${i + 1}] ${r.title}\n${r.snippet}\nFonte: ${r.url}`)
+    .join("\n\n");
+}
+
+const SYSTEM_PROMPT = `Você é um analista B2B sênior. Recebe dados públicos de um negócio e produz um BRIEFING ESTRATÉGICO pra um SDR usar antes do primeiro contato.
+
+═══════ HIERARQUIA DE EVIDÊNCIA (CRÍTICO) ═══════
+A análise DEVE ser ancorada nesta ordem:
+
+1. RAMO/CATEGORIA do Maps + LOCALIZAÇÃO → define o tipo de negócio e suas dores REAIS de mercado.
+   Ex: "Escritório de contabilidade em cidade do interior" → dores reais: captação de novos clientes,
+   eficiência em fechamento mensal, retenção de clientes contra contadores online (Conta Azul, Contabilizei),
+   gestão de prazos fiscais, aumento de ticket médio com serviços extras (BPO, consultoria tributária).
+
+2. AVALIAÇÃO + Nº DE REVIEWS do Maps → sinal de PORTE e MATURIDADE:
+   - <10 reviews → micro/recém-aberto, pouca presença digital
+   - 10-50 → estabelecido localmente
+   - 50-200 → maduro, fluxo consistente
+   - 200+ → referência regional
+   Avaliação <4.0 → possível dor de reputação. 4.5+ → operação sólida.
+
+3. CONTEÚDO DO SITE (se houver) → use APENAS pra entender posicionamento, tom e serviços específicos
+   que ele oferece. NUNCA derive dores comerciais de texto de política de cookies/LGPD/termos.
+   Se o site só fala de privacidade, IGNORE-o e baseie tudo no ramo + Maps.
+
+4. INSTAGRAM/FACEBOOK → tom de comunicação, público-alvo aparente, frequência de posts.
+
+5. PESQUISA WEB → contexto extra, concorrentes, notícias.
+
+═══════ ARMADILHAS A EVITAR (LEIA) ═══════
+✗ NÃO invente "dor de LGPD/segurança de dados" só porque o site tem política de privacidade.
+  TODO site tem. Não é sinal de dor — é exigência legal.
+✗ NÃO use o conteúdo do site como base pra dores se for boilerplate (cookies, termos).
+✗ NÃO sugira ângulo genérico como "fale sobre LGPD/cookies" pra negócio físico local.
+  Padaria, oficina, escritório local — a dor REAL é cliente/receita/operação, não compliance.
+✗ NÃO dê icp_score 90+ sem evidência forte de fit. Sem dados → score na faixa 40-60.
+✗ NÃO copie palavras-chave do site pra dores. Site fala "soluções inovadoras"? Isso não é dor.
+
+═══════ CAMPOS DO JSON ═══════
+- "lead_type":
+  * b2b_recurring → empresas que cabem contrato/serviço recorrente (prédios, clínicas, escolas, indústrias, restaurantes). Maior LTV.
+  * b2c_oneshot → consumidor final ou serviço pontual.
+  * mixed → atende ambos.
+  * unknown → não dá pra inferir.
+
+- "icp_score" (0-100): fit com perfil ideal de cliente recorrente. Use a hierarquia acima.
+  Calibre: 90+ = fit perfeito com evidência forte. 60-80 = bom fit pelo ramo. 40-60 = incerto/dados fracos. <40 = mal-encaixe.
+
+- "dores": 2-4 dores REAIS do nicho dele, considerando porte (reviews) e região.
+  ✓ BOM (contador interior): "Concorrência de contabilidade online (Contabilizei) reduzindo ticket médio";
+                              "Dificuldade em captar PJs novos numa cidade pequena";
+                              "Sobrecarga em fechamento mensal sem automação".
+  ✗ RUIM: "Conformidade LGPD"; "Vazamento de dados"; "Disponibilidade de sistemas".
+  Essas dores genéricas só fazem sentido pra empresa GRANDE (>500 reviews) ou tech.
+
+- "abordagem" (1 frase): ângulo que faz sentido pra um negócio DESTE porte e ramo.
+  ✓ "Mostrar como aumentar ticket médio com serviços de consultoria além da escrita fiscal."
+  ✗ "Foco em mitigação de riscos LGPD." (genérico/inadequado pro porte)
+
+- "decisor": quem decide nesse tipo de empresa, considerando o porte. Em escritório pequeno é o sócio. Em rede grande é gerente comercial.
+
+- "alerta" (opcional): só preencha se houver risco/compliance/sazonalidade ESPECÍFICO e relevante pro RAMO.
+  Não use pra observações genéricas sobre o site.
+
+- "concorrente_local" (opcional): só se identificar nome real de concorrente direto na região via pesquisa.
+
+- "briefing_md": markdown 4-8 linhas pro SDR ler em 30s. Use ## headers.
+  Estrutura: ## Perfil do Lead (porte + ramo + localização + sinal Maps) → ## Estratégia de Abordagem (ângulo aterrado no ramo) → linha final "**Mensagem 0 sugerida (NÃO use literal — adapte):** ...".
+  A mensagem 0 deve falar de ALGO QUE FAÇA SENTIDO PRO NEGÓCIO DELE (cliente, receita, operação do ramo) — NUNCA de cookies/privacidade/site.
+
+FORMATO DE SAÍDA: JSON estrito. Nada além.`;
+
+/**
+ * THINK PASS — equivalente ao "think tool" da Anthropic, adaptado pra modelos
+ * sem reasoning nativo. Força reflexão estruturada ANTES do output final.
+ * Anthropic mediu +54% em domínios complexos com esse padrão.
+ *
+ * O texto produzido aqui é só pra consumo da própria IA no Pass 2 — não vai
+ * pro usuário. Por isso é ok ser verboso e em texto corrido.
+ */
+const THINK_SYSTEM_PROMPT = `Você é um analista B2B sênior fazendo a ANÁLISE PRELIMINAR de um lead antes de produzir um briefing estruturado. Esta é a etapa de RACIOCÍNIO — pense em voz alta, examine os dados criticamente, identifique armadilhas. NÃO produza JSON aqui; será gerado depois.
+
+ROTEIRO DE PENSAMENTO (siga em ordem, em texto corrido):
+
+1) **TRIAGEM DE SINAIS** — Olhe cada bloco de dado e classifique como FORTE, MÉDIO ou FRACO/RUIDOSO. Sinais fortes: ramo/categoria do Maps, nº reviews (porte), avaliação (reputação), localização. Sinais médios: meta description do site, bio de Instagram. Sinais FRACOS/RUIDOSOS pra descartar: termos de cookies/LGPD/política do site (SEMPRE descarte como dor — todo site tem isso).
+
+2) **ANCORAGEM NO RAMO** — Esqueça o site por um momento. Dado SOMENTE: ramo + cidade + porte (nº reviews) — quais são as 3-4 dores REAIS de mercado deste tipo de negócio neste porte? Pense no dia-a-dia operacional: captação de cliente, retenção, ticket médio, sazonalidade, concorrência específica do nicho. Ex: contador pequeno → concorrência de Contabilizei/Conta Azul, captação de PJs novos, sobrecarga em fechamento mensal. Padaria → margem apertada, gestão de turnos, fidelização. Etc.
+
+3) **CALIBRAGEM DE PORTE** — Reviews <10 = micro. 10-50 = pequeno. 50-200 = médio. 200+ = grande. As dores mudam com o porte! Não dê dor de empresa grande (LGPD, ERP) pra micro empresa.
+
+4) **GAPS E INFERÊNCIA** — O que você NÃO sabe? Onde está inferindo? Liste explicitamente. Se não tem site nem IG nem reviews suficientes, diga "informação muito limitada — análise será conservadora".
+
+5) **ICP HONESTO** — Dado os sinais, qual ICP score é HONESTO? Sem evidência forte de fit, fique entre 40-60. Só dê 80+ se múltiplos sinais convergem (porte certo + ramo certo + reputação boa).
+
+6) **ÂNGULO DE ABORDAGEM** — Qual gancho faz sentido pra ESTE negócio especificamente? Tem que ser algo que o dono dele acordou pensando hoje, não algo que parece sofisticado mas é genérico.
+
+Responda em PORTUGUÊS, em texto corrido, sem listas formais nem JSON. Seja objetivo: 8-15 linhas. Termine com uma frase começando com "CONCLUSÃO:" resumindo a tese central pro briefing.`;
+
+function buildUserPrompt(
+  lead: LeadInput,
+  ctx: {
+    websiteUrl?: string;
+    websiteText: string;
+    websiteDiscovered: boolean;
+    instagramUrl?: string;
+    instagramText: string;
+    facebookUrl?: string;
+    cidade: string;
+    estado: string;
+  },
+  searchAboutLead: string,
+  searchAboutCompetitors: string,
+): string {
+  // Sinal de porte derivado de reviews — entrega mastigado pra IA não errar a calibragem.
+  const reviewsNum = Number(lead.reviews) || 0;
+  const avalNum = Number(lead.avaliacao) || 0;
+  let porte = "indeterminado";
+  if (reviewsNum >= 200) porte = "GRANDE / referência regional";
+  else if (reviewsNum >= 50) porte = "MÉDIO / maduro com fluxo consistente";
+  else if (reviewsNum >= 10) porte = "PEQUENO-MÉDIO / estabelecido localmente";
+  else if (reviewsNum > 0) porte = "MICRO / pouca presença digital ou recém-aberto";
+  let reputacao = "";
+  if (avalNum > 0) {
+    if (avalNum >= 4.5) reputacao = "sólida";
+    else if (avalNum >= 4.0) reputacao = "boa";
+    else if (avalNum >= 3.0) reputacao = "média (possível dor de reputação)";
+    else reputacao = "ruim (DOR de reputação clara)";
+  }
+
+  const lines: string[] = [];
+  lines.push("# DADOS DIRETOS DO GOOGLE MAPS (FONTE PRIMÁRIA — ANCORE A ANÁLISE AQUI)");
+  lines.push(`- Nome: ${lead.nome_negocio || "(sem nome)"}`);
+  if (lead.ramo_negocio) lines.push(`- Ramo: ${lead.ramo_negocio}`);
+  if (lead.categoria) lines.push(`- Categoria Maps: ${lead.categoria}`);
+  if (lead.endereco) lines.push(`- Endereço: ${lead.endereco}`);
+  if (ctx.cidade || ctx.estado) lines.push(`- Localização: ${[ctx.cidade, ctx.estado].filter(Boolean).join(" / ")}`);
+  if (avalNum > 0) lines.push(`- Avaliação Google: ${lead.avaliacao}/5 (${lead.reviews || "?"} reviews) → reputação ${reputacao}`);
+  lines.push(`- Porte inferido (por nº reviews): ${porte}`);
+
+  // Site — agora claramente marcado como SECUNDÁRIO.
+  if (ctx.websiteText) {
+    const tag = ctx.websiteDiscovered ? " (descoberto via busca)" : "";
+    lines.push(`\n# SITE OFICIAL — FONTE SECUNDÁRIA${tag}\nURL: ${ctx.websiteUrl}\nUse APENAS pra entender posicionamento e serviços específicos. NÃO derive dores daqui.\n---\n${ctx.websiteText}\n---`);
+  } else if (ctx.websiteUrl) {
+    lines.push(`\n# SITE OFICIAL\nURL: ${ctx.websiteUrl}\n(Sem conteúdo comercial extraível — pode ser site bloqueado ou só com política de privacidade. Ignore.)`);
+  } else {
+    lines.push(`\n# SITE OFICIAL\n(Não localizado — empresa provavelmente pequena. Esse já é um sinal: depende de Maps/redes pra captação.)`);
+  }
+
+  // Instagram
+  if (ctx.instagramText) {
+    lines.push(`\n# INSTAGRAM (perfil público)\nURL: ${ctx.instagramUrl}\n${ctx.instagramText}`);
+  } else if (ctx.instagramUrl) {
+    lines.push(`\n# INSTAGRAM\nURL: ${ctx.instagramUrl}\n(Bio não pôde ser raspada — Instagram bloqueou.)`);
+  }
+  if (ctx.facebookUrl) lines.push(`\n# FACEBOOK\nURL: ${ctx.facebookUrl}`);
+
+  lines.push(`\n# PESQUISA WEB SOBRE ESTE LEAD (filtrada por relevância de localização)\n${searchAboutLead || "(sem resultados confiáveis sobre este lead específico)"}`);
+  lines.push(`\n# PESQUISA SOBRE TOP PLAYERS DO MESMO NICHO/REGIÃO\n${searchAboutCompetitors || "(sem resultados relevantes)"}`);
+
+  // Sinaliza dados fracos pra IA não inventar.
+  const haveSite = !!ctx.websiteText;
+  const haveIg = !!ctx.instagramText;
+  const haveLeadInfo = haveSite || haveIg || (searchAboutLead && !searchAboutLead.startsWith("("));
+  if (!haveLeadInfo) {
+    lines.push(`\n# AVISO IMPORTANTE\nDados públicos sobre ESTE lead específico são MUITO escassos. Baseie a análise em:\n- Categoria/ramo do Maps (sinaliza o tipo de negócio)\n- Localização (${ctx.cidade}/${ctx.estado}) e suas características\n- Avaliação/reviews como proxy de maturidade\nNÃO invente fatos sobre o negócio. Se não souber, escreva "não identificado". O icp_score deve refletir a INCERTEZA — não dê 90+ sem evidência.`);
+  }
+
+  lines.push(`\n# TAREFA\nProduza o JSON de briefing usando ESTRITAMENTE os dados acima. Foque em estratégia para SDR, não copy. Se identificar concorrentes diretos pelos resultados, cite em "concorrente_local".`);
+  return lines.join("\n");
+}
+
+/** Resultado de uma análise — pode vir do cache ou nova. */
+export interface AnalyzeResult {
+  leadId: number;
+  intelligence: LeadIntelligence;
+  cached: boolean;
+  /** Fontes coletadas nesta análise (só preenchido em análise nova, não em cache). */
+  sources?: {
+    site: boolean;
+    site_discovered?: boolean;
+    instagram?: boolean;
+    facebook?: boolean;
+    searchLead: number;        // qtd de resultados de busca sobre o lead (filtrados)
+    searchCompetitors: number; // qtd de resultados sobre concorrentes (filtrados)
+  };
+}
+
+/**
+ * Analisa 1 lead. Lê cache se válido; senão chama Gemini, salva, retorna.
+ * Use force=true pra forçar reanálise.
+ */
+export async function analyzeLead(opts: {
+  leadId: number;
+  apiKey: string;
+  model?: string;
+  force?: boolean;
+}): Promise<AnalyzeResult | { error: string }> {
+  const { data: lead, error } = await supabaseAdmin
+    .from("leads_extraidos")
+    .select("id, \"remoteJid\", nome_negocio, ramo_negocio, categoria, endereco, website, avaliacao, reviews, intelligence, intelligence_at, icp_score, lead_type")
+    .eq("id", opts.leadId)
+    .maybeSingle();
+  if (error || !lead) return { error: error?.message || "Lead não encontrado" };
+
+  // Cache hit?
+  if (!opts.force && lead.intelligence && lead.intelligence_at) {
+    const age = Date.now() - new Date(lead.intelligence_at).getTime();
+    if (age < CACHE_TTL_MS) {
+      return {
+        leadId: lead.id,
+        intelligence: lead.intelligence as LeadIntelligence,
+        cached: true,
+      };
+    }
+  }
+
+  // ── Coleta de dados — pipeline em estágios pra maximizar precisão ──
+  //
+  // Estágio 1 (paralelo): site cadastrado + buscas iniciais (lead + concorrentes).
+  // Estágio 2 (condicional): se NÃO há site cadastrado, usa busca pra DESCOBRIR
+  //   site oficial / Instagram / Facebook do lead, depois raspa o que achou.
+  //
+  // Tudo é filtrado por relevância de localização — descarta resultados de
+  // outras cidades, portais genéricos (reclameaqui, listas), homônimos.
+  const loc = extractLocation(lead.endereco);
+  const cidade = loc.cidade;
+  const estado = loc.estado;
+  const leadName = (lead.nome_negocio || "").trim();
+  const ramo = (lead.ramo_negocio || lead.categoria || "").trim();
+
+  // Queries direcionadas com cidade — usar aspas no nome pra não diluir.
+  const queryLead = leadName
+    ? `"${leadName}" ${[cidade, estado].filter(Boolean).join(" ")}`.trim()
+    : "";
+  const queryConcorrentes = ramo
+    ? `melhores ${ramo} ${[cidade, estado].filter(Boolean).join(" ")}`.trim()
+    : "";
+
+  // Estágio 1.
+  const [websiteCadastradoText, searchLeadRaw, searchCompetitorsRaw] = await Promise.all([
+    scrapeWebsite(lead.website || null),
+    queryLead ? webSearch(queryLead, 6) : Promise.resolve([]),
+    queryConcorrentes ? webSearch(queryConcorrentes, 5) : Promise.resolve([]),
+  ]);
+
+  // Filtra busca do lead por relevância (nome + cidade).
+  const searchLead = searchLeadRaw.filter(r => isResultRelevant(r, leadName, cidade)).slice(0, 5);
+  // Concorrentes: filtra só por cidade (não bate o nome do lead).
+  const searchCompetitors = searchCompetitorsRaw
+    .filter(r => {
+      const h = norm(`${r.title} ${r.snippet} ${r.url}`);
+      if (!cidade) return true;
+      const cidadeNorm = norm(cidade);
+      return h.includes(cidadeNorm) || cidadeNorm.split(" ").every(p => h.includes(p));
+    })
+    .slice(0, 5);
+
+  // Estágio 2: descobrir site/redes se o lead não tem website cadastrado.
+  let websiteUrl = lead.website || undefined;
+  let websiteText = websiteCadastradoText;
+  let websiteDiscovered = false;
+  let instagramUrl: string | undefined;
+  let instagramText = "";
+  let facebookUrl: string | undefined;
+
+  // Mesmo se o lead tem site, ainda tentamos achar IG (sinal social útil).
+  // Se NÃO tem site, fazemos descoberta completa.
+  const needDiscovery = !websiteText;
+  if (leadName && (needDiscovery || !instagramUrl)) {
+    const found = await discoverPresence(leadName, cidade, estado);
+    if (needDiscovery && found.website) {
+      websiteUrl = found.website;
+      websiteDiscovered = true;
+      websiteText = await scrapeWebsite(found.website);
+    }
+    if (found.instagram) {
+      instagramUrl = found.instagram;
+      instagramText = await scrapeInstagram(found.instagram);
+    }
+    if (found.facebook) facebookUrl = found.facebook;
+  }
+
+  // ─── Geração em DOIS passes (think → JSON) ───
+  //
+  // Pass 1 (THINK): texto livre. A IA reflete sobre os dados, identifica sinais
+  //   fortes vs fracos, ancora dores no ramo+porte, e calibra ICP honestamente.
+  //   Esse passo é o equivalente ao "think tool" da Anthropic — força reflexão
+  //   estruturada ANTES de produzir output. Vale pra QUALQUER modelo (mesmo
+  //   sem reasoning nativo), porque é só um round-trip de texto.
+  //
+  // Pass 2 (JSON): recebe a reflexão como contexto extra e produz o JSON final.
+  //
+  // Pra modelos que suportam thinking nativo (Gemini 2.5+), também ativamos
+  // thinkingBudget=-1 (dinâmico). Modelos que não suportam ignoram o campo.
+  const model = opts.model || "gemini-2.5-flash";
+  const genai = new GoogleGenerativeAI(opts.apiKey);
+  const supportsNativeThinking = /gemini-(2\.5|3)/i.test(model);
+  const thinkingCfg: any = supportsNativeThinking
+    ? { thinkingConfig: { thinkingBudget: -1 } } // dynamic
+    : {};
+
+  const userPromptBase = buildUserPrompt(
+    lead as any,
+    {
+      websiteUrl,
+      websiteText,
+      websiteDiscovered,
+      instagramUrl,
+      instagramText,
+      facebookUrl,
+      cidade,
+      estado,
+    },
+    searchResultsToText(searchLead),
+    searchResultsToText(searchCompetitors),
+  );
+
+  // ── Pass 1: THINK (reflexão estruturada em texto livre) ──
+  let reflexao = "";
+  try {
+    const thinkModel = genai.getGenerativeModel({
+      model,
+      systemInstruction: THINK_SYSTEM_PROMPT,
+      generationConfig: { temperature: 0.3, ...thinkingCfg } as any,
+    });
+    const thinkResp = await thinkModel.generateContent(userPromptBase);
+    reflexao = (thinkResp.response.text() || "").trim();
+    try {
+      const u = extractGeminiUsage(thinkResp.response);
+      await logTokenUsage({
+        source: "other",
+        sourceLabel: `Lead Intel THINK: ${lead.nome_negocio || lead.remoteJid}`,
+        sourceId: String(lead.id),
+        model,
+        provider: "Gemini",
+        ...u,
+      });
+    } catch {}
+  } catch {
+    reflexao = ""; // se falhar, segue só com o JSON pass — não bloqueia
+  }
+
+  // ── Pass 2: JSON final (usa a reflexão como contexto extra) ──
+  const m = genai.getGenerativeModel({
+    model,
+    systemInstruction: SYSTEM_PROMPT,
+    generationConfig: { temperature: 0.2, responseMimeType: "application/json", ...thinkingCfg } as any,
+  });
+
+  const userPrompt = reflexao
+    ? `${userPromptBase}\n\n# ANÁLISE PRELIMINAR (sua própria reflexão — use como base, refine se necessário)\n${reflexao}\n\n# AGORA PRODUZA O JSON FINAL`
+    : userPromptBase;
+  const resp = await m.generateContent(userPrompt);
+  const raw = resp.response.text();
+
+  // Token tracking (pass 2).
+  try {
+    const usage = extractGeminiUsage(resp.response);
+    await logTokenUsage({
+      source: "other",
+      sourceLabel: `Lead Intel: ${lead.nome_negocio || lead.remoteJid}`,
+      sourceId: String(lead.id),
+      model,
+      provider: "Gemini",
+      ...usage,
+    });
+  } catch {}
+
+  let parsed: LeadIntelligence;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { error: "IA não retornou JSON válido" };
+  }
+
+  // Defesa: garante campos. Aceita variação de nomes da IA.
+  parsed.icp_score = Number(parsed.icp_score) || 50;
+  parsed.lead_type = (parsed.lead_type || "unknown") as any;
+  parsed.dores = Array.isArray(parsed.dores) ? parsed.dores : [];
+  parsed.abordagem = parsed.abordagem || "";
+  parsed.decisor = parsed.decisor || "não identificado";
+  parsed.briefing_md = parsed.briefing_md || "";
+
+  // Anexa as fontes (transparência: usuário vê o que a IA olhou).
+  parsed.sources = {
+    site_url: websiteUrl,
+    site_excerpt: websiteText ? websiteText.slice(0, 1500) : undefined,
+    site_discovered: websiteDiscovered || undefined,
+    instagram_url: instagramUrl,
+    instagram_excerpt: instagramText || undefined,
+    facebook_url: facebookUrl,
+    search_lead: searchLead.slice(0, 5),
+    search_competitors: searchCompetitors.slice(0, 5),
+    model_used: model,
+    analyzed_at: new Date().toISOString(),
+    reflection: reflexao ? reflexao.slice(0, 2000) : undefined,
+  };
+
+  // Salva no DB pra reuso.
+  await supabaseAdmin
+    .from("leads_extraidos")
+    .update({
+      icp_score: parsed.icp_score,
+      lead_type: parsed.lead_type,
+      intelligence: parsed,
+      intelligence_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", lead.id);
+
+  return {
+    leadId: lead.id,
+    intelligence: parsed,
+    cached: false,
+    sources: {
+      site: !!websiteText,
+      site_discovered: websiteDiscovered || undefined,
+      instagram: !!instagramText,
+      facebook: !!facebookUrl,
+      searchLead: searchLead.length,
+      searchCompetitors: searchCompetitors.length,
+    },
+  };
+}
+
+// Exports auxiliares pra teste/uso externo (UI pode mostrar a localização extraída).
+export { extractLocation };
+
+/**
+ * Pega o briefing de um lead (do cache) pra usar em personalização.
+ * Não chama IA. Retorna null se nunca foi analisado.
+ *
+ * Usado por: campaign-worker (personalizeWithAI) e automation-worker.
+ */
+export async function getCachedIntelligence(remoteJid: string): Promise<LeadIntelligence | null> {
+  const { data } = await supabaseAdmin
+    .from("leads_extraidos")
+    .select("intelligence, intelligence_at")
+    .eq("remoteJid", remoteJid)
+    .maybeSingle();
+  if (!data?.intelligence) return null;
+  // Mesmo se velho, retorna — quem chama decide. Reanálise só por trigger explícito.
+  return data.intelligence as LeadIntelligence;
+}
+
+/**
+ * Formata o briefing como string compacta pra injetar em prompts de personalização.
+ * Mantém poucos tokens — só o essencial pra a IA da personalização entender o contexto.
+ */
+export function intelligenceToPromptContext(intel: LeadIntelligence | null): string {
+  if (!intel) return "";
+  const lines: string[] = [];
+  lines.push(`[INTEL DO LEAD - use como contexto, NÃO mencione literalmente]`);
+  lines.push(`- Tipo: ${intel.lead_type} | ICP score: ${intel.icp_score}/100`);
+  if (intel.dores.length > 0) lines.push(`- Dores prováveis: ${intel.dores.slice(0, 3).join("; ")}`);
+  if (intel.abordagem) lines.push(`- Ângulo recomendado: ${intel.abordagem}`);
+  if (intel.alerta) lines.push(`- Alerta: ${intel.alerta}`);
+  return lines.join("\n");
+}

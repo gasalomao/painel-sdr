@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:www.anthropic.com)",
+      "WebFetch(domain:ai.google.dev)",
+      "Bash(cd \"/c/Users/Vitinho Crazy/Downloads/painel-sdr-main\" && grep -iE \"^CREATE TABLE\" SETUP_COMPLETO.sql)",
+      "Read(//c/c/Users/Vitinho Crazy/Downloads/painel-sdr-main/**)",
+      "Bash(cd \"/c/Users/Vitinho Crazy/Downloads/painel-sdr-main\" && grep -iE \"FUNCTION|TRIGGER|POLICY\" SETUP_COMPLETO.sql | head -40)",
+      "Bash(cd \"/c/Users/Vitinho Crazy/Downloads/painel-sdr-main\" && grep -iE \"^CREATE \\(OR REPLACE \\)?\\(FUNCTION|TRIGGER|VIEW\\)\" *.sql | grep -v SETUP_COMPLETO)",
+      "Read(//c/c/Users/Vitinho Crazy/Downloads/**)",
+      "Bash(node scripts/build-setup-sql.mjs)"
+    ]
+  }
+}
