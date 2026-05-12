@@ -33,15 +33,28 @@ async function checkTables(url: string, serviceRole: string): Promise<{ ok: bool
     const client = createClient(url, serviceRole, { auth: { persistSession: false } });
     const present: string[] = [];
     const missing: string[] = [];
-    // head-count em cada tabela; se retornar erro 42P01 (undefined_table) → missing
-    for (const t of ESSENTIAL_TABLES) {
-      const { error } = await client.from(t).select("*", { count: "exact", head: true });
-      if (error && (error as any).code === "42P01") missing.push(t);
-      else if (error && /does not exist/i.test(error.message)) missing.push(t);
-      else present.push(t);
+
+    // Promise.all para ser muito mais rápido + Timeout global
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s max
+
+    try {
+      const promises = ESSENTIAL_TABLES.map(async (t) => {
+        const { error } = await client.from(t).select("*", { count: "exact", head: true, abortSignal: controller.signal } as any);
+        if (error && (error as any).code === "42P01") missing.push(t);
+        else if (error && /does not exist/i.test(error.message)) missing.push(t);
+        else present.push(t);
+      });
+      await Promise.all(promises);
+    } finally {
+      clearTimeout(timeoutId);
     }
+
     return { ok: missing.length === 0, present, missing };
   } catch (err: any) {
+    if (err.name === 'AbortError' || err.message?.includes('aborted')) {
+      return { ok: false, present: [], missing: ESSENTIAL_TABLES, error: "Tempo esgotado. A URL fornecida não respondeu em 10 segundos. Verifique se a URL está correta e se o servidor está online." };
+    }
     return { ok: false, present: [], missing: ESSENTIAL_TABLES, error: err?.message || String(err) };
   }
 }
