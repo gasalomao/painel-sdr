@@ -14,15 +14,19 @@ export async function GET(req: NextRequest) {
   try {
     const instanceName = req.nextUrl.searchParams.get("instance") || evolution.instanceName || "sdr";
 
-    // Evolution API v2: GET /webhook/find/{instance}
-    const EVO_URL = process.env.EVOLUTION_API_URL;
-    const EVO_KEY = process.env.EVOLUTION_API_KEY;
+    // Usa getEvolutionConfig() que lê do banco (app_settings) com fallback pro .env
+    // Isso garante que funcione quando a Evolution foi configurada pela UI (sem rebuild).
+    const { getEvolutionConfig } = await import("@/lib/evolution");
+    const cfg = await getEvolutionConfig(true);
+    const EVO_URL = cfg.url;
+    const EVO_KEY = cfg.apiKey;
 
     if (!EVO_URL || EVO_URL.includes("url_aqui")) {
-      return NextResponse.json({ success: false, error: "EVOLUTION_API_URL não configurada no .env.local" });
+      return NextResponse.json({ success: false, error: "Evolution API URL não configurada. Configure em Configurações → Evolution API ou no .env.local" });
     }
 
-    const res = await fetch(`${EVO_URL}/webhook/find/${instanceName}`, {
+    const base = EVO_URL.endsWith("/") ? EVO_URL.slice(0, -1) : EVO_URL;
+    const res = await fetch(`${base}/webhook/find/${instanceName}`, {
       headers: { apikey: EVO_KEY || "" }
     });
 

@@ -58,13 +58,18 @@ export default function ConfiguracoesPage() {
       if (d.migration) setEvoMigration(d.migration);
       setEvoApiKey("");
       await loadEvolutionConfig();
-      // Após salvar, dispara um teste automático pra mostrar se conectou.
-      await testEvolution(true);
     } catch (e: any) {
-      alert("Erro: " + e.message);
-    } finally {
+      alert("Erro ao salvar: " + e.message);
       setEvoSaving(false);
+      return;
     }
+    // Após salvar, dispara um teste automático separado (não bloqueia o save).
+    try {
+      await testEvolution(true);
+    } catch {
+      // Se o teste falhar, o save já foi feito — não mostra como erro de save.
+    }
+    setEvoSaving(false);
   }
 
   async function testEvolution(useStored = false) {
