@@ -36,21 +36,71 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 
-const navItems = [
-  { href: "/", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/leads", label: "Leads (CRM)", icon: Users },
-  { href: "/chat", label: "Chat", icon: MessageSquare },
-  { href: "/agente", label: "Agente IA", icon: Bot },
-  { href: "/automacao", label: "Automação", icon: Cpu },
-  { href: "/disparo", label: "Disparo em Massa", icon: Zap },
-  { href: "/follow-up", label: "Follow-up", icon: Repeat },
-  { href: "/captador", label: "Captador Maps", icon: MapPin },
-  { href: "/inteligencia", label: "Inteligência", icon: BarChart3 },
-  { href: "/whatsapp", label: "WhatsApp", icon: Smartphone },
-  { href: "/historico-ia", label: "Histórico IA", icon: History },
-  { href: "/tokens", label: "Tokens IA", icon: Coins },
-  { href: "/configuracoes", label: "Configurações", icon: Settings2 },
+// Cada item tem `feature` — chave que bate com client.features no DB. Quando
+// o cliente não tem aquela feature true, o item some do menu. Items SEM
+// feature key (admin, login, etc) são sempre visíveis pra quem tem acesso.
+const navItems: Array<{ href: string; label: string; icon: any; feature?: string; adminOnly?: boolean }> = [
+  { href: "/",               label: "Dashboard",        icon: LayoutDashboard, feature: "dashboard" },
+  { href: "/leads",          label: "Leads (CRM)",      icon: Users,           feature: "leads" },
+  { href: "/chat",           label: "Chat",             icon: MessageSquare,   feature: "chat" },
+  { href: "/agente",         label: "Agente IA",        icon: Bot,             feature: "agente" },
+  { href: "/automacao",      label: "Automação",        icon: Cpu,             feature: "automacao" },
+  { href: "/disparo",        label: "Disparo em Massa", icon: Zap,             feature: "disparo" },
+  { href: "/follow-up",      label: "Follow-up",        icon: Repeat,          feature: "followup" },
+  { href: "/captador",       label: "Captador Maps",    icon: MapPin,          feature: "captador" },
+  { href: "/inteligencia",   label: "Inteligência",     icon: BarChart3,       feature: "inteligencia" },
+  { href: "/whatsapp",       label: "WhatsApp",         icon: Smartphone,      feature: "whatsapp" },
+  { href: "/historico-ia",   label: "Histórico IA",     icon: History,         feature: "historico" },
+  { href: "/tokens",         label: "Tokens IA",        icon: Coins,           feature: "tokens" },
+  { href: "/configuracoes",  label: "Configurações",    icon: Settings2,       feature: "configuracoes" },
+  // Item exclusivo de admin — aparece com badge separado
+  { href: "/admin/clientes", label: "Clientes",         icon: UserCheck,       adminOnly: true },
 ];
+
+type SessionData = {
+  authenticated: boolean;
+  isAdmin?: boolean;
+  impersonating?: boolean;
+  features?: Record<string, boolean>;
+  name?: string;
+};
+
+// Hook leve que pega a sessão atual. Cacheia em window pra não bater no
+// endpoint a cada render. Atualiza quando usuário troca de cliente
+// (impersonate / logout) via evento `session-changed`.
+function useSession(): SessionData | null {
+  const [session, setSession] = useState<SessionData | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const r = await fetch("/api/auth/session", { cache: "no-store" });
+        const d = await r.json();
+        if (!cancelled) setSession(d);
+      } catch {
+        if (!cancelled) setSession({ authenticated: false });
+      }
+    };
+    load();
+    const handler = () => load();
+    window.addEventListener("session-changed", handler);
+    return () => { cancelled = true; window.removeEventListener("session-changed", handler); };
+  }, []);
+  return session;
+}
+
+// Filtra navItems baseado em sessão. Admin sempre vê tudo (não-impersonando).
+function filterNav(items: typeof navItems, session: SessionData | null) {
+  if (!session?.authenticated) return [];
+  const isAdmin = !!session.isAdmin && !session.impersonating;
+  const features = session.features || {};
+  return items.filter((item) => {
+    if (item.adminOnly) return isAdmin;
+    if (isAdmin) return true; // admin vê tudo
+    if (!item.feature) return true;
+    return features[item.feature] !== false; // default true se não setado
+  });
+}
 
 // Primary tabs shown in bottom nav bar (most used on mobile)
 const bottomNavItems = [
@@ -62,6 +112,8 @@ const bottomNavItems = [
 
 function SidebarContent({ collapsed, onToggle, onNavigate }: { collapsed: boolean; onToggle: () => void; onNavigate?: () => void }) {
   const pathname = usePathname();
+  const session = useSession();
+  const visibleNav = filterNav(navItems, session);
 
   return (
     <div className="flex flex-col h-full">
@@ -90,7 +142,7 @@ function SidebarContent({ collapsed, onToggle, onNavigate }: { collapsed: boolea
 
       {/* Nav Items */}
       <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
-        {navItems.map((item) => {
+        {visibleNav.map((item) => {
           const isActive = pathname === item.href;
           const ItemIcon = item.icon;
 
@@ -155,6 +207,8 @@ function SidebarContent({ collapsed, onToggle, onNavigate }: { collapsed: boolea
 function MobileBottomNav() {
   const pathname = usePathname();
   const [moreOpen, setMoreOpen] = useState(false);
+  const session = useSession();
+  const visibleNav = filterNav(navItems, session);
 
   // Close "more" sheet when navigating
   useEffect(() => {
@@ -239,7 +293,7 @@ function MobileBottomNav() {
           </div>
 
           <nav className="px-3 pb-6 space-y-1 overflow-y-auto">
-            {navItems.map((item) => {
+            {visibleNav.map((item) => {
               const isActive = pathname === item.href;
               const ItemIcon = item.icon;
               return (

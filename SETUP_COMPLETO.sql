@@ -611,6 +611,104 @@ CREATE TABLE IF NOT EXISTS public.automation_logs (
 CREATE INDEX IF NOT EXISTS idx_automation_logs_automation ON public.automation_logs(automation_id, created_at DESC);
 
 -- =====================================================================
+-- PARTE 10.6 — MULTI-TENANT (clients, auth_sessions, kanban_columns,
+-- coluna client_id em todas as tabelas tenant-aware)
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS public.clients (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name              TEXT NOT NULL,
+  email             TEXT NOT NULL UNIQUE,
+  password_hash     TEXT,                              -- pbkdf2$iter$salt$hash; NULL = sem login direto
+  is_admin          BOOLEAN NOT NULL DEFAULT FALSE,
+  is_active         BOOLEAN NOT NULL DEFAULT TRUE,
+  default_ai_model  TEXT DEFAULT 'gemini-3.1-flash-lite-preview',
+  features          JSONB NOT NULL DEFAULT '{"dashboard":true,"leads":true,"chat":true,"agente":true,"automacao":true,"disparo":true,"followup":true,"captador":true,"inteligencia":true,"whatsapp":true,"historico":true,"tokens":true,"configuracoes":true}'::jsonb,
+  organizer_prompt  TEXT,
+  notes             TEXT,
+  created_at        TIMESTAMPTZ DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_clients_email     ON public.clients(email);
+CREATE INDEX IF NOT EXISTS idx_clients_is_active ON public.clients(is_active);
+CREATE INDEX IF NOT EXISTS idx_clients_is_admin  ON public.clients(is_admin);
+
+-- Cliente "Default" recebe todos os dados pré-multi-tenant.
+INSERT INTO public.clients (id, name, email, is_admin, is_active, notes)
+VALUES ('00000000-0000-0000-0000-000000000001', 'Default', 'default@local', FALSE, TRUE, 'Cliente automático — dados legados.')
+ON CONFLICT (id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS public.auth_sessions (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id       UUID NOT NULL REFERENCES public.clients(id) ON DELETE CASCADE,
+  impersonated_as UUID REFERENCES public.clients(id) ON DELETE SET NULL,
+  token_hash      TEXT NOT NULL UNIQUE,
+  user_agent      TEXT,
+  ip              TEXT,
+  expires_at      TIMESTAMPTZ NOT NULL,
+  revoked_at      TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_token   ON public.auth_sessions(token_hash) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_client  ON public.auth_sessions(client_id, expires_at);
+
+-- Adiciona client_id em todas as tabelas tenant-aware. NULLABLE de propósito
+-- — código antigo continua funcionando até a blindagem completa por query.
+-- DEFAULT '...001' garante que INSERTs sem client_id vão pro Default.
+DO $$
+DECLARE
+  tbl TEXT;
+  tenant_tables TEXT[] := ARRAY[
+    'leads_extraidos', 'chats_dashboard', 'messages', 'contacts', 'sessions',
+    'agent_settings', 'agent_stages', 'agent_knowledge', 'channel_connections',
+    'campaigns', 'campaign_targets', 'campaign_logs',
+    'followup_campaigns', 'followup_targets', 'followup_logs',
+    'automations', 'automation_logs',
+    'ai_token_usage', 'historico_ia_leads', 'ai_organizer_runs', 'chat_buffers'
+  ];
+BEGIN
+  FOREACH tbl IN ARRAY tenant_tables LOOP
+    EXECUTE format(
+      'ALTER TABLE public.%I ADD COLUMN IF NOT EXISTS client_id UUID REFERENCES public.clients(id) ON DELETE CASCADE DEFAULT ''00000000-0000-0000-0000-000000000001''',
+      tbl
+    );
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_%I_client ON public.%I(client_id)', tbl, tbl);
+    EXECUTE format('UPDATE public.%I SET client_id = ''00000000-0000-0000-0000-000000000001'' WHERE client_id IS NULL', tbl);
+  END LOOP;
+END $$;
+
+-- Kanban editável por cliente
+CREATE TABLE IF NOT EXISTS public.kanban_columns (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id   UUID NOT NULL REFERENCES public.clients(id) ON DELETE CASCADE,
+  status_key  TEXT NOT NULL,
+  label       TEXT NOT NULL,
+  color       TEXT,
+  order_index INT NOT NULL DEFAULT 0,
+  is_system   BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at  TIMESTAMPTZ DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(client_id, status_key)
+);
+CREATE INDEX IF NOT EXISTS idx_kanban_columns_client ON public.kanban_columns(client_id, order_index);
+
+INSERT INTO public.kanban_columns (client_id, status_key, label, color, order_index, is_system) VALUES
+  ('00000000-0000-0000-0000-000000000001', 'novo',              'Novos',             '#3b82f6', 0, TRUE),
+  ('00000000-0000-0000-0000-000000000001', 'primeiro_contato',  'Primeiro contato',  '#06b6d4', 1, FALSE),
+  ('00000000-0000-0000-0000-000000000001', 'follow-up',         'Follow-up',         '#eab308', 2, FALSE),
+  ('00000000-0000-0000-0000-000000000001', 'qualificado',       'Qualificado',       '#10b981', 3, FALSE),
+  ('00000000-0000-0000-0000-000000000001', 'fechado',           'Fechado',           '#22c55e', 4, FALSE),
+  ('00000000-0000-0000-0000-000000000001', 'perdido',           'Perdido',           '#ef4444', 5, FALSE),
+  ('00000000-0000-0000-0000-000000000001', 'sem_contato',       'Sem contato',       '#6b7280', 6, FALSE)
+ON CONFLICT (client_id, status_key) DO NOTHING;
+
+ALTER TABLE public.clients         DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.auth_sessions   DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.kanban_columns  DISABLE ROW LEVEL SECURITY;
+GRANT ALL ON TABLE public.clients         TO anon, authenticated, service_role;
+GRANT ALL ON TABLE public.auth_sessions   TO anon, authenticated, service_role;
+GRANT ALL ON TABLE public.kanban_columns  TO anon, authenticated, service_role;
+
+-- =====================================================================
 -- PARTE 11 — app_settings (URL pública, credenciais Evolution global, flags)
 -- =====================================================================
 CREATE TABLE IF NOT EXISTS public.app_settings (
