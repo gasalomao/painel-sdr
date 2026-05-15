@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { verifySession, SESSION_COOKIE } from "@/lib/auth";
+import { verifySession, SESSION_COOKIE } from "@/lib/auth-edge";
 
 /**
  * Middleware Next.js — protege rotas que exigem autenticação.

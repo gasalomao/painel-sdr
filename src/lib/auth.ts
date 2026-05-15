@@ -1,25 +1,31 @@
 /**
- * Sistema de autenticação multi-tenant — admin + clientes.
+ * Sistema de autenticação multi-tenant — admin + clientes (Node-only).
+ *
+ * Esse arquivo carrega node:crypto e fica fora do middleware (edge runtime).
+ * Pra usar em middleware/middleware.ts → "@/lib/auth-edge".
  *
  * Design:
- *   - Senha: PBKDF2-SHA256 (100k iterações, salt 16 bytes) — sem dep nativa,
- *     funciona em edge runtime e nodejs.
- *   - Sessão: JWT assinado HS256 (jose) em cookie httpOnly + persistência em
- *     `auth_sessions` pra permitir revoke explícito (logout, troca de senha).
- *   - Impersonation: admin pode "entrar como cliente" — JWT carrega
- *     `actorId` (admin original) e `clientId` (cliente personificado).
- *     Toda revogação é por `auth_sessions.token_hash`.
- *
- * Por que NÃO bcrypt: bcryptjs roda em edge mas é lento; bcrypt-node é
- * binário nativo e não roda em edge runtime do Next.js. PBKDF2 do `crypto`
- * é nativo Node + Web Crypto, sem dep externa.
+ *   - Senha: PBKDF2-SHA256 (100k iterações, salt 16 bytes) — node:crypto nativo
+ *   - Sessão: JWT (jose) em cookie httpOnly + persistência em `auth_sessions`
+ *     pra permitir revoke explícito (logout, troca de senha, disable cliente)
+ *   - Impersonation: admin "entra como cliente" — JWT carrega `actorId`
+ *     (admin original) e `clientId` (cliente personificado)
  */
 
-import { SignJWT, jwtVerify } from "jose";
 import { createHash, pbkdf2Sync, randomBytes, timingSafeEqual } from "crypto";
 import { supabaseAdmin } from "@/lib/supabase";
 
-// ============= HASH DE SENHA =============
+// Re-exporta tudo do auth-edge pra calls antigos continuarem funcionando
+// (import { signSession, verifySession, SESSION_COOKIE, ... } from "@/lib/auth")
+export {
+  SESSION_COOKIE,
+  SESSION_TTL,
+  signSession,
+  verifySession,
+  type SessionClaims,
+} from "@/lib/auth-edge";
+
+// ============= HASH DE SENHA (Node-only — usa node:crypto) =============
 const PBKDF2_ITERATIONS = 100_000;
 const PBKDF2_KEYLEN = 64;
 const PBKDF2_SALT_BYTES = 16;
@@ -48,55 +54,7 @@ export function verifyPassword(plain: string, stored: string): boolean {
   try { return timingSafeEqual(expected, got); } catch { return false; }
 }
 
-// ============= JWT / COOKIE =============
-const JWT_ALG = "HS256";
-const COOKIE_NAME = "sdr_session";
-const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 dias
-
-function getSecret(): Uint8Array {
-  const s = process.env.AUTH_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || "";
-  if (!s) throw new Error("AUTH_SECRET ou SUPABASE_SERVICE_ROLE_KEY ausente — não posso assinar JWTs.");
-  return new TextEncoder().encode(s);
-}
-
-export type SessionClaims = {
-  /** Cliente "logado" (ou personificado, em caso de impersonation) */
-  clientId: string;
-  /** Admin que iniciou a sessão. Igual a clientId em login normal; diferente quando impersonando. */
-  actorId: string;
-  /** Email do clientId (denormalizado pra UI) */
-  email: string;
-  /** Nome do clientId (denormalizado) */
-  name: string;
-  /** TRUE quando actorId é admin */
-  isAdmin: boolean;
-  /** TRUE quando actor !== client (admin entrou como cliente) */
-  impersonating: boolean;
-  /** Permissões granulares por módulo */
-  features: Record<string, boolean>;
-  /** ID da auth_session pra revoke */
-  sessionId: string;
-};
-
-export async function signSession(claims: Omit<SessionClaims, "sessionId"> & { sessionId: string }): Promise<string> {
-  return new SignJWT(claims as any)
-    .setProtectedHeader({ alg: JWT_ALG })
-    .setIssuedAt()
-    .setExpirationTime(`${SESSION_TTL_SECONDS}s`)
-    .sign(getSecret());
-}
-
-export async function verifySession(token: string): Promise<SessionClaims | null> {
-  try {
-    const { payload } = await jwtVerify(token, getSecret(), { algorithms: [JWT_ALG] });
-    return payload as unknown as SessionClaims;
-  } catch {
-    return null;
-  }
-}
-
-export const SESSION_COOKIE = COOKIE_NAME;
-export const SESSION_TTL = SESSION_TTL_SECONDS;
+// JWT / sign / verify / cookie / SessionClaims vêm de @/lib/auth-edge (re-exportados acima).
 
 /**
  * SHA-256 do token JWT pra guardar em auth_sessions (não guardamos o token
@@ -105,6 +63,9 @@ export const SESSION_TTL = SESSION_TTL_SECONDS;
 export function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
+
+// Alias local pra usar nas funções de DB abaixo (importado pra evitar circular)
+import { SESSION_TTL as SESSION_TTL_SECONDS } from "@/lib/auth-edge";
 
 // ============= INTEGRAÇÃO COM `clients` + `auth_sessions` =============
 
