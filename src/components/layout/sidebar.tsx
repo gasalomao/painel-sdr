@@ -38,8 +38,16 @@ import {
 
 // Cada item tem `feature` — chave que bate com client.features no DB. Quando
 // o cliente não tem aquela feature true, o item some do menu. Items SEM
-// feature key (admin, login, etc) são sempre visíveis pra quem tem acesso.
-const navItems: Array<{ href: string; label: string; icon: any; feature?: string; adminOnly?: boolean }> = [
+// feature key (admin) são sempre visíveis pra quem tem acesso.
+type NavItem = { href: string; label: string; icon: any; feature?: string; adminOnly?: boolean };
+
+// Items admin-only — aparecem no topo do menu, com destaque visual.
+const adminItems: NavItem[] = [
+  { href: "/admin/clientes", label: "Clientes", icon: UserCheck, adminOnly: true },
+];
+
+// Items normais do painel — filtrados pelas features do cliente atual.
+const navItems: NavItem[] = [
   { href: "/",               label: "Dashboard",        icon: LayoutDashboard, feature: "dashboard" },
   { href: "/leads",          label: "Leads (CRM)",      icon: Users,           feature: "leads" },
   { href: "/chat",           label: "Chat",             icon: MessageSquare,   feature: "chat" },
@@ -53,8 +61,6 @@ const navItems: Array<{ href: string; label: string; icon: any; feature?: string
   { href: "/historico-ia",   label: "Histórico IA",     icon: History,         feature: "historico" },
   { href: "/tokens",         label: "Tokens IA",        icon: Coins,           feature: "tokens" },
   { href: "/configuracoes",  label: "Configurações",    icon: Settings2,       feature: "configuracoes" },
-  // Item exclusivo de admin — aparece com badge separado
-  { href: "/admin/clientes", label: "Clientes",         icon: UserCheck,       adminOnly: true },
 ];
 
 type SessionData = {
@@ -89,8 +95,8 @@ function useSession(): SessionData | null {
   return session;
 }
 
-// Filtra navItems baseado em sessão. Admin sempre vê tudo (não-impersonando).
-function filterNav(items: typeof navItems, session: SessionData | null) {
+// Filtra items baseado em sessão. Admin (não-impersonando) vê tudo.
+function filterNav(items: NavItem[], session: SessionData | null) {
   if (!session?.authenticated) return [];
   const isAdmin = !!session.isAdmin && !session.impersonating;
   const features = session.features || {};
@@ -114,6 +120,7 @@ function SidebarContent({ collapsed, onToggle, onNavigate }: { collapsed: boolea
   const pathname = usePathname();
   const session = useSession();
   const visibleNav = filterNav(navItems, session);
+  const visibleAdmin = filterNav(adminItems, session);
 
   return (
     <div className="flex flex-col h-full">
@@ -142,6 +149,44 @@ function SidebarContent({ collapsed, onToggle, onNavigate }: { collapsed: boolea
 
       {/* Nav Items */}
       <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
+        {/* Bloco ADMIN — só aparece pra admin não-impersonando.
+            Visual diferenciado (purple) pra distinguir da navegação do cliente. */}
+        {visibleAdmin.length > 0 && (
+          <div className="space-y-1 pb-2 mb-2 border-b border-white/5">
+            {!collapsed && (
+              <p className="px-3 pt-1 pb-1 text-[9px] font-black uppercase tracking-widest text-purple-400/70 flex items-center gap-1.5">
+                <ShieldAlert className="w-3 h-3" /> Administração
+              </p>
+            )}
+            {visibleAdmin.map((item) => {
+              const isActive = pathname === item.href || pathname.startsWith(item.href + "/");
+              const ItemIcon = item.icon;
+              const className = cn(
+                "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200",
+                "min-h-[44px]",
+                isActive
+                  ? "bg-purple-500/20 text-purple-200 shadow-[0_0_12px_rgba(168,85,247,0.25)]"
+                  : "text-purple-300/70 hover:text-purple-100 hover:bg-purple-500/10"
+              );
+              const link = (
+                <Link key={item.href} href={item.href} onClick={onNavigate} className={className}>
+                  <ItemIcon className={cn("w-[18px] h-[18px] shrink-0", isActive ? "text-purple-200" : "text-purple-300/80")} />
+                  {!collapsed && <span>{item.label}</span>}
+                </Link>
+              );
+              if (collapsed) {
+                return (
+                  <Tooltip key={item.href}>
+                    <TooltipTrigger>{link}</TooltipTrigger>
+                    <TooltipContent side="right" className="font-medium">{item.label}</TooltipContent>
+                  </Tooltip>
+                );
+              }
+              return link;
+            })}
+          </div>
+        )}
+
         {visibleNav.map((item) => {
           const isActive = pathname === item.href;
           const ItemIcon = item.icon;
@@ -209,6 +254,9 @@ function MobileBottomNav() {
   const [moreOpen, setMoreOpen] = useState(false);
   const session = useSession();
   const visibleNav = filterNav(navItems, session);
+  const visibleAdmin = filterNav(adminItems, session);
+  // No "Mais" do mobile, admin items vêm no topo seguidos da nav normal.
+  const allMobileItems = [...visibleAdmin, ...visibleNav];
 
   // Close "more" sheet when navigating
   useEffect(() => {
@@ -293,7 +341,7 @@ function MobileBottomNav() {
           </div>
 
           <nav className="px-3 pb-6 space-y-1 overflow-y-auto">
-            {visibleNav.map((item) => {
+            {allMobileItems.map((item) => {
               const isActive = pathname === item.href;
               const ItemIcon = item.icon;
               return (

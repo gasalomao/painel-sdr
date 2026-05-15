@@ -32,8 +32,9 @@ export default function LoginPage() {
         setError(data.error || "Falha ao entrar");
         return;
       }
-      // Admin sempre vai pro painel admin; cliente vai pro destino original (ou home)
-      const target = data.isAdmin ? "/admin/clientes" : (fromPath === "/login" ? "/" : fromPath);
+      // Admin abre no painel normal (Dashboard) — acessa Clientes pelo menu lateral.
+      // Cliente também vai pra raiz (ou destino original se foi redirecionado pra login).
+      const target = fromPath && fromPath !== "/login" && !fromPath.startsWith("/login") ? fromPath : "/";
       router.push(target);
       router.refresh();
     } catch (err: any) {
