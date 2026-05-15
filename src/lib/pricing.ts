@@ -54,13 +54,21 @@ let inflightFetch: Promise<CacheState> | null = null;
  * Preços em USD/token (não por 1M). Atualizado conforme docs Google em 2025.
  */
 const FALLBACK_PRICES: PricingMap = {
-  "gemini-2.5-flash":      { input_per_token: 0.075e-6,  output_per_token: 0.30e-6,  provider: "gemini", mode: "chat" },
-  "gemini-2.5-pro":        { input_per_token: 1.25e-6,   output_per_token: 10.0e-6,  provider: "gemini", mode: "chat" },
-  "gemini-2.0-flash":      { input_per_token: 0.075e-6,  output_per_token: 0.30e-6,  provider: "gemini", mode: "chat" },
-  "gemini-2.0-flash-lite": { input_per_token: 0.040e-6,  output_per_token: 0.15e-6,  provider: "gemini", mode: "chat" },
-  "gemini-1.5-flash":      { input_per_token: 0.075e-6,  output_per_token: 0.30e-6,  provider: "gemini", mode: "chat" },
-  "gemini-1.5-flash-8b":   { input_per_token: 0.040e-6,  output_per_token: 0.15e-6,  provider: "gemini", mode: "chat" },
-  "gemini-1.5-pro":        { input_per_token: 1.25e-6,   output_per_token: 5.00e-6,  provider: "gemini", mode: "chat" },
+  // Gemini 3 family (lançado 2026) — flagship multimodal
+  "gemini-3-flash":                 { input_per_token: 0.50e-6,   output_per_token: 3.00e-6,  provider: "gemini", mode: "chat" },
+  "gemini-3-pro":                   { input_per_token: 2.50e-6,   output_per_token: 15.00e-6, provider: "gemini", mode: "chat" },
+  "gemini-3.1-flash-lite-preview":  { input_per_token: 0.10e-6,   output_per_token: 0.40e-6,  provider: "gemini", mode: "chat" },
+  "gemini-3.1-flash-lite":          { input_per_token: 0.10e-6,   output_per_token: 0.40e-6,  provider: "gemini", mode: "chat" },
+  // Gemini 2.x family
+  "gemini-2.5-flash":               { input_per_token: 0.075e-6,  output_per_token: 0.30e-6,  provider: "gemini", mode: "chat" },
+  "gemini-2.5-flash-lite":          { input_per_token: 0.040e-6,  output_per_token: 0.15e-6,  provider: "gemini", mode: "chat" },
+  "gemini-2.5-pro":                 { input_per_token: 1.25e-6,   output_per_token: 10.0e-6,  provider: "gemini", mode: "chat" },
+  "gemini-2.0-flash":               { input_per_token: 0.075e-6,  output_per_token: 0.30e-6,  provider: "gemini", mode: "chat" },
+  "gemini-2.0-flash-lite":          { input_per_token: 0.040e-6,  output_per_token: 0.15e-6,  provider: "gemini", mode: "chat" },
+  // Gemini 1.5 family (fallback pra keys legadas)
+  "gemini-1.5-flash":               { input_per_token: 0.075e-6,  output_per_token: 0.30e-6,  provider: "gemini", mode: "chat" },
+  "gemini-1.5-flash-8b":            { input_per_token: 0.040e-6,  output_per_token: 0.15e-6,  provider: "gemini", mode: "chat" },
+  "gemini-1.5-pro":                 { input_per_token: 1.25e-6,   output_per_token: 5.00e-6,  provider: "gemini", mode: "chat" },
 };
 
 /** Filtra do JSON do LiteLLM só os modelos que a gente realmente usa (chat de Gemini etc). */

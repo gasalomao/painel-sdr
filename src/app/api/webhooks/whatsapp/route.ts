@@ -266,11 +266,25 @@ function sanitizeMimetype(mt: string | null | undefined, fallback: string): stri
  * Retorna null em caso de falha — o pipeline continua sem transcrição.
  */
 /**
- * Modelos Gemini tentados em ordem. Os modelos atuais suportam áudio nativamente
- * via inlineData. 2.5-flash é o flagship rápido atual (multimodal).
- * 1.5-flash fica como fallback porque muita API key antiga não tem acesso ao 2.5.
+ * Modelos Gemini tentados em ordem — ordenados por custo-benefício (mais
+ * barato primeiro, fallback se a key não tiver acesso). Todos suportam
+ * inlineData (áudio/imagem/PDF) nativamente.
+ *
+ * Por que essa ordem (2026):
+ *   - gemini-3.1-flash-lite-preview: $0.10/$0.40 por 1M tokens, multimodal,
+ *     "substancialmente melhor que 2.5-flash-lite em instrução e multimodal"
+ *     — ótimo pra transcrição/descrição em escala.
+ *   - gemini-3-flash: $0.50/$3 por 1M, reasoning Pro com latência Flash —
+ *     fallback pra mídias que o lite não dá conta (ex: PDF longo).
+ *   - 2.x/1.5: fallback final pra API keys legadas sem acesso aos 3.x.
  */
-const GEMINI_MODEL_CHAIN = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"];
+const GEMINI_MODEL_CHAIN = [
+  "gemini-3.1-flash-lite-preview",
+  "gemini-3-flash",
+  "gemini-2.5-flash",
+  "gemini-2.0-flash",
+  "gemini-1.5-flash",
+];
 
 async function transcribeAudioWithGemini(base64: string, mimetype: string, debugMessageId?: string): Promise<string | null> {
   const cfgResult = await supabase.from("ai_organizer_config").select("api_key").eq("id", 1).maybeSingle();
@@ -415,13 +429,88 @@ async function describeImageWithGemini(base64: string, mimetype: string): Promis
   return null;
 }
 
+/**
+ * Extrai conteúdo de PDF/documento usando Gemini multimodal.
+ * Gemini 1.5+ aceita PDFs inline diretamente (não precisa pdf-parse externo).
+ * Pra outros tipos de documento (docx, xlsx, txt), só PDF e TXT são suportados
+ * nativamente — outros formatos retornam null e a IA cai no placeholder.
+ *
+ * Retorna o conteúdo do documento resumido + texto principal extraído.
+ */
+async function describeDocumentWithGemini(base64: string, mimetype: string, fileName: string | null): Promise<string | null> {
+  const { data: cfg } = await supabase.from("ai_organizer_config").select("api_key").eq("id", 1).maybeSingle();
+  const apiKey = cfg?.api_key;
+  if (!apiKey) return null;
+
+  // Gemini API aceita estes mimetypes de documento inline:
+  // application/pdf, text/plain, text/html, text/css, text/javascript,
+  // application/x-javascript, text/x-typescript, application/x-typescript,
+  // text/csv, text/markdown, text/x-python, application/x-python-code,
+  // application/json, text/xml, application/rtf, text/rtf
+  const cleanMime = sanitizeMimetype(mimetype, "application/pdf");
+  const supportedDocs = /^(application\/pdf|text\/|application\/(json|rtf|x-javascript|x-python-code|x-typescript))/i;
+  if (!supportedDocs.test(cleanMime)) {
+    console.log(`[DocumentExtract] mimetype ${cleanMime} não suportado nativamente pelo Gemini — pulando.`);
+    return null;
+  }
+
+  const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");
+  const sizeBytes = Math.ceil(cleanBase64.length * 0.75);
+  // Gemini inline aceita até 20 MB. Acima disso seria preciso usar Files API (não cobrimos aqui).
+  if (sizeBytes > 20 * 1024 * 1024) {
+    console.warn(`[DocumentExtract] documento > 20 MB (${sizeBytes}B) — pulando (use Files API pra arquivos grandes).`);
+    return null;
+  }
+
+  const { GoogleGenerativeAI } = await import("@google/generative-ai");
+  const genAI = new GoogleGenerativeAI(apiKey);
+
+  const filenameHint = fileName ? ` (arquivo: ${fileName})` : "";
+
+  for (const modelName of GEMINI_MODEL_CHAIN) {
+    try {
+      const model = genAI.getGenerativeModel({ model: modelName });
+      const result = await model.generateContent([
+        { inlineData: { data: cleanBase64, mimeType: cleanMime } },
+        {
+          text:
+            `Você recebeu um documento${filenameHint}. ` +
+            "Gere um resumo executivo em PT-BR (até 4 frases) do conteúdo principal. " +
+            "Se o documento tiver dados estruturados (tabela, contrato, NF, currículo, proposta), " +
+            "liste os pontos-chave em bullets curtos. Sem preâmbulo, sem 'aqui está o resumo'.",
+        },
+      ]);
+      const text = result.response.text().trim();
+      if (text) {
+        const { logTokenUsage, extractGeminiUsage } = await import("@/lib/token-usage");
+        const u = extractGeminiUsage(result);
+        await logTokenUsage({
+          source: "other",
+          sourceLabel: "Extração de documento",
+          model: modelName,
+          promptTokens: u.promptTokens,
+          completionTokens: u.completionTokens,
+          totalTokens: u.totalTokens,
+          metadata: { kind: "document_extraction", mime: cleanMime, fileName, sizeBytes },
+        });
+        return text;
+      }
+    } catch (err: any) {
+      const msg = String(err?.message || err);
+      console.warn(`[DocumentExtract] falha ${modelName}: ${msg.slice(0, 200)}`);
+      if (/API key|invalid.*key|unauthorized|401|403.*api/i.test(msg) && !/model/i.test(msg)) return null;
+    }
+  }
+  return null;
+}
+
 // Placeholder textual pra mídias (aparece no chat antes do upload/transcrição terminarem)
 function mediaPlaceholder(msgType: string): string {
   switch (msgType) {
     case "image":    return "[📷 Imagem]";
     case "audio":    return "[🎤 Áudio — transcrevendo...]";
     case "video":    return "[🎥 Vídeo]";
-    case "document": return "[📄 Documento]";
+    case "document": return "[📄 Documento — extraindo conteúdo...]";
     case "sticker":  return "[Sticker]";
     case "location": return "[📍 Localização]";
     case "contact":  return "[👤 Contato]";
@@ -697,6 +786,17 @@ export async function POST(req: NextRequest) {
                 console.log("[Media] Descrição:", desc.slice(0, 80));
               }
               // Imagem sem descrição fica com placeholder "[📷 Imagem]" que já foi inserido
+            } else if (msgType === "document") {
+              console.log("[Media] Extraindo conteúdo de documento com Gemini...");
+              const fileName = extractFileName(message);
+              const desc = await describeDocumentWithGemini(base64Media, effMimetype, fileName);
+              if (desc) {
+                enrichedContent = `📄 ${fileName ? `[${fileName}] ` : ""}${desc}`;
+                console.log("[Media] Documento:", desc.slice(0, 80));
+              } else {
+                // Sem extração mas IA ainda recebe contexto de que cliente mandou arquivo
+                enrichedContent = `[📄 O cliente enviou ${fileName ? `o documento "${fileName}"` : "um documento"}${effMimetype ? ` (${effMimetype})` : ""} mas não consegui extrair o conteúdo automaticamente]`;
+              }
             }
 
             // 4) Update das tabelas — sempre atualiza media_url/mimetype,
