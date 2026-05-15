@@ -12,7 +12,10 @@ export const dynamic = "force-dynamic";
  */
 export async function GET(req: NextRequest) {
   const cfg = await getEvolutionConfig();
-  const instance = req.nextUrl.searchParams.get("instance") || cfg.instance || "sdr";
+  const instance = req.nextUrl.searchParams.get("instance") || cfg.instance;
+  if (!instance) {
+    return NextResponse.json({ error: "Sem instância configurada e nenhuma encontrada na Evolution. Crie uma em Configurações." }, { status: 400 });
+  }
   const diagnosis: any = {
     instance,
     checks: [] as any[],

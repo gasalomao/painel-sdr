@@ -192,47 +192,70 @@ export async function checkCrmDuplicate(remoteJid: string): Promise<string | nul
 }
 
 async function saveLeadAndSync(lead: Lead, settings: ScraperSettings) {
-  if (!lead.remoteJid) {
-    sendLog(`⚠️ Pulando "${lead.name}" — sem WhatsApp válido`, "warning");
-  } else {
-    try {
-      const client = supabaseAdmin || supabase;
-      if (!client) throw new Error("Supabase client não inicializado");
+  const hasWhatsApp = !!lead.remoteJid;
 
-      // Checagem final de race-condition: se outro processo gravou esse JID
-      // entre a checagem inicial e aqui, NÃO sobrescreve nem cria duplicata.
+  try {
+    const client = supabaseAdmin || supabase;
+    if (!client) throw new Error("Supabase client não inicializado");
+
+    // Se tem WhatsApp, checa duplicata
+    if (hasWhatsApp) {
       const dupSource = await checkCrmDuplicate(lead.remoteJid);
       if (dupSource) {
         sendLog(`⏭️ "${lead.name}" já estava no CRM (${dupSource}) — pulando`, "info");
         return;
       }
-
-      const payload = {
-        remoteJid: lead.remoteJid,
-        nome_negocio: lead.name,
-        telefone: lead.phones,
-        ramo_negocio: lead.categories,
-        endereco: lead.fullAddress,
-        rating: lead.averageRating,
-        reviews: lead.reviewCount,
-        website: lead.website,
-        instagram: lead.instagram,
-        facebook: lead.facebook,
-        instance_name: (await getEvolutionConfig()).instance || "sdr",
-        updated_at: new Date().toISOString(),
-      };
-
-      const { error: insError } = await client.from("leads_extraidos").insert({
-        ...payload,
-        status: "novo",
-        created_at: new Date().toISOString(),
-      });
-      if (insError) throw insError;
-      sendLog(`✅ Salvo: ${lead.name}`, "success");
-    } catch (err: any) {
-      console.error("Erro ao salvar no Supabase (CRM):", err);
-      sendLog(`❌ Falha ao salvar "${lead.name}": ${err.message || String(err)}`, "error");
     }
+
+    // Schema do leads_extraidos: avaliacao (NUMERIC), reviews (INT). Notas:
+    //   - O nome correto da coluna é `avaliacao`, NÃO `rating` — bug histórico
+    //     que rejeitava todos os INSERTs em bancos novos.
+    //   - `instagram` e `facebook` foram adicionadas via migration (PARTE 3
+    //     do SETUP_COMPLETO.sql); se o banco for muito antigo e não tiver
+    //     elas, o fallback abaixo retira-as e tenta de novo.
+    const fullPayload = {
+      remoteJid: lead.remoteJid || null,
+      nome_negocio: lead.name,
+      telefone: lead.phones,
+      ramo_negocio: lead.categories,
+      endereco: lead.fullAddress,
+      avaliacao: lead.averageRating ? Number(lead.averageRating) || null : null,
+      reviews: lead.reviewCount ? Number(String(lead.reviewCount).replace(/\D/g, "")) || null : null,
+      website: lead.website,
+      instagram: lead.instagram,
+      facebook: lead.facebook,
+      instance_name: (await getEvolutionConfig()).instance,
+      status: hasWhatsApp ? "novo" : "sem_contato",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    let { error: insError } = await client.from("leads_extraidos").insert(fullPayload);
+
+    // PGRST204 = coluna inexistente. Banco antigo sem instagram/facebook —
+    // tenta de novo só com as colunas garantidas pra não perder o lead.
+    if (insError && (insError as any).code === "PGRST204") {
+      const { instagram: _i, facebook: _f, ...minimal } = fullPayload;
+      void _i; void _f;
+      const retry = await client.from("leads_extraidos").insert(minimal);
+      insError = retry.error as any;
+      if (!insError) {
+        sendLog(`(coluna instagram/facebook não existe no banco — lead salvo sem essas redes)`, "warning");
+      }
+    }
+
+    if (insError) throw insError;
+
+    if (hasWhatsApp) {
+      sendLog(`✅ Salvo: ${lead.name}`, "success");
+    } else {
+      sendLog(`✅ Salvo: ${lead.name} (sem WhatsApp — status: sem_contato)`, "success");
+    }
+  } catch (err: any) {
+    const msg = err?.message || String(err);
+    const detail = err?.details || err?.hint || "";
+    console.error("Erro ao salvar no Supabase (CRM):", msg, detail);
+    sendLog(`❌ Falha ao salvar "${lead.name}": ${msg}${detail ? ` (${detail})` : ""}`, "error");
   }
 
   if (!settings.webhookEnabled || !settings.webhookUrl) return;

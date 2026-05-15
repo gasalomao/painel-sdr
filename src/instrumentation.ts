@@ -212,10 +212,15 @@ export async function register() {
     }
   }, 1000 * 60);
 
-  console.log("[FOLLOWUP] Iniciando ticker (2 min).");
+  console.log("[FOLLOWUP] Iniciando ticker (2 min) — primeiro tick em 15s.");
   const { tickAllAutoCampaigns } = await import("@/lib/followup-worker");
   const { promoteStalePrimeiroContato } = await import("@/lib/auto-promoter");
   if (globalThis.followupTickerId) clearInterval(globalThis.followupTickerId);
+
+  // Delay inicial de 15s para dar tempo ao Supabase ficar pronto no boot
+  await new Promise(r => setTimeout(r, 15_000));
+  console.log("[FOLLOWUP] Delay de boot concluído, ticker ativo.");
+
   globalThis.followupTickerId = setInterval(async () => {
     // 1) Promove quem está há >24h em primeiro_contato (vindo de disparo) para follow-up
     try {

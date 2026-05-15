@@ -71,7 +71,8 @@ async function handle(jids: string[], instanceParam: string | null, force: boole
   const cleanJids = Array.from(new Set(jids.filter(Boolean))).slice(0, 200); // hard cap pra DoS
   if (cleanJids.length === 0) return { success: true, avatars: {} as Record<string, string | null> };
 
-  const instance = instanceParam || (await getEvolutionConfig()).instance || "sdr";
+  const instance = instanceParam || (await getEvolutionConfig()).instance;
+  if (!instance) return { success: true, avatars: {} as Record<string, string | null> };
   const cached = await getCachedAvatars(cleanJids);
   const result: Record<string, string | null> = {};
   const stale: string[] = [];

@@ -522,7 +522,11 @@ export async function POST(req: NextRequest) {
     const eventName = body.event || body.type || "unknown";
     // Aceita QUALQUER nome de instância vindo do payload da Evolution.
     // Fallback final = instância configurada (DB ou env), nunca um literal.
-    const instanceName = body.instance || body.instance_name || (await getEvolutionConfig()).instance || "sdr";
+    const instanceName = body.instance || body.instance_name || (await getEvolutionConfig()).instance;
+    if (!instanceName) {
+      console.warn(">>> webhook recebido sem instância identificável; ignorando");
+      return NextResponse.json({ success: false, ignored: true, reason: "no_instance" });
+    }
     const overrideAgentId = req.nextUrl.searchParams.get("agentId");
 
     console.log(">>> [Evolution API v2] Evento:", eventName, "| Instância:", instanceName);

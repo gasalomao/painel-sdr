@@ -19,6 +19,11 @@ import {
   MoreHorizontal,
   X,
   Cpu,
+  BookOpen,
+  ShieldAlert,
+  BarChart3,
+  UserCheck,
+  Trophy,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
@@ -40,6 +45,7 @@ const navItems = [
   { href: "/disparo", label: "Disparo em Massa", icon: Zap },
   { href: "/follow-up", label: "Follow-up", icon: Repeat },
   { href: "/captador", label: "Captador Maps", icon: MapPin },
+  { href: "/inteligencia", label: "Inteligência", icon: BarChart3 },
   { href: "/whatsapp", label: "WhatsApp", icon: Smartphone },
   { href: "/historico-ia", label: "Histórico IA", icon: History },
   { href: "/tokens", label: "Tokens IA", icon: Coins },

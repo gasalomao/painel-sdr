@@ -265,9 +265,8 @@ CREATE TABLE IF NOT EXISTS public.channel_connections (
 ALTER TABLE public.channel_connections ADD COLUMN IF NOT EXISTS provider        TEXT NOT NULL DEFAULT 'evolution';
 ALTER TABLE public.channel_connections ADD COLUMN IF NOT EXISTS provider_config JSONB DEFAULT '{}'::jsonb;
 
-INSERT INTO public.channel_connections (instance_name, agent_id, status)
-VALUES ('sdr', 1, 'open')
-ON CONFLICT (instance_name) DO NOTHING;
+-- (Sem seed de instância padrão — a primeira linha de channel_connections é
+-- criada quando o usuário cria/conecta uma instância pela UI.)
 
 CREATE INDEX IF NOT EXISTS idx_channel_provider_phone_id
   ON public.channel_connections ((provider_config->>'phone_number_id'))

@@ -146,6 +146,10 @@ ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS ramo_negocio        
 ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS categoria            TEXT;
 ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS endereco             TEXT;
 ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS website              TEXT;
+-- Redes sociais detectadas pelo scraper Google Maps. Sem essas colunas, o
+-- INSERT do scraper-engine era rejeitado com PGRST204 e nenhum lead salvava.
+ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS instagram            TEXT;
+ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS facebook             TEXT;
 ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS avaliacao            NUMERIC;
 ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS reviews              INT;
 ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS telefone             TEXT;

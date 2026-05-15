@@ -62,7 +62,7 @@ em MAIÚSCULO** pelos seus reais.
 
 ```env
 # ============= SUPABASE (self-hosted) =============
-NEXT_PUBLIC_SUPABASE_URL=https://sistema-supabase.ridnli.easypanel.host
+NEXT_PUBLIC_SUPABASE_URL=https://sistema-supabase.ridnii.easypanel.host
 NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJhbm9uIiwKICAgICJpc3MiOiAic3VwYWJhc2UtZGVtbyIsCiAgICAiaWF0IjogMTY0MTc2OTIwMCwKICAgICJleHAiOiAxNzk5NTM1NjAwCn0.dc_X5iR_VP_qT0zsiyj_I_OZ2T9FtRU2BBNWN8Bu4GE
 SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJzZXJ2aWNlX3JvbGUiLAogICAgImlzcyI6ICJzdXBhYmFzZS1kZW1vIiwKICAgICJpYXQiOiAxNjQxNzY5MjAwLAogICAgImV4cCI6IDE3OTk1MzU2MDAKfQ.DaYlNEoUrrEn2Ig7tqibS-PHK5vgusbcbo7X36XVt4Q
 
@@ -79,7 +79,7 @@ REDIS_USERNAME=default
 
 # ============= APP =============
 ADMIN_PASSWORD=Gabriel@3074
-NEXT_PUBLIC_APP_URL=https://sistema-sdr.ridnli.easypanel.host
+NEXT_PUBLIC_APP_URL=https://sistema-sdr.ridnii.easypanel.host
 INTERNAL_APP_URL=http://localhost:3000
 PORT=3000
 HOSTNAME=0.0.0.0
@@ -99,9 +99,9 @@ Em **Build → Build Args**, cole as variáveis `NEXT_PUBLIC_*` e
 `SUPABASE_SERVICE_ROLE_KEY`:
 
 ```
-NEXT_PUBLIC_SUPABASE_URL=https://sistema-supabase.ridnli.easypanel.host
+NEXT_PUBLIC_SUPABASE_URL=https://sistema-supabase.ridnii.easypanel.host
 NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJhbm9uIiwKICAgICJpc3MiOiAic3VwYWJhc2UtZGVtbyIsCiAgICAiaWF0IjogMTY0MTc2OTIwMCwKICAgICJleHAiOiAxNzk5NTM1NjAwCn0.dc_X5iR_VP_qT0zsiyj_I_OZ2T9FtRU2BBNWN8Bu4GE
-NEXT_PUBLIC_APP_URL=https://sistema-sdr.ridnli.easypanel.host
+NEXT_PUBLIC_APP_URL=https://sistema-sdr.ridnii.easypanel.host
 SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJzZXJ2aWNlX3JvbGUiLAogICAgImlzcyI6ICJzdXBhYmFzZS1kZW1vIiwKICAgICJpYXQiOiAxNjQxNzY5MjAwLAogICAgImV4cCI6IDE3OTk1MzU2MDAKfQ.DaYlNEoUrrEn2Ig7tqibS-PHK5vgusbcbo7X36XVt4Q
 ```
 

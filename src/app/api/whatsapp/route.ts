@@ -73,39 +73,39 @@ export async function POST(req: NextRequest) {
 
     switch (action) {
       case "connect": {
-        // 1. Checa status da instancia
-        let status: any;
+        // Já conectado? Não regera QR — devolve o estado pra UI mostrar "online".
+        const pre = await evolution.getStatus(instanceName).catch(() => ({ state: "not_found" as const, data: null }));
+        if (pre.state === "open") {
+          return NextResponse.json({ success: true, qrCode: null, pairingCode: null, state: "open", data: pre.data });
+        }
+
+        // ensureInstanceConfigured: cria se faltar, (re)aplica settings padrão
+        // (rejectCall, groupsIgnore, alwaysOnline, etc) e registra o webhook
+        // apontando pra URL pública atual. Garante que cada Conectar deixa a
+        // instância em estado consistente, sem depender de mudanças manuais
+        // no painel da Evolution.
+        const { supabaseAdmin } = await import("@/lib/supabase_admin");
+        let publicUrl: string | undefined;
         try {
-          status = await evolution.getStatus(instanceName);
-        } catch {
-          status = { state: "not_found" };
+          const { data } = await supabaseAdmin
+            .from("app_settings")
+            .select("value")
+            .eq("key", "public_url")
+            .maybeSingle();
+          if (data?.value && !data.value.includes("localhost")) publicUrl = data.value;
+        } catch { /* sem URL pública não trava o connect, só o webhook */ }
+        if (!publicUrl) {
+          const env = process.env.NEXT_PUBLIC_APP_URL;
+          if (env && !env.includes("localhost")) publicUrl = env;
         }
 
-        let connectResponse: any;
+        const connectResponse = await evolution.ensureInstanceConfigured(instanceName, publicUrl);
 
-        if (status.state === "not_found") {
-          // Cria instancia se nao existe
-          connectResponse = await evolution.createInstance(instanceName);
-          // Aguarda um pouco para instancia existir
-          await new Promise(r => setTimeout(r, 2000));
-        }
-
-        // Gera QR ou retorna status se ja conectado
-        if (connectResponse || status.state !== "open") {
-          try {
-            connectResponse = await evolution.connect(instanceName);
-          } catch (e) {
-            return NextResponse.json({ success: false, error: (e as Error).message }, { status: 500 });
-          }
-        }
-
-        // Evolution v2 retorna: { code: "...raw QR...", pairingCode: "..." }
-        // Normaliza para a UI saber o que exibir
         return NextResponse.json({
           success: true,
-          qrCode: connectResponse?.code || null,
+          qrCode: connectResponse?.code || connectResponse?.base64 || null,
           pairingCode: connectResponse?.pairingCode || null,
-          fullData: connectResponse
+          fullData: connectResponse,
         });
       }
 

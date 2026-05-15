@@ -15,7 +15,7 @@ const INTERNAL_BASE = `http://localhost:${process.env.PORT || 3000}`;
 export async function POST(req: NextRequest) {
   try {
     const payloadBody = await req.json();
-    const defaultInstance = (await getEvolutionConfig()).instance || "sdr";
+    const defaultInstance = (await getEvolutionConfig()).instance;
     const { remoteJid, isStatusUpdate, instanceName = defaultInstance, text, isTestMode = false, testHistory = [], sessionId, testState, testLeadData } = payloadBody;
 
     if (!remoteJid || !text) {

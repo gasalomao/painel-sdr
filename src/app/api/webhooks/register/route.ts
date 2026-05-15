@@ -12,7 +12,10 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
   try {
-    const instanceName = req.nextUrl.searchParams.get("instance") || evolution.instanceName || "sdr";
+    const instanceName = req.nextUrl.searchParams.get("instance") || (await evolution.getActiveInstance().catch(() => ""));
+    if (!instanceName) {
+      return NextResponse.json({ success: false, error: "Sem instância configurada. Crie uma em Configurações → Evolution API." }, { status: 400 });
+    }
 
     // Usa getEvolutionConfig() que lê do banco (app_settings) com fallback pro .env
     // Isso garante que funcione quando a Evolution foi configurada pela UI (sem rebuild).
@@ -41,7 +44,10 @@ export async function POST(req: NextRequest) {
   try {
     const { instanceName, appUrl, agentId } = await req.json();
 
-    const instance = instanceName || evolution.instanceName || "sdr";
+    const instance = instanceName || (await evolution.getActiveInstance().catch(() => ""));
+    if (!instance) {
+      return NextResponse.json({ success: false, error: "Sem instância configurada. Crie uma em Configurações → Evolution API." }, { status: 400 });
+    }
 
     // Prioridade para buscar URL pública (ao clicar "Sincronizar Agora"):
     //   1. appUrl enviado pelo front-end (geralmente window.location.origin → o

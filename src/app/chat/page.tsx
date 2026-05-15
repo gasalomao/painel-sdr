@@ -320,7 +320,7 @@ export default function ChatPage() {
   const [isAiBlockedTemporal, setIsAiBlockedTemporal] = useState(false);
   const [aiTtlRemaining, setAiTtlRemaining] = useState(0);
   const [instances, setInstances] = useState<any[]>([]);
-  const [activeInstance, setActiveInstance] = useState<string>("sdr");
+  const [activeInstance, setActiveInstance] = useState<string>("");
   const [resumeAt, setResumeAt] = useState<string | null>(null);
   const [countdown, setCountdown] = useState<string | null>(null);
 
@@ -682,7 +682,7 @@ export default function ChatPage() {
         // primeira COM mensagens (ou primeira da lista).
         if (merged.length > 0 && activeInstance !== "__all__" && !merged.some(i => i.instanceName === activeInstance)) {
           const fallback = merged.find(i => i.msgCount > 0) || merged[0];
-          setActiveInstance(fallback?.instanceName || "sdr");
+          if (fallback?.instanceName) setActiveInstance(fallback.instanceName);
         }
       } catch (err) {
         console.error("Erro ao carregar instâncias:", err);

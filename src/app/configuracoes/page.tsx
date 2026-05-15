@@ -26,6 +26,12 @@ export default function ConfiguracoesPage() {
   const [evoTesting, setEvoTesting]     = useState(false);
   const [evoTestResult, setEvoTestResult] = useState<null | { ok: boolean; instances?: any[]; error?: string }>(null);
   const [evoMigration, setEvoMigration] = useState<null | { from: string; to: string; tables: Record<string, { ok: boolean; error?: string }> }>(null);
+  // Lista plana com nomes das instâncias do servidor remoto, pra mostrar como
+  // chips clicáveis. Atualizada após Test/Save e quando URL+key são editadas.
+  const [evoAvailable, setEvoAvailable] = useState<string[]>([]);
+  const [evoQrCode, setEvoQrCode] = useState<string | null>(null);
+  const [evoPairingCode, setEvoPairingCode] = useState<string | null>(null);
+  const [evoCreated, setEvoCreated] = useState(false);
 
   async function loadEvolutionConfig() {
     try {
@@ -37,16 +43,52 @@ export default function ConfiguracoesPage() {
         setEvoUrl(d.stored?.url || "");
         setEvoInstance(d.stored?.instance || "");
         // Não pré-preenchemos a key (vem mascarada do servidor); deixamos em branco para não substituir sem querer.
+        // Se já temos URL+key salvas, lista as instâncias do servidor pra UI
+        // mostrar os chips clicáveis sem o user precisar clicar em "Testar".
+        if (d.stored?.url && d.stored?.hasKey) {
+          fetch("/api/evolution/config?test=1", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          })
+            .then(r => r.json())
+            .then(t => {
+              if (t.success && Array.isArray(t.instances)) {
+                setEvoAvailable(t.instances.map(instanceNameOf).filter(Boolean));
+              }
+            })
+            .catch(() => {});
+        }
       }
     } catch {}
+  }
+
+  // Extrai o nome da instância de um item bruto vindo da Evolution API.
+  function instanceNameOf(i: any): string {
+    return i?.instance?.instanceName || i?.instance?.name || i?.instanceName || i?.name || "";
   }
 
   async function saveEvolution() {
     setEvoSaving(true);
     setEvoTestResult(null);
     setEvoMigration(null);
+    setEvoQrCode(null);
+    setEvoPairingCode(null);
+    setEvoCreated(false);
     try {
-      const payload: any = { url: evoUrl.trim(), instance: evoInstance.trim() };
+      const payload: any = {
+        url: evoUrl.trim(),
+        instance: evoInstance.trim(),
+        // Garante que se a instância informada não existir no servidor, ela
+        // será criada com settings padrão + webhook automaticamente. Sem isso,
+        // o user precisava ir manualmente na Evolution criar uma instância.
+        ensure: true,
+        // Manda a URL pública atual da página pra ser usada no webhook (caso
+        // o painel esteja servido em domínio diferente do salvo no DB).
+        publicUrl: typeof window !== "undefined" && !window.location.origin.includes("localhost")
+          ? window.location.origin
+          : undefined,
+      };
       if (evoApiKey.trim()) payload.apiKey = evoApiKey.trim();
       const r = await fetch("/api/evolution/config", {
         method: "PATCH",
@@ -56,18 +98,21 @@ export default function ConfiguracoesPage() {
       const d = await r.json();
       if (!d.success) throw new Error(d.error || "Falha ao salvar");
       if (d.migration) setEvoMigration(d.migration);
+      if (Array.isArray(d.availableInstances)) setEvoAvailable(d.availableInstances);
+      if (d.created) {
+        setEvoCreated(true);
+        if (d.qrCode) setEvoQrCode(d.qrCode);
+        if (d.pairingCode) setEvoPairingCode(d.pairingCode);
+      }
+      if (d.serverError) {
+        setEvoTestResult({ ok: false, error: d.serverError });
+      }
       setEvoApiKey("");
       await loadEvolutionConfig();
     } catch (e: any) {
       alert("Erro ao salvar: " + e.message);
       setEvoSaving(false);
       return;
-    }
-    // Após salvar, dispara um teste automático separado (não bloqueia o save).
-    try {
-      await testEvolution(true);
-    } catch {
-      // Se o teste falhar, o save já foi feito — não mostra como erro de save.
     }
     setEvoSaving(false);
   }
@@ -86,6 +131,9 @@ export default function ConfiguracoesPage() {
       });
       const d = await r.json();
       setEvoTestResult({ ok: !!d.success, instances: d.instances, error: d.error });
+      if (d.success && Array.isArray(d.instances)) {
+        setEvoAvailable(d.instances.map(instanceNameOf).filter(Boolean));
+      }
     } catch (e: any) {
       setEvoTestResult({ ok: false, error: e.message });
     } finally {
@@ -429,16 +477,79 @@ export default function ConfiguracoesPage() {
                 <Input
                   value={evoInstance}
                   onChange={e => setEvoInstance(e.target.value)}
-                  placeholder="sdr"
+                  placeholder={evoAvailable.length > 0 ? "Escolha abaixo ou digite um nome novo" : "Digite um nome (ex: minhaempresa)"}
                   className="bg-black/40 border-white/10 font-mono text-sm h-11"
                   autoComplete="off"
                   spellCheck={false}
                 />
                 <p className="text-[9px] text-muted-foreground">
-                  Nome da instância WhatsApp na Evolution. Default <span className="font-mono">sdr</span>.
+                  {evoInstance.trim() && evoAvailable.includes(evoInstance.trim()) ? (
+                    <>Vai vincular a uma instância <span className="text-green-300 font-bold">já existente</span> nesse servidor.</>
+                  ) : evoInstance.trim() ? (
+                    <>Esse nome ainda <span className="text-amber-300 font-bold">não existe</span> no servidor — será criada com QR Code automaticamente ao salvar.</>
+                  ) : (
+                    <>Cole o nome da instância. Se ela ainda não existir no servidor, será criada com configuração padrão (rejeita ligações, ignora grupos) + webhook automaticamente.</>
+                  )}
                 </p>
               </div>
             </div>
+
+            {evoAvailable.length > 0 && (
+              <div className="rounded-xl border border-white/10 bg-black/30 p-3 space-y-2">
+                <p className="text-[9px] uppercase font-black tracking-widest text-muted-foreground">
+                  Instâncias detectadas no servidor ({evoAvailable.length})
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {evoAvailable.map(name => (
+                    <button
+                      key={name}
+                      type="button"
+                      onClick={() => setEvoInstance(name)}
+                      className={cn(
+                        "px-2.5 py-1 rounded-md text-[11px] font-mono border transition",
+                        evoInstance.trim() === name
+                          ? "bg-cyan-500/20 border-cyan-500/60 text-cyan-100"
+                          : "bg-white/5 border-white/10 text-white/70 hover:bg-white/10 hover:text-white"
+                      )}
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[9px] text-muted-foreground">Clique pra usar uma existente, ou digite um nome novo no campo acima pra criar.</p>
+              </div>
+            )}
+
+            {evoCreated && (
+              <div className="rounded-xl border border-green-500/30 bg-green-500/10 p-3 space-y-3">
+                <div className="flex items-start gap-2 text-green-200">
+                  <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                  <div className="text-[11px] space-y-1">
+                    <p className="font-bold">Instância criada com sucesso!</p>
+                    <p className="opacity-80">
+                      Settings padrão aplicados (<span className="font-mono">rejectCall</span>, <span className="font-mono">groupsIgnore</span>, <span className="font-mono">alwaysOnline</span>) e webhook registrado. Escaneie o QR Code abaixo no WhatsApp do celular pra finalizar a conexão.
+                    </p>
+                  </div>
+                </div>
+                {evoQrCode && (
+                  <div className="flex flex-col items-center gap-2">
+                    <img
+                      src={evoQrCode.startsWith("data:") ? evoQrCode : `data:image/png;base64,${evoQrCode}`}
+                      alt="QR Code WhatsApp"
+                      className="w-56 h-56 rounded-lg bg-white p-2"
+                    />
+                    <p className="text-[10px] text-muted-foreground">
+                      WhatsApp → Configurações → Aparelhos conectados → Conectar aparelho. O QR expira em ~60s — clique <span className="font-mono">Salvar e conectar</span> de novo se passar.
+                    </p>
+                  </div>
+                )}
+                {evoPairingCode && (
+                  <p className="text-center text-[11px] font-mono text-cyan-300">
+                    Ou use o código de pareamento: <span className="font-bold text-base">{evoPairingCode}</span>
+                  </p>
+                )}
+              </div>
+            )}
 
             <div className="flex flex-wrap gap-2">
               <Button

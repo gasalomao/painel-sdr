@@ -26,9 +26,9 @@ COPY . .
 # ----- Build args (variáveis NEXT_PUBLIC_* viram código no JS do cliente) -----
 # Easypanel injeta estes valores via "Build Args" se você setar lá.
 # Se NÃO setar, caem nos defaults abaixo (que apontam pra produção).
-ARG NEXT_PUBLIC_SUPABASE_URL=https://sistema-supabase.ridnli.easypanel.host
+ARG NEXT_PUBLIC_SUPABASE_URL=https://sistema-supabase.ridnii.easypanel.host
 ARG NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJhbm9uIiwKICAgICJpc3MiOiAic3VwYWJhc2UtZGVtbyIsCiAgICAiaWF0IjogMTY0MTc2OTIwMCwKICAgICJleHAiOiAxNzk5NTM1NjAwCn0.dc_X5iR_VP_qT0zsiyj_I_OZ2T9FtRU2BBNWN8Bu4GE
-ARG NEXT_PUBLIC_APP_URL=https://sistema-sdr.ridnli.easypanel.host
+ARG NEXT_PUBLIC_APP_URL=https://sistema-sdr.ridnii.easypanel.host
 ARG SUPABASE_SERVICE_ROLE_KEY=
 
 ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL \

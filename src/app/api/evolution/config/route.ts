@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import axios from "axios";
 import https from "https";
 import { supabaseAdmin } from "@/lib/supabase_admin";
-import { invalidateEvolutionCache, getEvolutionConfig } from "@/lib/evolution";
+import { invalidateEvolutionCache, getEvolutionConfig, evolution } from "@/lib/evolution";
 
 export const dynamic = "force-dynamic";
 
@@ -229,7 +229,60 @@ export async function PATCH(req: NextRequest) {
     }
 
     invalidateEvolutionCache();
-    const cfg = await getEvolutionConfig(true);
+    const cfg = await getEvolutionConfig({ force: true, resolve: false });
+
+    // Lista instâncias remotas — útil pra UI mostrar o que existe no servidor
+    // E também pra decidir se precisamos criar a que o user pediu.
+    let availableInstances: string[] = [];
+    let serverError: string | undefined;
+    try {
+      const probeRes = await probe(cfg.url, cfg.apiKey).catch(() => ({ ok: false, instances: [] as any[], error: "probe falhou" }));
+      if (probeRes.ok) {
+        availableInstances = (probeRes.instances || [])
+          .map((i: any) => i?.instance?.instanceName || i?.instance?.name || i?.instanceName || i?.name)
+          .filter(Boolean);
+      } else if ((probeRes as any).error) {
+        serverError = (probeRes as any).error;
+      }
+    } catch { /* ignore — só é informativo */ }
+
+    // Se o user pediu pra garantir/criar a instância (default true quando passou
+    // um nome explícito), e ela ainda não existe no servidor remoto, cria com
+    // settings padrão + webhook apontando pra publicAppUrl.
+    let created = false;
+    let qrCode: string | null = null;
+    let pairingCode: string | null = null;
+    const wantEnsure = body.ensure !== false; // default true
+    const targetInstance = (instance || cfg.instance || "").trim();
+
+    if (wantEnsure && targetInstance && cfg.url && cfg.apiKey) {
+      const exists = availableInstances.includes(targetInstance);
+      if (!exists) {
+        try {
+          // Descobre a URL pública pra registrar o webhook junto da criação.
+          let publicUrl: string | undefined = (body.publicUrl ?? "").trim() || undefined;
+          if (!publicUrl) {
+            const { data } = await supabaseAdmin
+              .from("app_settings").select("value").eq("key", "public_url").maybeSingle();
+            if (data?.value && !data.value.includes("localhost")) publicUrl = data.value;
+          }
+          if (!publicUrl) {
+            const env = process.env.NEXT_PUBLIC_APP_URL;
+            if (env && !env.includes("localhost")) publicUrl = env;
+          }
+
+          const connectRes = await evolution.ensureInstanceConfigured(targetInstance, publicUrl);
+          created = true;
+          qrCode = connectRes?.code || connectRes?.base64 || null;
+          pairingCode = connectRes?.pairingCode || null;
+          availableInstances = [...availableInstances, targetInstance];
+        } catch (e: any) {
+          // Não trava o save — o user pode ter salvo URL/key sem querer criar
+          // ainda. Devolvemos o erro pra UI mostrar.
+          serverError = `Falha ao criar instância "${targetInstance}": ${e?.message || e}`;
+        }
+      }
+    }
 
     return NextResponse.json({
       success: true,
@@ -239,6 +292,11 @@ export async function PATCH(req: NextRequest) {
         to: instance,
         tables: migration,
       },
+      availableInstances,
+      created,
+      qrCode,
+      pairingCode,
+      serverError,
     });
   } catch (e: any) {
     return NextResponse.json({ success: false, error: e.message }, { status: 500 });

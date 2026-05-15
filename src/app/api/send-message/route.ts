@@ -71,7 +71,7 @@ function inferMimeForType(type: string, explicit?: string): string {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const defaultInstance = (await getEvolutionConfig()).instance || "sdr";
+    const defaultInstance = (await getEvolutionConfig()).instance;
     const { remoteJid, text, media, instanceName = defaultInstance } = body;
 
     if (!remoteJid) {

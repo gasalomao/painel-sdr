@@ -15,8 +15,12 @@ import { createClient } from "@supabase/supabase-js";
 
 let EVO_URL  = process.env.EVOLUTION_API_URL  || "";
 let EVO_KEY  = process.env.EVOLUTION_API_KEY  || "";
-let INSTANCE = process.env.EVOLUTION_INSTANCE || "sdr";
+// Sem default chumbado. Resolução em ordem: app_settings.evolution_instance
+// → process.env.EVOLUTION_INSTANCE → auto-discover via /instance/fetchInstances
+// (e o resultado é persistido no DB pra próxima chamada).
+let INSTANCE = process.env.EVOLUTION_INSTANCE || "";
 let _cfgLoadedAt = 0;
+let _autoDiscoverTried = false; // evita martelar fetchInstances por request
 const CFG_TTL_MS = 15_000;
 
 async function loadEvoCfg(force = false): Promise<void> {
@@ -37,17 +41,102 @@ async function loadEvoCfg(force = false): Promise<void> {
     }
     EVO_URL  = map.evolution_url      || process.env.EVOLUTION_API_URL  || "";
     EVO_KEY  = map.evolution_api_key  || process.env.EVOLUTION_API_KEY  || "";
-    INSTANCE = map.evolution_instance || process.env.EVOLUTION_INSTANCE || "sdr";
+    INSTANCE = map.evolution_instance || process.env.EVOLUTION_INSTANCE || "";
   } catch { /* mantém os valores atuais; melhor que crashar todas as rotas */ }
   _cfgLoadedAt = Date.now();
 }
 
 /** Invalida o cache para forçar releitura da próxima chamada (após troca de VPS pela UI). */
-export function invalidateEvolutionCache(): void { _cfgLoadedAt = 0; }
+export function invalidateEvolutionCache(): void { _cfgLoadedAt = 0; _autoDiscoverTried = false; }
 
-/** Lê as credenciais atuais (úteis para a tela de Configurações testar/exibir). */
-export async function getEvolutionConfig(force = false): Promise<{ url: string; apiKey: string; instance: string; source: "db+env" | "env"; }> {
-  await loadEvoCfg(force);
+/**
+ * Auto-descobre uma instância existente na Evolution se nenhuma estiver
+ * configurada. Usa a 1ª retornada por /instance/fetchInstances e persiste no
+ * DB pra próxima chamada não precisar redescobrir. Roda no máx 1 vez por
+ * "ciclo" (até invalidateEvolutionCache).
+ *
+ * Por que isso existe: o user pediu pra remover qualquer chumbo de "sdr".
+ * Sem auto-descoberta, qualquer rota disparada antes do user salvar uma
+ * instância pela UI quebraria com "Sem instância configurada". Agora basta
+ * a Evolution ter QUALQUER instância (não importa o nome) que o app pega
+ * sozinho.
+ */
+async function autoDiscoverInstance(): Promise<string> {
+  if (_autoDiscoverTried) return INSTANCE;
+  _autoDiscoverTried = true;
+  if (!EVO_URL || !EVO_KEY) return "";
+  try {
+    const base = EVO_URL.endsWith("/") ? EVO_URL.slice(0, -1) : EVO_URL;
+    const res = await axios({
+      url: `${base}/instance/fetchInstances`,
+      method: "GET",
+      headers: { apikey: EVO_KEY, "Content-Type": "application/json" },
+      timeout: 10000,
+      httpsAgent,
+      transformResponse: [(d) => d],
+    });
+    let body: any = res.data;
+    if (typeof body === "string") { try { body = JSON.parse(body); } catch { return ""; } }
+    const list = Array.isArray(body) ? body : (body?.instances || body?.data || []);
+    if (!Array.isArray(list) || list.length === 0) return "";
+    const first = list[0];
+    const name = first?.instance?.instanceName || first?.instance?.name || first?.instanceName || first?.name;
+    if (!name || typeof name !== "string") return "";
+    INSTANCE = name;
+    // Persiste no DB pra próxima chamada não precisar redescobrir.
+    const SUPA_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const SUPA_SR  = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (SUPA_URL && SUPA_SR) {
+      try {
+        const supa = createClient(SUPA_URL, SUPA_SR, { auth: { persistSession: false } });
+        await supa.from("app_settings").upsert(
+          { key: "evolution_instance", value: name, updated_at: new Date().toISOString() },
+          { onConflict: "key" }
+        );
+      } catch { /* ignore */ }
+    }
+    return name;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Resolve a instância a usar quando o caller não especificou.
+ * Carrega cfg do DB (se TTL expirou) e auto-descobre se ainda estiver vazia.
+ * Lança erro claro se não conseguir resolver — assim o caller sabe que precisa
+ * configurar Evolution antes de tentar enviar mensagem.
+ */
+export async function resolveInstance(provided?: string): Promise<string> {
+  if (provided && provided.trim()) return provided.trim();
+  await loadEvoCfg();
+  if (INSTANCE) return INSTANCE;
+  const discovered = await autoDiscoverInstance();
+  if (discovered) return discovered;
+  throw new Error(
+    "Nenhuma instância Evolution configurada nem encontrada na API. " +
+    "Crie uma instância em Configurações → Evolution API ou clique 'Conectar' na aba do Agente."
+  );
+}
+
+/**
+ * Lê as credenciais atuais. Por padrão dispara auto-descoberta da instância
+ * se DB/env não tiverem valor — assim quem consome `cfg.instance` nunca
+ * recebe string vazia (a menos que a Evolution não tenha NENHUMA instância,
+ * caso em que vem "" silenciosamente — chamadas que dependem disso vão
+ * falhar com erro claro pelo `resolveInstance()`).
+ *
+ * Use `{ resolve: false }` quando só quiser ler o estado bruto (ex: tela de
+ * Configurações precisa mostrar "(vazio)" sem dispar fetchInstances).
+ */
+export async function getEvolutionConfig(
+  forceOrOpts: boolean | { force?: boolean; resolve?: boolean } = false
+): Promise<{ url: string; apiKey: string; instance: string; source: "db+env" | "env"; }> {
+  const opts = typeof forceOrOpts === "boolean" ? { force: forceOrOpts, resolve: true } : { resolve: true, ...forceOrOpts };
+  await loadEvoCfg(!!opts.force);
+  if (opts.resolve && !INSTANCE) {
+    await autoDiscoverInstance().catch(() => "");
+  }
   return {
     url: EVO_URL,
     apiKey: EVO_KEY,
@@ -126,14 +215,24 @@ async function evoFetch(path: string, method: string = "GET", body?: unknown) {
 }
 
 export const evolution = {
-  /** Sempre devolve o nome da instância atual (env ou DB, conforme sobrescrita). */
+  /**
+   * Snapshot SÍNCRONO da instância atual (pode estar vazio se ainda não foi
+   * resolvida). Útil pra logs e UI; pra lógica que DEPENDE da instância,
+   * use `await evolution.getActiveInstance()` que dispara auto-descoberta.
+   */
   get instanceName() { return INSTANCE; },
+
+  /** Versão async que garante resolução (DB → env → auto-discover). */
+  async getActiveInstance(): Promise<string> {
+    return resolveInstance();
+  },
 
   async fetchInstances() {
      return evoFetch(`/instance/fetchInstances`);
   },
 
-  async getStatus(instance: string = INSTANCE) {
+  async getStatus(instance?: string) {
+    instance = await resolveInstance(instance);
     try {
       // EVOLUTION v2 BUG FIX:
       // O endpoint /instance/connectionState/:instanceName frequentemente fica preso
@@ -165,30 +264,97 @@ export const evolution = {
     }
   },
 
-  async createInstance(instance: string = INSTANCE) {
-    return evoFetch("/instance/create", "POST", {
+  async createInstance(instance: string) {
+    // createInstance EXIGE nome explícito — não faz sentido auto-descobrir,
+    // porque a intenção é criar algo novo. Quem chama (UI, ensure...) passa.
+    if (!instance || !instance.trim()) {
+      throw new Error("createInstance: nome da instância é obrigatório.");
+    }
+    // Evolution v2 espera camelCase. `reject_call` (snake) é silenciosamente
+    // ignorado e a config fica `rejectCall:false` — daí ligações tocam mesmo
+    // com a intenção contrária. Aplicamos settings inline no /instance/create
+    // E em seguida via /settings/set como cinto-e-suspensório (algumas versões
+    // só respeitam um dos caminhos).
+    const created = await evoFetch("/instance/create", "POST", {
       instanceName: instance,
       token: EVO_KEY,
       qrcode: true,
       integration: "WHATSAPP-BAILEYS",
-      reject_call: true,
+      rejectCall: true,
+      msgCall: "No momento não atendemos por chamadas. Envie uma mensagem.",
+      groupsIgnore: true,
       alwaysOnline: true,
+      readMessages: false,
+      readStatus: false,
+      syncFullHistory: false,
+    });
+    try { await this.setSettings(instance); } catch { /* não fatal */ }
+    return created;
+  },
+
+  /**
+   * Aplica os settings padrão da instância no endpoint dedicado da v2.
+   * Idempotente: pode rodar quantas vezes quiser.
+   */
+  async setSettings(instance?: string) {
+    instance = await resolveInstance(instance);
+    return evoFetch(`/settings/set/${instance}`, "POST", {
+      rejectCall: true,
+      msgCall: "No momento não atendemos por chamadas. Envie uma mensagem.",
+      groupsIgnore: true,
+      alwaysOnline: true,
+      readMessages: false,
+      readStatus: false,
+      syncFullHistory: false,
     });
   },
+
+  async findSettings(instance?: string) {
+    instance = await resolveInstance(instance);
+    return evoFetch(`/settings/find/${instance}`, "GET");
+  },
+
+  /**
+   * Garante que a instância existe E está com settings + webhook corretos.
+   * Chamada pelo "Conectar" da UI: se não existir cria; se existir, só
+   * (re)aplica os settings e o webhook. Assim cada vez que o user clica
+   * Conectar, a instância sai padronizada — não importa o estado prévio.
+   * Retorna o resultado de /instance/connect (com QR/pairingCode).
+   */
+  async ensureInstanceConfigured(instance: string, publicAppUrl?: string) {
+    const status = await this.getStatus(instance).catch(() => ({ state: "not_found" as const, data: null }));
+    if (status.state === "not_found") {
+      await this.createInstance(instance);
+      // Pequena espera pra Evolution materializar a instância antes do connect.
+      await new Promise((r) => setTimeout(r, 1500));
+    } else {
+      // Já existe — só re-padroniza settings (não-fatal se falhar)
+      try { await this.setSettings(instance); } catch { /* ignore */ }
+    }
+    if (publicAppUrl) {
+      const baseUrl = publicAppUrl.endsWith("/") ? publicAppUrl.slice(0, -1) : publicAppUrl;
+      try { await this.setWebhook(`${baseUrl}/api/webhooks/whatsapp`, instance); } catch { /* ignore */ }
+    }
+    return this.connect(instance);
+  },
   
-  async deleteInstance(instance: string = INSTANCE) {
+  async deleteInstance(instance?: string) {
+    instance = await resolveInstance(instance);
     return evoFetch(`/instance/delete/${instance}`, "DELETE");
   },
 
-  async connect(instance: string = INSTANCE) {
+  async connect(instance?: string) {
+    instance = await resolveInstance(instance);
     return evoFetch(`/instance/connect/${instance}`);
   },
 
-  async restartInstance(instance: string = INSTANCE) {
+  async restartInstance(instance?: string) {
+    instance = await resolveInstance(instance);
     return evoFetch(`/instance/restart/${instance}`, "PUT");
   },
 
-  async logout(instance: string = INSTANCE) {
+  async logout(instance?: string) {
+    instance = await resolveInstance(instance);
     return evoFetch(`/instance/logout/${instance}`, "DELETE");
   },
 
@@ -203,7 +369,9 @@ export const evolution = {
    * instância — não é erro fatal, só significa "sem foto / sem visibilidade".
    * Retornamos null nesses casos.
    */
-  async fetchProfilePicture(number: string, instance: string = INSTANCE): Promise<string | null> {
+  async fetchProfilePicture(number: string, instance?: string): Promise<string | null> {
+    instance = await resolveInstance(instance).catch(() => "");
+    if (!instance) return null;
     if (!number.includes("@s.whatsapp.net") && !number.includes("@g.us")) {
       number = number.replace(/\D/g, "") + "@s.whatsapp.net";
     }
@@ -219,16 +387,18 @@ export const evolution = {
     }
   },
 
-  async sendTextMessage(number: string, text: string, instance: string = INSTANCE) {
+  async sendTextMessage(number: string, text: string, instance?: string) {
+    instance = await resolveInstance(instance);
     if (!number.includes("@s.whatsapp.net") && !number.includes("@g.us")) {
       number = number.replace(/\D/g, "") + "@s.whatsapp.net";
     }
     return evoFetch(`/message/sendText/${instance}`, "POST", { number, text });
   },
 
-  async sendMessage(number: string, text: string, instance: string = INSTANCE) {
+  async sendMessage(number: string, text: string, instance?: string) {
     if (!text) return null;
-    
+    instance = await resolveInstance(instance);
+
     // Na v2, o ideal é o número estar limpo ou ser o JID completo
     let target = number.replace(/\D/g, "");
     if (number.includes("@g.us")) {
@@ -249,7 +419,8 @@ export const evolution = {
     });
   },
 
-  async sendMedia(number: string, caption: string, mediaData: { type: "image" | "audio" | "document", base64: string, fileName?: string, mimetype?: string }, instance: string = INSTANCE) {
+  async sendMedia(number: string, caption: string, mediaData: { type: "image" | "audio" | "document", base64: string, fileName?: string, mimetype?: string }, instance?: string) {
+    instance = await resolveInstance(instance);
     const targetJid = (number.includes("@") && (number.endsWith(".net") || number.endsWith(".us")))
        ? number
        : number.replace(/\D/g, "") + "@s.whatsapp.net";
@@ -275,7 +446,9 @@ export const evolution = {
     });
   },
 
-  async sendPresence(number: string, presence: "composing" | "recording" | "paused", instance: string = INSTANCE) {
+  async sendPresence(number: string, presence: "composing" | "recording" | "paused", instance?: string) {
+    instance = await resolveInstance(instance).catch(() => "");
+    if (!instance) return null;
     return evoFetch(`/chat/presence/${instance}`, "POST", {
       number,
       presence
@@ -323,7 +496,8 @@ export const evolution = {
     });
   },
 
-  async setWebhook(url: string, instance: string = INSTANCE) {
+  async setWebhook(url: string, instance?: string) {
+    instance = await resolveInstance(instance);
     return evoFetch(`/webhook/set/${instance}`, "POST", {
       webhook: {
         url,
@@ -342,7 +516,8 @@ export const evolution = {
     });
   },
 
-  async findMessages(remoteJid: string, count: number = 20, instance: string = INSTANCE) {
+  async findMessages(remoteJid: string, count: number = 20, instance?: string) {
+    instance = await resolveInstance(instance);
     return evoFetch(`/chat/findMessages/${instance}`, "POST", {
       where: {
         key: {
@@ -358,7 +533,8 @@ export const evolution = {
    * Útil como fallback quando o webhook não traz o base64 inline.
    * Requer que a Evolution API tenha store habilitado.
    */
-  async getBase64FromMedia(messageId: string, instance: string = INSTANCE) {
+  async getBase64FromMedia(messageId: string, instance?: string) {
+    instance = await resolveInstance(instance);
     return evoFetch(`/chat/getBase64FromMediaMessage/${instance}`, "POST", {
       message: { key: { id: messageId } },
       convertToMp4: false
@@ -375,8 +551,10 @@ export const evolution = {
    * Retorna objeto { [number]: exists:boolean }.
    * Usado no disparo pra pular números inválidos ANTES de gastar a tentativa de envio.
    */
-  async checkWhatsAppNumbers(numbers: string[], instance: string = INSTANCE): Promise<Record<string, boolean>> {
+  async checkWhatsAppNumbers(numbers: string[], instance?: string): Promise<Record<string, boolean>> {
     if (numbers.length === 0) return {};
+    instance = await resolveInstance(instance).catch(() => "");
+    if (!instance) return {};
     const clean = numbers.map(n => n.replace(/\D/g, "")).filter(Boolean);
     try {
       const res = await evoFetch(`/chat/whatsappNumbers/${instance}`, "POST", { numbers: clean });

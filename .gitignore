@@ -39,3 +39,12 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Diagnostic scripts that embed Supabase service_role keys — keep local only
+scratch/generate-supabase-keys.mjs
+scratch/test-supabase-connection.mjs
+scratch/test-supabase-http.mjs
+
+# Local artifacts (não vai pro deploy)
+qr-sdr.png
+.claude/scheduled_tasks.lock
