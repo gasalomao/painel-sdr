@@ -35,6 +35,11 @@ ALTER TABLE public.contacts ADD COLUMN IF NOT EXISTS push_name TEXT;
 -- Renovamos opportunisticamente quando passa de 24h.
 ALTER TABLE public.contacts ADD COLUMN IF NOT EXISTS profile_pic_url TEXT;
 ALTER TABLE public.contacts ADD COLUMN IF NOT EXISTS profile_pic_fetched_at TIMESTAMPTZ;
+ALTER TABLE public.contacts ADD COLUMN IF NOT EXISTS profile_pic TEXT;
+ALTER TABLE public.contacts ADD COLUMN IF NOT EXISTS lead_id INT;
+ALTER TABLE public.contacts ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT '{}'::TEXT[];
+ALTER TABLE public.contacts ADD COLUMN IF NOT EXISTS notes TEXT;
+ALTER TABLE public.contacts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 
 CREATE TABLE IF NOT EXISTS public.sessions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -56,6 +61,8 @@ ALTER TABLE public.sessions ADD COLUMN IF NOT EXISTS unread_count     INT DEFAUL
 ALTER TABLE public.sessions ADD COLUMN IF NOT EXISTS paused_by        TEXT;
 ALTER TABLE public.sessions ADD COLUMN IF NOT EXISTS paused_at        TIMESTAMPTZ;
 ALTER TABLE public.sessions ADD COLUMN IF NOT EXISTS resume_at        TIMESTAMPTZ;
+ALTER TABLE public.sessions ADD COLUMN IF NOT EXISTS current_stage    TEXT;
+ALTER TABLE public.sessions ADD COLUMN IF NOT EXISTS updated_at       TIMESTAMPTZ DEFAULT NOW();
 
 CREATE TABLE IF NOT EXISTS public.messages (
   id BIGSERIAL PRIMARY KEY,
@@ -83,6 +90,15 @@ ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS quoted_msg_id  TEXT;
 ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS quoted_text    TEXT;
 ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS raw_payload    JSONB;
 CREATE INDEX IF NOT EXISTS idx_messages_session ON public.messages(session_id, created_at);
+
+CREATE TABLE IF NOT EXISTS public.n8n_chat_histories (
+  id serial not null,
+  session_id text not null,
+  message jsonb not null,
+  data timestamp with time zone null default now(),
+  constraint n8n_chat_histories_pkey primary key (id)
+);
+CREATE INDEX IF NOT EXISTS idx_n8n_chat_histories_session ON public.n8n_chat_histories(session_id);
 
 -- =====================================================================
 -- PARTE 2 — chats_dashboard (LEGADO, fonte que o painel /chat lê)
@@ -113,6 +129,7 @@ ALTER TABLE public.chats_dashboard ADD COLUMN IF NOT EXISTS mimetype      TEXT;
 ALTER TABLE public.chats_dashboard ADD COLUMN IF NOT EXISTS message_type  TEXT;
 ALTER TABLE public.chats_dashboard ADD COLUMN IF NOT EXISTS quoted_id     TEXT;
 ALTER TABLE public.chats_dashboard ADD COLUMN IF NOT EXISTS quoted_text   TEXT;
+ALTER TABLE public.chats_dashboard ADD COLUMN IF NOT EXISTS file_name     TEXT;
 CREATE INDEX IF NOT EXISTS idx_chats_remote_jid ON public.chats_dashboard(remote_jid, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_chats_instance   ON public.chats_dashboard(instance_name);
 
@@ -151,6 +168,7 @@ ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS website             
 ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS instagram            TEXT;
 ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS facebook             TEXT;
 ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS avaliacao            NUMERIC;
+ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS rating               NUMERIC;
 ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS reviews              INT;
 ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS telefone             TEXT;
 ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS justificativa_ia     TEXT;
@@ -159,6 +177,8 @@ ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS ia_last_analyzed_at 
 ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS primeiro_contato_at  TIMESTAMPTZ;
 ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS primeiro_contato_source TEXT;
 ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS updated_at           TIMESTAMPTZ DEFAULT NOW();
+ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS next_follow_up       TIMESTAMPTZ;
+ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS current_stage_index  INT DEFAULT 0;
 -- =====================================================================
 -- Lead Intelligence — briefing gerado por IA antes do disparo.
 -- Ideia: cada lead recebe um "diagnóstico" 1x (cache no banco). Esse
@@ -237,9 +257,14 @@ CREATE TABLE IF NOT EXISTS public.agent_knowledge (
 );
 
 CREATE TABLE IF NOT EXISTS public.agent_batch_locks (
-  agent_id     INT PRIMARY KEY,
-  locked_until TIMESTAMPTZ,
-  updated_at   TIMESTAMPTZ DEFAULT NOW()
+  id uuid not null default gen_random_uuid (),
+  remote_jid text not null,
+  instance_name text not null,
+  agent_id bigint not null,
+  created_at timestamp with time zone null default now(),
+  expires_at timestamp with time zone not null,
+  constraint agent_batch_locks_pkey primary key (id),
+  constraint agent_batch_locks_remote_jid_instance_name_key unique (remote_jid, instance_name)
 );
 
 CREATE TABLE IF NOT EXISTS public.chat_buffers (
@@ -248,6 +273,14 @@ CREATE TABLE IF NOT EXISTS public.chat_buffers (
   expires_at    TIMESTAMPTZ NOT NULL,
   created_at    TIMESTAMPTZ DEFAULT NOW(),
   PRIMARY KEY (remote_jid, instance_name)
+);
+
+CREATE TABLE IF NOT EXISTS public.ai_control (
+  remote_jid text not null,
+  is_paused boolean null default false,
+  paused_until timestamp with time zone null,
+  updated_at timestamp with time zone null default now(),
+  constraint ai_control_pkey primary key (remote_jid)
 );
 
 -- =====================================================================
@@ -460,6 +493,21 @@ CREATE TABLE IF NOT EXISTS public.followup_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_followup_logs_campaign ON public.followup_logs(followup_campaign_id, created_at);
 
+CREATE TABLE IF NOT EXISTS public."follow-up_V2" (
+  id uuid not null default gen_random_uuid(),
+  created_at timestamp with time zone null default now(),
+  "remoteJid" text not null,
+  "ultimaAtividade" timestamp with time zone null,
+  "ultimaMensagem" text null,
+  encerramento boolean null default false,
+  followup1 boolean null default false,
+  followup2 boolean null default false,
+  followup3 boolean null default false,
+  metadata jsonb null default '{}'::jsonb,
+  constraint "follow-up_V2_pkey" primary key (id),
+  constraint "follow-up_V2_remoteJid_key" unique ("remoteJid")
+);
+
 -- =====================================================================
 -- PARTE 10 — TOKENS / CUSTO IA
 -- =====================================================================
@@ -624,6 +672,22 @@ BEGIN
 END $$;
 
 -- =====================================================================
+-- PARTE 11.6 - INTELIGÊNCIA COMERCIAL (AI-FIRST OS)
+-- =====================================================================
+
+CREATE TABLE IF NOT EXISTS public.sales_insights (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  remote_jid     TEXT NOT NULL,
+  nome_negocio   TEXT,
+  insight_type   TEXT NOT NULL, -- 'objecao', 'dor', 'oportunidade', 'dado_extraido', 'feedback'
+  content        TEXT NOT NULL,
+  confidence     NUMERIC DEFAULT 1.0,
+  extracted_from TEXT DEFAULT 'chat_ai',
+  created_at     TIMESTAMPTZ DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- =====================================================================
 -- PARTE 12 — STORAGE BUCKET (mídia do WhatsApp)
 -- =====================================================================
 INSERT INTO storage.buckets (id, name, public)
@@ -664,7 +728,8 @@ BEGIN
       'campaigns','campaign_targets','campaign_logs',
       'followup_campaigns','followup_targets','followup_logs',
       'automations','automation_logs',
-      'app_settings','ai_token_usage','ai_pricing_cache','chat_buffers'
+      'app_settings','ai_token_usage','ai_pricing_cache','chat_buffers',
+      'ai_control','follow-up_V2','n8n_chat_histories'
     ])
   LOOP
     EXECUTE format('ALTER TABLE public.%I DISABLE ROW LEVEL SECURITY', tbl);
@@ -718,7 +783,10 @@ BEGIN
     historico_ia_leads,
     leads_extraidos,
     automations,
-    automation_logs;
+    automation_logs,
+    ai_control,
+    "follow-up_V2",
+    n8n_chat_histories;
 END$$;
 
 -- =====================================================================
@@ -737,7 +805,8 @@ DECLARE
     'campaigns','campaign_targets','campaign_logs',
     'followup_campaigns','followup_targets','followup_logs',
     'automations','automation_logs',
-    'app_settings','ai_token_usage','ai_pricing_cache'
+    'app_settings','ai_token_usage','ai_pricing_cache',
+    'ai_control','follow-up_V2','n8n_chat_histories'
   ];
   missing TEXT[];
 BEGIN
@@ -751,7 +820,7 @@ BEGIN
   IF missing IS NOT NULL AND array_length(missing, 1) > 0 THEN
     RAISE WARNING '⚠️ Tabelas faltando: %', missing;
   ELSE
-    RAISE NOTICE '✅ Todas as 26 tabelas essenciais foram criadas.';
+    RAISE NOTICE '✅ Todas as 29 tabelas essenciais foram criadas.';
   END IF;
 END $$;
 
