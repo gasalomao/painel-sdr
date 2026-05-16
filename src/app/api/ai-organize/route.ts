@@ -1,11 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase, supabaseAdmin } from "@/lib/supabase";
 import axios from "axios";
+import { createHash } from "crypto";
 import { logTokenUsage } from "@/lib/token-usage";
 
 // Client pra LER a config central (ai_organizer_config). Usa service role
 // quando disponível pra contornar RLS; cai pro anon só em dev sem service key.
 const adminClient = supabaseAdmin || supabase;
+
+/**
+ * Hash determinístico das mensagens de um chat. Usado pelo FILTRO 4 (cache):
+ * se a IA já analisou EXATAMENTE essa sequência de mensagens, pula.
+ *
+ * Inclui status atual no hash — assim mudança de estado externa (drag manual
+ * no Kanban) também invalida o cache e força reanálise.
+ */
+function hashChatContent(messages: string[], statusAtual: string): string {
+  return createHash("sha256").update(`${statusAtual}|${messages.join("||")}`).digest("hex").slice(0, 16);
+}
 
 export async function POST(req: NextRequest) {
   const runStartedAt = new Date();
@@ -125,15 +137,22 @@ export async function POST(req: NextRequest) {
     const numerosProcessados: string[] = Object.keys(grouped);
     chatsAnalyzed = numerosProcessados.length;
 
-    // Lead: status + nome + origem (disparo/webhook/manual) + quando entrou em primeiro_contato
+    // Lead: status + nome + origem + cache hash + tipo + client_id (pra prompt custom)
     const { data: leadsAtuais } = await adminClient
        .from("leads_extraidos")
-       .select("remoteJid, status, nome_negocio, primeiro_contato_source, primeiro_contato_at, created_at")
+       .select("remoteJid, status, nome_negocio, primeiro_contato_source, primeiro_contato_at, created_at, last_analysis_hash, lead_type, client_id")
        .in("remoteJid", numerosProcessados);
 
     const statusAtualMap: Record<string, string> = {};
     const nomeNegocioMap: Record<string, string> = {};
-    const leadMetaMap: Record<string, { source: string | null; primeiroContatoAt: string | null; createdAt: string | null }> = {};
+    const leadMetaMap: Record<string, {
+      source: string | null;
+      primeiroContatoAt: string | null;
+      createdAt: string | null;
+      lastHash: string | null;
+      leadType: string | null;
+      clientId: string | null;
+    }> = {};
     if (leadsAtuais) {
         leadsAtuais.forEach((l: any) => {
             statusAtualMap[l.remoteJid] = l.status;
@@ -142,8 +161,51 @@ export async function POST(req: NextRequest) {
               source: l.primeiro_contato_source || null,
               primeiroContatoAt: l.primeiro_contato_at || null,
               createdAt: l.created_at || null,
+              lastHash: l.last_analysis_hash || null,
+              leadType: l.lead_type || null,
+              clientId: l.client_id || null,
             };
         });
+    }
+
+    // Anti-bouncing: leads que a IA tocou nas últimas 24h.
+    // Se a IA quer mudar de novo dentro da janela, exige evidência forte (manda no prompt).
+    const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const recentlyTouchedByIa = new Set<string>();
+    {
+      const { data: recentChanges } = await adminClient
+        .from("historico_ia_leads")
+        .select("remote_jid, status_antigo, status_novo, created_at")
+        .in("remote_jid", numerosProcessados)
+        .gte("created_at", last24h);
+      (recentChanges || []).forEach((r: any) => {
+        if (r.status_antigo !== r.status_novo) recentlyTouchedByIa.add(r.remote_jid);
+      });
+    }
+
+    // Prompt customizado por cliente — multi-tenant. Carrega o prompt do
+    // cliente DOMINANTE entre os leads desse run (o que tem mais chats hoje).
+    // Se vários clientes tiverem chats, vira fallback pro prompt global hardcoded.
+    let customOrganizerPrompt: string | null = null;
+    {
+      const clientCount: Record<string, number> = {};
+      for (const jid of numerosProcessados) {
+        const cid = leadMetaMap[jid]?.clientId;
+        if (cid && cid !== "00000000-0000-0000-0000-000000000001") {
+          clientCount[cid] = (clientCount[cid] || 0) + 1;
+        }
+      }
+      const dominantClient = Object.entries(clientCount).sort((a, b) => b[1] - a[1])[0];
+      if (dominantClient && dominantClient[1] > 0) {
+        const { data: cli } = await adminClient
+          .from("clients")
+          .select("organizer_prompt, organizer_enabled")
+          .eq("id", dominantClient[0])
+          .maybeSingle();
+        if (cli?.organizer_enabled !== false && cli?.organizer_prompt) {
+          customOrganizerPrompt = cli.organizer_prompt.trim() || null;
+        }
+      }
     }
 
     // HISTÓRICO ANTES DE HOJE — conta quantas msgs o SDR já mandou e quantas o cliente
@@ -192,9 +254,11 @@ export async function POST(req: NextRequest) {
     // tokens em accounts maduros, sem perder precisão.
     // ================================================================
     const STATUS_TERMINAL = new Set(["sem_interesse", "descartado", "fechado"]);
-    const decisoesHeuristicas: Record<string, { status: string; razao: string; resumo: string }> = {};
+    const decisoesHeuristicas: Record<string, { status: string; razao: string; resumo: string; lead_type?: string }> = {};
     const skippedSemMudanca: string[] = [];
+    const skippedCacheHit: string[] = []; // FILTRO 4: hash match → skip total
     const candidatosParaIA: string[] = [];
+    const hashAtualMap: Record<string, string> = {}; // pra persistir no UPDATE
 
     for (const jid of numerosProcessados) {
       const statusAtual = statusAtualMap[jid] || "nenhum";
@@ -205,6 +269,18 @@ export async function POST(req: NextRequest) {
       const textoClienteHoje = ultimaMsgCliente
         ? ultimaMsgCliente.toLowerCase().replace(/\[.*?\]\s*cliente:\s*/i, "").trim()
         : "";
+
+      // ───────── FILTRO 4: Cache por hash (skip se já analisado idêntico) ─────────
+      // Mesma conversa + mesmo status que da última análise → não há motivo pra
+      // gastar tokens de novo. Hash inclui status atual, então mudança manual
+      // no Kanban invalida cache e força reanálise.
+      const hashAtual = hashChatContent(msgsHoje, statusAtual);
+      hashAtualMap[jid] = hashAtual;
+      const meta = leadMetaMap[jid];
+      if (meta?.lastHash === hashAtual && statusAtual !== "nenhum") {
+        skippedCacheHit.push(jid);
+        continue;
+      }
 
       // ───────── FILTRO 1: Terminal sem novidade ─────────
       // Lead "sem_interesse" / "descartado" / "fechado" + sem msg nova do cliente
@@ -255,10 +331,13 @@ export async function POST(req: NextRequest) {
     if (skippedSemMudanca.length > 0) {
       console.log(`[AI-ORGANIZE] Pulados (sem mudança): ${skippedSemMudanca.length} chats — economia de tokens.`);
     }
+    if (skippedCacheHit.length > 0) {
+      console.log(`[AI-ORGANIZE] Pulados (cache hit): ${skippedCacheHit.length} chats — conversa idêntica à última análise.`);
+    }
     if (Object.keys(decisoesHeuristicas).length > 0) {
       console.log(`[AI-ORGANIZE] Decididos por heurística (sem IA): ${Object.keys(decisoesHeuristicas).length} chats.`);
     }
-    console.log(`[AI-ORGANIZE] Total: ${numerosProcessados.length} | IA: ${candidatosParaIA.length} | Pulados: ${skippedSemMudanca.length} | Heurística: ${Object.keys(decisoesHeuristicas).length}`);
+    console.log(`[AI-ORGANIZE] Total: ${numerosProcessados.length} | IA: ${candidatosParaIA.length} | Pulados: ${skippedSemMudanca.length} | Cache: ${skippedCacheHit.length} | Heurística: ${Object.keys(decisoesHeuristicas).length}`);
 
     // 3. Montar o Prompt Base — com contexto enriquecido
     // Antes: iterava sobre numerosProcessados (todos). Agora: só candidatosParaIA.
@@ -303,7 +382,21 @@ export async function POST(req: NextRequest) {
        const contexto: string[] = [];
        contexto.push(`NOME DO NEGÓCIO: ${nome}`);
        contexto.push(`STATUS ATUAL NO CRM: ${statusAtual}`);
+       contexto.push(`TIPO DE LEAD ATUAL: ${meta.leadType || "(ainda não classificado)"}`);
        contexto.push(`ORIGEM DO LEAD: ${origem}`);
+       if (recentlyTouchedByIa.has(jid)) {
+         contexto.push(`⚑ ATENÇÃO ANTI-BOUNCING: a IA JÁ ALTEROU este lead nas últimas 24h. Só mude o status de novo se houver evidência MUITO clara hoje. Em dúvida, mantenha.`);
+       }
+       if (statusAtual === "fechado") {
+         contexto.push(`⚑ CLIENTE JÁ FECHADO: este lead já comprou/contratou. Provavelmente é cliente recorrente tirando dúvida operacional. NÃO rebaixe (não mude pra "interessado" ou "primeiro_contato"). Use lead_type="cliente_ativo".`);
+       }
+       if (statusAtual === "agendado") {
+         contexto.push(`⚑ JÁ AGENDADO: reunião marcada. Cliente entrando em contato pode ser confirmação, reagendamento ou dúvida. NÃO rebaixe.`);
+       }
+       const meta2 = leadMetaMap[jid];
+       if (meta2?.leadType === "cliente_ativo" || meta2?.leadType === "recorrente") {
+         contexto.push(`⚑ CLIENTE RECORRENTE/ATIVO marcado em análise anterior. NÃO inicie funil de novo. Mantenha status. Se for nova venda separada, anote em "razao".`);
+       }
        if (meta.primeiroContatoAt) contexto.push(`PRIMEIRO CONTATO REGISTRADO: ${new Date(meta.primeiroContatoAt).toLocaleString("pt-BR")}${diasDesdePrimeiroContato != null ? ` (há ${diasDesdePrimeiroContato} dia(s))` : ""}`);
        contexto.push(`MENSAGENS DO SDR ANTES DE HOJE: ${hist.sdrBefore}`);
        contexto.push(`RESPOSTAS DO CLIENTE ANTES DE HOJE: ${hist.clientBefore}`);
@@ -322,7 +415,10 @@ export async function POST(req: NextRequest) {
        return `--- CHAT ID: ${jid} ---\n${contexto.join("\n")}\nMENSAGENS DE HOJE (ordem cronológica):\n${msgs.join("\n")}\n--- FIM DE CHAT ID: ${jid} ---`;
     }).join("\n\n");
 
-    const systemInstruction = `
+    // Se o cliente DOMINANTE tem prompt custom, usa ele como SISTEMA principal
+    // e mantém regras técnicas (R1-R14 + formato) como apêndice obrigatório.
+    // Senão usa o prompt SDR B2B hardcoded como sistema.
+    const baseSystemInstruction = customOrganizerPrompt || `
 Você é um classificador SÊNIOR de leads B2B para um funil SDR (Sales Development Representative).
 Vai receber conversas de HOJE, agrupadas por contato. Cada bloco vem com CONTEXTO HISTÓRICO rico:
 
@@ -367,6 +463,29 @@ R10. ⚑ LEAD AUTO-PROMOVIDO PARA FOLLOW-UP (status atual = "follow-up", origem 
      - Se HOJE continua sem resposta → MANTENHA "follow-up". No resumo explique: "Lead auto-promovido para follow-up após X dias de silêncio do disparo. Continua sem retorno. Recomendado: entrar em cadência de retomada ou considerar descarte se persistir por mais de 7 dias."
      - NUNCA rebaixe para "primeiro_contato".
 
+R11. CLIENTE RECORRENTE / JÁ COMPROU (status atual = "fechado" OU lead_type prévio = "cliente_ativo"|"recorrente"):
+     - O cliente JÁ COMPROU/CONTRATOU. Está voltando pra suporte, dúvida operacional, segunda compra, problema, etc.
+     - JAMAIS rebaixe para "interessado" / "primeiro_contato" / "follow-up".
+     - Mantenha "fechado" e marque lead_type="cliente_ativo".
+     - SÓ mude pra "sem_interesse" se ele EXPLICITAMENTE pedir cancelamento/descadastramento.
+     - Se houver sinal forte de NOVA venda separada (ex: "quero contratar outro plano", "tenho outra unidade"), anote em "razao" pra operador analisar — mas mantenha o status "fechado".
+
+R12. DÚVIDA ÚNICA vs INTERESSE REAL:
+     - Pergunta CURTA pontual + cliente nunca demonstrou interesse antes ("vocês atendem fim de semana?", "qual horário?") → lead_type="unica_duvida".
+       Mantenha status atual ou no máximo "primeiro_contato". NÃO suba pra "interessado".
+     - Pergunta sobre preço/condição/prazo/funcionalidade/proposta + contexto de compra → lead_type="qualificado" + status "interessado".
+     - Diferença: dúvida operacional ≠ pergunta comercial.
+
+R13. ANTI-BOUNCING (⚑ marcador no contexto):
+     - Se o lead foi tocado pela IA nas últimas 24h e quer mudar de novo agora:
+       - Aceita mudança SOMENTE se houver EVIDÊNCIA TEXTUAL FORTE no chat de hoje (cliente disse X explicitamente).
+       - Em dúvida → mantenha o status atual. Evita pingue-pongue.
+
+R14. SUSPEITA DE FALSO POSITIVO:
+     - "Vou pensar" / "depois te respondo" / "quem sabe" → NÃO é "interessado", é "follow-up".
+     - "Vou ver com sócio" / "vou falar com a equipe" → "follow-up", não "interessado".
+     - Cliente perguntou e desapareceu → mantém status atual; NÃO conclua.
+
 ## HIERARQUIA (nunca rebaixe, exceto em estados terminais):
 
 Ordem: novo < primeiro_contato < interessado < follow-up < agendado < fechado.
@@ -400,6 +519,13 @@ Ordem: novo < primeiro_contato < interessado < follow-up < agendado < fechado.
 Devolva ESTRITAMENTE um JSON array. Cada item:
 - "jid": string (copie exato do CHAT ID recebido)
 - "status": um dos estágios válidos
+- "lead_type": OBRIGATÓRIO. Um destes:
+   * "novo"            — primeira interação, sem compra prévia
+   * "cliente_ativo"   — já comprou e está ativo (NÃO mover funil)
+   * "recorrente"      — comprador recorrente em ciclos
+   * "unica_duvida"    — fez 1 pergunta pontual, sem sinal de compra
+   * "qualificado"     — sinais reais de intenção de compra
+   * "frio"            — silencioso ou desinteressado claro
 - "razao": ≤ 160 caracteres. REGRA acionada + evidência + menção ao contexto histórico quando relevante.
 - "resumo": 1-3 frases (≤ 400 caracteres). Tom da conversa + contexto histórico + próximo passo concreto.
 
@@ -408,25 +534,29 @@ Exemplo VÁLIDO:
   {
     "jid": "55279999@s.whatsapp.net",
     "status": "interessado",
+    "lead_type": "qualificado",
     "razao": "R6: cliente perguntou 'quanto fica o plano mensal?'.",
     "resumo": "Cliente pediu detalhes e preço do plano mensal após 2 msgs de prospecção. SDR enviou tabela. Aguarda cliente confirmar orçamento interno."
   },
   {
     "jid": "55318888@s.whatsapp.net",
-    "status": "primeiro_contato",
-    "razao": "R8 + ⚑primeira interação: disparo em massa enviado hoje, sem resposta ainda.",
-    "resumo": "Primeira prospecção enviada hoje via disparo em massa. Cliente ainda não respondeu. Lead no funil aguardando. Próximo passo: dar 24-48h antes de follow-up."
+    "status": "fechado",
+    "lead_type": "cliente_ativo",
+    "razao": "R11: cliente já comprou, hoje veio tirar dúvida operacional. Mantém fechado.",
+    "resumo": "Cliente recorrente perguntou sobre boleto da próxima fatura. Suporte respondeu. Mantém em fechado — NÃO é nova venda."
   },
   {
     "jid": "55317777@s.whatsapp.net",
     "status": "primeiro_contato",
-    "razao": "R8: SDR já havia mandado 1 msg, hoje reenviou. Cliente nunca respondeu. Mantém no mesmo estágio.",
-    "resumo": "SDR já tinha mandado 1 msg antes sem retorno. Hoje reenviou um follow-up curto, segue sem resposta do cliente. Lead estagnado, considerar nova abordagem."
+    "lead_type": "unica_duvida",
+    "razao": "R12: cliente fez 1 pergunta operacional curta sem sinal de compra.",
+    "resumo": "Cliente perguntou apenas 'vocês atendem domingo?'. Sem contexto de interesse. SDR respondeu. Aguardar próximas msgs antes de classificar como interessado."
   }
 ]
 
 Nada além do JSON. Sem markdown, sem explicação, sem texto antes ou depois.
     `;
+    const systemInstruction = baseSystemInstruction;
 
     // 4. Fluxo de Requisição Híbrida
     // SHORT-CIRCUIT: se nenhum candidato sobrou pra IA (tudo decidido por
@@ -560,6 +690,11 @@ Nada além do JSON. Sem markdown, sem explicação, sem texto antes ou depois.
        const novoStatus = item.status?.toLowerCase()?.trim();
        const razao = (item.razao || "Sem justificativa detalhada pela IA.").toString().slice(0, 500);
        const resumo = item.resumo ? String(item.resumo).slice(0, 800) : null;
+       // lead_type vem do output novo da IA. Validamos contra a lista esperada
+       // pra evitar gravar lixo se a IA inventar uma categoria nova.
+       const VALID_LEAD_TYPES = ["novo", "cliente_ativo", "recorrente", "unica_duvida", "qualificado", "frio"];
+       const leadTypeRaw = item.lead_type?.toString().toLowerCase().trim();
+       const leadType = leadTypeRaw && VALID_LEAD_TYPES.includes(leadTypeRaw) ? leadTypeRaw : null;
 
        if (!jid || !numerosProcessados.includes(jid)) continue;
        if (!["novo", "primeiro_contato", "interessado", "follow-up", "agendado", "fechado", "sem_interesse", "descartado"].includes(novoStatus)) continue;
@@ -572,8 +707,13 @@ Nada além do JSON. Sem markdown, sem explicação, sem texto antes ou depois.
        const isTerminal = ["sem_interesse", "descartado"].includes(novoStatus);
        const isDowngrade = !isTerminal && !isLeadNovo && (hierarquia[novoStatus] ?? 0) < (hierarquia[statusAntigo] ?? 0);
 
+       // Cliente recorrente/ativo: NUNCA permite rebaixar/mover, mesmo se IA pediu.
+       // Defesa em profundidade contra a IA ignorar R11.
+       const isClienteAtivo = leadType === "cliente_ativo" || leadType === "recorrente";
+       const blockMoveByRecurringClient = isClienteAtivo && novoStatus !== statusAntigo && !isTerminal;
+
        let movido = false;
-       const statusMudou = statusAntigo !== novoStatus && !isDowngrade;
+       const statusMudou = statusAntigo !== novoStatus && !isDowngrade && !blockMoveByRecurringClient;
 
        if (isLeadNovo) {
            await adminClient.from("leads_extraidos").insert({
@@ -582,6 +722,9 @@ Nada além do JSON. Sem markdown, sem explicação, sem texto antes ou depois.
                justificativa_ia: razao,
                resumo_ia: resumo,
                ia_last_analyzed_at: nowIso,
+               last_analysis_hash: hashAtualMap[jid] || null,
+               last_analysis_at: nowIso,
+               lead_type: leadType,
                nome_negocio: "Lead Via Chat ("+jid.split("@")[0]+")"
            });
            alteracoes++;
@@ -593,8 +736,11 @@ Nada além do JSON. Sem markdown, sem explicação, sem texto antes ou depois.
                justificativa_ia: razao,
                resumo_ia: resumo,
                ia_last_analyzed_at: nowIso,
+               last_analysis_hash: hashAtualMap[jid] || null,
+               last_analysis_at: nowIso,
                updated_at: nowIso,
            };
+           if (leadType) update.lead_type = leadType;
            if (statusMudou) {
                update.status = novoStatus;
                alteracoes++;
@@ -660,7 +806,8 @@ Nada além do JSON. Sem markdown, sem explicação, sem texto antes ou depois.
     }
 
     leadsMoved = alteracoes;
-    const summary = `${chatsAnalyzed} chats analisados — ${candidatosParaIA.length} via IA (${provider}/${model}), ${Object.keys(decisoesHeuristicas).length} via heurística (sem IA), ${skippedSemMudanca.length} pulados sem mudança. ${alteracoes} leads movidos.`;
+    const customPromptInfo = customOrganizerPrompt ? " · prompt CUSTOM do cliente" : "";
+    const summary = `${chatsAnalyzed} chats — IA: ${candidatosParaIA.length} (${provider}/${model}${customPromptInfo}) · heurística: ${Object.keys(decisoesHeuristicas).length} · pulados sem msg: ${skippedSemMudanca.length} · cache hit: ${skippedCacheHit.length}. ${alteracoes} movidos.`;
     await finishRun("ok", { summary });
 
     return NextResponse.json({
