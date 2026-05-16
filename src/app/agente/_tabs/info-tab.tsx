@@ -57,6 +57,7 @@ export type InfoTabProps = {
   messageBufferSeconds: number; setMessageBufferSeconds: (n: number) => void;
   humanizeMessages: boolean; setHumanizeMessages: (v: boolean) => void;
   webSearchEnabled: boolean; setWebSearchEnabled: (v: boolean) => void;
+  leadIntelligenceEnabled: boolean; setLeadIntelligenceEnabled: (v: boolean) => void;
   saveIdentity: () => void;
   savingConfig: boolean;
   toggleAgentActive: () => void;
@@ -256,6 +257,16 @@ export function InfoTab(p: InfoTabProps) {
               checked={p.webSearchEnabled}
               onChange={p.setWebSearchEnabled}
               hint={<>Habilita a tool <code className="text-cyan-300">web_search</code> (DuckDuckGo, sem chave). Funciona em qualquer modelo. Use quando precisar de fato/dado atualizado.</>}
+            />
+
+            {/* Lead Intelligence — por agente */}
+            <ToggleRow
+              label="Inteligência de Lead"
+              labelColor="text-purple-400"
+              color="purple"
+              checked={p.leadIntelligenceEnabled}
+              onChange={p.setLeadIntelligenceEnabled}
+              hint={<>Antes de cada interação, a IA gera um <strong>briefing do lead</strong> (dores, abordagem, decisor, alertas) e usa no contexto. Custa tokens extra — ative só nos agentes que precisam de análise profunda.</>}
             />
 
             {/* Função */}

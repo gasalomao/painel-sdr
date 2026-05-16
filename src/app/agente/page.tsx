@@ -73,6 +73,9 @@ export default function AgentePage() {
   const [messageBufferSeconds, setMessageBufferSeconds] = useState(0);
   const [humanizeMessages, setHumanizeMessages] = useState(false);
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
+  // Lead Intelligence é POR AGENTE — não é mais um flag global da campanha/automação.
+  // Cliente quer ativar só nos agentes que precisam de análise profunda do lead.
+  const [leadIntelligenceEnabled, setLeadIntelligenceEnabled] = useState(false);
 
   // ============= GOOGLE CALENDAR =============
   const [calendarEnabled, setCalendarEnabled] = useState(false);
@@ -214,6 +217,9 @@ export default function AgentePage() {
         setMessageBufferSeconds(opts.message_buffer_seconds || 0);
         setHumanizeMessages(opts.humanize_messages ?? false);
         setWebSearchEnabled(opts.web_search_enabled ?? false);
+        // Lead Intelligence vem da coluna dedicada na tabela (não do JSONB options),
+        // pra worker/automation conseguirem ler com SELECT simples.
+        setLeadIntelligenceEnabled((data as any).lead_intelligence_enabled ?? false);
       }
       if (kb.data) setKnowledge(kb.data);
       setVinculoInstance(conn.data?.[0]?.instance_name || "");
@@ -427,6 +433,8 @@ export default function AgentePage() {
         humanize_messages: humanizeMessages,
         web_search_enabled: webSearchEnabled,
       },
+      // Coluna dedicada (não JSONB) — workers/backend filtram via WHERE
+      lead_intelligence_enabled: leadIntelligenceEnabled,
     }).eq("id", activeAgentId).eq("client_id", clientId);
     setSavingConfig(false);
     if (!error) alert("Identidade salva!"); else alert("Erro: " + error.message);
@@ -825,6 +833,7 @@ export default function AgentePage() {
                 messageBufferSeconds={messageBufferSeconds} setMessageBufferSeconds={setMessageBufferSeconds}
                 humanizeMessages={humanizeMessages} setHumanizeMessages={setHumanizeMessages}
                 webSearchEnabled={webSearchEnabled} setWebSearchEnabled={setWebSearchEnabled}
+                leadIntelligenceEnabled={leadIntelligenceEnabled} setLeadIntelligenceEnabled={setLeadIntelligenceEnabled}
                 saveIdentity={saveIdentity}
                 savingConfig={savingConfig}
                 toggleAgentActive={toggleAgentActive}

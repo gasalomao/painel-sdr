@@ -15,10 +15,16 @@ type OrganizerState = {
   enabled: boolean;
   prompt: string;
   defaultPrompt: string;
+  effectivePrompt: string;     // o que a IA REALMENTE recebe (custom ou default)
   globalEnabled: boolean;
   lastRun: string | null;
   executionHour: number;
+  model: string;                // modelo global em uso (só admin altera)
+  provider: string;
+  isAdmin: boolean;             // pra UI mostrar/esconder o select de modelo
 };
+
+type AiModel = { id: string; name: string; description?: string };
 
 type KanbanColumn = {
   id: string;
@@ -61,6 +67,11 @@ export default function OrganizadorPage() {
   const [suggesting, setSuggesting] = useState(false);
   const [suggestion, setSuggestion] = useState<Suggestion | null>(null);
 
+  // Modelos Gemini em tempo real (/api/ai-models) — só admin altera
+  const [models, setModels] = useState<AiModel[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [savingModel, setSavingModel] = useState(false);
+
   const reload = useCallback(async () => {
     setLoading(true);
     try {
@@ -73,14 +84,28 @@ export default function OrganizadorPage() {
           enabled: orgRes.enabled,
           prompt: orgRes.prompt,
           defaultPrompt: orgRes.defaultPrompt,
+          effectivePrompt: orgRes.effectivePrompt || orgRes.defaultPrompt || "",
           globalEnabled: orgRes.globalEnabled,
           lastRun: orgRes.lastRun,
           executionHour: orgRes.executionHour,
+          model: orgRes.model || "gemini-2.5-flash",
+          provider: orgRes.provider || "Gemini",
+          isAdmin: !!orgRes.isAdmin,
         });
         setPromptDraft(orgRes.prompt || "");
         setEnabledDraft(orgRes.enabled);
       }
       if (kbRes.ok) setColumns(kbRes.columns);
+
+      // Carrega modelos em tempo real só se for admin (cliente nem precisa)
+      if (orgRes.ok && orgRes.isAdmin) {
+        setModelsLoading(true);
+        try {
+          const m = await fetch("/api/ai-models", { cache: "no-store" }).then((r) => r.json());
+          if (m.success && Array.isArray(m.models)) setModels(m.models);
+        } catch { /* ignore */ }
+        finally { setModelsLoading(false); }
+      }
     } catch (err: any) {
       setError(err?.message || "Falha ao carregar");
     } finally {
@@ -89,6 +114,29 @@ export default function OrganizadorPage() {
   }, []);
 
   useEffect(() => { reload(); }, [reload]);
+
+  // ============= SAVE MODEL (só admin) =============
+  const saveModel = async (newModel: string) => {
+    if (!org || newModel === org.model) return;
+    setSavingModel(true);
+    setError(null);
+    try {
+      const r = await fetch("/api/organizer/model", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: newModel }),
+      });
+      const d = await r.json();
+      if (!d.ok) setError(d.error || "Falha ao salvar modelo");
+      else {
+        setInfo("Modelo atualizado pra " + newModel);
+        setTimeout(() => setInfo(null), 3000);
+        reload();
+      }
+    } finally {
+      setSavingModel(false);
+    }
+  };
 
   // ============= SAVE ORG (prompt + enabled) =============
   const saveOrg = async () => {
@@ -275,6 +323,86 @@ export default function OrganizadorPage() {
             </div>
           ) : (
             <>
+              {/* ============= SEÇÃO 0: EM USO AGORA (read-only summary) ============= */}
+              <section className="rounded-2xl border border-cyan-500/30 bg-gradient-to-br from-cyan-500/[0.06] to-transparent p-5 space-y-3">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <h2 className="text-sm font-bold flex items-center gap-2 text-cyan-200">
+                    <Sparkles className="w-4 h-4" /> Em uso agora
+                  </h2>
+                  <div className="flex items-center gap-2 text-[10px]">
+                    <span className={cn(
+                      "px-2 py-1 rounded font-black uppercase tracking-widest",
+                      org?.enabled && org?.globalEnabled
+                        ? "bg-emerald-500/20 text-emerald-300"
+                        : "bg-amber-500/20 text-amber-300"
+                    )}>
+                      {!org?.globalEnabled ? "GLOBAL OFF" : !org?.enabled ? "Cliente OFF" : "Ativo"}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Modelo ativo — só admin pode mudar */}
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] font-black uppercase tracking-widest text-cyan-300">
+                      Modelo de IA {org?.isAdmin ? "(você pode alterar)" : "(definido pelo admin)"}
+                    </label>
+                    {modelsLoading && (
+                      <span className="text-[9px] text-muted-foreground flex items-center gap-1">
+                        <Loader2 className="w-3 h-3 animate-spin" /> buscando modelos…
+                      </span>
+                    )}
+                    {!modelsLoading && org?.isAdmin && models.length > 0 && (
+                      <span className="text-[9px] text-emerald-400">{models.length} modelos Gemini (ao vivo)</span>
+                    )}
+                  </div>
+
+                  {org?.isAdmin ? (
+                    <select
+                      value={org.model}
+                      onChange={(e) => saveModel(e.target.value)}
+                      disabled={savingModel}
+                      className="w-full bg-black/40 border border-cyan-500/20 h-11 rounded-xl text-sm px-3 font-mono disabled:opacity-50"
+                    >
+                      {/* Garante que o valor salvo aparece mesmo se não veio na lista */}
+                      {org.model && !models.some((m) => m.id === org.model) && (
+                        <option value={org.model}>{org.model} (salvo)</option>
+                      )}
+                      {models.map((m) => (
+                        <option key={m.id} value={m.id}>{m.name} ({m.id})</option>
+                      ))}
+                      {models.length === 0 && !modelsLoading && (
+                        <option value={org.model}>{org.model}</option>
+                      )}
+                    </select>
+                  ) : (
+                    <div className="px-3 py-2.5 rounded-xl bg-black/30 border border-white/10 text-sm font-mono text-white/90 flex items-center justify-between">
+                      <span>{org?.model}</span>
+                      <span className="text-[9px] text-muted-foreground uppercase">readonly</span>
+                    </div>
+                  )}
+                  {savingModel && (
+                    <p className="text-[10px] text-amber-300 flex items-center gap-1">
+                      <Loader2 className="w-3 h-3 animate-spin" /> Atualizando modelo no servidor…
+                    </p>
+                  )}
+                </div>
+
+                {/* Prompt efetivo (read-only) */}
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-cyan-300">
+                    Prompt em uso (efetivo)
+                    {!org?.prompt && <span className="text-muted-foreground normal-case font-normal ml-1">— usando padrão global</span>}
+                  </label>
+                  <pre className="bg-black/40 border border-cyan-500/15 rounded p-3 text-[11px] text-white/85 whitespace-pre-wrap font-mono leading-relaxed max-h-48 overflow-y-auto">
+                    {org?.effectivePrompt || "(vazio)"}
+                  </pre>
+                  <p className="text-[9px] text-muted-foreground italic">
+                    Esse é o texto exato que a IA recebe a cada execução. Edite abaixo na seção "Status + Prompt" pra customizar.
+                  </p>
+                </div>
+              </section>
+
               {/* ============= SEÇÃO 1: STATUS + PROMPT ============= */}
               <section className="glass-card rounded-2xl border-white/10 bg-white/[0.02] p-5 space-y-4">
                 <div className="flex items-center justify-between gap-3">

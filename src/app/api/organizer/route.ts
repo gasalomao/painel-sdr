@@ -33,21 +33,31 @@ export async function GET(req: NextRequest) {
     .eq("id", ctx.clientId)
     .maybeSingle();
 
-  // last_run vem da config global ai_organizer_config (1 só, compartilhado)
+  // ai_organizer_config (id=1) é GLOBAL — só admin altera. Carrega o modelo
+  // em uso pra mostrar pro cliente, mesmo que ele não possa mudar.
   const { data: cfg } = await supabaseAdmin
     .from("ai_organizer_config")
-    .select("last_run, execution_hour, enabled")
+    .select("last_run, execution_hour, enabled, model, provider")
     .eq("id", 1)
     .maybeSingle();
+
+  // Prompt EFETIVO que está sendo usado (custom do cliente OU default global)
+  const effectivePrompt = (client?.organizer_prompt && client.organizer_prompt.trim())
+    ? client.organizer_prompt
+    : DEFAULT_ORGANIZER_PROMPT;
 
   return NextResponse.json({
     ok: true,
     enabled: client?.organizer_enabled !== false,
     prompt: client?.organizer_prompt || "",
     defaultPrompt: DEFAULT_ORGANIZER_PROMPT,
+    effectivePrompt,                                  // o que a IA realmente recebe
     globalEnabled: cfg?.enabled !== false,
     lastRun: cfg?.last_run || null,
     executionHour: cfg?.execution_hour ?? 20,
+    model: cfg?.model || "gemini-2.5-flash",          // modelo em uso (global)
+    provider: cfg?.provider || "Gemini",
+    isAdmin: ctx.isAdmin,                             // pra UI mostrar/esconder controles
   });
 }
 
