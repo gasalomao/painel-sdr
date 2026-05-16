@@ -9,7 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import {
   Plus, Trash2, Pencil, KeyRound, LogIn, Power, Check, X, Loader2,
-  Shield, UserCog, AlertCircle,
+  Shield, UserCog, AlertCircle, Bot,
 } from "lucide-react";
 
 type Client = {
@@ -21,6 +21,7 @@ type Client = {
   default_ai_model: string | null;
   features: Record<string, boolean>;
   organizer_prompt?: string | null;
+  organizer_enabled?: boolean;
   notes?: string | null;
   created_at: string;
 };
@@ -42,17 +43,30 @@ const FEATURE_LIST = [
   { key: "configuracoes", label: "Configurações" },
 ];
 
-const AI_MODEL_OPTIONS = [
-  "gemini-3.1-flash-lite-preview",
-  "gemini-3-flash",
-  "gemini-2.5-flash",
-  "gemini-2.5-pro",
-  "gemini-1.5-flash",
-  "gemini-1.5-pro",
-];
+// AI_MODEL_OPTIONS NÃO é mais hardcoded — vem de /api/ai-models em tempo real,
+// que consulta a Google AI usando a API Key salva. Quando a Google lança um
+// modelo novo (gemini-4-flash etc), ele aparece aqui automaticamente sem precisar
+// de deploy.
+const DEFAULT_AI_MODEL = "gemini-3.1-flash-lite-preview";
+
+const DEFAULT_ORGANIZER_PROMPT = `Você é um SDR experiente analisando conversas WhatsApp de leads.
+
+Sua função: ler o histórico recente de cada conversa e decidir o próximo status do lead.
+
+Status possíveis:
+- novo: ainda não houve interação
+- primeiro_contato: foi enviada mensagem mas cliente não respondeu
+- follow-up: cliente respondeu mas precisa de follow-up
+- qualificado: lead demonstrou interesse real
+- fechado: venda concluída
+- perdido: cliente desistiu ou não tem interesse
+
+Para cada conversa, retorne JSON: { status_novo, razao_curta, resumo }.`;
 
 const DEFAULT_FEATURES = Object.fromEntries(FEATURE_LIST.map((f) => [f.key, true]));
 const NO_FEATURES = Object.fromEntries(FEATURE_LIST.map((f) => [f.key, false]));
+
+type AiModel = { id: string; name: string; description?: string };
 
 export default function AdminClientesPage() {
   const router = useRouter();
@@ -305,12 +319,43 @@ function ClientEditor({
   const [email, setEmail] = useState(client.email);
   const [password, setPassword] = useState("");
   const [isAdmin, setIsAdmin] = useState(client.is_admin);
-  const [model, setModel] = useState(client.default_ai_model || "gemini-3.1-flash-lite-preview");
+  const [model, setModel] = useState(client.default_ai_model || DEFAULT_AI_MODEL);
   const [features, setFeatures] = useState<Record<string, boolean>>(client.features || DEFAULT_FEATURES);
+  // Organizador IA: por padrão TRUE (admin pode desativar quando quiser)
+  const [organizerEnabled, setOrganizerEnabled] = useState<boolean>(client.organizer_enabled !== false);
   const [organizerPrompt, setOrganizerPrompt] = useState(client.organizer_prompt || "");
   const [notes, setNotes] = useState(client.notes || "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Modelos em tempo real da Google AI — atualiza automaticamente quando
+  // Google lança um modelo novo (gemini-4-flash etc). Sem hardcode.
+  const [models, setModels] = useState<AiModel[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(true);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch("/api/ai-models", { cache: "no-store" });
+        const d = await r.json();
+        if (cancelled) return;
+        if (d.success && Array.isArray(d.models) && d.models.length > 0) {
+          setModels(d.models);
+          setModelsError(null);
+        } else {
+          // API key não configurada ou erro — mostra mensagem útil
+          setModelsError(d.error || "Configure a API Key do Gemini em Configurações pra ver os modelos disponíveis.");
+        }
+      } catch (e: any) {
+        if (!cancelled) setModelsError(e?.message || "Falha ao listar modelos");
+      } finally {
+        if (!cancelled) setModelsLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const toggleFeature = (key: string) => setFeatures((f) => ({ ...f, [key]: !f[key] }));
 
@@ -324,6 +369,7 @@ function ClientEditor({
         is_admin: isAdmin,
         default_ai_model: model,
         features,
+        organizer_enabled: organizerEnabled,
         organizer_prompt: organizerPrompt || null,
         notes: notes || null,
       };
@@ -407,16 +453,101 @@ function ClientEditor({
             </div>
           </label>
 
-          {/* Modelo IA */}
+          {/* Modelo IA — em tempo real via /api/ai-models */}
           <div className="space-y-1">
-            <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Modelo de IA padrão</label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Modelo de IA padrão</label>
+              {modelsLoading && (
+                <span className="text-[9px] text-muted-foreground flex items-center gap-1">
+                  <Loader2 className="w-3 h-3 animate-spin" /> buscando modelos disponíveis...
+                </span>
+              )}
+              {!modelsLoading && !modelsError && models.length > 0 && (
+                <span className="text-[9px] text-emerald-400">{models.length} modelo(s) disponíveis (Gemini ao vivo)</span>
+              )}
+            </div>
             <select
               value={model}
               onChange={(e) => setModel(e.target.value)}
               className="w-full bg-white/5 border border-white/10 h-11 rounded-xl text-sm px-3 font-mono"
             >
-              {AI_MODEL_OPTIONS.map((m) => <option key={m} value={m} className="bg-neutral-900">{m}</option>)}
+              {/* Garante que o valor salvo SEMPRE aparece, mesmo se não veio na lista da API */}
+              {model && !models.some((m) => m.id === model) && (
+                <option value={model} className="bg-neutral-900">{model} (salvo)</option>
+              )}
+              {modelsLoading && !models.length && (
+                <option value="" className="bg-neutral-900 text-muted-foreground">Carregando...</option>
+              )}
+              {models.map((m) => (
+                <option key={m.id} value={m.id} className="bg-neutral-900">
+                  {m.name} ({m.id})
+                </option>
+              ))}
             </select>
+            {modelsError && (
+              <p className="text-[10px] text-amber-400 flex items-start gap-1 mt-1">
+                <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" /> {modelsError}
+              </p>
+            )}
+          </div>
+
+          {/* ========== ORGANIZADOR IA (toggle + prompt) ========== */}
+          <div className="rounded-xl bg-purple-500/[0.04] border border-purple-500/20 p-3 space-y-3">
+            <label className="flex items-center justify-between gap-3 cursor-pointer">
+              <div>
+                <p className="text-xs font-bold text-white flex items-center gap-2">
+                  <Bot className="w-4 h-4 text-purple-400" /> Organizador IA
+                  <span className={cn(
+                    "text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded",
+                    organizerEnabled ? "bg-emerald-500/20 text-emerald-300" : "bg-white/10 text-muted-foreground"
+                  )}>
+                    {organizerEnabled ? "Ativo" : "Desligado"}
+                  </span>
+                </p>
+                <p className="text-[10px] text-muted-foreground mt-0.5">
+                  Reorganiza o status dos leads automaticamente 1x/dia (hora definida em Configurações).
+                  {!organizerEnabled && <span className="text-amber-300"> Desligado: não roda pra este cliente.</span>}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOrganizerEnabled(!organizerEnabled)}
+                className={cn("w-12 h-6 rounded-full p-1 cursor-pointer transition shrink-0", organizerEnabled ? "bg-purple-500" : "bg-white/10")}
+              >
+                <div className={cn("w-4 h-4 rounded-full bg-white transition-all", organizerEnabled && "translate-x-6")} />
+              </button>
+            </label>
+
+            {organizerEnabled && (
+              <div className="space-y-1.5 pt-2 border-t border-purple-500/10">
+                <div className="flex items-center justify-between">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-purple-300">Prompt customizado</label>
+                  {organizerPrompt && (
+                    <button
+                      type="button"
+                      onClick={() => setOrganizerPrompt("")}
+                      className="text-[10px] text-muted-foreground hover:text-red-400"
+                    >Limpar (usar padrão)</button>
+                  )}
+                  {!organizerPrompt && (
+                    <button
+                      type="button"
+                      onClick={() => setOrganizerPrompt(DEFAULT_ORGANIZER_PROMPT)}
+                      className="text-[10px] text-purple-300 hover:underline"
+                    >Carregar template padrão</button>
+                  )}
+                </div>
+                <Textarea
+                  value={organizerPrompt}
+                  onChange={(e) => setOrganizerPrompt(e.target.value)}
+                  placeholder="Vazio = usa o prompt global. Personalize aqui pra adaptar a IA ao negócio do cliente: vendas, atendimento, agendamento, suporte, etc."
+                  className="bg-black/40 border-white/10 h-40 text-xs font-mono"
+                />
+                <p className="text-[9px] text-muted-foreground italic">
+                  Dica: descreva o tipo de negócio, os status possíveis e a lógica de classificação. A IA usa isso pra decidir o próximo status de cada lead.
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Features */}
@@ -455,21 +586,6 @@ function ClientEditor({
               })}
             </div>
           </div>
-
-          {/* Prompt do organizador IA */}
-          <details className="rounded-xl bg-white/[0.02] border border-white/5 overflow-hidden">
-            <summary className="px-4 py-2 cursor-pointer text-xs font-bold text-muted-foreground hover:text-white">
-              Prompt customizado do Organizador IA (opcional)
-            </summary>
-            <div className="px-4 pb-3">
-              <Textarea
-                value={organizerPrompt}
-                onChange={(e) => setOrganizerPrompt(e.target.value)}
-                placeholder="Vazio = usa o prompt padrão global. Personalize aqui pra adaptar a IA ao tipo de negócio (vendas, atendimento, agendamento, suporte, etc)."
-                className="bg-black/40 border-white/10 h-32 text-xs font-mono"
-              />
-            </div>
-          </details>
 
           {/* Notes */}
           <div className="space-y-1">

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { supabaseAdmin } from "@/lib/supabase";
+import { supabaseAdmin } from "@/lib/supabase_admin";
 import { hashPassword } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -15,7 +15,7 @@ export async function GET() {
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
   const { data, error } = await supabaseAdmin
     .from("clients")
-    .select("id, name, email, is_admin, is_active, default_ai_model, features, created_at, updated_at, notes")
+    .select("id, name, email, is_admin, is_active, default_ai_model, features, organizer_enabled, organizer_prompt, created_at, updated_at, notes")
     .order("created_at", { ascending: false });
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   return NextResponse.json({ ok: true, clients: data });
@@ -24,7 +24,7 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
   const body = await req.json().catch(() => ({}));
-  const { name, email, password, features, default_ai_model, organizer_prompt, notes, is_admin } = body;
+  const { name, email, password, features, default_ai_model, organizer_prompt, organizer_enabled, notes, is_admin } = body;
 
   if (!name || !email || !password) {
     return NextResponse.json({ ok: false, error: "name, email e password são obrigatórios" }, { status: 400 });
@@ -44,9 +44,11 @@ export async function POST(req: NextRequest) {
       default_ai_model: default_ai_model || null,
       features: features || undefined, // deixa o default do schema
       organizer_prompt: organizer_prompt || null,
+      // Default = TRUE quando não enviado (organizador roda por padrão)
+      organizer_enabled: typeof organizer_enabled === "boolean" ? organizer_enabled : true,
       notes: notes || null,
     })
-    .select("id, name, email, is_admin, is_active, default_ai_model, features")
+    .select("id, name, email, is_admin, is_active, default_ai_model, features, organizer_enabled, organizer_prompt")
     .single();
 
   if (error) {

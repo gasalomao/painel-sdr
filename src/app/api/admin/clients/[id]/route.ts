@@ -16,7 +16,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
   const { data, error } = await supabaseAdmin
     .from("clients")
-    .select("id, name, email, is_admin, is_active, default_ai_model, features, organizer_prompt, notes, created_at, updated_at")
+    .select("id, name, email, is_admin, is_active, default_ai_model, features, organizer_prompt, organizer_enabled, notes, created_at, updated_at")
     .eq("id", id)
     .maybeSingle();
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
@@ -38,6 +38,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   if (typeof body.default_ai_model !== "undefined") patch.default_ai_model = body.default_ai_model || null;
   if (typeof body.features !== "undefined")         patch.features = body.features;
   if (typeof body.organizer_prompt !== "undefined") patch.organizer_prompt = body.organizer_prompt || null;
+  if (typeof body.organizer_enabled === "boolean")  patch.organizer_enabled = body.organizer_enabled;
   if (typeof body.notes !== "undefined")            patch.notes = body.notes || null;
 
   // Reset de senha — só admin pode (rota é admin-only)
@@ -56,7 +57,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     .from("clients")
     .update(patch)
     .eq("id", id)
-    .select("id, name, email, is_admin, is_active, default_ai_model, features")
+    .select("id, name, email, is_admin, is_active, default_ai_model, features, organizer_enabled")
     .single();
   if (error) {
     if (error.code === "23505") return NextResponse.json({ ok: false, error: "Email já em uso" }, { status: 409 });

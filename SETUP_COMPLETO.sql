@@ -623,11 +623,14 @@ CREATE TABLE IF NOT EXISTS public.clients (
   is_active         BOOLEAN NOT NULL DEFAULT TRUE,
   default_ai_model  TEXT DEFAULT 'gemini-3.1-flash-lite-preview',
   features          JSONB NOT NULL DEFAULT '{"dashboard":true,"leads":true,"chat":true,"agente":true,"automacao":true,"disparo":true,"followup":true,"captador":true,"inteligencia":true,"whatsapp":true,"historico":true,"tokens":true,"configuracoes":true}'::jsonb,
-  organizer_prompt  TEXT,
+  organizer_enabled BOOLEAN NOT NULL DEFAULT TRUE,     -- toggle por cliente: roda Organizador IA?
+  organizer_prompt  TEXT,                              -- prompt customizado do Organizador (NULL = usa global)
   notes             TEXT,
   created_at        TIMESTAMPTZ DEFAULT NOW(),
   updated_at        TIMESTAMPTZ DEFAULT NOW()
 );
+-- Migração defensiva pra bancos antigos
+ALTER TABLE public.clients ADD COLUMN IF NOT EXISTS organizer_enabled BOOLEAN NOT NULL DEFAULT TRUE;
 CREATE INDEX IF NOT EXISTS idx_clients_email     ON public.clients(email);
 CREATE INDEX IF NOT EXISTS idx_clients_is_active ON public.clients(is_active);
 CREATE INDEX IF NOT EXISTS idx_clients_is_admin  ON public.clients(is_admin);
