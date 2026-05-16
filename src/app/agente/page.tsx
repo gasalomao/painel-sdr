@@ -339,9 +339,13 @@ export default function AgentePage() {
       if (data.success && data.models) setModelOptions(data.models);
     });
 
-    supabase.from("webhook_logs").select("*").order("created_at", { ascending: false }).limit(20).then(({ data }) => {
-      if (data) setWebhookLogs(data);
-    });
+    // Multi-tenant: cliente só vê logs das próprias instâncias.
+    // Admin (clientId = id do admin) vê apenas os logs do escopo dele.
+    {
+      let wlQ = supabase.from("webhook_logs").select("*").order("created_at", { ascending: false }).limit(20);
+      if (clientId) wlQ = wlQ.eq("client_id", clientId);
+      wlQ.then(({ data }) => { if (data) setWebhookLogs(data); });
+    }
 
     const channel = supabase.channel("webhook_logs_realtime")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "webhook_logs" }, (payload) => {

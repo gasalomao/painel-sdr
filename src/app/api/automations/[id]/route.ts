@@ -1,16 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
+import { requireClientId } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
 /**
- * GET    /api/automations/:id    → detalhes
+ * GET    /api/automations/:id    → detalhes (ownership check obrigatório)
  * PATCH  /api/automations/:id    → edita campos (apenas em status=draft|paused|done|error)
  * DELETE /api/automations/:id    → remove + para campanhas vinculadas
+ *
+ * Sem filtro client_id: qualquer cliente autenticado podia ler/editar/apagar
+ * automação de outro cliente passando o id na URL (IDOR).
  */
-export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const tenant = await requireClientId(req);
+  if (!tenant.ok) return tenant.response;
   const { id } = await ctx.params;
-  const { data, error } = await supabase.from("automations").select("*").eq("id", id).maybeSingle();
+
+  let q = supabase.from("automations").select("*").eq("id", id);
+  if (!tenant.isAdmin) q = q.eq("client_id", tenant.clientId);
+  const { data, error } = await q.maybeSingle();
   if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   if (!data) return NextResponse.json({ success: false, error: "Não encontrada" }, { status: 404 });
   return NextResponse.json({ success: true, automation: data });
@@ -43,6 +52,8 @@ const EDITABLE_FIELDS = [
 ];
 
 export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const tenant = await requireClientId(req);
+  if (!tenant.ok) return tenant.response;
   const { id } = await ctx.params;
   try {
     const body = await req.json();
@@ -50,7 +61,9 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     for (const key of EDITABLE_FIELDS) {
       if (key in body) update[key] = body[key];
     }
-    const { error } = await supabase.from("automations").update(update).eq("id", id);
+    let q = supabase.from("automations").update(update).eq("id", id);
+    if (!tenant.isAdmin) q = q.eq("client_id", tenant.clientId);
+    const { error } = await q;
     if (error) throw error;
     return NextResponse.json({ success: true });
   } catch (e: any) {
@@ -58,22 +71,27 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   }
 }
 
-export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const tenant = await requireClientId(req);
+  if (!tenant.ok) return tenant.response;
   const { id } = await ctx.params;
   try {
-    // Pega referências pra também parar campanhas filhas.
-    const { data: a } = await supabase
-      .from("automations")
-      .select("campaign_id, followup_campaign_id")
-      .eq("id", id)
-      .maybeSingle();
+    // Pega referências pra também parar campanhas filhas — só se a automação
+    // pertence ao tenant atual (ou se for admin).
+    let lookupQ = supabase.from("automations").select("campaign_id, followup_campaign_id").eq("id", id);
+    if (!tenant.isAdmin) lookupQ = lookupQ.eq("client_id", tenant.clientId);
+    const { data: a } = await lookupQ.maybeSingle();
+    if (!a) return NextResponse.json({ success: false, error: "Não encontrada ou sem permissão" }, { status: 404 });
+
     if (a?.campaign_id) {
       await supabase.from("campaigns").update({ status: "stopped" }).eq("id", a.campaign_id);
     }
     if (a?.followup_campaign_id) {
       await supabase.from("followup_campaigns").update({ status: "stopped" }).eq("id", a.followup_campaign_id);
     }
-    const { error } = await supabase.from("automations").delete().eq("id", id);
+    let delQ = supabase.from("automations").delete().eq("id", id);
+    if (!tenant.isAdmin) delQ = delQ.eq("client_id", tenant.clientId);
+    const { error } = await delQ;
     if (error) throw error;
     return NextResponse.json({ success: true });
   } catch (e: any) {

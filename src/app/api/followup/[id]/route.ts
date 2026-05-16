@@ -1,10 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
+import { requireClientId } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+/**
+ * Ownership check pra evitar IDOR: cliente A passa id da campanha de follow-up
+ * do cliente B e edita/lê/apaga. Admin (não-impersonando) tem visão global.
+ */
+async function ownsFollowup(req: NextRequest, id: string) {
+  const tenant = await requireClientId(req);
+  if (!tenant.ok) return { ok: false as const, res: tenant.response };
+  if (tenant.isAdmin) return { ok: true as const, isAdmin: true, clientId: tenant.clientId };
+  const { data } = await supabase.from("followup_campaigns").select("client_id").eq("id", id).maybeSingle();
+  if (!data) return { ok: false as const, res: NextResponse.json({ success: false, error: "Não encontrada" }, { status: 404 }) };
+  if (data.client_id !== tenant.clientId) {
+    return { ok: false as const, res: NextResponse.json({ success: false, error: "Sem permissão" }, { status: 403 }) };
+  }
+  return { ok: true as const, isAdmin: false, clientId: tenant.clientId };
+}
+
+export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
+  const own = await ownsFollowup(req, id);
+  if (!own.ok) return own.res;
+
   const { data: camp, error } = await supabase
     .from("followup_campaigns")
     .select("*")
@@ -26,6 +46,9 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
+    const own = await ownsFollowup(req, id);
+    if (!own.ok) return own.res;
+
     const body = await req.json();
     const allowed = [
       "name",
@@ -61,8 +84,10 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   }
 }
 
-export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
+  const own = await ownsFollowup(req, id);
+  if (!own.ok) return own.res;
   const { error } = await supabase.from("followup_campaigns").delete().eq("id", id);
   if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   return NextResponse.json({ success: true });

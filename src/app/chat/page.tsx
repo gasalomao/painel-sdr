@@ -939,19 +939,33 @@ export default function ChatPage() {
 
     const loadFunnelData = async () => {
         try {
-            const { data: channelData } = await supabase.from("channel_connections").select("agent_id").eq("instance_name", activeInstance).maybeSingle();
+            // Multi-tenant: usa client_id da sessão pra garantir que dados de outras
+            // contas não vazem (mesmo se um cliente tentasse hackear o instance_name).
+            const sessRes = await fetch("/api/auth/session");
+            const session = await sessRes.json();
+            const cid = session?.clientId;
+
+            let chQ = supabase.from("channel_connections").select("agent_id, client_id").eq("instance_name", activeInstance);
+            if (cid) chQ = chQ.eq("client_id", cid);
+            const { data: channelData } = await chQ.maybeSingle();
             const agentId = channelData?.agent_id;
-            
+
             if (agentId) {
-                const { data: stageData } = await supabase.from("agent_stages").select("*").eq("agent_id", agentId).order("order_index", { ascending: true });
+                let stagesQ = supabase.from("agent_stages").select("*").eq("agent_id", agentId).order("order_index", { ascending: true });
+                if (cid) stagesQ = stagesQ.eq("client_id", cid);
+                const { data: stageData } = await stagesQ;
                 setStages(stageData || []);
             } else {
                 setStages([]);
             }
 
-            const { data: contactData } = await supabase.from("contacts").select("id").eq("remote_jid", selectedSession).maybeSingle();
+            let ctQ = supabase.from("contacts").select("id").eq("remote_jid", selectedSession);
+            if (cid) ctQ = ctQ.eq("client_id", cid);
+            const { data: contactData } = await ctQ.maybeSingle();
             if (contactData) {
-                const { data: sessData } = await supabase.from("sessions").select("id, current_stage_id, variables").eq("contact_id", contactData.id).eq("instance_name", activeInstance).maybeSingle();
+                let sessQ = supabase.from("sessions").select("id, current_stage_id, variables").eq("contact_id", contactData.id).eq("instance_name", activeInstance);
+                if (cid) sessQ = sessQ.eq("client_id", cid);
+                const { data: sessData } = await sessQ.maybeSingle();
                 if (sessData) {
                     setCurrentStageId(sessData.current_stage_id);
                     setSessionVariables(sessData.variables || {});
