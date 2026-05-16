@@ -1,18 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
+import { requireClientId } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  const { data, error } = await supabase
-    .from("followup_campaigns")
-    .select("*")
-    .order("created_at", { ascending: false });
+export async function GET(req: NextRequest) {
+  const ctx = await requireClientId(req);
+  if (!ctx.ok) return ctx.response;
+
+  let q = supabase.from("followup_campaigns").select("*").order("created_at", { ascending: false });
+  if (!ctx.isAdmin) q = q.eq("client_id", ctx.clientId);
+  const { data, error } = await q;
   if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   return NextResponse.json({ success: true, campaigns: data });
 }
 
 export async function POST(req: NextRequest) {
+  const ctx = await requireClientId(req);
+  if (!ctx.ok) return ctx.response;
+
   try {
     const body = await req.json();
     const {
@@ -71,6 +77,7 @@ export async function POST(req: NextRequest) {
     const { data, error } = await supabase
       .from("followup_campaigns")
       .insert({
+        client_id: ctx.clientId,
         name,
         instance_name,
         ai_enabled,

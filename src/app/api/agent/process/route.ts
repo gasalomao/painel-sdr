@@ -60,7 +60,7 @@ export async function POST(req: NextRequest) {
     // O lead (leads_extraidos) e o contato (contacts) trazem todas as variáveis
     // dinâmicas que o prompt do agente pode usar ({{nome_empresa}}, {{ramo}}, etc).
     const [channelRes, orgRes, leadRes, contactRes] = await Promise.all([
-       supabase.from("channel_connections").select("agent_id").eq("instance_name", instanceName).single(),
+       supabase.from("channel_connections").select("agent_id, client_id").eq("instance_name", instanceName).maybeSingle(),
        supabase.from("ai_organizer_config").select("*").eq("id", 1).single(),
        !isTestMode ? supabase.from("leads_extraidos")
          .select('"remoteJid", nome_negocio, ramo_negocio, categoria, endereco, website, avaliacao, reviews, telefone, status')
@@ -90,6 +90,9 @@ export async function POST(req: NextRequest) {
 
     // 2. Determinar AgentID e Buscar Dados do Agente em Paralelo
     let agentId = Number(req.headers.get("x-test-agent-id")) || channel?.agent_id || 1;
+    // Multi-tenant: identifica o cliente pelo client_id da channel_connection.
+    // Toda token usage / message gravada nessa request fica vinculada a este cliente.
+    const clientId: string = (channel as any)?.client_id || "00000000-0000-0000-0000-000000000001";
 
     // Buscar histórico — limit 30 (era 10) cobre disparo inicial + 3-4 follow-ups +
     // ~20 trocas de mensagem do cliente. Antes, se o lead tivesse trocado >10
@@ -1018,6 +1021,9 @@ ${capturedVariablesPrompt}
       source: "agent",
       sourceId: agentId ? String(agentId) : null,
       sourceLabel: agentConfig?.name || `Agente #${agentId}`,
+      // Vincula o gasto ao cliente — sem isso, o painel /tokens do cliente
+      // não enxerga o consumo e admin vê os dados misturados.
+      clientId,
       model: modelId,
       promptTokens: totalPrompt,
       completionTokens: totalCompletion,

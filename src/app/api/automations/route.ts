@@ -1,18 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
+import { requireClientId } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
 /**
- * GET  /api/automations             → lista todas
+ * GET  /api/automations             → lista do cliente atual (admin vê todas)
  * POST /api/automations             → cria nova (status='draft', phase='idle')
  */
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
-    const { data, error } = await supabase
-      .from("automations")
-      .select("*")
-      .order("created_at", { ascending: false });
+    const ctx = await requireClientId(req);
+    if (!ctx.ok) return ctx.response;
+
+    let q = supabase.from("automations").select("*").order("created_at", { ascending: false });
+    if (!ctx.isAdmin) q = q.eq("client_id", ctx.clientId);
+    const { data, error } = await q;
     if (error) throw error;
     return NextResponse.json({ success: true, automations: data || [] });
   } catch (e: any) {
@@ -36,6 +39,9 @@ const DEFAULTS = {
 
 export async function POST(req: NextRequest) {
   try {
+    const ctx = await requireClientId(req);
+    if (!ctx.ok) return ctx.response;
+
     const body = await req.json();
     if (!body?.name?.trim()) {
       return NextResponse.json({ success: false, error: "name é obrigatório" }, { status: 400 });
@@ -45,6 +51,7 @@ export async function POST(req: NextRequest) {
     }
 
     const row = {
+      client_id: ctx.clientId,
       name: String(body.name).trim(),
       agent_id: body.agent_id ? Number(body.agent_id) : null,
       instance_name: String(body.instance_name).trim(),

@@ -23,6 +23,9 @@ export interface TokenUsageInput {
   completionTokens?: number;
   totalTokens?: number;
   metadata?: Record<string, any>;
+  /** Multi-tenant: cliente dono do gasto. Sem isso, /tokens do cliente fica
+   *  vazio e admin vê tudo misturado. Default = Default client. */
+  clientId?: string;
 }
 
 /**
@@ -71,6 +74,7 @@ export async function logTokenUsage(input: TokenUsageInput): Promise<void> {
     const cost = estimateCost(input.model, promptTokens, completionTokens);
 
     const { error } = await adminClient.from("ai_token_usage").insert({
+      client_id: input.clientId || "00000000-0000-0000-0000-000000000001",
       source: input.source,
       source_id: input.sourceId != null ? String(input.sourceId) : null,
       source_label: input.sourceLabel || null,

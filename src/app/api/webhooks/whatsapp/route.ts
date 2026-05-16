@@ -3,6 +3,7 @@ import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { evolution, getEvolutionConfig } from "@/lib/evolution";
 import { getEffectiveStatus } from "@/lib/bot-status";
 import { isManualSend } from "@/lib/manual-send-registry";
+import { clientIdFromInstance, DEFAULT_CLIENT_ID } from "@/lib/tenant";
 
 export const dynamic = 'force-dynamic';
 
@@ -524,34 +525,35 @@ function mediaPlaceholder(msgType: string): string {
 // FIND OR CREATE: Contact + Session
 // ============================================================
 
-async function findOrCreateContact(remoteJid: string, pushName?: string) {
-  // Tenta encontrar contato existente
+async function findOrCreateContact(remoteJid: string, pushName: string | undefined, clientId: string) {
+  // Tenta encontrar contato existente (escopo: cliente)
   const { data: existing } = await supabase
     .from("contacts")
     .select("id, push_name")
     .eq("remote_jid", remoteJid)
-    .single();
+    .eq("client_id", clientId)
+    .maybeSingle();
 
   if (existing) {
-    // Atualizar push_name se mudou
     if (pushName && pushName !== existing.push_name) {
       await supabase.from("contacts").update({ push_name: pushName }).eq("id", existing.id);
     }
     return existing.id;
   }
 
-  // Criar novo contato
   const phoneNumber = evolution.extractPhone(remoteJid);
   const { data: newContact, error } = await supabase.from("contacts").insert({
+    client_id: clientId,
     remote_jid: remoteJid,
     push_name: pushName || null,
     phone_number: phoneNumber,
   }).select("id").single();
 
   if (error) {
-    // Race condition: outro webhook pode ter criado entre o select e o insert
     if (error.code === "23505") {
-      const { data: retry } = await supabase.from("contacts").select("id").eq("remote_jid", remoteJid).single();
+      const { data: retry } = await supabase
+        .from("contacts").select("id")
+        .eq("remote_jid", remoteJid).eq("client_id", clientId).single();
       return retry?.id;
     }
     throw error;
@@ -559,28 +561,28 @@ async function findOrCreateContact(remoteJid: string, pushName?: string) {
   return newContact.id;
 }
 
-async function findOrCreateSession(contactId: string, instanceName: string, remoteJid: string) {
+async function findOrCreateSession(contactId: string, instanceName: string, remoteJid: string, clientId: string) {
   const { data: existing } = await supabase
     .from("sessions")
     .select("id, contact_id, instance_name, bot_status, paused_by, paused_at, resume_at, agent_id")
     .eq("contact_id", contactId)
     .eq("instance_name", instanceName)
-    .single();
+    .maybeSingle();
 
   if (existing) {
-    // Auto-resume se snooze venceu (faz update no DB internamente)
     const eff = await getEffectiveStatus(existing as any);
     return { ...existing, bot_status: eff.status, resume_at: eff.resumeAt, _effective_active: eff.isActive };
   }
 
-  // Buscar agent_id da instância
+  // Busca agent do cliente desta instância
   const { data: channel } = await supabase
     .from("channel_connections")
     .select("agent_id")
     .eq("instance_name", instanceName)
-    .single();
+    .maybeSingle();
 
   const { data: newSession, error } = await supabase.from("sessions").insert({
+    client_id: clientId,
     contact_id: contactId,
     instance_name: instanceName,
     agent_id: channel?.agent_id || 1,
@@ -620,8 +622,17 @@ export async function POST(req: NextRequest) {
 
     console.log(">>> [Evolution API v2] Evento:", eventName, "| Instância:", instanceName);
 
+    // ============================================================
+    // MULTI-TENANT: descobre a qual cliente esta instância pertence.
+    // Sem isso, mensagens de cliente A vazariam no painel do cliente B.
+    // Fallback Default mantém compat com webhooks de instâncias antigas
+    // que ainda não foram vinculadas a um cliente específico.
+    // ============================================================
+    const clientId = (await clientIdFromInstance(instanceName)) || DEFAULT_CLIENT_ID;
+
     // Log tudo para debug
     await supabase.from("webhook_logs").insert({
+      client_id: clientId,
       instance_name: instanceName,
       event: eventName,
       payload: { level: "raw", event: eventName, instance: instanceName, raw: body },
@@ -665,13 +676,14 @@ export async function POST(req: NextRequest) {
       let contactId: string | null = null;
       let session: any = null;
       try {
-        contactId = await findOrCreateContact(remoteJid, pushName);
+        contactId = await findOrCreateContact(remoteJid, pushName, clientId);
         if (contactId) {
-          session = await findOrCreateSession(contactId, instanceName, remoteJid);
+          session = await findOrCreateSession(contactId, instanceName, remoteJid, clientId);
         }
       } catch (sessErr: any) {
         console.error(">>> [Webhook] ⚠ Falha ao criar contact/session (não-fatal):", sessErr?.message);
         await supabase.from("webhook_logs").insert({
+          client_id: clientId,
           instance_name: instanceName,
           event: "WEBHOOK_SESSION_FAIL",
           payload: { remote_jid: remoteJid, error: sessErr?.message, fromMe },
@@ -883,6 +895,7 @@ export async function POST(req: NextRequest) {
         (msgType && msgType !== "text" ? mediaPlaceholder(msgType) : null);
 
       const basePayload: Record<string, any> = {
+        client_id: clientId,
         instance_name: instanceName,
         message_id: finalId,
         remote_jid: remoteJid,
@@ -898,6 +911,7 @@ export async function POST(req: NextRequest) {
       if (dashErr?.code === "PGRST204") {
         console.warn(">>> [Webhook] chats_dashboard rejeitou coluna — tentando payload mínimo:", dashErr.message);
         const minimal = {
+          client_id: clientId,
           remote_jid: remoteJid,
           message_id: finalId,
           sender_type: sender === 'ai' ? 'ai' : sender,
@@ -941,6 +955,7 @@ export async function POST(req: NextRequest) {
       // === 2. SALVA no messages (V2) — só se tiver session. NÃO bloqueia. ===
       if (session?.id) {
         const { error: insertError } = await supabase.from("messages").insert({
+          client_id: clientId,
           session_id: session.id,
           message_id: finalId,
           sender,
@@ -1030,7 +1045,21 @@ export async function POST(req: NextRequest) {
     if (eventName === "connection.update" || eventName === "CONNECTION_UPDATE") {
       const data = body.data || body;
       console.log(">>> CONNECTION UPDATE ->", JSON.stringify(data).slice(0, 200));
-      return NextResponse.json({ success: true, event: "connection_update" });
+      
+      const rawState = (data.state || data.status || "").toLowerCase();
+      let state = "disconnected";
+      if (rawState === "open" || rawState === "connected") state = "open";
+      if (rawState === "connecting" || rawState === "pairing") state = "connecting";
+      if (rawState === "close" || rawState === "disconnected") state = "close";
+
+      if (instanceName && state) {
+        await supabase
+          .from("channel_connections")
+          .update({ status: state })
+          .eq("instance_name", instanceName);
+      }
+      
+      return NextResponse.json({ success: true, event: "connection_update", state });
     }
 
     // ============================================================

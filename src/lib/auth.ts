@@ -15,15 +15,22 @@
 import { createHash, pbkdf2Sync, randomBytes, timingSafeEqual } from "crypto";
 import { supabaseAdmin } from "@/lib/supabase";
 
-// Re-exporta tudo do auth-edge pra calls antigos continuarem funcionando
-// (import { signSession, verifySession, SESSION_COOKIE, ... } from "@/lib/auth")
-export {
-  SESSION_COOKIE,
-  SESSION_TTL,
-  signSession,
-  verifySession,
-  type SessionClaims,
-} from "@/lib/auth-edge";
+import { SESSION_COOKIE, SESSION_TTL, verifySession as verifySessionEdge, type SessionClaims } from "@/lib/auth-edge";
+import { NextRequest } from "next/server";
+
+export { SESSION_COOKIE, SESSION_TTL, type SessionClaims };
+
+/**
+ * Versão robusta do verifySession para uso em rotas API (Node).
+ * Aceita o token string OU o objeto NextRequest (extrai o cookie automaticamente).
+ */
+export async function verifySession(input: string | NextRequest): Promise<SessionClaims | null> {
+  const token = typeof input === "string" ? input : input.cookies.get(SESSION_COOKIE)?.value;
+  if (!token) return null;
+  return verifySessionEdge(token);
+}
+
+export { signSession } from "@/lib/auth-edge";
 
 // ============= HASH DE SENHA (Node-only — usa node:crypto) =============
 const PBKDF2_ITERATIONS = 100_000;
@@ -113,6 +120,7 @@ export async function findClientById(id: string): Promise<ClientRow | null> {
  * Retorna o ID da sessão pra incluir no JWT (permite revoke individual).
  */
 export async function createAuthSession(opts: {
+  id?: string;
   clientId: string;
   impersonatedAs?: string | null;
   token: string;
@@ -122,16 +130,23 @@ export async function createAuthSession(opts: {
   if (!supabase) throw new Error("Supabase admin não disponível");
   const tokenHash = hashToken(opts.token);
   const expiresAt = new Date(Date.now() + SESSION_TTL_SECONDS * 1000).toISOString();
+  
+  const insertData: any = {
+    client_id: opts.clientId,
+    impersonated_as: opts.impersonatedAs || null,
+    token_hash: tokenHash,
+    user_agent: opts.userAgent?.slice(0, 500),
+    ip: opts.ip?.slice(0, 64),
+    expires_at: expiresAt,
+  };
+  
+  if (opts.id) {
+    insertData.id = opts.id;
+  }
+
   const { data, error } = await supabase
     .from("auth_sessions")
-    .insert({
-      client_id: opts.clientId,
-      impersonated_as: opts.impersonatedAs || null,
-      token_hash: tokenHash,
-      user_agent: opts.userAgent?.slice(0, 500),
-      ip: opts.ip?.slice(0, 64),
-      expires_at: expiresAt,
-    })
+    .insert(insertData)
     .select("id")
     .single();
   if (error) throw error;
@@ -141,20 +156,39 @@ export async function createAuthSession(opts: {
 /**
  * Confirma que o token (do cookie) AINDA é válido no DB — bloqueia tokens
  * já revogados ou expirados mesmo que o JWT seja crypto-válido.
+ *
+ * IMPORTANTE: é RESILIENTE a falhas transient do Supabase. Se a query der
+ * erro (timeout, HTML do Easypanel quando container reinicia, etc), assume
+ * que a sessão é live — o JWT já está crypto-válido. Só recusa se a row
+ * EXPLICITAMENTE foi encontrada com revoked_at ou expires_at no passado.
+ *
+ * Por que: sem isso, todo cliente era deslogado num loop ao menor blip do
+ * Supabase. Agora só desloga quando temos certeza (revogação explícita).
  */
 export async function isSessionLive(sessionId: string, token: string): Promise<boolean> {
-  if (!supabase) return false;
+  if (!supabase || !sessionId) return true; // sem DB ou sem sessionId → confia no JWT
   const tokenHash = hashToken(token);
-  const { data } = await supabase
-    .from("auth_sessions")
-    .select("id, revoked_at, expires_at")
-    .eq("id", sessionId)
-    .eq("token_hash", tokenHash)
-    .maybeSingle();
-  if (!data) return false;
-  if (data.revoked_at) return false;
-  if (data.expires_at && new Date(data.expires_at).getTime() < Date.now()) return false;
-  return true;
+  try {
+    const { data, error } = await supabase
+      .from("auth_sessions")
+      .select("id, revoked_at, expires_at")
+      .eq("id", sessionId)
+      .eq("token_hash", tokenHash)
+      .maybeSingle();
+    // Erro de rede / HTML / timeout → confia no JWT pra não deslogar em loop
+    if (error) {
+      console.warn("[auth] isSessionLive: DB error, assumindo live:", error.message);
+      return true;
+    }
+    // Row não existe = pode ser sessão antiga pré-tracking; confia no JWT
+    if (!data) return true;
+    if (data.revoked_at) return false;
+    if (data.expires_at && new Date(data.expires_at).getTime() < Date.now()) return false;
+    return true;
+  } catch (err: any) {
+    console.warn("[auth] isSessionLive: exception, assumindo live:", err?.message);
+    return true;
+  }
 }
 
 export async function revokeSession(sessionId: string): Promise<void> {

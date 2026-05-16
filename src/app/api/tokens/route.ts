@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase, supabaseAdmin } from "@/lib/supabase";
 import { ensurePricing, lookupPriceSync, computeCost, getCacheState, ensureFxRate, getFxState } from "@/lib/pricing";
+import { requireClientId } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
@@ -25,17 +26,21 @@ const SOURCES = ["agent", "disparo", "followup", "organizer", "other"] as const;
  */
 export async function GET(req: NextRequest) {
   try {
+    // Multi-tenant: cliente só vê os próprios tokens. Admin (não-impersonando)
+    // vê TUDO (sem filtro client_id) pra dashboard global do sistema.
+    const ctx = await requireClientId(req);
+    if (!ctx.ok) return ctx.response;
+
     await Promise.all([ensurePricing(), ensureFxRate()]);
 
     const fromIso = req.nextUrl.searchParams.get("from");
     const toIso   = req.nextUrl.searchParams.get("to");
-    // Câmbio: ?brl=X tem prioridade (override manual). Senão pega tempo real
-    // da AwesomeAPI via getFxState (atualiza 6/6h, fallback pra DB e depois 5.0).
     const fxState = await getFxState();
     const brlOverride = req.nextUrl.searchParams.get("brl");
     const brlRate = brlOverride ? Number(brlOverride) : fxState.rate;
 
     let q = adminClient.from("ai_token_usage").select("*").order("created_at", { ascending: false });
+    if (!ctx.isAdmin) q = q.eq("client_id", ctx.clientId);
     if (fromIso) q = q.gte("created_at", fromIso);
     if (toIso) q = q.lte("created_at", toIso);
 
