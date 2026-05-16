@@ -13,7 +13,7 @@
  */
 
 import { createHash, pbkdf2Sync, randomBytes, timingSafeEqual } from "crypto";
-import { supabaseAdmin } from "@/lib/supabase";
+import { supabaseAdmin } from "@/lib/supabase_admin";
 
 import { SESSION_COOKIE, SESSION_TTL, verifySession as verifySessionEdge, type SessionClaims } from "@/lib/auth-edge";
 import { NextRequest } from "next/server";

@@ -5,7 +5,7 @@
  * Retorna void e nunca lança — falha de log NÃO pode quebrar a feature.
  */
 
-import { supabaseAdmin } from "@/lib/supabase";
+import { supabaseAdmin } from "@/lib/supabase_admin";
 import { supabase } from "@/lib/supabase";
 import { ensurePricing, lookupPriceSync, computeCost } from "@/lib/pricing";
 

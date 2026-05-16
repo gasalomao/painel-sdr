@@ -27,19 +27,27 @@ export async function GET(req: NextRequest) {
   if (!ctx.ok) return ctx.response;
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
 
-  const { data: client } = await supabaseAdmin
-    .from("clients")
-    .select("organizer_enabled, organizer_prompt")
-    .eq("id", ctx.clientId)
-    .maybeSingle();
-
-  // ai_organizer_config (id=1) é GLOBAL — só admin altera. Carrega o modelo
-  // em uso pra mostrar pro cliente, mesmo que ele não possa mudar.
-  const { data: cfg } = await supabaseAdmin
-    .from("ai_organizer_config")
-    .select("last_run, execution_hour, enabled, model, provider")
-    .eq("id", 1)
-    .maybeSingle();
+  const [{ data: client }, { data: cfg }, { data: agents }] = await Promise.all([
+    supabaseAdmin
+      .from("clients")
+      .select("organizer_enabled, organizer_prompt")
+      .eq("id", ctx.clientId)
+      .maybeSingle(),
+    // ai_organizer_config (id=1) é GLOBAL — só admin altera. Carrega o modelo
+    // + last_run + enabled pra mostrar pro cliente.
+    supabaseAdmin
+      .from("ai_organizer_config")
+      .select("last_run, execution_hour, enabled, model, provider")
+      .eq("id", 1)
+      .maybeSingle(),
+    // Agentes do cliente — UI mostra dropdown pra "qual agente o
+    // organizador deve analisar pra sugerir kanban + prompt".
+    supabaseAdmin
+      .from("agent_settings")
+      .select("id, name, role")
+      .eq("client_id", ctx.clientId)
+      .order("id"),
+  ]);
 
   // Prompt EFETIVO que está sendo usado (custom do cliente OU default global)
   const effectivePrompt = (client?.organizer_prompt && client.organizer_prompt.trim())
@@ -58,6 +66,7 @@ export async function GET(req: NextRequest) {
     model: cfg?.model || "gemini-2.5-flash",          // modelo em uso (global)
     provider: cfg?.provider || "Gemini",
     isAdmin: ctx.isAdmin,                             // pra UI mostrar/esconder controles
+    agents: agents || [],                             // pra dropdown de "agente base pra sugestão"
   });
 }
 

@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useRef, useCallback } from "react";
 import { usePathname } from "next/navigation";
+import Link from "next/link";
 import { Header } from "@/components/layout/header";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -1390,32 +1391,26 @@ export default function ChatPage() {
               </div>
             </div>
 
-            {/* Organizador IA — análise diária + agendamento */}
-            <button
-              type="button"
-              onClick={() => setOrgOpen(true)}
-              className={cn(
-                "w-full p-3 rounded-2xl border transition-all text-left flex items-center justify-between gap-3",
-                orgEnabled
-                  ? "bg-primary/10 border-primary/30 hover:bg-primary/15"
-                  : "bg-white/5 border-white/5 hover:bg-white/10"
-              )}
+            {/* Organizador IA foi MOVIDO pra página dedicada /organizador.
+                Aqui só fica um link informativo — toda config + prompt + kanban
+                + histórico + sugestão IA estão lá agora. */}
+            <Link
+              href="/organizador"
+              className="w-full p-3 rounded-2xl border bg-white/5 border-white/5 hover:bg-purple-500/10 hover:border-purple-500/30 transition-all flex items-center justify-between gap-3 group"
             >
               <div className="flex items-center gap-2 min-w-0">
-                <BrainCircuit className={cn("w-4 h-4 shrink-0", orgEnabled ? "text-primary" : "text-muted-foreground")} />
+                <BrainCircuit className="w-4 h-4 shrink-0 text-purple-400" />
                 <div className="min-w-0">
-                  <p className={cn("text-[10px] font-black uppercase tracking-widest truncate", orgEnabled ? "text-primary" : "text-foreground")}>
+                  <p className="text-[10px] font-black uppercase tracking-widest truncate text-foreground group-hover:text-purple-200">
                     Organizador IA
                   </p>
                   <p className="text-[9px] truncate text-muted-foreground">
-                    {orgEnabled
-                      ? `Auto todo dia às ${String(orgHour).padStart(2, "0")}h`
-                      : "Desativado — clique para configurar"}
+                    Configurar prompt, kanban, histórico →
                   </p>
                 </div>
               </div>
-              <Settings className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-            </button>
+              <Settings className="w-3.5 h-3.5 text-muted-foreground shrink-0 group-hover:text-purple-300" />
+            </Link>
 
             <div className="relative">
               <Select value={activeInstance} onValueChange={(val: any) => { if (val) { setActiveInstance(val); setSelectedSession(null as any); }}}>

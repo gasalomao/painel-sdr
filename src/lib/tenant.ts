@@ -20,7 +20,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE, verifySession, type SessionClaims } from "@/lib/auth-edge";
-import { supabaseAdmin } from "@/lib/supabase";
+import { supabaseAdmin } from "@/lib/supabase_admin";
 
 export type TenantContext =
   | { ok: true; clientId: string; isAdmin: boolean; impersonating: boolean; claims: SessionClaims }

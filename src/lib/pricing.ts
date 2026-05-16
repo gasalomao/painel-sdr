@@ -16,7 +16,7 @@
  *    Gemini de 2025) — o cálculo nunca fica em zero.
  */
 
-import { supabaseAdmin } from "@/lib/supabase";
+import { supabaseAdmin } from "@/lib/supabase_admin";
 import { supabase } from "@/lib/supabase";
 
 const adminClient = supabaseAdmin || supabase;

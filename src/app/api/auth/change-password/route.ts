@@ -8,7 +8,7 @@ import {
   verifyPassword,
   revokeAllClientSessions,
 } from "@/lib/auth";
-import { supabaseAdmin } from "@/lib/supabase";
+import { supabaseAdmin } from "@/lib/supabase_admin";
 
 export const dynamic = "force-dynamic";
 
