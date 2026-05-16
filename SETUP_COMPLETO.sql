@@ -663,7 +663,8 @@ DECLARE
     'campaigns', 'campaign_targets', 'campaign_logs',
     'followup_campaigns', 'followup_targets', 'followup_logs',
     'automations', 'automation_logs',
-    'ai_token_usage', 'historico_ia_leads', 'ai_organizer_runs', 'chat_buffers'
+    'ai_token_usage', 'historico_ia_leads', 'ai_organizer_runs', 'chat_buffers',
+    'webhook_logs'
   ];
 BEGIN
   FOREACH tbl IN ARRAY tenant_tables LOOP
