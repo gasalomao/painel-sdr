@@ -40,6 +40,7 @@ const FEATURE_LIST = [
   { key: "whatsapp",      label: "WhatsApp" },
   { key: "historico",     label: "Histórico IA" },
   { key: "tokens",        label: "Tokens IA" },
+  { key: "organizador",   label: "Organizador IA" },
   { key: "configuracoes", label: "Configurações" },
 ];
 

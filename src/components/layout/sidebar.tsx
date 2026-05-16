@@ -64,6 +64,7 @@ const navItems: NavItem[] = [
   { href: "/whatsapp",       label: "WhatsApp",         icon: Smartphone,      feature: "whatsapp" },
   { href: "/historico-ia",   label: "Histórico IA",     icon: History,         feature: "historico" },
   { href: "/tokens",         label: "Tokens IA",        icon: Coins,           feature: "tokens" },
+  { href: "/organizador",    label: "Organizador IA",   icon: BookOpen,        feature: "organizador" },
   { href: "/configuracoes",  label: "Configurações",    icon: Settings2,       feature: "configuracoes" },
 ];
 
