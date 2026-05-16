@@ -25,6 +25,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
+import { useClientSession } from "@/lib/use-session";
 
 interface ChatMessage {
   id: number;
@@ -295,8 +296,7 @@ function WhatsAppAudioPlayer({ src, isMe }: { src: string; isMe: boolean }) {
 }
 
 export default function ChatPage() {
-
-  
+  const { clientId } = useClientSession();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -629,13 +629,28 @@ export default function ChatPage() {
   useEffect(() => {
     async function fetchInstances() {
       try {
-        const [evoRes, dbRes] = await Promise.all([
+        const sessRes = await fetch("/api/auth/session");
+        const session = await sessRes.json();
+        if (!session?.authenticated) return;
+
+        let dbQuery = supabase.from("chats_dashboard").select("instance_name, remote_jid").limit(20000);
+        if (session.clientId) {
+          dbQuery = dbQuery.eq("client_id", session.clientId);
+        }
+
+        let connQuery = supabase.from("channel_connections").select("instance_name");
+        if (session.clientId) {
+          connQuery = connQuery.eq("client_id", session.clientId);
+        }
+
+        const [evoRes, dbRes, connsRes] = await Promise.all([
           fetch("/api/whatsapp?instances=true").then(r => r.json()).catch(() => ({ instances: [] })),
-          // Busca instance_name + remote_jid pra contar conversas únicas por instância.
-          supabase.from("chats_dashboard").select("instance_name, remote_jid").limit(20000),
+          dbQuery,
+          connQuery,
         ]);
 
-        // Mapa: instance_name → Set de remote_jids únicos (= número de conversas)
+        const myInstances = new Set(connsRes.data?.map((c: any) => c.instance_name) || []);
+
         const conversasPorInstancia = new Map<string, Set<string>>();
         for (const row of (dbRes.data || [])) {
           const inst = row.instance_name as string;
@@ -645,23 +660,20 @@ export default function ChatPage() {
           conversasPorInstancia.get(inst)!.add(rj);
         }
 
-        const evoInstances = evoRes.instances || [];
+        const evoInstances = (evoRes.instances || []).filter((i: any) => myInstances.has(i.instanceName));
         const evoNames = new Set(evoInstances.map((i: any) => i.instanceName));
 
-        // 1) Começa com TODAS da Evolution (mesmo zeradas) — assim user pode escolher
-        //    a instância nova (que ele acabou de criar) sem ter que mandar msg primeiro.
         const merged: any[] = evoInstances.map((i: any) => ({
           ...i,
           msgCount: conversasPorInstancia.get(i.instanceName)?.size || 0,
           offline: false,
         }));
 
-        // 2) Adiciona instâncias órfãs (têm msgs no DB mas sumiram da Evolution).
         for (const [name, set] of conversasPorInstancia) {
           if (!evoNames.has(name)) {
             merged.push({
               instanceName: name,
-              profileName: `${name} (offline)`,
+              profileName: `${name} (offline/cloud)`,
               status: "unknown",
               msgCount: set.size,
               offline: true,
@@ -669,7 +681,18 @@ export default function ChatPage() {
           }
         }
 
-        // Ordena: mais conversas primeiro, depois online > offline, depois alfabética.
+        for (const name of myInstances) {
+           if (!evoNames.has(name) && !conversasPorInstancia.has(name)) {
+             merged.push({
+               instanceName: name,
+               profileName: `${name}`,
+               status: "unknown",
+               msgCount: 0,
+               offline: false,
+             });
+           }
+        }
+
         merged.sort((a, b) => {
           if (b.msgCount !== a.msgCount) return b.msgCount - a.msgCount;
           if (!!a.offline !== !!b.offline) return a.offline ? 1 : -1;
@@ -678,8 +701,6 @@ export default function ChatPage() {
 
         setInstances(merged);
 
-        // Se a instância atualmente selecionada não está na lista, troca pela
-        // primeira COM mensagens (ou primeira da lista).
         if (merged.length > 0 && activeInstance !== "__all__" && !merged.some(i => i.instanceName === activeInstance)) {
           const fallback = merged.find(i => i.msgCount > 0) || merged[0];
           if (fallback?.instanceName) setActiveInstance(fallback.instanceName);
@@ -692,10 +713,11 @@ export default function ChatPage() {
   }, [activeInstance]);
 
   const loadConversations = useCallback(async () => {
-    if (!activeInstance) return;
+    if (!activeInstance || !clientId) return;
     try {
       const isAll = activeInstance === "__all__";
-      const baseQuery = supabase.from("chats_dashboard").select("*").order("id", { ascending: false }).limit(400);
+      let baseQuery = supabase.from("chats_dashboard").select("*").eq("client_id", clientId).order("id", { ascending: false }).limit(400);
+      
       const { data: messages, error } = isAll
         ? await baseQuery
         : await baseQuery.eq("instance_name", activeInstance);
@@ -739,6 +761,7 @@ export default function ChatPage() {
         const { data: leads } = await supabase
           .from("leads_extraidos")
           .select("remoteJid, nome_negocio")
+          .eq("client_id", clientId)
           .in("remoteJid", jids);
         if (leads) {
           for (const lead of leads) {
@@ -753,6 +776,7 @@ export default function ChatPage() {
         const { data: contactsData } = await supabase
           .from("contacts")
           .select("remote_jid, profile_pic_url")
+          .eq("client_id", clientId)
           .in("remote_jid", jids);
         if (contactsData) {
           for (const c of contactsData) {
@@ -803,10 +827,10 @@ export default function ChatPage() {
   }, [activeInstance]);
 
   const loadMessages = useCallback(async (sessionId: string) => {
-    if (!activeInstance) return;
+    if (!activeInstance || !clientId) return;
     try {
       const isAll = activeInstance === "__all__";
-      const base = supabase.from("chats_dashboard").select("*").eq("remote_jid", sessionId)
+      const base = supabase.from("chats_dashboard").select("*").eq("client_id", clientId).eq("remote_jid", sessionId)
         .order("created_at", { ascending: false }).order("id", { ascending: false }).limit(100);
       const { data, error } = isAll ? await base : await base.eq("instance_name", activeInstance);
       

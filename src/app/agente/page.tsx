@@ -16,6 +16,7 @@ import { Header } from "@/components/layout/header";
 import { supabase } from "@/lib/supabase";
 import { renderTemplate } from "@/lib/template-vars";
 import { cn } from "@/lib/utils";
+import { useClientSession } from "@/lib/use-session";
 import { Activity, FlaskConical, Info, ListTree, Settings } from "lucide-react";
 
 import { AgentSwitcher } from "./_components/agent-switcher";
@@ -43,6 +44,7 @@ INSTRUÇÕES:
 - NÃO invente dados que não tem certeza.`;
 
 export default function AgentePage() {
+  const { clientId } = useClientSession();
   // ============= TAB ATIVA =============
   const [activeTab, setActiveTab] = useState<Tab>("info");
 
@@ -168,16 +170,18 @@ export default function AgentePage() {
     // As 4 queries não dependem entre si — paralelizamos com Promise.all e
     // limpamos o spinner no finally pra não ter race do `setLoadingConfig(false)`
     // disparar antes da última callback (bug do código original).
+    if (!clientId) return;
     try {
       const [settings, kb, conn, stagesRes] = await Promise.all([
-        supabase.from("agent_settings").select("*").eq("id", id).single(),
-        supabase.from("agent_knowledge").select("*").eq("agent_id", id).order("created_at"),
+        supabase.from("agent_settings").select("*").eq("id", id).eq("client_id", clientId).single(),
+        supabase.from("agent_knowledge").select("*").eq("agent_id", id).eq("client_id", clientId).order("created_at"),
         supabase.from("channel_connections")
           .select("instance_name, created_at")
           .eq("agent_id", id)
+          .eq("client_id", clientId)
           .order("created_at", { ascending: true })
           .limit(1),
-        supabase.from("agent_stages").select("*").eq("agent_id", id).order("order_index"),
+        supabase.from("agent_stages").select("*").eq("agent_id", id).eq("client_id", clientId).order("order_index"),
       ]);
 
       if (settings.data) {
@@ -217,7 +221,7 @@ export default function AgentePage() {
     } finally {
       setLoadingConfig(false);
     }
-  }, []);
+  }, [clientId]);
 
   /* ====================================================================
      VINCULAR INSTÂNCIA — com checagem de conflito (instância já vinculada
@@ -259,7 +263,12 @@ export default function AgentePage() {
       // Vincula (upsert) e limpa OUTRAS instâncias antigas do mesmo agente
       const { error: e1 } = await supabase
         .from("channel_connections")
-        .upsert({ instance_name: instanceName, agent_id: activeAgentId, status: "open" }, { onConflict: "instance_name" });
+        .upsert({ 
+          instance_name: instanceName, 
+          agent_id: activeAgentId, 
+          client_id: clientId,
+          status: "open" 
+        }, { onConflict: "instance_name" });
       if (e1) throw e1;
 
       const { error: e2 } = await supabase
@@ -279,40 +288,52 @@ export default function AgentePage() {
      EFFECTS de boot — corre uma vez no mount.
   ==================================================================== */
   useEffect(() => {
-    const saved = localStorage.getItem("sdr_active_agent_id");
-    if (saved) setActiveAgentId(Number(saved));
+    if (clientId) {
+      const saved = localStorage.getItem(`sdr_active_agent_id_${clientId}`);
+      if (saved) setActiveAgentId(Number(saved));
+    }
 
-    supabase.from("ai_organizer_config").select("*").eq("id", 1).single().then(({ data }) => {
-      if (data?.app_url) setAppUrl(data.app_url);
-    });
-
-    supabase.from("agent_settings").select("id, name").order("id").then(({ data }) => {
-      if (data && data.length > 0) {
-        setAgentsList(data);
-        const agentExists = data.some((a) => a.id === activeAgentId);
-        const idToLoad = agentExists ? activeAgentId : data[0].id;
-        loadAgent(idToLoad);
-      }
-    });
-
-    // Instâncias do banco local
-    supabase.from("channel_connections").select("instance_name").then(({ data }) => {
-      if (data) {
-        const names = Array.from(new Set(data.map((i) => i.instance_name as string))).filter(Boolean);
-        setAllInstances(names);
-      }
-    });
-
-    // Instâncias da Evolution API (caso tenha alguma que o banco não conhece ainda)
-    fetch("/api/whatsapp").then((r) => r.json()).then((data) => {
-      if (!data.instances) return;
-      const names = data.instances.map((i: any) => i.instanceName || i.instance_name).filter(Boolean) as string[];
-      setAllInstances((prev) => {
-        // Evita re-render desnecessário quando a Evolution só repete o que o DB já tinha.
-        const next = Array.from(new Set([...prev, ...names]));
-        return next.length === prev.length ? prev : next;
+    if (!clientId) return;
+    (async () => {
+      supabase.from("ai_organizer_config").select("*").eq("id", 1).single().then(({ data }) => {
+        if (data?.app_url) setAppUrl(data.app_url);
       });
-    }).catch(console.error);
+
+      supabase.from("agent_settings").select("id, name").eq("client_id", clientId).order("id").then(({ data }) => {
+        if (data && data.length > 0) {
+          setAgentsList(data);
+          const agentExists = data.some((a) => a.id === activeAgentId);
+          const idToLoad = agentExists ? activeAgentId : data[0].id;
+          if (!agentExists) setActiveAgentId(data[0].id);
+          loadAgent(idToLoad);
+        }
+      });
+
+      supabase.from("channel_connections").select("instance_name").eq("client_id", clientId).then(({ data }) => {
+        if (data) {
+          const names = Array.from(new Set(data.map((i) => i.instance_name as string))).filter(Boolean);
+          setAllInstances(names);
+        }
+      });
+
+      // Instâncias da Evolution API (caso tenha alguma que o banco não conhece ainda)
+      // O endpoint /api/whatsapp já filtra por client_id no backend.
+      fetch("/api/whatsapp")
+        .then((r) => r.json())
+        .then((data) => {
+          if (!data.instances) return;
+          const evoNames = data.instances
+            .map((i: any) => i.instanceName || i.instance_name)
+            .filter(Boolean) as string[];
+
+          setAllInstances((prev) => {
+            const next = Array.from(new Set([...prev, ...evoNames]));
+            return next.length === prev.length ? prev : next;
+          });
+        })
+        .catch(console.error);
+
+    })();
 
     fetch("/api/ai-models").then((r) => r.json()).then((data) => {
       if (data.success && data.models) setModelOptions(data.models);
@@ -341,12 +362,12 @@ export default function AgentePage() {
       if (testBufferTimerRef.current) clearTimeout(testBufferTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadAgent]);
+  }, [loadAgent, clientId]);
 
   // Persiste agente selecionado entre sessões
   useEffect(() => {
-    if (activeAgentId) localStorage.setItem("sdr_active_agent_id", activeAgentId.toString());
-  }, [activeAgentId]);
+    if (activeAgentId && clientId) localStorage.setItem(`sdr_active_agent_id_${clientId}`, activeAgentId.toString());
+  }, [activeAgentId, clientId]);
 
   // Sandbox de testes: persiste histórico por agente no localStorage
   useEffect(() => {
@@ -384,7 +405,7 @@ export default function AgentePage() {
       cancelled = true;
       window.removeEventListener("public-url-changed", handler);
     };
-  }, []);
+  }, [clientId, loadAgent]);
 
   /* ====================================================================
      SAVE handlers — todos chamam supabase.update com o subset relevante.
@@ -402,7 +423,7 @@ export default function AgentePage() {
         humanize_messages: humanizeMessages,
         web_search_enabled: webSearchEnabled,
       },
-    }).eq("id", activeAgentId);
+    }).eq("id", activeAgentId).eq("client_id", clientId);
     setSavingConfig(false);
     if (!error) alert("Identidade salva!"); else alert("Erro: " + error.message);
   };
@@ -410,7 +431,7 @@ export default function AgentePage() {
   const savePrompt = async () => {
     if (!activeAgentId) return;
     setSavingConfig(true);
-    const { error } = await supabase.from("agent_settings").update({ main_prompt: prompt }).eq("id", activeAgentId);
+    const { error } = await supabase.from("agent_settings").update({ main_prompt: prompt }).eq("id", activeAgentId).eq("client_id", clientId);
     setSavingConfig(false);
     if (!error) alert("Prompt salvo!"); else alert("Erro: " + error.message);
   };
@@ -418,7 +439,7 @@ export default function AgentePage() {
   const saveSchedules = async () => {
     if (!activeAgentId) return;
     setSavingConfig(true);
-    const { error } = await supabase.from("agent_settings").update({ schedules, is_24h: is24h, away_message: awayMessage }).eq("id", activeAgentId);
+    const { error } = await supabase.from("agent_settings").update({ schedules, is_24h: is24h, away_message: awayMessage }).eq("id", activeAgentId).eq("client_id", clientId);
     setSavingConfig(false);
     if (!error) alert("Horários salvos!"); else alert("Erro: " + error.message);
   };
@@ -435,10 +456,8 @@ export default function AgentePage() {
         calendar_default_duration: calendarDefaultDuration,
         calendar_optional_fields: calendarOptionalFields,
         calendar_auto_capture: calendarAutoCapture,
-        // mantém compatibilidade pra leituras antigas
-        calendar_ask_fields: Object.entries(calendarOptionalFields).filter(([, v]) => v).map(([k]) => k).join(", "),
       },
-    }).eq("id", activeAgentId);
+    }).eq("id", activeAgentId).eq("client_id", clientId);
     setSavingConfig(false);
     if (!error) alert("Agenda salva!"); else alert("Erro: " + error.message);
   };
@@ -560,11 +579,18 @@ export default function AgentePage() {
   const loadPreviewLeads = useCallback(async () => {
     setPreviewLeadsLoading(true);
     try {
-      const { data } = await supabase
+      const sessRes = await fetch("/api/auth/session");
+      const session = await sessRes.json();
+      
+      let query = supabase
         .from("leads_extraidos")
         .select('id, "remoteJid", nome_negocio, ramo_negocio, categoria, endereco, website, telefone')
         .order("created_at", { ascending: false })
         .limit(500);
+      if (session?.clientId) {
+        query = query.eq("client_id", session.clientId);
+      }
+      const { data } = await query;
       setPreviewLeads((data || []) as any);
     } finally {
       setPreviewLeadsLoading(false);
@@ -770,6 +796,7 @@ export default function AgentePage() {
           setAgentsList={setAgentsList}
           setActiveAgentId={setActiveAgentId}
           loadAgent={loadAgent}
+          clientId={clientId}
         />
 
         <div className="max-w-6xl mx-auto p-3 sm:p-8 space-y-4 sm:space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500 mobile-safe-bottom">

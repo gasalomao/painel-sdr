@@ -7,6 +7,7 @@ import {
   SESSION_COOKIE,
   SESSION_TTL,
 } from "@/lib/auth";
+import { randomUUID } from "crypto";
 
 export const dynamic = "force-dynamic";
 
@@ -31,24 +32,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "Conta desativada. Fale com o administrador." }, { status: 403 });
     }
 
-    // Cria JWT (sem sessionId ainda; vamos preencher após o INSERT no DB)
-    const tmpToken = await signSession({
-      sessionId: "pending",
-      clientId: client.id,
-      actorId: client.id,
-      email: client.email,
-      name: client.name,
-      isAdmin: client.is_admin,
-      impersonating: false,
-      features: client.features || {},
-    });
-    const sessionId = await createAuthSession({
-      clientId: client.id,
-      token: tmpToken,
-      userAgent: req.headers.get("user-agent") || undefined,
-      ip: req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || undefined,
-    });
-    // JWT final com sessionId real. O tmpToken acima é descartado — só o real entra no cookie.
+    // Cria o ID da sessão e gera o JWT final
+    const sessionId = randomUUID();
     const token = await signSession({
       sessionId,
       clientId: client.id,
@@ -58,6 +43,15 @@ export async function POST(req: NextRequest) {
       isAdmin: client.is_admin,
       impersonating: false,
       features: client.features || {},
+    });
+    
+    // Grava no banco com o Hash do token FINAL
+    await createAuthSession({
+      id: sessionId,
+      clientId: client.id,
+      token: token,
+      userAgent: req.headers.get("user-agent") || undefined,
+      ip: req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || undefined,
     });
 
     const res = NextResponse.json({

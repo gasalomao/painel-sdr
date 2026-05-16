@@ -9,6 +9,7 @@ import {
   createAuthSession,
   revokeSession,
 } from "@/lib/auth";
+import { randomUUID } from "crypto";
 
 export const dynamic = "force-dynamic";
 
@@ -37,24 +38,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   if (!target) return NextResponse.json({ ok: false, error: "Cliente não encontrado" }, { status: 404 });
   if (!target.is_active) return NextResponse.json({ ok: false, error: "Cliente desativado" }, { status: 403 });
 
-  // Cria nova sessão impersonando
-  const tmpToken = await signSession({
-    sessionId: "pending",
-    clientId: target.id,
-    actorId: claims.actorId,           // admin original
-    email: target.email,
-    name: target.name,
-    isAdmin: target.is_admin,
-    impersonating: true,
-    features: target.features || {},
-  });
-  const newSessionId = await createAuthSession({
-    clientId: target.id,
-    impersonatedAs: target.id,
-    token: tmpToken,
-    userAgent: req.headers.get("user-agent") || undefined,
-    ip: req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || undefined,
-  });
+  // Cria nova sessão impersonando com ID já definido
+  const newSessionId = randomUUID();
   const newToken = await signSession({
     sessionId: newSessionId,
     clientId: target.id,
@@ -65,11 +50,27 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     impersonating: true,
     features: target.features || {},
   });
-
-  // Revoga a sessão admin original
-  await revokeSession(claims.sessionId).catch(() => {});
+  
+  await createAuthSession({
+    id: newSessionId,
+    clientId: target.id,
+    impersonatedAs: target.id,
+    token: newToken,
+    userAgent: req.headers.get("user-agent") || undefined,
+    ip: req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || undefined,
+  });
 
   const res = NextResponse.json({ ok: true, clientId: target.id, name: target.name });
+
+  // Salva o token atual (do admin) para permitir restauração posterior
+  res.cookies.set("ADMIN_SESSION_COOKIE", token, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: SESSION_TTL,
+  });
+
   res.cookies.set(SESSION_COOKIE, newToken, {
     httpOnly: true,
     sameSite: "lax",

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { Header } from "@/components/layout/header";
 import { supabase } from "@/lib/supabase";
 import { Button } from "@/components/ui/button";
@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { TEMPLATE_VARIABLES, renderTemplate, greetingFor } from "@/lib/template-vars";
 import { cn } from "@/lib/utils";
+import { useClientSession } from "@/lib/use-session";
 import { LeadIntelligenceBatch } from "@/components/lead-intelligence-batch";
 
 type Lead = {
@@ -65,6 +66,7 @@ INSTRUÇÕES:
 - NÃO invente dados que não tem certeza.`;
 
 export default function DisparoPage() {
+  const { clientId } = useClientSession();
   const [tab, setTab] = useState<"create" | "list">("list");
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [loadingCampaigns, setLoadingCampaigns] = useState(true);
@@ -191,11 +193,15 @@ export default function DisparoPage() {
     }
   }
 
-  async function loadInstances() {
+  const loadInstances = useCallback(async () => {
+    if (!clientId) return;
     console.log("[DISPARO] loadInstances() iniciado");
     setLoadingInstances(true);
     setInstancesError(null);
     try {
+      const { data: conns } = await supabase.from("channel_connections").select("instance_name").eq("client_id", clientId);
+      const myInstances = new Set((conns || []).map((c: any) => c.instance_name));
+
       // Timeout generoso (35s) — Evolution pode levar até 30s em instâncias pesadas
       const ctrl = new AbortController();
       const tm = setTimeout(() => ctrl.abort(), 35000);
@@ -204,8 +210,9 @@ export default function DisparoPage() {
       const d = await r.json();
       console.log("[DISPARO] loadInstances() resposta:", d);
       if (d.success && Array.isArray(d.instances)) {
-        setInstances(d.instances);
-        if (d.instances.length === 0) setInstancesError("Nenhuma instância conectada. Conecte em WhatsApp.");
+        const filtered = d.instances.filter((i: any) => myInstances.has(i.instanceName));
+        setInstances(filtered);
+        if (filtered.length === 0) setInstancesError("Nenhuma instância conectada. Conecte em WhatsApp.");
       } else {
         setInstancesError(d.error || "Falha ao carregar instâncias.");
       }
@@ -219,25 +226,35 @@ export default function DisparoPage() {
       console.log("[DISPARO] loadInstances() terminou");
       setLoadingInstances(false);
     }
-  }
+  }, [clientId]);
 
   async function loadLeads() {
-    const { data } = await supabase
+    const sessRes = await fetch("/api/auth/session");
+    const session = await sessRes.json();
+    
+    let query = supabase
       .from("leads_extraidos")
       .select("id, remoteJid, nome_negocio, ramo_negocio, status, instance_name")
       .order("created_at", { ascending: false })
       .limit(2000);
+      
+    if (session?.clientId) {
+      query = query.eq("client_id", session.clientId);
+    }
+    
+    const { data } = await query;
     setLeads((data as Lead[]) || []);
   }
 
   useEffect(() => {
+    if (!clientId) return;
     loadCampaigns(true);
     loadInstances();
     loadLeads();
     loadAiModels();
     const t = setInterval(() => loadCampaigns(false), 8000);
     return () => clearInterval(t);
-  }, []);
+  }, [clientId, loadInstances]);
 
   // Ao ligar "personalizar com IA" sem prompt preenchido, sugere o default
   // e carrega a lista de modelos Gemini.

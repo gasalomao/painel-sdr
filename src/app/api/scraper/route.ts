@@ -16,6 +16,8 @@ import {
   attachSseClient,
   detachSseClient,
 } from "@/lib/scraper-engine";
+import { SESSION_COOKIE, verifySession } from "@/lib/auth";
+import { cookies } from "next/headers";
 
 // --- GET: SSE Stream ---
 export async function GET() {
@@ -38,6 +40,13 @@ export async function GET() {
 
 // --- POST: Actions ---
 export async function POST(req: NextRequest) {
+  const cookieStore = await cookies();
+  const token = cookieStore.get(SESSION_COOKIE)?.value;
+  const session = token ? await verifySession(token) : null;
+  if (!session) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const body = await req.json();
   const { action } = body;
 
@@ -54,6 +63,7 @@ export async function POST(req: NextRequest) {
         filterLandlines: body.filterLandlines,
         maxLeads: body.maxLeads,            // /captador também pode passar limite
         automation_id: body.automation_id,
+        client_id: session.clientId,
       });
       if (!r.ok) return NextResponse.json({ error: r.error }, { status: 400 });
       if (r.alreadyRunning) {

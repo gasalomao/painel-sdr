@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { useClientSession } from "@/lib/use-session";
 
 interface AIHistoryLog {
   id: number;
@@ -44,6 +45,7 @@ interface OrganizerRun {
 }
 
 export default function HistoricoIAPage() {
+  const { clientId } = useClientSession();
   const [logs, setLogs] = useState<AIHistoryLog[]>([]);
   const [runs, setRuns] = useState<OrganizerRun[]>([]);
   const [loading, setLoading] = useState(true);
@@ -61,18 +63,23 @@ export default function HistoricoIAPage() {
   const [runFeedback, setRunFeedback] = useState<null | { ok: boolean; msg: string }>(null);
 
   const fetchRuns = useCallback(async () => {
-    const { data } = await supabase
+    if (!clientId) return;
+    let query = supabase
       .from("ai_organizer_runs")
       .select("*")
+      .eq("client_id", clientId)
       .order("started_at", { ascending: false })
       .limit(30);
+    const { data } = await query;
     if (data) setRuns(data as OrganizerRun[]);
-  }, []);
+  }, [clientId]);
 
   const fetchLogs = useCallback(async () => {
+    if (!clientId) return;
     setLoading(true);
     let query = supabase.from("historico_ia_leads")
       .select("*")
+      .eq("client_id", clientId)
       .order("created_at", { ascending: false })
       .order("id", { ascending: false });
     
@@ -86,7 +93,7 @@ export default function HistoricoIAPage() {
       if (data.length > 0 && !expandedBatch) setExpandedBatch(data[0].batch_id || "legacy");
     }
     setLoading(false);
-  }, [filterStatus, expandedBatch]);
+  }, [clientId, filterStatus, expandedBatch]);
 
   useEffect(() => {
     fetchLogs();

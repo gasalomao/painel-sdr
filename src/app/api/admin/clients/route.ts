@@ -66,5 +66,15 @@ export async function POST(req: NextRequest) {
     { client_id: data.id, status_key: "perdido",          label: "Perdido",          color: "#ef4444", order_index: 5, is_system: false },
   ]).then(({ error: kbErr }) => kbErr && console.warn("[admin/clients] seed kanban:", kbErr.message));
 
+  // Seed do Agente padrão pro cliente novo
+  await supabaseAdmin.from("agent_settings").insert([
+    { 
+      client_id: data.id, 
+      name: "Agente Principal", 
+      main_prompt: "Você é o assistente virtual oficial da empresa. Seu objetivo é qualificar leads e agendar reuniões.",
+      is_active: true
+    }
+  ]).then(({ error: agErr }) => agErr && console.warn("[admin/clients] seed agent:", agErr.message));
+
   return NextResponse.json({ ok: true, client: data });
 }

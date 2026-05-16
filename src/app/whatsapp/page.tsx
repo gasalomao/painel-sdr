@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { Header } from "@/components/layout/header";
 import { supabase } from "@/lib/supabase";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { useClientSession } from "@/lib/use-session";
 
 const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string }> = {
   open: { label: "Online", color: "text-green-400", bg: "bg-green-500/10 border-green-500/20" },
@@ -43,6 +44,7 @@ type CloudForm = {
 };
 
 export default function WhatsAppPage() {
+  const { clientId } = useClientSession();
   const [connections, setConnections] = useState<InstanceData[]>([]);
   const [agents, setAgents] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -300,10 +302,23 @@ export default function WhatsAppPage() {
     try {
       const res = await fetch(`/api/whatsapp?instance=${instanceName}`);
       const data = await res.json();
-      let state = data.state || data.instance?.state || "unknown";
+      let state = (data.state || data.instance?.state || "unknown").toLowerCase();
+      
+      // Normalização
+      if (state === "connected") state = "open";
+      if (state === "disconnected") state = "close";
+
       const owner = data.data?.instance?.owner || data.data?.owner || null;
       const profileName = data.data?.instance?.profileName || data.data?.profileName || null;
       setStatusMap(prev => ({ ...prev, [instanceName]: { state, owner, profileName } }));
+
+      // Persiste no banco se o estado for válido
+      if (state === "open" || state === "close") {
+        await supabase
+          .from("channel_connections")
+          .update({ status: state })
+          .eq("instance_name", instanceName);
+      }
     } catch {
       setStatusMap(prev => ({ ...prev, [instanceName]: { state: "error" } }));
     }
@@ -375,24 +390,41 @@ export default function WhatsAppPage() {
   };
 
   // Load tudo (connections + agents + status)
-  const loadData = async () => {
-    const { data: conns } = await supabase.from("channel_connections").select("*").order("created_at");
-    if (conns) {
-      setConnections(conns);
-      conns.forEach(c => checkStatus(c.instance_name));
-    } else {
-      setConnections([]);
-    }
-    const { data: agentsData } = await supabase.from("agent_settings").select("id, name");
-    if (agentsData) setAgents(agentsData);
-    setLoading(false);
-  };
+  const loadData = useCallback(async () => {
+    if (!clientId) return;
+    try {
+      setLoading(true);
+      const { data: conns } = await supabase
+        .from("channel_connections")
+        .select("*")
+        .eq("client_id", clientId)
+        .order("created_at");
 
-  // Roda apenas uma vez no mount
+      if (conns) {
+        setConnections(conns);
+        conns.forEach(c => checkStatus(c.instance_name));
+      } else {
+        setConnections([]);
+      }
+
+      const { data: agentsData } = await supabase
+        .from("agent_settings")
+        .select("id, name")
+        .eq("client_id", clientId);
+      
+      if (agentsData) setAgents(agentsData);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  }, [clientId]);
+
+  // Roda apenas uma vez no mount (e quando clientId muda)
   useEffect(() => {
     loadData();
     loadPublicUrl();
-  }, []);
+  }, [loadData]);
 
   // Polling de status: checa a cada 15s usando ref
   useEffect(() => {
@@ -444,20 +476,47 @@ export default function WhatsAppPage() {
       return alert("Digite um nome para a instancia (sem espacos)");
     }
 
-    // Verifica se ja nao existe
+    const sessRes = await fetch("/api/auth/session");
+    const session = await sessRes.json();
+    const clientId = session?.clientId;
+    if (!clientId) return alert("Sessão inválida");
+
+    // Nome interno único para a Evolution/DB: prefixo_nome
+    // Isso permite que múltiplos clientes usem o mesmo nome amigável (ex: "vendas")
+    const internalName = `${clientId.substring(0, 5)}_${novaInstancia}`;
+
+    // Verifica se ja nao existe PARA ESTE CLIENTE (ou globalmente se preferir manter UNIQUE no DB)
     const { data: existing } = await supabase
       .from("channel_connections")
       .select("id")
-      .eq("instance_name", novaInstancia)
+      .eq("instance_name", internalName)
       .single();
 
     if (existing) {
-      return alert("Ja existe uma instancia com esse nome!");
+      return alert("Você já tem uma instancia com esse nome!");
+    }
+
+    let targetAgentId = agents.length > 0 ? agents[0].id : null;
+
+    // Se o cliente não tem nenhum agente, cria um padrão agora pra não dar erro de vínculo
+    if (!targetAgentId && clientId) {
+      const { data: newAg, error: agErr } = await supabase
+        .from("agent_settings")
+        .insert({ 
+          client_id: clientId, 
+          name: "Agente Principal", 
+          main_prompt: "Você é o assistente virtual oficial da empresa. Seu objetivo é qualificar leads e agendar reuniões.",
+          is_active: true 
+        })
+        .select("id")
+        .single();
+      if (!agErr && newAg) targetAgentId = newAg.id;
     }
 
     const { error } = await supabase.from("channel_connections").insert({
-      instance_name: novaInstancia,
-      agent_id: 1
+      instance_name: internalName,
+      agent_id: targetAgentId, 
+      client_id: clientId
     });
     if (error) return alert(error.message);
 
@@ -856,7 +915,11 @@ export default function WhatsAppPage() {
         ) : (
            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
              {connections.filter(c => (c.provider || "evolution") === "evolution").map(conn => {
-                const connState = statusMap[conn.instance_name]?.state || "unknown";
+                let connState = (statusMap[conn.instance_name]?.state || "close").toLowerCase();
+                if (connState === "connected") connState = "open";
+                if (connState === "disconnected") connState = "close";
+                if (connState === "connecting" || connState === "pairing") connState = "connecting";
+
                 const statusCfg = STATUS_CONFIG[connState] || STATUS_CONFIG["close"];
                 const owner = statusMap[conn.instance_name]?.owner;
                 const profileName = statusMap[conn.instance_name]?.profileName;
@@ -877,7 +940,7 @@ export default function WhatsAppPage() {
                          </div>
                          <div>
                             <CardTitle className="text-sm font-bold text-white flex items-center gap-2">
-                               {conn.instance_name}
+                               {conn.instance_name.includes("_") ? conn.instance_name.split("_").slice(1).join("_") : conn.instance_name}
                                <Badge variant="outline" className={cn("text-[9px] uppercase tracking-wider", isOnline ? "border-green-500/30 text-green-400" : "border-white/10 text-muted-foreground")}>
                                   {statusCfg.label}
                                </Badge>
@@ -948,11 +1011,19 @@ export default function WhatsAppPage() {
                         <div className="flex flex-col items-center bg-black/40 p-4 rounded-2xl border border-white/5 space-y-3">
                           <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">Escaneie o QR Code</div>
                           <div className="bg-white p-3 rounded-xl">
-                             <img
-                               src={`https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent(qrCodes[conn.instance_name])}`}
-                               className="w-40 h-40"
-                               alt="QR Code para conectar"
-                             />
+                             {qrCodes[conn.instance_name]?.startsWith("data:image") ? (
+                               <img
+                                 src={qrCodes[conn.instance_name]}
+                                 className="w-40 h-40"
+                                 alt="QR Code para conectar"
+                               />
+                             ) : (
+                               <img
+                                 src={`https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent(qrCodes[conn.instance_name])}`}
+                                 className="w-40 h-40"
+                                 alt="QR Code para conectar"
+                               />
+                             )}
                           </div>
                           <p className="text-[10px] text-yellow-500/70 text-center">
                             Abra o WhatsApp no celular → Aparelhos conectados → Conectar com QR Code

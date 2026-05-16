@@ -49,23 +49,55 @@ export default function DashboardPage() {
   useEffect(() => {
     async function fetchData() {
       try {
+        const sessRes = await fetch("/api/auth/session");
+        const session = await sessRes.json();
+        if (!session?.authenticated) return;
+
         const today = new Date();
         today.setHours(0, 0, 0, 0);
         const todayISO = today.toISOString();
 
+        const cid = session.clientId;
+
         // === Core metrics ===
+        let totalLeadsQ = supabase.from("leads_extraidos").select("*", { count: "exact", head: true });
+        let leadsHojeQ = supabase.from("leads_extraidos").select("*", { count: "exact", head: true }).gte("created_at", todayISO);
+        let activeConvQ = supabase.from("chats_dashboard").select("remote_jid").limit(2000);
+
+        if (cid) {
+          totalLeadsQ = totalLeadsQ.eq("client_id", cid);
+          leadsHojeQ = leadsHojeQ.eq("client_id", cid);
+          activeConvQ = activeConvQ.eq("client_id", cid);
+        }
+
         const [
           { count: totalLeads },
           { count: leadsHoje },
           { data: activeConversations },
-        ] = await Promise.all([
-          supabase.from("leads_extraidos").select("*", { count: "exact", head: true }),
-          supabase.from("leads_extraidos").select("*", { count: "exact", head: true }).gte("created_at", todayISO),
-          supabase.from("chats_dashboard").select("remote_jid").limit(2000),
-        ]);
+        ] = await Promise.all([totalLeadsQ, leadsHojeQ, activeConvQ]);
         const uniqueSessions = new Set(activeConversations?.map((s: { remote_jid: string }) => s.remote_jid) || []);
 
         // === Automation metrics ===
+        let disparosAtivosQ = supabase.from("campaigns").select("*", { count: "exact", head: true }).in("status", ["running", "sending"]);
+        let disparosSentQ = supabase.from("campaigns").select("sent_count");
+        let followUpCampanhasQ = supabase.from("followup_campaigns").select("*", { count: "exact", head: true }).in("status", ["running", "sending"]);
+        let followUpSentQ = supabase.from("followup_campaigns").select("total_sent");
+        let automacoesAtivasQ = supabase.from("automations").select("*", { count: "exact", head: true }).in("status", ["running"]);
+        let tokensDataQ = supabase.from("ai_token_usage").select("total_tokens").gte("created_at", todayISO);
+        let instanciasOnlineQ = supabase.from("channel_connections").select("*", { count: "exact", head: true }).eq("status", "open");
+        let iaInteracoesHojeQ = supabase.from("chats_dashboard").select("*", { count: "exact", head: true }).eq("sender_type", "ai").gte("created_at", todayISO);
+
+        if (cid) {
+          disparosAtivosQ = disparosAtivosQ.eq("client_id", cid);
+          disparosSentQ = disparosSentQ.eq("client_id", cid);
+          followUpCampanhasQ = followUpCampanhasQ.eq("client_id", cid);
+          followUpSentQ = followUpSentQ.eq("client_id", cid);
+          automacoesAtivasQ = automacoesAtivasQ.eq("client_id", cid);
+          tokensDataQ = tokensDataQ.eq("client_id", cid);
+          instanciasOnlineQ = instanciasOnlineQ.eq("client_id", cid);
+          iaInteracoesHojeQ = iaInteracoesHojeQ.eq("client_id", cid);
+        }
+
         const [
           { count: disparosAtivos },
           { data: disparosSent },
@@ -76,22 +108,8 @@ export default function DashboardPage() {
           { count: instanciasOnline },
           { count: iaInteracoesHoje },
         ] = await Promise.all([
-          // Campanhas de disparo ativas (running/sending)
-          supabase.from("campaigns").select("*", { count: "exact", head: true }).in("status", ["running", "sending"]),
-          // Total disparos enviados (sum sent_count)
-          supabase.from("campaigns").select("sent_count"),
-          // Follow-up campanhas ativas
-          supabase.from("followup_campaigns").select("*", { count: "exact", head: true }).in("status", ["running", "sending"]),
-          // Total follow-ups enviados
-          supabase.from("followup_campaigns").select("total_sent"),
-          // Automações ativas
-          supabase.from("automations").select("*", { count: "exact", head: true }).in("status", ["running"]),
-          // Tokens usados hoje
-          supabase.from("ai_token_usage").select("total_tokens").gte("created_at", todayISO),
-          // Instâncias WhatsApp online
-          supabase.from("channel_connections").select("*", { count: "exact", head: true }).eq("status", "open"),
-          // Interações IA hoje (chats_dashboard com sender_type = ai)
-          supabase.from("chats_dashboard").select("*", { count: "exact", head: true }).eq("sender_type", "ai").gte("created_at", todayISO),
+          disparosAtivosQ, disparosSentQ, followUpCampanhasQ, followUpSentQ,
+          automacoesAtivasQ, tokensDataQ, instanciasOnlineQ, iaInteracoesHojeQ,
         ]);
 
         const totalDisparosEnviados = (disparosSent || []).reduce((acc: number, c: any) => acc + (c.sent_count || 0), 0);
@@ -113,13 +131,15 @@ export default function DashboardPage() {
           iaInteracoesHoje: iaInteracoesHoje || 0,
         });
 
-        const { data: recent } = await supabase
+        let recentQ = supabase
           .from("leads_extraidos")
           .select("id, nome_negocio, ramo_negocio, created_at")
           .order("created_at", { ascending: false })
           .order("id", { ascending: false })
           .limit(8);
+        if (cid) recentQ = recentQ.eq("client_id", cid);
 
+        const { data: recent } = await recentQ;
         setRecentLeads(recent || []);
       } catch (err) {
         console.error("Erro ao carregar dashboard:", err);

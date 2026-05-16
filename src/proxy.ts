@@ -17,7 +17,7 @@ import { verifySession, SESSION_COOKIE } from "@/lib/auth-edge";
  * e bater no Supabase em cada request seria pesado. O check de revoke fica
  * em /api/auth/session (chamado uma vez por load de página).
  */
-export async function middleware(req: NextRequest) {
+export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   // Rotas públicas — passa direto
@@ -46,10 +46,13 @@ export async function middleware(req: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  // Rotas admin-only — não-admin é bloqueado (impersonating admin ainda passa
-  // porque o actor real continua admin)
+  // Rotas admin-only — não-admin é bloqueado.
+  // EXCEÇÃO: /api/admin/stop-impersonate é permitida para quem está impersonando,
+  // para que o usuário possa voltar para a conta de admin.
   if (pathname.startsWith("/admin") || pathname.startsWith("/api/admin")) {
-    if (!claims.isAdmin) {
+    const isStopImpersonate = pathname === "/api/admin/stop-impersonate";
+    
+    if (!claims.isAdmin && !isStopImpersonate) {
       if (pathname.startsWith("/api/")) {
         return NextResponse.json({ ok: false, error: "Apenas admin" }, { status: 403 });
       }

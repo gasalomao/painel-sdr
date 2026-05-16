@@ -9,7 +9,6 @@ const nextConfig: NextConfig = {
   // workers de ~2 GB cada). Em VPS modesta o build estoura OOM. Desligamos
   // aqui — o IDE continua mostrando os erros em desenvolvimento.
   typescript: { ignoreBuildErrors: true },
-  eslint: { ignoreDuringBuilds: true },
   serverExternalPackages: [
     "puppeteer-core",
     "puppeteer-extra",

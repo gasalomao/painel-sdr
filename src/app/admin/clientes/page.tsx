@@ -97,15 +97,15 @@ export default function AdminClientesPage() {
 
   // ============= IMPERSONATE =============
   const handleImpersonate = async (c: Client) => {
-    if (!confirm(`Entrar como "${c.name}"?\n\nVocê sai da conta admin atual. Pra voltar, faça logout + login.`)) return;
     setBusy(true);
     try {
       const r = await fetch(`/api/admin/clients/${c.id}/impersonate`, { method: "POST" });
       const d = await r.json();
       if (!d.ok) { alert("Erro: " + d.error); return; }
-      // Redireciona pro painel do cliente
-      router.push("/");
-      router.refresh();
+      // Navega pro painel do cliente — usa window.location pra garantir
+      // que todos os componentes (banner, sidebar, dados) reinicializem
+      // com a nova sessão de impersonação.
+      window.location.href = "/";
     } finally {
       setBusy(false);
     }
@@ -371,8 +371,8 @@ function ClientEditor({
               <Input value={name} onChange={(e) => setName(e.target.value)} className="bg-white/5 border-white/10 h-11" />
             </div>
             <div className="space-y-1">
-              <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Email (login)</label>
-              <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="bg-white/5 border-white/10 h-11 font-mono text-xs" />
+              <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Usuário ou Email (login)</label>
+              <Input type="text" value={email} onChange={(e) => setEmail(e.target.value)} className="bg-white/5 border-white/10 h-11 font-mono text-xs" />
             </div>
           </div>
 

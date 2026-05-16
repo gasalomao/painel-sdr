@@ -12,16 +12,21 @@ export function AgentSwitcher({
   setAgentsList,
   setActiveAgentId,
   loadAgent,
+  clientId,
 }: {
   activeAgentId: number;
   agentsList: AgentRow[];
   setAgentsList: (v: AgentRow[]) => void;
   setActiveAgentId: (id: number) => void;
   loadAgent: (id: number) => void;
+  clientId: string | null;
 }) {
   const handleCreate = async () => {
     const randomId = Math.floor(Math.random() * 90000) + 1000;
-    const { data } = await supabase.from("agent_settings").insert({ id: randomId, name: "Novo Agente" }).select();
+    const insertPayload: any = { id: randomId, name: "Novo Agente" };
+    if (clientId) insertPayload.client_id = clientId;
+    
+    const { data } = await supabase.from("agent_settings").insert(insertPayload).select();
     if (data && data[0]) {
       setAgentsList([...agentsList, data[0]]);
       setActiveAgentId(data[0].id);
@@ -31,7 +36,10 @@ export function AgentSwitcher({
 
   const handleDelete = async () => {
     if (!confirm("Deletar agente?")) return;
-    await supabase.from("agent_settings").delete().eq("id", activeAgentId);
+    const q = supabase.from("agent_settings").delete().eq("id", activeAgentId);
+    if (clientId) q.eq("client_id", clientId);
+    await q;
+
     const filtered = agentsList.filter((a) => a.id !== activeAgentId);
     setAgentsList(filtered);
     if (filtered.length > 0) {

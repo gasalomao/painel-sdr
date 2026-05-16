@@ -30,6 +30,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
+import { useClientSession } from "@/lib/use-session";
 
 interface Lead {
   id: number;
@@ -65,6 +66,7 @@ const KANBAN_COLUMNS = [
 const PAGE_SIZE = 15;
 
 export default function LeadsPage() {
+  const { clientId } = useClientSession();
   const [leads, setLeads] = useState<Lead[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
@@ -136,7 +138,7 @@ export default function LeadsPage() {
   useEffect(() => {
     setSelectedIds(new Set());
     setSelectAllAcrossPages(false);
-  }, [page, search, categoryFilter, viewMode]);
+  }, [page, search, categoryFilter, clientId, viewMode]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 15 } }),
@@ -145,6 +147,7 @@ export default function LeadsPage() {
   );
 
   const fetchLeads = useCallback(async () => {
+    if (!clientId) return;
     setLoading(true);
     try {
       let query = supabase
@@ -152,6 +155,10 @@ export default function LeadsPage() {
         .select("*", { count: "exact" })
         .order("created_at", { ascending: false })
         .order("id", { ascending: false });
+
+      if (clientId) {
+        query = query.eq("client_id", clientId);
+      }
 
       if (search) {
         query = query.or(`nome_negocio.ilike.%${search}%,ramo_negocio.ilike.%${search}%,telefone.ilike.%${search}%`);
@@ -182,7 +189,7 @@ export default function LeadsPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, search, viewMode, categoryFilter]);
+  }, [page, search, viewMode, categoryFilter, clientId]);
 
   useEffect(() => {
     fetchLeads();
@@ -199,10 +206,17 @@ export default function LeadsPage() {
 
   async function exportXLSX() {
     const XLSX = await import("xlsx");
-    const { data } = await supabase.from("leads_extraidos")
+    
+    let query = supabase.from("leads_extraidos")
         .select("*")
         .order("created_at", { ascending: false })
         .order("id", { ascending: false });
+
+    if (clientId) {
+      query = query.eq("client_id", clientId);
+    }
+    
+    const { data } = await query;
     if (!data) return;
 
     const rows = data.map((l: Lead) => ({

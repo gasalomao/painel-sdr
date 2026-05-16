@@ -42,6 +42,7 @@ export interface ScraperSettings {
    *  sai do loop limpo, fecha o navegador, e o worker detecta o cap no próximo
    *  tick e avança pra fase de disparo. Sem limite = sem parada por contagem. */
   maxLeads?: number;
+  client_id?: string | null;
 }
 
 // ---- Estado in-memory (singleton no processo Node) ----
@@ -52,6 +53,7 @@ let keepRunning = true;
 let lastSearchNiche = "Leads";
 let lastSearchRegion = "Exportados";
 let currentAutomationId: string | null = null;
+let currentClientId: string | null = null;
 
 // SSE clients (apenas o /captador via browser inscreve)
 const sseClients: Set<ReadableStreamDefaultController> = new Set();
@@ -173,15 +175,23 @@ export function formatLeadForN8n(lead: Lead) {
  *
  * Retorna `null` se NÃO está no CRM, ou string descritiva se está (pra log).
  */
-export async function checkCrmDuplicate(remoteJid: string): Promise<string | null> {
+export async function checkCrmDuplicate(remoteJid: string, clientId?: string | null): Promise<string | null> {
   if (!remoteJid) return null;
   try {
     const client = supabaseAdmin || supabase;
     if (!client) return null;
-    // Em paralelo — dedupe deve ser O(1) extra de latência.
+    
+    let leadQ = client.from("leads_extraidos").select("id").eq("remoteJid", remoteJid);
+    let contactQ = client.from("contacts").select("id").eq("remote_jid", remoteJid);
+    
+    if (clientId) {
+      leadQ = leadQ.eq("client_id", clientId);
+      contactQ = contactQ.eq("client_id", clientId);
+    }
+    
     const [leadRow, contactRow] = await Promise.all([
-      client.from("leads_extraidos").select("id").eq("remoteJid", remoteJid).maybeSingle(),
-      client.from("contacts").select("id").eq("remote_jid", remoteJid).maybeSingle(),
+      leadQ.maybeSingle(),
+      contactQ.maybeSingle(),
     ]);
     if (leadRow.data) return "leads_extraidos";
     if (contactRow.data) return "contacts";
@@ -200,7 +210,7 @@ async function saveLeadAndSync(lead: Lead, settings: ScraperSettings) {
 
     // Se tem WhatsApp, checa duplicata
     if (hasWhatsApp) {
-      const dupSource = await checkCrmDuplicate(lead.remoteJid);
+      const dupSource = await checkCrmDuplicate(lead.remoteJid, currentClientId);
       if (dupSource) {
         sendLog(`⏭️ "${lead.name}" já estava no CRM (${dupSource}) — pulando`, "info");
         return;
@@ -214,6 +224,7 @@ async function saveLeadAndSync(lead: Lead, settings: ScraperSettings) {
     //     do SETUP_COMPLETO.sql); se o banco for muito antigo e não tiver
     //     elas, o fallback abaixo retira-as e tenta de novo.
     const fullPayload = {
+      client_id: currentClientId || null,
       remoteJid: lead.remoteJid || null,
       nome_negocio: lead.name,
       telefone: lead.phones,
@@ -492,7 +503,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
             const jid = formatJid(phoneStr);
             // Filtro CRM: se o JID já está no leads_extraidos OU contacts, pula
             // SEM contar pro maxLeads, sem broadcast, sem salvar duplicata.
-            const dupSource = jid ? await checkCrmDuplicate(jid) : null;
+            const dupSource = jid ? await checkCrmDuplicate(jid, currentClientId) : null;
             if (dupSource) {
               crmSkipped++;
               sendLog(`⏭️ Já no CRM (${dupSource}): ${cardData.name}`, "info");
@@ -616,6 +627,7 @@ export interface StartOpts {
   /** Limite de leads — quando atingido o scraper sai limpo. */
   maxLeads?: number;
   automation_id?: string | null;
+  client_id?: string | null;
 }
 
 /**
@@ -634,6 +646,7 @@ export function startScraperRun(opts: StartOpts): { ok: boolean; error?: string;
   lastSearchNiche = opts.niches[0];
   lastSearchRegion = opts.regions[0];
   currentAutomationId = opts.automation_id || null;
+  currentClientId = opts.client_id || null;
   // Fire-and-forget — runScraper tem try/finally que reseta isScraping=false.
   runScraper(opts.niches, opts.regions, {
     webhookUrl: opts.webhookUrl,

@@ -159,16 +159,31 @@ export default function AutomacaoPage() {
   const loadAll = useCallback(async (showLoader = false) => {
     if (showLoader) setLoading(true);
     try {
+      const sessRes = await fetch("/api/auth/session");
+      const session = await sessRes.json();
+      if (!session?.authenticated) return;
+
+      let agQuery = supabase.from("agent_settings").select("id, name").order("id");
+      let chQuery = supabase.from("channel_connections").select("instance_name").order("instance_name");
+
+      if (session.clientId) {
+        agQuery = agQuery.eq("client_id", session.clientId);
+        chQuery = chQuery.eq("client_id", session.clientId);
+      }
+
       const [autoRes, agRes, chRes, evoRes] = await Promise.all([
         safeJson("/api/automations"),
-        supabase.from("agent_settings").select("id, name").order("id"),
-        supabase.from("channel_connections").select("instance_name").order("instance_name"),
+        agQuery,
+        chQuery,
         safeJson("/api/whatsapp?instances=true"),
       ]);
       if (autoRes.success) setAutomations(autoRes.automations || []);
       if (agRes.data) setAgents(agRes.data as Agent[]);
       const fromDb = ((chRes.data || []) as any[]).map(c => ({ instanceName: c.instance_name }));
-      const fromEvo = (evoRes.instances || []).map((i: any) => ({ instanceName: i.instanceName }));
+      
+      const myInstances = new Set(fromDb.map((i: any) => i.instanceName));
+      const fromEvo = (evoRes.instances || []).filter((i: any) => myInstances.has(i.instanceName)).map((i: any) => ({ instanceName: i.instanceName }));
+      
       const merged: Instance[] = [];
       const seen = new Set<string>();
       for (const x of [...fromDb, ...fromEvo]) {

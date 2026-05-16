@@ -15,6 +15,8 @@ export default function ConfiguracoesPage() {
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<null | { ok: boolean; message: string; count?: number }>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [sessionLoaded, setSessionLoaded] = useState(false);
 
   // Evolution API (troca de VPS sem rebuild — credenciais persistidas em app_settings)
   const [evoUrl, setEvoUrl]             = useState("");
@@ -200,6 +202,19 @@ export default function ConfiguracoesPage() {
     }
   }
 
+  // Load session to determine admin status
+  useEffect(() => {
+    fetch("/api/auth/session", { cache: "no-store" })
+      .then(r => r.json())
+      .then(d => {
+        if (d.authenticated) {
+          setIsAdmin(!!d.isAdmin && !d.impersonating);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setSessionLoaded(true));
+  }, []);
+
   // Load current config
   useEffect(() => {
     fetch("/api/ai-organize/config", { cache: "no-store" })
@@ -277,10 +292,20 @@ export default function ConfiguracoesPage() {
             <Settings2 className="w-6 h-6 text-primary" /> Configurações
           </h1>
           <p className="text-xs text-muted-foreground mt-1">
-            Credenciais compartilhadas por todo o sistema. Configure aqui uma vez — Agente IA, Disparo em Massa, Follow-up e Organizador usam automaticamente.
+            {isAdmin
+              ? "Credenciais compartilhadas por todo o sistema. Configure aqui uma vez — Agente IA, Disparo em Massa, Follow-up e Organizador usam automaticamente."
+              : "Configurações da sua conta."}
           </p>
         </div>
 
+        {!isAdmin && sessionLoaded && (
+          <div className="rounded-xl bg-amber-500/10 border border-amber-500/30 p-4 text-xs text-amber-200">
+            <p className="font-bold">⚠ Configurações do sistema estão disponíveis apenas para administradores.</p>
+            <p className="text-[10px] text-amber-200/70 mt-1">Contate seu administrador para alterar API Keys, servidor Evolution ou banco de dados.</p>
+          </div>
+        )}
+
+        {isAdmin && (<>
         <Card className="border-white/10 bg-white/[0.02]">
           <CardHeader>
             <CardTitle className="text-sm font-black uppercase tracking-widest flex items-center gap-2">
@@ -860,6 +885,7 @@ export default function ConfiguracoesPage() {
             </details>
           </CardContent>
         </Card>
+        </>)}
       </main>
     </div>
   );

@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
+import { verifySession } from "@/lib/auth";
 
-function buildFilterQuery(search: string | null, category: string | null) {
+function buildFilterQuery(clientId: string, search: string | null, category: string | null) {
   let q = supabase.from("leads_extraidos");
-  let sel: any = q.select("id, remoteJid");
+  let sel: any = q.select("id, remoteJid").eq("client_id", clientId);
   if (search) {
     sel = sel.or(
       `nome_negocio.ilike.%${search}%,ramo_negocio.ilike.%${search}%,telefone.ilike.%${search}%`
@@ -16,6 +17,11 @@ function buildFilterQuery(search: string | null, category: string | null) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const session = await verifySession(req);
+  if (!session) {
+    return NextResponse.json({ error: "Não autorizado" }, { status: 401 });
+  }
+
   try {
     const { searchParams } = new URL(req.url);
     const idsParam = searchParams.get("ids");
@@ -32,11 +38,10 @@ export async function DELETE(req: NextRequest) {
 
     if (allMatching) {
       // Busca todos os IDs (e remoteJids) que batem com os filtros atuais.
-      // Paginado para não estourar limite default do Supabase (1000 por página).
       const pageSize = 1000;
       let from = 0;
       while (true) {
-        const { data, error } = await buildFilterQuery(search, category).range(
+        const { data, error } = await buildFilterQuery(session.clientId!, search, category).range(
           from,
           from + pageSize - 1
         );
@@ -76,6 +81,7 @@ export async function DELETE(req: NextRequest) {
       const { error: err1 } = await supabase
         .from("leads_extraidos")
         .delete()
+        .eq("client_id", session.clientId)
         .in("id", chunk);
       if (err1) throw err1;
     }
@@ -83,10 +89,11 @@ export async function DELETE(req: NextRequest) {
     if (mode === "all" && jids.length > 0) {
       for (let i = 0; i < jids.length; i += chunkSize) {
         const chunk = jids.slice(i, i + chunkSize);
-        await supabase.from("chats_dashboard").delete().in("remote_jid", chunk);
+        await supabase.from("chats_dashboard").delete().eq("client_id", session.clientId).in("remote_jid", chunk);
         await supabase
           .from("historico_ia_leads")
           .delete()
+          .eq("client_id", session.clientId)
           .in("remote_jid", chunk);
       }
     }

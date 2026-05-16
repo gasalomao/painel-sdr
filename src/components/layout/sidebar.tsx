@@ -24,6 +24,7 @@ import {
   BarChart3,
   UserCheck,
   Trophy,
+  LogOut,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
@@ -44,6 +45,7 @@ type NavItem = { href: string; label: string; icon: any; feature?: string; admin
 // Items admin-only — aparecem no topo do menu, com destaque visual.
 const adminItems: NavItem[] = [
   { href: "/admin/clientes", label: "Clientes", icon: UserCheck, adminOnly: true },
+  { href: "/configuracoes",  label: "Configurações",    icon: Settings2, adminOnly: true },
 ];
 
 // Items normais do painel — filtrados pelas features do cliente atual.
@@ -60,7 +62,6 @@ const navItems: NavItem[] = [
   { href: "/whatsapp",       label: "WhatsApp",         icon: Smartphone,      feature: "whatsapp" },
   { href: "/historico-ia",   label: "Histórico IA",     icon: History,         feature: "historico" },
   { href: "/tokens",         label: "Tokens IA",        icon: Coins,           feature: "tokens" },
-  { href: "/configuracoes",  label: "Configurações",    icon: Settings2,       feature: "configuracoes" },
 ];
 
 type SessionData = {
@@ -82,9 +83,19 @@ function useSession(): SessionData | null {
       try {
         const r = await fetch("/api/auth/session", { cache: "no-store" });
         const d = await r.json();
-        if (!cancelled) setSession(d);
+        if (!cancelled) {
+          setSession(d);
+          if (!d.authenticated && window.location.pathname !== "/login") {
+            window.location.href = "/login";
+          }
+        }
       } catch {
-        if (!cancelled) setSession({ authenticated: false });
+        if (!cancelled) {
+          setSession({ authenticated: false });
+          if (window.location.pathname !== "/login") {
+            window.location.href = "/login";
+          }
+        }
       }
     };
     load();
@@ -239,7 +250,50 @@ function SidebarContent({ collapsed, onToggle, onNavigate }: { collapsed: boolea
       </nav>
 
       {/* Footer */}
-      <div className="p-4">
+      <div className="p-4 space-y-2">
+        {/* Se impersonando: botão de voltar pra conta do admin */}
+        {session?.impersonating && (
+          <button
+            onClick={async () => {
+              try {
+                const r = await fetch("/api/admin/stop-impersonate", { method: "POST" });
+                const data = await r.json();
+                if (data.redirectedToLogin) {
+                  window.location.href = "/login";
+                } else {
+                  window.location.href = "/admin/clientes";
+                }
+              } catch {
+                alert("Erro ao restaurar sessão.");
+              }
+            }}
+            className={cn(
+              "flex w-full items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200",
+              "text-purple-300 hover:text-purple-100 hover:bg-purple-500/10 border border-purple-500/20",
+              collapsed && "justify-center"
+            )}
+          >
+            <LogOut className="w-5 h-5 shrink-0" />
+            {!collapsed && <span>Voltar para Admin</span>}
+          </button>
+        )}
+
+        {/* Deslogar real — volta pra tela de login */}
+        <button
+          onClick={async () => {
+            await fetch("/api/auth/logout", { method: "POST" });
+            window.location.href = "/login";
+          }}
+          className={cn(
+            "flex w-full items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200",
+            "text-red-400/80 hover:text-red-300 hover:bg-red-500/10",
+            collapsed && "justify-center"
+          )}
+        >
+          <LogOut className="w-5 h-5 shrink-0" />
+          {!collapsed && <span>Deslogar</span>}
+        </button>
+
         <div className={cn("flex items-center gap-2 px-3 py-2 rounded-lg bg-secondary/50", collapsed && "justify-center")}>
           <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse-dot" />
           {!collapsed && <span className="text-xs text-muted-foreground">Sistema Online</span>}
@@ -368,6 +422,19 @@ function MobileBottomNav() {
                 </Link>
               );
             })}
+
+            <button
+              onClick={async () => {
+                await fetch("/api/auth/logout", { method: "POST" });
+                window.location.href = "/login";
+              }}
+              className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all min-h-[48px] active:bg-white/5 text-red-400/80 mt-4"
+            >
+              <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0 bg-red-500/10">
+                <LogOut className="w-4 h-4 text-red-400" />
+              </div>
+              <span>Sair do sistema</span>
+            </button>
           </nav>
 
           {/* Safe area padding */}
@@ -380,6 +447,11 @@ function MobileBottomNav() {
 
 export function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
+  const pathname = usePathname();
+
+  if (pathname === "/login") {
+    return null;
+  }
 
   return (
     <>

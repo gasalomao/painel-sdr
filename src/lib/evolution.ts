@@ -251,7 +251,12 @@ export const evolution = {
         return { state: "not_found", data: null };
       }
 
-      const state = match.instance?.connectionStatus || match.connectionStatus || "unknown";
+      let state = (match.instance?.connectionStatus || match.connectionStatus || "unknown").toLowerCase();
+      // Mapeamento v2 -> v1 (ou o que a UI espera)
+      if (state === "connected") state = "open";
+      if (state === "disconnected") state = "close";
+      if (state === "connecting" || state === "pairing") state = "connecting";
+
       return {
         state,
         data: match,

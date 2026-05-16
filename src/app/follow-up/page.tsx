@@ -144,11 +144,22 @@ export default function FollowUpPage() {
 
   const loadInstances = useCallback(async () => {
     try {
+      const sessRes = await fetch("/api/auth/session");
+      const session = await sessRes.json();
+
+      let connQuery = supabase.from("channel_connections").select("instance_name");
+      if (session?.clientId) {
+         connQuery = connQuery.eq("client_id", session.clientId);
+      }
+      const { data: conns } = await connQuery;
+      const myInstances = new Set((conns || []).map((c: any) => c.instance_name));
+
       const r = await fetch("/api/whatsapp?instances=true");
       const d = await r.json();
       if (d.success && d.instances) {
-        setInstances(d.instances);
-        if (!instanceName && d.instances[0]) setInstanceName(d.instances[0].instanceName);
+        const filtered = d.instances.filter((i: any) => myInstances.has(i.instanceName));
+        setInstances(filtered);
+        if (!instanceName && filtered[0]) setInstanceName(filtered[0].instanceName);
       }
     } catch {}
   }, [instanceName]);
@@ -179,12 +190,21 @@ export default function FollowUpPage() {
   }, []);
 
   const loadAvailableLeads = useCallback(async () => {
+    const sessRes = await fetch("/api/auth/session");
+    const session = await sessRes.json();
+    
     // Pega os leads em follow-up (mais úteis para preview) + alguns recentes como fallback
-    const { data } = await supabase
+    let query = supabase
       .from("leads_extraidos")
       .select("id, remoteJid, nome_negocio, ramo_negocio, status")
       .order("created_at", { ascending: false })
       .limit(200);
+      
+    if (session?.clientId) {
+       query = query.eq("client_id", session.clientId);
+    }
+    
+    const { data } = await query;
     setAvailableLeads(data || []);
   }, []);
 
@@ -337,20 +357,33 @@ export default function FollowUpPage() {
     setPickerOpen(true);
     setPickerLoading(true);
     try {
+      const sessRes = await fetch("/api/auth/session");
+      const session = await sessRes.json();
+
       // Prioriza leads em status follow-up; traz também demais (pro usuário escolher à vontade)
-      const { data: a } = await supabase
+      let q1 = supabase
         .from("leads_extraidos")
         .select("id, remoteJid, nome_negocio, ramo_negocio, status, created_at")
         .eq("status", "follow-up")
         .order("created_at", { ascending: false })
         .limit(1000);
-      const { data: b } = await supabase
+        
+      let q2 = supabase
         .from("leads_extraidos")
         .select("id, remoteJid, nome_negocio, ramo_negocio, status, created_at")
         .neq("status", "follow-up")
         .not("status", "in", "(fechado,sem_interesse,descartado)")
         .order("created_at", { ascending: false })
         .limit(500);
+
+      if (session?.clientId) {
+        q1 = q1.eq("client_id", session.clientId);
+        q2 = q2.eq("client_id", session.clientId);
+      }
+      
+      const { data: a } = await q1;
+      const { data: b } = await q2;
+      
       const merged = [...(a || []), ...(b || [])];
       setPickerLeads(merged);
     } finally {

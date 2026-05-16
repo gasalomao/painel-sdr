@@ -1,26 +1,26 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
+import { verifySession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 /** GET /api/campaigns — lista campanhas MANUAIS (criadas pelo /disparo).
- *  Campanhas criadas pela automação ficam ESCONDIDAS aqui — elas vivem
- *  só dentro do card da automação, pra evitar confusão e clique acidental.
- *  Filtro: automation_id IS NULL.
+ *  Filtro: automation_id IS NULL + client_id.
  */
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const session = await verifySession(req);
+  if (!session) {
+    return NextResponse.json({ success: false, error: "Não autorizado" }, { status: 401 });
+  }
+
   const { data, error } = await supabase
     .from("campaigns")
     .select("*")
+    .eq("client_id", session.clientId)
     .is("automation_id", null)   // só manuais
     .order("created_at", { ascending: false });
+    
   if (error) {
-    // Se a coluna ainda não existe (DB antigo), faz fallback mostrando tudo.
-    if ((error as any).code === "42703") {
-      const fallback = await supabase.from("campaigns").select("*").order("created_at", { ascending: false });
-      if (fallback.error) return NextResponse.json({ success: false, error: fallback.error.message }, { status: 500 });
-      return NextResponse.json({ success: true, campaigns: fallback.data });
-    }
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
   return NextResponse.json({ success: true, campaigns: data });
@@ -28,6 +28,11 @@ export async function GET() {
 
 /** POST /api/campaigns — cria campanha + targets a partir dos remoteJids */
 export async function POST(req: NextRequest) {
+  const session = await verifySession(req);
+  if (!session) {
+    return NextResponse.json({ success: false, error: "Não autorizado" }, { status: 401 });
+  }
+
   try {
     const {
       name,
@@ -58,6 +63,7 @@ export async function POST(req: NextRequest) {
 
     // Cria campanha
     const insertPayload: Record<string, any> = {
+      client_id: session.clientId,
       name, instance_name, message_template, agent_id: agent_id || null,
       min_interval_seconds, max_interval_seconds, allowed_start_hour, allowed_end_hour,
       personalize_with_ai, use_web_search,
