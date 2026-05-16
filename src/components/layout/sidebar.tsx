@@ -43,12 +43,14 @@ import {
 type NavItem = { href: string; label: string; icon: any; feature?: string; adminOnly?: boolean };
 
 // Items admin-only — aparecem no topo do menu, com destaque visual.
+// "Clientes" é EXCLUSIVO de admin (cliente nunca vê, mesmo com feature marcada).
 const adminItems: NavItem[] = [
   { href: "/admin/clientes", label: "Clientes", icon: UserCheck, adminOnly: true },
-  { href: "/configuracoes",  label: "Configurações",    icon: Settings2, adminOnly: true },
 ];
 
 // Items normais do painel — filtrados pelas features do cliente atual.
+// "Configurações" voltou pra cá: cliente só vê se admin marcar features.configuracoes.
+// Admin (não-impersonando) sempre vê tudo.
 const navItems: NavItem[] = [
   { href: "/",               label: "Dashboard",        icon: LayoutDashboard, feature: "dashboard" },
   { href: "/leads",          label: "Leads (CRM)",      icon: Users,           feature: "leads" },
@@ -62,6 +64,7 @@ const navItems: NavItem[] = [
   { href: "/whatsapp",       label: "WhatsApp",         icon: Smartphone,      feature: "whatsapp" },
   { href: "/historico-ia",   label: "Histórico IA",     icon: History,         feature: "historico" },
   { href: "/tokens",         label: "Tokens IA",        icon: Coins,           feature: "tokens" },
+  { href: "/configuracoes",  label: "Configurações",    icon: Settings2,       feature: "configuracoes" },
 ];
 
 type SessionData = {

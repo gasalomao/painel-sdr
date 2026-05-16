@@ -9,7 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import {
   Plus, Trash2, Pencil, KeyRound, LogIn, Power, Check, X, Loader2,
-  Shield, UserCog, AlertCircle, Bot,
+  Shield, UserCog, AlertCircle, Bot, Copy, ClipboardCheck,
 } from "lucide-react";
 
 type Client = {
@@ -76,6 +76,8 @@ export default function AdminClientesPage() {
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Cliente alvo do "copiar credenciais" — abre modal mini pra definir senha + copiar
+  const [credsClient, setCredsClient] = useState<Client | null>(null);
 
   const reload = async () => {
     setLoading(true);
@@ -254,6 +256,13 @@ export default function AdminClientesPage() {
                               ><LogIn className="w-4 h-4" /></Button>
                             )}
                             <Button
+                              onClick={() => setCredsClient(c)}
+                              disabled={busy}
+                              size="icon" variant="ghost"
+                              className="h-8 w-8 text-emerald-400 hover:bg-emerald-400/10 rounded-lg"
+                              title="Copiar credenciais (URL + usuário + senha)"
+                            ><Copy className="w-4 h-4" /></Button>
+                            <Button
                               onClick={() => { setEditing(c); setCreating(false); }}
                               disabled={busy}
                               size="icon" variant="ghost"
@@ -301,6 +310,161 @@ export default function AdminClientesPage() {
           onSaved={() => { setEditing(null); setCreating(false); reload(); }}
         />
       )}
+
+      {/* Modal copiar credenciais */}
+      {credsClient && (
+        <CredentialsModal client={credsClient} onClose={() => setCredsClient(null)} />
+      )}
+    </div>
+  );
+}
+
+/* ====================================================================
+   CREDENCIAIS — modal mini que reseta a senha e copia bloco formatado
+   pra mandar pro cliente (WhatsApp/email). A senha do DB é hash, então
+   o admin SEMPRE define uma nova quando quer enviar.
+==================================================================== */
+function CredentialsModal({ client, onClose }: { client: Client; onClose: () => void }) {
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  // URL do painel — usa o domínio que o admin está acessando agora.
+  // Em prod fica https://sistema-sdr.ridnii.easypanel.host, em dev localhost:3000.
+  const panelUrl = typeof window !== "undefined" ? window.location.origin : "";
+
+  // Gera uma senha forte aleatória pra agilizar (admin pode trocar).
+  const generatePassword = () => {
+    const charset = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
+    let pwd = "";
+    const arr = new Uint8Array(12);
+    crypto.getRandomValues(arr);
+    for (let i = 0; i < 12; i++) pwd += charset[arr[i] % charset.length];
+    setPassword(pwd);
+  };
+
+  const credsText = `🔐 Acesso ao Painel SDR
+
+🌐 Link: ${panelUrl}
+👤 Usuário: ${client.email}
+🔑 Senha: ${password || "(defina uma senha primeiro)"}
+
+Acesse com essas credenciais e troque a senha no primeiro login.`;
+
+  const handleCopy = async () => {
+    if (!password || password.length < 8) {
+      setError("Defina uma senha de pelo menos 8 caracteres antes de copiar.");
+      return;
+    }
+    setError(null);
+    setBusy(true);
+    try {
+      // 1. Reseta a senha do cliente no DB (rota admin: cria hash novo + revoga sessões antigas)
+      const r = await fetch(`/api/admin/clients/${client.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      const d = await r.json();
+      if (!d.ok) {
+        setError("Falha ao resetar senha: " + (d.error || "desconhecido"));
+        return;
+      }
+      // 2. Copia o bloco formatado pra clipboard
+      await navigator.clipboard.writeText(credsText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 3000);
+    } catch (e: any) {
+      setError(e?.message || "Falha ao copiar");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+      <div className="w-full max-w-md glass-card rounded-3xl border-white/10 bg-neutral-950 shadow-2xl">
+        <div className="px-6 py-5 border-b border-white/10 flex items-center justify-between">
+          <h2 className="text-lg font-black flex items-center gap-2">
+            <Copy className="w-5 h-5 text-emerald-400" /> Credenciais
+          </h2>
+          <Button onClick={onClose} size="icon" variant="ghost" className="h-8 w-8"><X className="w-4 h-4" /></Button>
+        </div>
+
+        <div className="p-6 space-y-4">
+          <div className="text-[11px] text-muted-foreground bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
+            <span>
+              A senha guardada no banco é <strong>hash</strong> — não dá pra recuperar a atual.
+              Defina uma <strong>nova</strong> aqui; ela vai ser aplicada ao cliente e o texto formatado
+              será copiado pro clipboard. As sessões antigas do cliente serão revogadas.
+            </span>
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Painel (URL)</label>
+            <Input readOnly value={panelUrl} className="bg-white/5 border-white/10 h-10 text-xs font-mono" />
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Usuário</label>
+            <Input readOnly value={client.email} className="bg-white/5 border-white/10 h-10 text-xs font-mono" />
+          </div>
+
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground flex items-center gap-1">
+                <KeyRound className="w-3 h-3" /> Nova senha (será aplicada)
+              </label>
+              <button type="button" onClick={generatePassword} className="text-[10px] text-emerald-400 hover:underline">
+                Gerar senha forte
+              </button>
+            </div>
+            <Input
+              type="text"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Mínimo 8 caracteres"
+              className="bg-white/5 border-white/10 h-10 text-sm font-mono"
+            />
+          </div>
+
+          {/* Preview do que vai ser copiado */}
+          <div className="space-y-1">
+            <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Preview (pronto pra colar)</label>
+            <pre className="bg-black/40 border border-white/10 rounded-lg p-3 text-[11px] text-white/80 whitespace-pre-wrap font-mono leading-relaxed">
+              {credsText}
+            </pre>
+          </div>
+
+          {error && (
+            <div className="flex items-start gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-200 text-xs">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" /> <span>{error}</span>
+            </div>
+          )}
+        </div>
+
+        <div className="px-6 py-4 border-t border-white/10 flex justify-end gap-2">
+          <Button onClick={onClose} variant="outline" className="text-xs">Cancelar</Button>
+          <Button
+            onClick={handleCopy}
+            disabled={busy || password.length < 8}
+            className={cn(
+              "text-xs gap-2",
+              copied ? "bg-emerald-500/20 text-emerald-200 border border-emerald-500/40" : "glow-primary"
+            )}
+          >
+            {busy ? (
+              <><Loader2 className="w-4 h-4 animate-spin" /> Aplicando...</>
+            ) : copied ? (
+              <><ClipboardCheck className="w-4 h-4" /> Copiado!</>
+            ) : (
+              <><Copy className="w-4 h-4" /> Resetar senha + Copiar</>
+            )}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
