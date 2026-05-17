@@ -129,6 +129,9 @@ export default function OrganizadorPage() {
   const [effectiveVisible, setEffectiveVisible] = useState(false);
   const [editingDefault, setEditingDefault] = useState(false);
   const [defaultDraft, setDefaultDraft] = useState("");
+  // Sugestão de prompt pelo /api/organizer/suggest-prompt — preview antes de aplicar
+  const [promptSuggesting, setPromptSuggesting] = useState(false);
+  const [promptSuggestion, setPromptSuggestion] = useState<{ business_type: string; organizer_prompt: string } | null>(null);
 
   // ============= LOAD =============
   const reload = useCallback(async () => {
@@ -271,6 +274,40 @@ export default function OrganizadorPage() {
       || (h.razao || "").toLowerCase().includes(q)
       || (h.resumo || "").toLowerCase().includes(q);
   });
+
+  // ============= SUGESTÃO DE PROMPT (kanban atual + agente) =============
+  const generatePromptSuggestion = async () => {
+    setPromptSuggesting(true);
+    setError(null);
+    try {
+      const r = await fetch("/api/organizer/suggest-prompt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentId: suggestAgentId || undefined }),
+      });
+      const d = await r.json();
+      if (!d.ok) { setError(d.error); return; }
+      setPromptSuggestion(d.suggestion);
+    } finally { setPromptSuggesting(false); }
+  };
+  const applyPromptSuggestion = async () => {
+    if (!promptSuggestion) return;
+    setSavingOrg(true);
+    try {
+      const r = await fetch("/api/organizer", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: enabledDraft, prompt: promptSuggestion.organizer_prompt, executionHour: hourDraft }),
+      });
+      const d = await r.json();
+      if (!d.ok) { setError(d.error); return; }
+      setPromptDraft(promptSuggestion.organizer_prompt);
+      setPromptSuggestion(null);
+      setInfo("Prompt sugerido aplicado e salvo");
+      setTimeout(() => setInfo(null), 3000);
+      reload();
+    } finally { setSavingOrg(false); }
+  };
 
   // ============= KANBAN CRUD =============
   const addColumn = async () => {
@@ -997,6 +1034,64 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
 
                 {effectiveVisible && effective && (
                   <div className="space-y-3">
+                    {/* ----- AÇÃO: GERAR PROMPT SUGERIDO COM IA ----- */}
+                    <div className="rounded-xl bg-purple-500/[0.06] border border-purple-500/20 p-3 space-y-2">
+                      <div className="flex items-start justify-between gap-2 flex-wrap">
+                        <div>
+                          <p className="text-[11px] font-bold text-purple-200 flex items-center gap-1.5">
+                            <Wand2 className="w-3.5 h-3.5" /> Gerar prompt sugerido pra esse kanban
+                          </p>
+                          <p className="text-[10px] text-muted-foreground mt-0.5 max-w-xl">
+                            A IA lê o agente IA da conta + as colunas do seu kanban atual e reescreve o template R1-R17 adaptado ao seu nicho usando os status_keys reais. Você revisa antes de aplicar.
+                          </p>
+                        </div>
+                        <Button
+                          onClick={generatePromptSuggestion}
+                          disabled={promptSuggesting || columns.length === 0 || (org?.agents?.length || 0) === 0}
+                          className="bg-purple-600 hover:bg-purple-500 text-white text-[11px] h-8 gap-1.5"
+                        >
+                          {promptSuggesting ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Gerando…</> : <><Sparkles className="w-3.5 h-3.5" /> Gerar sugestão</>}
+                        </Button>
+                      </div>
+                      {(columns.length === 0 || (org?.agents?.length || 0) === 0) && (
+                        <p className="text-[10px] text-amber-300">
+                          {(org?.agents?.length || 0) === 0
+                            ? "Crie um agente IA em /agente primeiro."
+                            : "Configure colunas no Kanban antes."}
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Preview da sugestão com aprovação */}
+                    {promptSuggestion && (
+                      <div className="rounded-xl border border-purple-500/30 bg-purple-500/[0.05] p-3 space-y-2">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <p className="text-[11px] font-bold text-purple-200">
+                            Sugestão pronta · nicho identificado: <span className="text-white">{promptSuggestion.business_type}</span>
+                          </p>
+                          <div className="flex gap-1.5">
+                            <Button onClick={() => setPromptSuggestion(null)} variant="outline" className="text-[10px] h-7 px-2">
+                              Descartar
+                            </Button>
+                            <Button onClick={generatePromptSuggestion} disabled={promptSuggesting} variant="outline" className="text-[10px] h-7 px-2 gap-1">
+                              <RefreshCw className="w-3 h-3" /> Gerar outra
+                            </Button>
+                            <Button onClick={applyPromptSuggestion} disabled={savingOrg} className="bg-purple-600 hover:bg-purple-500 text-white text-[10px] h-7 px-2 gap-1">
+                              {savingOrg ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />} Aplicar como meu prompt
+                            </Button>
+                          </div>
+                        </div>
+                        <Textarea
+                          value={promptSuggestion.organizer_prompt}
+                          onChange={(e) => setPromptSuggestion({ ...promptSuggestion, organizer_prompt: e.target.value })}
+                          className="bg-black/40 border-white/10 min-h-[280px] text-[10px] font-mono"
+                        />
+                        <p className="text-[9px] text-muted-foreground italic">
+                          Você pode editar livremente antes de aplicar. Quando aplicar, vira o seu prompt customizado dessa conta (substitui o padrão).
+                        </p>
+                      </div>
+                    )}
+
                     {/* Bloco 1: prompt base (custom OU padrão) */}
                     <div>
                       <div className="flex items-center justify-between mb-1">
