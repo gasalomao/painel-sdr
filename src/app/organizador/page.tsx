@@ -493,105 +493,189 @@ export default function OrganizadorPage() {
               )}
 
               {/* ============= CARD CLIENTE (status + prompt + modelo readonly) ============= */}
-              <section className="rounded-2xl border border-cyan-500/30 bg-gradient-to-br from-cyan-500/[0.06] to-transparent p-5 space-y-4">
-                <div className="flex items-center justify-between gap-3 flex-wrap">
-                  <h2 className="text-sm font-bold flex items-center gap-2 text-cyan-200">
-                    <Sparkles className="w-4 h-4" /> Sua configuração
-                  </h2>
-                  <div className="flex items-center gap-2 text-[10px]">
-                    <span className={cn(
-                      "px-2 py-1 rounded font-black uppercase tracking-widest",
-                      enabledDraft && org?.globalEnabled ? "bg-emerald-500/20 text-emerald-300" : "bg-amber-500/20 text-amber-300"
-                    )}>
-                      {!org?.globalEnabled ? "GLOBAL OFF" : !enabledDraft ? "Cliente OFF" : "Ativo"}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Toggle por cliente */}
-                <label className="flex items-center justify-between gap-3 p-3 rounded-lg bg-black/30 cursor-pointer">
+              <section className="rounded-2xl border border-cyan-500/30 bg-gradient-to-br from-cyan-500/[0.06] to-transparent p-5 space-y-5">
+                {/* ----- INTRO DIDÁTICO ----- */}
+                <div className="flex items-start justify-between gap-3 flex-wrap">
                   <div>
-                    <p className="text-xs font-bold">Rodar pra essa conta</p>
-                    <p className="text-[10px] text-muted-foreground mt-0.5">
-                      Liga/desliga o Organizador SOMENTE pra esta conta. O global precisa estar ativo também.
+                    <h2 className="text-base font-bold flex items-center gap-2 text-cyan-200">
+                      <Sparkles className="w-5 h-5" /> Sua configuração
+                    </h2>
+                    <p className="text-[11px] text-muted-foreground mt-1 leading-relaxed max-w-2xl">
+                      Aqui você decide <strong className="text-white">quando</strong> a IA analisa suas conversas e <strong className="text-white">como</strong> ela decide pra qual coluna do Kanban cada lead vai. É pessoal — só afeta esta conta.
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setEnabledDraft(!enabledDraft)}
-                    className={cn("w-12 h-6 rounded-full p-1 transition shrink-0", enabledDraft ? "bg-cyan-500" : "bg-white/10")}
-                  >
-                    <div className={cn("w-4 h-4 rounded-full bg-white transition-all", enabledDraft && "translate-x-6")} />
-                  </button>
-                </label>
+                  <span className={cn(
+                    "px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest",
+                    enabledDraft && org?.globalEnabled ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" : "bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                  )}>
+                    {!org?.globalEnabled ? "Sistema desligado" : !enabledDraft ? "Sua conta: pausada" : "✓ Funcionando"}
+                  </span>
+                </div>
 
-                {/* Horário de execução diária — POR CLIENTE */}
-                <div className="space-y-1.5">
-                  <label className="text-[10px] font-black uppercase tracking-widest text-cyan-300">
-                    Horário diário de execução
-                  </label>
+                {/* ----- 1. ATIVAÇÃO ----- */}
+                <div className="rounded-xl bg-black/30 p-4 space-y-2">
                   <div className="flex items-center gap-2">
-                    <select
-                      value={hourDraft}
-                      onChange={(e) => setHourDraft(Number(e.target.value))}
-                      className="bg-black/40 border border-white/10 text-white h-10 rounded-xl text-sm px-3 focus:outline-none"
+                    <span className="w-6 h-6 rounded-full bg-cyan-500/20 text-cyan-300 text-[11px] font-black flex items-center justify-center">1</span>
+                    <p className="text-xs font-bold text-white">Ligar o Organizador</p>
+                  </div>
+                  <label className="flex items-center justify-between gap-3 cursor-pointer pl-8">
+                    <p className="text-[11px] text-muted-foreground">
+                      Quando ligado, a IA analisa as conversas <strong className="text-white">automaticamente todo dia</strong>. Desligue se quiser parar de mexer nos leads dessa conta.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setEnabledDraft(!enabledDraft)}
+                      className={cn("w-14 h-7 rounded-full p-1 transition shrink-0", enabledDraft ? "bg-cyan-500" : "bg-white/10")}
                     >
-                      {Array.from({ length: 24 }, (_, h) => (
-                        <option key={h} value={h} className="bg-neutral-900">
-                          {String(h).padStart(2, "0")}:00
-                        </option>
-                      ))}
-                    </select>
-                    <span className="text-[10px] text-muted-foreground">
-                      Todo dia às <strong className="text-white">{String(hourDraft).padStart(2, "0")}h</strong> o organizador roda analisando as conversas do dia desta conta.
-                      {org?.lastRun && <> Último: {new Date(org.lastRun).toLocaleString("pt-BR")}.</>}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Modelo (readonly pra cliente, info-only) */}
-                <div className="space-y-1">
-                  <label className="text-[10px] font-black uppercase tracking-widest text-cyan-300">
-                    Modelo de IA em uso {!org?.isAdmin && "(controlado pelo admin)"}
+                      <div className={cn("w-5 h-5 rounded-full bg-white transition-all", enabledDraft && "translate-x-7")} />
+                    </button>
                   </label>
-                  <div className="px-3 py-2.5 rounded-xl bg-black/30 border border-white/10 text-sm font-mono text-white/90 flex items-center justify-between">
-                    <span>{org?.model}</span>
-                    <span className="text-[9px] text-muted-foreground uppercase">{org?.isAdmin ? "altere no card admin acima" : "readonly"}</span>
+                </div>
+
+                {/* ----- 2. HORÁRIO ----- */}
+                <div className="rounded-xl bg-black/30 p-4 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-cyan-500/20 text-cyan-300 text-[11px] font-black flex items-center justify-center">2</span>
+                    <p className="text-xs font-bold text-white">Que horas rodar</p>
+                  </div>
+                  <div className="pl-8 space-y-2">
+                    <p className="text-[11px] text-muted-foreground">
+                      A IA roda <strong className="text-white">uma vez por dia</strong> no horário que você escolher. A dica é deixar pra um horário em que você já parou de atender (ex.: noite), pra ela analisar tudo de uma vez.
+                    </p>
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <select
+                        value={hourDraft}
+                        onChange={(e) => setHourDraft(Number(e.target.value))}
+                        className="bg-black/40 border border-cyan-500/20 text-white h-11 rounded-xl text-base font-bold px-4 focus:outline-none focus:border-cyan-400"
+                      >
+                        {Array.from({ length: 24 }, (_, h) => (
+                          <option key={h} value={h} className="bg-neutral-900">
+                            {String(h).padStart(2, "0")}:00
+                          </option>
+                        ))}
+                      </select>
+                      <span className="text-[11px] text-cyan-200">
+                        Todo dia às <strong className="text-white text-sm">{String(hourDraft).padStart(2, "0")}h</strong>
+                      </span>
+                    </div>
+                    {org?.lastRun && (
+                      <p className="text-[10px] text-muted-foreground italic">
+                        Última execução: {new Date(org.lastRun).toLocaleString("pt-BR")}
+                      </p>
+                    )}
                   </div>
                 </div>
 
-                {/* Prompt */}
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between">
-                    <label className="text-[10px] font-black uppercase tracking-widest text-cyan-300">Prompt do Organizador</label>
-                    <div className="flex gap-1">
-                      {promptDraft && (
-                        <button type="button" onClick={() => setPromptDraft("")} className="text-[10px] text-muted-foreground hover:text-red-400">
-                          Limpar (usar padrão)
-                        </button>
-                      )}
-                      {!promptDraft && org?.defaultPrompt && (
-                        <button type="button" onClick={() => setPromptDraft(org.defaultPrompt)} className="text-[10px] text-cyan-300 hover:underline">
-                          Carregar template padrão
-                        </button>
+                {/* ----- 3. MODELO (info-only) ----- */}
+                <div className="rounded-xl bg-black/30 p-4 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-cyan-500/20 text-cyan-300 text-[11px] font-black flex items-center justify-center">3</span>
+                    <p className="text-xs font-bold text-white">Qual IA está pensando por você</p>
+                  </div>
+                  <div className="pl-8 space-y-1.5">
+                    <div className="px-3 py-2 rounded-lg bg-black/40 border border-white/10 text-sm font-mono text-white/90 flex items-center justify-between gap-2">
+                      <span>{org?.model}</span>
+                      <span className="text-[9px] text-muted-foreground uppercase tracking-widest">
+                        {org?.isAdmin ? "altere no card roxo acima" : "definido pelo admin"}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground">
+                      O modelo (cérebro da IA) é escolhido pelo admin pra todo o sistema. Modelos mais inteligentes acertam mais — mas custam mais.
+                    </p>
+                  </div>
+                </div>
+
+                {/* ----- 4. PROMPT — A PARTE MAIS IMPORTANTE ----- */}
+                <div className="rounded-xl bg-black/30 p-4 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-cyan-500/20 text-cyan-300 text-[11px] font-black flex items-center justify-center">4</span>
+                    <p className="text-xs font-bold text-white">Como a IA deve pensar (Prompt)</p>
+                  </div>
+
+                  <div className="pl-8 space-y-3">
+                    {/* Explicação do que é prompt — para iniciantes */}
+                    <div className="rounded-lg bg-cyan-500/[0.08] border border-cyan-500/20 p-3 space-y-1.5">
+                      <p className="text-[11px] text-cyan-100 leading-relaxed">
+                        <strong>O que é o prompt?</strong> É o manual que você dá pra IA. Igual a treinar um funcionário novo: você explica o seu negócio, quais critérios usar pra mover um cliente de uma coluna pra outra, e o que NÃO fazer.
+                      </p>
+                      <p className="text-[10px] text-cyan-200/80 leading-relaxed">
+                        <strong>Você não precisa escrever nada</strong> — se deixar vazio, a IA usa o manual padrão (já bom pra qualquer nicho). Mas se quiser personalizar pro SEU negócio (ex.: "se cliente disser que está grávida, não sugerir esmalte tóxico"), escreva aqui.
+                      </p>
+                    </div>
+
+                    {/* Status atual: padrão ou customizado */}
+                    <div className={cn(
+                      "rounded-lg p-3 border text-[11px]",
+                      promptDraft
+                        ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-200"
+                        : "bg-white/[0.03] border-white/10 text-muted-foreground"
+                    )}>
+                      {promptDraft ? (
+                        <>✓ <strong>Você tem um prompt customizado.</strong> A IA segue as suas instruções (+ as regras técnicas R1-R17 e seu kanban automaticamente).</>
+                      ) : (
+                        <>○ <strong>Usando o manual padrão.</strong> Funciona pra qualquer nicho. Personalize só se quiser regras específicas do seu negócio.</>
                       )}
                     </div>
+
+                    {/* Ações rápidas pra escrever */}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {!promptDraft && org?.defaultPrompt && (
+                        <button
+                          type="button"
+                          onClick={() => setPromptDraft(org.defaultPrompt)}
+                          className="text-[10px] px-2.5 py-1.5 rounded-lg bg-cyan-500/15 border border-cyan-500/30 text-cyan-200 hover:bg-cyan-500/25 flex items-center gap-1.5"
+                        >
+                          <FileText className="w-3 h-3" /> Começar com o manual padrão
+                        </button>
+                      )}
+                      {promptDraft && (
+                        <button
+                          type="button"
+                          onClick={() => { if (confirm("Voltar pro manual padrão? Seu texto custom será apagado.")) setPromptDraft(""); }}
+                          className="text-[10px] px-2.5 py-1.5 rounded-lg bg-white/5 border border-white/10 text-muted-foreground hover:text-red-300 hover:border-red-500/30 flex items-center gap-1.5"
+                        >
+                          <RefreshCw className="w-3 h-3" /> Voltar pro manual padrão
+                        </button>
+                      )}
+                      <span className="text-[10px] text-muted-foreground">
+                        ou role pra baixo até <strong className="text-purple-300">Sugestão automática</strong> pra a IA gerar pra você
+                      </span>
+                    </div>
+
+                    {/* Textarea */}
+                    <Textarea
+                      value={promptDraft}
+                      onChange={(e) => setPromptDraft(e.target.value)}
+                      placeholder={`Exemplo:
+
+Sou dona de um salão de manicure.
+Mova o lead pra "agendado" quando ele confirmar data+horário.
+Se a cliente pedir pra remarcar, mantenha "agendado".
+Se mandar foto da unha pronta + agradecimento, mova pra "atendido".
+NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
+
+(Deixe vazio pra usar o manual padrão — funciona pra qualquer nicho.)`}
+                      className="bg-black/40 border-white/10 min-h-[180px] text-xs leading-relaxed"
+                    />
+                    <p className="text-[10px] text-muted-foreground">
+                      💡 <strong>Dica:</strong> escreva em português normal, como se estivesse explicando pra uma pessoa. A IA entende. Pra ver o texto FINAL completo (seu prompt + regras técnicas + seu kanban), abra o card amarelo "Prompt completo que está rodando" mais abaixo.
+                    </p>
                   </div>
-                  <Textarea
-                    value={promptDraft}
-                    onChange={(e) => setPromptDraft(e.target.value)}
-                    placeholder="Vazio = usa o padrão global. Personalize aqui pra adaptar a IA ao seu negócio."
-                    className="bg-black/40 border-white/10 h-44 text-xs font-mono"
-                  />
-                  <p className="text-[9px] text-muted-foreground italic">
-                    Prompt em uso atualmente (efetivo): {org?.prompt ? "seu prompt customizado" : "padrão global"}
-                  </p>
                 </div>
 
-                <div className="flex items-center justify-end gap-2">
-                  {promptDirty && <span className="text-[10px] text-amber-300">Alterações não salvas</span>}
-                  <Button onClick={saveOrg} disabled={savingOrg || !promptDirty} className={cn("text-xs gap-2", promptDirty ? "glow-primary" : "bg-white/5 text-muted-foreground")}>
-                    {savingOrg ? <><Loader2 className="w-4 h-4 animate-spin" /> Salvando</> : <><Save className="w-4 h-4" /> Salvar</>}
+                {/* ----- BOTÃO SALVAR ----- */}
+                <div className="flex items-center justify-end gap-3 pt-2 border-t border-cyan-500/10">
+                  {promptDirty && (
+                    <span className="text-[11px] text-amber-300 flex items-center gap-1">
+                      <AlertCircle className="w-3.5 h-3.5" /> Você tem alterações sem salvar
+                    </span>
+                  )}
+                  <Button
+                    onClick={saveOrg}
+                    disabled={savingOrg || !promptDirty}
+                    className={cn("text-sm gap-2 px-5 h-10", promptDirty ? "bg-cyan-600 hover:bg-cyan-500 text-white glow-primary" : "bg-white/5 text-muted-foreground")}
+                  >
+                    {savingOrg ? <><Loader2 className="w-4 h-4 animate-spin" /> Salvando…</> : <><Save className="w-4 h-4" /> Salvar configuração</>}
                   </Button>
                 </div>
               </section>
