@@ -89,7 +89,7 @@ export async function register() {
       // 2) Clientes elegíveis
       const { data: clients, error: clientsErr } = await supabase
         .from("clients")
-        .select("id, nome, organizer_execution_hour, organizer_last_run, organizer_enabled")
+        .select("id, name, organizer_execution_hour, organizer_last_run, organizer_enabled")
         .neq("organizer_enabled", false);
       if (clientsErr) {
         console.warn("[SCHEDULER] Erro lendo clients:", clientsErr.message);
@@ -107,7 +107,7 @@ export async function register() {
         const ranToday = lastRunDate === todayStr;
         const windowReached = currentHour >= hour;
         if (!ranToday && windowReached) {
-          await runOrganizerForClient(c.id, c.nome || c.id, cfg as any, "auto");
+          await runOrganizerForClient(c.id, (c as any).name || c.id, cfg as any, "auto");
           fired++;
         }
       }
