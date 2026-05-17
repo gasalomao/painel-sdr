@@ -49,6 +49,7 @@ export type InfoTabProps = {
   isActiveAgente: boolean; setIsActiveAgente: (v: boolean) => void;
   targetModel: string; setTargetModel: (v: string) => void;
   modelOptions: any[];
+  isAdmin?: boolean;  // só admin vê/altera modelo de IA (controle de custo)
   appUrl: string; setAppUrl: (v: string) => void;
   vinculoInstance: string; setVinculoInstance: (v: string) => void;
   allInstances: string[];
@@ -138,30 +139,39 @@ export function InfoTab(p: InfoTabProps) {
 
             <div className="space-y-2">
               <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Modelo Gemini (LLM)</label>
-              <select
-                value={p.targetModel}
-                onChange={(e) => p.setTargetModel(e.target.value)}
-                className="w-full bg-white/5 border-white/10 text-white h-12 rounded-xl text-sm px-3 focus:outline-none"
-              >
-                {p.targetModel && !p.modelOptions.some((m) => m.id === p.targetModel) && (
-                  <option key={p.targetModel} value={p.targetModel} className="bg-neutral-900">
-                    {p.targetModel} (salvo)
-                  </option>
-                )}
-                {p.modelOptions.length === 0 && !p.targetModel && (
-                  <option value="" className="bg-neutral-900 text-muted-foreground">
-                    Configure a API Key em Configurações primeiro…
-                  </option>
-                )}
-                {p.modelOptions.map((m) => (
-                  <option key={m.id} value={m.id} className="bg-neutral-900">{m.name}</option>
-                ))}
-              </select>
-              <p className="text-[9px] text-muted-foreground mt-1 px-1">
-                {p.modelOptions.length > 0
-                  ? `${p.modelOptions.length} modelos Gemini disponíveis · chave central configurada.`
-                  : <>⚠ Lista de modelos vazia. Configure a chave do Gemini em <a href="/configuracoes" className="text-primary underline decoration-dotted">Configurações</a>.</>}
-              </p>
+              {p.isAdmin ? (
+                <>
+                  <select
+                    value={p.targetModel}
+                    onChange={(e) => p.setTargetModel(e.target.value)}
+                    className="w-full bg-white/5 border-white/10 text-white h-12 rounded-xl text-sm px-3 focus:outline-none"
+                  >
+                    {p.targetModel && !p.modelOptions.some((m) => m.id === p.targetModel) && (
+                      <option key={p.targetModel} value={p.targetModel} className="bg-neutral-900">
+                        {p.targetModel} (salvo)
+                      </option>
+                    )}
+                    {p.modelOptions.length === 0 && !p.targetModel && (
+                      <option value="" className="bg-neutral-900 text-muted-foreground">
+                        Configure a API Key em Configurações primeiro…
+                      </option>
+                    )}
+                    {p.modelOptions.map((m) => (
+                      <option key={m.id} value={m.id} className="bg-neutral-900">{m.name}</option>
+                    ))}
+                  </select>
+                  <p className="text-[9px] text-muted-foreground mt-1 px-1">
+                    {p.modelOptions.length > 0
+                      ? `${p.modelOptions.length} modelos Gemini disponíveis · só admin altera.`
+                      : <>⚠ Lista de modelos vazia. Configure a chave do Gemini em <a href="/configuracoes" className="text-primary underline decoration-dotted">Configurações</a>.</>}
+                  </p>
+                </>
+              ) : (
+                <div className="w-full bg-white/5 border border-white/10 h-12 rounded-xl text-sm px-3 flex items-center text-muted-foreground">
+                  <span className="font-mono text-white/80">{p.targetModel || "—"}</span>
+                  <span className="ml-auto text-[9px] uppercase tracking-widest text-purple-300/70">definido pelo admin</span>
+                </div>
+              )}
             </div>
 
             <div className="pt-4 border-t border-white/5 mt-4 space-y-4">

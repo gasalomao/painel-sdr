@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
+import { requireClientId } from "@/lib/tenant";
 
 export async function GET() {
   try {
@@ -27,8 +28,24 @@ export async function GET() {
 
 export async function PATCH(req: NextRequest) {
   try {
+    const ctx = await requireClientId(req);
+    if (!ctx.ok) return ctx.response;
+
     const body = await req.json();
     const update: Record<string, any> = { id: 1, updated_at: new Date().toISOString() };
+
+    // Campos sensíveis (modelo/provedor/api_key/enabled global) — APENAS admin.
+    // Cliente comum não pode trocar nada disso, pra evitar inflar custo.
+    const wantsModelChange = (typeof body.model === "string" && body.model.trim())
+      || (typeof body.provider === "string" && body.provider.trim())
+      || (typeof body.api_key === "string" && body.api_key.trim())
+      || (typeof body.enabled === "boolean");
+    if (wantsModelChange && !ctx.isAdmin) {
+      return NextResponse.json(
+        { success: false, error: "Apenas admin pode alterar modelo, provedor, API key ou ligar/desligar global." },
+        { status: 403 }
+      );
+    }
 
     if (typeof body.enabled === "boolean") update.enabled = body.enabled;
     if (typeof body.model === "string" && body.model.trim()) update.model = body.model.trim();

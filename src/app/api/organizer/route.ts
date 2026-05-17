@@ -30,7 +30,7 @@ export async function GET(req: NextRequest) {
   const [{ data: client }, { data: cfg }, { data: agents }] = await Promise.all([
     supabaseAdmin
       .from("clients")
-      .select("organizer_enabled, organizer_prompt")
+      .select("organizer_enabled, organizer_prompt, organizer_execution_hour, organizer_last_run")
       .eq("id", ctx.clientId)
       .maybeSingle(),
     // ai_organizer_config (id=1) é GLOBAL — só admin altera. Carrega o modelo
@@ -61,8 +61,11 @@ export async function GET(req: NextRequest) {
     defaultPrompt: DEFAULT_ORGANIZER_PROMPT,
     effectivePrompt,                                  // o que a IA realmente recebe
     globalEnabled: cfg?.enabled !== false,
-    lastRun: cfg?.last_run || null,
-    executionHour: cfg?.execution_hour ?? 20,
+    lastRun: client?.organizer_last_run || cfg?.last_run || null,  // per-client > global
+    executionHour: typeof client?.organizer_execution_hour === "number"
+      ? client.organizer_execution_hour
+      : (cfg?.execution_hour ?? 20),                  // per-client > global
+    globalExecutionHour: cfg?.execution_hour ?? 20,
     model: cfg?.model || "gemini-2.5-flash",          // modelo em uso (global)
     provider: cfg?.provider || "Gemini",
     isAdmin: ctx.isAdmin,                             // pra UI mostrar/esconder controles
@@ -79,6 +82,13 @@ export async function PATCH(req: NextRequest) {
   const patch: Record<string, any> = { updated_at: new Date().toISOString() };
   if (typeof body.enabled === "boolean") patch.organizer_enabled = body.enabled;
   if (typeof body.prompt === "string")   patch.organizer_prompt = body.prompt || null;
+  if (body.executionHour !== undefined) {
+    const h = Number(body.executionHour);
+    if (!Number.isInteger(h) || h < 0 || h > 23) {
+      return NextResponse.json({ ok: false, error: "executionHour deve ser inteiro entre 0 e 23." }, { status: 400 });
+    }
+    patch.organizer_execution_hour = h;
+  }
 
   if (Object.keys(patch).length === 1) {
     return NextResponse.json({ ok: false, error: "Nada pra atualizar" }, { status: 400 });

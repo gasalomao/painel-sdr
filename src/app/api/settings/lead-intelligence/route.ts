@@ -7,6 +7,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
+import { requireClientId } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
@@ -56,6 +57,14 @@ export async function GET() {
 
 export async function PATCH(req: NextRequest) {
   try {
+    const ctx = await requireClientId(req);
+    if (!ctx.ok) return ctx.response;
+    if (!ctx.isAdmin) {
+      return NextResponse.json(
+        { success: false, error: "Apenas admin pode alterar o modelo de IA." },
+        { status: 403 }
+      );
+    }
     const body = await req.json().catch(() => ({}));
     const model = String(body.model || "").trim();
     if (!model) {

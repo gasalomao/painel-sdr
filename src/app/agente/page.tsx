@@ -60,6 +60,7 @@ export default function AgentePage() {
   const [tomAgente, setTomAgente] = useState("");
   const [targetModel, setTargetModel] = useState("gemini-1.5-flash");
   const [modelOptions, setModelOptions] = useState<any[]>([]);
+  const [isAdmin, setIsAdmin] = useState(false);  // só admin altera modelo de IA
   const [appUrl, setAppUrl] = useState("");
   const [savingConfig, setSavingConfig] = useState(false);
   const [loadingConfig, setLoadingConfig] = useState(true);
@@ -157,6 +158,12 @@ export default function AgentePage() {
   // Evita hydration mismatch — só popula depois do mount.
   const [browserOrigin, setBrowserOrigin] = useState("");
   useEffect(() => { setBrowserOrigin(window.location.origin); }, []);
+  // Carrega sessão pra saber se é admin (só admin altera modelo de IA).
+  useEffect(() => {
+    fetch("/api/auth/session").then(r => r.json()).then(s => {
+      setIsAdmin(!!s?.isAdmin && !s?.impersonating);
+    }).catch(() => {});
+  }, []);
   const webhookBase = appUrl || browserOrigin;
   const webhookUrl = useMemo(
     () => webhookBase
@@ -825,6 +832,7 @@ export default function AgentePage() {
                 isActiveAgente={isActiveAgente} setIsActiveAgente={setIsActiveAgente}
                 targetModel={targetModel} setTargetModel={setTargetModel}
                 modelOptions={modelOptions}
+                isAdmin={isAdmin}
                 appUrl={appUrl} setAppUrl={setAppUrl}
                 vinculoInstance={vinculoInstance} setVinculoInstance={setVinculoInstance}
                 allInstances={allInstances}

@@ -47,10 +47,15 @@ export async function POST(req: NextRequest) {
     }
   };
 
+  // clientId pode vir do body (scheduler per-client) → restringe TUDO a esse tenant.
+  // Sem clientId = modo legado/global (admin manual).
+  let clientIdScope: string | null = null;
+
   try {
     const body = await req.json().catch(() => ({}));
-    let { apiKey, model, provider, triggered_by } = body || {};
+    let { apiKey, model, provider, triggered_by, clientId } = body || {};
     triggerLabel = triggered_by === "auto" || triggered_by === "schedule_catchup" ? triggered_by : "manual";
+    if (typeof clientId === "string" && clientId.trim()) clientIdScope = clientId.trim();
 
     // Abre registro da execução antes de qualquer coisa — vale mesmo se falhar.
     // Fallback silencioso se a tabela ainda não existe (PGRST/42P01).
@@ -108,16 +113,18 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1. Puxar as mensagens de HOJE (00:00 até agora)
+    // 1. Puxar as mensagens de HOJE (00:00 até agora) — filtrando por cliente quando aplicável
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
 
-    const { data: mensagensHoje, error: msgError } = await adminClient
+    let chatsQuery = adminClient
       .from("chats_dashboard")
       .select("*")
       .gte("created_at", startOfDay.toISOString())
       .order("created_at", { ascending: true })
       .order("id", { ascending: true });
+    if (clientIdScope) chatsQuery = chatsQuery.eq("client_id", clientIdScope);
+    const { data: mensagensHoje, error: msgError } = await chatsQuery;
 
     if (msgError) throw new Error("Erro ao buscar mensagens do dia: " + msgError.message);
     if (!mensagensHoje || mensagensHoje.length === 0) {
@@ -138,10 +145,12 @@ export async function POST(req: NextRequest) {
     chatsAnalyzed = numerosProcessados.length;
 
     // Lead: status + nome + origem + cache hash + tipo + client_id (pra prompt custom)
-    const { data: leadsAtuais } = await adminClient
+    let leadsQuery = adminClient
        .from("leads_extraidos")
        .select("remoteJid, status, nome_negocio, primeiro_contato_source, primeiro_contato_at, created_at, last_analysis_hash, lead_type, client_id")
        .in("remoteJid", numerosProcessados);
+    if (clientIdScope) leadsQuery = leadsQuery.eq("client_id", clientIdScope);
+    const { data: leadsAtuais } = await leadsQuery;
 
     const statusAtualMap: Record<string, string> = {};
     const nomeNegocioMap: Record<string, string> = {};
@@ -183,29 +192,59 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Prompt customizado por cliente — multi-tenant. Carrega o prompt do
-    // cliente DOMINANTE entre os leads desse run (o que tem mais chats hoje).
-    // Se vários clientes tiverem chats, vira fallback pro prompt global hardcoded.
+    // Prompt customizado por cliente — multi-tenant.
+    // No modo per-client (scheduler), usa direto o prompt do cliente em foco.
+    // No modo global (legado), elege o cliente DOMINANTE (com mais chats hoje).
     let customOrganizerPrompt: string | null = null;
+    let activeClientId: string | null = clientIdScope;
     {
-      const clientCount: Record<string, number> = {};
-      for (const jid of numerosProcessados) {
-        const cid = leadMetaMap[jid]?.clientId;
-        if (cid && cid !== "00000000-0000-0000-0000-000000000001") {
-          clientCount[cid] = (clientCount[cid] || 0) + 1;
+      let pickedClient = clientIdScope;
+      if (!pickedClient) {
+        const clientCount: Record<string, number> = {};
+        for (const jid of numerosProcessados) {
+          const cid = leadMetaMap[jid]?.clientId;
+          if (cid && cid !== "00000000-0000-0000-0000-000000000001") {
+            clientCount[cid] = (clientCount[cid] || 0) + 1;
+          }
         }
+        const dominantClient = Object.entries(clientCount).sort((a, b) => b[1] - a[1])[0];
+        if (dominantClient && dominantClient[1] > 0) pickedClient = dominantClient[0];
       }
-      const dominantClient = Object.entries(clientCount).sort((a, b) => b[1] - a[1])[0];
-      if (dominantClient && dominantClient[1] > 0) {
+      if (pickedClient) {
+        activeClientId = pickedClient;
         const { data: cli } = await adminClient
           .from("clients")
           .select("organizer_prompt, organizer_enabled")
-          .eq("id", dominantClient[0])
+          .eq("id", pickedClient)
           .maybeSingle();
         if (cli?.organizer_enabled !== false && cli?.organizer_prompt) {
           customOrganizerPrompt = cli.organizer_prompt.trim() || null;
         }
       }
+    }
+
+    // Kanban dinâmico por cliente: carrega as colunas reais do tenant em foco.
+    // Cada cliente pode ter status diferentes (salão de beleza vs B2B vs imobiliária).
+    // Sem cliente em foco → cai pros estágios B2B hardcoded.
+    type KanbanCol = { status_key: string; label: string; order_index: number };
+    let kanbanCols: KanbanCol[] = [];
+    if (activeClientId) {
+      const { data: cols } = await adminClient
+        .from("kanban_columns")
+        .select("status_key, label, order_index")
+        .eq("client_id", activeClientId)
+        .order("order_index", { ascending: true });
+      kanbanCols = (cols || []) as KanbanCol[];
+    }
+    const dynamicStatusKeys = kanbanCols.map(c => c.status_key);
+    const dynamicHierarquia: Record<string, number> = {};
+    kanbanCols.forEach((c, i) => { dynamicHierarquia[c.status_key] = i; });
+    // Terminais detectados por padrão de nome (cobre B2B + nichos B2C tipo "perdido", "cancelado", "atendido_final").
+    const isTerminalKey = (k: string) => /sem_interesse|descartado|perdido|cancelado|recusou/i.test(k);
+    const terminalSet = new Set<string>(dynamicStatusKeys.filter(isTerminalKey));
+    // Hardcoded fallback (modo global sem cliente em foco)
+    if (kanbanCols.length === 0) {
+      ["sem_interesse", "descartado"].forEach(k => terminalSet.add(k));
     }
 
     // HISTÓRICO ANTES DE HOJE — conta quantas msgs o SDR já mandou e quantas o cliente
@@ -253,7 +292,9 @@ export async function POST(req: NextRequest) {
     // Só os casos AMBÍGUOS / NOVOS chegam na IA. Resultado: 60-80% menos
     // tokens em accounts maduros, sem perder precisão.
     // ================================================================
-    const STATUS_TERMINAL = new Set(["sem_interesse", "descartado", "fechado"]);
+    // Terminais pra fim de FILTRO 1 (skip se status já é terminal e cliente não respondeu).
+    // Inclui "fechado" e qualquer status do kanban marcado como terminal.
+    const STATUS_TERMINAL = new Set<string>(["sem_interesse", "descartado", "fechado", ...terminalSet]);
     const decisoesHeuristicas: Record<string, { status: string; razao: string; resumo: string; lead_type?: string }> = {};
     const skippedSemMudanca: string[] = [];
     const skippedCacheHit: string[] = []; // FILTRO 4: hash match → skip total
@@ -486,6 +527,18 @@ R14. SUSPEITA DE FALSO POSITIVO:
      - "Vou ver com sócio" / "vou falar com a equipe" → "follow-up", não "interessado".
      - Cliente perguntou e desapareceu → mantém status atual; NÃO conclua.
 
+R15. JÁ AGENDADO — pergunta off-topic ou de confirmação NÃO rebaixa:
+     - Status atual = "agendado" + cliente manda dúvida sobre OUTRO assunto (horário de outro dia, formas de pagamento, leva acompanhante, "to com dor de cabeça", qualquer coisa que NÃO seja desmarcar) → MANTÉM "agendado".
+     - Status atual = "agendado" + cliente confirma ("tô indo", "confirmado", "tá certo") → MANTÉM "agendado".
+     - Status atual = "agendado" + cliente pede pra REMARCAR explicitamente → MANTÉM "agendado" (ou move pra "follow-up" se o kanban tiver esse estágio). NUNCA volta pra "interessado"/"primeiro_contato".
+     - Status atual = "agendado" + cliente CANCELA explicitamente ("não vou mais", "desisti", "cancela") → "sem_interesse" ou status terminal equivalente do kanban.
+     - Status atual = "agendado" + data da reunião JÁ PASSOU + cliente agradece/conta como foi/pede próximo agendamento → MANTÉM "agendado" e registre no resumo "Atendimento já ocorreu em DD/MM". Só sobe pra "fechado" se houver confirmação EXPLÍCITA de venda/contrato/pagamento.
+
+R16. CLIENTE EM ESTÁGIO AVANÇADO (interessado/follow-up/agendado/fechado) fazendo PERGUNTA OPERACIONAL única:
+     - Ex: "qual o horário?", "atende fim de semana?", "tem estacionamento?", "aceita pix?" sem nada de comprar/desistir.
+     - SEMPRE mantém o status atual. Anota a pergunta em "resumo" pra operador responder.
+     - NUNCA usa essa pergunta como motivo pra mover. lead_type pode ser "unica_duvida" mas o STATUS permanece.
+
 ## HIERARQUIA (nunca rebaixe, exceto em estados terminais):
 
 Ordem: novo < primeiro_contato < interessado < follow-up < agendado < fechado.
@@ -556,7 +609,24 @@ Exemplo VÁLIDO:
 
 Nada além do JSON. Sem markdown, sem explicação, sem texto antes ou depois.
     `;
-    const systemInstruction = baseSystemInstruction;
+
+    // Apêndice com o KANBAN REAL do cliente — sobrescreve a lista hardcoded
+    // de estágios quando o cliente tem um kanban customizado. AI deve usar
+    // EXCLUSIVAMENTE os status_keys listados aqui (válido pro nicho dele).
+    const kanbanAppendix = kanbanCols.length > 0
+      ? `\n\n## ESTÁGIOS DISPONÍVEIS NESTE KANBAN (use SOMENTE estes status_key, ordem do funil — index 0 é o início):
+${kanbanCols.map((c, i) => `  ${i}. status_key="${c.status_key}"  →  label exibido: "${c.label}"`).join("\n")}
+
+REGRAS ESPECÍFICAS PARA ESTE KANBAN:
+- Use o "status_key" EXATO (em minúsculas, com underscore) no campo "status" da resposta. NÃO use o "label".
+- Hierarquia = ordem da lista acima (index menor = início do funil, maior = mais avançado). NUNCA rebaixe (mover pra index menor) exceto pra status terminais.
+- Status TERMINAIS detectados automaticamente: ${[...terminalSet].join(", ") || "(nenhum)"}.
+- Se o kanban tem um estágio que casa com "agendado"/"agendamento"/"reuniao" — trate como ponto alto do funil (R15 vale: não rebaixar por pergunta off-topic).
+- Se o kanban tem um estágio que casa com "fechado"/"comprou"/"contratado"/"venda" — trate como conclusão positiva (R11 vale: cliente recorrente nunca rebaixa).
+`
+      : "";
+
+    const systemInstruction = baseSystemInstruction + kanbanAppendix;
 
     // 4. Fluxo de Requisição Híbrida
     // SHORT-CIRCUIT: se nenhum candidato sobrou pra IA (tudo decidido por
@@ -697,14 +767,21 @@ Nada além do JSON. Sem markdown, sem explicação, sem texto antes ou depois.
        const leadType = leadTypeRaw && VALID_LEAD_TYPES.includes(leadTypeRaw) ? leadTypeRaw : null;
 
        if (!jid || !numerosProcessados.includes(jid)) continue;
-       if (!["novo", "primeiro_contato", "interessado", "follow-up", "agendado", "fechado", "sem_interesse", "descartado"].includes(novoStatus)) continue;
+
+       // Validação dinâmica: aceita status_keys do kanban do cliente OU os hardcoded (modo global).
+       const HARDCODED_VALID = new Set(["novo", "primeiro_contato", "interessado", "follow-up", "agendado", "fechado", "sem_interesse", "descartado"]);
+       const validStatuses = kanbanCols.length > 0
+         ? new Set<string>([...dynamicStatusKeys, "sem_interesse", "descartado"]) // terminais universais sempre aceitos
+         : HARDCODED_VALID;
+       if (!validStatuses.has(novoStatus)) continue;
 
        const statusAntigo = statusAtualMap[jid] || "nenhum";
        const isLeadNovo = !statusAtualMap[jid];
 
-       // Hierarquia: não rebaixa leads (exceto para sem_interesse/descartado que são terminais)
-       const hierarquia: Record<string, number> = { "novo": 0, "primeiro_contato": 1, "interessado": 2, "follow-up": 3, "agendado": 4, "fechado": 5 };
-       const isTerminal = ["sem_interesse", "descartado"].includes(novoStatus);
+       // Hierarquia: kanban dinâmico tem prioridade. Fallback pro B2B hardcoded.
+       const HARDCODED_HIERARQUIA: Record<string, number> = { "novo": 0, "primeiro_contato": 1, "interessado": 2, "follow-up": 3, "agendado": 4, "fechado": 5 };
+       const hierarquia = kanbanCols.length > 0 ? dynamicHierarquia : HARDCODED_HIERARQUIA;
+       const isTerminal = terminalSet.has(novoStatus) || ["sem_interesse", "descartado"].includes(novoStatus);
        const isDowngrade = !isTerminal && !isLeadNovo && (hierarquia[novoStatus] ?? 0) < (hierarquia[statusAntigo] ?? 0);
 
        // Cliente recorrente/ativo: NUNCA permite rebaixar/mover, mesmo se IA pediu.
@@ -712,8 +789,28 @@ Nada além do JSON. Sem markdown, sem explicação, sem texto antes ou depois.
        const isClienteAtivo = leadType === "cliente_ativo" || leadType === "recorrente";
        const blockMoveByRecurringClient = isClienteAtivo && novoStatus !== statusAntigo && !isTerminal;
 
+       // R15/R16 hard-guard: lead em estágio AGENDADO / FECHADO / equivalente nunca volta
+       // pra estágios iniciais por causa de mensagem off-topic. Detecta "agendado"/"fechado"
+       // por nome OU por estar nos top 30% do kanban (estágios avançados).
+       const isAdvancedStage = (key: string): boolean => {
+         if (/agendado|agendamento|reuniao|atendido|comprou|contratado|fechado/i.test(key)) return true;
+         if (kanbanCols.length > 0) {
+           const idx = hierarquia[key];
+           if (typeof idx === "number" && idx >= Math.floor(kanbanCols.length * 0.6)) return true;
+         }
+         return false;
+       };
+       const blockDowngradeFromAdvanced = !isLeadNovo
+         && !isTerminal
+         && isAdvancedStage(statusAntigo)
+         && !isAdvancedStage(novoStatus);
+
+       if (blockDowngradeFromAdvanced) {
+         console.log(`[AI-ORGANIZE] R15/R16 GUARD: bloqueando rebaixe de "${statusAntigo}" → "${novoStatus}" no lead ${jid} (pergunta off-topic não rebaixa estágio avançado).`);
+       }
+
        let movido = false;
-       const statusMudou = statusAntigo !== novoStatus && !isDowngrade && !blockMoveByRecurringClient;
+       const statusMudou = statusAntigo !== novoStatus && !isDowngrade && !blockMoveByRecurringClient && !blockDowngradeFromAdvanced;
 
        if (isLeadNovo) {
            await adminClient.from("leads_extraidos").insert({
@@ -807,8 +904,17 @@ Nada além do JSON. Sem markdown, sem explicação, sem texto antes ou depois.
 
     leadsMoved = alteracoes;
     const customPromptInfo = customOrganizerPrompt ? " · prompt CUSTOM do cliente" : "";
-    const summary = `${chatsAnalyzed} chats — IA: ${candidatosParaIA.length} (${provider}/${model}${customPromptInfo}) · heurística: ${Object.keys(decisoesHeuristicas).length} · pulados sem msg: ${skippedSemMudanca.length} · cache hit: ${skippedCacheHit.length}. ${alteracoes} movidos.`;
+    const kanbanInfo = kanbanCols.length > 0 ? ` · kanban[${kanbanCols.length} colunas]` : "";
+    const summary = `${chatsAnalyzed} chats — IA: ${candidatosParaIA.length} (${provider}/${model}${customPromptInfo}${kanbanInfo}) · heurística: ${Object.keys(decisoesHeuristicas).length} · pulados sem msg: ${skippedSemMudanca.length} · cache hit: ${skippedCacheHit.length}. ${alteracoes} movidos.`;
     await finishRun("ok", { summary });
+
+    // Per-client mode: marca o último run no cliente em foco (scheduler usa isso
+    // pra evitar re-disparar no mesmo dia).
+    if (clientIdScope) {
+      await adminClient.from("clients")
+        .update({ organizer_last_run: new Date().toISOString() })
+        .eq("id", clientIdScope);
+    }
 
     return NextResponse.json({
       success: true,

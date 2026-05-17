@@ -89,9 +89,10 @@ export default function OrganizadorPage() {
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
-  // Prompt + enabled draft (local)
+  // Prompt + enabled + hour draft (local)
   const [promptDraft, setPromptDraft] = useState("");
   const [enabledDraft, setEnabledDraft] = useState(true);
+  const [hourDraft, setHourDraft] = useState<number>(20);
   const [savingOrg, setSavingOrg] = useState(false);
 
   // Global toggle (só admin)
@@ -138,6 +139,7 @@ export default function OrganizadorPage() {
         setOrg(o);
         setPromptDraft(orgRes.prompt || "");
         setEnabledDraft(orgRes.enabled);
+        setHourDraft(typeof orgRes.executionHour === "number" ? orgRes.executionHour : 20);
         // Default: 1º agente do cliente pra sugestão
         if (o.agents.length > 0 && suggestAgentId === null) setSuggestAgentId(o.agents[0].id);
       }
@@ -203,7 +205,7 @@ export default function OrganizadorPage() {
       const r = await fetch("/api/organizer", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: enabledDraft, prompt: promptDraft }),
+        body: JSON.stringify({ enabled: enabledDraft, prompt: promptDraft, executionHour: hourDraft }),
       });
       const d = await r.json();
       if (!d.ok) setError(d.error);
@@ -337,7 +339,9 @@ export default function OrganizadorPage() {
     });
   };
 
-  const promptDirty = (org?.prompt || "") !== promptDraft || (org?.enabled ?? true) !== enabledDraft;
+  const promptDirty = (org?.prompt || "") !== promptDraft
+    || (org?.enabled ?? true) !== enabledDraft
+    || (org?.executionHour ?? 20) !== hourDraft;
 
   return (
     <div className="flex flex-col h-[100dvh] bg-background overflow-hidden text-white">
@@ -387,7 +391,7 @@ export default function OrganizadorPage() {
                       <p className="text-xs font-bold">Organizador IA ativo (todo o sistema)</p>
                       <p className="text-[10px] text-muted-foreground mt-0.5">
                         {org.globalEnabled
-                          ? `Roda 1×/dia às ${String(org.executionHour).padStart(2, "0")}h. Pra desligar pra todos, use esse toggle.`
+                          ? "Kill-switch global. Cada cliente escolhe a própria hora (configurada no card abaixo). Aqui só liga/desliga o sistema todo."
                           : "Desligado globalmente — nenhum cliente recebe organização automática até religar."}
                       </p>
                     </div>
@@ -461,6 +465,30 @@ export default function OrganizadorPage() {
                     <div className={cn("w-4 h-4 rounded-full bg-white transition-all", enabledDraft && "translate-x-6")} />
                   </button>
                 </label>
+
+                {/* Horário de execução diária — POR CLIENTE */}
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-cyan-300">
+                    Horário diário de execução
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={hourDraft}
+                      onChange={(e) => setHourDraft(Number(e.target.value))}
+                      className="bg-black/40 border border-white/10 text-white h-10 rounded-xl text-sm px-3 focus:outline-none"
+                    >
+                      {Array.from({ length: 24 }, (_, h) => (
+                        <option key={h} value={h} className="bg-neutral-900">
+                          {String(h).padStart(2, "0")}:00
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-[10px] text-muted-foreground">
+                      Todo dia às <strong className="text-white">{String(hourDraft).padStart(2, "0")}h</strong> o organizador roda analisando as conversas do dia desta conta.
+                      {org?.lastRun && <> Último: {new Date(org.lastRun).toLocaleString("pt-BR")}.</>}
+                    </span>
+                  </div>
+                </div>
 
                 {/* Modelo (readonly pra cliente, info-only) */}
                 <div className="space-y-1">
