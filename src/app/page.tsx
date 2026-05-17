@@ -37,6 +37,27 @@ interface RecentLead {
   created_at: string;
 }
 
+function BlockedFeatureBanner() {
+  const [blocked, setBlocked] = useState<string | null>(null);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sp = new URLSearchParams(window.location.search);
+    setBlocked(sp.get("blocked"));
+  }, []);
+  if (!blocked) return null;
+  return (
+    <div className="p-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 text-amber-200 text-sm flex items-start gap-3">
+      <div className="text-2xl">🔒</div>
+      <div>
+        <p className="font-bold">Módulo "{blocked}" não está liberado pra sua conta.</p>
+        <p className="text-xs text-amber-200/80 mt-1">
+          Fale com o administrador pra liberar esse módulo. Você foi redirecionado pra cá automaticamente.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   const [metrics, setMetrics] = useState<Metrics>({
     totalLeads: 0, leadsHoje: 0, conversasAtivas: 0, followUpsPendentes: 0,
@@ -175,7 +196,9 @@ export default function DashboardPage() {
       
       <Header />
       <main className="flex-1 p-3 sm:p-6 lg:p-10 space-y-4 sm:space-y-8 max-w-[1600px] mx-auto w-full z-10 relative mobile-safe-bottom">
-        
+
+        <BlockedFeatureBanner />
+
         {/* Hero */}
         <section className="relative overflow-hidden p-5 sm:p-10 rounded-2xl sm:rounded-[2rem] glass-card animate-slide-up hover-float">
           <div className="absolute top-0 right-0 p-4 sm:p-8 opacity-20 pointer-events-none">
