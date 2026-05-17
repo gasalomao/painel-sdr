@@ -133,6 +133,9 @@ export default function OrganizadorPage() {
   const [promptSuggesting, setPromptSuggesting] = useState(false);
   const [promptSuggestion, setPromptSuggestion] = useState<{ business_type: string; organizer_prompt: string } | null>(null);
 
+  // Disparo manual ("Rodar agora") — só pra essa conta
+  const [runningNow, setRunningNow] = useState(false);
+
   // ============= LOAD =============
   const reload = useCallback(async () => {
     setLoading(true);
@@ -290,6 +293,22 @@ export default function OrganizadorPage() {
       setPromptSuggestion(d.suggestion);
     } finally { setPromptSuggesting(false); }
   };
+  const runNow = async () => {
+    if (!confirm("Rodar o Organizador AGORA pra esta conta? Vai analisar as conversas de hoje e mover leads no kanban se preciso.")) return;
+    setRunningNow(true);
+    setError(null);
+    try {
+      const r = await fetch("/api/organizer/run-now", { method: "POST" });
+      const d = await r.json();
+      if (!d.ok) { setError(d.error || "Falha"); return; }
+      setInfo(`✓ Execução concluída — ${d.updatedCount || 0} lead(s) movido(s). Atualizando histórico…`);
+      setTimeout(() => setInfo(null), 5000);
+      reload();
+    } catch (e: any) {
+      setError(e?.message || "Falha de rede");
+    } finally { setRunningNow(false); }
+  };
+
   const applyPromptSuggestion = async () => {
     if (!promptSuggestion) return;
     setSavingOrg(true);
@@ -446,13 +465,23 @@ export default function OrganizadorPage() {
       <main className="flex-1 overflow-y-auto w-full">
         <div className="max-w-6xl mx-auto p-4 sm:p-8 space-y-6">
           {/* Header */}
-          <div>
-            <h1 className="text-2xl font-black tracking-tight flex items-center gap-3">
-              <Bot className="w-7 h-7 text-purple-400" /> Organizador IA
-            </h1>
-            <p className="text-xs text-muted-foreground mt-1">
-              Tudo do Organizador num só lugar: status, prompt, kanban, histórico e sugestão automática pro seu nicho.
-            </p>
+          <div className="flex items-start justify-between gap-4 flex-wrap">
+            <div>
+              <h1 className="text-2xl font-black tracking-tight flex items-center gap-3">
+                <Bot className="w-7 h-7 text-purple-400" /> Organizador IA
+              </h1>
+              <p className="text-xs text-muted-foreground mt-1">
+                Tudo do Organizador num só lugar: status, prompt, kanban, histórico e sugestão automática pro seu nicho.
+              </p>
+            </div>
+            <Button
+              onClick={runNow}
+              disabled={runningNow || loading || !org?.globalEnabled || !enabledDraft}
+              title={!org?.globalEnabled ? "Organizador desligado globalmente" : !enabledDraft ? "Ativo desligado pra essa conta" : "Roda agora analisando as conversas de hoje desta conta"}
+              className="bg-emerald-600 hover:bg-emerald-500 text-white text-sm gap-2 h-11 px-4 shrink-0"
+            >
+              {runningNow ? <><Loader2 className="w-4 h-4 animate-spin" /> Executando…</> : <><Power className="w-4 h-4" /> Rodar agora</>}
+            </Button>
           </div>
 
           {/* Feedback */}
