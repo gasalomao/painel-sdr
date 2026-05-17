@@ -298,7 +298,7 @@ export default function OrganizadorPage() {
     setRunningNow(true);
     setError(null);
     try {
-      const r = await fetch("/api/organizer/run-now", { method: "POST" });
+      const r = await fetch("/api/organizer/run-now", { method: "POST", credentials: "include" });
       const d = await r.json();
       if (!d.ok) { setError(d.error || "Falha"); return; }
       setInfo(`✓ Execução concluída — ${d.updatedCount || 0} lead(s) movido(s). Atualizando histórico…`);
