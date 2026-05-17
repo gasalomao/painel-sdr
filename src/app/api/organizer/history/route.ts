@@ -57,3 +57,49 @@ export async function GET(req: NextRequest) {
   if (histErr) return NextResponse.json({ ok: false, error: histErr.message }, { status: 500 });
   return NextResponse.json({ ok: true, history: history || [], runs: runs || [] });
 }
+
+/**
+ * DELETE /api/organizer/history          → apaga TODO o histórico do cliente atual
+ * DELETE /api/organizer/history?id=123   → apaga só esse item (com ownership check)
+ *
+ * Cliente só apaga o próprio; admin apaga qualquer (do sistema todo se sem id).
+ */
+export async function DELETE(req: NextRequest) {
+  const ctx = await requireClientId(req);
+  if (!ctx.ok) return ctx.response;
+  if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
+
+  const idParam = req.nextUrl.searchParams.get("id");
+
+  // Resolve JIDs do cliente pra usar como filtro de ownership
+  let myJids: string[] | null = null;
+  if (!ctx.isAdmin) {
+    const { data: leads } = await supabaseAdmin
+      .from("leads_extraidos")
+      .select("remoteJid")
+      .eq("client_id", ctx.clientId)
+      .limit(5000);
+    myJids = (leads || []).map((l: any) => l.remoteJid).filter(Boolean);
+    if (myJids.length === 0) return NextResponse.json({ ok: true, deleted: 0 });
+  }
+
+  if (idParam) {
+    const id = Number(idParam);
+    if (!Number.isInteger(id)) {
+      return NextResponse.json({ ok: false, error: "id inválido" }, { status: 400 });
+    }
+    let q = supabaseAdmin.from("historico_ia_leads").delete().eq("id", id);
+    if (myJids) q = q.in("remote_jid", myJids);
+    const { error } = await q;
+    if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    return NextResponse.json({ ok: true, deleted: 1 });
+  }
+
+  // Clear all — somente do cliente (ou tudo se admin)
+  let q = supabaseAdmin.from("historico_ia_leads").delete();
+  if (myJids) q = q.in("remote_jid", myJids);
+  else q = q.gte("id", 0); // admin sem id: deleta tudo — PostgREST exige um filtro
+  const { error } = await q;
+  if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+  return NextResponse.json({ ok: true });
+}

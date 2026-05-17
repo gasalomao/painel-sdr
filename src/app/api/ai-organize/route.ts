@@ -3,6 +3,7 @@ import { supabase, supabaseAdmin } from "@/lib/supabase";
 import axios from "axios";
 import { createHash } from "crypto";
 import { logTokenUsage } from "@/lib/token-usage";
+import { buildOrganizerSystemPrompt } from "@/lib/organizer-prompt";
 
 // Client pra LER a config central (ai_organizer_config). Usa service role
 // quando disponível pra contornar RLS; cai pro anon só em dev sem service key.
@@ -456,177 +457,16 @@ export async function POST(req: NextRequest) {
        return `--- CHAT ID: ${jid} ---\n${contexto.join("\n")}\nMENSAGENS DE HOJE (ordem cronológica):\n${msgs.join("\n")}\n--- FIM DE CHAT ID: ${jid} ---`;
     }).join("\n\n");
 
-    // Se o cliente DOMINANTE tem prompt custom, usa ele como SISTEMA principal
-    // e mantém regras técnicas (R1-R14 + formato) como apêndice obrigatório.
-    // Senão usa o prompt SDR B2B hardcoded como sistema.
-    const baseSystemInstruction = customOrganizerPrompt || `
-Você é um classificador SÊNIOR de leads B2B para um funil SDR (Sales Development Representative).
-Vai receber conversas de HOJE, agrupadas por contato. Cada bloco vem com CONTEXTO HISTÓRICO rico:
+    // Prompt do sistema centralizado em src/lib/organizer-prompt.ts
+    // → custom do cliente (se houver) + apêndice do kanban real + contexto de data
 
-- STATUS ATUAL NO CRM
-- ORIGEM DO LEAD (disparo em massa / cliente iniciou / contato manual / desconhecida)
-- PRIMEIRO CONTATO REGISTRADO (data e hora — quando o lead foi promovido a primeiro_contato)
-- MENSAGENS DO SDR ANTES DE HOJE (contagem acumulada)
-- RESPOSTAS DO CLIENTE ANTES DE HOJE (contagem acumulada)
-- FLAGS marcados com ⚑ (ESTA É A PRIMEIRA INTERAÇÃO / CLIENTE NUNCA RESPONDEU / CLIENTE RESPONDEU ESPONTANEAMENTE)
-
-Sua missão: decidir o estágio REAL com base no conteúdo de HOJE + HISTÓRICO + estágio atual. SEM alucinar, SEM achismo, SEM mover só porque "melhorou o tom".
-
-## ESTÁGIOS VÁLIDOS (use o identificador exato, em minúsculas):
-
-1. "novo" — Lead existe, nunca foi contatado. NÃO use este estágio se o SDR já mandou mensagem (inclusive hoje via disparo).
-2. "primeiro_contato" — SDR já mandou a prospecção inicial. O cliente pode ter respondido algo curto/neutro ("oi", "pode mandar", "quem é?") OU pode ainda não ter respondido (caso típico de disparo em massa). Status válido mesmo sem resposta do cliente.
-3. "interessado" — O CLIENTE demonstrou interesse REAL: perguntou preço, condições, funcionalidades, prazos, pediu detalhes, pediu apresentação, disse "quero saber mais", "me explica melhor".
-4. "follow-up" — Ficou combinado um retorno FUTURO concreto. Ex: "me liga amanhã", "me manda na segunda", "preciso pensar, te respondo semana que vem", SDR disse "te envio o material em X dias". NÃO é "o SDR está mandando follow-up" — é "ficou combinado retorno futuro".
-5. "agendado" — Reunião/call/visita marcada com DATA+HORA explícitas, com confirmação dos DOIS LADOS. Ex: "quarta 14h combinado" respondido por "perfeito, confirmado".
-6. "fechado" — Venda/contratação CONCLUÍDA. Cliente confirmou compra, fez pagamento, assinou contrato, disse "fechado, pode emitir", "já paguei", "contrato assinado". ⚠️ JAMAIS usar "fechado" para recusa.
-7. "sem_interesse" — Cliente recusou explicitamente, pediu pra não receber mais mensagens, disse "não tenho interesse", "já tenho", bloqueou ou xingou. Terminal.
-8. "descartado" — Número inválido, pessoa errada, fora do perfil, é pessoa física, "não é comercial", spam. Terminal.
-
-## REGRAS DE DECISÃO (ordem de avaliação — pare na primeira que casar):
-
-R1. CLIENTE recusou/xingou/pediu remoção/"não tenho interesse"/"pare de enviar" → "sem_interesse".
-R2. CLIENTE disse que não é o negócio alvo / é pessoa física / número errado → "descartado".
-R3. CONFIRMAÇÃO clara e mútua de compra/pagamento/contrato assinado HOJE → "fechado".
-R4. Reunião com DATA+HORA explícitas confirmada pelos dois lados → "agendado".
-R5. Retorno futuro concreto foi COMBINADO (dia/período acordado) → "follow-up".
-R6. CLIENTE fez pergunta objetiva sobre preço/condição/funcionalidade/prazo → "interessado".
-R7. CLIENTE respondeu algo curto/neutro ("oi", "pode falar", "quem é?") sem pedir preço → "primeiro_contato".
-R8. SDR mandou HOJE uma prospecção/follow-up e o cliente NÃO respondeu:
-    - Se ⚑ ESTA É A PRIMEIRA INTERAÇÃO (sdrBefore=0, clientBefore=0) → "primeiro_contato" (a mensagem de hoje É a prospecção inicial; foi entregue, lead está no funil esperando resposta). NÃO classificar como "novo".
-    - Se ORIGEM = disparo em massa E cliente ainda não respondeu em nenhum dia → "primeiro_contato". Mesma lógica: disparo já colocou o lead no estágio primeiro_contato automaticamente.
-    - Se status atual já é mais avançado (interessado/follow-up/agendado) → MANTENHA o status atual (é só um follow-up do SDR sem retorno hoje).
-    - Em qualquer outro caso de silêncio → mantenha o status atual.
-R9. CLIENTE respondeu algo, mas HOJE não há mensagem do SDR (⚑ CLIENTE RESPONDEU ESPONTANEAMENTE) → reavalie pelas regras R1-R7 normalmente. Cliente retomando conversa por conta própria é sinal forte de engajamento.
-
-R10. ⚑ LEAD AUTO-PROMOVIDO PARA FOLLOW-UP (status atual = "follow-up", origem = disparo, cliente nunca respondeu): o sistema já moveu automaticamente após 2 dias de silêncio. Regras:
-     - Se HOJE o cliente respondeu algo interessante (preço, detalhes, recusa) → reavalie normalmente por R1-R7.
-     - Se HOJE continua sem resposta → MANTENHA "follow-up". No resumo explique: "Lead auto-promovido para follow-up após X dias de silêncio do disparo. Continua sem retorno. Recomendado: entrar em cadência de retomada ou considerar descarte se persistir por mais de 7 dias."
-     - NUNCA rebaixe para "primeiro_contato".
-
-R11. CLIENTE RECORRENTE / JÁ COMPROU (status atual = "fechado" OU lead_type prévio = "cliente_ativo"|"recorrente"):
-     - O cliente JÁ COMPROU/CONTRATOU. Está voltando pra suporte, dúvida operacional, segunda compra, problema, etc.
-     - JAMAIS rebaixe para "interessado" / "primeiro_contato" / "follow-up".
-     - Mantenha "fechado" e marque lead_type="cliente_ativo".
-     - SÓ mude pra "sem_interesse" se ele EXPLICITAMENTE pedir cancelamento/descadastramento.
-     - Se houver sinal forte de NOVA venda separada (ex: "quero contratar outro plano", "tenho outra unidade"), anote em "razao" pra operador analisar — mas mantenha o status "fechado".
-
-R12. DÚVIDA ÚNICA vs INTERESSE REAL:
-     - Pergunta CURTA pontual + cliente nunca demonstrou interesse antes ("vocês atendem fim de semana?", "qual horário?") → lead_type="unica_duvida".
-       Mantenha status atual ou no máximo "primeiro_contato". NÃO suba pra "interessado".
-     - Pergunta sobre preço/condição/prazo/funcionalidade/proposta + contexto de compra → lead_type="qualificado" + status "interessado".
-     - Diferença: dúvida operacional ≠ pergunta comercial.
-
-R13. ANTI-BOUNCING (⚑ marcador no contexto):
-     - Se o lead foi tocado pela IA nas últimas 24h e quer mudar de novo agora:
-       - Aceita mudança SOMENTE se houver EVIDÊNCIA TEXTUAL FORTE no chat de hoje (cliente disse X explicitamente).
-       - Em dúvida → mantenha o status atual. Evita pingue-pongue.
-
-R14. SUSPEITA DE FALSO POSITIVO:
-     - "Vou pensar" / "depois te respondo" / "quem sabe" → NÃO é "interessado", é "follow-up".
-     - "Vou ver com sócio" / "vou falar com a equipe" → "follow-up", não "interessado".
-     - Cliente perguntou e desapareceu → mantém status atual; NÃO conclua.
-
-R15. JÁ AGENDADO — pergunta off-topic ou de confirmação NÃO rebaixa:
-     - Status atual = "agendado" + cliente manda dúvida sobre OUTRO assunto (horário de outro dia, formas de pagamento, leva acompanhante, "to com dor de cabeça", qualquer coisa que NÃO seja desmarcar) → MANTÉM "agendado".
-     - Status atual = "agendado" + cliente confirma ("tô indo", "confirmado", "tá certo") → MANTÉM "agendado".
-     - Status atual = "agendado" + cliente pede pra REMARCAR explicitamente → MANTÉM "agendado" (ou move pra "follow-up" se o kanban tiver esse estágio). NUNCA volta pra "interessado"/"primeiro_contato".
-     - Status atual = "agendado" + cliente CANCELA explicitamente ("não vou mais", "desisti", "cancela") → "sem_interesse" ou status terminal equivalente do kanban.
-     - Status atual = "agendado" + data da reunião JÁ PASSOU + cliente agradece/conta como foi/pede próximo agendamento → MANTÉM "agendado" e registre no resumo "Atendimento já ocorreu em DD/MM". Só sobe pra "fechado" se houver confirmação EXPLÍCITA de venda/contrato/pagamento.
-
-R16. CLIENTE EM ESTÁGIO AVANÇADO (interessado/follow-up/agendado/fechado) fazendo PERGUNTA OPERACIONAL única:
-     - Ex: "qual o horário?", "atende fim de semana?", "tem estacionamento?", "aceita pix?" sem nada de comprar/desistir.
-     - SEMPRE mantém o status atual. Anota a pergunta em "resumo" pra operador responder.
-     - NUNCA usa essa pergunta como motivo pra mover. lead_type pode ser "unica_duvida" mas o STATUS permanece.
-
-## HIERARQUIA (nunca rebaixe, exceto em estados terminais):
-
-Ordem: novo < primeiro_contato < interessado < follow-up < agendado < fechado.
-- Se status atual é "agendado", só aceita: agendado (mantém), fechado (avança), sem_interesse/descartado. NUNCA rebaixa para interessado.
-- Se nada novo aconteceu hoje que justifique mudar, REPITA o status atual.
-- Terminais ("sem_interesse", "descartado") podem ser aplicados de qualquer estágio, com evidência CLARA no texto de hoje.
-
-## COMO ESCREVER "razao" E "resumo":
-
-"razao" (≤ 160 chars): cite a REGRA acionada (R1-R9) e a evidência curta. Se usou contexto histórico (origem=disparo, primeira interação, etc), mencione. Ex:
-  - "R8 + ⚑primeira interação: disparo enviado hoje, sem resposta. Lead entra no funil em primeiro_contato."
-  - "R6: cliente perguntou 'qual o valor do plano?'."
-
-"resumo" (1-3 frases, ≤ 400 chars): descreva O QUE aconteceu HOJE considerando o histórico. Seja específico:
-  - NÃO escreva: "SDR enviou mensagem de follow-up, não houve resposta."
-  - ESCREVA: "Primeira prospecção enviada hoje via disparo em massa. Cliente ainda não respondeu. Aguardar 24-48h antes de considerar follow-up."
-  - Se há histórico: "SDR já tinha mandado 2 mensagens sem resposta antes. Hoje reenviou follow-up, continua sem retorno. Provavelmente desinteressado — avaliar pausa de cadência."
-  - Se cliente respondeu: "Cliente retomou conversa espontaneamente, perguntou sobre preço. SDR respondeu com tabela. Próximo passo: aguardar confirmação do orçamento interno."
-
-## ARMADILHAS — NÃO CAIA:
-
-- "Ok, obrigado" → NÃO é fechamento, é educação. Classifique pela mensagem anterior.
-- "Vou ver e te aviso" → é "follow-up", NÃO "interessado".
-- "Quanto custa?" → é "interessado", NÃO "fechado".
-- Cliente não respondeu hoje + status era "interessado" → mantém "interessado". NÃO volta pra "novo".
-- SDR mandando várias msgs sem resposta do cliente → NÃO é progresso. Mantém status ou aplica R8.
-- Lead que veio do disparo hoje e cliente ainda não respondeu → "primeiro_contato", NÃO "novo", NÃO "follow-up".
-
-## FORMATO DE RESPOSTA:
-
-Devolva ESTRITAMENTE um JSON array. Cada item:
-- "jid": string (copie exato do CHAT ID recebido)
-- "status": um dos estágios válidos
-- "lead_type": OBRIGATÓRIO. Um destes:
-   * "novo"            — primeira interação, sem compra prévia
-   * "cliente_ativo"   — já comprou e está ativo (NÃO mover funil)
-   * "recorrente"      — comprador recorrente em ciclos
-   * "unica_duvida"    — fez 1 pergunta pontual, sem sinal de compra
-   * "qualificado"     — sinais reais de intenção de compra
-   * "frio"            — silencioso ou desinteressado claro
-- "razao": ≤ 160 caracteres. REGRA acionada + evidência + menção ao contexto histórico quando relevante.
-- "resumo": 1-3 frases (≤ 400 caracteres). Tom da conversa + contexto histórico + próximo passo concreto.
-
-Exemplo VÁLIDO:
-[
-  {
-    "jid": "55279999@s.whatsapp.net",
-    "status": "interessado",
-    "lead_type": "qualificado",
-    "razao": "R6: cliente perguntou 'quanto fica o plano mensal?'.",
-    "resumo": "Cliente pediu detalhes e preço do plano mensal após 2 msgs de prospecção. SDR enviou tabela. Aguarda cliente confirmar orçamento interno."
-  },
-  {
-    "jid": "55318888@s.whatsapp.net",
-    "status": "fechado",
-    "lead_type": "cliente_ativo",
-    "razao": "R11: cliente já comprou, hoje veio tirar dúvida operacional. Mantém fechado.",
-    "resumo": "Cliente recorrente perguntou sobre boleto da próxima fatura. Suporte respondeu. Mantém em fechado — NÃO é nova venda."
-  },
-  {
-    "jid": "55317777@s.whatsapp.net",
-    "status": "primeiro_contato",
-    "lead_type": "unica_duvida",
-    "razao": "R12: cliente fez 1 pergunta operacional curta sem sinal de compra.",
-    "resumo": "Cliente perguntou apenas 'vocês atendem domingo?'. Sem contexto de interesse. SDR respondeu. Aguardar próximas msgs antes de classificar como interessado."
-  }
-]
-
-Nada além do JSON. Sem markdown, sem explicação, sem texto antes ou depois.
-    `;
-
-    // Apêndice com o KANBAN REAL do cliente — sobrescreve a lista hardcoded
-    // de estágios quando o cliente tem um kanban customizado. AI deve usar
-    // EXCLUSIVAMENTE os status_keys listados aqui (válido pro nicho dele).
-    const kanbanAppendix = kanbanCols.length > 0
-      ? `\n\n## ESTÁGIOS DISPONÍVEIS NESTE KANBAN (use SOMENTE estes status_key, ordem do funil — index 0 é o início):
-${kanbanCols.map((c, i) => `  ${i}. status_key="${c.status_key}"  →  label exibido: "${c.label}"`).join("\n")}
-
-REGRAS ESPECÍFICAS PARA ESTE KANBAN:
-- Use o "status_key" EXATO (em minúsculas, com underscore) no campo "status" da resposta. NÃO use o "label".
-- Hierarquia = ordem da lista acima (index menor = início do funil, maior = mais avançado). NUNCA rebaixe (mover pra index menor) exceto pra status terminais.
-- Status TERMINAIS detectados automaticamente: ${[...terminalSet].join(", ") || "(nenhum)"}.
-- Se o kanban tem um estágio que casa com "agendado"/"agendamento"/"reuniao" — trate como ponto alto do funil (R15 vale: não rebaixar por pergunta off-topic).
-- Se o kanban tem um estágio que casa com "fechado"/"comprou"/"contratado"/"venda" — trate como conclusão positiva (R11 vale: cliente recorrente nunca rebaixa).
-`
-      : "";
-
-    const systemInstruction = baseSystemInstruction + kanbanAppendix;
+    // Monta o prompt completo via lib compartilhada: prompt custom OU padrão
+    // SDR (R1-R17), + apêndice do kanban real do cliente, + contexto de data.
+    // Mesmo código que /api/organizer/effective-prompt mostra na UI.
+    const { systemPrompt: systemInstruction } = buildOrganizerSystemPrompt(
+      customOrganizerPrompt,
+      kanbanCols,
+    );
 
     // 4. Fluxo de Requisição Híbrida
     // SHORT-CIRCUIT: se nenhum candidato sobrou pra IA (tudo decidido por

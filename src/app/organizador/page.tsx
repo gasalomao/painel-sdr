@@ -9,7 +9,7 @@ import { cn } from "@/lib/utils";
 import {
   Bot, Sparkles, Save, Loader2, AlertCircle, Check, Plus, Trash2,
   ChevronUp, ChevronDown, Wand2, Power, RefreshCw, ClipboardCheck,
-  History, ArrowRight, Globe, Pencil,
+  History, ArrowRight, Globe, Pencil, Search, FileText, Eye, EyeOff,
 } from "lucide-react";
 
 /* ============================================================
@@ -113,15 +113,43 @@ export default function OrganizadorPage() {
   // Edição manual da sugestão antes de aplicar
   const [editingSuggestion, setEditingSuggestion] = useState(false);
 
+  // Histórico: busca + linha expandida
+  const [historyQuery, setHistoryQuery] = useState("");
+  const [expandedHistoryId, setExpandedHistoryId] = useState<number | null>(null);
+  const [clearingHistory, setClearingHistory] = useState(false);
+
+  // Prompt EFETIVO completo (o que de fato vai pra IA)
+  const [effective, setEffective] = useState<{
+    fullPrompt: string;
+    customPrompt: string | null;
+    defaultBasePrompt: string;
+    kanbanAppendix: string;
+    dateContext: string;
+  } | null>(null);
+  const [effectiveVisible, setEffectiveVisible] = useState(false);
+  const [editingDefault, setEditingDefault] = useState(false);
+  const [defaultDraft, setDefaultDraft] = useState("");
+
   // ============= LOAD =============
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const [orgRes, kbRes, histRes] = await Promise.all([
+      const [orgRes, kbRes, histRes, effRes] = await Promise.all([
         fetch("/api/organizer", { cache: "no-store" }).then((r) => r.json()),
         fetch("/api/kanban-columns", { cache: "no-store" }).then((r) => r.json()),
-        fetch("/api/organizer/history?limit=30", { cache: "no-store" }).then((r) => r.json()),
+        fetch("/api/organizer/history?limit=100", { cache: "no-store" }).then((r) => r.json()),
+        fetch("/api/organizer/effective-prompt", { cache: "no-store" }).then((r) => r.json()),
       ]);
+      if (effRes?.ok) {
+        setEffective({
+          fullPrompt: effRes.fullPrompt,
+          customPrompt: effRes.customPrompt,
+          defaultBasePrompt: effRes.defaultBasePrompt,
+          kanbanAppendix: effRes.kanbanAppendix,
+          dateContext: effRes.dateContext,
+        });
+        setDefaultDraft(effRes.defaultBasePrompt);
+      }
       if (orgRes.ok) {
         const o: OrganizerState = {
           enabled: orgRes.enabled,
@@ -212,6 +240,37 @@ export default function OrganizadorPage() {
       else { setInfo("Configuração do cliente salva"); setTimeout(() => setInfo(null), 2500); reload(); }
     } finally { setSavingOrg(false); }
   };
+
+  // ============= HISTÓRICO: delete =============
+  const deleteHistoryItem = async (id: number) => {
+    if (!confirm("Apagar essa movimentação do histórico? O lead em si NÃO é afetado.")) return;
+    const r = await fetch(`/api/organizer/history?id=${id}`, { method: "DELETE" });
+    const d = await r.json();
+    if (!d.ok) { alert("Erro: " + d.error); return; }
+    setHistory((prev) => prev.filter((h) => h.id !== id));
+  };
+  const clearAllHistory = async () => {
+    if (!confirm("Limpar TODO o histórico do organizador? Os leads NÃO são afetados — só o log de movimentações.")) return;
+    setClearingHistory(true);
+    try {
+      const r = await fetch("/api/organizer/history", { method: "DELETE" });
+      const d = await r.json();
+      if (!d.ok) { alert("Erro: " + d.error); return; }
+      setHistory([]);
+      setInfo("Histórico apagado"); setTimeout(() => setInfo(null), 2500);
+    } finally { setClearingHistory(false); }
+  };
+
+  const filteredHistory = history.filter((h) => {
+    if (!historyQuery.trim()) return true;
+    const q = historyQuery.toLowerCase();
+    return (h.nome_negocio || "").toLowerCase().includes(q)
+      || (h.remote_jid || "").toLowerCase().includes(q)
+      || (h.status_antigo || "").toLowerCase().includes(q)
+      || (h.status_novo || "").toLowerCase().includes(q)
+      || (h.razao || "").toLowerCase().includes(q)
+      || (h.resumo || "").toLowerCase().includes(q);
+  });
 
   // ============= KANBAN CRUD =============
   const addColumn = async () => {
@@ -737,36 +796,214 @@ export default function OrganizadorPage() {
                   )}
                 </div>
 
-                {/* Movimentações */}
-                <div className="space-y-1.5">
-                  <p className="text-[10px] uppercase font-black tracking-widest text-muted-foreground">Últimas movimentações de leads</p>
-                  {history.length === 0 ? (
-                    <p className="text-[11px] text-muted-foreground italic">Nenhuma movimentação ainda.</p>
+                {/* Movimentações — busca, expand, delete por item, clear-all */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <p className="text-[10px] uppercase font-black tracking-widest text-muted-foreground">
+                      Movimentações ({filteredHistory.length}{historyQuery && ` de ${history.length}`})
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <div className="relative">
+                        <Search className="w-3 h-3 absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                        <Input
+                          value={historyQuery}
+                          onChange={(e) => setHistoryQuery(e.target.value)}
+                          placeholder="filtrar (nome, status, razão…)"
+                          className="bg-black/30 border-white/10 h-7 text-[10px] pl-7 w-56"
+                        />
+                      </div>
+                      {history.length > 0 && (
+                        <Button
+                          onClick={clearAllHistory}
+                          disabled={clearingHistory}
+                          variant="outline"
+                          className="text-[10px] h-7 px-2 gap-1 text-red-300 border-red-500/30 hover:bg-red-500/10"
+                        >
+                          {clearingHistory ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                          Limpar tudo
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+
+                  {filteredHistory.length === 0 ? (
+                    <p className="text-[11px] text-muted-foreground italic">
+                      {history.length === 0 ? "Nenhuma movimentação ainda." : "Nada bate com o filtro."}
+                    </p>
                   ) : (
                     <div className="space-y-1">
-                      {history.slice(0, 15).map((h) => {
+                      {filteredHistory.map((h) => {
                         const moved = h.status_antigo !== h.status_novo;
+                        const expanded = expandedHistoryId === h.id;
                         return (
-                          <div key={h.id} className="flex items-start gap-2 p-2 rounded bg-black/20 border border-white/5 text-[11px]">
-                            <span className={cn("shrink-0 px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-widest",
-                              moved ? "bg-purple-500/20 text-purple-200" : "bg-white/5 text-muted-foreground"
-                            )}>
-                              {moved ? "MOVIDO" : "Mantido"}
-                            </span>
-                            <span className="text-white/80 shrink-0 max-w-[140px] truncate">{h.nome_negocio || h.remote_jid}</span>
-                            <div className="flex items-center gap-1 shrink-0 text-[10px] font-mono">
-                              <code className="px-1 bg-black/40 rounded text-muted-foreground">{h.status_antigo}</code>
-                              <ArrowRight className="w-2.5 h-2.5 text-muted-foreground" />
-                              <code className={cn("px-1 rounded", moved ? "bg-purple-500/20 text-purple-200" : "bg-black/40 text-muted-foreground")}>{h.status_novo}</code>
-                            </div>
-                            <span className="text-muted-foreground italic truncate flex-1 min-w-0" title={h.razao || ""}>{h.razao}</span>
-                            <span className="text-muted-foreground/60 shrink-0 text-[9px]">{new Date(h.created_at).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
+                          <div key={h.id} className="rounded border border-white/5 bg-black/20 overflow-hidden">
+                            <button
+                              type="button"
+                              onClick={() => setExpandedHistoryId(expanded ? null : h.id)}
+                              className="w-full flex items-start gap-2 p-2 text-left text-[11px] hover:bg-white/[0.03]"
+                            >
+                              <span className={cn("shrink-0 px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-widest",
+                                moved ? "bg-purple-500/20 text-purple-200" : "bg-white/5 text-muted-foreground"
+                              )}>
+                                {moved ? "MOVIDO" : "Mantido"}
+                              </span>
+                              <span className="text-white/80 shrink-0 max-w-[140px] truncate">{h.nome_negocio || h.remote_jid}</span>
+                              <div className="flex items-center gap-1 shrink-0 text-[10px] font-mono">
+                                <code className="px-1 bg-black/40 rounded text-muted-foreground">{h.status_antigo}</code>
+                                <ArrowRight className="w-2.5 h-2.5 text-muted-foreground" />
+                                <code className={cn("px-1 rounded", moved ? "bg-purple-500/20 text-purple-200" : "bg-black/40 text-muted-foreground")}>{h.status_novo}</code>
+                              </div>
+                              <span className="text-muted-foreground italic truncate flex-1 min-w-0">{h.razao}</span>
+                              <span className="text-muted-foreground/60 shrink-0 text-[9px]">{new Date(h.created_at).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
+                              {expanded ? <ChevronUp className="w-3 h-3 text-muted-foreground shrink-0" /> : <ChevronDown className="w-3 h-3 text-muted-foreground shrink-0" />}
+                            </button>
+                            {expanded && (
+                              <div className="border-t border-white/5 p-3 space-y-2 bg-black/30 text-[11px]">
+                                <div className="grid grid-cols-2 gap-2 text-[10px]">
+                                  <div><span className="text-muted-foreground">JID:</span> <code className="text-white/80">{h.remote_jid}</code></div>
+                                  <div><span className="text-muted-foreground">Data:</span> <span className="text-white/80">{new Date(h.created_at).toLocaleString("pt-BR")}</span></div>
+                                  {h.batch_id && <div className="col-span-2 truncate"><span className="text-muted-foreground">Batch:</span> <code className="text-white/60">{h.batch_id}</code></div>}
+                                </div>
+                                <div>
+                                  <p className="text-[9px] uppercase tracking-widest text-muted-foreground font-black mb-0.5">Razão completa</p>
+                                  <p className="text-white/90 whitespace-pre-wrap">{h.razao || <span className="italic text-muted-foreground">—</span>}</p>
+                                </div>
+                                <div>
+                                  <p className="text-[9px] uppercase tracking-widest text-muted-foreground font-black mb-0.5">Resumo da IA</p>
+                                  <p className="text-white/90 whitespace-pre-wrap">{h.resumo || <span className="italic text-muted-foreground">— sem resumo —</span>}</p>
+                                </div>
+                                <div className="flex justify-end pt-1 border-t border-white/5">
+                                  <Button
+                                    onClick={(e) => { e.stopPropagation(); deleteHistoryItem(h.id); }}
+                                    variant="outline"
+                                    className="text-[10px] h-7 px-2 gap-1 text-red-300 border-red-500/30 hover:bg-red-500/10"
+                                  >
+                                    <Trash2 className="w-3 h-3" /> Apagar
+                                  </Button>
+                                </div>
+                              </div>
+                            )}
                           </div>
                         );
                       })}
                     </div>
                   )}
                 </div>
+              </section>
+
+              {/* ============= PROMPT EFETIVO COMPLETO ============= */}
+              <section className="rounded-2xl border border-amber-500/20 bg-gradient-to-br from-amber-500/[0.04] to-transparent p-5 space-y-3">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div>
+                    <h2 className="text-sm font-bold flex items-center gap-2 text-amber-200">
+                      <FileText className="w-4 h-4" /> Prompt completo que está rodando
+                    </h2>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">
+                      O texto EXATO enviado pra IA agora: {effective?.customPrompt ? "seu prompt customizado" : "prompt padrão SDR (R1-R17)"} + colunas do seu kanban + data de hoje.
+                    </p>
+                  </div>
+                  <Button
+                    onClick={() => setEffectiveVisible((v) => !v)}
+                    variant="outline"
+                    className="text-[10px] h-7 px-2 gap-1"
+                  >
+                    {effectiveVisible ? <><EyeOff className="w-3 h-3" /> Ocultar</> : <><Eye className="w-3 h-3" /> Ver / editar</>}
+                  </Button>
+                </div>
+
+                {effectiveVisible && effective && (
+                  <div className="space-y-3">
+                    {/* Bloco 1: prompt base (custom OU padrão) */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <p className="text-[10px] uppercase font-black tracking-widest text-amber-300">
+                          1. Prompt base — {effective.customPrompt ? "seu customizado (editável no card cyan acima)" : "padrão R1-R17 (editável aqui)"}
+                        </p>
+                        {!effective.customPrompt && (
+                          <button onClick={() => setEditingDefault((e) => !e)} className="text-[10px] text-amber-300 hover:underline flex items-center gap-1">
+                            <Pencil className="w-3 h-3" /> {editingDefault ? "Cancelar edição" : "Editar padrão pra essa conta"}
+                          </button>
+                        )}
+                      </div>
+                      {effective.customPrompt ? (
+                        <pre className="bg-black/40 border border-white/5 rounded-xl p-3 text-[10px] text-white/80 font-mono whitespace-pre-wrap max-h-64 overflow-y-auto">{effective.customPrompt}</pre>
+                      ) : editingDefault ? (
+                        <div className="space-y-2">
+                          <Textarea
+                            value={defaultDraft}
+                            onChange={(e) => setDefaultDraft(e.target.value)}
+                            className="bg-black/40 border-white/10 h-80 text-[10px] font-mono"
+                          />
+                          <div className="flex justify-end gap-2">
+                            <Button onClick={() => { setDefaultDraft(effective.defaultBasePrompt); setEditingDefault(false); }} variant="outline" className="text-[10px] h-7 px-2">
+                              Cancelar
+                            </Button>
+                            <Button
+                              onClick={async () => {
+                                // Salvar como prompt customizado do cliente
+                                setPromptDraft(defaultDraft);
+                                const r = await fetch("/api/organizer", {
+                                  method: "PATCH",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({ enabled: enabledDraft, prompt: defaultDraft, executionHour: hourDraft }),
+                                });
+                                const d = await r.json();
+                                if (!d.ok) { alert("Erro: " + d.error); return; }
+                                setInfo("Prompt salvo como customizado pra essa conta");
+                                setTimeout(() => setInfo(null), 2500);
+                                setEditingDefault(false);
+                                reload();
+                              }}
+                              className="bg-amber-600 hover:bg-amber-500 text-white text-[10px] h-7 px-2 gap-1"
+                            >
+                              <Save className="w-3 h-3" /> Salvar como meu
+                            </Button>
+                          </div>
+                          <p className="text-[9px] text-muted-foreground italic">
+                            Salvar vira o prompt customizado DESTA conta (não afeta outras contas).
+                          </p>
+                        </div>
+                      ) : (
+                        <pre className="bg-black/40 border border-white/5 rounded-xl p-3 text-[10px] text-white/80 font-mono whitespace-pre-wrap max-h-64 overflow-y-auto">{effective.defaultBasePrompt}</pre>
+                      )}
+                    </div>
+
+                    {/* Bloco 2: apêndice do kanban */}
+                    <div>
+                      <p className="text-[10px] uppercase font-black tracking-widest text-amber-300 mb-1">
+                        2. Apêndice automático do seu kanban
+                      </p>
+                      <pre className="bg-black/40 border border-white/5 rounded-xl p-3 text-[10px] text-white/80 font-mono whitespace-pre-wrap max-h-48 overflow-y-auto">
+                        {effective.kanbanAppendix.trim() || "(nenhuma coluna no kanban — apêndice vazio)"}
+                      </pre>
+                    </div>
+
+                    {/* Bloco 3: contexto de data */}
+                    <div>
+                      <p className="text-[10px] uppercase font-black tracking-widest text-amber-300 mb-1">
+                        3. Contexto temporal (atualizado a cada execução)
+                      </p>
+                      <pre className="bg-black/40 border border-white/5 rounded-xl p-3 text-[10px] text-white/80 font-mono whitespace-pre-wrap">
+                        {effective.dateContext.trim()}
+                      </pre>
+                    </div>
+
+                    {/* Copy do prompt completo */}
+                    <div className="flex justify-end pt-2 border-t border-amber-500/10">
+                      <Button
+                        onClick={() => {
+                          navigator.clipboard.writeText(effective.fullPrompt);
+                          setInfo("Prompt completo copiado");
+                          setTimeout(() => setInfo(null), 2000);
+                        }}
+                        variant="outline"
+                        className="text-[10px] h-7 px-2 gap-1"
+                      >
+                        <ClipboardCheck className="w-3 h-3" /> Copiar prompt completo
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </section>
             </>
           )}
