@@ -653,7 +653,7 @@ export default function OrganizadorPage() {
                     <Wand2 className="w-4 h-4 text-purple-400" /> Sugestão automática (IA)
                   </h2>
                   <p className="text-[10px] text-muted-foreground mt-0.5">
-                    A IA lê o agente escolhido (prompt, função, base de conhecimento) e sugere um Kanban + prompt adequados ao seu nicho.
+                    A IA lê o agente escolhido (prompt, função, base de conhecimento), identifica o nicho e gera DOIS pacotes prontos: (1) colunas de Kanban com vocabulário do nicho, (2) prompt completo do Organizador — REESCRITA do template padrão R1-R17 adaptada ao nicho + status_keys reais. Você revisa, edita e aplica.
                   </p>
                 </div>
 

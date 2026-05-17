@@ -3,6 +3,7 @@ import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
 import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
 import { logTokenUsage, extractGeminiUsage } from "@/lib/token-usage";
+import { DEFAULT_ORGANIZER_BASE_PROMPT } from "@/lib/organizer-prompt";
 
 export const dynamic = "force-dynamic";
 
@@ -69,12 +70,25 @@ export async function POST(req: NextRequest) {
     `- ${k.title}: ${String(k.content || "").slice(0, 200)}`
   ).join("\n");
 
-  const prompt = `Você é especialista em CRM e processos de venda B2B/B2C.
+  const prompt = `Você é especialista em CRM e processos de venda multi-nicho.
 
-Analise o agente IA abaixo e sugira:
-1. Uma estrutura de Kanban (5 a 8 colunas) adequada ao negócio identificado.
-2. Um prompt customizado pro "Organizador IA" — sistema que classifica leads
-   nessas colunas automaticamente lendo o histórico de conversa do WhatsApp.
+A partir do agente IA descrito abaixo, identifique o NICHO real do negócio
+(salão de beleza, manicure, imobiliária, advocacia, clínica, SaaS B2B,
+e-commerce, restaurante, qualquer outro) e gere DUAS coisas:
+
+1. Estrutura de Kanban (5 a 8 colunas) adequada AO NICHO REAL.
+2. Prompt customizado pro Organizador IA — REESCRITA do template padrão
+   abaixo, mantendo TODAS as 17 regras (R1-R17) e a estrutura, mas:
+   - Adaptando exemplos e vocabulário pro nicho identificado.
+     Ex: pra manicure, falar "agendamento", "atendimento", "esmalte", em vez
+     de "reunião", "proposta", "contrato".
+   - Substituindo nas regras as MENÇÕES de status pelos status_key que VOCÊ
+     vai sugerir no kanban (use os mesmos status_key na lista de colunas E
+     dentro do prompt).
+   - Mantendo as seções "REGRAS DE DECISÃO", "HIERARQUIA", "COMO ESCREVER
+     razao E resumo", "ARMADILHAS", "FORMATO DE RESPOSTA" — todas elas.
+   - Preservando o cabeçalho que explica que recebe conversas de HOJE +
+     contexto histórico + flags ⚑.
 
 ## Agente IA
 - Nome: ${agent.name || "(sem nome)"}
@@ -88,21 +102,27 @@ ${(agent.main_prompt || "(vazio)").slice(0, 2000)}
 ## Base de conhecimento (amostra)
 ${knowledgeSnippet || "(vazia)"}
 
-## Sua tarefa
-Identifique o tipo de negócio (vendas SaaS, atendimento, agendamento, suporte,
-e-commerce, serviços, etc) e proponha um Kanban + prompt do Organizador
-adaptados pra esse contexto específico.
+## TEMPLATE OBRIGATÓRIO do prompt do Organizador (reescreva preservando estrutura R1-R17)
 
-Regras pras colunas:
-- status_key: snake_case, ASCII, sem espaços (ex: "primeiro_contato")
-- label: nome user-friendly em PT-BR (ex: "Primeiro contato")
-- color: hex 7-char (#3b82f6) escolhida pra fazer sentido (azul=novo, verde=fechado, vermelho=perdido)
-- Sempre inclua uma coluna inicial "novo" (status_key="novo") e finais "fechado"/"perdido"
+${DEFAULT_ORGANIZER_BASE_PROMPT}
 
-Regras pro prompt:
-- Em português, instrutivo, claro
-- Mencione os status_key disponíveis literalmente
-- Explique o critério de movimento entre colunas`;
+## Regras pras colunas do kanban
+- status_key: snake_case, ASCII, sem espaços. Use vocabulário do nicho
+  (ex: pra manicure → "agendado", "em_atendimento", "atendido", "recorrente").
+- label: nome user-friendly em PT-BR.
+- color: hex 7-char (#3b82f6). Azul/ciano pra estágios iniciais, amarelo/laranja
+  pra intermediários, verde pra positivos (fechado/atendido), vermelho pra
+  perdido/cancelado.
+- Sempre inclua coluna inicial ("novo" ou equivalente do nicho) e pelo menos
+  UM estágio terminal positivo (ex: "fechado", "atendido", "concluido") +
+  UM terminal negativo (ex: "perdido", "cancelado", "sem_interesse").
+
+## Regras pro prompt reescrito
+- Em PT-BR, instrutivo, claro, MANTENDO a mesma quantidade de regras (R1-R17).
+- USE OS MESMOS status_key que você sugeriu nas colunas, dentro das regras.
+  (Não invente status que não existem no kanban sugerido.)
+- Adapte os EXEMPLOS de cada regra ao nicho real.
+- Saída: somente o texto reescrito (sem markdown extra, sem comentário).`;
 
   // 5) Chama Gemini com response schema estruturado pra garantir JSON válido
   const genAI = new GoogleGenerativeAI(cfg.api_key);
@@ -128,7 +148,10 @@ Regras pro prompt:
               required: ["status_key", "label", "color"],
             },
           },
-          organizer_prompt: { type: SchemaType.STRING },
+          organizer_prompt: {
+            type: SchemaType.STRING,
+            description: "Reescrita do template R1-R17 adaptada ao nicho + status_keys das colunas sugeridas. Mínimo 2000 chars.",
+          },
         },
         required: ["business_type", "columns", "organizer_prompt"],
       },
