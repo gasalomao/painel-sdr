@@ -1,0 +1,96 @@
+/* Tema escuro pro react-big-calendar — escopado em .calendar-dark pra não
+   vazar estilo pro resto do app. Casa com o tema glass/dark do painel. */
+
+.calendar-dark {
+  --rbc-border: rgba(255, 255, 255, 0.08);
+  --rbc-border-strong: rgba(255, 255, 255, 0.14);
+  --rbc-muted: rgba(255, 255, 255, 0.45);
+  --rbc-text: rgba(255, 255, 255, 0.92);
+  color: var(--rbc-text);
+}
+
+.calendar-dark .rbc-calendar { background: transparent; color: var(--rbc-text); }
+
+/* Esconde a toolbar nativa — usamos a barra de controle própria da página. */
+.calendar-dark .rbc-toolbar { display: none; }
+
+/* Bordas gerais */
+.calendar-dark .rbc-month-view,
+.calendar-dark .rbc-time-view,
+.calendar-dark .rbc-time-header.rbc-overflowing,
+.calendar-dark .rbc-time-content,
+.calendar-dark .rbc-agenda-view table.rbc-agenda-table {
+  border-color: var(--rbc-border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.calendar-dark .rbc-month-row + .rbc-month-row,
+.calendar-dark .rbc-day-bg + .rbc-day-bg,
+.calendar-dark .rbc-header + .rbc-header,
+.calendar-dark .rbc-time-content > * + * > *,
+.calendar-dark .rbc-timeslot-group,
+.calendar-dark .rbc-time-header-content,
+.calendar-dark .rbc-time-content {
+  border-color: var(--rbc-border);
+}
+
+/* Cabeçalho dos dias da semana */
+.calendar-dark .rbc-header {
+  padding: 8px 4px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--rbc-muted);
+  border-bottom: 1px solid var(--rbc-border);
+}
+
+/* Números dos dias no mês */
+.calendar-dark .rbc-date-cell {
+  padding: 4px 6px;
+  font-size: 12px;
+  color: var(--rbc-text);
+}
+.calendar-dark .rbc-date-cell.rbc-now { font-weight: 800; }
+.calendar-dark .rbc-button-link { color: inherit; }
+
+/* Dias fora do mês / hoje */
+.calendar-dark .rbc-off-range-bg { background: rgba(255, 255, 255, 0.02); }
+.calendar-dark .rbc-off-range { color: rgba(255, 255, 255, 0.25); }
+.calendar-dark .rbc-today { background: rgba(99, 102, 241, 0.10); }
+
+/* Slots de hora (week/day) */
+.calendar-dark .rbc-time-gutter,
+.calendar-dark .rbc-time-gutter .rbc-timeslot-group {
+  color: var(--rbc-muted);
+  font-size: 11px;
+}
+.calendar-dark .rbc-day-slot .rbc-time-slot { border-top: none; }
+.calendar-dark .rbc-timeslot-group { min-height: 44px; }
+.calendar-dark .rbc-current-time-indicator { background: #ef4444; height: 2px; }
+
+/* Eventos — a cor de fundo vem do eventPropGetter (paleta Google). */
+.calendar-dark .rbc-event {
+  border: none;
+  border-radius: 6px;
+  padding: 2px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+.calendar-dark .rbc-event.rbc-selected { outline: 2px solid rgba(255, 255, 255, 0.6); }
+.calendar-dark .rbc-event-label { font-size: 10px; opacity: 0.85; }
+.calendar-dark .rbc-show-more { color: #93c5fd; font-size: 10px; background: transparent; }
+
+/* Seleção de slot (arrastar pra criar) */
+.calendar-dark .rbc-slot-selection { background: rgba(99, 102, 241, 0.35); border-radius: 6px; }
+
+/* Agenda (lista) */
+.calendar-dark .rbc-agenda-view table.rbc-agenda-table tbody > tr > td { border-color: var(--rbc-border); padding: 8px 10px; font-size: 13px; }
+.calendar-dark .rbc-agenda-view table.rbc-agenda-table thead > tr > th { border-color: var(--rbc-border); color: var(--rbc-muted); }
+.calendar-dark .rbc-agenda-empty { color: var(--rbc-muted); padding: 24px; text-align: center; }
+
+/* Preview ao arrastar (DnD addon) */
+.calendar-dark .rbc-addons-dnd .rbc-addons-dnd-drag-preview { opacity: 0.7; }
+.calendar-dark .rbc-addons-dnd-resize-ns-anchor { opacity: 0.6; }

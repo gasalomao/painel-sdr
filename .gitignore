@@ -1,0 +1,73 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+
+# arquivos com secrets locais pra rodar manualmente no Supabase
+RODAR_NO_SUPABASE.sql
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+.vscode/
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# Diagnostic scripts that embed Supabase service_role keys — keep local only
+scratch/generate-supabase-keys.mjs
+scratch/test-supabase-connection.mjs
+scratch/test-supabase-http.mjs
+
+# Local artifacts (não vai pro deploy)
+qr-sdr.png
+.claude/scheduled_tasks.lock
+
+# Ruflo / claude-flow — runtime state local (daemon pid, logs, métricas, memória)
+.claude-flow/
+.claude/memory.db
+.claude/memory.db-shm
+.claude/memory.db-wal
+.claude/settings.json
+.claude/settings.local.json
+.claude/helpers/
+
+# Pasta de diagnósticos e scripts temporários
+scratch/
+
+# Memória compartilhada entre IAs (Antigravity + Claude Code) — local only
+.shared-memory/
+
+# Conector embutido de assinaturas (CLIProxyAPI gerenciado pelo painel):
+# binário + config + management.key + logins das contas (auths/) — NUNCA versionar
+.gateway-proxy/
