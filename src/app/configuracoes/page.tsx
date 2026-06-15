@@ -554,7 +554,7 @@ export default function ConfiguracoesPage() {
    * URL de login OAuth, abre numa aba e fica esperando a confirmação. No fim,
    * salva a conexão local sozinho. O usuário só faz o login na conta dele.
    */
-  async function handleConnectAccount(provider: "gemini" | "claude" | "openai") {
+  async function handleConnectAccount(provider: "gemini" | "claude" | "openai" | "antigravity") {
     setPxError(null);
     setPxBusy(`login-${provider}`);
     pxCancelRef.current = false;
@@ -909,8 +909,14 @@ export default function ConfiguracoesPage() {
               </p>
               <p className="text-[11px] text-muted-foreground leading-relaxed">
                 Clique no botão da conta que quer usar. O painel <strong className="text-white">instala e liga o conector
-                sozinho</strong> e abre a página de login oficial (Google/Anthropic/OpenAI) — você só faz o login. Ao terminar,
-                os modelos da sua assinatura aparecem em todos os seletores, <strong className="text-emerald-200">sem gastar API</strong>.
+                sozinho</strong> e abre a página de login oficial — você só faz o login. Ao terminar,
+                os modelos da sua conta aparecem em todos os seletores, <strong className="text-emerald-200">sem gastar API</strong>.
+              </p>
+              <p className="text-[10px] text-emerald-200/90 leading-relaxed rounded-lg border border-emerald-400/20 bg-emerald-500/10 p-2">
+                💡 <strong>Quer o máximo de graça com 1 login só?</strong> Use o <strong>Antigravity</strong> (conta Google):
+                ele libera <strong>Gemini 3 Pro, Claude, GPT e Grok</strong> de uma vez. Já o <strong>DeepSeek</strong> não
+                tem login de conta — mas o <strong>DeepSeek grátis</strong> já está disponível pelo card do
+                <strong> OpenRouter</strong> (modelos “★ Grátis”, custo R$ 0).
               </p>
 
               {/* Status do conector */}
@@ -931,6 +937,14 @@ export default function ConfiguracoesPage() {
 
               {/* Botões por conta — fazem TUDO (instala → liga → login) */}
               <div className="flex flex-wrap gap-2">
+                <Button
+                  onClick={() => handleConnectAccount("antigravity")}
+                  disabled={!!pxBusy}
+                  className="bg-emerald-500/25 text-emerald-50 border border-emerald-400/60 hover:bg-emerald-500/40 font-black text-xs gap-2 shadow-[0_0_0_1px_rgba(16,185,129,0.3)]"
+                >
+                  {pxBusy === "login-antigravity" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                  ★ Antigravity (Gemini 3 Pro + Claude + GPT + Grok grátis)
+                </Button>
                 <Button
                   onClick={() => handleConnectAccount("gemini")}
                   disabled={!!pxBusy}
@@ -1025,7 +1039,7 @@ export default function ConfiguracoesPage() {
                   {pxStatus.accounts.map((a, i) => (
                     <span key={a.name + i} className="inline-flex items-center gap-1 mr-2">
                       <CheckCircle2 className="w-3 h-3 text-green-400" />
-                      {/claude|anthropic/.test(a.provider) ? "Claude" : /gem|google/.test(a.provider) ? "Gemini" : /codex|openai|gpt/.test(a.provider) ? "ChatGPT" : a.provider || a.name}
+                      {/antigravity/.test(a.provider) ? "Antigravity" : /claude|anthropic/.test(a.provider) ? "Claude" : /gem|google/.test(a.provider) ? "Gemini" : /codex|openai|gpt/.test(a.provider) ? "ChatGPT" : a.provider || a.name}
                     </span>
                   ))}
                 </div>
