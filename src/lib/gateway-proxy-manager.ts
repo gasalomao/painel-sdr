@@ -17,6 +17,7 @@
  */
 
 import fs from "fs";
+import os from "os";
 import path from "path";
 import crypto from "crypto";
 import { spawn, execFile } from "child_process";
@@ -26,7 +27,38 @@ export const PROXY_BASE_URL = `http://127.0.0.1:${PROXY_PORT}`;
 /** baseURL OpenAI-compatible que vira a "conexão" no gateway_endpoints. */
 export const PROXY_V1_URL = `${PROXY_BASE_URL}/v1`;
 
-const DIR = path.join(process.cwd(), ".gateway-proxy");
+/**
+ * Diretório onde o conector vive (binário, config, key, logins). Escolhido em
+ * ordem de preferência, caindo pra um lugar GRAVÁVEL:
+ *   1. GATEWAY_PROXY_DIR (env) — pra apontar um volume persistente no deploy.
+ *   2. {cwd}/.gateway-proxy   — padrão; persiste se a pasta for gravável
+ *      (no Docker exige chown pro usuário não-root — ver Dockerfile).
+ *   3. {tmp}/painel-gateway-proxy — último recurso SEMPRE gravável (mas some
+ *      no restart). Evita o erro EACCES quando /app pertence ao root.
+ */
+function dirWritable(dir: string): boolean {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.accessSync(dir, fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveBaseDir(): string {
+  const candidates = [
+    process.env.GATEWAY_PROXY_DIR,
+    path.join(process.cwd(), ".gateway-proxy"),
+    path.join(os.tmpdir(), "painel-gateway-proxy"),
+  ].filter(Boolean) as string[];
+  for (const c of candidates) {
+    if (dirWritable(c)) return c;
+  }
+  return path.join(process.cwd(), ".gateway-proxy"); // deixa estourar com erro claro depois
+}
+
+const DIR = resolveBaseDir();
 const BIN_DIR = path.join(DIR, "bin");
 const CONFIG_PATH = path.join(DIR, "config.yaml");
 const KEY_PATH = path.join(DIR, "management.key");
