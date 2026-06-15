@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "context-mode": {
+      "type": "stdio",
+      "command": "context-mode",
+      "args": [],
+      "env": {}
+    }
+  }
+}

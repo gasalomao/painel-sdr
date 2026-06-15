@@ -1,0 +1,119 @@
+import { NextRequest, NextResponse } from "next/server";
+import { supabase } from "@/lib/supabase";
+import { verifySession } from "@/lib/auth";
+
+/**
+ * Escape do termo de busca pra PostgREST .or() — sem isso, vírgulas e
+ * parênteses no input do usuário viram filtros adicionais (injection).
+ * Ex: `search=foo,id.gt.0` bypassava o escopo.
+ */
+function escapeForOr(term: string): string {
+  // PostgREST trata , ( ) e * como sintaxe. Remove ou escapa.
+  return term.replace(/[,()*]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function buildFilterQuery(clientId: string, search: string | null, category: string | null) {
+  const q = supabase.from("leads_extraidos");
+  let sel: any = q.select("id, remoteJid").eq("client_id", clientId);
+  if (search) {
+    const safe = escapeForOr(search);
+    if (safe) {
+      sel = sel.or(
+        `nome_negocio.ilike.%${safe}%,ramo_negocio.ilike.%${safe}%,telefone.ilike.%${safe}%`
+      );
+    }
+  }
+  if (category && category !== "all") {
+    sel = sel.eq("ramo_negocio", category);
+  }
+  return sel;
+}
+
+export async function DELETE(req: NextRequest) {
+  const session = await verifySession(req);
+  if (!session) {
+    return NextResponse.json({ error: "Não autorizado" }, { status: 401 });
+  }
+
+  try {
+    const { searchParams } = new URL(req.url);
+    const idsParam = searchParams.get("ids");
+    const id = searchParams.get("id");
+    const mode = searchParams.get("mode"); // "lead_only" ou "all"
+    const remoteJid = searchParams.get("remoteJid");
+    const remoteJidsParam = searchParams.get("remoteJids");
+    const allMatching = searchParams.get("allMatching") === "1";
+    const search = searchParams.get("search");
+    const category = searchParams.get("category");
+
+    let ids: string[] = [];
+    let jids: string[] = [];
+
+    if (allMatching) {
+      // Busca todos os IDs (e remoteJids) que batem com os filtros atuais.
+      const pageSize = 1000;
+      let from = 0;
+      while (true) {
+        const { data, error } = await buildFilterQuery(session.clientId!, search, category).range(
+          from,
+          from + pageSize - 1
+        );
+        if (error) throw error;
+        if (!data || data.length === 0) break;
+        for (const row of data) {
+          ids.push(String(row.id));
+          if (row.remoteJid) jids.push(row.remoteJid);
+        }
+        if (data.length < pageSize) break;
+        from += pageSize;
+      }
+    } else {
+      ids = idsParam
+        ? idsParam.split(",").map((v) => v.trim()).filter(Boolean)
+        : id
+        ? [id]
+        : [];
+      jids = remoteJidsParam
+        ? remoteJidsParam.split(",").map((v) => v.trim()).filter(Boolean)
+        : remoteJid
+        ? [remoteJid]
+        : [];
+    }
+
+    if (ids.length === 0) {
+      return NextResponse.json(
+        { error: "Nenhum lead encontrado para exclusão." },
+        { status: 400 }
+      );
+    }
+
+    // Delete em chunks para evitar URLs/queries gigantes.
+    const chunkSize = 500;
+    for (let i = 0; i < ids.length; i += chunkSize) {
+      const chunk = ids.slice(i, i + chunkSize);
+      const { error: err1 } = await supabase
+        .from("leads_extraidos")
+        .delete()
+        .eq("client_id", session.clientId)
+        .in("id", chunk);
+      if (err1) throw err1;
+    }
+
+    if (mode === "all" && jids.length > 0) {
+      for (let i = 0; i < jids.length; i += chunkSize) {
+        const chunk = jids.slice(i, i + chunkSize);
+        await supabase.from("chats_dashboard").delete().eq("client_id", session.clientId).in("remote_jid", chunk);
+        await supabase
+          .from("historico_ia_leads")
+          .delete()
+          .eq("client_id", session.clientId)
+          .in("remote_jid", chunk);
+      }
+    }
+
+    return NextResponse.json({ success: true, deleted: ids.length });
+  } catch (err: any) {
+    console.error("Erro deletando lead:", err);
+    return NextResponse.json({ error: err.message }, { status: 500 });
+  }
+}
