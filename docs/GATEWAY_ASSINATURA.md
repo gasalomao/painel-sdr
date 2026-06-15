@@ -53,7 +53,7 @@ Se o painel roda num **computador/servidor próprio** (seu PC, uma VPS — não
 hospedagem serverless tipo Vercel), você não precisa instalar nada na mão:
 
 1. Vá em **Configurações → Gateway de Assinatura → "Conectar conta em 1 clique"**.
-2. Clique em **Conectar conta Gemini / Claude / ChatGPT**.
+2. Clique no provedor: **★ Antigravity** (recomendado), **Gemini**, **Claude** ou **ChatGPT**.
 3. No primeiro clique o painel **baixa, configura e liga** o conector
    (CLIProxyAPI oficial, direto do GitHub) sozinho — só a primeira vez demora
    (~1 minuto, é o download).
@@ -67,10 +67,19 @@ Quer mais de uma conta? **Repita o clique** pros outros provedores — todas
 ficam no mesmo conector, numa única conexão salva ("Conector local (painel)").
 
 > 💰 **Funciona com conta grátis?** Depende do provedor (regra deles, não do
-> painel): **Gemini = sim** — conta Google grátis já dá uma cota generosa via
-> Gemini CLI (≈60 req/min, 1.000 req/dia). **Claude** exige assinatura
-> **Pro/Max** (conta free loga mas não autoriza uso). **ChatGPT** exige
-> **Plus ou superior** (o login Codex não está disponível no plano free).
+> painel): **★ Antigravity = sim, o melhor custo-benefício** — um login com
+> conta Google libera vários modelos de graça (Gemini 3 Pro, Claude, GPT, Grok).
+> **Gemini = sim** — conta Google grátis já dá uma cota generosa via Gemini CLI
+> (≈60 req/min, 1.000 req/dia). **Claude** exige assinatura **Pro/Max** (conta
+> free loga mas não autoriza uso). **ChatGPT** exige **Plus ou superior** (o
+> login Codex não está disponível no plano free).
+
+> 🔷 **E o DeepSeek?** O DeepSeek **não tem login de conta** (não existe um
+> app/CLI oficial dele com OAuth — é limitação do DeepSeek, não do painel), então
+> ele **não aparece** no "1 clique". Mas dá pra usar **DeepSeek grátis** assim
+> mesmo: pelo card do **OpenRouter** (Configurações → OpenRouter API Key), onde os
+> modelos marcados **"★ Grátis"** (`...:free`) incluem DeepSeek e custam **R$ 0**.
+> Criar a chave do OpenRouter é grátis.
 
 Como funciona por baixo (transparência):
 

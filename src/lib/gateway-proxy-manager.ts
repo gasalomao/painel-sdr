@@ -11,7 +11,7 @@
  * Management API (https://help.router-for.me/management/api):
  *   base   GET {proxy}/v0/management/...   Authorization: Bearer <secret-key>
  *   login  GET /gemini-cli-auth-url | /anthropic-auth-url | /codex-auth-url
- *          → { status:"ok", url, state }
+ *          | /antigravity-auth-url  → { status:"ok", url, state }
  *   poll   GET /get-auth-status?state=... → { status: "wait"|"ok"|"error" }
  *   contas GET /auth-files → lista de credenciais salvas
  */
@@ -35,7 +35,7 @@ const BINPATH_PATH = path.join(DIR, "bin-path.txt");
 const LOG_PATH = path.join(DIR, "proxy.log");
 const AUTH_DIR = path.join(DIR, "auths");
 
-export type ProxyProvider = "gemini" | "claude" | "openai";
+export type ProxyProvider = "gemini" | "claude" | "openai" | "antigravity";
 
 export interface ProxyStatus {
   /** Binário baixado e config escrito por NÓS. */
@@ -309,6 +309,9 @@ const LOGIN_ENDPOINT: Record<ProxyProvider, string> = {
   gemini: "gemini-cli-auth-url",
   claude: "anthropic-auth-url",
   openai: "codex-auth-url",
+  // Antigravity = uma conta Google que libera vários modelos de graça
+  // (Gemini 3 Pro, Claude, GPT, Grok). Mesmo fluxo OAuth dos demais.
+  antigravity: "antigravity-auth-url",
 };
 
 /** Inicia o OAuth e devolve a URL pro usuário abrir + state pra acompanhar. */

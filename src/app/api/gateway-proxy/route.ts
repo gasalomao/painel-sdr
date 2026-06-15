@@ -4,7 +4,7 @@
  *   status        → instalado? rodando? contas logadas?
  *   install       → baixa o release oficial + escreve config + liga
  *   start | stop  → liga/desliga o processo
- *   login-start   → {provider: gemini|claude|openai} → URL OAuth + state
+ *   login-start   → {provider: gemini|claude|openai|antigravity} → URL OAuth + state
  *   login-status  → {state} → wait|ok|error
  *
  * Por que servidor (e não o navegador direto no proxy): evita CORS, e a
@@ -52,9 +52,9 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === "login-start") {
-      const provider = String(body.provider || "") as "gemini" | "claude" | "openai";
-      if (!["gemini", "claude", "openai"].includes(provider)) {
-        return NextResponse.json({ success: false, error: "provider deve ser gemini, claude ou openai." }, { status: 400 });
+      const provider = String(body.provider || "") as "gemini" | "claude" | "openai" | "antigravity";
+      if (!["gemini", "claude", "openai", "antigravity"].includes(provider)) {
+        return NextResponse.json({ success: false, error: "provider deve ser gemini, claude, openai ou antigravity." }, { status: 400 });
       }
       const st = await mgr.getProxyStatus();
       if (!st.running) {
