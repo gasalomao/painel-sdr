@@ -54,7 +54,9 @@ FROM node:20-alpine AS runner
 WORKDIR /app
 
 # Chromium + libs de fonte/encoding pra Puppeteer (scraper Google Maps).
-RUN apk add --no-cache chromium nss freetype harfbuzz ca-certificates ttf-freefont font-noto-emoji
+# tar + libc6-compat: o conector embutido (1 clique) extrai e roda o binário do
+# CLIProxyAPI — tar garante a extração do .tar.gz e libc6-compat a execução.
+RUN apk add --no-cache chromium nss freetype harfbuzz ca-certificates ttf-freefont font-noto-emoji tar libc6-compat
 RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
 
 ENV NODE_ENV=production \
@@ -70,6 +72,12 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static     ./.next/static
 # node_modules de produção (inclui pacotes externos não-bundleados pelo Next).
 COPY --from=builder --chown=nextjs:nodejs /app/node_modules     ./node_modules
+
+# Conector embutido (1 clique) grava aqui: binário do CLIProxyAPI, config,
+# management.key e logins (auths/). Como o app roda como `nextjs` (não-root) e
+# /app pertence ao root, sem este chown o mkdir falha com EACCES.
+# Monte um VOLUME nesta pasta no Easypanel pra os logins sobreviverem a deploys.
+RUN mkdir -p /app/.gateway-proxy && chown -R nextjs:nodejs /app/.gateway-proxy
 
 USER nextjs
 EXPOSE 3000
