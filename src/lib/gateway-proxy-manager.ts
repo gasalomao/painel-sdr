@@ -127,6 +127,17 @@ async function mgmtFetch(pathname: string, timeoutMs = 8000): Promise<Response> 
   });
 }
 
+async function mgmtPost(pathname: string, body: unknown, timeoutMs = 20000): Promise<Response> {
+  const key = getManagementKey();
+  if (!key) throw new Error("Conector não instalado pelo painel (sem management key).");
+  return fetch(`${PROXY_BASE_URL}/v0/management/${pathname}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+}
+
 export async function getProxyStatus(): Promise<ProxyStatus> {
   const installed = isInstalled();
   const running = await isPortResponding();
@@ -346,11 +357,26 @@ const LOGIN_ENDPOINT: Record<ProxyProvider, string> = {
   antigravity: "antigravity-auth-url",
 };
 
-/** Inicia o OAuth e devolve a URL pro usuário abrir + state pra acompanhar. */
+/**
+ * Nome do provedor no corpo do POST /oauth-callback (difere do nosso rótulo
+ * interno). Espelha o WebUI oficial: gemini-cli vira "gemini".
+ */
+const CALLBACK_PROVIDER: Record<ProxyProvider, string> = {
+  gemini: "gemini",
+  claude: "anthropic",
+  openai: "codex",
+  antigravity: "antigravity",
+};
+
+/**
+ * Inicia o OAuth e devolve a URL pro usuário abrir + state pra acompanhar.
+ * `is_webui=true` faz o proxy montar o forwarder de callback do modo UI — é o
+ * que o WebUI oficial usa e o que mantém o login concluível via /oauth-callback.
+ */
 export async function startLogin(provider: ProxyProvider): Promise<{ url: string; state: string }> {
   const ep = LOGIN_ENDPOINT[provider];
   if (!ep) throw new Error(`Provedor desconhecido: ${provider}`);
-  const res = await mgmtFetch(ep, 20000);
+  const res = await mgmtFetch(`${ep}?is_webui=true`, 20000);
   const json: any = await res.json().catch(() => ({}));
   if (!res.ok || !json?.url) {
     throw new Error(json?.error || json?.message || `Conector respondeu ${res.status} ao iniciar o login.`);
@@ -367,17 +393,21 @@ export async function getLoginStatus(state: string): Promise<{ status: string; e
 
 /**
  * Conclui um login OAuth quando o NAVEGADOR do usuário não alcança o listener
- * do proxy. O provedor sempre redireciona pra http://localhost:PORTA/...
- * (Codex 1455, Gemini 8085, Claude 54545) — "localhost" da máquina DO PAINEL.
- * Se o painel roda numa VPS/Docker, a aba do usuário dá ERR_CONNECTION_REFUSED
- * e o código de autorização fica preso na URL. O usuário cola essa URL no
- * painel e esta função a reproduz server-side contra 127.0.0.1, onde o
- * listener realmente está — entregando o código e concluindo o login.
+ * do proxy. O provedor redireciona pra http://localhost:PORTA/... (Codex 1455,
+ * Gemini 8085, Claude 54545) — "localhost" da máquina DO PAINEL. Numa VPS/Docker
+ * a aba do usuário dá ERR_CONNECTION_REFUSED e o código fica preso na URL.
+ *
+ * Caminho ROBUSTO (igual ao WebUI oficial): entrega a URL inteira ao endpoint
+ * estável `POST /v0/management/oauth-callback` (porta de gerenciamento 8317),
+ * que extrai code+state e finaliza o login. NÃO depende do ouvinte efêmero da
+ * porta do OAuth, que expira rápido. Fallback (proxy antigo sem esse endpoint):
+ * reproduz a URL direto no 127.0.0.1:PORTA.
  */
-export async function completeLoginCallback(redirectUrl: string): Promise<void> {
+export async function completeLoginCallback(redirectUrl: string, provider?: ProxyProvider): Promise<void> {
+  const url = String(redirectUrl).trim();
   let u: URL;
   try {
-    u = new URL(String(redirectUrl).trim());
+    u = new URL(url);
   } catch {
     throw new Error('URL inválida. Cole a URL INTEIRA da aba do login (começa com "http://localhost:...").');
   }
@@ -386,20 +416,42 @@ export async function completeLoginCallback(redirectUrl: string): Promise<void> 
   const looksLikeOauthCallback = u.pathname.toLowerCase().includes("callback") && u.searchParams.has("code");
   if (!isLocalHost || !looksLikeOauthCallback || !Number.isFinite(port) || port < 1024 || port > 65535) {
     throw new Error(
-      "Essa não parece a URL de callback do login (esperado algo como http://localhost:1455/auth/callback?code=...&state=...)."
+      "Essa não parece a URL de callback do login (esperado algo como http://localhost:8085/oauth2callback?state=...&code=...)."
     );
   }
+
+  // 1) Caminho robusto: POST /oauth-callback na management API (estável).
+  const cbProvider = provider ? CALLBACK_PROVIDER[provider] : undefined;
+  let postErr: string | null = null;
+  if (cbProvider) {
+    try {
+      const res = await mgmtPost("oauth-callback", { provider: cbProvider, redirect_url: url });
+      if (res.ok) return; // login concluído
+      const txt = (await res.text().catch(() => "")).slice(0, 200);
+      // 404/405 = proxy não tem o endpoint → tenta o fallback abaixo.
+      if (res.status !== 404 && res.status !== 405) {
+        throw new Error(`O conector recusou o login (HTTP ${res.status}${txt ? ` — ${txt}` : ""}).`);
+      }
+      postErr = `HTTP ${res.status}`;
+    } catch (e: any) {
+      // erro de rede/timeout no POST → tenta o fallback efêmero.
+      postErr = e?.message || String(e);
+    }
+  }
+
+  // 2) Fallback: reproduz a URL no ouvinte efêmero do servidor (127.0.0.1:PORTA).
   const target = `http://127.0.0.1:${port}${u.pathname}${u.search}`;
-  let res: Response;
   try {
-    res = await fetch(target, { signal: AbortSignal.timeout(20000), redirect: "manual" });
-  } catch {
+    const res = await fetch(target, { signal: AbortSignal.timeout(20000), redirect: "manual" });
+    if (res.status >= 400) {
+      const body = (await res.text().catch(() => "")).slice(0, 160);
+      throw new Error(`O conector recusou o callback (HTTP ${res.status}${body ? ` — ${body}` : ""}).`);
+    }
+  } catch (e: any) {
     throw new Error(
-      'O conector não está mais esperando esse login (o link expira rápido). Clique em "Conectar conta" de novo, faça o login e cole a nova URL logo em seguida.'
+      'Não consegui concluir o login (o conector pode ter expirado o pedido' +
+        (postErr ? `; oauth-callback: ${postErr}` : "") +
+        '). Clique em "Conectar conta" de novo, faça o login e copie a URL logo em seguida.'
     );
-  }
-  if (res.status >= 400) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`O conector recusou o callback (HTTP ${res.status}${body ? ` — ${body.slice(0, 160)}` : ""}). Tente o login de novo.`);
   }
 }
