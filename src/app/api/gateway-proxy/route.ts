@@ -79,10 +79,14 @@ export async function POST(req: NextRequest) {
 
     if (action === "login-callback") {
       // O navegador do usuário não alcança o localhost DO SERVIDOR — ele cola a
-      // URL de callback aqui e nós a entregamos ao listener local do proxy.
+      // URL de callback aqui e nós a entregamos à management API do proxy.
       const url = String(body.url || "");
       if (!url) return NextResponse.json({ success: false, error: "url obrigatória." }, { status: 400 });
-      await mgr.completeLoginCallback(url);
+      const rawProvider = String(body.provider || "");
+      const provider = ["gemini", "claude", "openai", "antigravity"].includes(rawProvider)
+        ? (rawProvider as "gemini" | "claude" | "openai" | "antigravity")
+        : undefined;
+      await mgr.completeLoginCallback(url, provider);
       return NextResponse.json({ success: true });
     }
 

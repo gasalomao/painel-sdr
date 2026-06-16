@@ -615,7 +615,8 @@ export default function ConfiguracoesPage() {
     if (!url) return false;
     setPxError(null);
     try {
-      await pxCall({ action: "login-callback", url });
+      // provider ativo → o conector usa o endpoint /oauth-callback certo.
+      await pxCall({ action: "login-callback", url, provider: pxLogin?.provider });
       setPxCallbackUrl("");
       return true;
     } catch (e: any) {
