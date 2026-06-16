@@ -64,6 +64,8 @@ export default function ConfiguracoesPage() {
   const [pxError, setPxError] = useState<string | null>(null);
   const [pxCallbackUrl, setPxCallbackUrl] = useState("");
   const pxCancelRef = useRef(false);
+  // Última URL de callback já enviada — evita reenviar a mesma do clipboard.
+  const pxLastClipRef = useRef("");
 
   // Evolution API (troca de VPS sem rebuild — credenciais persistidas em app_settings)
   const [evoUrl, setEvoUrl]             = useState("");
@@ -594,23 +596,93 @@ export default function ConfiguracoesPage() {
     }
   }
 
+  /** Reconhece uma URL de callback OAuth (localhost:porta/...?code=...). */
+  function looksLikeCallbackUrl(s: string): boolean {
+    const t = (s || "").trim();
+    return (
+      /^https?:\/\/(localhost|127\.0\.0\.1):\d+\/\S*[?&]code=/i.test(t) ||
+      /(oauth2?callback|auth\/callback)\S*[?&]code=/i.test(t)
+    );
+  }
+
   /**
-   * Painel rodando em VPS/Docker: o provedor redireciona pra localhost:PORTA,
-   * que só existe NO SERVIDOR — a aba do usuário dá "recusou a conexão" e o
-   * código fica na URL. O usuário cola a URL aqui; o servidor a entrega ao
-   * conector e o poll do handleConnectAccount detecta o "ok" em seguida.
+   * Entrega a URL de callback ao servidor, que repassa ao conector (localhost
+   * do servidor). Compartilhado pelo botão manual, pelo "colar do clipboard" e
+   * pela detecção automática. Retorna true se deu certo.
    */
-  async function handlePxCallbackPaste() {
-    const url = pxCallbackUrl.trim();
-    if (!url) return;
+  async function submitCallbackUrl(rawUrl: string): Promise<boolean> {
+    const url = (rawUrl || "").trim();
+    if (!url) return false;
     setPxError(null);
     try {
       await pxCall({ action: "login-callback", url });
       setPxCallbackUrl("");
+      return true;
     } catch (e: any) {
       setPxError(e.message);
+      return false;
     }
   }
+
+  /** Botão "Concluir login" (campo de texto manual — último recurso). */
+  async function handlePxCallbackPaste() {
+    await submitCallbackUrl(pxCallbackUrl);
+  }
+
+  /** Botão "Colar do clipboard" — 1 clique, sem digitar (gesto = permissão). */
+  async function handlePxPasteFromClipboard() {
+    let text = "";
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      setPxError("Não consegui ler o clipboard. Cole a URL no campo abaixo e clique em Concluir login.");
+      return;
+    }
+    if (!looksLikeCallbackUrl(text)) {
+      setPxError('O que está copiado não parece a URL do login (precisa ter "code="). Copie a URL inteira da aba que deu erro.');
+      setPxCallbackUrl(text.trim());
+      return;
+    }
+    pxLastClipRef.current = text.trim();
+    await submitCallbackUrl(text);
+  }
+
+  /**
+   * Detecção AUTOMÁTICA: enquanto espera o login, sempre que o painel ganhar
+   * foco (você volta da aba de erro) ou a cada 1,5s, lê o clipboard e, se for a
+   * URL de callback, conclui sozinho — você só precisa COPIAR a URL (Ctrl+C).
+   * Best-effort: se o navegador bloquear a leitura, o botão/campo manual valem.
+   */
+  useEffect(() => {
+    if (!pxLogin) return;
+    let stopped = false;
+    async function check() {
+      if (stopped || typeof document === "undefined" || document.visibilityState !== "visible") return;
+      let text = "";
+      try {
+        text = await navigator.clipboard.readText();
+      } catch {
+        return; // sem permissão/foco — silencioso
+      }
+      text = (text || "").trim();
+      if (!text || text === pxLastClipRef.current || !looksLikeCallbackUrl(text)) return;
+      pxLastClipRef.current = text;
+      const ok = await submitCallbackUrl(text);
+      if (!ok) pxLastClipRef.current = ""; // permite nova tentativa
+    }
+    const onFocus = () => { void check(); };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    const iv = setInterval(() => void check(), 1500);
+    void check();
+    return () => {
+      stopped = true;
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+      clearInterval(iv);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pxLogin]);
 
   async function handleSave() {
     if (!apiKey.trim()) {
@@ -971,29 +1043,39 @@ export default function ConfiguracoesPage() {
                 </Button>
               </div>
 
-              {/* Login em andamento — link manual caso o popup seja bloqueado */}
+              {/* Login em andamento — detecção automática do clipboard */}
               {pxLogin && (
                 <div className="flex items-start gap-2 p-3 rounded-xl border border-blue-500/30 bg-blue-500/10 text-blue-100 text-[11px]">
                   <Loader2 className="w-4 h-4 shrink-0 animate-spin mt-0.5" />
                   <div className="space-y-2 flex-1 min-w-0">
                     <p className="font-bold">Esperando você concluir o login na outra aba…</p>
-                    <p className="opacity-80">
-                      Não abriu? <a href={pxLogin.url} target="_blank" rel="noopener noreferrer" className="underline font-bold text-blue-300">Clique aqui pra abrir a página de login</a>.
-                      {" "}Depois de logar, volte aqui — o painel detecta e salva sozinho.
-                    </p>
-                    <div className="rounded-lg border border-blue-400/30 bg-blue-500/10 p-2 space-y-1.5">
-                      <p className="font-bold">
-                        A aba terminou em erro “localhost recusou a conexão” (ERR_CONNECTION_REFUSED)? É normal — falta 1 passo:
-                      </p>
-                      <p className="opacity-80">
-                        Copie a <strong>URL inteira</strong> da barra de endereço daquela aba (começa com{" "}
-                        <span className="font-mono">http://localhost:…</span> e tem <span className="font-mono">code=</span>) e cole aqui:
-                      </p>
-                      <div className="flex gap-2">
+                    <div className="rounded-lg border border-blue-400/30 bg-blue-500/10 p-2.5 space-y-1.5">
+                      <p className="font-bold text-blue-50">Faça assim (sem digitar nada):</p>
+                      <ol className="list-decimal pl-4 space-y-0.5 opacity-90">
+                        <li>Faça o login na aba que abriu. <a href={pxLogin.url} target="_blank" rel="noopener noreferrer" className="underline font-bold text-blue-300">Não abriu? Clique aqui.</a></li>
+                        <li>Vai cair numa tela de erro <strong>“localhost recusou a conexão”</strong> — <strong>isso é normal</strong>.</li>
+                        <li>Nessa aba, clique na barra de endereço, selecione tudo e <strong>copie</strong> (Ctrl+L, depois Ctrl+C).</li>
+                        <li><strong>Volte para esta aba</strong> — o painel detecta a URL copiada e <strong>conclui sozinho</strong>. ✨</li>
+                      </ol>
+                      <div className="flex flex-wrap items-center gap-2 pt-1">
+                        <Button
+                          onClick={handlePxPasteFromClipboard}
+                          size="sm"
+                          className="h-8 text-[10px] font-black bg-blue-500/40 text-blue-50 border border-blue-400/60 hover:bg-blue-500/60 gap-1.5"
+                        >
+                          <Copy className="w-3.5 h-3.5" /> Colar do clipboard e concluir
+                        </Button>
+                        <span className="text-[10px] opacity-70">não concluiu sozinho? clique aqui depois de copiar</span>
+                      </div>
+                    </div>
+                    {/* Fallback manual — só se a leitura do clipboard for bloqueada */}
+                    <details className="text-[10px] opacity-80">
+                      <summary className="cursor-pointer select-none underline">Colar a URL na mão (se nada acima funcionar)</summary>
+                      <div className="flex gap-2 mt-1.5">
                         <Input
                           value={pxCallbackUrl}
                           onChange={(e) => setPxCallbackUrl(e.target.value)}
-                          placeholder="http://localhost:1455/auth/callback?code=...&state=..."
+                          placeholder="http://localhost:8085/oauth2callback?state=...&code=..."
                           className="h-8 bg-black/30 border-blue-400/30 text-[10px] font-mono text-white placeholder:text-white/30"
                         />
                         <Button
@@ -1005,7 +1087,7 @@ export default function ConfiguracoesPage() {
                           Concluir login
                         </Button>
                       </div>
-                    </div>
+                    </details>
                     <button
                       onClick={() => { pxCancelRef.current = true; }}
                       className="text-[10px] underline opacity-70 hover:opacity-100"
