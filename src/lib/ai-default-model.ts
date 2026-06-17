@@ -32,12 +32,13 @@ import { providerOf } from "@/lib/ai-provider";
  * a lista real (sem await). Só normaliza prefixo "models/" e devolve trimmed.
  * Para validação real contra o que a Google publica AGORA, use `mapModelAsync`.
  */
+// Modelos OpenRouter/Gateway passam intactos — não são Gemini.
 export function mapModel(model: string | null | undefined): string | null {
   if (!model) return null;
   const trimmed = model.trim();
   if (!trimmed) return null;
-  // Modelos OpenRouter (prefixo "openrouter:") passam intactos — não são Gemini.
-  if (providerOf(trimmed) === "openrouter") return trimmed;
+  const provider = providerOf(trimmed);
+  if (provider === "openrouter" || provider === "gateway") return trimmed;
   return trimmed.toLowerCase().startsWith("models/") ? trimmed.substring(7) : trimmed;
 }
 
@@ -53,9 +54,9 @@ export async function mapModelAsync(model: string | null | undefined): Promise<s
   const normalized = mapModel(model);
   if (!normalized) return null;
 
-  // OpenRouter: não validamos contra a lista Gemini — devolve o ref como está.
-  // (A descoberta/validação do OpenRouter é feita no seletor e na própria chamada.)
-  if (providerOf(normalized) === "openrouter") return normalized;
+  // OpenRouter/Gateway: não validamos contra a lista Gemini — devolve o ref como está.
+  const provider = providerOf(normalized);
+  if (provider === "openrouter" || provider === "gateway") return normalized;
 
   const available = await listAvailableGeminiModels();
   // Sem descoberta possível (API key vazia ou Google fora) — devolve o pedido

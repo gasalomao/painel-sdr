@@ -77,6 +77,42 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: true, ...r, v1Url: mgr.PROXY_V1_URL });
     }
 
+    if (action === "rename-account") {
+      // Define o apelido (label) de uma conta logada. Persistido em sidecar no
+      // disco — não toca no Supabase. O nome é o filename retornado por status.
+      const name = String(body.name || "");
+      const label = String(body.label || "");
+      if (!name) return NextResponse.json({ success: false, error: "name obrigatório." }, { status: 400 });
+      mgr.renameAccount(name, label);
+      return NextResponse.json({ success: true, status: await mgr.getProxyStatus() });
+    }
+
+    if (action === "delete-account") {
+      // Remove a conta do conector: apaga o auth file + o sidecar de metadado.
+      // O proxy detecta a remoção no próximo ciclo de varredura do auth-dir.
+      const name = String(body.name || "");
+      if (!name) return NextResponse.json({ success: false, error: "name obrigatório." }, { status: 400 });
+      mgr.deleteAccount(name);
+      return NextResponse.json({ success: true, status: await mgr.getProxyStatus() });
+    }
+
+    if (action === "pause-account") {
+      // Move o arquivo OAuth pra auths-paused/ — o proxy para de rotacionar pra
+      // essa conta SEM perder o login. Anti-banimento real (descansa a conta).
+      const name = String(body.name || "");
+      if (!name) return NextResponse.json({ success: false, error: "name obrigatório." }, { status: 400 });
+      mgr.pauseAccount(name);
+      return NextResponse.json({ success: true, status: await mgr.getProxyStatus() });
+    }
+
+    if (action === "resume-account") {
+      // Move o arquivo de auths-paused/ de volta pra auths/ — volta pra rotação.
+      const name = String(body.name || "");
+      if (!name) return NextResponse.json({ success: false, error: "name obrigatório." }, { status: 400 });
+      mgr.resumeAccount(name);
+      return NextResponse.json({ success: true, status: await mgr.getProxyStatus() });
+    }
+
     if (action === "login-callback") {
       // O navegador do usuário não alcança o localhost DO SERVIDOR — ele cola a
       // URL de callback aqui e nós a entregamos à management API do proxy.

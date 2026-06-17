@@ -71,3 +71,8 @@ scratch/
 # Conector embutido de assinaturas (CLIProxyAPI gerenciado pelo painel):
 # binário + config + management.key + logins das contas (auths/) — NUNCA versionar
 .gateway-proxy/
+
+# DeepSeek local session tokens and cache files — NUNCA versionar
+.deepseek-chat/
+*.bak
+

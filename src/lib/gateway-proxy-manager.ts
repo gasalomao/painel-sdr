@@ -66,8 +66,34 @@ const PID_PATH = path.join(DIR, "proxy.pid");
 const BINPATH_PATH = path.join(DIR, "bin-path.txt");
 const LOG_PATH = path.join(DIR, "proxy.log");
 const AUTH_DIR = path.join(DIR, "auths");
+// Sidecar irmão do auths/ — guarda APELIDO + provider canônico + createdAt.
+// Fica FORA do auth-dir do proxy de propósito: o proxy não escaneia esta pasta,
+// então não há risco do JSON de metadado ser confundido com uma credencial.
+const AUTH_META_DIR = path.join(DIR, "auth-meta");
+// "Estacionamento" pra contas pausadas — fica fora do auth-dir, então o proxy
+// para de usá-las na rotação SEM perder o login. Retomar = mover de volta.
+const AUTH_PAUSED_DIR = path.join(DIR, "auths-paused");
 
 export type ProxyProvider = "gemini" | "claude" | "openai" | "antigravity";
+
+/**
+ * Conta logada no conector. `name` é o NOME DO ARQUIVO em auths/ (chave única —
+ * o que a Management API devolve), `provider` é o rótulo canônico que a UI usa
+ * pra agrupar/colorir ("gemini"|"claude"|"openai"|"antigravity"|...), `email` é
+ * extraído do nome do arquivo quando dá (pra UI mostrar algo amigável), e
+ * `label` é o APELIDO que o usuário pôs (vindo do sidecar de metadados — pode
+ * ser vazio).
+ */
+export interface ProxyAccount {
+  name: string;
+  provider: string;
+  email?: string;
+  label?: string;
+  createdAt?: string;
+  status?: string;
+  /** true = arquivo movido pra auths-paused/; o proxy não a usa. */
+  paused?: boolean;
+}
 
 export interface ProxyStatus {
   /** Binário baixado e config escrito por NÓS. */
@@ -79,7 +105,7 @@ export interface ProxyStatus {
   baseUrl: string;
   v1Url: string;
   /** Contas logadas no conector (auth-files), quando managementReady. */
-  accounts: { name: string; provider: string; status?: string }[];
+  accounts: ProxyAccount[];
 }
 
 // ---------------------------------------------------------------------------
@@ -150,20 +176,201 @@ export async function getProxyStatus(): Promise<ProxyStatus> {
       if (res.ok) accounts = await parseAccounts(res);
     } catch { /* porta aberta mas management indisponível */ }
   }
+  // Contas pausadas vivem fora do auth-dir, então a Management API NÃO as vê.
+  // Listamos diretamente do FS pra UI mostrar e oferecer "Retomar".
+  accounts = [...accounts, ...listPausedAccounts()];
   return { installed, running, managementReady, baseUrl: PROXY_BASE_URL, v1Url: PROXY_V1_URL, accounts };
 }
 
-async function parseAccounts(res: Response): Promise<ProxyStatus["accounts"]> {
+/**
+ * Mapeia o `provider` cru (do auth-file ou inferido pelo nome) pro rótulo
+ * canônico que a UI conhece. Mantém compatibilidade com proxies que devolvem
+ * tipos diferentes ("anthropic" vs "claude", "codex" vs "openai", etc).
+ */
+function canonicalProvider(raw: string, fileName: string): string {
+  const s = (raw || "").toLowerCase();
+  const f = (fileName || "").toLowerCase();
+  if (/antigravity/.test(s) || /antigravity/.test(f)) return "antigravity";
+  if (/claude|anthropic/.test(s) || /claude|anthropic/.test(f)) return "claude";
+  if (/gem|google|gcp/.test(s) || /gem|google/.test(f)) return "gemini";
+  if (/codex|openai|gpt|chatgpt/.test(s) || /codex|openai|gpt/.test(f)) return "openai";
+  return s || "other";
+}
+
+/** Extrai um email do nome do arquivo, se houver (formato comum: `<provider>-<email>-<suffix>.json`). */
+function extractEmail(fileName: string): string | undefined {
+  const m = (fileName || "").match(/[\w.+-]+@[\w-]+\.[\w.-]+/);
+  return m?.[0];
+}
+
+async function parseAccounts(res: Response): Promise<ProxyAccount[]> {
   const json: any = await res.json().catch(() => null);
   const arr: any[] = Array.isArray(json) ? json
     : Array.isArray(json?.files) ? json.files
     : Array.isArray(json?.data) ? json.data
     : Array.isArray(json?.auth_files) ? json.auth_files : [];
-  return arr.map((f: any) => ({
-    name: String(f?.name ?? f?.file ?? ""),
-    provider: String(f?.provider ?? f?.type ?? "").toLowerCase(),
-    status: f?.status ? String(f.status) : undefined,
-  })).filter((f) => f.name);
+  return arr
+    .map((f: any) => {
+      const name = String(f?.name ?? f?.file ?? "");
+      const rawProvider = String(f?.provider ?? f?.type ?? "");
+      const provider = canonicalProvider(rawProvider, name);
+      const meta = readAccountMeta(name);
+      return {
+        name,
+        provider,
+        email: extractEmail(name),
+        label: meta?.label,
+        createdAt: meta?.createdAt,
+        status: f?.status ? String(f.status) : undefined,
+      } satisfies ProxyAccount;
+    })
+    .filter((f) => f.name);
+}
+
+// ---------------------------------------------------------------------------
+// Metadados das contas (apelido, criado-em) — sidecar fora do auth-dir
+// ---------------------------------------------------------------------------
+
+interface AccountMeta {
+  label?: string;
+  createdAt?: string;
+}
+
+/**
+ * Sanitiza o nome de arquivo recebido da UI/Management API ANTES de virar
+ * caminho — bloqueia path traversal (`..`, `/`, `\\`) e qualquer separador. Usa
+ * só o basename. Retorna `null` se sobrar algo suspeito.
+ */
+function safeAuthName(raw: string): string | null {
+  const s = String(raw || "");
+  if (!s) return null;
+  const base = path.basename(s);
+  if (!base || base.includes("..") || base.includes("/") || base.includes("\\")) return null;
+  if (!/^[\w.@+\-]+$/.test(base)) return null;
+  return base;
+}
+
+function metaPath(name: string): string | null {
+  const safe = safeAuthName(name);
+  if (!safe) return null;
+  return path.join(AUTH_META_DIR, `${safe}.json`);
+}
+
+function readAccountMeta(name: string): AccountMeta | null {
+  const p = metaPath(name);
+  if (!p) return null;
+  try {
+    const raw = fs.readFileSync(p, "utf8");
+    const j = JSON.parse(raw);
+    return {
+      label: typeof j?.label === "string" ? j.label : undefined,
+      createdAt: typeof j?.createdAt === "string" ? j.createdAt : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeAccountMeta(name: string, patch: AccountMeta): void {
+  const p = metaPath(name);
+  if (!p) throw new Error("Nome de conta inválido.");
+  fs.mkdirSync(AUTH_META_DIR, { recursive: true });
+  const current = readAccountMeta(name) || {};
+  const next: AccountMeta = {
+    label: patch.label !== undefined ? patch.label : current.label,
+    createdAt: current.createdAt || patch.createdAt || new Date().toISOString(),
+  };
+  fs.writeFileSync(p, JSON.stringify(next, null, 2), "utf8");
+}
+
+function deleteAccountMeta(name: string): void {
+  const p = metaPath(name);
+  if (!p) return;
+  try { fs.unlinkSync(p); } catch { /* não-fatal */ }
+}
+
+/**
+ * Define/atualiza o APELIDO de uma conta logada. Valida que o auth file existe
+ * antes de gravar metadado órfão.
+ */
+export function renameAccount(name: string, label: string): void {
+  const safe = safeAuthName(name);
+  if (!safe) throw new Error("Nome de conta inválido.");
+  const authFile = path.join(AUTH_DIR, safe);
+  if (!fs.existsSync(authFile)) throw new Error("Conta não encontrada no conector.");
+  const trimmed = String(label || "").slice(0, 60).trim();
+  writeAccountMeta(safe, { label: trimmed });
+}
+
+/**
+ * Remove uma conta logada — apaga o arquivo OAuth em auths/ e o sidecar de
+ * metadado. O proxy detecta a remoção no próximo reload do diretório. Caso o
+ * proxy esteja em uso, o pior cenário é que a próxima request use outra conta
+ * logada do mesmo provedor (a rotação interna).
+ */
+export function deleteAccount(name: string): void {
+  const safe = safeAuthName(name);
+  if (!safe) throw new Error("Nome de conta inválido.");
+  // Remove esteja ela ATIVA (auths/) ou PAUSADA (auths-paused/).
+  const activeFile = path.join(AUTH_DIR, safe);
+  const pausedFile = path.join(AUTH_PAUSED_DIR, safe);
+  let removed = false;
+  if (fs.existsSync(activeFile)) { fs.unlinkSync(activeFile); removed = true; }
+  if (fs.existsSync(pausedFile)) { fs.unlinkSync(pausedFile); removed = true; }
+  if (!removed) throw new Error("Conta não encontrada no conector.");
+  deleteAccountMeta(safe);
+}
+
+/**
+ * "Estaciona" uma conta — move o arquivo OAuth pra `auths-paused/`. O proxy
+ * deixa de rotacionar pra ela na próxima varredura, mas o login fica salvo.
+ * Pra retomar, basta chamar `resumeAccount`. Útil quando a conta começou a dar
+ * 429 e o usuário quer "descansar" sem perder o login.
+ */
+export function pauseAccount(name: string): void {
+  const safe = safeAuthName(name);
+  if (!safe) throw new Error("Nome de conta inválido.");
+  const src = path.join(AUTH_DIR, safe);
+  if (!fs.existsSync(src)) throw new Error("Conta não está ativa (já pausada ou inexistente).");
+  fs.mkdirSync(AUTH_PAUSED_DIR, { recursive: true });
+  const dst = path.join(AUTH_PAUSED_DIR, safe);
+  fs.renameSync(src, dst);
+}
+
+/** Move a conta pausada de volta pra rotação. */
+export function resumeAccount(name: string): void {
+  const safe = safeAuthName(name);
+  if (!safe) throw new Error("Nome de conta inválido.");
+  const src = path.join(AUTH_PAUSED_DIR, safe);
+  if (!fs.existsSync(src)) throw new Error("Conta pausada não encontrada.");
+  fs.mkdirSync(AUTH_DIR, { recursive: true });
+  const dst = path.join(AUTH_DIR, safe);
+  if (fs.existsSync(dst)) throw new Error("Já existe uma conta ativa com o mesmo nome.");
+  fs.renameSync(src, dst);
+}
+
+/**
+ * Lista as contas atualmente em `auths-paused/` (que a Management API NÃO vê).
+ * Faz o mesmo enriquecimento de `parseAccounts` (provider canônico + meta +
+ * email do nome) e marca `paused: true`. Tolerante a pasta inexistente.
+ */
+function listPausedAccounts(): ProxyAccount[] {
+  let entries: string[] = [];
+  try { entries = fs.readdirSync(AUTH_PAUSED_DIR); } catch { return []; }
+  return entries
+    .filter((n) => /\.json$/i.test(n))
+    .map((name) => {
+      const provider = canonicalProvider("", name);
+      const meta = readAccountMeta(name);
+      return {
+        name,
+        provider,
+        email: extractEmail(name),
+        label: meta?.label,
+        createdAt: meta?.createdAt,
+        paused: true,
+      } satisfies ProxyAccount;
+    });
 }
 
 // ---------------------------------------------------------------------------
