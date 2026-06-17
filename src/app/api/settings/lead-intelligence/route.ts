@@ -10,6 +10,8 @@ import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
 import { listAvailableOpenRouterModels } from "@/lib/openrouter-model-discovery";
 import { formatModelRef } from "@/lib/ai-provider";
+import { listAvailableGatewayModels } from "@/lib/gateway-model-discovery";
+import { parseGatewayEndpoints } from "@/lib/ai-keys";
 
 export const dynamic = "force-dynamic";
 
@@ -19,15 +21,24 @@ const KEY = "lead_intelligence_model";
 // isso ficava preso na versão antiga quando o admin não trocava.
 const DEFAULT_MODEL = "";
 
-type ModelOpt = { id: string; rawId: string; name: string; description?: string; provider: "gemini" | "openrouter"; supportsTools: boolean };
+type ModelOpt = { id: string; rawId: string; name: string; description?: string; provider: "gemini" | "openrouter" | "gateway"; supportsTools: boolean };
 
-// Lista unificada Gemini + OpenRouter (mesma fonte do /api/ai-models).
+// Lista unificada Gemini + OpenRouter + Gateway (mesma fonte do /api/ai-models).
 async function listAllModels(): Promise<ModelOpt[]> {
   const { data: cfg } = await supabaseAdmin
-    .from("ai_organizer_config").select("api_key, openrouter_api_key").eq("id", 1).maybeSingle();
+    .from("ai_organizer_config")
+    .select("api_key, openrouter_api_key, gateway_base_url, gateway_api_key, gateway_endpoints")
+    .eq("id", 1)
+    .maybeSingle();
+
   const geminiKey = cfg?.api_key && String(cfg.api_key).trim() ? String(cfg.api_key).trim() : null;
   const openrouterKey = (cfg as any)?.openrouter_api_key && String((cfg as any).openrouter_api_key).trim()
     ? String((cfg as any).openrouter_api_key).trim() : null;
+  const gatewayConfigured = parseGatewayEndpoints(
+    (cfg as any)?.gateway_endpoints,
+    (cfg as any)?.gateway_base_url || null,
+    (cfg as any)?.gateway_api_key || null,
+  ).length > 0;
 
   const geminiP: Promise<ModelOpt[]> = (async () => {
     if (!geminiKey) return [];
@@ -55,8 +66,25 @@ async function listAllModels(): Promise<ModelOpt[]> {
       })))
     : Promise.resolve([]);
 
-  const [g, o] = await Promise.all([geminiP, orP]);
-  return [...g, ...o];
+  const gwP: Promise<ModelOpt[]> = gatewayConfigured
+    ? listAvailableGatewayModels().then(list => {
+        const multi = new Set(list.map((m) => m.endpointId)).size > 1;
+        return list.map((m): ModelOpt => ({
+          id: formatModelRef("gateway", m.id),
+          rawId: m.id,
+          name: m.name,
+          description: [
+            m.ownedBy ? `Conta/assinatura · ${m.ownedBy}` : "Conta/assinatura",
+            multi && m.endpointLabel ? m.endpointLabel : null,
+          ].filter(Boolean).join(" · "),
+          provider: "gateway",
+          supportsTools: m.supportsTools,
+        }));
+      })
+    : Promise.resolve([]);
+
+  const [g, o, gw] = await Promise.all([geminiP, orP, gwP]);
+  return [...g, ...o, ...gw];
 }
 
 export async function GET() {

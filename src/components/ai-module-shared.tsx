@@ -6,6 +6,13 @@ import { Bot, ChevronDown, Loader2, Sparkles, Search, Wrench } from "lucide-reac
 import { cn } from "@/lib/utils";
 import { useMemo, useState } from "react";
 import { useAiModels } from "@/hooks/use-ai-models";
+import {
+  useGatewayAccounts,
+  accountsForFamily,
+  accountsLabelSnippet,
+  accountFriendlyName,
+  type GatewayAccount,
+} from "@/hooks/use-gateway-accounts";
 import { groupModels, type GroupableModel } from "@/lib/model-grouping";
 
 interface AIModelSelectProps {
@@ -38,6 +45,7 @@ export function AIModelSelect({ value, onChange, label = "Modelo IA", compact = 
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const { models, loading, error } = useAiModels();
+  const accounts = useGatewayAccounts();
 
   const currentModel = models.find(m => m.id === value);
   const providerName = currentModel?.provider ? PROVIDER_LABEL[currentModel.provider] : "";
@@ -115,16 +123,37 @@ export function AIModelSelect({ value, onChange, label = "Modelo IA", compact = 
                     {PROVIDER_LABEL[group.provider] || group.provider} · {groupCount}
                   </span>
                 </div>
-                {group.subgroups.map(sub => (
+                {group.subgroups.map(sub => {
+                  // Contas conectadas que atendem esta família (só Gateway).
+                  const familyAccounts: GatewayAccount[] = group.provider === "gateway"
+                    ? accountsForFamily(accounts, sub.label)
+                    : [];
+                  return (
                   <div key={sub.label || "_"}>
                     {sub.label && (
-                      <div className="px-3 py-1 bg-secondary/10 flex items-center gap-1.5">
+                      <div className="px-3 py-1 bg-secondary/10 flex items-center gap-1.5 flex-wrap">
                         <span className={cn(
                           "text-[9px] font-bold uppercase tracking-wider",
                           sub.label === "Grátis" ? "text-green-400" : "text-muted-foreground/80"
                         )}>
                           {sub.label === "Grátis" ? "★ Grátis" : sub.label} · {sub.items.length}
                         </span>
+                        {familyAccounts.length > 0 && (
+                          <span className="inline-flex items-center gap-1 flex-wrap">
+                            <span className="text-[9px] text-emerald-400/80 font-bold">
+                              ↳ {familyAccounts.length === 1 ? "conta:" : `${familyAccounts.length} contas (rotacionam):`}
+                            </span>
+                            {familyAccounts.map((a) => (
+                              <Badge
+                                key={a.name}
+                                title={a.email || a.name}
+                                className="bg-emerald-500/15 text-emerald-100 border border-emerald-500/30 text-[9px] font-bold px-1.5 py-0 h-4"
+                              >
+                                {accountFriendlyName(a)}
+                              </Badge>
+                            ))}
+                          </span>
+                        )}
                       </div>
                     )}
                     {sub.items.map(model => {
@@ -154,7 +183,8 @@ export function AIModelSelect({ value, onChange, label = "Modelo IA", compact = 
                       );
                     })}
                   </div>
-                ))}
+                  );
+                })}
               </div>
               );
             })}
@@ -172,13 +202,24 @@ export function AIModelSelect({ value, onChange, label = "Modelo IA", compact = 
  */
 export function ModelOptions({ models, markNoTools = false }: { models: GroupableModel[]; markNoTools?: boolean }) {
   const groups = groupModels(models);
+  // Apelidos das contas conectadas ao conector local — só usado pra rotular os
+  // subgrupos do Gateway. Vazio pra não-admin (a API responde 403 e o hook só
+  // retorna []), e nesse caso o seletor renderiza igual a antes.
+  const accounts = useGatewayAccounts();
   return (
     <>
       {groups.map(group =>
-        group.subgroups.map(sub => (
+        group.subgroups.map(sub => {
+          const familyAccounts = group.provider === "gateway"
+            ? accountsForFamily(accounts, sub.label)
+            : [];
+          const apelidosTag = familyAccounts.length
+            ? ` — ${accountsLabelSnippet(familyAccounts)}`
+            : "";
+          return (
           <optgroup
             key={group.provider + "|" + (sub.label || "_")}
-            label={`${PROVIDER_LABEL[group.provider] || group.provider}${sub.label ? " · " + (sub.label === "Grátis" ? "★ Grátis" : sub.label) : ""}`}
+            label={`${PROVIDER_LABEL[group.provider] || group.provider}${sub.label ? " · " + (sub.label === "Grátis" ? "★ Grátis" : sub.label) : ""}${apelidosTag}`}
             className="bg-neutral-900"
           >
             {sub.items.map(m => {
@@ -192,7 +233,8 @@ export function ModelOptions({ models, markNoTools = false }: { models: Groupabl
               );
             })}
           </optgroup>
-        ))
+          );
+        })
       )}
     </>
   );
