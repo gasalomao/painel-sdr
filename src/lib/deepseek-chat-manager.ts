@@ -44,6 +44,13 @@ export interface DsToken {
   createdAt: string;
   /** Fingerprint estável (sempre o mesmo pra ESTA conta). Gerado na criação. */
   fingerprint?: DsFingerprint;
+  /**
+   * Cooldown temporário (timestamp ms) depois de um 429 — a rotação pula esta
+   * conta até o prazo expirar, quando ela volta SOZINHA à rotação (sem o admin
+   * precisar retomar manualmente). Diferente de `paused` (que é permanente até
+   * ação humana em 401/403 = token morto). Recuo exponencial leve anti-ban.
+   */
+  pausedUntil?: number;
 }
 
 /**
@@ -85,7 +92,9 @@ function readAll(): DsToken[] {
     const raw = fs.readFileSync(TOKENS_PATH, "utf8");
     const j = JSON.parse(raw);
     if (!Array.isArray(j)) return [];
-    return j.filter((t) => t && typeof t.id === "string" && typeof t.token === "string");
+    const list = j.filter((t) => t && typeof t.id === "string" && typeof t.token === "string");
+    // Limpa cooldowns expirados (e persiste) só se houver mudança — barato.
+    return expireStaleCooldowns(list);
   } catch {
     return [];
   }
@@ -94,6 +103,28 @@ function readAll(): DsToken[] {
 function writeAll(list: DsToken[]): void {
   fs.mkdirSync(DIR, { recursive: true });
   fs.writeFileSync(TOKENS_PATH, JSON.stringify(list, null, 2), "utf8");
+}
+
+/**
+ * Limpa o rótulo "(cooldown...)" de contas cujo prazo JÁ EXPIROU e zera o
+ * pausedUntil. Idempotente e barato. Chamado nas leituras que alimentam a UI
+ * e a rotação — assim o label sempre reflete o estado real (conta voltou à
+ * rotação, o "(cooldown)" some sozinho sem o admin mexer).
+ */
+function expireStaleCooldowns(list: DsToken[]): DsToken[] {
+  const now = Date.now();
+  let changed = false;
+  for (const t of list) {
+    if (t.pausedUntil && t.pausedUntil <= now) {
+      t.pausedUntil = undefined;
+      t.label = t.label.replace(/\s*\(cooldown[^)]*\)\s*/g, "").trim() || t.label;
+      changed = true;
+    }
+  }
+  if (changed) {
+    try { writeAll(list); } catch { /* não-fatal */ }
+  }
+  return list;
 }
 
 function publicShape(t: DsToken): DsTokenPublic {
@@ -205,12 +236,42 @@ export function deleteToken(id: string): void {
 }
 
 /**
- * Seleciona um token ATIVO (não-pausado) pra atender a próxima request, em
- * round-robin. Retorna `null` se não houver nenhum — o caller responde 503 e
- * a UI mostra "nenhuma conta DeepSeek ativa".
+ * Coloca uma conta em COOLDOWN temporário (recuo exponencial leve anti-ban).
+ * Usado quando o upstream devolve 429 (rate-limit). A conta volta SOZINHA à
+ * rotação quando o prazo expira — não exige ação do admin. PRAZO cresce a cada
+ * 429 consecutivo: 2min → 5min → 15min → 1h (cap em 1h).
+ *
+ * Diferente de `autoPauseToken` (pausa PERMANENTE pra 401/403 = token morto),
+ * cooldown é temporário e reversível sozinho.
+ */
+const COOLDOWN_STEPS_MS = [2 * 60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000];
+export function setCooldown(id: string, reason: string): void {
+  try {
+    const list = readAll();
+    const t = list.find((x) => x.id === id);
+    if (!t || t.paused) return; // já pausada permanentemente — deixa quieto
+    // Recuo exponencial: se já estava em cooldown, dobra o passo (até o cap).
+    const inCooldown = t.pausedUntil && t.pausedUntil > Date.now();
+    const stepIndex = inCooldown
+      ? Math.min(COOLDOWN_STEPS_MS.length - 1, COOLDOWN_STEPS_MS.findIndex((s) => s >= (t.pausedUntil! - Date.now()) * 2) + 1)
+      : 0;
+    const ms = COOLDOWN_STEPS_MS[Math.max(0, stepIndex)];
+    t.pausedUntil = Date.now() + ms;
+    if (!/\(cooldown/.test(t.label)) {
+      t.label = `${t.label} (cooldown ${Math.round(ms / 60000)}min: ${reason.slice(0, 20)})`.slice(0, 60);
+    }
+    writeAll(list);
+  } catch { /* não-fatal */ }
+}
+
+/**
+ * Seleciona um token ATIVO (não-pausado e fora de cooldown) pra atender a
+ * próxima request, em round-robin. Retorna `null` se não houver nenhum — o
+ * caller responde 503 e a UI mostra "nenhuma conta DeepSeek ativa".
  */
 export function pickToken(): DsToken | null {
-  const list = readAll().filter((t) => !t.paused);
+  const now = Date.now();
+  const list = readAll().filter((t) => !t.paused && !(t.pausedUntil && t.pausedUntil > now));
   if (!list.length) return null;
   const pick = list[rrCursor % list.length];
   rrCursor = (rrCursor + 1) % list.length;

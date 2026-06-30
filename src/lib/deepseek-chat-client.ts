@@ -20,12 +20,14 @@
  *   - Multi-conta-de-uma-IP (passe um proxy diferente por instância se quiser).
  */
 
-import { autoPauseToken, type DsFingerprint } from "./deepseek-chat-manager";
+import { autoPauseToken, setCooldown, type DsFingerprint } from "./deepseek-chat-manager";
+import { solvePowWithRetry, type DsPowChallenge } from "./deepseek/deepseek-pow";
 
 const UPSTREAM = process.env.DEEPSEEK_CHAT_BASE || "https://chat.deepseek.com";
-// Min ms entre requests do MESMO token. 4s = ~15 req/min — abaixo do que um
-// humano digita em rajada, conservador.
-const MIN_INTERVAL_MS = Math.max(1000, Number(process.env.DEEPSEEK_CHAT_MIN_INTERVAL_MS) || 4000);
+// Min ms entre requests do MESMO token. 60s = 1 req/min por conta — ritmo
+// humano conservador, REDUZ (não elimina) o risco de ban da conta web.
+// Ajustável via env se precisar de mais vazão (a conta assume o risco).
+const MIN_INTERVAL_MS = Math.max(1000, Number(process.env.DEEPSEEK_CHAT_MIN_INTERVAL_MS) || 60000);
 const HTTP_PROXY = process.env.DEEPSEEK_HTTP_PROXY || "";
 
 // Fingerprint default (usado quando o token ainda não tem um — tokens antigos
@@ -140,6 +142,72 @@ async function createSession(token: string, fp: DsFingerprint): Promise<string> 
 }
 
 /**
+ * TESTE leve de uma conta: cria uma chat_session e resolve um desafio PoW —
+ * NÃO dispara completion (não desperdiça cota, não gera tráfego suspeito).
+ * Confirma que o token está vivo E que o PoW funciona com ele. Retorna
+ * { ok, detail }. Usado pela UI pra mostrar "Conta conectada ✓ e funcionando"
+ * logo após adicionar o token, em vez de deixar o usuário descobrir depois.
+ */
+export async function probeToken(args: {
+  tokenId: string;
+  token: string;
+  fingerprint?: DsFingerprint;
+}): Promise<{ ok: boolean; detail: string }> {
+  const fp = args.fingerprint || DEFAULT_FINGERPRINT;
+  try {
+    await rateLimit(args.tokenId);
+    await createSession(args.token, fp);
+    const pow = await buildPowHeader(args.token, fp);
+    return {
+      ok: true,
+      detail: pow
+        ? "Token válido e Proof-of-Work funcionando — conta pronta pra uso."
+        : "Token válido (sessão criada). PoW não exigido nesta req.",
+    };
+  } catch (e: any) {
+    const dead = e instanceof DsUpstreamError && e.tokenDead;
+    if (dead) autoPauseToken(args.tokenId, "probe falhou");
+    return {
+      ok: false,
+      detail: dead
+        ? "DeepSeek rejeitou o token (expirou/banido). Faça login de novo e recapture."
+        : `Falha ao testar: ${e?.message || String(e)}`,
+    };
+  }
+}
+
+/**
+ * Pede um desafio Proof-of-Work pro DeepSeek e devolve o valor pronto pro
+ * header `x-ds-pow-response`, ou `null` se o upstream não exigir PoW agora
+ * (alguns contextos/contas prescindem). Não lança em falha leve — se o PoW
+ * quebrar, tentamos a completion sem ele; se o servidor exigir, devolve 4xx e
+ * o chamador mostra o erro (preferível a bloquear todo o fluxo).
+ */
+async function buildPowHeader(token: string, fp: DsFingerprint): Promise<string | null> {
+  return solvePowWithRetry(async () => {
+    const res = await ds("POST", "/api/v0/chat/create_pow_challenge", token, fp, {
+      target_path: "/api/v0/chat/completion",
+    });
+    if (res.status === 401 || res.status === 403) {
+      throw new DsUpstreamError(res.status, "Token rejeitado ao pedir desafio PoW.", true);
+    }
+    if (!res.ok) return null; // sem PoW disponível → segue sem header
+    const j: any = await res.json().catch(() => null);
+    const ch = j?.data?.biz_data?.challenge || j?.data?.challenge;
+    if (!ch || !ch.challenge) return null;
+    return {
+      algorithm: String(ch.algorithm || "DeepSeekHashV1"),
+      challenge: String(ch.challenge),
+      salt: String(ch.salt || ""),
+      difficulty: Number(ch.difficulty) || 144000,
+      expire_at: Number(ch.expire_at) || 0,
+      signature: String(ch.signature || ""),
+      target_path: String(ch.target_path || "/api/v0/chat/completion"),
+    } satisfies DsPowChallenge;
+  }, 3);
+}
+
+/**
  * Roda uma completion e retorna a string final + tokens estimados. Buffer-isa
  * o stream SSE do upstream (mais simples e suficiente: nosso /chat/completions
  * pode devolver streaming ou non-stream a partir disso).
@@ -170,12 +238,19 @@ export async function chatComplete(args: {
   }
 
   const dispatcher = await getDispatcher();
+  // Proof-of-Work: o DeepSeek exige o header x-ds-pow-response em toda
+  // completion. Resolvemos o desafio aqui (WASM) e anexamos — sem isso, a
+  // request é descartada silenciosamente (causa do "DeepSeek não funciona").
+  const powHeader = await buildPowHeader(args.token, fp);
+  const headers: Record<string, string> = {
+    ...browserHeaders(fp, args.token),
+    Accept: "text/event-stream",
+  };
+  if (powHeader) headers["x-ds-pow-response"] = powHeader;
+
   const init: any = {
     method: "POST",
-    headers: {
-      ...browserHeaders(fp, args.token),
-      Accept: "text/event-stream",
-    },
+    headers,
     body: JSON.stringify({
       chat_session_id: sessionId,
       parent_message_id: null,
@@ -194,8 +269,10 @@ export async function chatComplete(args: {
     throw new DsUpstreamError(res.status, "Token rejeitado pelo DeepSeek (expirou ou foi revogado).", true);
   }
   if (res.status === 429) {
-    autoPauseToken(args.tokenId, "rate-limit/429");
-    throw new DsUpstreamError(429, "DeepSeek devolveu 429 — esta conta foi pausada automaticamente. Retome em 1 hora ou troque pra outra conta.", true);
+    // 429 = rate-limit temporário (não é ban). Cooldown com recuo exponencial:
+    // a conta descansa e VOLTA SOZINHA à rotação depois — sem travar tudo.
+    setCooldown(args.tokenId, "429 rate-limit");
+    throw new DsUpstreamError(429, "DeepSeek devolveu 429 — esta conta entrou em cooldown (volta sozinha). Aguarde ~2min ou troque pra outra conta.", false);
   }
   if (!res.ok || !res.body) {
     const txt = (await res.text().catch(() => "")).slice(0, 200);

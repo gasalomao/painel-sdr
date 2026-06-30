@@ -42,8 +42,23 @@ export async function GET(req: NextRequest) {
   // Painel base — derivado da própria request, pra funcionar tanto em dev
   // (localhost) quanto em produção (easypanel.host) sem hardcode.
   const origin = req.nextUrl.origin;
+  const u = new URL(origin);
   // host pro @connect (CORS do GM_xmlhttpRequest). Sem protocolo.
-  const host = new URL(origin).host;
+  const host = u.host;
+  // Lista de @connect robusta: cobre localhost, 127.0.0.1 e o host real.
+  // Necessário porque o Tampermonkey exige o host exato no @connect pra
+  // permitir GM_xmlhttpRequest cross-origin — sem isso, o Opera GX/Chrome
+  // bloqueiam a request do userscript (do chat.deepseek.com) pro painel.
+  const connectLines = [
+    host,
+    u.hostname, // host sem porta (localhost, ou domínio de produção)
+    "localhost",
+    "127.0.0.1",
+    "*", // segurança adicional: aceita qualquer host (o code autentica mesmo assim)
+  ]
+    .filter((v, i, a) => v && a.indexOf(v) === i)
+    .map((h) => `// @connect      ${h}`)
+    .join("\n");
 
   // JSON.stringify pra interpolação segura — code base64url não tem aspas, mas
   // é defensivo.
@@ -53,14 +68,14 @@ export async function GET(req: NextRequest) {
   const script = `// ==UserScript==
 // @name         Painel SDR — captura automática DeepSeek
 // @namespace    ${origin}
-// @version      1.1.0
+// @version      1.2.0
 // @description  Sincroniza o userToken do chat.deepseek.com com o painel SDR. Roda automático em cada visita.
 // @author       Painel SDR
 // @match        https://chat.deepseek.com/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
-// @connect      ${host}
+${connectLines}
 // @noframes
 // ==/UserScript==
 
@@ -215,13 +230,18 @@ export async function GET(req: NextRequest) {
             updateStatus('error', 'Painel recusou o token: ' + d.error);
           }
         } catch (e) {
-          console.warn('[Painel SDR] resposta inválida');
-          updateStatus('error', 'Resposta inválida do painel.');
+          console.warn('[Painel SDR] resposta inválida (HTTP ' + (r && r.status) + ')');
+          updateStatus('error', 'Resposta inválida do painel (HTTP ' + (r && r.status) + ').');
         }
       },
-      onerror: function() {
-        console.warn('[Painel SDR] erro de rede');
-        updateStatus('error', 'Falha de rede ao conectar no painel local.');
+      onerror: function(e) {
+        // Erro de rede = o GM_xmlhttpRequest não chegou no painel. Causas
+        // comuns: painel local fechado, @connect errado, ou Mixed Content.
+        console.warn('[Painel SDR] erro de rede', e);
+        updateStatus('error', 'Falha de rede: o painel local está aberto? (' + PAINEL + ')');
+      },
+      ontimeout: function() {
+        updateStatus('error', 'Tempo esgotado conectando no painel local.');
       }
     });
   }
