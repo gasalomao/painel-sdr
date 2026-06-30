@@ -14,7 +14,9 @@ import {
   listTokens, addToken, updateToken, deleteToken,
   generateImportCode,
   generateSubscriptionCode, listSubscriptions, revokeSubscription,
+  getFullToken,
 } from "@/lib/deepseek-chat-manager";
+import { probeToken } from "@/lib/deepseek-chat-client";
 
 export async function POST(req: NextRequest) {
   try {
@@ -53,6 +55,19 @@ export async function POST(req: NextRequest) {
       if (!id) return NextResponse.json({ success: false, error: "id obrigatório." }, { status: 400 });
       deleteToken(id);
       return NextResponse.json({ success: true, tokens: listTokens() });
+    }
+
+    if (action === "test") {
+      // Teste leve: cria sessão + resolve PoW (NÃO dispara completion). Confirma
+      // que o token está vivo e o PoW funciona — pra UI mostrar feedback real
+      // ao adicionar/conectar, em vez de descobrir depois que não funcionava.
+      const id = String(body.id || "");
+      if (!id) return NextResponse.json({ success: false, error: "id obrigatório." }, { status: 400 });
+      const full = getFullToken(id);
+      if (!full) return NextResponse.json({ success: false, error: "Token não encontrado." }, { status: 404 });
+      if (full.paused) return NextResponse.json({ success: false, error: "Conta pausada — ative antes de testar." }, { status: 409 });
+      const r = await probeToken({ tokenId: full.id, token: full.token, fingerprint: full.fingerprint });
+      return NextResponse.json({ success: true, ...r, tokens: listTokens() });
     }
 
     if (action === "generate-import-code") {

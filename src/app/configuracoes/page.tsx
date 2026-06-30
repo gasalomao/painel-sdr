@@ -68,6 +68,12 @@ export default function ConfiguracoesPage() {
   const [pxError, setPxError] = useState<string | null>(null);
   const [pxCallbackUrl, setPxCallbackUrl] = useState("");
   const pxCancelRef = useRef(false);
+  // Auto-start: o proxy é um processo SEPARADO do Next e morre quando a
+  // máquina/dev server reinicia. Ao abrir a aba do Gateway, se ele estiver
+  // instalado mas desligado, ligamos sozinho em background. O flag `pxAutoStarting`
+  // também estabiliza o badge (mostra "ligando…" em vez de flutuar null→running).
+  const [pxAutoStarting, setPxAutoStarting] = useState(false);
+  const pxAutoStartTriedRef = useRef(false);
   // Última URL de callback já enviada — evita reenviar a mesma do clipboard.
   const pxLastClipRef = useRef("");
   // Edição inline do apelido: { [name]: rascunho } enquanto digita.
@@ -83,6 +89,9 @@ export default function ConfiguracoesPage() {
   const [dsToken, setDsToken] = useState("");
   const [dsBusy, setDsBusy] = useState<string | null>(null); // "add" | id | null
   const [dsError, setDsError] = useState<string | null>(null);
+  // Resultado do teste de conexão automático (depois de adicionar token). Mostra
+  // "✓ funcionando" ou "✗ rejeitado" — o usuário sabe na hora se a conta presta.
+  const [dsTestResult, setDsTestResult] = useState<null | { ok: boolean; detail: string }>(null);
   const [dsLabelDraft, setDsLabelDraft] = useState<Record<string, string>>({});
   const [dsHelpOpen, setDsHelpOpen] = useState(false);
   // Bookmarklet de captura em 1 clique: gera importCode (15min TTL), monta o
@@ -98,7 +107,15 @@ export default function ConfiguracoesPage() {
   const [dsSubBusy, setDsSubBusy] = useState(false);
   const [dsSubCopied, setDsSubCopied] = useState<string | null>(null);
   const [dsAutoOpen, setDsAutoOpen] = useState(false);
-  const [newSubCode, setNewSubCode] = useState<string | null>(null);
+  // "Esperando" = fluxo 1-clique ativo. Liga o polling acelerado (3s) que caça
+  // o token chegando via userscript e mostra "✓ conta conectada" na hora.
+  const [dsWaitingConnect, setDsWaitingConnect] = useState(false);
+  // Fluxo por COLAR TOKEN (sem extensão — funciona em qualquer navegador, é o
+  // mesmo padrão do conector Antigravity que já funciona no Opera GX). Liga a
+  // detecção automática de clipboard: o usuário só copia o userToken do
+  // DeepSeek e o painel captura sozinho quando ele volta pra esta aba.
+  const [dsWaitingClipboard, setDsWaitingClipboard] = useState(false);
+  const dsLastClipRef = useRef<string>("");
 
   // Layout tabs and collapsible cards open states
   const [activeTab, setActiveTab] = useState<"ai_keys" | "gateway" | "whatsapp" | "models">("ai_keys");
@@ -534,7 +551,9 @@ export default function ConfiguracoesPage() {
   async function refreshProxyStatus() {
     try {
       const d = await pxCall({ action: "status" });
-      setPxStatus(d.status);
+      // Só atualiza o state se o status realmente mudou — evita re-render
+      // (e o pisca-pisca do badge) quando a resposta é idêntica à atual.
+      setPxStatus((prev) => (JSON.stringify(prev) === JSON.stringify(d.status) ? prev : d.status));
     } catch {
       /* sem permissão/rota — a seção mostra estado desconhecido */
     }
@@ -544,6 +563,45 @@ export default function ConfiguracoesPage() {
     refreshProxyStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /**
+   * AUTO-START do proxy: ao focar na aba "Contas Grátis (Gateway)", se o proxy
+   * está instalado mas desligado, liga sozinho em background. O proxy é um
+   * processo à parte e morre a cada reboot/dev-server restart — sem isso as
+   * contas somem da lista e os modelos sumiriam dos seletores (parecendo que
+   * "não salvou", embora o Supabase esteja ok). É idempotente: `startProxy()`
+   * no servidor devolve o status atual se a porta já responde.
+   */
+  useEffect(() => {
+    if (activeTab !== "gateway") return;
+    // Só tenta uma vez por sessão; reseta se o status confirmar que desligou de
+    // novo (ex.: usuário clicou em Desligar manualmente depois).
+    if (pxAutoStartTriedRef.current) return;
+    // Precisa saber o status primeiro — se ainda está carregando (null) ou já
+    // está rodando, não faz nada aqui.
+    if (!pxStatus || pxStatus.running) return;
+    if (!pxStatus.installed) return; // nada a ligar — a UI oferece "Instalar".
+
+    pxAutoStartTriedRef.current = true;
+    let alive = true;
+    setPxAutoStarting(true);
+
+    (async () => {
+      try {
+        await pxCall({ action: "start" });
+      } catch {
+        /* silencioso: se não conseguir ligar, o badge mostra "desligado" */
+      } finally {
+        if (alive) {
+          await refreshProxyStatus();
+          setPxAutoStarting(false);
+        }
+      }
+    })();
+
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, pxStatus?.running, pxStatus?.installed]);
 
   async function handlePxAction(action: "install" | "start" | "stop") {
     setPxError(null);
@@ -645,6 +703,49 @@ export default function ConfiguracoesPage() {
       /^https?:\/\/(localhost|127\.0\.0\.1):\d+\/\S*[?&]code=/i.test(t) ||
       /(oauth2?callback|auth\/callback)\S*[?&]code=/i.test(t)
     );
+  }
+
+  /**
+   * Reconhece um userToken do DeepSeek. O token vive em
+   * localStorage.getItem('userToken') no chat.deepseek.com. O DeepSeek JÁ USOU
+   * dois formatos — aceitamos ambos:
+   *   1) JWT antigo: começa com "eyJ", 3 partes base64 separadas por ".".
+   *   2) Wrapper JSON novo: {"value":"<base64>","__version":"0"} — o token real
+   *      está no campo `value` (base64 puro, sem pontos). Confirmado por um
+   *      usuário real (2026-06): o console devolve exatamente esse shape.
+   * Limpa aspas/JSON wrapper antes de validar. Não confunde com URLs ou texto
+   * comum. Usada pela detecção automática de clipboard (padrão do Antigravity).
+   * Devolve o texto LIMPO (token puro ou o JSON original — o backend limpa de
+   * novo de forma tolerante) ou `null` se não parecer um token.
+   */
+  function looksLikeDeepSeekToken(raw: string): string | null {
+    let t = (raw || "").trim();
+    if (!t) return null;
+    // Limpa aspas/backticks que o console às vezes cola em volta.
+    const outer = t.replace(/^["'`]+|["'`]+$/g, "").trim();
+    // Caso 2 (atual): wrapper JSON do DeepSeek. Se parseou e tem um `value`
+    // (ou userToken/token) com cara de token (>= 20 chars), devolve o JSON
+    // inteiro LIMPO — o backend (cleanTokenString) extrai o valor de novo.
+    if (outer.startsWith("{")) {
+      try {
+        const j = JSON.parse(outer);
+        const c = j.userToken || j.token || j.access_token || j.value || j.user_token;
+        if (typeof c === "string" && c.trim().length >= 20) {
+          return outer; // devolve o JSON limpo; backend extrai `value`.
+        }
+      } catch { /* não é JSON válido — segue pra tentar como token cru */ }
+    }
+    // Caso 1 (legado): JWT clássico. 3+ partes separadas por ".", primeira eyJ.
+    const jwtParts = outer.split(".");
+    if (jwtParts.length >= 3 && /^eyJ[A-Za-z0-9_-]+$/.test(jwtParts[0]) && outer.length >= 40) {
+      return outer;
+    }
+    // Caso 3: token cru (sem wrapper) que parece base64 longo — aceita se for
+    // suficientemente longo e não parecer URL/texto comum.
+    if (outer.length >= 40 && /^[A-Za-z0-9+/_\-=]+$/.test(outer) && !outer.includes(" ")) {
+      return outer;
+    }
+    return null;
   }
 
   /**
@@ -773,6 +874,40 @@ export default function ConfiguracoesPage() {
   }, [dsSubs.length]);
 
   /**
+   * Polling ACELERADO (3s) durante o fluxo 1-clique: caça o token chegando via
+   * userscript e, quando aparece uma conta nova, desliga sozinho e mostra "✓
+   * conta conectada". Timeout de ~6min pra não rodar pra sempre se o usuário
+   * desistir. É o que dá a sensação de "só logou e conectou".
+   */
+  useEffect(() => {
+    if (!dsWaitingConnect) return;
+    const baseline = dsTokens.length;
+    const deadline = Date.now() + 6 * 60 * 1000;
+    let active = true;
+    const iv = setInterval(async () => {
+      if (!active) return;
+      if (Date.now() > deadline) { setDsWaitingConnect(false); clearInterval(iv); return; }
+      try {
+        const d = await dsCall({ action: "list" });
+        const list: DsTok[] = d.tokens || [];
+        setDsTokens(list);
+        if (list.length > baseline) {
+          // Conta chegou! Desliga a espera e mostra sucesso.
+          setDsWaitingConnect(false);
+          clearInterval(iv);
+          const newest = list[list.length - 1];
+          setDsTestResult({
+            ok: true,
+            detail: `Conta "${newest?.label || "DeepSeek"}" conectada automaticamente! Já pode usar nos agentes.`,
+          });
+        }
+      } catch { /* polling silencioso */ }
+    }, 3000);
+    return () => { active = false; clearInterval(iv); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dsWaitingConnect]);
+
+  /**
    * Garante que existe um gateway_endpoint apontando pro proxy DeepSeek local
    * (assim os modelos aparecem nos seletores via descoberta dinâmica). Chamado
    * uma vez quando o usuário adiciona o PRIMEIRO token.
@@ -811,12 +946,26 @@ export default function ConfiguracoesPage() {
     if (!token) { setDsError("Cole o userToken antes de salvar."); return; }
     setDsBusy("add");
     setDsError(null);
+    setDsTestResult(null);
     try {
-      await dsCall({ action: "add", token, label: dsLabel.trim() || `DeepSeek ${dsTokens.length + 1}` });
+      const added = await dsCall({ action: "add", token, label: dsLabel.trim() || `DeepSeek ${dsTokens.length + 1}` });
       await refreshDsTokens();
       await ensureDsGatewayRegistered().catch(() => { /* não-fatal: token salvo, gateway falhou */ });
       setDsToken("");
       setDsLabel("");
+      // Teste automático: confirma na hora se a conta está viva + PoW funciona.
+      // Best-effort (não bloqueia) — se falhar, mostra o motivo pro usuário.
+      const tid = added?.token?.id;
+      if (tid) {
+        setDsTestResult({ ok: false, detail: "Testando conexão com o DeepSeek…" });
+        try {
+          const t = await dsCall({ action: "test", id: tid });
+          setDsTestResult({ ok: !!t.ok, detail: t.detail || (t.ok ? "OK" : "Falhou") });
+          await refreshDsTokens(); // o teste pode ter auto-pausado o token
+        } catch (e: any) {
+          setDsTestResult({ ok: false, detail: e.message || "Não foi possível testar." });
+        }
+      }
     } catch (e: any) { setDsError(e.message); }
     finally { setDsBusy(null); }
   }
@@ -895,18 +1044,129 @@ export default function ConfiguracoesPage() {
   useEffect(() => { void refreshDsSubs(); }, []);
 
   /** Gera uma subscription nova. */
-  async function handleInstallUserscript() {
+  /**
+   * FLUXO 1-CLIQUE ("só logar e capturar"): abre o chat.deepseek.com numa aba
+   * nova com a subscription embutida. Se o Tampermonkey já está instalado (1x na
+   * vida), o userscript instala sozinho e captura o token no seu login — você
+   * não precisa copiar nada. O painel fica de olho (polling 3s) e avisa "✓ conta
+   * conectada" assim que o token chega.
+   *
+   * Por que precisa do Tampermonkey 1x: o navegador BLOQUEIA o painel de ler o
+   * login de outra aba (CORS/isolamento de origem) e o DeepSeek BLOQUEIA ser
+   * embutido num iframe (CSP frame-ancestors 'none' — confirmado). A extensão é
+   * o único jeito de ser 100% automático a partir do login. Mas é UMA instalação
+   * só, depois é pra sempre.
+   */
+  async function handleOneClickConnect() {
     setDsSubBusy(true);
     setDsError(null);
+    setDsTestResult(null);
     try {
-      const d = await dsCall({ action: "generate-subscription" });
-      const code = d.subscription?.code;
-      if (!code) throw new Error("Servidor não devolveu o código.");
-      await refreshDsSubs();
-      setNewSubCode(code);
-    } catch (e: any) { setDsError(e.message); }
-    finally { setDsSubBusy(false); }
+      // Gera (ou reusa) a subscription e monta a URL .user.js que o Tampermonkey
+      // reconhece e abre a tela de instalação sozinho.
+      let code = dsSubs[0]?.code || "";
+      if (!code) {
+        const d = await dsCall({ action: "generate-subscription" });
+        code = d.subscription?.code;
+        if (!code) throw new Error("Servidor não devolveu o código.");
+        await refreshDsSubs();
+      }
+      const scriptUrl = `${window.location.origin}/api/deepseek-chat/userscript.user.js?sub=${encodeURIComponent(code)}`;
+      // Abre o script (instalação Tampermonkey) numa aba — gesto de clique do
+      // usuário, então não é bloqueado como popup.
+      window.open(scriptUrl, "_blank", "noopener");
+      // Pequeno respiro pro Tampermonkey processar, depois abre o chat.
+      setTimeout(() => window.open("https://chat.deepseek.com", "_blank", "noopener"), 400);
+      // Ativa a "espera ativa" — o polling acelerado (useEffect abaixo) detecta
+      // a conta chegando e mostra o ✓ automaticamente.
+      setDsWaitingConnect(true);
+    } catch (e: any) {
+      setDsError(e.message);
+    } finally {
+      setDsSubBusy(false);
+    }
   }
+
+  /**
+   * Fluxo COLAR TOKEN (sem extensão — funciona em qualquer navegador, inclusive
+   * Opera GX onde o Tampermonkey não injeta). Mesmo padrão do conector
+   * Antigravity: abre o DeepSeek, o usuário copia o userToken, volta pro painel
+   * e a detecção de clipboard captura sozinho (não clica em nada).
+   */
+  async function handleDsClipboardConnect() {
+    setDsError(null);
+    setDsTestResult(null);
+    dsLastClipRef.current = "";
+    // Abre o DeepSeek numa aba nova — gesto de clique, não é bloqueado como popup.
+    window.open("https://chat.deepseek.com", "_blank", "noopener");
+    setDsWaitingClipboard(true);
+  }
+
+  /**
+   * Detecção AUTOMÁTICA de clipboard durante o fluxo de colar token (espelha o
+   * useEffect do conector Antigravity). Enquanto espera, sempre que a aba ganha
+   * foco (você volta do DeepSeek) ou a cada 2s, lê o clipboard e, se achar um
+   * userToken válido do DeepSeek, conecta sozinho. Best-effort: se o navegador
+   * bloquear a leitura, tem o campo manual como fallback.
+   */
+  useEffect(() => {
+    if (!dsWaitingClipboard) return;
+    let stopped = false;
+    async function check() {
+      if (stopped || typeof document === "undefined" || document.visibilityState !== "visible") return;
+      let text = "";
+      try {
+        text = await navigator.clipboard.readText();
+      } catch {
+        return; // sem permissão/foco — silencioso (o campo manual vale)
+      }
+      text = (text || "").trim();
+      if (!text || text === dsLastClipRef.current) return;
+      const token = looksLikeDeepSeekToken(text);
+      if (!token) return; // clipboard tem outra coisa — ignora
+      dsLastClipRef.current = text;
+      // Token válido! Salva, registra gateway e avisa o usuário.
+      try {
+        setDsTestResult({ ok: false, detail: "Token detectado! Conectando…" });
+        await dsCall({ action: "add", token, label: dsLabel.trim() || `DeepSeek ${(dsTokens.length || 0) + 1}` });
+        await refreshDsTokens();
+        await ensureDsGatewayRegistered().catch(() => { /* não-fatal */ });
+        setDsLabel("");
+        setDsWaitingClipboard(false);
+        // Limpa o clipboard por segurança (token é sensível).
+        try { await navigator.clipboard.writeText(""); } catch { /* ok */ }
+        // Testa se a conta está viva (PoW + sessão) e dá feedback real.
+        const list = await dsCall({ action: "list" }).catch(() => null);
+        const newest = list?.tokens?.[list.tokens.length - 1];
+        if (newest?.id) {
+          try {
+            const t = await dsCall({ action: "test", id: newest.id });
+            setDsTestResult({ ok: !!t.ok, detail: t.detail || (t.ok ? "OK" : "Falhou") });
+            await refreshDsTokens();
+          } catch (e: any) {
+            setDsTestResult({ ok: false, detail: "Conectado, mas não foi possível testar agora." });
+          }
+        } else {
+          setDsTestResult({ ok: true, detail: "Conta conectada!" });
+        }
+      } catch (e: any) {
+        setDsError(e.message || "Falha ao salvar o token.");
+        dsLastClipRef.current = ""; // permite nova tentativa
+      }
+    }
+    const onFocus = () => { void check(); };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    const iv = setInterval(() => void check(), 2000);
+    void check();
+    return () => {
+      stopped = true;
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+      clearInterval(iv);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dsWaitingClipboard]);
 
   async function handleRevokeSub(code: string) {
     if (!confirm("Revogar esta subscription?\n\nO userscript instalado vai parar de funcionar (mas você pode gerar outra e reinstalar).")) return;
@@ -984,6 +1244,20 @@ export default function ConfiguracoesPage() {
     if (provider === "gemini") return "bg-blue-500/15 text-blue-100 border-blue-500/40";
     if (provider === "openai") return "bg-teal-500/15 text-teal-100 border-teal-500/40";
     return "bg-white/10 text-white border-white/20";
+  }
+
+  /**
+   * Estado ESTÁVEL do conector, derivado de pxStatus + pxAutoStarting numa fonte
+   * única. Antes, o cabeçalho e o bloco de status calculavam a condição cada um
+   * por si, o que fazia o badge flutuar (null→running) e parecer que piscava.
+   * "starting" ganha prioridade sobre o status cru pra suavizar a transição
+   * enquanto o auto-start está em andamento.
+   */
+  function pxBadgeState(): "starting" | "on" | "off" | "unknown" {
+    if (pxAutoStarting) return "starting";
+    if (!pxStatus) return "unknown";
+    if (pxStatus.running && pxStatus.managementReady) return "on";
+    return "off";
   }
 
   /** Botão "Colar do clipboard" — 1 clique, sem digitar (gesto = permissão). */
@@ -1979,15 +2253,26 @@ export default function ConfiguracoesPage() {
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
-                      {pxStatus?.running && pxStatus.managementReady ? (
-                        <span className="text-[9px] bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded-full font-black uppercase">
-                          Conector Ligado
-                        </span>
-                      ) : (
-                        <span className="text-[9px] bg-zinc-500/10 text-zinc-400 border border-zinc-500/20 px-2 py-0.5 rounded-full font-black uppercase">
-                          Inativo
-                        </span>
-                      )}
+                      {(() => {
+                        const st = pxBadgeState();
+                        if (st === "on")
+                          return (
+                            <span className="text-[9px] bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+                              Conector Ligado
+                            </span>
+                          );
+                        if (st === "starting")
+                          return (
+                            <span className="text-[9px] bg-blue-500/10 text-blue-300 border border-blue-500/20 px-2 py-0.5 rounded-full font-black uppercase flex items-center gap-1">
+                              <Loader2 className="w-2.5 h-2.5 animate-spin" /> Ligando…
+                            </span>
+                          );
+                        return (
+                          <span className="text-[9px] bg-zinc-500/10 text-zinc-400 border border-zinc-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+                            Inativo
+                          </span>
+                        );
+                      })()}
                       {openGateway ? (
                         <ChevronDown className="w-4 h-4 text-muted-foreground transition-transform duration-300" />
                       ) : (
@@ -2023,7 +2308,9 @@ export default function ConfiguracoesPage() {
                         {/* Status do conector */}
                         <div className="flex items-center gap-2 flex-wrap text-[10px]">
                           <span className="font-black uppercase tracking-widest text-muted-foreground">Conector:</span>
-                          {!pxStatus ? (
+                          {pxAutoStarting ? (
+                            <span className="font-black text-blue-300 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> ligando o conector…</span>
+                          ) : !pxStatus ? (
                             <span className="text-muted-foreground flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> verificando…</span>
                           ) : pxStatus.running && pxStatus.managementReady ? (
                             <span className="font-black text-green-400 flex items-center gap-1"><CheckCircle2 className="w-3 h-3" /> ligado{pxStatus.accounts.length ? " · " + pxStatus.accounts.length + " conta(s) logada(s)" : ""}</span>
@@ -2468,10 +2755,13 @@ export default function ConfiguracoesPage() {
                     <CardContent className="space-y-5 p-5 border-t border-red-500/10 animate-in fade-in slide-in-from-top-2 duration-200">
                       <div className="flex items-start gap-2">
                         <Info className="w-4 h-4 shrink-0 text-red-300 mt-0.5" />
-                        <div className="flex-1 min-w-0">
+                        <div className="flex-1 min-w-0 space-y-1.5">
                           <p className="text-[10px] text-red-100/90 leading-relaxed">
                             Usa o <strong>userToken</strong> da sua conta logada em <a href="https://chat.deepseek.com" target="_blank" rel="noreferrer" className="underline">chat.deepseek.com</a>{" "}
-                            — <strong>sem API key, sem gastar crédito</strong>. O painel atenua riscos de banimento (rate-limit, proxy HTTP, rotação multi-conta), mas use com moderação.
+                            — <strong>sem API key, sem gastar crédito</strong>. O painel resolve o Proof-of-Work automaticamente e atenua riscos de banimento (rate-limit de 1 msg/min por conta, rotação multi-conta, recuo em 429).
+                          </p>
+                          <p className="text-[10px] text-yellow-200/90 leading-relaxed rounded-md border border-yellow-500/30 bg-yellow-500/10 p-2">
+                            ⚠ <strong>Experimental — risco de ban real.</strong> O DeepSeek não tem OAuth oficial (ao contrário do Conector Antigravity/Codex, que é estável). Use com moderação. Para uso robusto no Agente de IA, prefira o <strong>Conector</strong> acima (contas Google/OpenAI via OAuth legítimo).
                           </p>
                         </div>
                       </div>
@@ -2486,60 +2776,99 @@ export default function ConfiguracoesPage() {
                         </ol>
                       </details>
 
-                      {/* CAPTURA AUTOMÁTICA (Tampermonkey) */}
-                      <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/[0.04] p-3 space-y-3">
+                      {/* ===== CONECTAR DEEPSEEK (colar token — funciona em qualquer navegador) ===== */}
+                      <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/[0.07] p-4 space-y-3">
                         <div className="flex items-center justify-between gap-2 flex-wrap">
-                          <p className="text-[11px] font-black uppercase tracking-widest text-emerald-200 flex items-center gap-1.5">
-                            ★ Captura automática com Tampermonkey (Recomendado)
+                          <p className="text-sm font-black text-emerald-200 flex items-center gap-1.5">
+                            ⚡ Conectar DeepSeek
                           </p>
-                          <span className="text-[9px] text-emerald-200/80">funciona em Chrome / Edge / Opera GX</span>
-                        </div>
-                        <p className="text-[10px] text-emerald-100/85 leading-relaxed">
-                          Toda vez que você abrir o chat do DeepSeek, seu token será sincronizado com o painel de forma transparente.
-                        </p>
-                        <ol className="text-[10px] text-muted-foreground space-y-0.5 list-decimal pl-4">
-                          <li>Instale a extensão do <strong className="text-white">Tampermonkey</strong> no seu navegador.</li>
-                          <li>Clique no botão abaixo → confirme a instalação do script na tela que abrir.</li>
-                          <li>Abra o chat do DeepSeek e a conta aparecerá aqui em segundos.</li>
-                        </ol>
-
-                        <div className="flex gap-2 items-center flex-wrap">
-                          <Button
-                            onClick={handleInstallUserscript}
-                            disabled={dsSubBusy}
-                            size="sm"
-                            className="h-8 text-[11px] font-black bg-emerald-500/30 text-emerald-50 border border-emerald-400/60 hover:bg-emerald-500/50 gap-1.5"
-                          >
-                            {dsSubBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plug className="w-3.5 h-3.5" />}
-                            {dsSubs.length > 0 ? "Gerar nova assinatura de captura" : "Gerar captura automática"}
-                          </Button>
+                          <span className="text-[9px] text-emerald-200/70">sem extensão · funciona no Opera GX</span>
                         </div>
 
-                        {newSubCode && (
-                          <div className="rounded-lg border border-emerald-400 bg-emerald-500/10 p-3.5 space-y-3 shadow-lg">
-                            <p className="text-xs font-black text-emerald-300 flex items-center gap-1.5 animate-pulse">
-                              🚀 CAPTURA GERADA COM SUCESSO!
+                        {/* Estado: esperando o token ser copiado (detecção de clipboard ativa) */}
+                        {dsWaitingClipboard ? (
+                          <div className="rounded-lg border border-emerald-400/50 bg-emerald-500/15 p-4 space-y-3">
+                            <p className="text-xs font-black text-emerald-200 flex items-center gap-2">
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                              Aguardando você copiar o token…
                             </p>
-                            <div className="flex gap-2 flex-wrap sm:flex-nowrap">
-                              <a
-                                href={`${window.location.origin}/api/deepseek-chat/userscript.user.js?sub=${encodeURIComponent(newSubCode)}`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="flex-1 inline-flex items-center justify-center rounded-xl bg-emerald-500 text-black font-extrabold text-xs uppercase tracking-widest h-11 px-4 gap-2 hover:bg-emerald-400 transition-all shadow-md active:scale-[0.98]"
-                              >
-                                <Plug className="w-4 h-4" /> 1. Instalar Script
-                              </a>
-                              <a
-                                href="https://chat.deepseek.com"
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="flex-1 inline-flex items-center justify-center rounded-xl bg-zinc-800 border border-zinc-700 text-white font-extrabold text-xs uppercase tracking-widest h-11 px-4 gap-2 hover:bg-zinc-700 transition-all active:scale-[0.98]"
-                              >
-                                <ExternalLink className="w-4 h-4" /> 2. Ir para o DeepSeek
-                              </a>
-                            </div>
+                            <ol className="text-[11px] text-emerald-100/90 leading-relaxed space-y-2">
+                              <li><strong>1.</strong> A aba do DeepSeek abriu. Faça o login lá (se ainda não tiver feito).</li>
+                              <li>
+                                <strong>2.</strong> Aperte <kbd className="px-1.5 py-0.5 rounded bg-black/40 border border-emerald-500/30 text-emerald-100 font-mono text-[10px]">F12</kbd>
+                                {" "}→ aba <strong>Console</strong> → cole isto e dê Enter:
+                                <code className="block mt-1 px-2 py-1.5 rounded bg-black/50 border border-emerald-500/20 text-emerald-200 font-mono text-[10px] break-all select-all">
+                                  localStorage.getItem('userToken')
+                                </code>
+                              </li>
+                              <li><strong>3.</strong> Clique em cima do resultado, selecione tudo e <strong>copie</strong> (Ctrl+C).</li>
+                              <li><strong>4.</strong> <strong>Volte pra esta aba</strong> — o painel detecta o token sozinho e conecta. ✓</li>
+                            </ol>
+                            <p className="text-[10px] text-emerald-200/70">
+                              ⏳ Fico de olho no clipboard. Quando voltar pra cá com o token copiado, conecto na hora.
+                              <br/><span className="text-emerald-300/60">(Se o Opera GX pedir permissão pra ler o clipboard na 1ª vez, clique em <strong>Permitir</strong>.)</span>
+                            </p>
+                            <Button
+                              onClick={() => { setDsWaitingClipboard(false); setDsTestResult(null); }}
+                              size="sm"
+                              variant="outline"
+                              className="h-7 text-[10px] border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/10"
+                            >
+                              Cancelar
+                            </Button>
                           </div>
+                        ) : (
+                          <>
+                            <p className="text-[11px] text-emerald-100/85 leading-relaxed">
+                              Clique no botão → abre o DeepSeek. Depois de logar, <strong>copie o token</strong> lá (mostro como)
+                              e <strong>volte aqui</strong>: o painel captura e conecta <strong>sozinho</strong>. Sem extensão, sem digitar nada aqui.
+                            </p>
+                            <Button
+                              onClick={handleDsClipboardConnect}
+                              className="w-full h-12 text-sm font-black bg-emerald-500 text-black border border-emerald-400 hover:bg-emerald-400 gap-2 shadow-lg active:scale-[0.99] transition-all"
+                            >
+                              <Plug className="w-5 h-5" />
+                              Conectar DeepSeek
+                            </Button>
+                            {/* Fallback manual: campo de colar o token direto */}
+                            <details className="text-[10px] text-emerald-100/70 leading-relaxed">
+                              <summary className="cursor-pointer select-none underline">Prefiro colar o token aqui (ou a detecção não funcionou)</summary>
+                              <div className="mt-2 space-y-2">
+                                <Input
+                                  value={dsToken}
+                                  onChange={(e) => setDsToken(e.target.value)}
+                                  placeholder="Cole o userToken do DeepSeek (eyJ...)"
+                                  className="h-9 bg-black/40 border-emerald-500/20 text-[11px] font-mono"
+                                />
+                                <Button
+                                  onClick={handleDsAddToken}
+                                  disabled={dsBusy === "add" || !dsToken.trim()}
+                                  size="sm"
+                                  className="h-8 text-[11px] font-black bg-emerald-500/30 text-emerald-50 border border-emerald-400/60 hover:bg-emerald-500/50 gap-1.5"
+                                >
+                                  {dsBusy === "add" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                                  Salvar token
+                                </Button>
+                              </div>
+                            </details>
+                            {/* Alternativa: Tampermonkey (1x na vida = automático pra sempre) */}
+                            <details className="text-[10px] text-emerald-100/60 leading-relaxed">
+                              <summary className="cursor-pointer select-none underline">Alternativa: automático pra sempre com Tampermonkey (1 instalação)</summary>
+                              <p className="mt-1.5">Se instalar o <a href="https://www.tampermonkey.net/" target="_blank" rel="noreferrer" className="underline text-emerald-200">Tampermonkey</a> (1x) e o script abaixo, todo login no DeepSeek é capturado sozinho — nem precisa copiar. Mas no Opera GX pode exigir permissão extra.</p>
+                              <Button
+                                onClick={handleOneClickConnect}
+                                disabled={dsSubBusy}
+                                size="sm"
+                                variant="outline"
+                                className="mt-2 h-8 text-[10px] border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/10 gap-1.5"
+                              >
+                                {dsSubBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                                Instalar captura automática
+                              </Button>
+                            </details>
+                          </>
                         )}
+                      </div>
 
                         {/* Lista de scripts Tampermonkey */}
                         {dsSubs.length > 0 && (
@@ -2596,7 +2925,6 @@ export default function ConfiguracoesPage() {
                             </div>
                           </div>
                         )}
-                      </div>
 
                       {/* Bookmarklet */}
                       <details open={dsAutoOpen} onToggle={(e) => setDsAutoOpen((e.target as HTMLDetailsElement).open)} className="rounded-lg border border-emerald-500/20 bg-emerald-500/[0.03] p-3">
@@ -2670,6 +2998,19 @@ export default function ConfiguracoesPage() {
                           </Button>
                         </div>
                         {dsError && <p className="text-[10px] text-red-300 font-medium">{dsError}</p>}
+                        {dsTestResult && (
+                          <div className={cn(
+                            "flex items-start gap-1.5 p-2 rounded-lg border text-[10px] leading-relaxed",
+                            dsTestResult.ok
+                              ? "border-green-500/30 bg-green-500/10 text-green-200"
+                              : "border-yellow-500/30 bg-yellow-500/10 text-yellow-200"
+                          )}>
+                            {dsTestResult.ok
+                              ? <CheckCircle2 className="w-3 h-3 shrink-0 mt-0.5" />
+                              : <XCircle className="w-3 h-3 shrink-0 mt-0.5" />}
+                            <span><strong>{dsTestResult.ok ? "Conta funcionando!" : "Atenção:"}</strong> {dsTestResult.detail}</span>
+                          </div>
+                        )}
                       </div>
 
                       {/* Lista de tokens salvos */}

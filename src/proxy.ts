@@ -50,6 +50,15 @@ export async function proxy(req: NextRequest) {
     pathname.startsWith("/_next") ||
     pathname.startsWith("/api/auth/") ||
     pathname.startsWith("/api/webhooks/") ||
+    // DeepSeek: as rotas de captura (import-bookmarklet, userscript.user.js) e
+    // o proxy OpenAI-shape (/v1/*) são chamadas CROSS-ORIGIN — do navegador do
+    // usuário no chat.deepseek.com (sem cookie de sessão do painel). O token é
+    // autenticado pela `subscription`/`code` dentro do handler, não por cookie.
+    // Sem isso aqui o proxy devolve 401 e o token NUNCA chega (bug histórico:
+    // userscript capturava mas o painel rejeitava a import).
+    pathname.startsWith("/api/deepseek-chat/import-bookmarklet") ||
+    pathname.startsWith("/api/deepseek-chat/userscript.user.js") ||
+    pathname.startsWith("/api/deepseek-chat/v1/") ||
     pathname === "/login" ||
     pathname === "/favicon.ico" ||
     pathname.match(/\.(png|jpg|svg|ico|webp)$/i)
