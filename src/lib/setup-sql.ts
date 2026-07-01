@@ -3,953 +3,910 @@
 // Não edite este arquivo manualmente.
 
 export const SETUP_SQL = `-- =====================================================================
--- 🚀 PAINEL SDR — SETUP COMPLETO DO ZERO
+-- PAINEL SDR — SETUP COMPLETO DO ZERO
+-- =====================================================================
 -- Cole TUDO num Supabase novo (SQL Editor) e clique RUN.
 -- 100% idempotente: pode rodar várias vezes sem quebrar nada.
--- Este arquivo unifica todas as migrações antigas: cria as tabelas,
--- adiciona TODAS as colunas, índices, permissões, bucket de storage,
--- publicação realtime e seeds iniciais.
 --
--- Versão: 2026-05-07
--- Inclui: 26 tabelas, automation/automation_logs, lead_intelligence,
--- automation.followup_enabled, profile_pic_*, push_name, provider
--- multi-canal, todos os campos de IA (token usage, pricing cache,
--- ai_organizer_runs), upsert-safe unique constraints em messages e
--- chats_dashboard, bucket whatsapp_media pré-criado.
+-- Versão: 2026-05-27 (sincronizado com schema real de produção)
+-- 32 tabelas + extensões + índices + constraints.
 --
--- Garantia: rodando este script num Supabase NOVO, o programa inteiro
--- (chat, IA, disparo em massa, follow-up, automação, leads, tokens)
--- deve funcionar sem precisar de NENHUM outro SQL auxiliar.
+-- Como foi gerado: rodando queries de introspecção em pg_class,
+-- information_schema e pg_indexes contra o banco real. NÃO inventa
+-- nada — espelha exatamente o que existe em prod.
+--
+-- O que NÃO está aqui (gerenciar separadamente):
+--   - RLS policies (gerenciadas via service_role no app)
+--   - Foreign keys explícitas (a maioria é validada via app/RLS)
+--   - Storage buckets (criados via /api/setup-db ou manualmente)
+--   - Publicação realtime (configurar via Supabase Studio)
 -- =====================================================================
 
 -- =====================================================================
--- PARTE 1 — CONTATOS / SESSÕES / MENSAGENS (V2)
+-- EXTENSÕES
 -- =====================================================================
-CREATE TABLE IF NOT EXISTS public.contacts (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  remote_jid    TEXT NOT NULL UNIQUE,
-  phone_number  TEXT,
-  nome_negocio  TEXT,
-  push_name     TEXT,
-  created_at    TIMESTAMPTZ DEFAULT NOW()
-);
-ALTER TABLE public.contacts ADD COLUMN IF NOT EXISTS push_name TEXT;
--- Foto de perfil do WhatsApp + timestamp do último fetch (cache TTL).
--- A URL Evolution retornada é assinada e tipicamente expira em 7 dias.
--- Renovamos opportunisticamente quando passa de 24h.
-ALTER TABLE public.contacts ADD COLUMN IF NOT EXISTS profile_pic_url TEXT;
-ALTER TABLE public.contacts ADD COLUMN IF NOT EXISTS profile_pic_fetched_at TIMESTAMPTZ;
-ALTER TABLE public.contacts ADD COLUMN IF NOT EXISTS profile_pic TEXT;
-ALTER TABLE public.contacts ADD COLUMN IF NOT EXISTS lead_id INT;
-ALTER TABLE public.contacts ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT '{}'::TEXT[];
-ALTER TABLE public.contacts ADD COLUMN IF NOT EXISTS notes TEXT;
-ALTER TABLE public.contacts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
-
-CREATE TABLE IF NOT EXISTS public.sessions (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  contact_id        UUID REFERENCES public.contacts(id) ON DELETE CASCADE,
-  instance_name     TEXT NOT NULL DEFAULT 'sdr',
-  agent_id          INT,
-  bot_status        TEXT DEFAULT 'bot_active',
-  last_message_at   TIMESTAMPTZ,
-  variables         JSONB DEFAULT '{}'::jsonb,
-  unread_count      INT DEFAULT 0,
-  paused_by         TEXT,
-  paused_at         TIMESTAMPTZ,
-  resume_at         TIMESTAMPTZ,
-  created_at        TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(contact_id, instance_name)
-);
-ALTER TABLE public.sessions ADD COLUMN IF NOT EXISTS variables        JSONB DEFAULT '{}'::jsonb;
-ALTER TABLE public.sessions ADD COLUMN IF NOT EXISTS unread_count     INT DEFAULT 0;
-ALTER TABLE public.sessions ADD COLUMN IF NOT EXISTS paused_by        TEXT;
-ALTER TABLE public.sessions ADD COLUMN IF NOT EXISTS paused_at        TIMESTAMPTZ;
-ALTER TABLE public.sessions ADD COLUMN IF NOT EXISTS resume_at        TIMESTAMPTZ;
-ALTER TABLE public.sessions ADD COLUMN IF NOT EXISTS current_stage    TEXT;
-ALTER TABLE public.sessions ADD COLUMN IF NOT EXISTS updated_at       TIMESTAMPTZ DEFAULT NOW();
-
-CREATE TABLE IF NOT EXISTS public.messages (
-  id BIGSERIAL PRIMARY KEY,
-  session_id        UUID REFERENCES public.sessions(id) ON DELETE CASCADE,
-  message_id        TEXT UNIQUE,
-  sender            TEXT NOT NULL DEFAULT 'customer', -- customer | ai | human | system
-  content           TEXT,
-  media_category    TEXT,                              -- text | image | audio | video | document
-  media_url         TEXT,
-  mimetype          TEXT,
-  file_name         TEXT,
-  file_size         BIGINT,
-  base64_content    TEXT,
-  delivery_status   TEXT,                              -- pending | sent | delivered | read | error
-  quoted_msg_id     TEXT,
-  quoted_text       TEXT,
-  raw_payload       JSONB,
-  created_at        TIMESTAMPTZ DEFAULT NOW()
-);
-ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS file_name      TEXT;
-ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS file_size      BIGINT;
-ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS mimetype       TEXT;
-ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS media_url      TEXT;
-ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS quoted_msg_id  TEXT;
-ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS quoted_text    TEXT;
-ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS raw_payload    JSONB;
-CREATE INDEX IF NOT EXISTS idx_messages_session ON public.messages(session_id, created_at);
-
-CREATE TABLE IF NOT EXISTS public.n8n_chat_histories (
-  id serial not null,
-  session_id text not null,
-  message jsonb not null,
-  data timestamp with time zone null default now(),
-  constraint n8n_chat_histories_pkey primary key (id)
-);
-CREATE INDEX IF NOT EXISTS idx_n8n_chat_histories_session ON public.n8n_chat_histories(session_id);
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";   -- gen_random_uuid()
+CREATE EXTENSION IF NOT EXISTS "vector";     -- agent_knowledge_chunks.embedding
 
 -- =====================================================================
--- PARTE 2 — chats_dashboard (LEGADO, fonte que o painel /chat lê)
+-- TABELAS
 -- =====================================================================
-CREATE TABLE IF NOT EXISTS public.chats_dashboard (
-  id BIGSERIAL PRIMARY KEY,
-  remote_jid     TEXT NOT NULL,
-  instance_name  TEXT NOT NULL DEFAULT 'sdr',
-  message_id     TEXT UNIQUE,
-  sender_type    TEXT NOT NULL DEFAULT 'customer', -- customer | ai | human | system
-  content        TEXT,
-  status_envio   TEXT,                             -- sent | delivered | read | error | received
-  is_from_me     BOOLEAN GENERATED ALWAYS AS (sender_type IN ('ai','human')) STORED,
-  -- mídia
-  media_url      TEXT,
-  media_type     TEXT,
-  mimetype       TEXT,
-  message_type   TEXT,
-  -- reply
-  quoted_id      TEXT,
-  quoted_text    TEXT,
-  created_at     TIMESTAMPTZ DEFAULT NOW()
-);
-ALTER TABLE public.chats_dashboard ADD COLUMN IF NOT EXISTS instance_name TEXT DEFAULT 'sdr';
-ALTER TABLE public.chats_dashboard ADD COLUMN IF NOT EXISTS media_url     TEXT;
-ALTER TABLE public.chats_dashboard ADD COLUMN IF NOT EXISTS media_type    TEXT;
-ALTER TABLE public.chats_dashboard ADD COLUMN IF NOT EXISTS mimetype      TEXT;
-ALTER TABLE public.chats_dashboard ADD COLUMN IF NOT EXISTS message_type  TEXT;
-ALTER TABLE public.chats_dashboard ADD COLUMN IF NOT EXISTS quoted_id     TEXT;
-ALTER TABLE public.chats_dashboard ADD COLUMN IF NOT EXISTS quoted_text   TEXT;
-ALTER TABLE public.chats_dashboard ADD COLUMN IF NOT EXISTS file_name     TEXT;
-CREATE INDEX IF NOT EXISTS idx_chats_remote_jid ON public.chats_dashboard(remote_jid, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_chats_instance   ON public.chats_dashboard(instance_name);
-
--- =====================================================================
--- PARTE 3 — LEADS
--- =====================================================================
-CREATE TABLE IF NOT EXISTS public.leads_extraidos (
-  id BIGSERIAL PRIMARY KEY,
-  "remoteJid"              TEXT UNIQUE,
-  nome_negocio             TEXT,
-  ramo_negocio             TEXT,
-  status                   TEXT DEFAULT 'novo',
-  instance_name            TEXT DEFAULT 'sdr',
-  justificativa_ia         TEXT,
-  resumo_ia                TEXT,
-  ia_last_analyzed_at      TIMESTAMPTZ,
-  primeiro_contato_at      TIMESTAMPTZ,
-  primeiro_contato_source  TEXT,                       -- disparo | ia | manual
-  telefone                 TEXT,
-  endereco                 TEXT,
-  avaliacao                NUMERIC,
-  reviews                  INT,
-  website                  TEXT,
-  categoria                TEXT,
-  created_at               TIMESTAMPTZ DEFAULT NOW(),
-  updated_at               TIMESTAMPTZ DEFAULT NOW()
-);
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS instance_name        TEXT DEFAULT 'sdr';
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS nome_negocio         TEXT;
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS ramo_negocio         TEXT;
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS categoria            TEXT;
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS endereco             TEXT;
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS website              TEXT;
--- Redes sociais detectadas pelo scraper Google Maps. Sem essas colunas, o
--- INSERT do scraper-engine era rejeitado com PGRST204 e nenhum lead salvava.
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS instagram            TEXT;
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS facebook             TEXT;
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS avaliacao            NUMERIC;
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS rating               NUMERIC;
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS reviews              INT;
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS telefone             TEXT;
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS justificativa_ia     TEXT;
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS resumo_ia            TEXT;
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS ia_last_analyzed_at  TIMESTAMPTZ;
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS primeiro_contato_at  TIMESTAMPTZ;
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS primeiro_contato_source TEXT;
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS updated_at           TIMESTAMPTZ DEFAULT NOW();
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS next_follow_up       TIMESTAMPTZ;
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS current_stage_index  INT DEFAULT 0;
--- =====================================================================
--- Lead Intelligence — briefing gerado por IA antes do disparo.
--- Ideia: cada lead recebe um "diagnóstico" 1x (cache no banco). Esse
--- briefing é reaproveitado pelo /disparo, /automacao e /leads — economia
--- de tokens (não re-analisa o mesmo lead) + personalização cirúrgica.
--- =====================================================================
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS icp_score INT;
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS lead_type TEXT;
-  -- Valores: b2b_recurring | b2c_oneshot | mixed | unknown
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS intelligence JSONB;
-  -- { dores: [], abordagem: "...", decisor: "...", concorrente_local: "...",
-  --   alerta: "..." (compliance, sazonalidade), briefing_md: "..." }
-ALTER TABLE public.leads_extraidos ADD COLUMN IF NOT EXISTS intelligence_at TIMESTAMPTZ;
-
-CREATE INDEX IF NOT EXISTS idx_leads_icp_score ON public.leads_extraidos (icp_score DESC NULLS LAST);
-CREATE INDEX IF NOT EXISTS idx_leads_lead_type ON public.leads_extraidos (lead_type);
-
-CREATE INDEX IF NOT EXISTS idx_leads_remoteJid ON public.leads_extraidos ("remoteJid");
-CREATE INDEX IF NOT EXISTS idx_leads_status    ON public.leads_extraidos (status);
-CREATE INDEX IF NOT EXISTS idx_leads_primeiro_contato_source
-  ON public.leads_extraidos (status, primeiro_contato_source, primeiro_contato_at)
-  WHERE status = 'primeiro_contato';
-
--- =====================================================================
--- PARTE 4 — AGENTES (settings, stages, knowledge)
--- =====================================================================
-CREATE TABLE IF NOT EXISTS public.agent_settings (
-  id SERIAL PRIMARY KEY,
-  name           TEXT NOT NULL DEFAULT 'Agente',
-  main_prompt    TEXT DEFAULT '',
-  role           TEXT DEFAULT '',
-  personality    TEXT DEFAULT '',
-  tone           TEXT DEFAULT '',
-  target_model   TEXT DEFAULT 'gemini-1.5-flash',
-  main_number    TEXT,
-  is_active      BOOLEAN DEFAULT TRUE,
-  is_24h         BOOLEAN DEFAULT TRUE,
-  away_message   TEXT,
-  schedules      JSONB DEFAULT '[]'::jsonb,
-  options        JSONB DEFAULT '{}'::jsonb,
-  created_at     TIMESTAMPTZ DEFAULT NOW(),
-  updated_at     TIMESTAMPTZ DEFAULT NOW()
-);
-ALTER TABLE public.agent_settings ADD COLUMN IF NOT EXISTS options JSONB DEFAULT '{}'::jsonb;
-
-INSERT INTO public.agent_settings (id, name, main_prompt)
-VALUES (1, 'Vendedor Geral', 'Você é um vendedor.')
-ON CONFLICT (id) DO NOTHING;
-
-CREATE TABLE IF NOT EXISTS public.agent_stages (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  agent_id           INT REFERENCES public.agent_settings(id) ON DELETE CASCADE,
-  title              TEXT NOT NULL,
-  goal_prompt        TEXT,
-  order_index        INT DEFAULT 0,
-  condition_variable TEXT,
-  condition_operator TEXT,
-  condition_value    TEXT,
-  captured_variables JSONB DEFAULT '[]'::jsonb,
-  created_at         TIMESTAMPTZ DEFAULT NOW()
-);
-ALTER TABLE public.agent_stages ADD COLUMN IF NOT EXISTS condition_variable TEXT;
-ALTER TABLE public.agent_stages ADD COLUMN IF NOT EXISTS condition_operator TEXT;
-ALTER TABLE public.agent_stages ADD COLUMN IF NOT EXISTS condition_value    TEXT;
-ALTER TABLE public.agent_stages ADD COLUMN IF NOT EXISTS captured_variables JSONB DEFAULT '[]'::jsonb;
-
--- Agora que agent_stages existe, podemos adicionar a chave estrangeira em sessions
-ALTER TABLE public.sessions ADD COLUMN IF NOT EXISTS current_stage_id UUID REFERENCES public.agent_stages(id) ON DELETE SET NULL;
-
-CREATE TABLE IF NOT EXISTS public.agent_knowledge (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  agent_id    INT REFERENCES public.agent_settings(id) ON DELETE CASCADE,
-  title       TEXT NOT NULL,
-  content     TEXT,
-  created_at  TIMESTAMPTZ DEFAULT NOW()
-);
 
 CREATE TABLE IF NOT EXISTS public.agent_batch_locks (
-  id uuid not null default gen_random_uuid (),
-  remote_jid text not null,
-  instance_name text not null,
-  agent_id bigint not null,
-  created_at timestamp with time zone null default now(),
-  expires_at timestamp with time zone not null,
-  constraint agent_batch_locks_pkey primary key (id),
-  constraint agent_batch_locks_remote_jid_instance_name_key unique (remote_jid, instance_name)
+  agent_id      integer PRIMARY KEY,
+  locked_until  timestamp with time zone,
+  updated_at    timestamp with time zone DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS public.chat_buffers (
-  remote_jid    TEXT NOT NULL,
-  instance_name TEXT NOT NULL,
-  expires_at    TIMESTAMPTZ NOT NULL,
-  created_at    TIMESTAMPTZ DEFAULT NOW(),
-  PRIMARY KEY (remote_jid, instance_name)
+CREATE TABLE IF NOT EXISTS public.agent_knowledge (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  agent_id    integer,
+  title       text NOT NULL,
+  content     text,
+  created_at  timestamp with time zone DEFAULT now(),
+  client_id   uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
+);
+
+CREATE TABLE IF NOT EXISTS public.agent_knowledge_chunks (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  knowledge_id  uuid NOT NULL,
+  agent_id      integer NOT NULL,
+  client_id     uuid,
+  chunk_index   integer NOT NULL DEFAULT 0,
+  content       text NOT NULL,
+  embedding     vector(768),
+  token_count   integer,
+  content_hash  text,
+  created_at    timestamp with time zone NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.agent_settings (
+  id                         SERIAL PRIMARY KEY,
+  name                       text NOT NULL DEFAULT 'Agente'::text,
+  main_prompt                text DEFAULT ''::text,
+  role                       text DEFAULT ''::text,
+  personality                text DEFAULT ''::text,
+  tone                       text DEFAULT ''::text,
+  target_model               text,
+  main_number                text,
+  is_active                  boolean DEFAULT true,
+  is_24h                     boolean DEFAULT true,
+  away_message               text,
+  schedules                  jsonb DEFAULT '[]'::jsonb,
+  options                    jsonb DEFAULT '{}'::jsonb,
+  created_at                 timestamp with time zone DEFAULT now(),
+  updated_at                 timestamp with time zone DEFAULT now(),
+  client_id                  uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid,
+  lead_intelligence_enabled  boolean DEFAULT false,
+  is_scheduler               boolean NOT NULL DEFAULT false,
+  scheduler_config           jsonb DEFAULT '{"reminders": [{"message": "Oi {nome}! Lembrete: amanhã às {hora_agendamento} temos seu agendamento de {servico}. Confirma a presença?", "offset_minutes": 1440}, {"message": "Oi {nome}! Em 1h é o seu agendamento ({servico}). Te esperamos!", "offset_minutes": 60}], "calendar_id": "primary", "owner_phone": null, "notify_owner": false, "business_hours": {"tz": "America/Sao_Paulo", "end": "18:00", "days": [1, 2, 3, 4, 5, 6], "start": "09:00"}, "cancel_window_minutes": 120, "default_duration_minutes": 60, "auto_promote_kanban_after_minutes": 30}'::jsonb
+);
+
+CREATE TABLE IF NOT EXISTS public.agent_stages (
+  id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  agent_id            integer,
+  title               text NOT NULL,
+  goal_prompt         text,
+  order_index         integer DEFAULT 0,
+  condition_variable  text,
+  condition_operator  text,
+  condition_value     text,
+  captured_variables  jsonb DEFAULT '[]'::jsonb,
+  created_at          timestamp with time zone DEFAULT now(),
+  client_id           uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
 );
 
 CREATE TABLE IF NOT EXISTS public.ai_control (
-  remote_jid text not null,
-  is_paused boolean null default false,
-  paused_until timestamp with time zone null,
-  updated_at timestamp with time zone null default now(),
-  constraint ai_control_pkey primary key (remote_jid)
+  remote_jid    text PRIMARY KEY,
+  is_paused     boolean DEFAULT false,
+  paused_until  timestamp with time zone,
+  updated_at    timestamp with time zone DEFAULT now()
 );
-
--- =====================================================================
--- PARTE 5 — INSTÂNCIAS (channel_connections multi-provider)
--- =====================================================================
-CREATE TABLE IF NOT EXISTS public.channel_connections (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  provider         TEXT NOT NULL DEFAULT 'evolution',  -- evolution | whatsapp_cloud
-  instance_name    TEXT NOT NULL UNIQUE,
-  agent_id         INT REFERENCES public.agent_settings(id) ON DELETE SET NULL,
-  status           TEXT DEFAULT 'disconnected',
-  provider_config  JSONB DEFAULT '{}'::jsonb,
-  created_at       TIMESTAMPTZ DEFAULT NOW()
-);
-ALTER TABLE public.channel_connections ADD COLUMN IF NOT EXISTS provider        TEXT NOT NULL DEFAULT 'evolution';
-ALTER TABLE public.channel_connections ADD COLUMN IF NOT EXISTS provider_config JSONB DEFAULT '{}'::jsonb;
-
-INSERT INTO public.channel_connections (instance_name, agent_id, status)
-VALUES ('sdr', 1, 'open')
-ON CONFLICT (instance_name) DO NOTHING;
-
-CREATE INDEX IF NOT EXISTS idx_channel_provider_phone_id
-  ON public.channel_connections ((provider_config->>'phone_number_id'))
-  WHERE provider = 'whatsapp_cloud';
-
--- =====================================================================
--- PARTE 6 — webhook_logs
--- =====================================================================
-CREATE TABLE IF NOT EXISTS public.webhook_logs (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  instance_name TEXT,
-  event         TEXT,
-  payload       JSONB,
-  created_at    TIMESTAMPTZ DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_webhook_logs_created ON public.webhook_logs (created_at DESC);
-
--- =====================================================================
--- PARTE 7 — HISTÓRICO / ORGANIZADOR IA
--- =====================================================================
-CREATE TABLE IF NOT EXISTS public.historico_ia_leads (
-  id BIGSERIAL PRIMARY KEY,
-  remote_jid     TEXT,
-  nome_negocio   TEXT,
-  status_antigo  TEXT,
-  status_novo    TEXT,
-  razao          TEXT,
-  resumo         TEXT,
-  batch_id       TEXT,
-  created_at     TIMESTAMPTZ DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_historico_ia_created ON public.historico_ia_leads(created_at DESC);
 
 CREATE TABLE IF NOT EXISTS public.ai_organizer_config (
-  id INT PRIMARY KEY DEFAULT 1,
-  enabled                BOOLEAN DEFAULT FALSE,
-  api_key                TEXT,
-  openrouter_api_key     TEXT,
-  gateway_base_url       TEXT,
-  gateway_api_key        TEXT,
-  gateway_fallback_model TEXT,
-  gateway_endpoints      JSONB DEFAULT '[]'::jsonb,
-  model                  TEXT,
-  provider               TEXT DEFAULT 'Gemini',
-  execution_hour         INT DEFAULT 20,
-  last_run               TIMESTAMPTZ,
-  app_url                TEXT,
-  updated_at             TIMESTAMPTZ DEFAULT NOW()
+  id                      integer PRIMARY KEY DEFAULT 1,
+  enabled                 boolean DEFAULT false,
+  api_key                 text,
+  openrouter_api_key      text,
+  gateway_base_url        text,
+  gateway_api_key         text,
+  gateway_fallback_model  text,
+  gateway_endpoints       jsonb DEFAULT '[]'::jsonb,
+  model                   text,
+  provider                text DEFAULT 'Gemini'::text,
+  execution_hour          integer DEFAULT 20,
+  last_run                timestamp with time zone,
+  app_url                 text,
+  updated_at              timestamp with time zone DEFAULT now()
 );
--- Idempotente: bancos antigos ganham a coluna do OpenRouter sem recriar a tabela.
-ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS openrouter_api_key TEXT;
--- Idempotente: Gateway de Assinatura (proxy OpenAI-compatible da sua conta).
+-- Idempotente: bancos antigos ganham as colunas novas sem recriar a tabela.
+ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS openrouter_api_key text;
+-- Gateway de Assinatura (proxy OpenAI-compatible da sua conta — ex: CLIProxyAPI):
 --   gateway_base_url       = URL do proxy local (ex: http://127.0.0.1:8317/v1)
 --   gateway_api_key        = management key opcional do proxy
 --   gateway_fallback_model = modelRef de reserva (API key) se o gateway cair
-ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS gateway_base_url TEXT;
-ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS gateway_api_key TEXT;
-ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS gateway_fallback_model TEXT;
--- gateway_endpoints = várias conexões/contas (Gemini, Claude, ChatGPT) em JSON.
-ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS gateway_endpoints JSONB DEFAULT '[]'::jsonb;
-INSERT INTO public.ai_organizer_config (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS gateway_base_url text;
+ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS gateway_api_key text;
+ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS gateway_fallback_model text;
+-- gateway_endpoints = lista JSON de conexões (várias contas: Gemini, Claude,
+-- ChatGPT). Cada item: {id, label, base_url, api_key}. Os campos single acima
+-- viram a 1ª conexão (retrocompat). gateway_fallback_model continua global.
+ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS gateway_endpoints jsonb DEFAULT '[]'::jsonb;
 
 CREATE TABLE IF NOT EXISTS public.ai_organizer_runs (
-  id BIGSERIAL PRIMARY KEY,
-  batch_id        UUID,
-  triggered_by    TEXT NOT NULL DEFAULT 'manual',
-  started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  finished_at     TIMESTAMPTZ,
-  duration_ms     INT,
-  model           TEXT,
-  provider        TEXT,
-  chats_analyzed  INT DEFAULT 0,
-  leads_moved     INT DEFAULT 0,
-  status          TEXT NOT NULL DEFAULT 'running',
-  error           TEXT,
-  summary         TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_ai_organizer_runs_started ON public.ai_organizer_runs(started_at DESC);
-
--- =====================================================================
--- PARTE 8 — DISPARO EM MASSA
--- =====================================================================
-CREATE TABLE IF NOT EXISTS public.campaigns (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name                    TEXT NOT NULL,
-  instance_name           TEXT NOT NULL,
-  agent_id                INT REFERENCES public.agent_settings(id) ON DELETE SET NULL,
-  message_template        TEXT NOT NULL,
-  -- Intervalos SEGUROS pra WhatsApp (Evolution / Baileys). Defaults conservadores
-  -- baseados em práticas anti-banimento: 60-180s entre disparos (média ~2 min)
-  -- + janela de horário comercial. Para números novos/frios, considere 90-300s.
-  min_interval_seconds    INT NOT NULL DEFAULT 60,
-  max_interval_seconds    INT NOT NULL DEFAULT 180,
-  allowed_start_hour      INT DEFAULT 9,
-  allowed_end_hour        INT DEFAULT 20,
-  status                  TEXT NOT NULL DEFAULT 'draft',
-  total_targets           INT DEFAULT 0,
-  sent_count              INT DEFAULT 0,
-  failed_count            INT DEFAULT 0,
-  skipped_count           INT DEFAULT 0,
-  personalize_with_ai     BOOLEAN DEFAULT FALSE,
-  use_web_search          BOOLEAN DEFAULT FALSE,
-  ai_model                TEXT,
-  ai_prompt               TEXT,
-  last_error              TEXT,
-  last_error_at           TIMESTAMPTZ,
-  started_at              TIMESTAMPTZ,
-  finished_at             TIMESTAMPTZ,
-  created_at              TIMESTAMPTZ DEFAULT NOW(),
-  updated_at              TIMESTAMPTZ DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_campaigns_status ON public.campaigns(status);
--- Marca campanhas criadas pela automação. /disparo filtra IS NULL pra
--- esconder essas e evitar disparo manual acidental.
-ALTER TABLE public.campaigns ADD COLUMN IF NOT EXISTS automation_id UUID;
--- Toggle "pré-analisar leads com Lead Intelligence" antes de disparar.
-ALTER TABLE public.campaigns ADD COLUMN IF NOT EXISTS lead_intelligence_enabled BOOLEAN DEFAULT FALSE;
-CREATE INDEX IF NOT EXISTS idx_campaigns_automation ON public.campaigns(automation_id) WHERE automation_id IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS public.campaign_targets (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  campaign_id       UUID NOT NULL REFERENCES public.campaigns(id) ON DELETE CASCADE,
-  remote_jid        TEXT NOT NULL,
-  nome_negocio      TEXT,
-  ramo_negocio      TEXT,
-  next_send_at      TIMESTAMPTZ,
-  status            TEXT NOT NULL DEFAULT 'pending',
-  message_id        TEXT,
-  rendered_message  TEXT,
-  ai_input          TEXT,
-  error_message     TEXT,
-  attempts          INT DEFAULT 0,
-  sent_at           TIMESTAMPTZ,
-  created_at        TIMESTAMPTZ DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_campaign_targets_campaign ON public.campaign_targets(campaign_id);
-CREATE INDEX IF NOT EXISTS idx_campaign_targets_status   ON public.campaign_targets(campaign_id, status);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_campaign_target     ON public.campaign_targets(campaign_id, remote_jid);
-
-CREATE TABLE IF NOT EXISTS public.campaign_logs (
-  id BIGSERIAL PRIMARY KEY,
-  campaign_id  UUID NOT NULL REFERENCES public.campaigns(id) ON DELETE CASCADE,
-  message      TEXT NOT NULL,
-  level        TEXT NOT NULL DEFAULT 'info',
-  created_at   TIMESTAMPTZ DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_campaign_logs_campaign ON public.campaign_logs(campaign_id, created_at);
-
--- =====================================================================
--- PARTE 9 — FOLLOW-UP AUTOMÁTICO
--- =====================================================================
-CREATE TABLE IF NOT EXISTS public.followup_campaigns (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name                  TEXT NOT NULL,
-  instance_name         TEXT NOT NULL,
-  ai_enabled            BOOLEAN DEFAULT FALSE,
-  ai_model              TEXT,
-  ai_prompt             TEXT,
-  steps                 JSONB NOT NULL DEFAULT '[]'::jsonb,
-  -- Follow-up: ainda mais espaçado que disparo, pra parecer humano (60-240s).
-  min_interval_seconds  INT NOT NULL DEFAULT 60,
-  max_interval_seconds  INT NOT NULL DEFAULT 240,
-  allowed_start_hour    INT DEFAULT 9,
-  allowed_end_hour      INT DEFAULT 20,
-  auto_execute          BOOLEAN DEFAULT FALSE,
-  status                TEXT NOT NULL DEFAULT 'draft',
-  total_enrolled        INT DEFAULT 0,
-  total_sent            INT DEFAULT 0,
-  total_responded       INT DEFAULT 0,
-  total_exhausted       INT DEFAULT 0,
-  last_error            TEXT,
-  last_error_at         TIMESTAMPTZ,
-  created_at            TIMESTAMPTZ DEFAULT NOW(),
-  updated_at            TIMESTAMPTZ DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_followup_campaigns_status ON public.followup_campaigns(status);
-
-CREATE TABLE IF NOT EXISTS public.followup_targets (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  followup_campaign_id  UUID NOT NULL REFERENCES public.followup_campaigns(id) ON DELETE CASCADE,
-  lead_id               INT,
-  remote_jid            TEXT NOT NULL,
-  nome_negocio          TEXT,
-  ramo_negocio          TEXT,
-  current_step          INT NOT NULL DEFAULT 0,
-  last_sent_at          TIMESTAMPTZ,
-  next_send_at          TIMESTAMPTZ,
-  status                TEXT NOT NULL DEFAULT 'pending',
-  last_message_id       TEXT,
-  last_rendered         TEXT,
-  ai_input              TEXT,
-  error_message         TEXT,
-  created_at            TIMESTAMPTZ DEFAULT NOW(),
-  updated_at            TIMESTAMPTZ DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_followup_targets_campaign ON public.followup_targets(followup_campaign_id);
-CREATE INDEX IF NOT EXISTS idx_followup_targets_next     ON public.followup_targets(followup_campaign_id, status, next_send_at);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_followup_target     ON public.followup_targets(followup_campaign_id, remote_jid);
-
-CREATE TABLE IF NOT EXISTS public.followup_logs (
-  id BIGSERIAL PRIMARY KEY,
-  followup_campaign_id  UUID NOT NULL REFERENCES public.followup_campaigns(id) ON DELETE CASCADE,
-  message               TEXT NOT NULL,
-  level                 TEXT NOT NULL DEFAULT 'info',
-  created_at            TIMESTAMPTZ DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_followup_logs_campaign ON public.followup_logs(followup_campaign_id, created_at);
-
-CREATE TABLE IF NOT EXISTS public."follow-up_V2" (
-  id uuid not null default gen_random_uuid(),
-  created_at timestamp with time zone null default now(),
-  "remoteJid" text not null,
-  "ultimaAtividade" timestamp with time zone null,
-  "ultimaMensagem" text null,
-  encerramento boolean null default false,
-  followup1 boolean null default false,
-  followup2 boolean null default false,
-  followup3 boolean null default false,
-  metadata jsonb null default '{}'::jsonb,
-  constraint "follow-up_V2_pkey" primary key (id),
-  constraint "follow-up_V2_remoteJid_key" unique ("remoteJid")
+  id              BIGSERIAL PRIMARY KEY,
+  batch_id        uuid,
+  triggered_by    text NOT NULL DEFAULT 'manual'::text,
+  started_at      timestamp with time zone NOT NULL DEFAULT now(),
+  finished_at     timestamp with time zone,
+  duration_ms     integer,
+  model           text,
+  provider        text,
+  chats_analyzed  integer DEFAULT 0,
+  leads_moved     integer DEFAULT 0,
+  status          text NOT NULL DEFAULT 'running'::text,
+  error           text,
+  summary         text,
+  client_id       uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
 );
 
--- =====================================================================
--- PARTE 10 — TOKENS / CUSTO IA
--- =====================================================================
-CREATE TABLE IF NOT EXISTS public.ai_token_usage (
-  id BIGSERIAL PRIMARY KEY,
-  source             TEXT NOT NULL,                 -- agent | disparo | followup | organizer | other
-  source_id          TEXT,
-  source_label       TEXT,
-  model              TEXT,
-  provider           TEXT DEFAULT 'Gemini',
-  prompt_tokens      INT DEFAULT 0,
-  completion_tokens  INT DEFAULT 0,
-  total_tokens       INT DEFAULT 0,
-  cost_usd           NUMERIC(12, 8) DEFAULT 0,
-  metadata           JSONB DEFAULT '{}'::jsonb,
-  created_at         TIMESTAMPTZ DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_token_usage_created ON public.ai_token_usage(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_token_usage_source  ON public.ai_token_usage(source, source_id);
--- Indexar por dia: timestamptz→date depende da timezone da sessão (não é
--- IMMUTABLE). Postgres rejeita índices em expressões não-IMMUTABLE. Fixando
--- UTC com \`AT TIME ZONE\` torna a expressão determinística.
-CREATE INDEX IF NOT EXISTS idx_token_usage_day     ON public.ai_token_usage(((created_at AT TIME ZONE 'UTC')::date));
-
--- Cache de preços online de modelos (LiteLLM) — usado em /tokens
 CREATE TABLE IF NOT EXISTS public.ai_pricing_cache (
-  key         TEXT PRIMARY KEY,
-  payload     JSONB NOT NULL,
-  fetched_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  key         text PRIMARY KEY,
+  payload     jsonb NOT NULL,
+  fetched_at  timestamp with time zone NOT NULL DEFAULT now()
 );
 
--- =====================================================================
--- PARTE 10.5 — AUTOMAÇÃO (orquestrador: scrape → disparo → follow-up)
--- Uma "automação" amarra: scraper (nicho/região/filtros) + disparo em massa
--- (template + intervalos + horários) + follow-up (steps + IA opcional),
--- vinculados a um agente IA + instância. State machine progride:
--- idle → scraping → dispatching → following → done.
--- =====================================================================
-CREATE TABLE IF NOT EXISTS public.automations (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name                   TEXT NOT NULL,
-  agent_id               INT REFERENCES public.agent_settings(id) ON DELETE SET NULL,
-  instance_name          TEXT NOT NULL,
-  -- Scraper config
-  niches                 JSONB NOT NULL DEFAULT '[]'::jsonb,    -- ["pizzaria","açaí"]
-  regions                JSONB NOT NULL DEFAULT '[]'::jsonb,    -- ["Vitoria/ES","Vila Velha/ES"]
-  scrape_filters         JSONB DEFAULT '{}'::jsonb,             -- {filterEmpty,filterDuplicates,filterLandlines,maxLeads}
-  scrape_max_leads       INT DEFAULT 200,
-  -- Disparo (intervalos SEGUROS WhatsApp: 60-180s aleatório, média ~2 min)
-  dispatch_template      TEXT,
-  dispatch_min_interval  INT NOT NULL DEFAULT 60,
-  dispatch_max_interval  INT NOT NULL DEFAULT 180,
-  dispatch_personalize   BOOLEAN DEFAULT FALSE,
-  dispatch_ai_model      TEXT,
-  dispatch_ai_prompt     TEXT,
-  -- Follow-up (mais espaçado: 60-240s)
-  followup_steps         JSONB NOT NULL DEFAULT '[]'::jsonb,    -- [{day_offset,template}]
-  followup_min_interval  INT NOT NULL DEFAULT 60,
-  followup_max_interval  INT NOT NULL DEFAULT 240,
-  followup_ai_enabled    BOOLEAN DEFAULT FALSE,
-  followup_ai_model      TEXT,
-  followup_ai_prompt     TEXT,
-  -- Janela de horário (válida pra disparo + follow-up)
-  allowed_start_hour     INT NOT NULL DEFAULT 9,
-  allowed_end_hour       INT NOT NULL DEFAULT 20,
-  -- State machine
-  phase                  TEXT NOT NULL DEFAULT 'idle',          -- idle|scraping|dispatching|following|done|error|paused
-  status                 TEXT NOT NULL DEFAULT 'draft',         -- draft|running|paused|done|error
-  campaign_id            UUID,                                  -- ref. solta pra evitar cascade surpresa
-  followup_campaign_id   UUID,
-  -- Contadores e timestamps
-  scraped_count          INT DEFAULT 0,
-  last_error             TEXT,
-  last_error_at          TIMESTAMPTZ,
-  started_at             TIMESTAMPTZ,
-  finished_at            TIMESTAMPTZ,
-  scrape_finished_at     TIMESTAMPTZ,
-  dispatch_finished_at   TIMESTAMPTZ,
-  created_at             TIMESTAMPTZ DEFAULT NOW(),
-  updated_at             TIMESTAMPTZ DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS public.ai_token_usage (
+  id                 BIGSERIAL PRIMARY KEY,
+  source             text NOT NULL,
+  source_id          text,
+  source_label       text,
+  model              text,
+  provider           text DEFAULT 'Gemini'::text,
+  prompt_tokens      integer DEFAULT 0,
+  completion_tokens  integer DEFAULT 0,
+  total_tokens       integer DEFAULT 0,
+  cost_usd           numeric(12,8) DEFAULT 0,
+  metadata           jsonb DEFAULT '{}'::jsonb,
+  created_at         timestamp with time zone DEFAULT now(),
+  client_id          uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
 );
-CREATE INDEX IF NOT EXISTS idx_automations_status ON public.automations(status, phase);
--- Migração defensiva: tabela existente ganha o toggle de follow-up.
-ALTER TABLE public.automations ADD COLUMN IF NOT EXISTS followup_enabled BOOLEAN DEFAULT TRUE;
--- Toggle pra rodar Lead Intelligence automaticamente entre captação e disparo.
-ALTER TABLE public.automations ADD COLUMN IF NOT EXISTS lead_intelligence_enabled BOOLEAN DEFAULT FALSE;
 
--- Log estruturado da automação — feed em tempo real visível na UI.
--- Diferentes "kind" (fonte): scrape | dispatch | followup | reply | state | error
--- Carrega remote_jid quando aplicável pra você clicar no log e abrir o chat.
-CREATE TABLE IF NOT EXISTS public.automation_logs (
-  id BIGSERIAL PRIMARY KEY,
-  automation_id  UUID NOT NULL REFERENCES public.automations(id) ON DELETE CASCADE,
-  kind           TEXT NOT NULL DEFAULT 'state',  -- scrape|dispatch|followup|reply|state|error
-  level          TEXT NOT NULL DEFAULT 'info',   -- info|success|warning|error
-  message        TEXT NOT NULL,
-  remote_jid     TEXT,
-  metadata       JSONB DEFAULT '{}'::jsonb,
-  created_at     TIMESTAMPTZ DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS public.app_settings (
+  key         text PRIMARY KEY,
+  value       text,
+  updated_at  timestamp with time zone DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_automation_logs_automation ON public.automation_logs(automation_id, created_at DESC);
 
--- =====================================================================
--- PARTE 10.6 — MULTI-TENANT (clients, auth_sessions, kanban_columns,
--- coluna client_id em todas as tabelas tenant-aware)
--- =====================================================================
-CREATE TABLE IF NOT EXISTS public.clients (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name              TEXT NOT NULL,
-  email             TEXT NOT NULL UNIQUE,
-  password_hash     TEXT,                              -- pbkdf2$iter$salt$hash; NULL = sem login direto
-  is_admin          BOOLEAN NOT NULL DEFAULT FALSE,
-  is_active         BOOLEAN NOT NULL DEFAULT TRUE,
-  default_ai_model  TEXT,                              -- NULL = usa default global de ai_organizer_config. Runtime resolve via /api/ai-models (sem hardcode de modelo aqui)
-  features          JSONB NOT NULL DEFAULT '{"dashboard":true,"leads":true,"chat":true,"agente":true,"automacao":true,"disparo":true,"followup":true,"captador":true,"inteligencia":true,"whatsapp":true,"historico":true,"tokens":true,"configuracoes":true}'::jsonb,
-  organizer_enabled BOOLEAN NOT NULL DEFAULT TRUE,     -- toggle por cliente: roda Organizador IA?
-  organizer_prompt  TEXT,                              -- prompt customizado do Organizador (NULL = usa global)
-  notes             TEXT,
-  created_at        TIMESTAMPTZ DEFAULT NOW(),
-  updated_at        TIMESTAMPTZ DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS public.appointments (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id         uuid NOT NULL,
+  agent_id          integer,
+  lead_id           integer,
+  remote_jid        text NOT NULL,
+  instance_name     text,
+  google_event_id   text,
+  calendar_id       text DEFAULT 'primary'::text,
+  title             text NOT NULL,
+  description       text,
+  service_name      text,
+  start_at          timestamp with time zone NOT NULL,
+  end_at            timestamp with time zone NOT NULL,
+  status            text NOT NULL DEFAULT 'confirmed'::text,
+  reminders_sent    jsonb DEFAULT '[]'::jsonb,
+  created_by        text NOT NULL DEFAULT 'ia'::text,
+  metadata          jsonb DEFAULT '{}'::jsonb,
+  cancelled_reason  text,
+  cancelled_at      timestamp with time zone,
+  completed_at      timestamp with time zone,
+  created_at        timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at        timestamp with time zone NOT NULL DEFAULT now(),
+  location          text,
+  attendees         jsonb DEFAULT '[]'::jsonb,
+  all_day           boolean NOT NULL DEFAULT false,
+  visibility        text DEFAULT 'default'::text,
+  color_id          text,
+  html_link         text,
+  conference_data   jsonb,
+  recurrence        text[],
+  organizer_email   text
 );
--- Migração defensiva pra bancos antigos
-ALTER TABLE public.clients ADD COLUMN IF NOT EXISTS organizer_enabled BOOLEAN NOT NULL DEFAULT TRUE;
-CREATE INDEX IF NOT EXISTS idx_clients_email     ON public.clients(email);
-CREATE INDEX IF NOT EXISTS idx_clients_is_active ON public.clients(is_active);
-CREATE INDEX IF NOT EXISTS idx_clients_is_admin  ON public.clients(is_admin);
-
--- Cliente "Default" recebe todos os dados pré-multi-tenant.
-INSERT INTO public.clients (id, name, email, is_admin, is_active, notes)
-VALUES ('00000000-0000-0000-0000-000000000001', 'Default', 'default@local', FALSE, TRUE, 'Cliente automático — dados legados.')
-ON CONFLICT (id) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS public.auth_sessions (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  client_id       UUID NOT NULL REFERENCES public.clients(id) ON DELETE CASCADE,
-  impersonated_as UUID REFERENCES public.clients(id) ON DELETE SET NULL,
-  token_hash      TEXT NOT NULL UNIQUE,
-  user_agent      TEXT,
-  ip              TEXT,
-  expires_at      TIMESTAMPTZ NOT NULL,
-  revoked_at      TIMESTAMPTZ,
-  created_at      TIMESTAMPTZ DEFAULT NOW()
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id        uuid NOT NULL,
+  impersonated_as  uuid,
+  token_hash       text NOT NULL UNIQUE,
+  user_agent       text,
+  ip               text,
+  expires_at       timestamp with time zone NOT NULL,
+  revoked_at       timestamp with time zone,
+  created_at       timestamp with time zone DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_auth_sessions_token   ON public.auth_sessions(token_hash) WHERE revoked_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_auth_sessions_client  ON public.auth_sessions(client_id, expires_at);
 
--- Adiciona client_id em todas as tabelas tenant-aware. NULLABLE de propósito
--- — código antigo continua funcionando até a blindagem completa por query.
--- DEFAULT '...001' garante que INSERTs sem client_id vão pro Default.
-DO $$
-DECLARE
-  tbl TEXT;
-  tenant_tables TEXT[] := ARRAY[
-    'leads_extraidos', 'chats_dashboard', 'messages', 'contacts', 'sessions',
-    'agent_settings', 'agent_stages', 'agent_knowledge', 'channel_connections',
-    'campaigns', 'campaign_targets', 'campaign_logs',
-    'followup_campaigns', 'followup_targets', 'followup_logs',
-    'automations', 'automation_logs',
-    'ai_token_usage', 'historico_ia_leads', 'ai_organizer_runs', 'chat_buffers',
-    'webhook_logs'
-  ];
-BEGIN
-  FOREACH tbl IN ARRAY tenant_tables LOOP
-    EXECUTE format(
-      'ALTER TABLE public.%I ADD COLUMN IF NOT EXISTS client_id UUID REFERENCES public.clients(id) ON DELETE CASCADE DEFAULT ''00000000-0000-0000-0000-000000000001''',
-      tbl
-    );
-    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_%I_client ON public.%I(client_id)', tbl, tbl);
-    EXECUTE format('UPDATE public.%I SET client_id = ''00000000-0000-0000-0000-000000000001'' WHERE client_id IS NULL', tbl);
-  END LOOP;
-END $$;
+CREATE TABLE IF NOT EXISTS public.automation_logs (
+  id             BIGSERIAL PRIMARY KEY,
+  automation_id  uuid NOT NULL,
+  kind           text NOT NULL DEFAULT 'state'::text,
+  level          text NOT NULL DEFAULT 'info'::text,
+  message        text NOT NULL,
+  remote_jid     text,
+  metadata       jsonb DEFAULT '{}'::jsonb,
+  created_at     timestamp with time zone DEFAULT now(),
+  client_id      uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
+);
 
--- Kanban editável por cliente
+CREATE TABLE IF NOT EXISTS public.automations (
+  id                         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name                       text NOT NULL,
+  agent_id                   integer,
+  instance_name              text NOT NULL,
+  niches                     jsonb NOT NULL DEFAULT '[]'::jsonb,
+  regions                    jsonb NOT NULL DEFAULT '[]'::jsonb,
+  scrape_filters             jsonb DEFAULT '{}'::jsonb,
+  scrape_max_leads           integer DEFAULT 200,
+  dispatch_template          text,
+  dispatch_min_interval      integer NOT NULL DEFAULT 60,
+  dispatch_max_interval      integer NOT NULL DEFAULT 180,
+  dispatch_personalize       boolean DEFAULT false,
+  dispatch_ai_model          text,
+  dispatch_ai_prompt         text,
+  followup_steps             jsonb NOT NULL DEFAULT '[]'::jsonb,
+  followup_min_interval      integer NOT NULL DEFAULT 60,
+  followup_max_interval      integer NOT NULL DEFAULT 240,
+  followup_ai_enabled        boolean DEFAULT false,
+  followup_ai_model          text,
+  followup_ai_prompt         text,
+  allowed_start_hour         integer NOT NULL DEFAULT 9,
+  allowed_end_hour           integer NOT NULL DEFAULT 20,
+  phase                      text NOT NULL DEFAULT 'idle'::text,
+  status                     text NOT NULL DEFAULT 'draft'::text,
+  campaign_id                uuid,
+  followup_campaign_id       uuid,
+  scraped_count              integer DEFAULT 0,
+  last_error                 text,
+  last_error_at              timestamp with time zone,
+  started_at                 timestamp with time zone,
+  finished_at                timestamp with time zone,
+  scrape_finished_at         timestamp with time zone,
+  dispatch_finished_at       timestamp with time zone,
+  created_at                 timestamp with time zone DEFAULT now(),
+  updated_at                 timestamp with time zone DEFAULT now(),
+  followup_enabled           boolean DEFAULT true,
+  lead_intelligence_enabled  boolean DEFAULT false,
+  client_id                  uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
+);
+
+CREATE TABLE IF NOT EXISTS public.campaign_logs (
+  id           BIGSERIAL PRIMARY KEY,
+  campaign_id  uuid NOT NULL,
+  message      text NOT NULL,
+  level        text NOT NULL DEFAULT 'info'::text,
+  created_at   timestamp with time zone DEFAULT now(),
+  client_id    uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
+);
+
+CREATE TABLE IF NOT EXISTS public.campaign_targets (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  campaign_id       uuid NOT NULL,
+  remote_jid        text NOT NULL,
+  nome_negocio      text,
+  ramo_negocio      text,
+  next_send_at      timestamp with time zone,
+  status            text NOT NULL DEFAULT 'pending'::text,
+  message_id        text,
+  rendered_message  text,
+  ai_input          text,
+  error_message     text,
+  attempts          integer DEFAULT 0,
+  sent_at           timestamp with time zone,
+  created_at        timestamp with time zone DEFAULT now(),
+  client_id         uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
+);
+
+CREATE TABLE IF NOT EXISTS public.campaigns (
+  id                         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name                       text NOT NULL,
+  instance_name              text NOT NULL,
+  agent_id                   integer,
+  message_template           text NOT NULL,
+  min_interval_seconds       integer NOT NULL DEFAULT 60,
+  max_interval_seconds       integer NOT NULL DEFAULT 180,
+  allowed_start_hour         integer DEFAULT 9,
+  allowed_end_hour           integer DEFAULT 20,
+  status                     text NOT NULL DEFAULT 'draft'::text,
+  total_targets              integer DEFAULT 0,
+  sent_count                 integer DEFAULT 0,
+  failed_count               integer DEFAULT 0,
+  skipped_count              integer DEFAULT 0,
+  personalize_with_ai        boolean DEFAULT false,
+  use_web_search             boolean DEFAULT false,
+  ai_model                   text,
+  ai_prompt                  text,
+  last_error                 text,
+  last_error_at              timestamp with time zone,
+  started_at                 timestamp with time zone,
+  finished_at                timestamp with time zone,
+  created_at                 timestamp with time zone DEFAULT now(),
+  updated_at                 timestamp with time zone DEFAULT now(),
+  automation_id              uuid,
+  lead_intelligence_enabled  boolean DEFAULT false,
+  client_id                  uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
+);
+
+CREATE TABLE IF NOT EXISTS public.channel_connections (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  provider         text NOT NULL DEFAULT 'evolution'::text,
+  instance_name    text NOT NULL UNIQUE,
+  agent_id         integer,
+  status           text DEFAULT 'disconnected'::text,
+  provider_config  jsonb DEFAULT '{}'::jsonb,
+  created_at       timestamp with time zone DEFAULT now(),
+  client_id        uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
+);
+
+CREATE TABLE IF NOT EXISTS public.chat_buffers (
+  remote_jid     text NOT NULL,
+  instance_name  text NOT NULL,
+  expires_at     timestamp with time zone NOT NULL,
+  created_at     timestamp with time zone DEFAULT now(),
+  client_id      uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid,
+  PRIMARY KEY (remote_jid, instance_name)
+);
+
+CREATE TABLE IF NOT EXISTS public.chats_dashboard (
+  id                 BIGSERIAL PRIMARY KEY,
+  remote_jid         text NOT NULL,
+  instance_name      text NOT NULL DEFAULT 'sdr'::text,
+  message_id         text UNIQUE,
+  sender_type        text NOT NULL DEFAULT 'customer'::text,
+  content            text,
+  status_envio       text,
+  is_from_me         boolean DEFAULT (sender_type = ANY (ARRAY['ai'::text, 'human'::text])),
+  media_url          text,
+  media_type         text,
+  mimetype           text,
+  message_type       text,
+  quoted_id          text,
+  quoted_text        text,
+  created_at         timestamp with time zone DEFAULT now(),
+  contact_name       text,
+  profile_pic_url    text,
+  last_message       text,
+  last_message_time  timestamp with time zone,
+  unread_count       integer DEFAULT 0,
+  status             text DEFAULT 'bot_active'::text,
+  agent_id           integer,
+  updated_at         timestamp with time zone DEFAULT now(),
+  file_name          text,
+  client_id          uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
+);
+
+CREATE TABLE IF NOT EXISTS public.clients (
+  id                        uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name                      text NOT NULL,
+  email                     text NOT NULL UNIQUE,
+  password_hash             text,
+  is_admin                  boolean NOT NULL DEFAULT false,
+  is_active                 boolean NOT NULL DEFAULT true,
+  default_ai_model          text,
+  features                  jsonb NOT NULL DEFAULT '{"chat": true, "leads": true, "agente": true, "tokens": true, "disparo": true, "captador": true, "followup": true, "whatsapp": true, "automacao": true, "dashboard": true, "historico": true, "inteligencia": true, "configuracoes": true}'::jsonb,
+  organizer_prompt          text,
+  notes                     text,
+  created_at                timestamp with time zone DEFAULT now(),
+  updated_at                timestamp with time zone DEFAULT now(),
+  organizer_enabled         boolean NOT NULL DEFAULT true,
+  organizer_execution_hour  integer NOT NULL DEFAULT 20,
+  organizer_last_run        timestamp with time zone
+);
+
+CREATE TABLE IF NOT EXISTS public.contacts (
+  id                     uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  remote_jid             text NOT NULL UNIQUE,
+  phone_number           text,
+  nome_negocio           text,
+  push_name              text,
+  created_at             timestamp with time zone DEFAULT now(),
+  profile_pic_url        text,
+  profile_pic_fetched_at timestamp with time zone,
+  profile_pic            text,
+  lead_id                integer,
+  tags                   text[] DEFAULT '{}'::text[],
+  notes                  text,
+  updated_at             timestamp with time zone DEFAULT now(),
+  client_id              uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
+);
+
+CREATE TABLE IF NOT EXISTS public.followup_campaigns (
+  id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name                  text NOT NULL,
+  instance_name         text NOT NULL,
+  ai_enabled            boolean DEFAULT false,
+  ai_model              text,
+  ai_prompt             text,
+  steps                 jsonb NOT NULL DEFAULT '[]'::jsonb,
+  min_interval_seconds  integer NOT NULL DEFAULT 60,
+  max_interval_seconds  integer NOT NULL DEFAULT 240,
+  allowed_start_hour    integer DEFAULT 9,
+  allowed_end_hour      integer DEFAULT 20,
+  auto_execute          boolean DEFAULT false,
+  status                text NOT NULL DEFAULT 'draft'::text,
+  total_enrolled        integer DEFAULT 0,
+  total_sent            integer DEFAULT 0,
+  total_responded       integer DEFAULT 0,
+  total_exhausted       integer DEFAULT 0,
+  last_error            text,
+  last_error_at         timestamp with time zone,
+  created_at            timestamp with time zone DEFAULT now(),
+  updated_at            timestamp with time zone DEFAULT now(),
+  client_id             uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
+);
+
+CREATE TABLE IF NOT EXISTS public.followup_logs (
+  id                    BIGSERIAL PRIMARY KEY,
+  followup_campaign_id  uuid NOT NULL,
+  message               text NOT NULL,
+  level                 text NOT NULL DEFAULT 'info'::text,
+  created_at            timestamp with time zone DEFAULT now(),
+  client_id             uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
+);
+
+CREATE TABLE IF NOT EXISTS public.followup_targets (
+  id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  followup_campaign_id  uuid NOT NULL,
+  lead_id               integer,
+  remote_jid            text NOT NULL,
+  nome_negocio          text,
+  ramo_negocio          text,
+  current_step          integer NOT NULL DEFAULT 0,
+  last_sent_at          timestamp with time zone,
+  next_send_at          timestamp with time zone,
+  status                text NOT NULL DEFAULT 'pending'::text,
+  last_message_id       text,
+  last_rendered         text,
+  ai_input              text,
+  error_message         text,
+  created_at            timestamp with time zone DEFAULT now(),
+  updated_at            timestamp with time zone DEFAULT now(),
+  client_id             uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
+);
+
+CREATE TABLE IF NOT EXISTS public.historico_ia_leads (
+  id            BIGSERIAL PRIMARY KEY,
+  remote_jid    text,
+  nome_negocio  text,
+  status_antigo text,
+  status_novo   text,
+  razao         text,
+  resumo        text,
+  batch_id      text,
+  created_at    timestamp with time zone DEFAULT now(),
+  client_id     uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
+);
+
 CREATE TABLE IF NOT EXISTS public.kanban_columns (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  client_id   UUID NOT NULL REFERENCES public.clients(id) ON DELETE CASCADE,
-  status_key  TEXT NOT NULL,
-  label       TEXT NOT NULL,
-  color       TEXT,
-  order_index INT NOT NULL DEFAULT 0,
-  is_system   BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at  TIMESTAMPTZ DEFAULT NOW(),
-  updated_at  TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(client_id, status_key)
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id    uuid NOT NULL,
+  status_key   text NOT NULL,
+  label        text NOT NULL,
+  color        text,
+  order_index  integer NOT NULL DEFAULT 0,
+  is_system    boolean NOT NULL DEFAULT false,
+  created_at   timestamp with time zone DEFAULT now(),
+  updated_at   timestamp with time zone DEFAULT now(),
+  UNIQUE (client_id, status_key)
 );
-CREATE INDEX IF NOT EXISTS idx_kanban_columns_client ON public.kanban_columns(client_id, order_index);
 
-INSERT INTO public.kanban_columns (client_id, status_key, label, color, order_index, is_system) VALUES
-  ('00000000-0000-0000-0000-000000000001', 'novo',              'Novos',             '#3b82f6', 0, TRUE),
-  ('00000000-0000-0000-0000-000000000001', 'primeiro_contato',  'Primeiro contato',  '#06b6d4', 1, FALSE),
-  ('00000000-0000-0000-0000-000000000001', 'follow-up',         'Follow-up',         '#eab308', 2, FALSE),
-  ('00000000-0000-0000-0000-000000000001', 'qualificado',       'Qualificado',       '#10b981', 3, FALSE),
-  ('00000000-0000-0000-0000-000000000001', 'fechado',           'Fechado',           '#22c55e', 4, FALSE),
-  ('00000000-0000-0000-0000-000000000001', 'perdido',           'Perdido',           '#ef4444', 5, FALSE),
-  ('00000000-0000-0000-0000-000000000001', 'sem_contato',       'Sem contato',       '#6b7280', 6, FALSE)
-ON CONFLICT (client_id, status_key) DO NOTHING;
-
-ALTER TABLE public.clients         DISABLE ROW LEVEL SECURITY;
-ALTER TABLE public.auth_sessions   DISABLE ROW LEVEL SECURITY;
-ALTER TABLE public.kanban_columns  DISABLE ROW LEVEL SECURITY;
-GRANT ALL ON TABLE public.clients         TO anon, authenticated, service_role;
-GRANT ALL ON TABLE public.auth_sessions   TO anon, authenticated, service_role;
-GRANT ALL ON TABLE public.kanban_columns  TO anon, authenticated, service_role;
-
--- =====================================================================
--- PARTE 11 — app_settings (URL pública, credenciais Evolution global, flags)
--- =====================================================================
-CREATE TABLE IF NOT EXISTS public.app_settings (
-  key         TEXT PRIMARY KEY,
-  value       TEXT,
-  updated_at  TIMESTAMPTZ DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS public.leads_extraidos (
+  id                       BIGSERIAL PRIMARY KEY,
+  "remoteJid"              text UNIQUE,
+  nome_negocio             text,
+  ramo_negocio             text,
+  status                   text DEFAULT 'novo'::text,
+  instance_name            text DEFAULT 'sdr'::text,
+  justificativa_ia         text,
+  resumo_ia                text,
+  ia_last_analyzed_at      timestamp with time zone,
+  primeiro_contato_at      timestamp with time zone,
+  primeiro_contato_source  text,
+  telefone                 text,
+  endereco                 text,
+  avaliacao                numeric,
+  reviews                  integer,
+  website                  text,
+  categoria                text,
+  created_at               timestamp with time zone DEFAULT now(),
+  updated_at               timestamp with time zone DEFAULT now(),
+  icp_score                integer,
+  lead_type                text,
+  intelligence             jsonb,
+  intelligence_at          timestamp with time zone,
+  instagram                text,
+  facebook                 text,
+  rating                   numeric,
+  next_follow_up           timestamp with time zone,
+  current_stage_index      integer DEFAULT 0,
+  client_id                uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid,
+  last_analysis_hash       text,
+  last_analysis_at         timestamp with time zone,
+  email                    text,
+  observacoes              text
 );
-INSERT INTO public.app_settings (key, value, updated_at) VALUES
-  ('public_url',          '', NOW()),
-  ('evolution_url',       '', NOW()),
-  ('evolution_api_key',   '', NOW()),
-  ('evolution_instance',  '', NOW()),
-  ('lead_intelligence_model', 'gemini-2.5-flash', NOW()),  -- modelo padrão pra Lead Intelligence
-  ('rag_embedding_model', 'gemini-embedding-001', NOW())   -- modelo de embeddings do RAG (Gemini ou OpenRouter, sempre 768 dims)
-ON CONFLICT (key) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS public.messages (
+  id              BIGSERIAL PRIMARY KEY,
+  session_id      uuid,
+  message_id      text UNIQUE,
+  sender          text NOT NULL DEFAULT 'customer'::text,
+  content         text,
+  media_category  text,
+  media_url       text,
+  mimetype        text,
+  file_name       text,
+  file_size       bigint,
+  base64_content  text,
+  delivery_status text,
+  quoted_msg_id   text,
+  quoted_text     text,
+  raw_payload     jsonb,
+  created_at      timestamp with time zone DEFAULT now(),
+  chat_id         bigint,
+  remote_jid      text,
+  text            text,
+  is_from_me      boolean DEFAULT false,
+  status          text,
+  "timestamp"     timestamp with time zone DEFAULT now(),
+  instance_name   text DEFAULT 'sdr'::text,
+  media_type      text,
+  media_mimetype  text,
+  context_info    jsonb DEFAULT '{}'::jsonb,
+  client_id       uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
+);
+
+CREATE TABLE IF NOT EXISTS public.sessions (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  contact_id        uuid,
+  instance_name     text NOT NULL DEFAULT 'sdr'::text,
+  agent_id          integer,
+  bot_status        text DEFAULT 'bot_active'::text,
+  last_message_at   timestamp with time zone,
+  variables         jsonb DEFAULT '{}'::jsonb,
+  unread_count      integer DEFAULT 0,
+  paused_by         text,
+  paused_at         timestamp with time zone,
+  resume_at         timestamp with time zone,
+  created_at        timestamp with time zone DEFAULT now(),
+  current_stage_id  uuid,
+  current_stage     text,
+  updated_at        timestamp with time zone DEFAULT now(),
+  client_id         uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid,
+  UNIQUE (contact_id, instance_name)
+);
+
+CREATE TABLE IF NOT EXISTS public.webhook_logs (
+  id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  instance_name  text,
+  event          text,
+  payload        jsonb,
+  created_at     timestamp with time zone DEFAULT now(),
+  client_id      uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
+);
 
 -- =====================================================================
--- PARTE 11.5 — UNIQUE CONSTRAINTS DEFENSIVAS (necessárias pra UPSERT)
--- Garante que tabelas pré-existentes (de bancos antigos sem o CREATE
--- TABLE original) ganhem as UNIQUE necessárias pros upserts dos workers
--- de disparo / follow-up / webhook funcionarem. Sem isso, o
--- \`upsert(onConflict: "message_id")\` falha em runtime.
+-- CONSTRAINTS COMPOSTAS / UNIQUE (idempotente via DO blocks)
 -- =====================================================================
-DO $$
-BEGIN
-  -- chats_dashboard.message_id UNIQUE (campaign-worker faz upsert por aqui)
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-    WHERE conrelid = 'public.chats_dashboard'::regclass
-      AND contype  = 'u'
-      AND conkey   = (SELECT array_agg(attnum) FROM pg_attribute
-                      WHERE attrelid = 'public.chats_dashboard'::regclass
-                        AND attname  = 'message_id')
-  ) THEN
-    BEGIN
-      ALTER TABLE public.chats_dashboard
-        ADD CONSTRAINT chats_dashboard_message_id_key UNIQUE (message_id);
-    EXCEPTION WHEN duplicate_table OR duplicate_object THEN
-      -- já existe sob outro nome — ignora
-      NULL;
-    END;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_campaign_target') THEN
+    ALTER TABLE public.campaign_targets ADD CONSTRAINT uq_campaign_target UNIQUE (campaign_id, remote_jid);
   END IF;
-
-  -- messages.message_id UNIQUE (idem, agora também via upsert)
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-    WHERE conrelid = 'public.messages'::regclass
-      AND contype  = 'u'
-      AND conkey   = (SELECT array_agg(attnum) FROM pg_attribute
-                      WHERE attrelid = 'public.messages'::regclass
-                        AND attname  = 'message_id')
-  ) THEN
-    BEGIN
-      ALTER TABLE public.messages
-        ADD CONSTRAINT messages_message_id_key UNIQUE (message_id);
-    EXCEPTION WHEN duplicate_table OR duplicate_object THEN
-      NULL;
-    END;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_followup_target') THEN
+    ALTER TABLE public.followup_targets ADD CONSTRAINT uq_followup_target UNIQUE (followup_campaign_id, remote_jid);
   END IF;
 END $$;
 
 -- =====================================================================
--- PARTE 11.6 - INTELIGÊNCIA COMERCIAL (AI-FIRST OS)
+-- ÍNDICES
 -- =====================================================================
 
-CREATE TABLE IF NOT EXISTS public.sales_insights (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  remote_jid     TEXT NOT NULL,
-  nome_negocio   TEXT,
-  insight_type   TEXT NOT NULL, -- 'objecao', 'dor', 'oportunidade', 'dado_extraido', 'feedback'
-  content        TEXT NOT NULL,
-  confidence     NUMERIC DEFAULT 1.0,
-  extracted_from TEXT DEFAULT 'chat_ai',
-  created_at     TIMESTAMPTZ DEFAULT NOW(),
-  updated_at     TIMESTAMPTZ DEFAULT NOW()
-);
+-- agent_knowledge / chunks
+CREATE INDEX IF NOT EXISTS idx_agent_knowledge_client              ON public.agent_knowledge        USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_agent_knowledge_chunks_agent_id     ON public.agent_knowledge_chunks USING btree (agent_id);
+CREATE INDEX IF NOT EXISTS idx_agent_knowledge_chunks_knowledge_id ON public.agent_knowledge_chunks USING btree (knowledge_id);
+CREATE INDEX IF NOT EXISTS idx_agent_knowledge_chunks_embedding_hnsw ON public.agent_knowledge_chunks USING hnsw (embedding vector_cosine_ops) WITH (m='16', ef_construction='64');
+
+-- agents
+CREATE INDEX IF NOT EXISTS idx_agent_settings_client ON public.agent_settings USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_agent_stages_client   ON public.agent_stages   USING btree (client_id);
+
+-- AI organizer / tokens
+CREATE INDEX IF NOT EXISTS idx_ai_organizer_runs_client  ON public.ai_organizer_runs USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_ai_organizer_runs_started ON public.ai_organizer_runs USING btree (started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_token_usage_client     ON public.ai_token_usage    USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_ai_token_usage_created    ON public.ai_token_usage    USING btree (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_token_usage_created       ON public.ai_token_usage    USING btree (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_token_usage_day           ON public.ai_token_usage    USING btree ((((created_at AT TIME ZONE 'UTC'::text))::date));
+CREATE INDEX IF NOT EXISTS idx_token_usage_source        ON public.ai_token_usage    USING btree (source, source_id);
+
+-- appointments
+CREATE INDEX IF NOT EXISTS idx_appointments_agent_start  ON public.appointments USING btree (agent_id, start_at);
+CREATE INDEX IF NOT EXISTS idx_appointments_client_start ON public.appointments USING btree (client_id, start_at);
+CREATE INDEX IF NOT EXISTS idx_appointments_remote_jid   ON public.appointments USING btree (remote_jid);
+CREATE INDEX IF NOT EXISTS idx_appointments_status_start ON public.appointments USING btree (status, start_at);
+CREATE UNIQUE INDEX IF NOT EXISTS appointments_google_event_id_unique ON public.appointments USING btree (google_event_id) WHERE (google_event_id IS NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS appointments_no_overlap             ON public.appointments USING btree (agent_id, start_at) WHERE ((agent_id IS NOT NULL) AND (status = ANY (ARRAY['confirmed'::text, 'tentative'::text])));
+
+-- auth
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_client ON public.auth_sessions USING btree (client_id, expires_at);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_token  ON public.auth_sessions USING btree (token_hash) WHERE (revoked_at IS NULL);
+
+-- automations
+CREATE INDEX IF NOT EXISTS idx_automation_logs_automation ON public.automation_logs USING btree (automation_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_automation_logs_client     ON public.automation_logs USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_automations_client         ON public.automations     USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_automations_status         ON public.automations     USING btree (status, phase);
+
+-- campaigns / targets
+CREATE INDEX IF NOT EXISTS idx_campaign_logs_campaign    ON public.campaign_logs    USING btree (campaign_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_campaign_logs_client      ON public.campaign_logs    USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_targets_campaign ON public.campaign_targets USING btree (campaign_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_targets_client   ON public.campaign_targets USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_targets_status   ON public.campaign_targets USING btree (campaign_id, status);
+CREATE INDEX IF NOT EXISTS idx_campaigns_automation      ON public.campaigns        USING btree (automation_id) WHERE (automation_id IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_campaigns_client          ON public.campaigns        USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_campaigns_status          ON public.campaigns        USING btree (status);
+
+-- channel_connections
+CREATE INDEX IF NOT EXISTS idx_channel_connections_client ON public.channel_connections USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_channel_provider_phone_id  ON public.channel_connections USING btree (((provider_config ->> 'phone_number_id'::text))) WHERE (provider = 'whatsapp_cloud'::text);
+
+-- chat / chats_dashboard
+CREATE INDEX IF NOT EXISTS idx_chat_buffers_client             ON public.chat_buffers    USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_chats_dashboard_client          ON public.chats_dashboard USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_chats_dashboard_client_created  ON public.chats_dashboard USING btree (client_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_chats_dashboard_client_inst_jid ON public.chats_dashboard USING btree (client_id, instance_name, remote_jid);
+CREATE INDEX IF NOT EXISTS idx_chats_dashboard_jid_created     ON public.chats_dashboard USING btree (remote_jid, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_chats_instance                  ON public.chats_dashboard USING btree (instance_name);
+CREATE INDEX IF NOT EXISTS idx_chats_remote_jid                ON public.chats_dashboard USING btree (remote_jid, created_at DESC);
+
+-- clients
+CREATE INDEX IF NOT EXISTS idx_clients_email     ON public.clients USING btree (email);
+CREATE INDEX IF NOT EXISTS idx_clients_is_active ON public.clients USING btree (is_active);
+CREATE INDEX IF NOT EXISTS idx_clients_is_admin  ON public.clients USING btree (is_admin);
+
+-- contacts
+CREATE INDEX IF NOT EXISTS idx_contacts_client ON public.contacts USING btree (client_id);
+
+-- followup
+CREATE INDEX IF NOT EXISTS idx_followup_campaigns_client    ON public.followup_campaigns USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_followup_campaigns_status    ON public.followup_campaigns USING btree (status);
+CREATE INDEX IF NOT EXISTS idx_followup_logs_campaign       ON public.followup_logs      USING btree (followup_campaign_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_followup_logs_client         ON public.followup_logs      USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_followup_targets_camp_status ON public.followup_targets   USING btree (followup_campaign_id, status);
+CREATE INDEX IF NOT EXISTS idx_followup_targets_campaign    ON public.followup_targets   USING btree (followup_campaign_id);
+CREATE INDEX IF NOT EXISTS idx_followup_targets_client      ON public.followup_targets   USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_followup_targets_next        ON public.followup_targets   USING btree (followup_campaign_id, status, next_send_at);
+
+-- historico
+CREATE INDEX IF NOT EXISTS idx_historico_ia_created      ON public.historico_ia_leads USING btree (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_historico_ia_jid_created  ON public.historico_ia_leads USING btree (remote_jid, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_historico_ia_leads_client ON public.historico_ia_leads USING btree (client_id);
+
+-- kanban
+CREATE INDEX IF NOT EXISTS idx_kanban_columns_client ON public.kanban_columns USING btree (client_id, order_index);
+
+-- leads_extraidos
+CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client         ON public.leads_extraidos USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_created ON public.leads_extraidos USING btree (client_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_email   ON public.leads_extraidos USING btree (client_id, email) WHERE (email IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_status  ON public.leads_extraidos USING btree (client_id, status);
+CREATE INDEX IF NOT EXISTS idx_leads_extraidos_remotejid      ON public.leads_extraidos USING btree ("remoteJid");
+CREATE INDEX IF NOT EXISTS idx_leads_icp_score                ON public.leads_extraidos USING btree (icp_score DESC NULLS LAST);
+CREATE INDEX IF NOT EXISTS idx_leads_lead_type                ON public.leads_extraidos USING btree (lead_type);
+CREATE INDEX IF NOT EXISTS idx_leads_primeiro_contato_source  ON public.leads_extraidos USING btree (status, primeiro_contato_source, primeiro_contato_at) WHERE (status = 'primeiro_contato'::text);
+CREATE INDEX IF NOT EXISTS idx_leads_remotejid                ON public.leads_extraidos USING btree ("remoteJid");
+CREATE INDEX IF NOT EXISTS idx_leads_status                   ON public.leads_extraidos USING btree (status);
+
+-- messages / sessions
+CREATE INDEX IF NOT EXISTS idx_messages_client          ON public.messages USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_messages_session         ON public.messages USING btree (session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_session_created ON public.messages USING btree (session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_client          ON public.sessions USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_contact_inst    ON public.sessions USING btree (contact_id, instance_name);
+
+-- webhook_logs
+CREATE INDEX IF NOT EXISTS idx_webhook_logs_client  ON public.webhook_logs USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_webhook_logs_created ON public.webhook_logs USING btree (created_at DESC);
 
 -- =====================================================================
--- PARTE 12 — STORAGE BUCKET (mídia do WhatsApp)
+-- FOREIGN KEYS (idempotente — só adiciona se não existir)
 -- =====================================================================
-INSERT INTO storage.buckets (id, name, public)
-VALUES ('whatsapp_media', 'whatsapp_media', true)
-ON CONFLICT (id) DO NOTHING;
-
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_policies
-    WHERE schemaname = 'storage' AND tablename = 'objects' AND policyname = 'whatsapp_media_public_read'
-  ) THEN
-    CREATE POLICY whatsapp_media_public_read ON storage.objects
-      FOR SELECT USING (bucket_id = 'whatsapp_media');
+DO $$ BEGIN
+  -- agent_settings ← clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agent_settings_client_id_fkey') THEN
+    ALTER TABLE public.agent_settings ADD CONSTRAINT agent_settings_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
   END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_policies
-    WHERE schemaname = 'storage' AND tablename = 'objects' AND policyname = 'whatsapp_media_service_write'
-  ) THEN
-    CREATE POLICY whatsapp_media_service_write ON storage.objects
-      FOR ALL TO service_role USING (bucket_id = 'whatsapp_media') WITH CHECK (bucket_id = 'whatsapp_media');
+
+  -- agent_knowledge ← agent_settings, clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agent_knowledge_agent_id_fkey') THEN
+    ALTER TABLE public.agent_knowledge ADD CONSTRAINT agent_knowledge_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.agent_settings(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agent_knowledge_client_id_fkey') THEN
+    ALTER TABLE public.agent_knowledge ADD CONSTRAINT agent_knowledge_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- agent_knowledge_chunks ← agent_knowledge, agent_settings
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agent_knowledge_chunks_knowledge_id_fkey') THEN
+    ALTER TABLE public.agent_knowledge_chunks ADD CONSTRAINT agent_knowledge_chunks_knowledge_id_fkey FOREIGN KEY (knowledge_id) REFERENCES public.agent_knowledge(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agent_knowledge_chunks_agent_id_fkey') THEN
+    ALTER TABLE public.agent_knowledge_chunks ADD CONSTRAINT agent_knowledge_chunks_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.agent_settings(id) ON DELETE CASCADE;
+  END IF;
+
+  -- agent_stages ← agent_settings, clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agent_stages_agent_id_fkey') THEN
+    ALTER TABLE public.agent_stages ADD CONSTRAINT agent_stages_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.agent_settings(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agent_stages_client_id_fkey') THEN
+    ALTER TABLE public.agent_stages ADD CONSTRAINT agent_stages_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- ai_organizer_runs ← clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ai_organizer_runs_client_id_fkey') THEN
+    ALTER TABLE public.ai_organizer_runs ADD CONSTRAINT ai_organizer_runs_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- ai_token_usage ← clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ai_token_usage_client_id_fkey') THEN
+    ALTER TABLE public.ai_token_usage ADD CONSTRAINT ai_token_usage_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- appointments ← clients, agent_settings, leads_extraidos
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'appointments_client_id_fkey') THEN
+    ALTER TABLE public.appointments ADD CONSTRAINT appointments_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'appointments_agent_id_fkey') THEN
+    ALTER TABLE public.appointments ADD CONSTRAINT appointments_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.agent_settings(id) ON DELETE SET NULL;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'appointments_lead_id_fkey') THEN
+    ALTER TABLE public.appointments ADD CONSTRAINT appointments_lead_id_fkey FOREIGN KEY (lead_id) REFERENCES public.leads_extraidos(id) ON DELETE SET NULL;
+  END IF;
+
+  -- auth_sessions ← clients (próprio + impersonação)
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'auth_sessions_client_id_fkey') THEN
+    ALTER TABLE public.auth_sessions ADD CONSTRAINT auth_sessions_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'auth_sessions_impersonated_as_fkey') THEN
+    ALTER TABLE public.auth_sessions ADD CONSTRAINT auth_sessions_impersonated_as_fkey FOREIGN KEY (impersonated_as) REFERENCES public.clients(id) ON DELETE SET NULL;
+  END IF;
+
+  -- automations ← agent_settings, clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'automations_agent_id_fkey') THEN
+    ALTER TABLE public.automations ADD CONSTRAINT automations_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.agent_settings(id) ON DELETE SET NULL;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'automations_client_id_fkey') THEN
+    ALTER TABLE public.automations ADD CONSTRAINT automations_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- automation_logs ← automations, clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'automation_logs_automation_id_fkey') THEN
+    ALTER TABLE public.automation_logs ADD CONSTRAINT automation_logs_automation_id_fkey FOREIGN KEY (automation_id) REFERENCES public.automations(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'automation_logs_client_id_fkey') THEN
+    ALTER TABLE public.automation_logs ADD CONSTRAINT automation_logs_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- campaigns ← agent_settings, clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'campaigns_agent_id_fkey') THEN
+    ALTER TABLE public.campaigns ADD CONSTRAINT campaigns_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.agent_settings(id) ON DELETE SET NULL;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'campaigns_client_id_fkey') THEN
+    ALTER TABLE public.campaigns ADD CONSTRAINT campaigns_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- campaign_targets ← campaigns, clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'campaign_targets_campaign_id_fkey') THEN
+    ALTER TABLE public.campaign_targets ADD CONSTRAINT campaign_targets_campaign_id_fkey FOREIGN KEY (campaign_id) REFERENCES public.campaigns(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'campaign_targets_client_id_fkey') THEN
+    ALTER TABLE public.campaign_targets ADD CONSTRAINT campaign_targets_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- campaign_logs ← campaigns, clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'campaign_logs_campaign_id_fkey') THEN
+    ALTER TABLE public.campaign_logs ADD CONSTRAINT campaign_logs_campaign_id_fkey FOREIGN KEY (campaign_id) REFERENCES public.campaigns(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'campaign_logs_client_id_fkey') THEN
+    ALTER TABLE public.campaign_logs ADD CONSTRAINT campaign_logs_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- channel_connections ← agent_settings, clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'channel_connections_agent_id_fkey') THEN
+    ALTER TABLE public.channel_connections ADD CONSTRAINT channel_connections_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.agent_settings(id) ON DELETE SET NULL;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'channel_connections_client_id_fkey') THEN
+    ALTER TABLE public.channel_connections ADD CONSTRAINT channel_connections_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- chat_buffers ← clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chat_buffers_client_id_fkey') THEN
+    ALTER TABLE public.chat_buffers ADD CONSTRAINT chat_buffers_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- chats_dashboard ← clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chats_dashboard_client_id_fkey') THEN
+    ALTER TABLE public.chats_dashboard ADD CONSTRAINT chats_dashboard_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- contacts ← clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'contacts_client_id_fkey') THEN
+    ALTER TABLE public.contacts ADD CONSTRAINT contacts_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- followup_campaigns ← clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'followup_campaigns_client_id_fkey') THEN
+    ALTER TABLE public.followup_campaigns ADD CONSTRAINT followup_campaigns_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- followup_targets ← followup_campaigns, clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'followup_targets_followup_campaign_id_fkey') THEN
+    ALTER TABLE public.followup_targets ADD CONSTRAINT followup_targets_followup_campaign_id_fkey FOREIGN KEY (followup_campaign_id) REFERENCES public.followup_campaigns(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'followup_targets_client_id_fkey') THEN
+    ALTER TABLE public.followup_targets ADD CONSTRAINT followup_targets_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- followup_logs ← followup_campaigns, clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'followup_logs_followup_campaign_id_fkey') THEN
+    ALTER TABLE public.followup_logs ADD CONSTRAINT followup_logs_followup_campaign_id_fkey FOREIGN KEY (followup_campaign_id) REFERENCES public.followup_campaigns(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'followup_logs_client_id_fkey') THEN
+    ALTER TABLE public.followup_logs ADD CONSTRAINT followup_logs_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- historico_ia_leads ← clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'historico_ia_leads_client_id_fkey') THEN
+    ALTER TABLE public.historico_ia_leads ADD CONSTRAINT historico_ia_leads_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- kanban_columns ← clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'kanban_columns_client_id_fkey') THEN
+    ALTER TABLE public.kanban_columns ADD CONSTRAINT kanban_columns_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- leads_extraidos ← clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'leads_extraidos_client_id_fkey') THEN
+    ALTER TABLE public.leads_extraidos ADD CONSTRAINT leads_extraidos_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- messages ← sessions, chats_dashboard, clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'messages_session_id_fkey') THEN
+    ALTER TABLE public.messages ADD CONSTRAINT messages_session_id_fkey FOREIGN KEY (session_id) REFERENCES public.sessions(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'messages_chat_id_fkey') THEN
+    ALTER TABLE public.messages ADD CONSTRAINT messages_chat_id_fkey FOREIGN KEY (chat_id) REFERENCES public.chats_dashboard(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'messages_client_id_fkey') THEN
+    ALTER TABLE public.messages ADD CONSTRAINT messages_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- sessions ← contacts, agent_stages, clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sessions_contact_id_fkey') THEN
+    ALTER TABLE public.sessions ADD CONSTRAINT sessions_contact_id_fkey FOREIGN KEY (contact_id) REFERENCES public.contacts(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sessions_current_stage_id_fkey') THEN
+    ALTER TABLE public.sessions ADD CONSTRAINT sessions_current_stage_id_fkey FOREIGN KEY (current_stage_id) REFERENCES public.agent_stages(id) ON DELETE SET NULL;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sessions_client_id_fkey') THEN
+    ALTER TABLE public.sessions ADD CONSTRAINT sessions_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
+  END IF;
+
+  -- webhook_logs ← clients
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'webhook_logs_client_id_fkey') THEN
+    ALTER TABLE public.webhook_logs ADD CONSTRAINT webhook_logs_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE CASCADE;
   END IF;
 END $$;
 
 -- =====================================================================
--- PARTE 13 — DESATIVA RLS + GRANTS (todas as operações usam service_role)
--- =====================================================================
-DO $$
-DECLARE tbl TEXT;
-BEGIN
-  FOR tbl IN
-    SELECT unnest(ARRAY[
-      'contacts','sessions','messages',
-      'chats_dashboard','leads_extraidos',
-      'agent_settings','agent_stages','agent_knowledge','agent_batch_locks',
-      'channel_connections','webhook_logs',
-      'historico_ia_leads','ai_organizer_config','ai_organizer_runs',
-      'campaigns','campaign_targets','campaign_logs',
-      'followup_campaigns','followup_targets','followup_logs',
-      'automations','automation_logs',
-      'app_settings','ai_token_usage','ai_pricing_cache','chat_buffers',
-      'ai_control','follow-up_V2','n8n_chat_histories'
-    ])
-  LOOP
-    EXECUTE format('ALTER TABLE public.%I DISABLE ROW LEVEL SECURITY', tbl);
-    EXECUTE format('GRANT ALL ON TABLE public.%I TO anon, authenticated, service_role', tbl);
-  END LOOP;
-END$$;
-
--- Sequences (BIGSERIAL/SERIAL)
-DO $$
-DECLARE seq TEXT;
-BEGIN
-  FOR seq IN
-    SELECT sequence_name FROM information_schema.sequences WHERE sequence_schema = 'public'
-  LOOP
-    EXECUTE format('GRANT USAGE, SELECT ON SEQUENCE public.%I TO anon, authenticated, service_role', seq);
-  END LOOP;
-END$$;
-
--- Schema-level grants (defensivo: garante CREATE/USAGE no schema public)
-GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
-GRANT ALL  ON ALL TABLES    IN SCHEMA public TO anon, authenticated, service_role;
-GRANT ALL  ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated, service_role;
-GRANT ALL  ON ALL FUNCTIONS IN SCHEMA public TO anon, authenticated, service_role;
-
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT ALL ON TABLES    TO anon, authenticated, service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT ALL ON SEQUENCES TO anon, authenticated, service_role;
-
--- =====================================================================
--- PARTE 14 — REALTIME (publicação para logs / chats em tempo real)
--- =====================================================================
-DO $$
-BEGIN
-  DROP PUBLICATION IF EXISTS supabase_realtime;
-  CREATE PUBLICATION supabase_realtime FOR TABLE
-    webhook_logs,
-    agent_settings,
-    agent_stages,
-    agent_knowledge,
-    channel_connections,
-    chats_dashboard,
-    messages,
-    campaigns,
-    campaign_targets,
-    campaign_logs,
-    followup_campaigns,
-    followup_targets,
-    followup_logs,
-    ai_organizer_runs,
-    historico_ia_leads,
-    leads_extraidos,
-    automations,
-    automation_logs,
-    ai_control,
-    "follow-up_V2",
-    n8n_chat_histories;
-END$$;
-
--- =====================================================================
--- PARTE 15 — SANITY CHECK FINAL
--- Conta tabelas essenciais. Se retornar count=26, tudo OK. Se faltar
--- alguma, o script lança RAISE NOTICE com a lista do que falta — mais
--- útil que descobrir depois pela UI.
--- =====================================================================
-DO $$
-DECLARE
-  required_tables TEXT[] := ARRAY[
-    'contacts','sessions','messages','chats_dashboard','leads_extraidos',
-    'agent_settings','agent_stages','agent_knowledge','agent_batch_locks','chat_buffers',
-    'channel_connections','webhook_logs',
-    'historico_ia_leads','ai_organizer_config','ai_organizer_runs',
-    'campaigns','campaign_targets','campaign_logs',
-    'followup_campaigns','followup_targets','followup_logs',
-    'automations','automation_logs',
-    'app_settings','ai_token_usage','ai_pricing_cache',
-    'ai_control','follow-up_V2','n8n_chat_histories'
-  ];
-  missing TEXT[];
-BEGIN
-  SELECT array_agg(t)
-    INTO missing
-    FROM unnest(required_tables) AS t
-   WHERE NOT EXISTS (
-     SELECT 1 FROM information_schema.tables
-      WHERE table_schema = 'public' AND table_name = t
-   );
-  IF missing IS NOT NULL AND array_length(missing, 1) > 0 THEN
-    RAISE WARNING '⚠️ Tabelas faltando: %', missing;
-  ELSE
-    RAISE NOTICE '✅ Todas as 29 tabelas essenciais foram criadas.';
-  END IF;
-END $$;
-
--- =====================================================================
--- ✅ PRONTO. Se viu "Success. No rows returned" está tudo certo.
--- Volte ao painel: Configurações → Setup do Banco → "Verificar agora".
--- Deve aparecer o badge verde "Banco pronto".
+-- FIM
 -- =====================================================================
 `;
