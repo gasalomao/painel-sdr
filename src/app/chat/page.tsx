@@ -899,7 +899,7 @@ export default function ChatPage() {
         return;
       }
 
-      const convMap = new Map<string, Conversation>();
+      const convMap = new Map<string, Conversation & { _instSet?: Set<string> }>();
       for (const m of messages) {
         if (!convMap.has(m.remote_jid)) {
           let preview = m.content?.slice(0, 80) || "";
@@ -910,6 +910,10 @@ export default function ChatPage() {
             else if (m.media_type === "document") preview = "📄 Arquivo";
           }
 
+          // Set interno pra acumular instâncias sem O(n²) (anti-pattern do
+          // Array.includes + spread). Convertido pra array só no fim.
+          const instSet = new Set<string>();
+          if (m.instance_name) instSet.add(m.instance_name);
           convMap.set(m.remote_jid, {
             remote_jid: m.remote_jid,
             lastMessage: preview || "[Sem conteúdo]",
@@ -920,28 +924,46 @@ export default function ChatPage() {
             last_instance: m.instance_name || null,
             // Coleta TODAS as instâncias por onde o contato passou — base do
             // FILTRO da lista por instância selecionada.
-            all_instances: m.instance_name ? [m.instance_name] : [],
+            all_instances: Array.from(instSet),
+            _instSet: instSet,
           });
         } else {
           const conv = convMap.get(m.remote_jid)!;
           conv.messageCount++;
-          // Acumula a instância desta msg no conjunto da conversa (sem repetir).
-          if (m.instance_name && !conv.all_instances?.includes(m.instance_name)) {
-            conv.all_instances = [...(conv.all_instances || []), m.instance_name];
+          // Acumula a instância desta msg no Set (O(1) — sem recriar array).
+          if (m.instance_name && !conv._instSet?.has(m.instance_name)) {
+            conv._instSet?.add(m.instance_name);
           }
+        }
+      }
+      // Conversões: Set → array definitivo. E fallback pra conversas com
+      // instance_name histórico nulo: se não tem NENHUMA instância coletada
+      // (msgs muito antigas sem o campo), marca como "todas" pra não sumir
+      // do filtro — o activeInstance atual é o melhor palpite.
+      const allInstEmpty = (a: string[] | undefined) => !a || a.length === 0;
+      for (const conv of convMap.values()) {
+        conv.all_instances = Array.from(conv._instSet || []);
+        delete conv._instSet;
+        if (allInstEmpty(conv.all_instances) && activeInstance && activeInstance !== "__all__") {
+          conv.all_instances = [activeInstance]; // fallback: aparece na instância atual
         }
       }
 
       const jids = Array.from(convMap.keys());
       if (jids.length > 0) {
+        // Fatiar jids em batches de 500 — o PostgREST/Supabase rejeita URLs
+        // gigantes quando .in() tem milhares de itens (contas com disparo em
+        // massa). Cada batch vira uma query; resultados são somados.
+        const BATCH = 500;
+        const batches: string[][] = [];
+        for (let i = 0; i < jids.length; i += BATCH) batches.push(jids.slice(i, i + BATCH));
+
         // 1) Nome do negócio dos leads_extraidos
-        const { data: leads } = await supabase
-          .from("leads_extraidos")
-          .select("remoteJid, nome_negocio")
-          .eq("client_id", clientId)
-          .in("remoteJid", jids);
-        if (leads) {
-          for (const lead of leads) {
+        const leadResults = await Promise.all(
+          batches.map((b) => supabase.from("leads_extraidos").select("remoteJid, nome_negocio").eq("client_id", clientId).in("remoteJid", b))
+        );
+        for (const { data: leads } of leadResults) {
+          if (leads) for (const lead of leads) {
             const conv = convMap.get(lead.remoteJid);
             if (conv) conv.nome_negocio = lead.nome_negocio;
           }
@@ -950,13 +972,11 @@ export default function ChatPage() {
         // 2) Foto de perfil do WhatsApp — lê do cache em contacts.profile_pic_url.
         //    O cache é populado por /api/contacts/avatars (chamado abaixo)
         //    OU pelo webhook quando recebe pushName + profilePic.
-        const { data: contactsData } = await supabase
-          .from("contacts")
-          .select("remote_jid, profile_pic_url")
-          .eq("client_id", clientId)
-          .in("remote_jid", jids);
-        if (contactsData) {
-          for (const c of contactsData) {
+        const contactResults = await Promise.all(
+          batches.map((b) => supabase.from("contacts").select("remote_jid, profile_pic_url").eq("client_id", clientId).in("remote_jid", b))
+        );
+        for (const { data: contactsData } of contactResults) {
+          if (contactsData) for (const c of contactsData) {
             const conv = convMap.get(c.remote_jid);
             if (conv) conv.avatarUrl = c.profile_pic_url || null;
           }
@@ -1068,7 +1088,10 @@ export default function ChatPage() {
              checkWsStatus()
           ]);
         } finally {
-          if (active) setTimeout(poll, 15000);
+          // Realtime (incremental) já cobre o imediato; o polling vira rede de
+          // segurança em intervalo maior (45s) pra não martelar o banco a cada
+          // 15s com 3000 msgs. Resolve nomes/avatares que o incremental não pega.
+          if (active) setTimeout(poll, 45000);
         }
     };
     if (activeInstance) poll();
@@ -1220,7 +1243,44 @@ export default function ChatPage() {
                 });
               });
             }
-            loadConversations();
+            // Atualização INCREMENTAL da lista (em vez de loadConversations()
+            // completo): só sobe a conversa afetada pro topo + atualiza preview.
+            // Evita a cascata de re-fetch de 3000 msgs a cada INSERT.
+            const preview = newMsg.content?.slice(0, 80)
+              || (newMsg.media_type === "image" ? "📷 Imagem"
+                : newMsg.media_type === "audio" ? "🎤 Áudio"
+                : newMsg.media_type === "video" ? "🎥 Vídeo"
+                : newMsg.media_type === "document" ? "📄 Arquivo"
+                : "[Sem conteúdo]");
+            setConversations((prev) => {
+              const idx = prev.findIndex((c) => c.remote_jid === newMsg.remote_jid);
+              if (idx < 0) {
+                // Conversa nova — adiciona no topo (sem nome/avatar ainda; o
+                // polling completo a resolve depois, ~45s).
+                return [{
+                  remote_jid: String(newMsg.remote_jid || ""),
+                  lastMessage: preview,
+                  messageCount: 1,
+                  lastTime: newMsg.created_at,
+                  last_instance: newMsg.instance_name || null,
+                  all_instances: newMsg.instance_name ? [newMsg.instance_name] : [],
+                } as Conversation, ...prev];
+              }
+              const updated = { ...prev[idx],
+                lastMessage: preview,
+                messageCount: (prev[idx].messageCount || 0) + 1,
+                lastTime: newMsg.created_at,
+                last_instance: newMsg.instance_name || prev[idx].last_instance || null,
+                all_instances: Array.from(new Set([
+                  ...(prev[idx].all_instances || []),
+                  ...(newMsg.instance_name ? [newMsg.instance_name] : []),
+                ])),
+              };
+              // Move pro topo mantendo as outras intactas.
+              const next = [...prev];
+              next.splice(idx, 1);
+              return [updated, ...next];
+            });
           } else if (payload.eventType === "UPDATE") {
             const updatedMsg = payload.new as ChatMessage;
             setMessages((prev) =>
