@@ -75,8 +75,9 @@ export default function AgentePage() {
   const [messageBufferSeconds, setMessageBufferSeconds] = useState(0);
   const [humanizeMessages, setHumanizeMessages] = useState(false);
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
-  // Modo de raciocínio (thinking budget): 0 = econômico (default), 256 = equilibrado, -1 = dinâmico.
-  const [thinkingBudget, setThinkingBudget] = useState(0);
+  // Modo de raciocínio UNIVERSAL: 0=Econômico, 1=Equilibrado, 2=Intenso.
+  // Funciona em todos os modelos (o ai-provider mapeia pro param de cada um).
+  const [reasoningMode, setReasoningMode] = useState<0 | 1 | 2>(0);
   // Lead Intelligence é POR AGENTE — não é mais um flag global da campanha/automação.
   // Cliente quer ativar só nos agentes que precisam de análise profunda do lead.
   const [leadIntelligenceEnabled, setLeadIntelligenceEnabled] = useState(false);
@@ -107,6 +108,9 @@ export default function AgentePage() {
   const [autoPromoteAfter, setAutoPromoteAfter] = useState(30);
   const [notifyOwner, setNotifyOwner] = useState(false);
   const [ownerPhone, setOwnerPhone] = useState("");
+  // Pausa a IA após agendar com sucesso para um contato (default 2h = 120min).
+  // Evita bombardear o cliente logo após marcar e dá janela ao humano. 0 = off.
+  const [pauseAfterSchedule, setPauseAfterSchedule] = useState(120);
   // Resumo IA pro dono (agendamento/cancelamento/reagendamento)
   const [ownerSummaryEnabled, setOwnerSummaryEnabled] = useState(false);
   const [ownerSummaryPrompt, setOwnerSummaryPrompt] = useState("");
@@ -269,6 +273,7 @@ export default function AgentePage() {
         if (Array.isArray(schedCfg.reminders)) setReminders(schedCfg.reminders);
         if (typeof schedCfg.auto_promote_kanban_after_minutes === "number") setAutoPromoteAfter(schedCfg.auto_promote_kanban_after_minutes);
         setNotifyOwner(!!schedCfg.notify_owner);
+        if (typeof schedCfg.pause_after_schedule_minutes === "number") setPauseAfterSchedule(schedCfg.pause_after_schedule_minutes);
         setOwnerPhone(schedCfg.owner_phone || "");
         setOwnerSummaryEnabled(!!schedCfg.owner_summary_enabled);
         setOwnerSummaryPrompt(schedCfg.owner_summary_prompt || "");
@@ -285,7 +290,14 @@ export default function AgentePage() {
         setMessageBufferSeconds(opts.message_buffer_seconds || 0);
         setHumanizeMessages(opts.humanize_messages ?? false);
         setWebSearchEnabled(opts.web_search_enabled ?? false);
-        setThinkingBudget(opts.thinking_budget === undefined || opts.thinking_budget === null || opts.thinking_budget === "" ? 0 : Number(opts.thinking_budget));
+        // Modo de raciocínio: prefere reasoning_mode (novo); retrocompat thinking_budget.
+        if (opts.reasoning_mode === 0 || opts.reasoning_mode === 1 || opts.reasoning_mode === 2) {
+          setReasoningMode(opts.reasoning_mode);
+        } else if (opts.thinking_budget !== undefined && opts.thinking_budget !== null && opts.thinking_budget !== "") {
+          setReasoningMode(Number(opts.thinking_budget) < 0 ? 2 : Number(opts.thinking_budget) > 0 ? 1 : 0);
+        } else {
+          setReasoningMode(0);
+        }
         // Lead Intelligence vem da coluna dedicada na tabela (não do JSONB options),
         // pra worker/automation conseguirem ler com SELECT simples.
         setLeadIntelligenceEnabled((data as any).lead_intelligence_enabled ?? false);
@@ -508,7 +520,8 @@ export default function AgentePage() {
         message_buffer_seconds: messageBufferSeconds,
         humanize_messages: humanizeMessages,
         web_search_enabled: webSearchEnabled,
-        thinking_budget: thinkingBudget,
+        reasoning_mode: reasoningMode,
+        thinking_budget: reasoningMode, // retrocompat: grava o mesmo valor no campo legado
       },
       // Coluna dedicada (não JSONB) — workers/backend filtram via WHERE
       lead_intelligence_enabled: leadIntelligenceEnabled,
@@ -571,6 +584,8 @@ export default function AgentePage() {
         // Auto-mover kanban: De → Para
         auto_promote_from_status: autoPromoteFrom || "",
         auto_promote_to_status: autoPromoteTo || "",
+        // Pausa pós-agendamento (minutos). 0 = não pausa.
+        pause_after_schedule_minutes: Number(pauseAfterSchedule) || 0,
       },
     }).eq("id", activeAgentId).eq("client_id", clientId);
     setSavingConfig(false);
@@ -1008,7 +1023,7 @@ export default function AgentePage() {
                 messageBufferSeconds={messageBufferSeconds} setMessageBufferSeconds={setMessageBufferSeconds}
                 humanizeMessages={humanizeMessages} setHumanizeMessages={setHumanizeMessages}
                 webSearchEnabled={webSearchEnabled} setWebSearchEnabled={setWebSearchEnabled}
-                thinkingBudget={thinkingBudget} setThinkingBudget={setThinkingBudget}
+                reasoningMode={reasoningMode} setReasoningMode={setReasoningMode}
                 leadIntelligenceEnabled={leadIntelligenceEnabled} setLeadIntelligenceEnabled={setLeadIntelligenceEnabled}
                 saveIdentity={saveIdentity}
                 savingConfig={savingConfig}
@@ -1033,6 +1048,7 @@ export default function AgentePage() {
                 ownerSummaryModel={ownerSummaryModel} setOwnerSummaryModel={setOwnerSummaryModel}
                 autoPromoteFrom={autoPromoteFrom} setAutoPromoteFrom={setAutoPromoteFrom}
                 autoPromoteTo={autoPromoteTo} setAutoPromoteTo={setAutoPromoteTo}
+                pauseAfterSchedule={pauseAfterSchedule} setPauseAfterSchedule={setPauseAfterSchedule}
                 kanbanColumns={kanbanColumns}
 
                 webhookUrl={webhookUrl}

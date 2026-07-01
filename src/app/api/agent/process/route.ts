@@ -382,9 +382,18 @@ export async function POST(req: NextRequest) {
         let windowed: any[] = chrono;
         if (chrono.length > KEEP_HEAD + KEEP_TAIL) {
             const skipped = chrono.length - KEEP_HEAD - KEEP_TAIL;
+            const middle = chrono.slice(KEEP_HEAD, chrono.length - KEEP_TAIL);
+            // RESUMO REAL do meio (antes era placeholder vazio — IA esquecia dados).
+            // Gera com modelo barato + reasoningMode=0, cacheado por conteúdo (hash).
+            // Se falhar, cai no placeholder legado como fallback (não-fatal).
+            const { summarizeMiddleMessages } = await import("@/lib/history-summary");
+            const summary = await summarizeMiddleMessages(remoteJid, middle).catch(() => null);
+            const middleContent = summary
+              ? `[Resumo de ${skipped} mensagens intermediárias da conversa — a IA deve usar estas informações como contexto]: ${summary}`
+              : `[...${skipped} mensagens intermediárias omitidas pra economizar contexto. Resumo: cliente já passou pelo disparo inicial e está em diálogo ativo...]`;
             windowed = [
                 ...chrono.slice(0, KEEP_HEAD),
-                { sender: "system", content: `[...${skipped} mensagens intermediárias omitidas pra economizar contexto. O resumo do que rolou: cliente já passou pelo disparo inicial e está em diálogo ativo...]`, _skip_marker: true },
+                { sender: "system", content: middleContent, _skip_marker: true },
                 ...chrono.slice(-KEEP_TAIL),
             ];
         }
@@ -821,13 +830,23 @@ ${capturedVariablesPrompt}
 
     // THINKING BUDGET — Gemini 2.5 Flash liga "thinking" por padrão, e esses
     // tokens são cobrados como SAÍDA (o token mais caro). Pra um SDR de chat o
-    // raciocínio em cadeia raramente agrega, então desligamos por padrão
-    // (budget 0). Admin pode religar por agente via options.thinking_budget
-    // (ex: 256 pra decisões de tool/agendamento, -1 pra dinâmico).
+    // MODO DE RACIOCÍNIO UNIVERSAL (0=Econômico, 1=Equilibrado, 2=Intenso).
+    // Funciona em TODOS os modelos (o ai-provider mapeia pro param certo de
+    // cada provedor: Gemini thinkingBudget, OpenAI reasoning.effort, Anthropic
+    // thinking, etc.). Default 0 (Econômico) — SDR raramente precisa raciocínio
+    // extra; admin sobe pra Equilibrado em agendamento/tools, Intenso em casos
+    // complexos. Retrocompat: se só vier thinking_budget legado, deriva dele.
+    const rawReasoning = agentConfig.options?.reasoning_mode;
     const rawThinking = agentConfig.options?.thinking_budget;
-    const thinkingBudget = (rawThinking === undefined || rawThinking === null || rawThinking === "")
-      ? 0
-      : Number(rawThinking);
+    let reasoningMode: 0 | 1 | 2;
+    if (rawReasoning === 0 || rawReasoning === 1 || rawReasoning === 2) {
+      reasoningMode = rawReasoning;
+    } else if (rawThinking !== undefined && rawThinking !== null && rawThinking !== "") {
+      // Legado: 0→econômico, >0→equilibrado, -1→intenso.
+      reasoningMode = Number(rawThinking) < 0 ? 2 : Number(rawThinking) > 0 ? 1 : 0;
+    } else {
+      reasoningMode = 0;
+    }
     // Temperatura só entra se o admin configurou — senão mantém o default do
     // modelo (não mexer no comportamento atual sem necessidade).
     let temperature: number | undefined;
@@ -856,7 +875,7 @@ ${capturedVariablesPrompt}
       history: neutralHistory,
       tools: functionDeclarations,
       temperature,
-      thinkingBudget: Number.isFinite(thinkingBudget) ? thinkingBudget : 0,
+      reasoningMode,
       geminiApiKey,
       openrouterApiKey,
     });
@@ -1278,6 +1297,32 @@ ${capturedVariablesPrompt}
              } catch (sumErr: any) {
                  console.warn("[Agent/Schedule] resumo p/ dono falhou (não-fatal):", sumErr?.message);
              }
+
+             // PAUSA PÓS-AGENDAMENTO: silencia a IA pra ESTE contato por X tempo
+             // depois de marcar, evitando bombardear o cliente logo após confirmar
+             // e dando uma janela pro atendente humano. Default 2h (120 min),
+             // configurável por agente em scheduler_config.pause_after_schedule_minutes
+             // (0 ou ausente = não pausa). Reusa o mecanismo de snooze existente
+             // (sessions.resume_at + gate de pausa) — auto-resume gratuito.
+             // Só roda quando o agendamento foi REALMENTE confirmado (o guard
+             // anti-chamada-dupla em ~1084 garante que é 1x por agendamento).
+             try {
+                 const schedPause = (agentConfig.scheduler_config || {}) as any;
+                 const pauseMin = Number(schedPause.pause_after_schedule_minutes);
+                 if (!isTestMode && sessionId && Number.isFinite(pauseMin) && pauseMin > 0) {
+                    const { snoozeSession } = await import("@/lib/bot-status");
+                    await snoozeSession(sessionId, pauseMin, "system").catch((e: any) =>
+                       console.warn("[Agent/Schedule] pausa pós-agendamento falhou (não-fatal):", e?.message));
+                    // Log de auditoria: rastreável em /api/webhooks/diagnose.
+                    supabase.from("webhook_logs").insert({
+                       instance_name: instanceName,
+                       event: "AGENT_SCHEDULE_PAUSE",
+                       payload: { remote_jid: maskJid(remoteJid), session_id: sessionId, pause_minutes: pauseMin },
+                       created_at: new Date().toISOString(),
+                    }).then(() => {}, () => {});
+                    console.log(`[Agent/Schedule] IA pausada por ${pauseMin}min p/ ${maskJid(remoteJid)} (pós-agendamento).`);
+                 }
+             } catch { /* não-fatal — o agendamento já está salvo */ }
 
              // Se o operador ligou "Enviar link do Meet ao cliente", a IA é
              // OBRIGADA a incluir o link na resposta. Senão, só informa que foi

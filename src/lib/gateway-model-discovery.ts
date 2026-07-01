@@ -43,11 +43,19 @@ const TTL_MS = 10 * 60 * 1000;
  * Mapa modelId → conexão de origem, preenchido durante a descoberta. É o que
  * permite rotear `gateway:<modelId>` para a conta certa em tempo de chamada,
  * sem precisar codificar o endpoint no modelRef (mantém parseModelRef simples).
+ * Mantém APENAS o PRIMEIRO endpoint (first-seen wins) — retrocompat.
  */
 const MODEL_ENDPOINT = new Map<string, GatewayEndpoint>();
+/**
+ * Mapa modelId → TODAS as conexões que expõem aquele modelo. Preenchido junto
+ * com MODEL_ENDPOINT. É o que viabiliza o FAILOVER entre contas: quando a conta
+ * primária falha (429/quota/401), o roteador itera aqui pra achar outra conta
+ * que sirva o mesmo modelo. Ordem = ordem das conexões no banco.
+ */
+const MODEL_ENDPOINTS = new Map<string, GatewayEndpoint[]>();
 
 /** Conexões configuradas (já com fallback legado aplicado), URL normalizada. */
-async function getEndpoints(): Promise<GatewayEndpoint[]> {
+export async function getEndpoints(): Promise<GatewayEndpoint[]> {
   try {
     const keys = await getAiKeys();
     return (keys.gatewayEndpoints || [])
@@ -118,15 +126,21 @@ export async function listAvailableGatewayModels(force = false): Promise<Gateway
   const merged: GatewayModel[] = [];
   const seen = new Set<string>();
   MODEL_ENDPOINT.clear();
+  MODEL_ENDPOINTS.clear();
   for (let i = 0; i < settled.length; i++) {
     const r = settled[i];
     if (r.status !== "fulfilled") continue;
     for (const m of r.value) {
-      if (seen.has(m.id)) continue; // primeira conexão a expor o id vence
+      const ep = epById.get(m.endpointId);
+      if (!ep) continue;
+      // Plural: acumula TODAS as conexões que expõem este modelo (ordem do banco).
+      const arr = MODEL_ENDPOINTS.get(m.id) || [];
+      if (!arr.some((x) => x.id === ep.id)) arr.push(ep);
+      MODEL_ENDPOINTS.set(m.id, arr);
+      if (seen.has(m.id)) continue; // primeira conexão a expor o id vence (singular)
       seen.add(m.id);
       merged.push(m);
-      const ep = epById.get(m.endpointId);
-      if (ep) MODEL_ENDPOINT.set(m.id, ep);
+      MODEL_ENDPOINT.set(m.id, ep);
     }
   }
 
@@ -169,4 +183,32 @@ export async function resolveGatewayEndpointForModel(modelId: string): Promise<G
 export function invalidateGatewayModelsCache() {
   CACHE = null;
   MODEL_ENDPOINT.clear();
+  MODEL_ENDPOINTS.clear();
+}
+
+/**
+ * Lista TODAS as conexões (contas) que expõem um `modelId` — base do FAILOVER.
+ * Quando a conta primária falha (429/quota/401), o roteador itera nesta lista
+ * (pulando as em cooldown/mortas) pra achar outra conta que sirva o mesmo
+ * modelo e dar seguimento ao atendimento sem o usuário perceber.
+ *
+ * Ordem = ordem das conexões no banco (estável). Garante que a descoberta
+ * rodou (cache quente); se o modelo não estiver mapeado (ex.: conta nova),
+ * devolve TODAS as conexões como candidatos genéricos — preferimos tentar do
+ * que falhar. O roteador filtra cooldown depois.
+ */
+export async function listEndpointsForModel(modelId: string): Promise<GatewayEndpoint[]> {
+  const id = (modelId || "").trim();
+  if (!id) return [];
+  // Garante cache quente (não força — se frio e vazio, segue pro fallback).
+  if (!MODEL_ENDPOINTS.size) await listAvailableGatewayModels(false);
+  const list = MODEL_ENDPOINTS.get(id);
+  if (list && list.length) return list;
+  // Modelo não mapeado (ex.: conta recém-adicionada, cache desatualizado):
+  // força descoberta e checa de novo.
+  await listAvailableGatewayModels(true);
+  const forced = MODEL_ENDPOINTS.get(id);
+  if (forced && forced.length) return forced;
+  // Rede de segurança: todas as conexões configuradas (o roteador decide).
+  return getEndpoints();
 }
