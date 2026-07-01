@@ -56,7 +56,9 @@ WORKDIR /app
 # Chromium + libs de fonte/encoding pra Puppeteer (scraper Google Maps).
 # tar + libc6-compat: o conector embutido (1 clique) extrai e roda o binário do
 # CLIProxyAPI — tar garante a extração do .tar.gz e libc6-compat a execução.
-RUN apk add --no-cache chromium nss freetype harfbuzz ca-certificates ttf-freefont font-noto-emoji tar libc6-compat
+# ffmpeg: conversão ogg→wav16k exigida pelo whisper.cpp (transcrição grátis).
+# libc6-compat também roda o binário whisper-bin-ubuntu-x64 no Alpine.
+RUN apk add --no-cache chromium nss freetype harfbuzz ca-certificates ttf-freefont font-noto-emoji tar libc6-compat ffmpeg
 RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
 
 ENV NODE_ENV=production \
@@ -85,6 +87,11 @@ RUN mkdir -p /app/.gateway-proxy && chown -R nextjs:nodejs /app/.gateway-proxy
 # Foi o mesmo bug corrigido em 6433bb5 pro conector — agora aplicado pro DeepSeek.
 # Monte um VOLUME aqui no Easypanel pra os tokens sobreviverem a deploys.
 RUN mkdir -p /app/.deepseek-chat && chown -R nextjs:nodejs /app/.deepseek-chat
+
+# Whisper.cpp (transcrição de áudio GRATUITA, sem API): o binário + modelo
+# (ggml-base.bin, 74MB) são baixados em runtime pra aqui (mesmo padrão do
+# conector). Sem permissão o download falha com EACCES. Monte VOLUME opcional.
+RUN mkdir -p /app/.whisper && chown -R nextjs:nodejs /app/.whisper
 
 USER nextjs
 EXPOSE 3000

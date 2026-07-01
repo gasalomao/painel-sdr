@@ -1048,14 +1048,31 @@ export async function POST(req: NextRequest) {
               console.warn("[Media] Upload falhou — segue pra transcrição mesmo assim.");
             }
 
-            // 3) Gemini: transcrição (áudio) ou descrição (imagem)
+            // 3) ÁUDIO: whisper.cpp PRIMEIRO (grátis, local) → Gemini fallback.
+            // Nunca perde um áudio: se o whisper falhar/indisponível, cai pro
+            // Gemini (multimodal, gasta token mas garante resposta ao cliente).
             let enrichedContent: string | null = null;
             if (msgType === "audio") {
-              console.log("[Media] Transcrevendo áudio com Gemini...");
-              const transcript = await transcribeAudioWithGemini(base64Media, effMimetype, finalId);
+              let transcript: string | null = null;
+              let transcribeProvider = "none";
+              // Tenta whisper.cpp (grátis) primeiro — baixa na 1ª vez, cacheia.
+              try {
+                const { transcribeAudioWithWhisper } = await import("@/lib/whisper-manager");
+                console.log("[Media] Transcrevendo áudio com whisper.cpp (grátis)...");
+                transcript = await transcribeAudioWithWhisper(base64Media, effMimetype);
+                if (transcript) transcribeProvider = "whisper";
+              } catch (wErr: any) {
+                console.warn("[Media] whisper.cpp indisponível:", wErr?.message, "→ cai pro Gemini.");
+              }
+              // Fallback: Gemini multimodal (gasta token, mas nunca falha).
+              if (!transcript) {
+                console.log("[Media] Transcrevendo áudio com Gemini (fallback)...");
+                transcript = await transcribeAudioWithGemini(base64Media, effMimetype, finalId);
+                if (transcript) transcribeProvider = "gemini";
+              }
               if (transcript) {
                 enrichedContent = `🎤 ${transcript}`;
-                console.log("[Media] Transcrição:", transcript.slice(0, 80));
+                console.log(`[Media] Transcrição (${transcribeProvider}):`, transcript.slice(0, 80));
               } else {
                 // Sem transcrição — mas ainda manda o áudio pra IA com uma nota
                 // pra ela poder responder algo ("peça pra cliente repetir por texto")
