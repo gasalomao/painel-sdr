@@ -79,6 +79,13 @@ COPY --from=builder --chown=nextjs:nodejs /app/node_modules     ./node_modules
 # Monte um VOLUME nesta pasta no Easypanel pra os logins sobreviverem a deploys.
 RUN mkdir -p /app/.gateway-proxy && chown -R nextjs:nodejs /app/.gateway-proxy
 
+# DeepSeek "modo conta" grava aqui: tokens (userToken capturado) + subscriptions
+# (userscript Tampermonkey). Mesma razão do .gateway-proxy acima: sem permissão,
+# o save falha com EACCES em runtime (app roda como nextjs, /app é do root).
+# Foi o mesmo bug corrigido em 6433bb5 pro conector — agora aplicado pro DeepSeek.
+# Monte um VOLUME aqui no Easypanel pra os tokens sobreviverem a deploys.
+RUN mkdir -p /app/.deepseek-chat && chown -R nextjs:nodejs /app/.deepseek-chat
+
 USER nextjs
 EXPOSE 3000
 
