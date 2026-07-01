@@ -76,7 +76,7 @@ export type InfoTabProps = {
   messageBufferSeconds: number; setMessageBufferSeconds: (n: number) => void;
   humanizeMessages: boolean; setHumanizeMessages: (v: boolean) => void;
   webSearchEnabled: boolean; setWebSearchEnabled: (v: boolean) => void;
-  thinkingBudget: number; setThinkingBudget: (n: number) => void;
+  reasoningMode: 0 | 1 | 2; setReasoningMode: (n: 0 | 1 | 2) => void;
   leadIntelligenceEnabled: boolean; setLeadIntelligenceEnabled: (v: boolean) => void;
   saveIdentity: () => void;
   savingConfig: boolean;
@@ -115,6 +115,8 @@ export type InfoTabProps = {
   // Auto-mover kanban: De [coluna] → Para [coluna]
   autoPromoteFrom: string; setAutoPromoteFrom: (v: string) => void;
   autoPromoteTo: string; setAutoPromoteTo: (v: string) => void;
+  // Pausa a IA após agendar com sucesso para um contato (minutos). 0 = off.
+  pauseAfterSchedule: number; setPauseAfterSchedule: (n: number) => void;
   kanbanColumns: { status_key: string; label: string }[];
 
   // Webhook
@@ -311,20 +313,20 @@ export function InfoTab(p: InfoTabProps) {
               hint={<>Habilita a tool <code className="text-cyan-300">web_search</code> (DuckDuckGo, sem chave). Funciona em qualquer modelo. Use quando precisar de fato/dado atualizado.</>}
             />
 
-            {/* Modo de raciocínio (thinking budget) — economia de tokens */}
+            {/* Modo de Raciocínio UNIVERSAL — funciona em todos os modelos */}
             <div className="space-y-2">
-              <label className="text-[10px] font-black uppercase tracking-widest text-amber-400">Modo de Raciocínio (custo)</label>
+              <label className="text-[10px] font-black uppercase tracking-widest text-amber-400">Modo de Raciocínio (custo) — vale pra TODOS os modelos</label>
               <select
-                value={p.thinkingBudget}
-                onChange={(e) => p.setThinkingBudget(Number(e.target.value))}
+                value={p.reasoningMode}
+                onChange={(e) => p.setReasoningMode(Number(e.target.value) as 0 | 1 | 2)}
                 className="w-full bg-white/5 border border-amber-400/20 text-white h-12 rounded-xl text-sm px-3 focus:outline-none focus:ring-1 focus:ring-amber-400/50"
               >
-                <option value={0} className="bg-neutral-900 text-white">Econômico — sem raciocínio extra (recomendado)</option>
-                <option value={256} className="bg-neutral-900 text-white">Equilibrado — pouco raciocínio (tools/agendamento)</option>
-                <option value={-1} className="bg-neutral-900 text-white">Inteligente — raciocínio dinâmico (mais caro)</option>
+                <option value={0} className="bg-neutral-900 text-white">Econômico — sem raciocínio extra (recomendado p/ SDR)</option>
+                <option value={1} className="bg-neutral-900 text-white">Equilibrado — pouco raciocínio (tools/agendamento)</option>
+                <option value={2} className="bg-neutral-900 text-white">Intenso — raciocínio total (casos complexos, mais caro)</option>
               </select>
               <p className="text-[11px] text-white/40 leading-relaxed">
-                O Gemini cobra o &quot;raciocínio&quot; como tokens de <strong>saída</strong> (os mais caros). No modo <strong>Econômico</strong> a IA responde direto — ideal pra SDR. Só suba se notar respostas rasas em casos complexos.
+                Controla quanto a IA &quot;pensa&quot; antes de responder — <strong>em qualquer modelo</strong> (GPT, Claude, Gemini, DeepSeek). No modo <strong>Econômico</strong> responde direto (gasta menos token, ideal pra SDR). Suba pra <strong>Equilibrado</strong> se usar agendamento/tools, ou <strong>Intenso</strong> em casos complexos. Modelos sem suporte ignoram.
               </p>
             </div>
 
@@ -676,6 +678,27 @@ export function InfoTab(p: InfoTabProps) {
                           className="bg-black/40 border-white/10 text-sm h-9 w-24 font-mono"
                         />
                         <span className="text-[10px] text-muted-foreground uppercase font-bold">min após o agendamento</span>
+                      </div>
+
+                      {/* Pausa pós-agendamento: silencia a IA pra ESTE contato por
+                          X minutos depois de marcar. Evita bombardear o cliente
+                          e dá uma janela ao atendente humano. 0 = não pausa. */}
+                      <div className="mt-3 p-3 rounded-lg border border-emerald-500/20 bg-emerald-500/[0.04]">
+                        <label className="text-[10px] font-black uppercase tracking-widest text-emerald-400">Silenciar IA após agendar</label>
+                        <p className="text-[9px] text-muted-foreground mt-0.5 leading-relaxed">
+                          Depois que o agente marca com sucesso, a IA <strong>para de responder este número</strong> pelo tempo abaixo (depois volta sozinha). Dá respiro pro cliente e espaço pro humano assumir. <strong>0 = não pausa.</strong>
+                        </p>
+                        <div className="flex gap-2 items-center mt-2">
+                          <NumberInput
+                            min={0}
+                            max={10080}
+                            fallback={120}
+                            value={p.pauseAfterSchedule}
+                            onChange={(n) => p.setPauseAfterSchedule(n)}
+                            className="bg-black/40 border-white/10 text-sm h-9 w-24 font-mono"
+                          />
+                          <span className="text-[10px] text-muted-foreground uppercase font-bold">minutos (padrão 120 = 2h)</span>
+                        </div>
                       </div>
                       <div className="grid grid-cols-2 gap-2 mt-3">
                         <div>

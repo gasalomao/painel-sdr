@@ -53,6 +53,157 @@ export const GATEWAY_PREFIX = "gateway:";
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 
 /**
+ * Erro HTTP de provedor OpenAI-compatible (gateway/openrouter) que PRESERVA o
+ * `status` — sem isso, antes só tínhamos uma string de mensagem e era impossível
+ * distinguir "quota acabou/429" de "5xx temporário" de "credencial morta/401".
+ * Esse distinção é o que viabiliza o FAILOVER entre contas: 429/quota → tenta
+ * outra conta; 401/403 → marca morta e pula; 5xx/rede → só tenta outra.
+ * Estende Error p/ retrocompat (quem faz catch como Error continua funcionando).
+ */
+export class ProviderHttpError extends Error {
+  status: number;
+  /** Id da conexão/conta (quando aplicável) pra marcação de cooldown/morto. */
+  endpointId?: string;
+  constructor(status: number, message: string, endpointId?: string) {
+    super(message);
+    this.name = "ProviderHttpError";
+    this.status = status;
+    if (endpointId) this.endpointId = endpointId;
+  }
+}
+
+/**
+ * Decide se um erro (status) justifica FAILOVER pra outra conta conectada.
+ *   - 429 / 402 / mensagem de quota → sim (esgotou o grátis hoje).
+ *   - 401 / 403 → sim (credencial inválida/morta; marca e pula).
+ *   - 5xx / rede (status 0) → sim (transitório; tenta outra).
+ *   - 4xx outros (400 bad request…) → NÃO (erro do request, outra conta dará o
+ *     mesmo erro — não adianta trocar).
+ */
+export function isFailoverableStatus(status: number, message?: string): boolean {
+  if (status === 429 || status === 402) return true;
+  if (status === 401 || status === 403) return true;
+  if (status >= 500 || status === 0) return true;
+  // 400 com mensagem de quota/limite (alguns proxies devolvem 400 em vez de 429).
+  const m = (message || "").toLowerCase();
+  if (status === 400 && /quota|rate.?limit|exhaust|insufficient|exceeded|too many requests/.test(m)) return true;
+  return false;
+}
+
+/**
+ * Normaliza o "modo de raciocínio" (0=Econômico, 1=Equilibrado, 2=Intenso) com
+ * RETROCOMPAT do legado `thinkingBudget` (Gemini-only): se `reasoningMode` não
+ * vier mas `thinkingBudget` sim, deriva dele (0→econômico, >0→equilibrado,
+ * -1→intenso). Devolve sempre 0/1/2.
+ */
+export function resolveReasoningMode(mode?: 0 | 1 | 2 | null, thinkingBudget?: number | null): 0 | 1 | 2 {
+  if (mode === 0 || mode === 1 || mode === 2) return mode;
+  if (thinkingBudget != null && Number.isFinite(thinkingBudget)) {
+    if (thinkingBudget < 0) return 2;   // -1 dinâmico = intenso
+    if (thinkingBudget > 0) return 1;   // 256 etc = equilibrado
+    return 0;                           // 0 = econômico
+  }
+  return 0; // default: econômico (ideal pra SDR — raciocínio extra só sob demanda)
+}
+
+/**
+ * Aplica o MODO DE RACIOCÍNIO no `body` da request, mapeando pro parâmetro
+ * certo de cada provedor. UNIVERSAL — o mesmo seletor (Econômico/Equilibrado/
+ * Intenso) funciona em qualquer modelo. Modelos sem suporte ignoram silencioso.
+ *
+ * Mapa (baseado na doc oficial de cada provedor, 2025/2026):
+ *   - Gemini:         thinkingConfig.thinkingBudget (0 / 8192 / -1 dinâmico).
+ *   - OpenAI (GPT-5): reasoning.effort ("minimal"/"medium"/"high"). Modelos não-
+ *                     reasoning ignoram o campo sem erro.
+ *   - Anthropic:      thinking.budget_tokens (1=interleaved, 2=high). Modelos
+ *                     antigos ignoram.
+ *   - DeepSeek:       não tem nível — o modelo é que muda (deepseek-reasoner).
+ *                     Quem força é o roteador (não este body). Aqui só no-op.
+ *
+ * O mapeamento é DEFENSIVO: se um provedor rejeitar o campo (HTTP 400), o
+ * startOpenAICompatibleChat já degrada pra chat puro (sem tools) e reenvia —
+ * e o `applyReasoning` é chamado de novo no retry sem o campo de raciocínio.
+ */
+export function applyReasoning(
+  body: Record<string, any>,
+  mode: 0 | 1 | 2,
+  provider: AiProvider,
+  model: string,
+): void {
+  const m = (model || "").toLowerCase();
+  if (provider === "gemini") {
+    // Gemini usa thinkingBudget no generationConfig (tratado à parte nas funções
+    // Gemini). Aqui é no-op — o Gemini lê opts.reasoningMode direto.
+    return;
+  }
+  // OpenAI-compatible (openrouter + gateway): ramos por família de modelo.
+  if (/^(o1|o3|o4|gpt-5|gpt-4o-)/.test(m) || /openai/.test(m)) {
+    body.reasoning = { effort: mode === 0 ? "minimal" : mode === 1 ? "medium" : "high" };
+    return;
+  }
+  // Anthropic/Claude (via gateway OpenAI-compat — CLIProxyAPI traduz).
+  if (/claude|anthropic/.test(m)) {
+    if (mode === 0) {
+      // Econômico: sem thinking explícito (Claude usa adaptive por padrão).
+    } else {
+      body.thinking = { type: "enabled", budget_tokens: mode === 1 ? 4096 : 16000 };
+    }
+    return;
+  }
+  // DeepSeek / outros: sem nível de raciocínio no body. DeepSeek-reasoner é
+  // acionado pelo modelRef, não por aqui.
+}
+
+/**
+ * Converte reasoningMode (0/1/2) em thinkingBudget do Gemini. Centraliza o
+ * mapeamento pras funções Gemini (generateText + startGeminiChat).
+ */
+export function reasoningModeToThinkingBudget(mode: 0 | 1 | 2): number {
+  if (mode === 2) return -1;   // dinâmico (intenso)
+  if (mode === 1) return 8192; // equilibrado
+  return 0;                    // econômico (sem raciocínio extra)
+}
+
+/**
+ * PROMPT CACHING — Anthropic/Claude via gateway.
+ *
+ * Claude suporta cache explícito do prefixo (system prompt) via `cache_control`.
+ * Isso dá até ~90% de desconto nos tokens do systemInstruction quando ele se
+ * repete entre chamadas (que é SEMPRE — a persona é a mesma por agente). O
+ * CLIProxyAPI repassa o cache_control pro Anthropic ao traduzir o shape OpenAI.
+ *
+ * Como o sistema já mantém o systemInstruction byte-idêntico (implícit caching
+ * do Gemini/OpenAI é automático), só precisamos DECLARAR o cache pro Claude.
+ * Modelos não-Claude ignoram o campo extra sem erro (OpenAI-compat).
+ *
+ * Devolve a mensagem de system no shape Anthropic (array de blocos com
+ * cache_control no último bloco do system) — só pra Claude. Outros mantêm string.
+ */
+export function buildSystemMessage(
+  systemInstruction: string,
+  provider: AiProvider,
+  model: string,
+): { role: "system"; content: any } {
+  const m = (model || "").toLowerCase();
+  // Só vale a pena pra Claude (tem cache_control explícito). OpenAI/Gemini já
+  // cacheiam implicitamente o prefixo estável — não precisam declarar.
+  if (provider !== "gateway" && provider !== "openrouter") {
+    return { role: "system", content: systemInstruction };
+  }
+  if (!/claude|anthropic/.test(m)) {
+    return { role: "system", content: systemInstruction };
+  }
+  // Shape Anthropic: system como array de content blocks, último com cache_control.
+  // O CLIProxyAPI espera esse formato quando o modelo é Claude.
+  return {
+    role: "system",
+    content: [
+      { type: "text", text: systemInstruction, cache_control: { type: "ephemeral" } },
+    ],
+  };
+}
+
+/**
  * Interpreta a string de modelo salva no banco e devolve { provider, model }.
  * Sem prefixo conhecido = Gemini (retrocompatível com tudo que já existe).
  */
@@ -164,6 +315,7 @@ async function openAICompatibleChat(
   body: Record<string, any>,
   headers: Record<string, string>,
   label: string,
+  endpointId?: string,
 ): Promise<any> {
   const res = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
@@ -173,7 +325,13 @@ async function openAICompatibleChat(
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
     const msg = json?.error?.message || json?.error || `${label} HTTP ${res.status}`;
-    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+    // Preserva o status no erro — viabiliza o FAILOVER distinguir quota/429 de
+    // 5xx de credencial morta/401. (Antes virava string e se perdia.)
+    throw new ProviderHttpError(
+      res.status,
+      typeof msg === "string" ? msg : JSON.stringify(msg),
+      endpointId,
+    );
   }
   return json;
 }
@@ -182,14 +340,16 @@ async function openRouterChat(apiKey: string, body: Record<string, any>): Promis
   return openAICompatibleChat(OPENROUTER_BASE, body, openRouterHeaders(apiKey), "OpenRouter");
 }
 
-async function gatewayChat(baseUrl: string, apiKey: string | null, body: Record<string, any>): Promise<any> {
-  return openAICompatibleChat(baseUrl, body, gatewayHeaders(apiKey), "Gateway de assinatura");
+async function gatewayChat(baseUrl: string, apiKey: string | null, body: Record<string, any>, endpointId?: string): Promise<any> {
+  return openAICompatibleChat(baseUrl, body, gatewayHeaders(apiKey), "Gateway de assinatura", endpointId);
 }
 
 /** Credenciais resolvidas do gateway de assinatura. */
 interface GatewayCreds {
   baseUrl: string;
   apiKey: string | null;
+  /** Id da CONEXÃO (conta) primária — usado pra marcação de cooldown/failover. */
+  endpointId?: string;
   /** modelRef de RESERVA (API key) se o gateway falhar — garante "nunca quebra". */
   fallbackModelRef: string | null;
 }
@@ -210,6 +370,7 @@ async function resolveGatewayCreds(opts: {
 }, model?: string): Promise<GatewayCreds> {
   let baseUrl = normalizeGatewayBaseUrl(opts.gatewayBaseUrl);
   let apiKey = (opts.gatewayApiKey || "").trim() || null;
+  let endpointId: string | undefined;
   let fallbackModelRef = (opts.fallbackModelRef || "").trim() || null;
 
   // Sem override explícito de baseURL: resolve a CONEXÃO específica do modelo.
@@ -219,6 +380,7 @@ async function resolveGatewayCreds(opts: {
       const ep = await resolveGatewayEndpointForModel(model);
       if (ep) {
         baseUrl = normalizeGatewayBaseUrl(ep.baseUrl);
+        endpointId = ep.id;
         if (!apiKey) apiKey = ep.apiKey || null;
       }
     } catch {
@@ -240,7 +402,80 @@ async function resolveGatewayCreds(opts: {
       /* sem banco acessível — segue só com o que veio em opts */
     }
   }
-  return { baseUrl, apiKey, fallbackModelRef };
+  return { baseUrl, apiKey, endpointId, fallbackModelRef };
+}
+
+/**
+ * FAILOVER entre contas conectadas do gateway. Tenta o endpoint PRIMÁRIO (a
+ * conta que serve o modelo normalmente); se ele falhar com erro "failoverable"
+ * (429/quota/401/403/5xx/rede), marca cooldown/morto e itera sobre as OUTRAS
+ * contas que também expõem o modelo (pulando as indisponíveis) até uma acertar.
+ *
+ * Comportamento quando tudo falha: relança o último erro — o caller (generateText
+ * / startAiChat) então cai no `fallbackModelRef` (API key paga) ou propaga (e o
+ * catch global do agente loga; a próxima msg do cliente retenta = "esperar e
+ * retentar"). Ou seja: NUNCA pior que o comportamento anterior.
+ *
+ * Ponto ÚNICO de injeção: usado tanto por generateText quanto pela sessão
+ * (startOpenAICompatibleChat via deps.post) — cobre os dois caminhos de uma vez.
+ */
+async function gatewayChatWithFailover(
+  model: string,
+  body: Record<string, any>,
+  primary: { baseUrl: string; apiKey: string | null; endpointId?: string },
+): Promise<any> {
+  const { listEndpointsForModel } = await import("@/lib/gateway-model-discovery");
+  const { markEndpointCooldown, markEndpointDead, isEndpointUnavailable } = await import("@/lib/gateway-cooldown");
+
+  // Candidatos: primário primeiro, depois as alternativas (sem repetir).
+  const alts = await listEndpointsForModel(model);
+  const seen = new Set<string>();
+  const candidates: { baseUrl: string; apiKey: string | null; endpointId?: string }[] = [];
+  const pushUnique = (ep: { baseUrl: string; apiKey: string | null; endpointId?: string }) => {
+    const key = ep.endpointId || ep.baseUrl;
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push(ep);
+  };
+  pushUnique(primary);
+  for (const ep of alts) {
+    pushUnique({ baseUrl: normalizeGatewayBaseUrl(ep.baseUrl), apiKey: ep.apiKey || null, endpointId: ep.id });
+  }
+
+  let lastErr: unknown = null;
+  for (const c of candidates) {
+    // Pula endpoints sabidamente indisponíveis (cooldown/morto) ANTES de chamar.
+    if (c.endpointId && isEndpointUnavailable(c.endpointId)) continue;
+    try {
+      return await gatewayChat(c.baseUrl, c.apiKey, body, c.endpointId);
+    } catch (err) {
+      lastErr = err;
+      if (err instanceof ProviderHttpError && c.endpointId) {
+        // 401/403 → credencial morta: marca p/ sempre pular até restart.
+        if (err.status === 401 || err.status === 403) {
+          markEndpointDead(c.endpointId);
+          console.warn(`[ai-provider] Conta ${c.endpointId} marcada MORTA (HTTP ${err.status}). Failover.`);
+          continue;
+        }
+        // 429/402/quota → cooldown temporário (volta sozinha depois).
+        if (err.status === 429 || err.status === 402 || isFailoverableStatus(err.status, err.message)) {
+          markEndpointCooldown(c.endpointId);
+          console.warn(`[ai-provider] Conta ${c.endpointId} em cooldown (HTTP ${err.status}). Failover pra próxima.`);
+          continue;
+        }
+        // Outro 4xx (400 bad request, etc.) → erro do request; outra conta dará
+        // o mesmo. Relança (não adianta trocar).
+        throw err;
+      }
+      // Erro de rede/timeout (não ProviderHttpError) → tenta próxima conta.
+      console.warn(`[ai-provider] Conta ${c.endpointId || c.baseUrl} falhou (rede/timeout). Failover:`, (err as any)?.message);
+      continue;
+    }
+  }
+  // Esgotou todos os candidatos (ou todos em cooldown/mortos).
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error("Todas as contas do gateway falharam ou estão em cooldown. Tente novamente mais tarde.");
 }
 
 // =====================================================================
@@ -255,6 +490,13 @@ export interface GenerateTextOpts {
   /** Conteúdo do usuário / prompt principal. */
   prompt: string;
   temperature?: number | null;
+  /**
+   * Modo de raciocínio UNIVERSAL (0=Econômico, 1=Equilibrado, 2=Intenso).
+   * Mapeia pro parâmetro certo de cada provedor (Gemini thinkingBudget, OpenAI
+   * reasoning.effort, Anthropic thinking/effort, DeepSeek deepseek-reasoner).
+   * Retrocompat: se `thinkingBudget` vier setado e reasoningMode não, deriva dele.
+   */
+  reasoningMode?: 0 | 1 | 2 | null;
   /** Só Gemini: thinking budget (0 desliga "raciocínio" cobrado como saída). */
   thinkingBudget?: number | null;
   maxOutputTokens?: number | null;
@@ -291,12 +533,13 @@ export async function generateText(opts: GenerateTextOpts): Promise<GenerateText
   if (provider === "openrouter") {
     if (!opts.openrouterApiKey) throw new Error("OpenRouter API Key não configurada.");
     const messages: any[] = [];
-    if (opts.system) messages.push({ role: "system", content: opts.system });
+    if (opts.system) messages.push(buildSystemMessage(opts.system, provider, model));
     messages.push({ role: "user", content: opts.prompt });
     const body: Record<string, any> = { model, messages };
     if (opts.temperature != null && Number.isFinite(opts.temperature)) body.temperature = opts.temperature;
     if (opts.maxOutputTokens != null) body.max_tokens = opts.maxOutputTokens;
     if (opts.jsonMode) body.response_format = { type: "json_object" };
+    applyReasoning(body, resolveReasoningMode(opts.reasoningMode, opts.thinkingBudget), provider, model);
     const json = await openRouterChat(opts.openrouterApiKey, body);
     const text = String(json?.choices?.[0]?.message?.content || "").trim();
     return { text, usage: openRouterUsage(json), provider, modelUsed: model, didFallback: false };
@@ -313,14 +556,15 @@ export async function generateText(opts: GenerateTextOpts): Promise<GenerateText
       throw new Error("Gateway de assinatura não configurado. Defina a URL do proxy em Configurações.");
     }
     const messages: any[] = [];
-    if (opts.system) messages.push({ role: "system", content: opts.system });
+    if (opts.system) messages.push(buildSystemMessage(opts.system, provider, model));
     messages.push({ role: "user", content: opts.prompt });
     const body: Record<string, any> = { model, messages };
     if (opts.temperature != null && Number.isFinite(opts.temperature)) body.temperature = opts.temperature;
     if (opts.maxOutputTokens != null) body.max_tokens = opts.maxOutputTokens;
     if (opts.jsonMode) body.response_format = { type: "json_object" };
+    applyReasoning(body, resolveReasoningMode(opts.reasoningMode, opts.thinkingBudget), provider, model);
     try {
-      const json = await gatewayChat(creds.baseUrl, creds.apiKey, body);
+      const json = await gatewayChatWithFailover(model, body, { baseUrl: creds.baseUrl, apiKey: creds.apiKey, endpointId: creds.endpointId });
       const text = String(json?.choices?.[0]?.message?.content || "").trim();
       return { text, usage: openRouterUsage(json), provider, modelUsed: model, didFallback: false };
     } catch (err) {
@@ -338,10 +582,12 @@ export async function generateText(opts: GenerateTextOpts): Promise<GenerateText
   if (!opts.geminiApiKey) throw new Error("API Key Gemini não configurada.");
   const genAI = new GoogleGenerativeAI(opts.geminiApiKey);
   const generationConfig: any = {};
-  const tb = opts.thinkingBudget;
-  if (tb !== undefined) {
-    const n = (tb === null) ? 0 : Number(tb);
-    generationConfig.thinkingConfig = { thinkingBudget: Number.isFinite(n) ? n : 0 };
+  // Modo de raciocínio universal: reasoningMode vence; retrocompat thinkingBudget.
+  const rMode = resolveReasoningMode(opts.reasoningMode, opts.thinkingBudget);
+  // Econômico (0) SÓ seta thinkingBudget se o usuário escolheu explicitamente
+  // (mode 0 ou thinkingBudget===0). Default sem nada = Gemini decide sozinho.
+  if (opts.reasoningMode != null || opts.thinkingBudget != null) {
+    generationConfig.thinkingConfig = { thinkingBudget: reasoningModeToThinkingBudget(rMode) };
   }
   if (opts.temperature != null && Number.isFinite(opts.temperature)) generationConfig.temperature = opts.temperature;
   if (opts.maxOutputTokens != null) generationConfig.maxOutputTokens = opts.maxOutputTokens;
@@ -439,6 +685,8 @@ export interface StartAiChatOpts {
   history: Array<{ role: "user" | "model"; text: string }>;
   tools: AiFunctionDecl[];
   temperature?: number | null;
+  /** Modo de raciocínio UNIVERSAL (0=Econômico, 1=Equilibrado, 2=Intenso). */
+  reasoningMode?: 0 | 1 | 2 | null;
   thinkingBudget?: number | null;
   geminiApiKey?: string | null;
   openrouterApiKey?: string | null;
@@ -472,7 +720,7 @@ export async function startAiChat(opts: StartAiChatOpts): Promise<AiChatSession>
     }
     return startOpenAICompatibleChat(opts, model, {
       provider: "gateway",
-      post: (body) => gatewayChat(creds.baseUrl, creds.apiKey, body),
+      post: (body) => gatewayChatWithFailover(model, body, { baseUrl: creds.baseUrl, apiKey: creds.apiKey, endpointId: creds.endpointId }),
       // "Nunca quebra": se a 1ª mensagem falhar, migra a sessão pro fallback (API key).
       makeFallback: fb ? () => startAiChat({ ...opts, modelRef: fb, gatewayBaseUrl: null, fallbackModelRef: null }) : undefined,
     });
@@ -488,9 +736,11 @@ function startGeminiChat(opts: StartAiChatOpts, requestedModel: string): AiChatS
   const genAI = new GoogleGenerativeAI(opts.geminiApiKey);
 
   const generationConfig: any = {};
-  const tb = opts.thinkingBudget;
-  const n = (tb === undefined || tb === null) ? 0 : Number(tb);
-  generationConfig.thinkingConfig = { thinkingBudget: Number.isFinite(n) ? n : 0 };
+  // Modo de raciocínio universal: reasoningMode vence; retrocompat thinkingBudget.
+  if (opts.reasoningMode != null || opts.thinkingBudget != null) {
+    const rMode = resolveReasoningMode(opts.reasoningMode, opts.thinkingBudget);
+    generationConfig.thinkingConfig = { thinkingBudget: reasoningModeToThinkingBudget(rMode) };
+  }
   if (opts.temperature != null && Number.isFinite(opts.temperature)) generationConfig.temperature = opts.temperature;
 
   const toolsConfig = opts.tools.length > 0 ? [{ functionDeclarations: opts.tools }] : undefined;
@@ -578,7 +828,7 @@ function startOpenAICompatibleChat(opts: StartAiChatOpts, model: string, deps: O
       }))
     : undefined;
 
-  const messages: any[] = [{ role: "system", content: opts.systemInstruction }];
+  const messages: any[] = [buildSystemMessage(opts.systemInstruction, deps.provider, model)];
   for (const m of opts.history) {
     messages.push({ role: m.role === "model" ? "assistant" : "user", content: m.text });
   }
@@ -590,6 +840,9 @@ function startOpenAICompatibleChat(opts: StartAiChatOpts, model: string, deps: O
   // com suporte a ferramentas se quiser agenda/KB).
   let toolsDisabled = false;
   const temp = (opts.temperature != null && Number.isFinite(opts.temperature)) ? opts.temperature : undefined;
+  // Modo de raciocínio universal (resolve 1x; mesmo valor em todos os turnos
+  // do loop de tools — incl. o retry sem tools). Mapeado por applyReasoning.
+  const rMode = resolveReasoningMode(opts.reasoningMode, opts.thinkingBudget);
 
   // Estado do fallback de sessão (só gateway). Migra UMA vez, na 1ª mensagem.
   let fallbackSession: AiChatSession | null = null;
@@ -600,6 +853,7 @@ function startOpenAICompatibleChat(opts: StartAiChatOpts, model: string, deps: O
     const body: Record<string, any> = { model, messages };
     if (tools && !toolsDisabled) { body.tools = tools; body.tool_choice = "auto"; }
     if (temp !== undefined) body.temperature = temp;
+    applyReasoning(body, rMode, deps.provider, model);
 
     let json: any;
     try {
@@ -612,6 +866,7 @@ function startOpenAICompatibleChat(opts: StartAiChatOpts, model: string, deps: O
         toolsDisabled = true;
         const body2: Record<string, any> = { model, messages };
         if (temp !== undefined) body2.temperature = temp;
+        applyReasoning(body2, rMode, deps.provider, model);
         json = await deps.post(body2);
       } else {
         throw err;
