@@ -180,6 +180,12 @@ interface Conversation {
    *  porque o mesmo phone pode ter passado por várias instâncias (ex: cliente
    *  desconecta sdr e conecta sdr_v2 com o mesmo número WhatsApp). */
   last_instance?: string | null;
+  /** TODAS as instâncias que receberam mensagem deste contato. Coletado durante
+   *  o agrupamento (cada msg soma a sua instance_name aqui). É o que permite
+   *  FILTRAR a lista pela instância selecionada sem perder o agrupamento cross-
+   *  instance: a mesma conversa aparece quando você seleciona qualquer uma das
+   *  instâncias por onde ela passou. */
+  all_instances?: string[];
 }
 
 /**
@@ -912,9 +918,17 @@ export default function ChatPage() {
             // Guarda a instance da MENSAGEM MAIS RECENTE — usado pelo header
             // do chat pra mostrar "Recebendo via: sdr_v2".
             last_instance: m.instance_name || null,
+            // Coleta TODAS as instâncias por onde o contato passou — base do
+            // FILTRO da lista por instância selecionada.
+            all_instances: m.instance_name ? [m.instance_name] : [],
           });
         } else {
-          convMap.get(m.remote_jid)!.messageCount++;
+          const conv = convMap.get(m.remote_jid)!;
+          conv.messageCount++;
+          // Acumula a instância desta msg no conjunto da conversa (sem repetir).
+          if (m.instance_name && !conv.all_instances?.includes(m.instance_name)) {
+            conv.all_instances = [...(conv.all_instances || []), m.instance_name];
+          }
         }
       }
 
@@ -1470,6 +1484,16 @@ export default function ChatPage() {
   }
 
   const filteredConvs = conversations.filter((c) => {
+    // FILTRO POR INSTÂNCIA: quando uma instância específica está selecionada
+    // (não "__all__"), mostra SÓ conversas que têm ao menos uma mensagem nela.
+    // Usa all_instances (todas por onde o contato passou) — preserva o
+    // agrupamento cross-instance (a mesma conversa aparece na sdr E na sdr_v2).
+    if (activeInstance && activeInstance !== "__all__") {
+      if (!c.all_instances?.includes(activeInstance) && c.last_instance !== activeInstance) {
+        return false;
+      }
+    }
+    // Busca por texto (nome ou telefone) — mantém funcionando junto com o filtro.
     if (!searchConv) return true;
     const s = searchConv.toLowerCase();
     return c.remote_jid.includes(s) || (c.nome_negocio || "").toLowerCase().includes(s);
@@ -1868,7 +1892,25 @@ export default function ChatPage() {
             ) : filteredConvs.length === 0 ? (
               <div className="p-10 text-center space-y-3">
                 <MessageSquare className="w-10 h-10 mx-auto text-muted-foreground/10" />
-                <p className="text-xs text-muted-foreground font-medium uppercase tracking-widest">Nenhuma conversa</p>
+                {activeInstance && activeInstance !== "__all__" ? (
+                  <>
+                    <p className="text-xs text-muted-foreground font-medium uppercase tracking-widest">
+                      Nenhuma conversa nesta instância
+                    </p>
+                    <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
+                      Você está filtrando por <strong className="text-foreground">{activeInstance}</strong>.
+                      <br/>Selecione <strong>“Todas as instâncias”</strong> no seletor acima pra ver tudo.
+                    </p>
+                    <button
+                      onClick={() => setActiveInstance("__all__")}
+                      className="mt-1 text-[11px] font-bold text-primary hover:underline"
+                    >
+                      Ver todas as conversas →
+                    </button>
+                  </>
+                ) : (
+                  <p className="text-xs text-muted-foreground font-medium uppercase tracking-widest">Nenhuma conversa</p>
+                )}
               </div>
             ) : (
               <div className="space-y-1 pb-6 lg:pb-6" style={{ paddingBottom: 'calc(var(--bottom-nav-height) + var(--safe-bottom) + 16px)' }}>
