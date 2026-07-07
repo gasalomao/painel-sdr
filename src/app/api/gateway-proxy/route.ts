@@ -38,12 +38,17 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === "install") {
+      // Restaura auth-files do Supabase ANTES de instalar/iniciar — assim o
+      // proxy lê as contas no boot e elas sobrevivem a redeploys sem volume.
+      await import("@/lib/gateway-auth-backup").then((m) => m.restoreAllCredentialsFromSupabase()).catch(() => {});
       const info = await mgr.installProxy();
       const status = await mgr.startProxy();
       return NextResponse.json({ success: true, version: info.version, status });
     }
 
     if (action === "start") {
+      // Mesma restauração ao (re)iniciar o proxy manualmente.
+      await import("@/lib/gateway-auth-backup").then((m) => m.restoreAllCredentialsFromSupabase()).catch(() => {});
       return NextResponse.json({ success: true, status: await mgr.startProxy() });
     }
 
@@ -74,42 +79,48 @@ export async function POST(req: NextRequest) {
       const state = String(body.state || "");
       if (!state) return NextResponse.json({ success: false, error: "state obrigatório." }, { status: 400 });
       const r = await mgr.getLoginStatus(state);
+      // Login concluído (status "ok") = novo auth-file no disco. Faz backup pro
+      // Supabase AGORA (fire-and-forget) pra sobreviver a redeploys.
+      if (r.status === "ok") {
+        import("@/lib/gateway-auth-backup").then((m) => m.backupGatewayAuthFiles()).catch(() => {});
+      }
       return NextResponse.json({ success: true, ...r, v1Url: mgr.PROXY_V1_URL });
     }
 
     if (action === "rename-account") {
-      // Define o apelido (label) de uma conta logada. Persistido em sidecar no
-      // disco — não toca no Supabase. O nome é o filename retornado por status.
       const name = String(body.name || "");
       const label = String(body.label || "");
       if (!name) return NextResponse.json({ success: false, error: "name obrigatório." }, { status: 400 });
       mgr.renameAccount(name, label);
+      // Backup: label mudou — espelha no Supabase (fire-and-forget).
+      import("@/lib/gateway-auth-backup").then((m) => m.backupGatewayAuthFiles()).catch(() => {});
       return NextResponse.json({ success: true, status: await mgr.getProxyStatus() });
     }
 
     if (action === "delete-account") {
-      // Remove a conta do conector: apaga o auth file + o sidecar de metadado.
-      // O proxy detecta a remoção no próximo ciclo de varredura do auth-dir.
       const name = String(body.name || "");
       if (!name) return NextResponse.json({ success: false, error: "name obrigatório." }, { status: 400 });
       mgr.deleteAccount(name);
+      // Backup: remove do Supabase pra não restaurar conta deletada no boot.
+      import("@/lib/gateway-auth-backup").then((m) => m.deleteGatewayAuthFromBackup(name)).catch(() => {});
       return NextResponse.json({ success: true, status: await mgr.getProxyStatus() });
     }
 
     if (action === "pause-account") {
-      // Move o arquivo OAuth pra auths-paused/ — o proxy para de rotacionar pra
-      // essa conta SEM perder o login. Anti-banimento real (descansa a conta).
       const name = String(body.name || "");
       if (!name) return NextResponse.json({ success: false, error: "name obrigatório." }, { status: 400 });
       mgr.pauseAccount(name);
+      // Backup: estado pausado mudou — espelha no Supabase.
+      import("@/lib/gateway-auth-backup").then((m) => m.backupGatewayAuthFiles()).catch(() => {});
       return NextResponse.json({ success: true, status: await mgr.getProxyStatus() });
     }
 
     if (action === "resume-account") {
-      // Move o arquivo de auths-paused/ de volta pra auths/ — volta pra rotação.
       const name = String(body.name || "");
       if (!name) return NextResponse.json({ success: false, error: "name obrigatório." }, { status: 400 });
       mgr.resumeAccount(name);
+      // Backup: voltou pra rotação — espelha no Supabase.
+      import("@/lib/gateway-auth-backup").then((m) => m.backupGatewayAuthFiles()).catch(() => {});
       return NextResponse.json({ success: true, status: await mgr.getProxyStatus() });
     }
 
