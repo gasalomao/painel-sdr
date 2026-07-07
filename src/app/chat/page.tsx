@@ -311,7 +311,18 @@ function WhatsAppAudioPlayer({ src, isMe }: { src: string; isMe: boolean }) {
 
 export default function ChatPage() {
   const { clientId } = useClientSession();
-  const [conversations, setConversations] = useState<Conversation[]>([]);
+  // STALE-WHILE-REVALIDATE: inicializa do cache de sessionStorage (se houver)
+  // pra o chat aparecer INSTANTÂNEO ao voltar de outra página, sem esperar o
+  // re-fetch de 3000 msgs. O re-fetch real roda em background e atualiza quando
+  // chega. O cache é por clientId (multi-tenant: cada conta tem seu conjunto).
+  const CONV_CACHE_KEY = clientId ? `sdr_conversations_${clientId}` : "sdr_conversations";
+  const [conversations, setConversations] = useState<Conversation[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const cached = window.sessionStorage.getItem(CONV_CACHE_KEY);
+      return cached ? JSON.parse(cached) : [];
+    } catch { return []; }
+  });
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
   const [saveAsLeadOpen, setSaveAsLeadOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -1020,7 +1031,11 @@ export default function ChatPage() {
         }
       }
 
-      setConversations(Array.from(convMap.values()));
+      const finalConvs = Array.from(convMap.values());
+      setConversations(finalConvs);
+      // Atualiza o cache SWR (stale-while-revalidate) — pra下次 volta de outra
+      // página, o chat mostra essas conversas instantaneamente sem re-fetch.
+      try { window.sessionStorage.setItem(CONV_CACHE_KEY, JSON.stringify(finalConvs.slice(0, 200))); } catch { /* quota */ }
 
       // 3) Dispara fetch de avatars que estejam faltando — em background, sem
       //    bloquear o render. /api/contacts/avatars busca da Evolution e salva
@@ -1182,31 +1197,37 @@ export default function ChatPage() {
 
     const loadFunnelData = async () => {
         try {
-            // Multi-tenant: usa client_id da sessão pra garantir que dados de outras
-            // contas não vazem (mesmo se um cliente tentasse hackear o instance_name).
-            const sessRes = await fetch("/api/auth/session");
-            const session = await sessRes.json();
-            const cid = session?.clientId;
+            // Reusa o clientId JÁ resolvido no mount (em vez de re-buscar
+            // /api/auth/session de novo — era chamado 3x por mount antes).
+            const cid = clientId;
 
             const funnelInst = getInstanceForJid(selectedSession);
+            // PASSO 1: resolve agentId (channel_connections). Precisa antes das
+            // outras queries que dependem dele.
             let chQ = supabase.from("channel_connections").select("agent_id, client_id").eq("instance_name", funnelInst);
             if (cid) chQ = chQ.eq("client_id", cid);
             const { data: channelData } = await chQ.maybeSingle();
             const agentId = channelData?.agent_id;
 
+            // PASSO 2: queries INDEPENDENTES em paralelo (Promise.all).
+            // Antes eram 4 awaits sequenciais (~1.5-2s). Agora rodam juntas.
+            const tasks: Promise<void>[] = [];
+
+            // (a) stages do agente
             if (agentId) {
                 let stagesQ = supabase.from("agent_stages").select("*").eq("agent_id", agentId).order("order_index", { ascending: true });
                 if (cid) stagesQ = stagesQ.eq("client_id", cid);
-                const { data: stageData } = await stagesQ;
-                setStages(stageData || []);
+                tasks.push(Promise.resolve(stagesQ).then(({ data }) => setStages(data || [])));
             } else {
                 setStages([]);
             }
 
+            // (b) contact + session (dependem uma do outro, mas rodam em paralelo com stages)
             let ctQ = supabase.from("contacts").select("id").eq("remote_jid", selectedSession);
             if (cid) ctQ = ctQ.eq("client_id", cid);
-            const { data: contactData } = await ctQ.maybeSingle();
-            if (contactData) {
+            tasks.push(
+              Promise.resolve(ctQ.maybeSingle()).then(async ({ data: contactData }) => {
+                if (!contactData) { setCurrentStageId(null); setSessionVariables({}); return; }
                 let sessQ = supabase.from("sessions").select("id, current_stage_id, variables").eq("contact_id", contactData.id).eq("instance_name", funnelInst);
                 if (cid) sessQ = sessQ.eq("client_id", cid);
                 const { data: sessData } = await sessQ.maybeSingle();
@@ -1217,7 +1238,10 @@ export default function ChatPage() {
                     setCurrentStageId(null);
                     setSessionVariables({});
                 }
-            }
+              })
+            );
+
+            await Promise.all(tasks);
         } catch (err) {
             console.error("Erro ao carregar dados do funil:", err);
         }

@@ -146,8 +146,11 @@ export default function CalendarioPage() {
     }
   }, []);
 
-  const loadAppointments = useCallback(async () => {
-    setLoading(true);
+  const loadAppointments = useCallback(async (silent = false) => {
+    // silent=true (sync/polling de background): NÃO ativa o loading spinner —
+    // mantém o CalendarGrid montado e só troca os dados quando chegarem. Sem
+    // isso, o polling de 60s desmontava o grid inteiro (piscar) a cada ciclo.
+    if (!silent) setLoading(true);
     try {
       const params = new URLSearchParams({
         from: from.toISOString(),
@@ -158,7 +161,7 @@ export default function CalendarioPage() {
       const r = await fetch(`/api/appointments?${params.toString()}`, { cache: "no-store" });
       const d = await r.json();
       if (!r.ok || !d.ok) {
-        setToast({ kind: "err", text: d.error || "Erro ao carregar" });
+        if (!silent) setToast({ kind: "err", text: d.error || "Erro ao carregar" });
         setAppointments([]);
       } else {
         let list: Appointment[] = d.appointments || [];
@@ -166,9 +169,9 @@ export default function CalendarioPage() {
         setAppointments(list);
       }
     } catch (e: any) {
-      setToast({ kind: "err", text: e.message });
+      if (!silent) setToast({ kind: "err", text: e.message });
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [from, to, filterAgent, filterStatus]);
 
@@ -194,7 +197,9 @@ export default function CalendarioPage() {
         if (!silent && d.synced > 0) {
           setToast({ kind: "ok", text: `${d.synced} eventos sincronizados do Google` });
         }
-        await loadAppointments();
+        // SILENT: não ativa loading spinner — o grid fica montado e só
+        // atualiza os dados. Assim o polling de 60s não pisca o calendário.
+        await loadAppointments(true);
       }
     } catch (e: any) {
       if (!silent) setToast({ kind: "err", text: e.message });
