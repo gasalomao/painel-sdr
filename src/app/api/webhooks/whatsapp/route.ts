@@ -1450,6 +1450,46 @@ export async function POST(req: NextRequest) {
           } catch (e) {
             console.warn("[CONNECTION_UPDATE] auto-link falhou:", (e as Error).message);
           }
+
+          // Busca o owner da Evolution para sincronizar e migrar o histórico
+          try {
+            const status = await evolution.getStatus(instanceName).catch(() => null);
+            const owner = status?.data?.owner || data.owner || data.jid;
+            const phone = owner ? String(owner).replace(/\D/g, "") : null;
+            if (phone) {
+              const phoneInstanceName = `phone:${phone}`;
+              console.log(`[CONNECTION_UPDATE] Instância "${instanceName}" ativa. Restaurando histórico do telefone ${phone}`);
+              // Busca o client_id associado à conexão
+              const { data: connData } = await supabase
+                .from("channel_connections")
+                .select("client_id")
+                .eq("instance_name", instanceName)
+                .maybeSingle();
+
+              if (connData?.client_id) {
+                // Sincroniza owner_phone no provider_config
+                const { data: cur } = await supabase
+                  .from("channel_connections")
+                  .select("provider_config")
+                  .eq("instance_name", instanceName)
+                  .maybeSingle();
+                const merged = { ...(cur?.provider_config || {}), owner_phone: phone, owner_jid: owner };
+                await supabase
+                  .from("channel_connections")
+                  .update({ provider_config: merged })
+                  .eq("instance_name", instanceName);
+
+                // Migra conversas, sessões e mensagens de volta
+                await Promise.all([
+                  supabase.from("chats_dashboard").update({ instance_name: instanceName }).eq("instance_name", phoneInstanceName).eq("client_id", connData.client_id),
+                  supabase.from("sessions").update({ instance_name: instanceName }).eq("instance_name", phoneInstanceName).eq("client_id", connData.client_id),
+                  supabase.from("messages").update({ instance_name: instanceName }).eq("instance_name", phoneInstanceName).eq("client_id", connData.client_id),
+                ]);
+              }
+            }
+          } catch (err: any) {
+            console.warn("[CONNECTION_UPDATE] Falha na migração automática de histórico:", err.message);
+          }
         }
       }
 
