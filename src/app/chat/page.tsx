@@ -970,8 +970,9 @@ export default function ChatPage() {
       // 3) FALLBACK: Adiciona conversas que foram "empurradas" do limite de 3000 mensagens,
       // mas que ainda são sessões ativas recentes.
       if (recentSessions) {
-        for (const sess of recentSessions) {
-          const jid = Array.isArray(sess.contacts) ? sess.contacts[0]?.remote_jid : sess.contacts?.remote_jid;
+        for (const sess of recentSessions as any[]) {
+          const c = sess.contacts;
+          const jid = Array.isArray(c) ? c[0]?.remote_jid : c?.remote_jid;
           if (jid && !convMap.has(jid)) {
             convMap.set(jid, {
               remote_jid: jid,

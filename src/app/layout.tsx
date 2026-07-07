@@ -8,6 +8,7 @@ import { ImpersonationBanner } from "@/components/layout/impersonation-banner";
 const inter = Inter({
   subsets: ["latin"],
   variable: "--font-sans",
+  display: "swap",
 });
 
 export const metadata: Metadata = {
