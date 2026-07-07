@@ -20,16 +20,32 @@ import {
     Clock, Trash2, Filter, Bot, X, CheckSquare, Loader2, UserPlus
 } from "lucide-react";
 import { AddLeadDialog } from "@/components/add-lead-dialog";
-import { 
-  DndContext, closestCenter, KeyboardSensor, PointerSensor, TouchSensor,
-  useSensor, useSensors, DragOverlay, defaultDropAnimationSideEffects
-} from "@dnd-kit/core";
-import { 
-  arrayMove, SortableContext, sortableKeyboardCoordinates, 
-  verticalListSortingStrategy, useSortable 
-} from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
 import { supabase } from "@/lib/supabase";
+import dynamic from "next/dynamic";
+
+const KanbanBoard = dynamic(
+  () => import("./_components/KanbanBoard"),
+  { ssr: false, loading: () => <KanbanSkeleton /> }
+);
+
+function KanbanSkeleton() {
+  return (
+    <div className="flex-1 w-full overflow-x-auto pb-8">
+      <div className="flex gap-3 sm:gap-6 min-w-max p-2">
+        {[1, 2, 3, 4].map((i) => (
+          <div key={i} className="w-[280px] sm:w-[320px] flex flex-col gap-4">
+            <div className="h-12 rounded-2xl bg-white/5 animate-pulse" />
+            <div className="space-y-4">
+              {[1, 2, 3].map((j) => (
+                <div key={j} className="h-32 rounded-2xl bg-white/5 animate-pulse" />
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 import { cn } from "@/lib/utils";
 import { useClientSession } from "@/lib/use-session";
 
@@ -78,7 +94,6 @@ export default function LeadsPage() {
   const [addLeadOpen, setAddLeadOpen] = useState(false);
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
   const [viewMode, setViewMode] = useState<"list" | "kanban">("list");
-  const [activeId, setActiveId] = useState<number | null>(null);
 
   // Colunas do Kanban — fonte única é a tabela kanban_columns (editável no
   // Organizador). Começa com o fallback hardcoded e troca pelo que vier da API
@@ -157,11 +172,7 @@ export default function LeadsPage() {
     setSelectAllAcrossPages(false);
   }, [page, search, categoryFilter, clientId, viewMode]);
 
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 15 } }),
-    useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 8 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
-  );
+
 
   const fetchLeads = useCallback(async () => {
     if (!clientId) return;
@@ -305,25 +316,11 @@ export default function LeadsPage() {
           setBulkDeleting(false);
       }
   };
-
   const totalPages = Math.ceil(total / PAGE_SIZE);
 
-  const handleDragEnd = async (event: any) => {
-    const { active, over } = event;
-    if (!over) return;
-    const leadId = active.id;
-    const overId = over.id;
-    let newStatus = columns.find(c => c.id === overId) ? overId : null;
-    if (!newStatus) {
-        const overLead = leads.find(l => l.id === overId);
-        if (overLead) newStatus = overLead.status || "novo";
-    }
-    if (newStatus && newStatus !== (leads.find(l => l.id === leadId)?.status || 'novo')) {
-        setLeads(prev => prev.map(l => l.id === leadId ? { ...l, status: newStatus as string } : l));
-        await supabase.from("leads_extraidos").update({ status: newStatus }).eq("id", leadId);
-    }
-    setActiveId(null);
-  };
+  const handleKanbanLeadsUpdated = useCallback((updatedLeads: Lead[]) => {
+    setLeads(updatedLeads);
+  }, []);
 
   const handleUpdateFollowUp = async (leadId: number, date: string) => {
     const { error } = await supabase.from("leads_extraidos").update({ 
@@ -634,25 +631,13 @@ export default function LeadsPage() {
             </CardContent>
           </Card>
         ) : (
-          <div className="flex-1 w-full overflow-x-auto custom-scrollbar pb-8 cursor-default kanban-scroll-container mobile-safe-bottom">
-            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={(e) => setActiveId(e.active.id as number)} onDragEnd={handleDragEnd}>
-              <div className="flex gap-3 sm:gap-6 min-w-max p-2 h-full min-h-[calc(100vh-250px)]">
-                {columns.map((col) => (
-                  <SortableContext key={col.id} items={leads.filter(l => (l.status || 'novo') === col.id).map(l => l.id)} strategy={verticalListSortingStrategy}>
-                    <KanbanColumn 
-                        column={col} 
-                        leads={leads.filter(l => (l.status || 'novo') === col.id)} 
-                        onLeadClick={setSelectedLead}
-                        formatPhone={formatPhone}
-                    />
-                  </SortableContext>
-                ))}
-              </div>
-              <DragOverlay>
-                {activeId ? <KanbanCard lead={leads.find(l => l.id === activeId)} isOverlay formatPhone={formatPhone} /> : null}
-              </DragOverlay>
-            </DndContext>
-          </div>
+          <KanbanBoard
+            leads={leads}
+            columns={columns}
+            onLeadClick={setSelectedLead}
+            formatPhone={formatPhone}
+            onLeadsUpdated={handleKanbanLeadsUpdated}
+          />
         )}
       </div>
 
@@ -853,130 +838,7 @@ export default function LeadsPage() {
       </Dialog>
     </div>
   );
-}
-
-// --- Kanban Sub-components ---
-
-function KanbanColumn({ column, leads, onLeadClick, formatPhone }: any) {
-    const { setNodeRef } = useSortable({ id: column.id });
-
-    // Cor da coluna pode vir como classe tailwind (fallback hardcoded) ou hex
-    // (tabela kanban_columns, fonte única). Hex → estilo inline com alpha.
-    const isHex = typeof column.color === "string" && column.color.startsWith("#");
-    const hexStyle = isHex
-        ? { backgroundColor: `${column.color}1a`, borderColor: `${column.color}33`, color: column.color }
-        : undefined;
-
-    return (
-        <div className="w-[280px] sm:w-[320px] flex flex-col gap-4">
-            <div
-                className={cn("px-5 py-3 rounded-2xl border text-xs font-black uppercase tracking-widest flex items-center justify-between backdrop-blur-md shadow-lg", !isHex && column.color)}
-                style={hexStyle}
-            >
-                {column.label}
-                <Badge variant="secondary" className="bg-black/40 text-inherit border-none text-[10px] w-6 h-6 p-0 flex items-center justify-center rounded-full">{leads.length}</Badge>
-            </div>
-            
-            <div ref={setNodeRef} className="flex-1 space-y-4 p-1 min-h-[200px] overflow-y-auto custom-scrollbar pr-2 max-h-[calc(100vh-320px)]">
-                {leads.map((lead: any) => (
-                    <KanbanCard key={lead.id} lead={lead} onClick={() => onLeadClick(lead)} formatPhone={formatPhone} />
-                ))}
-            </div>
-        </div>
-    );
-}
-
-function KanbanCard({ lead, onClick, isOverlay, formatPhone }: any) {
-    const {
-        attributes,
-        listeners,
-        setNodeRef,
-        transform,
-        transition,
-        isDragging,
-    } = useSortable({ id: lead?.id || 0 });
-
-    if (!lead) return null;
-
-    const style = {
-        transform: CSS.Translate.toString(transform),
-        transition,
-        zIndex: isDragging || isOverlay ? 50 : 1,
-        opacity: isDragging ? 0.6 : 1,
-    };
-
-    const isOverdue = lead.next_follow_up && new Date(lead.next_follow_up) < new Date();
-    
-    // Pegar iniciais para avatar
-    const initials = (lead.nome_negocio || "UD").substring(0,2).toUpperCase();
-
-    return (
-        <Card 
-            ref={setNodeRef}
-            style={style}
-            className={cn(
-                "group border-white/5 bg-white/5 backdrop-blur-xl transition-all duration-300 rounded-2xl overflow-hidden",
-                isOverlay && "scale-[1.03] shadow-2xl shadow-primary/20 rotate-2 border-primary/40 ring-1 ring-primary/30 z-[100]",
-                !isOverlay && "hover:bg-white/10 hover:border-white/20 hover:shadow-xl hover:-translate-y-0.5"
-            )}
-            onClick={onClick}
-        >
-            {/* Drag handle — only this area triggers drag on mobile */}
-            <div
-              {...attributes}
-              {...listeners}
-              className="flex items-center justify-center h-5 cursor-grab active:cursor-grabbing bg-white/[0.03] border-b border-white/5 md:hidden"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="w-8 h-1 rounded-full bg-white/20" />
-            </div>
-            <CardContent className="p-4" {...(typeof window !== 'undefined' && window.matchMedia('(min-width:768px)').matches ? { ...attributes, ...listeners, style: { cursor: 'grab' } } : {})}>
-                <div className="flex gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary/20 to-purple-500/20 flex items-center justify-center shrink-0 border border-white/10 group-hover:border-primary/50 transition-colors">
-                        <span className="text-xs font-black text-white/90">{initials}</span>
-                    </div>
-                    
-                    <div className="flex-1 min-w-0">
-                        <p className="text-[13px] font-bold leading-tight group-hover:text-primary-300 transition-colors line-clamp-2 text-white pb-1">
-                            {lead.nome_negocio || "Sem Registro"}
-                        </p>
-                        
-                        <div className="flex items-center gap-1.5 mt-1 opacity-80 group-hover:opacity-100 transition-opacity">
-                            <Phone className="w-3 h-3 text-green-400" />
-                            <span className="text-[10px] font-mono text-green-100">{lead.telefone || formatPhone(lead.remoteJid)}</span>
-                        </div>
-                    </div>
-                </div>
-                
-                <div className="flex flex-wrap gap-2 mt-3 items-center justify-between">
-                    <Badge variant="outline" className="text-[9px] font-bold tracking-wider py-0.5 px-2.5 border-white/10 bg-black/40 text-neutral-300 rounded-md">
-                        {lead.ramo_negocio ? (lead.ramo_negocio.length > 25 ? lead.ramo_negocio.substring(0, 25) + '...' : lead.ramo_negocio) : "GERAL"}
-                    </Badge>
-                    
-                    {lead.rating && (
-                        <div className="flex items-center gap-1 bg-amber-500/10 px-2 py-0.5 rounded-md border border-amber-500/20">
-                            <Star className="w-2.5 h-2.5 text-amber-400 fill-amber-400" />
-                            <span className="text-[9px] font-bold text-amber-400">{lead.rating}</span>
-                        </div>
-                    )}
-                </div>
-
-                {lead.next_follow_up && (
-                    <div className={cn(
-                        "mt-3 p-2 rounded-lg flex items-center gap-1.5 text-[10px] font-bold border",
-                        isOverdue ? "bg-red-500/10 text-red-400 border-red-500/20" : "bg-primary/10 text-primary-300 border-primary/20"
-                    )}>
-                        <Clock className="w-3.5 h-3.5" />
-                        {isOverdue ? "ATRASADO: " : "RETORNO: "}
-                        {new Date(lead.next_follow_up).toLocaleString("pt-BR", {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'})}
-                    </div>
-                )}
-            </CardContent>
-        </Card>
-    );
-}
-
-// =====================================================================
+}// =====================================================================
 // LeadIntelligenceSection — mostra o briefing IA do lead OU botão pra gerar.
 // Reutilizável: mesmo componente vai entrar depois no /disparo e /automacao
 // na seleção de leads.

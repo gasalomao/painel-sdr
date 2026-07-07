@@ -9,9 +9,18 @@ import {
   DollarSign, TrendingUp, Calculator, Calendar, Cpu, ListChecks,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import {
-  ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Legend, Cell,
-} from "recharts";
+import { formatBRL, formatUSD, formatTokens, formatPctMoney } from "@/lib/token-format";
+import dynamic from "next/dynamic";
+
+const DailyCostChart = dynamic(
+  () => import("./_components/TokensCharts").then((m) => m.DailyCostChart),
+  { ssr: false, loading: () => <div className="h-full flex items-center justify-center text-xs text-muted-foreground">Carregando gráfico…</div> }
+);
+
+const TopSourcesChart = dynamic(
+  () => import("./_components/TokensCharts").then((m) => m.TopSourcesChart),
+  { ssr: false, loading: () => <div className="h-full flex items-center justify-center text-xs text-muted-foreground">Carregando gráfico…</div> }
+);
 
 type Period = "today" | "7d" | "30d" | "all";
 
@@ -38,27 +47,7 @@ const SOURCE_META: Record<string, { label: string; color: string; icon: any; gra
   other:     { label: "Outros (mídia)",   color: "#94a3b8", icon: Sparkles,     gradient: "from-slate-500/20   to-slate-500/0" },
 };
 
-function formatTokens(n: number) {
-  if (!isFinite(n) || n === 0) return "0";
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + "M";
-  if (n >= 1_000) return (n / 1_000).toFixed(1) + "k";
-  return String(Math.round(n));
-}
-function formatUSD(c: number) {
-  if (!isFinite(c)) return "$0.00";
-  if (c === 0) return "$0.00";
-  if (c < 0.01) return `$${c.toFixed(6)}`;
-  if (c < 1) return `$${c.toFixed(4)}`;
-  return `$${c.toFixed(2)}`;
-}
-function formatBRL(c: number) {
-  if (!isFinite(c) || c === 0) return "R$ 0,00";
-  return c.toLocaleString("pt-BR", { style: "currency", currency: "BRL", minimumFractionDigits: c < 0.10 ? 4 : 2 });
-}
-function formatPctMoney(part: number, total: number) {
-  if (!total) return "0%";
-  return ((part / total) * 100).toFixed(part / total < 0.05 ? 1 : 0) + "%";
-}
+// formatBRL, formatUSD, formatTokens, formatPctMoney agora são importados de @/lib/token-format
 function periodToRange(p: Period): { from?: string; to?: string } {
   const now = new Date();
   const to = now.toISOString();
@@ -340,45 +329,7 @@ export default function TokensPage() {
             </p>
           </CardHeader>
           <CardContent className="h-80 pt-2">
-            {byDayStacked.length === 0 ? (
-              <div className="h-full flex items-center justify-center text-xs text-muted-foreground italic">Sem dados no período.</div>
-            ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={byDayStacked.map(d => ({
-                  ...d,
-                  agent_brl:     d.agent     * totals.brlRate,
-                  disparo_brl:   d.disparo   * totals.brlRate,
-                  followup_brl:  d.followup  * totals.brlRate,
-                  organizer_brl: d.organizer * totals.brlRate,
-                  other_brl:     d.other     * totals.brlRate,
-                }))}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#ffffff10" />
-                  <XAxis dataKey="day" stroke="#ffffff60" fontSize={10} tickFormatter={d => d.slice(5)} />
-                  <YAxis stroke="#ffffff60" fontSize={10} tickFormatter={(v) => `R$ ${Number(v).toFixed(2)}`} width={60} />
-                  <Tooltip
-                    contentStyle={{ background: "#0a0a0a", border: "1px solid #ffffff20", borderRadius: 8, fontSize: 11 }}
-                    formatter={(v: any, name: any) => {
-                      const key = String(name).replace("_brl", "");
-                      const meta = SOURCE_META[key] || SOURCE_META.other;
-                      return [formatBRL(Number(v)), meta.label];
-                    }}
-                    labelFormatter={(d) => `📅 ${d}`}
-                  />
-                  <Legend
-                    wrapperStyle={{ fontSize: 10 }}
-                    formatter={(v) => {
-                      const key = String(v).replace("_brl", "");
-                      return SOURCE_META[key]?.label || key;
-                    }}
-                  />
-                  <Bar dataKey="agent_brl"     stackId="a" fill={SOURCE_META.agent.color} />
-                  <Bar dataKey="disparo_brl"   stackId="a" fill={SOURCE_META.disparo.color} />
-                  <Bar dataKey="followup_brl"  stackId="a" fill={SOURCE_META.followup.color} />
-                  <Bar dataKey="organizer_brl" stackId="a" fill={SOURCE_META.organizer.color} />
-                  <Bar dataKey="other_brl"     stackId="a" fill={SOURCE_META.other.color} radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            )}
+            <DailyCostChart byDayStacked={byDayStacked} brlRate={totals.brlRate} />
           </CardContent>
         </Card>
 
@@ -526,33 +477,7 @@ export default function TokensPage() {
             </CardTitle>
           </CardHeader>
           <CardContent className="h-80 pt-2">
-            {bySourceLabel.length === 0 ? (
-              <div className="h-full flex items-center justify-center text-xs text-muted-foreground italic">Sem dados.</div>
-            ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart
-                  data={bySourceLabel.slice(0, 10).map(s => ({
-                    ...s,
-                    cost_brl: s.cost * totals.brlRate,
-                  }))}
-                  layout="vertical"
-                  margin={{ left: 110, right: 20 }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" stroke="#ffffff10" />
-                  <XAxis type="number" stroke="#ffffff60" fontSize={10} tickFormatter={(v) => `R$ ${Number(v).toFixed(2)}`} />
-                  <YAxis type="category" dataKey="label" stroke="#ffffff60" fontSize={10} width={140} />
-                  <Tooltip
-                    contentStyle={{ background: "#0a0a0a", border: "1px solid #ffffff20", borderRadius: 8, fontSize: 11 }}
-                    formatter={(v: any) => formatBRL(Number(v))}
-                  />
-                  <Bar dataKey="cost_brl" radius={[0, 4, 4, 0]}>
-                    {bySourceLabel.slice(0, 10).map((s, i) => (
-                      <Cell key={i} fill={SOURCE_META[s.source]?.color || "#94a3b8"} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            )}
+            <TopSourcesChart bySourceLabel={bySourceLabel} brlRate={totals.brlRate} />
           </CardContent>
         </Card>
 

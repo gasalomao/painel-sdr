@@ -21,31 +21,25 @@ import { cn } from "@/lib/utils";
 import { ConnectGoogleDialog } from "@/components/connect-google-dialog";
 import { CalendarStatusBar } from "@/components/calendar-status-bar";
 import { SendFollowupDialog } from "@/components/send-followup-dialog";
-import { Calendar, dateFnsLocalizer } from "react-big-calendar";
-import withDragAndDrop from "react-big-calendar/lib/addons/dragAndDrop";
-import { format as dfFormat, parse as dfParse, startOfWeek as dfStartOfWeek, getDay as dfGetDay } from "date-fns";
-import { ptBR } from "date-fns/locale";
-import "react-big-calendar/lib/css/react-big-calendar.css";
-import "react-big-calendar/lib/addons/dragAndDrop/styles.css";
+import { GOOGLE_EVENT_COLORS } from "@/lib/google-calendar-colors";
 import "./calendar-theme.css";
-import { colorForAppointment, GOOGLE_EVENT_COLORS } from "@/lib/google-calendar-colors";
+import dynamic from "next/dynamic";
 
-// Localizer date-fns em pt-BR (semana começa domingo, como o Google BR).
-const rbcLocalizer = dateFnsLocalizer({
-  format: dfFormat,
-  parse: dfParse,
-  startOfWeek: (date: Date) => dfStartOfWeek(date, { weekStartsOn: 0 }),
-  getDay: dfGetDay,
-  locales: { "pt-BR": ptBR },
-});
-const DnDCalendar = withDragAndDrop(Calendar as any);
-const RBC_MESSAGES = {
-  date: "Data", time: "Hora", event: "Evento", allDay: "Dia todo",
-  week: "Semana", work_week: "Semana útil", day: "Dia", month: "Mês",
-  previous: "Anterior", next: "Próximo", yesterday: "Ontem", tomorrow: "Amanhã",
-  today: "Hoje", agenda: "Agenda", noEventsInRange: "Nenhum agendamento neste período.",
-  showMore: (n: number) => `+${n} mais`,
-};
+const CalendarGrid = dynamic(
+  () => import("./_components/CalendarGrid"),
+  { ssr: false, loading: () => <CalendarSkeleton /> }
+);
+
+function CalendarSkeleton() {
+  return (
+    <div className="rounded-2xl border border-white/10 bg-secondary/20 p-1 sm:p-2 flex items-center justify-center" style={{ height: "calc(100vh - 240px)", minHeight: 520 }}>
+      <div className="text-center text-muted-foreground">
+        <div className="w-8 h-8 mx-auto animate-spin rounded-full border-2 border-primary border-t-transparent" />
+        <p className="text-xs mt-3">Carregando calendário…</p>
+      </div>
+    </div>
+  );
+}
 
 type Appointment = {
   id: string;
@@ -342,32 +336,6 @@ export default function CalendarioPage() {
 
   const today = startOfDay(new Date()).getTime();
 
-  // ===== react-big-calendar: eventos, cores e interações =====
-  const rbcEvents = useMemo(
-    () => appointments.map((a) => ({
-      id: a.id,
-      title: a.title,
-      start: new Date(a.start_at),
-      end: new Date(a.end_at),
-      allDay: !!a.all_day,
-      resource: a,
-    })),
-    [appointments]
-  );
-
-  const eventPropGetter = useCallback((event: any) => {
-    const a = event.resource as Appointment;
-    const past = new Date(a.end_at).getTime() < Date.now();
-    return {
-      style: {
-        backgroundColor: colorForAppointment(a),
-        color: "#fff",
-        opacity: a.status === "cancelled" ? 0.4 : past ? 0.7 : 1,
-        textDecoration: a.status === "cancelled" ? "line-through" : "none",
-      },
-    };
-  }, []);
-
   // Mover/redimensionar: update otimista + PATCH (que sincroniza no Google e
   // recarrega). Em falha, o reload do patchAppointment reverte pro estado real.
   const onEventDropOrResize = useCallback(async ({ event, start, end }: any) => {
@@ -645,35 +613,16 @@ export default function CalendarioPage() {
           </div>
           )
         ) : (
-          <div className="calendar-dark rounded-2xl border border-white/10 bg-secondary/20 p-1 sm:p-2" style={{ height: "calc(100vh - 240px)", minHeight: 520 }}>
-            <DnDCalendar
-              localizer={rbcLocalizer}
-              culture="pt-BR"
-              messages={RBC_MESSAGES}
-              events={rbcEvents}
-              date={anchor}
-              onNavigate={(d: Date) => setAnchor(d)}
-              view={view as any}
-              onView={(v: any) => setView(v)}
-              views={["month", "week", "day"]}
-              toolbar={false}
-              popup
-              selectable
-              startAccessor="start"
-              endAccessor="end"
-              step={30}
-              timeslots={2}
-              scrollToTime={new Date(1970, 0, 1, 7, 0, 0)}
-              eventPropGetter={eventPropGetter}
-              onSelectEvent={onSelectEvent}
-              onSelectSlot={onSelectSlot}
-              onEventDrop={onEventDropOrResize}
-              onEventResize={onEventDropOrResize}
-              draggableAccessor={(e: any) => e.resource?.status !== "cancelled"}
-              resizableAccessor={(e: any) => e.resource?.status !== "cancelled"}
-              style={{ height: "100%" }}
-            />
-          </div>
+          <CalendarGrid
+            appointments={appointments}
+            anchor={anchor}
+            view={view}
+            onNavigate={(d: Date) => setAnchor(d)}
+            onView={(v) => setView(v)}
+            onSelectSlot={onSelectSlot}
+            onSelectEvent={onSelectEvent}
+            onEventDropOrResize={onEventDropOrResize}
+          />
         )}
       </div>
 

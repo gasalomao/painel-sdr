@@ -893,49 +893,67 @@ export default function ChatPage() {
         return;
       }
 
-      console.log(`[CHAT-LOG] Encontradas ${messages?.length || 0} mensagens (agrupando por remote_jid)`);
-      if (!messages || messages.length === 0) {
+      // 2) Pega as últimas 500 SESSÕES ATIVAS (isso garante que nenhuma conversa recente seja
+      // "empurrada" para fora da lista por contas com alto volume de mensagens)
+      const { data: recentSessions, error: sessErr } = await supabase
+        .from("sessions")
+        .select("instance_name, last_message_at, contacts!inner(remote_jid)")
+        .eq("client_id", clientId)
+        .order("last_message_at", { ascending: false })
+        .limit(1000);
+        
+      if (sessErr) {
+        console.error("[CHAT-ERROR] Erro ao carregar sessões recentes:", sessErr);
+      }
+
+      console.log(`[CHAT-LOG] Encontradas ${messages?.length || 0} mensagens e ${recentSessions?.length || 0} sessões ativas.`);
+      
+      if ((!messages || messages.length === 0) && (!recentSessions || recentSessions.length === 0)) {
         setConversations([]);
         return;
       }
 
       const convMap = new Map<string, Conversation & { _instSet?: Set<string> }>();
-      for (const m of messages) {
-        if (!convMap.has(m.remote_jid)) {
-          let preview = m.content?.slice(0, 80) || "";
-          if (!preview && m.media_type) {
-            if (m.media_type === "image") preview = "📷 Imagem";
-            else if (m.media_type === "audio") preview = "🎤 Áudio";
-            else if (m.media_type === "video") preview = "🎥 Vídeo";
-            else if (m.media_type === "document") preview = "📄 Arquivo";
-          }
+      
+      if (messages) {
+        for (const m of messages) {
+          if (!convMap.has(m.remote_jid)) {
+            let preview = m.content?.slice(0, 80) || "";
+            if (!preview && m.media_type) {
+              if (m.media_type === "image") preview = "📷 Imagem";
+              else if (m.media_type === "audio") preview = "🎤 Áudio";
+              else if (m.media_type === "video") preview = "🎥 Vídeo";
+              else if (m.media_type === "document") preview = "📄 Arquivo";
+            }
 
-          // Set interno pra acumular instâncias sem O(n²) (anti-pattern do
-          // Array.includes + spread). Convertido pra array só no fim.
-          const instSet = new Set<string>();
-          if (m.instance_name) instSet.add(m.instance_name);
-          convMap.set(m.remote_jid, {
-            remote_jid: m.remote_jid,
-            lastMessage: preview || "[Sem conteúdo]",
-            messageCount: 1,
-            lastTime: m.created_at,
-            // Guarda a instance da MENSAGEM MAIS RECENTE — usado pelo header
-            // do chat pra mostrar "Recebendo via: sdr_v2".
-            last_instance: m.instance_name || null,
-            // Coleta TODAS as instâncias por onde o contato passou — base do
-            // FILTRO da lista por instância selecionada.
-            all_instances: Array.from(instSet),
-            _instSet: instSet,
-          });
-        } else {
-          const conv = convMap.get(m.remote_jid)!;
-          conv.messageCount++;
-          // Acumula a instância desta msg no Set (O(1) — sem recriar array).
-          if (m.instance_name && !conv._instSet?.has(m.instance_name)) {
-            conv._instSet?.add(m.instance_name);
+            // Set interno pra acumular instâncias sem O(n²) (anti-pattern do
+            // Array.includes + spread). Convertido pra array só no fim.
+            const instSet = new Set<string>();
+            if (m.instance_name) instSet.add(m.instance_name);
+            convMap.set(m.remote_jid, {
+              remote_jid: m.remote_jid,
+              lastMessage: preview || "[Sem conteúdo]",
+              messageCount: 1,
+              lastTime: m.created_at,
+              // Guarda a instance da MENSAGEM MAIS RECENTE — usado pelo header
+              // do chat pra mostrar "Recebendo via: sdr_v2".
+              last_instance: m.instance_name || null,
+              // Coleta TODAS as instâncias por onde o contato passou — base do
+              // FILTRO da lista por instância selecionada.
+              all_instances: Array.from(instSet),
+              _instSet: instSet,
+            });
+          } else {
+            const conv = convMap.get(m.remote_jid)!;
+            conv.messageCount++;
+            // Acumula a instância desta msg no Set (O(1) — sem recriar array).
+            if (m.instance_name && !conv._instSet?.has(m.instance_name)) {
+              conv._instSet?.add(m.instance_name);
+            }
           }
         }
       }
+
       // Conversões: Set → array definitivo. E fallback pra conversas com
       // instance_name histórico nulo: se não tem NENHUMA instância coletada
       // (msgs muito antigas sem o campo), marca como "todas" pra não sumir
@@ -946,6 +964,24 @@ export default function ChatPage() {
         delete conv._instSet;
         if (allInstEmpty(conv.all_instances) && activeInstance && activeInstance !== "__all__") {
           conv.all_instances = [activeInstance]; // fallback: aparece na instância atual
+        }
+      }
+      
+      // 3) FALLBACK: Adiciona conversas que foram "empurradas" do limite de 3000 mensagens,
+      // mas que ainda são sessões ativas recentes.
+      if (recentSessions) {
+        for (const sess of recentSessions) {
+          const jid = Array.isArray(sess.contacts) ? sess.contacts[0]?.remote_jid : sess.contacts?.remote_jid;
+          if (jid && !convMap.has(jid)) {
+            convMap.set(jid, {
+              remote_jid: jid,
+              lastMessage: "Conversa ativa (clique para ver as mensagens)",
+              messageCount: 1, // Não sabemos o count real, mas 1 força a aparecer
+              lastTime: sess.last_message_at,
+              last_instance: sess.instance_name || null,
+              all_instances: sess.instance_name ? [sess.instance_name] : [],
+            });
+          }
         }
       }
 
