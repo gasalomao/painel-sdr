@@ -103,6 +103,9 @@ function readAll(): DsToken[] {
 function writeAll(list: DsToken[]): void {
   fs.mkdirSync(DIR, { recursive: true });
   fs.writeFileSync(TOKENS_PATH, JSON.stringify(list, null, 2), "utf8");
+  // Backup duplo (fire-and-forget): salva tokens no Supabase pra sobreviver a
+  // redeploys sem volume persistente. Não bloqueia — falha é não-fatal.
+  import("@/lib/gateway-auth-backup").then((m) => m.backupDeepSeekData()).catch(() => {});
 }
 
 /**
@@ -398,6 +401,8 @@ function readSubs(): DsSubscription[] {
 function writeSubs(list: DsSubscription[]): void {
   fs.mkdirSync(DIR, { recursive: true });
   fs.writeFileSync(SUBS_PATH, JSON.stringify(list, null, 2), "utf8");
+  // Backup duplo (fire-and-forget): subscriptions também vão pro Supabase.
+  import("@/lib/gateway-auth-backup").then((m) => m.backupDeepSeekData()).catch(() => {});
 }
 
 export function listSubscriptions(): DsSubscriptionPublic[] {

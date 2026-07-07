@@ -592,6 +592,21 @@ CREATE TABLE IF NOT EXISTS public.webhook_logs (
   client_id      uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
 );
 
+-- Backup de contas conectadas (gateway OAuth + DeepSeek). Vive em arquivo
+-- local (.gateway-proxy/auths/, .deepseek-chat/tokens.json) e SOME a cada
+-- redeploy sem volume persistente. Esta tabela é o BACKUP DUPLO: o painel
+-- salva aqui após cada login/mudança e restaura pro FS no boot do proxy.
+-- Assim as contas sobrevivem a redeploys mesmo sem volume no Easypanel.
+CREATE TABLE IF NOT EXISTS public.provider_credentials (
+  id          text PRIMARY KEY,
+  provider    text NOT NULL,
+  content     jsonb NOT NULL,
+  label       text,
+  paused      boolean DEFAULT false,
+  created_at  timestamp with time zone DEFAULT now(),
+  updated_at  timestamp with time zone DEFAULT now()
+);
+
 -- =====================================================================
 -- CONSTRAINTS COMPOSTAS / UNIQUE (idempotente via DO blocks)
 -- =====================================================================
