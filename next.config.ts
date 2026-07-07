@@ -21,6 +21,20 @@ const nextConfig: NextConfig = {
     "puppeteer-extra",
     "puppeteer-extra-plugin-stealth",
   ],
+  // Otimização de bundle: instrui o Next a tree-shake melhor e agrupar
+  // imports de pacotes grandes em chunks separados (menos JS baixado em
+  // cada página que não usa esses pacotes).
+  experimental: {
+    optimizePackageImports: [
+      "lucide-react",
+      "date-fns",
+      "recharts",
+      "react-big-calendar",
+      "@dnd-kit/core",
+      "@dnd-kit/sortable",
+      "@dnd-kit/utilities",
+    ],
+  },
 };
 
 export default nextConfig;

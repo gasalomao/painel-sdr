@@ -199,7 +199,10 @@ describe("startAiChat OpenRouter — ferramentas e contexto", () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(body.model).toBe("anthropic/claude-3.5-sonnet");
     // contexto preservado, na ordem certa, com system na frente
-    expect(body.messages[0]).toEqual({ role: "system", content: "PERSONA" });
+    expect(body.messages[0]).toEqual({
+      role: "system",
+      content: [{ type: "text", text: "PERSONA", cache_control: { type: "ephemeral" } }],
+    });
     expect(body.messages[1]).toEqual({ role: "user", content: "primeira do cliente" });
     expect(body.messages[2]).toEqual({ role: "assistant", content: "resposta anterior da IA" });
     expect(body.messages[3]).toEqual({ role: "user", content: "nova mensagem" });

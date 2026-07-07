@@ -15,10 +15,10 @@ O RTK intercepta comandos Bash e comprime a saída ANTES de mandar pra IA, econo
 - Para ver a economia: `rtk gain` (mostra tokens salvos).
 - Prefira comandos que o RTK otimiza: `git`, `ls`, `tree`, `find`, `grep`, `cat`, `diff`, `docker`, `pnpm`, `npm`.
 
-## Memória Compartilhada Universal (Antigravity, Claude Code, Zcode, Freebuff, Cursor, etc.)
+## Memória Compartilhada Universal (Antigravity, Claude Code, Zcode, Freebuff, Cursor, Codebuff, etc.)
 
 > Este projeto usa memória compartilhada persistente em `.shared-memory/`.
-> Sempre que os tokens de uma IA acabam e você troca para outra (seja Antigravity, Claude Code, Zcode, Freebuff, ou qualquer IDE/CLI), a nova IA saberá exatamente o estado e onde continuar.
+> Sempre que os tokens de uma IA acabam e você troca para outra (seja Antigravity, Claude Code, Zcode, Freebuff, Codebuff, Cursor, ou qualquer IDE/CLI), a nova IA saberá exatamente o estado e onde continuar.
 
 ### Regras Obrigatórias para TODOS os Agentes de IA
 
