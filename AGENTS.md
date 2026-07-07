@@ -4,6 +4,17 @@
 This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` before writing any code. Heed deprecation notices.
 <!-- END:nextjs-agent-rules -->
 
+## Economia de Token com RTK (Rust Token Killer)
+
+Este projeto tem o **RTK** ativo via hook do Claude Code (`.claude/settings.json`).
+O RTK intercepta comandos Bash e comprime a saída ANTES de mandar pra IA, economizando 60-90% de token em operações de desenvolvimento.
+
+**Regras para a IA:**
+- NÃO resista às reescritas do hook (`git status` → `rtk git status`). Elas são transparentes e economizam token.
+- Use comandos Bash normalmente — o hook faz a otimização sozinho.
+- Para ver a economia: `rtk gain` (mostra tokens salvos).
+- Prefira comandos que o RTK otimiza: `git`, `ls`, `tree`, `find`, `grep`, `cat`, `diff`, `docker`, `pnpm`, `npm`.
+
 ---
 
 ## Memória Compartilhada com Claude Code
