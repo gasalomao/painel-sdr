@@ -32,7 +32,16 @@ function detectMode(url: string): Mode {
 export function NgrokQuickConnect() {
   const [open, setOpen] = useState(false);
   const [publicUrl, setPublicUrl] = useState("");
-  const [reachable, setReachable] = useState<boolean | null>(null);
+  // Inicializa do cache de sessionStorage — evita o "piscar" do badge voltando
+  // pra "Verificando…" (null) a cada render do header. Se já sabemos que estava
+  // Online/Fora do ar na última verificação, mostra isso imediatamente.
+  const [reachable, setReachable] = useState<boolean | null>(() => {
+    if (typeof window === "undefined") return null;
+    const cached = window.sessionStorage.getItem("ngrok_reachable_cache");
+    if (cached === "true") return true;
+    if (cached === "false") return false;
+    return null;
+  });
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<Mode>("local");
   const [prodUrl, setProdUrl] = useState("");
@@ -72,8 +81,10 @@ export function NgrokQuickConnect() {
     try {
       await fetch(url, { method: "HEAD", mode: "no-cors", cache: "no-store" });
       setReachable(true);
+      if (typeof window !== "undefined") window.sessionStorage.setItem("ngrok_reachable_cache", "true");
     } catch {
       setReachable(false);
+      if (typeof window !== "undefined") window.sessionStorage.setItem("ngrok_reachable_cache", "false");
     }
   }
 
