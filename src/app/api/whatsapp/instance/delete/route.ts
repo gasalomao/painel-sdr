@@ -51,7 +51,7 @@ export async function POST(req: NextRequest) {
   // 1) Ownership
   const { data: conn } = await supabaseAdmin
     .from("channel_connections")
-    .select("instance_name, client_id, status, provider")
+    .select("instance_name, client_id, status, provider, provider_config")
     .eq("instance_name", instanceName)
     .maybeSingle();
 
@@ -123,6 +123,19 @@ export async function POST(req: NextRequest) {
     await drop("chats_dashboard", "instance_name", "chats_dashboard");
     await drop("sessions", "instance_name", "sessions");
     await drop("webhook_logs", "instance_name", "webhook_logs");
+  } else {
+    // Modo preservação: mapeia o instance_name antigo para o owner_phone (se disponível)
+    // para que a reconexão futura do mesmo número resgate o histórico automaticamente.
+    const phone = conn.provider_config?.owner_phone || conn.provider_config?.owner_jid?.replace(/\D/g, "");
+    if (phone) {
+      const phoneInstanceName = `phone:${phone}`;
+      console.log(`[delete] Mapeando histórico da instância ${instanceName} para ${phoneInstanceName}`);
+      await Promise.all([
+        supabaseAdmin.from("chats_dashboard").update({ instance_name: phoneInstanceName }).eq("instance_name", instanceName),
+        supabaseAdmin.from("sessions").update({ instance_name: phoneInstanceName }).eq("instance_name", instanceName),
+        supabaseAdmin.from("messages").update({ instance_name: phoneInstanceName }).eq("instance_name", instanceName),
+      ]);
+    }
   }
 
   // channel_connections: SEMPRE deleta (é o que torna a instância "instância")

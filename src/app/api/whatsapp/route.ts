@@ -77,6 +77,27 @@ export async function GET(req: NextRequest) {
               .update({ provider_config: merged })
               .eq("instance_name", i.instanceName)
               .eq("client_id", session.clientId);
+
+            // Migra qualquer histórico órfão associado a esse telefone de volta para esta instância ativa.
+            // Isso garante que reconectar o mesmo número (mesmo com nome de instância diferente) resgate o histórico.
+            const phoneInstanceName = `phone:${phone}`;
+            await Promise.all([
+              supabaseAdmin
+                .from("chats_dashboard")
+                .update({ instance_name: i.instanceName })
+                .eq("instance_name", phoneInstanceName)
+                .eq("client_id", session.clientId),
+              supabaseAdmin
+                .from("sessions")
+                .update({ instance_name: i.instanceName })
+                .eq("instance_name", phoneInstanceName)
+                .eq("client_id", session.clientId),
+              supabaseAdmin
+                .from("messages")
+                .update({ instance_name: i.instanceName })
+                .eq("instance_name", phoneInstanceName)
+                .eq("client_id", session.clientId),
+            ]);
           })
       ).catch(() => {});
 

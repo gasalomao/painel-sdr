@@ -15,38 +15,35 @@ O RTK intercepta comandos Bash e comprime a saída ANTES de mandar pra IA, econo
 - Para ver a economia: `rtk gain` (mostra tokens salvos).
 - Prefira comandos que o RTK otimiza: `git`, `ls`, `tree`, `find`, `grep`, `cat`, `diff`, `docker`, `pnpm`, `npm`.
 
----
+## Memória Compartilhada Universal (Antigravity, Claude Code, Zcode, Freebuff, Cursor, etc.)
 
-## Memória Compartilhada com Claude Code
+> Este projeto usa memória compartilhada persistente em `.shared-memory/`.
+> Sempre que os tokens de uma IA acabam e você troca para outra (seja Antigravity, Claude Code, Zcode, Freebuff, ou qualquer IDE/CLI), a nova IA saberá exatamente o estado e onde continuar.
 
-> Este projeto usa memória compartilhada entre **Antigravity** e **Claude Code**.
-> Quando os tokens de uma IA acabam, o usuário troca para a outra — e ela sabe tudo.
-
-### Regras Obrigatórias para o Antigravity
+### Regras Obrigatórias para TODOS os Agentes de IA
 
 1. **No INÍCIO de cada sessão/conversa**: Leia os 4 arquivos de `.shared-memory/`:
-   - `.shared-memory/CONTEXT.md` — estado atual do projeto e o que está acontecendo
-   - `.shared-memory/MEMORY.md` — conhecimento persistente sobre o projeto
-   - `.shared-memory/SESSION_LOG.md` — o que o Claude Code fez recentemente
-   - `.shared-memory/TASKS.md` — tarefas pendentes/em progresso
+   - [CONTEXT.md](file:///.shared-memory/CONTEXT.md) — estado atual do projeto e o que está acontecendo
+   - [MEMORY.md](file:///.shared-memory/MEMORY.md) — conhecimento persistente sobre o projeto
+   - [SESSION_LOG.md](file:///.shared-memory/SESSION_LOG.md) — histórico de sessões anteriores
+   - [TASKS.md](file:///.shared-memory/TASKS.md) — lista de tarefas pendentes e em progresso
 
-2. **DURANTE a sessão**: Atualize `.shared-memory/CONTEXT.md` quando:
-   - Tomar uma decisão importante
-   - Encontrar um problema/bug
-   - Completar uma tarefa significativa
-   - Mudar a direção do trabalho
+2. **DURANTE a sessão**: Atualize o [CONTEXT.md](file:///.shared-memory/CONTEXT.md) quando:
+   - Tomar uma decisão técnica ou arquitetural importante
+   - Encontrar um problema/bug relevante
+   - Mudar o escopo ou direção do trabalho
 
-3. **ANTES de encerrar** ou quando o usuário pedir para parar: Atualize todos os 4 arquivos:
-   - `CONTEXT.md` — o que está acontecendo agora, onde parou
-   - `MEMORY.md` — novos aprendizados sobre o projeto
-   - `SESSION_LOG.md` — adicionar entrada com o que fez nesta sessão (formato abaixo)
-   - `TASKS.md` — atualizar status das tarefas
+3. **ANTES de encerrar** ou quando o usuário pedir para parar/trocar: Atualize os 4 arquivos:
+   - [CONTEXT.md](file:///.shared-memory/CONTEXT.md) — o estado atual em que você está deixando o projeto
+   - [MEMORY.md](file:///.shared-memory/MEMORY.md) — novos aprendizados e descobertas sobre a base de código
+   - [SESSION_LOG.md](file:///.shared-memory/SESSION_LOG.md) — adicione uma nova entrada seguindo o formato abaixo
+   - [TASKS.md](file:///.shared-memory/TASKS.md) — atualize o status das tarefas completas/pendentes
 
-4. **NUNCA** sobrescrever completamente um arquivo — sempre adicionar/atualizar seções
+4. **NUNCA** sobrescreva completamente um arquivo — sempre adicione/atualize seções de forma incremental.
 
 ### Formato do SESSION_LOG.md
 ```markdown
-## [YYYY-MM-DD HH:MM] NomeDaIA — Descrição Curta
+## [YYYY-MM-DD HH:MM] NomeDaIA/IDE — Descrição Curta
 - **O que foi feito**: lista do que fez
 - **Arquivos alterados**: lista de arquivos
 - **Decisões**: decisões tomadas
@@ -57,4 +54,5 @@ O RTK intercepta comandos Bash e comprime a saída ANTES de mandar pra IA, econo
 ### Economia de Tokens
 - Evite ler arquivos grandes inteiros — use buscas direcionadas
 - Resuma dados antes de processar
-- Priorize ações diretas sobre análises exaustivas
+- Priorize ações diretas sobre análises exaustivas e loops de diagnóstico
+- Use as ferramentas de economia do RTK sempre que disponíveis
