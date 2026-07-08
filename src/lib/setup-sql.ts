@@ -492,6 +492,7 @@ CREATE TABLE IF NOT EXISTS public.kanban_columns (
   color        text,
   order_index  integer NOT NULL DEFAULT 0,
   is_system    boolean NOT NULL DEFAULT false,
+  is_terminal  boolean NOT NULL DEFAULT false,
   created_at   timestamp with time zone DEFAULT now(),
   updated_at   timestamp with time zone DEFAULT now(),
   UNIQUE (client_id, status_key)

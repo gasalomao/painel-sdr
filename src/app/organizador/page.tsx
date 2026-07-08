@@ -38,6 +38,7 @@ type KanbanColumn = {
   color: string;
   order_index: number;
   is_system: boolean;
+  is_terminal: boolean;
 };
 
 type Suggestion = {
@@ -107,6 +108,7 @@ export default function OrganizadorPage() {
   // Kanban
   const [newColLabel, setNewColLabel] = useState("");
   const [newColColor, setNewColColor] = useState(DEFAULT_COLOR);
+  const [newColTerminal, setNewColTerminal] = useState(false);
 
   // IA Suggest
   const [suggestAgentId, setSuggestAgentId] = useState<number | null>(null);
@@ -343,11 +345,11 @@ export default function OrganizadorPage() {
     const r = await fetch("/api/kanban-columns", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status_key, label, color: newColColor }),
+      body: JSON.stringify({ status_key, label, color: newColColor, is_terminal: newColTerminal }),
     });
     const d = await r.json();
     if (!d.ok) { alert("Erro: " + d.error); return; }
-    setNewColLabel(""); setNewColColor(DEFAULT_COLOR);
+    setNewColLabel(""); setNewColColor(DEFAULT_COLOR); setNewColTerminal(false);
     reload();
   };
 
@@ -426,6 +428,7 @@ export default function OrganizadorPage() {
           body: JSON.stringify({
             status_key: col.status_key, label: col.label, color: col.color,
             order_index: systemCount + i,
+            is_terminal: false,
           }),
         });
       }
@@ -784,6 +787,10 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                         className="flex-1 bg-white/5 border-white/10 h-9 text-sm"
                       />
                       <code className="text-[10px] text-muted-foreground font-mono shrink-0 px-2 py-1 bg-black/40 rounded">{col.status_key}</code>
+                      <label className="flex items-center gap-1.5 text-[10px] text-muted-foreground hover:text-white cursor-pointer px-2" title="Leads não saem desta coluna automaticamente">
+                        <input type="checkbox" checked={col.is_terminal} onChange={(e) => updateColumn(col.id, { is_terminal: e.target.checked })} className="accent-purple-500 w-3 h-3" />
+                        Coluna final
+                      </label>
                       {col.is_system && <span className="text-[9px] uppercase font-black tracking-widest text-amber-300 bg-amber-500/10 border border-amber-500/20 px-2 py-1 rounded">sistema</span>}
                       <Button onClick={() => deleteColumn(col)} disabled={col.is_system} size="icon" variant="ghost" className="h-8 w-8 text-red-400 hover:bg-red-500/10 disabled:opacity-30"><Trash2 className="w-3.5 h-3.5" /></Button>
                     </div>
@@ -793,6 +800,10 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                 <div className="flex items-center gap-2 p-2 rounded-lg bg-cyan-500/5 border border-cyan-500/20">
                   <input type="color" value={newColColor} onChange={(e) => setNewColColor(e.target.value)} className="w-8 h-8 rounded cursor-pointer bg-transparent border border-white/10" />
                   <Input value={newColLabel} onChange={(e) => setNewColLabel(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addColumn()} placeholder="Nova coluna (ex: Em negociação)" className="flex-1 bg-white/5 border-white/10 h-9 text-sm" />
+                  <label className="flex items-center gap-1.5 text-[10px] text-muted-foreground cursor-pointer px-2">
+                    <input type="checkbox" checked={newColTerminal} onChange={(e) => setNewColTerminal(e.target.checked)} className="accent-purple-500 w-3 h-3" />
+                    Coluna final
+                  </label>
                   <div className="flex gap-0.5">
                     {PRESET_COLORS.map((c) => (
                       <button key={c} type="button" onClick={() => setNewColColor(c)} className={cn("w-5 h-5 rounded border-2", newColColor === c ? "border-white" : "border-transparent")} style={{ background: c }} />
