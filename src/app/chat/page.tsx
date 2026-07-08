@@ -115,19 +115,23 @@ function detectMediaCategory(msg: ChatMessage): 'image' | 'audio' | 'video' | 'd
  * Formata a data para exibir separadores no chat (ex: "HOJE", "ONTEM", "DD/MM/YYYY")
  */
 function formatChatDate(dateString: string): string {
+  // Usa timezone fixo America/Sao_Paulo pra evitar que mensagens perto da
+  // meia-noite apareçam no dia errado (servidor em UTC, browser em outro fuso).
+  const TZ = "America/Sao_Paulo";
   const date = new Date(dateString);
   const today = new Date();
   const yesterday = new Date(today);
   yesterday.setDate(yesterday.getDate() - 1);
 
-  if (date.toDateString() === today.toDateString()) return "HOJE";
-  if (date.toDateString() === yesterday.toDateString()) return "ONTEM";
+  // Compara apenas a DATA (dd/mm/yyyy) no fuso de São Paulo — ignora horas.
+  const fmtOpts: Intl.DateTimeFormatOptions = { day: "2-digit", month: "2-digit", year: "numeric", timeZone: TZ };
+  const dateStr = date.toLocaleDateString("pt-BR", fmtOpts);
+  const todayStr = today.toLocaleDateString("pt-BR", fmtOpts);
+  const yestStr = yesterday.toLocaleDateString("pt-BR", fmtOpts);
 
-  return date.toLocaleDateString("pt-BR", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric"
-  });
+  if (dateStr === todayStr) return "HOJE";
+  if (dateStr === yestStr) return "ONTEM";
+  return dateStr;
 }
 
 /**
@@ -140,14 +144,17 @@ function formatChatDate(dateString: string): string {
  */
 function formatRelativeTime(dateString: string): string {
   if (!dateString) return "";
+  const TZ = "America/Sao_Paulo";
   const d = new Date(dateString);
   const now = new Date();
   const diffMs = now.getTime() - d.getTime();
-  const isToday = d.toDateString() === now.toDateString();
+  // Compara datas no fuso de SP (evita dia errado perto da meia-noite).
+  const fmtDate: Intl.DateTimeFormatOptions = { day: "2-digit", month: "2-digit", year: "numeric", timeZone: TZ };
+  const isToday = d.toLocaleDateString("pt-BR", fmtDate) === now.toLocaleDateString("pt-BR", fmtDate);
   const yest = new Date(now); yest.setDate(now.getDate() - 1);
-  const isYesterday = d.toDateString() === yest.toDateString();
+  const isYesterday = d.toLocaleDateString("pt-BR", fmtDate) === yest.toLocaleDateString("pt-BR", fmtDate);
 
-  if (isToday) return d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+  if (isToday) return d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: TZ });
   if (isYesterday) return "Ontem";
 
   // Mesma semana (até 7 dias atrás): mostra dia da semana
@@ -1084,6 +1091,8 @@ export default function ChatPage() {
       // Como conversations são agrupadas por remote_jid (não por instance),
       // o histórico mostra TODAS as mensagens daquele contato — mistura de
       // qualquer instância em que ele tenha aparecido. Cronológico unificado.
+      // Ordena por id DESC (ordem de inserção real no banco) — é mais confiável
+      // que created_at quando há empate de timestamp (mesmo milissegundo).
       const { data, error } = await supabase
         .from("chats_dashboard")
         .select("*")
@@ -1093,16 +1102,10 @@ export default function ChatPage() {
         .order("id", { ascending: false })
         .limit(100);
 
-      const rawMsgs = data || [];
+      const rawMsgs = (data || []).reverse(); // DESC do banco → ASC cronológico
 
-      // Ordem CRONOLÓGICA pura: created_at e, em empate técnico, id.
-      // Antes existia um "Smart Sort" que dentro de uma janela de 7s forçava
-      // a ordem customer → human → ai. Isso quebrava o caso real do disparo:
-      // a IA enviava primeiro (T) e a auto-resposta da loja chegava 2-3s
-      // depois (T+2s) — mas o sort jogava a resposta da loja PRA CIMA da
-      // mensagem da IA, fazendo parecer que o cliente "iniciou" a conversa.
-      // A ordem do banco (created_at gerado no momento real de cada msg) é
-      // a fonte da verdade — confia nela.
+      // Ordem CRONOLÓGICA pura: created_at primeiro; em empate, id (inserção).
+      // Confia no timestamp do banco (gerado no momento real de cada msg).
       const newMsgs = [...rawMsgs].sort((a, b) => {
         const ta = new Date(a.created_at).getTime();
         const tb = new Date(b.created_at).getTime();
@@ -1189,7 +1192,10 @@ export default function ChatPage() {
 
   useEffect(() => {
     if (!selectedSession || !activeInstance) return;
-    setMessages([]);
+    // NÃO limpa as mensagens ao trocar de conversa — mantém as anteriores
+    // visíveis (blur suave) enquanto carrega as novas. Antes era setMessages([])
+    // que deixava o chat em branco/esqueleto por ~1-2s dando sensação de lento.
+    // Só ativa o skeleton se NÃO houver mensagens ainda (primeira abertura).
     setLoadingMsgs(true);
     loadMessages(selectedSession);
     checkAiControl(selectedSession, getInstanceForJid(selectedSession));
@@ -2267,7 +2273,7 @@ export default function ChatPage() {
                 <div className="absolute inset-0 opacity-[0.02] pointer-events-none bg-[url('https://w0.peakpx.com/wallpaper/508/606/HD-wallpaper-whatsapp-dark-mode-theme-background.jpg')] bg-repeat" />
                 
                 <div className="p-4 sm:p-8 md:p-12 max-w-5xl mx-auto space-y-6 relative z-10">
-                  {loadingMsgs ? (
+                  {loadingMsgs && messages.length === 0 ? (
                     <div className="space-y-6 py-10">
                       {[...Array(5)].map((_, i) => (
                         <div key={i} className={cn("flex", i % 2 === 0 ? "justify-start" : "justify-end")}>
@@ -2532,7 +2538,7 @@ export default function ChatPage() {
                             </div>
                             <div className={cn("mt-3 flex items-center gap-2", isMe ? "justify-end" : "justify-start")}>
                                 <span className={cn("text-[10px] font-mono font-bold", isMe ? "text-white/60" : "text-white/40")}>
-                                    {new Date(msg.created_at).toLocaleTimeString("pt-BR", { hour: '2-digit', minute: '2-digit' })}
+                                    {new Date(msg.created_at).toLocaleTimeString("pt-BR", { hour: '2-digit', minute: '2-digit', timeZone: "America/Sao_Paulo" })}
                                 </span>
                                 {isMe && (
                                     <div className="flex items-center">
