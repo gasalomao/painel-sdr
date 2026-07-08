@@ -20,13 +20,14 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue, SelectGroup, SelectLabel,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { AddLeadDialog } from "@/components/add-lead-dialog";
 import { Switch } from "@/components/ui/switch";
 import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
+import { groupModels, PROVIDER_LABEL } from "@/lib/model-grouping";
 import { useClientSession } from "@/lib/use-session";
 
 interface ChatMessage {
@@ -2963,7 +2964,7 @@ export default function ChatPage() {
 
                           {/* Modelo */}
                           <div className="space-y-2">
-                              <label className="text-[10px] font-black text-muted-foreground uppercase tracking-widest">Modelo Gemini</label>
+                              <label className="text-[10px] font-black text-muted-foreground uppercase tracking-widest">Modelo de IA</label>
                               <Select value={orgModel} onValueChange={(v) => setOrgModel(v as string)}>
                                   <SelectTrigger className="h-11 bg-white/5 border-white/10 rounded-xl">
                                       <SelectValue placeholder={orgModels.length ? "Escolha um modelo" : "Nenhum modelo disponível"} />
@@ -2974,11 +2975,23 @@ export default function ChatPage() {
                                               Nenhum modelo (verifique API Key)
                                           </SelectItem>
                                       ) : (
-                                          orgModels.map((m) => (
-                                              <SelectItem key={m.id} value={m.id} className="text-xs">
-                                                  {m.name || m.id}
-                                              </SelectItem>
-                                          ))
+                                          groupModels(orgModels as any).flatMap((group) =>
+                                            group.subgroups.map((sub) => (
+                                              <SelectGroup key={group.provider + "|" + (sub.label || "_")}>
+                                                <SelectLabel className="text-[10px] uppercase tracking-wider opacity-70">
+                                                  {(PROVIDER_LABEL[group.provider] || group.provider) + (sub.label ? ` · ${sub.label === "Grátis" ? "★ Grátis" : sub.label}` : "")}
+                                                </SelectLabel>
+                                                {sub.items.map((m) => {
+                                                  const raw = (m as any).rawId || m.id;
+                                                  return (
+                                                    <SelectItem key={m.id} value={m.id} className="text-xs">
+                                                      {m.name && m.name !== raw ? `${raw} — ${m.name}` : (m.name || m.id)}
+                                                    </SelectItem>
+                                                  );
+                                                })}
+                                              </SelectGroup>
+                                            ))
+                                          )
                                       )}
                                   </SelectContent>
                               </Select>

@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { AutomationLogs } from "./AutomationLogs";
 import { LeadIntelligenceBatch } from "@/components/lead-intelligence-batch";
+import { ModelOptions } from "@/components/ai-module-shared";
 
 type FollowupStep = { day_offset: number; template: string };
 
@@ -647,7 +648,7 @@ export default function AutomacaoPage() {
                     <div className="space-y-2 pl-4 border-l-2 border-cyan-500/30">
                       <div>
                         <label className="text-[10px] uppercase font-bold text-muted-foreground flex items-center gap-2">
-                          <span>Modelo Gemini</span>
+                          <span>Modelo de IA</span>
                           {loadingAiModels && <Loader2 className="w-3 h-3 animate-spin" />}
                           <button type="button" onClick={loadAiModels} className="text-cyan-300 hover:underline text-[9px] normal-case">recarregar</button>
                         </label>
@@ -662,11 +663,7 @@ export default function AutomacaoPage() {
                               {!isAdmin && defaultAiModel && !aiModels.some(m => m.id === defaultAiModel) && (
                                 <option value={defaultAiModel} className="bg-neutral-900">{defaultAiModel}</option>
                               )}
-                              {aiModels.map(m => (
-                                <option key={m.id} value={m.id} className="bg-neutral-900">
-                                  {m.id}{m.name ? ` — ${m.name}` : ""}
-                                </option>
-                              ))}
+                              <ModelOptions models={aiModels as any} />
                             </>
                           )}
                         </select>
@@ -784,7 +781,7 @@ export default function AutomacaoPage() {
                     <div className="space-y-2 pl-4 border-l-2 border-purple-500/30">
                       <div>
                         <label className="text-[10px] uppercase font-bold text-muted-foreground flex items-center gap-2">
-                          <span>Modelo Gemini</span>
+                          <span>Modelo de IA</span>
                           {loadingAiModels && <Loader2 className="w-3 h-3 animate-spin" />}
                           <button type="button" onClick={loadAiModels} className="text-purple-300 hover:underline text-[9px] normal-case">recarregar</button>
                         </label>
@@ -799,11 +796,7 @@ export default function AutomacaoPage() {
                               {!isAdmin && defaultAiModel && !aiModels.some(m => m.id === defaultAiModel) && (
                                 <option value={defaultAiModel} className="bg-neutral-900">{defaultAiModel}</option>
                               )}
-                              {aiModels.map(m => (
-                                <option key={m.id} value={m.id} className="bg-neutral-900">
-                                  {m.id}{m.name ? ` — ${m.name}` : ""}
-                                </option>
-                              ))}
+                              <ModelOptions models={aiModels as any} />
                             </>
                           )}
                         </select>

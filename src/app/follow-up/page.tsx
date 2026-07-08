@@ -15,6 +15,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue, SelectGroup, SelectLabel,
 } from "@/components/ui/select";
 import { groupModels, PROVIDER_LABEL } from "@/lib/model-grouping";
+import { useGatewayAccounts, accountsForFamily, accountsLabelSnippet } from "@/hooks/use-gateway-accounts";
 import { Switch } from "@/components/ui/switch";
 import {
   Repeat, Plus, Play, Pause, Trash2, Send, Loader2, Bot, Clock,
@@ -72,6 +73,7 @@ type FollowupLog = { id: number; followup_campaign_id: string; message: string; 
 
 export default function FollowUpPage() {
   const [campaigns, setCampaigns] = useState<FollowupCampaign[]>([]);
+  const gwAccounts = useGatewayAccounts();
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -1191,7 +1193,7 @@ export default function FollowUpPage() {
                 <div className="space-y-3">
                   <div>
                     <label className="text-[10px] font-black text-muted-foreground uppercase tracking-widest">
-                      Modelo Gemini
+                      Modelo de IA
                     </label>
                     {aiModels.length === 0 && isAdmin ? (
                       <div className="mt-1 text-xs text-orange-300 bg-orange-500/10 border border-orange-500/30 rounded px-2 py-1.5">
@@ -1216,7 +1218,14 @@ export default function FollowUpPage() {
                             group.subgroups.map((sub) => (
                               <SelectGroup key={group.provider + "|" + (sub.label || "_")}>
                                 <SelectLabel className="text-[10px] uppercase tracking-wider opacity-70">
-                                  {(PROVIDER_LABEL[group.provider] || group.provider) + (sub.label ? ` · ${sub.label === "Grátis" ? "★ Grátis" : sub.label}` : "")}
+                                  {(() => {
+                                    const base = (PROVIDER_LABEL[group.provider] || group.provider) + (sub.label ? ` · ${sub.label === "Grátis" ? "★ Grátis" : sub.label}` : "");
+                                    if (group.provider === "gateway") {
+                                      const accs = accountsForFamily(gwAccounts, sub.label);
+                                      if (accs.length) return `${base} — ${accountsLabelSnippet(accs)}`;
+                                    }
+                                    return base;
+                                  })()}
                                 </SelectLabel>
                                 {sub.items.map((m) => {
                                   const raw = (m as any).rawId || m.id;

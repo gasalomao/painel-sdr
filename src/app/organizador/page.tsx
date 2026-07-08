@@ -11,6 +11,7 @@ import {
   ChevronUp, ChevronDown, Wand2, Power, RefreshCw, ClipboardCheck,
   History, ArrowRight, Globe, Pencil, Search, FileText, Eye, EyeOff,
 } from "lucide-react";
+import { ModelOptions } from "@/components/ai-module-shared";
 
 /* ============================================================
    TYPES
@@ -546,7 +547,7 @@ export default function OrganizadorPage() {
                         Modelo de IA (compartilhado entre clientes)
                       </label>
                       {modelsLoading && <span className="text-[9px] text-muted-foreground flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> modelos…</span>}
-                      {!modelsLoading && models.length > 0 && <span className="text-[9px] text-emerald-400">{models.length} modelos Gemini (ao vivo)</span>}
+                      {!modelsLoading && models.length > 0 && <span className="text-[9px] text-emerald-400">{models.length} modelos (ao vivo)</span>}
                     </div>
                     <select
                       value={org.model}
@@ -557,11 +558,11 @@ export default function OrganizadorPage() {
                       {org.model && !models.some((m) => m.id === org.model) && (
                         <option value={org.model}>{org.model} (salvo)</option>
                       )}
-                      {models.map((m) => <option key={m.id} value={m.id}>{m.name} ({m.id})</option>)}
+                      <ModelOptions models={models as any} />
                       {models.length === 0 && !modelsLoading && <option value={org.model}>{org.model}</option>}
                     </select>
                     <p className="text-[9px] text-muted-foreground italic">
-                      Lista vinda direto da API do Gemini — modelos novos lançados pela Google aparecem aqui automaticamente sem deploy.
+                      Lista ao vivo de todas as fontes (Gemini, OpenRouter, Gateway) — modelos novos aparecem automaticamente sem deploy.
                     </p>
                   </div>
                 </section>
@@ -866,7 +867,7 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                         <option value={defaultAiModel} className="bg-neutral-900">{defaultAiModel}</option>
                       )}
                       {models.map((m) => (
-                        <option key={m.id} value={m.id} className="bg-neutral-900">{m.name}</option>
+                        <option key={m.id} value={m.id} className="bg-neutral-900">{m.name} ({m.id})</option>
                       ))}
                       {models.length === 0 && !modelsLoading && (
                         <option value="" className="bg-neutral-900">Carregando modelos…</option>
@@ -1152,7 +1153,7 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                             <option value={defaultAiModel} className="bg-neutral-900">{defaultAiModel}</option>
                           )}
                           {models.map((m) => (
-                            <option key={m.id} value={m.id} className="bg-neutral-900">{m.name}</option>
+                            <option key={m.id} value={m.id} className="bg-neutral-900">{m.name} ({m.id})</option>
                           ))}
                           {models.length === 0 && !modelsLoading && (
                             <option value="" className="bg-neutral-900">Carregando modelos…</option>
