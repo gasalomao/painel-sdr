@@ -44,7 +44,7 @@ export async function GET(req: NextRequest) {
 
   const { data, error } = await supabaseAdmin
     .from("kanban_columns")
-    .select("id, status_key, label, color, order_index, is_system")
+    .select("id, status_key, label, color, order_index, is_system, is_terminal")
     .eq("client_id", ctx.clientId)
     .order("order_index");
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
@@ -53,11 +53,11 @@ export async function GET(req: NextRequest) {
     const { data: seeded, error: seedErr } = await supabaseAdmin!
       .from("kanban_columns")
       .insert(DEFAULT_KANBAN_COLUMNS.map((c) => ({ ...c, client_id: ctx.clientId })))
-      .select("id, status_key, label, color, order_index, is_system");
+      .select("id, status_key, label, color, order_index, is_system, is_terminal");
     if (seedErr) {
       const { data: reread } = await supabaseAdmin!
         .from("kanban_columns")
-        .select("id, status_key, label, color, order_index, is_system")
+        .select("id, status_key, label, color, order_index, is_system, is_terminal")
         .eq("client_id", ctx.clientId)
         .order("order_index");
       return NextResponse.json({ ok: true, columns: reread || [], seeded: false });
@@ -117,6 +117,7 @@ export async function POST(req: NextRequest) {
       color: body.color || "#6b7280",
       order_index,
       is_system: false,
+      is_terminal: !!body.is_terminal,
     })
     .select()
     .single();

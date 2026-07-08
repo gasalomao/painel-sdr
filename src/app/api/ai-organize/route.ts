@@ -270,12 +270,12 @@ export async function POST(req: NextRequest) {
     // Kanban dinâmico por cliente: carrega as colunas reais do tenant em foco.
     // Cada cliente pode ter status diferentes (salão de beleza vs B2B vs imobiliária).
     // Sem cliente em foco → cai pros estágios B2B hardcoded.
-    type KanbanCol = { status_key: string; label: string; order_index: number };
+    type KanbanCol = { status_key: string; label: string; order_index: number; is_terminal?: boolean };
     let kanbanCols: KanbanCol[] = [];
     if (activeClientId) {
       const { data: cols } = await adminClient
         .from("kanban_columns")
-        .select("status_key, label, order_index")
+        .select("status_key, label, order_index, is_terminal")
         .eq("client_id", activeClientId)
         .order("order_index", { ascending: true });
       kanbanCols = (cols || []) as KanbanCol[];
@@ -283,9 +283,16 @@ export async function POST(req: NextRequest) {
     const dynamicStatusKeys = kanbanCols.map(c => c.status_key);
     const dynamicHierarquia: Record<string, number> = {};
     kanbanCols.forEach((c, i) => { dynamicHierarquia[c.status_key] = i; });
-    // Terminais detectados por padrão de nome (cobre B2B + nichos B2C tipo "perdido", "cancelado", "atendido_final").
+    // TERMINAIS: prioriza o campo is_terminal (marcado pelo usuário na UI do
+    // organizador). Fallback pro regex de nome (compat com bancos antigos sem
+    // a coluna is_terminal). Assim QUALQUER kanban funciona — "arquivado",
+    // "nao_deu", "gono" etc são detectados como terminal se o usuário marcou.
     const isTerminalKey = (k: string) => /sem_interesse|descartado|perdido|cancelado|recusou/i.test(k);
-    const terminalSet = new Set<string>(dynamicStatusKeys.filter(isTerminalKey));
+    const terminalSet = new Set<string>(
+      kanbanCols
+        .filter((c: any) => c.is_terminal || isTerminalKey(c.status_key))
+        .map((c: any) => c.status_key)
+    );
     // Hardcoded fallback (modo global sem cliente em foco)
     if (kanbanCols.length === 0) {
       ["sem_interesse", "descartado"].forEach(k => terminalSet.add(k));
@@ -337,8 +344,15 @@ export async function POST(req: NextRequest) {
     // tokens em accounts maduros, sem perder precisão.
     // ================================================================
     // Terminais pra fim de FILTRO 1 (skip se status já é terminal e cliente não respondeu).
-    // Inclui "fechado" e qualquer status do kanban marcado como terminal.
-    const STATUS_TERMINAL = new Set<string>(["sem_interesse", "descartado", "fechado", ...terminalSet]);
+    // STATUS_TERMINAL dinâmico: usa os terminais do kanban do cliente (is_terminal
+    // ou regex). Antes forçava "sem_interesse"/"descartado"/"fechado" mesmo se
+    // não existissem no kanban — pulava leads que estavam em terminais custom.
+    const STATUS_TERMINAL = new Set<string>(terminalSet);
+    // Fallback: se não há terminais detectados (kanban vazio ou sem marcação),
+    // usa os padrões B2B pra não quebrar o filtro de economia.
+    if (STATUS_TERMINAL.size === 0) {
+      ["sem_interesse", "descartado", "fechado"].forEach(k => STATUS_TERMINAL.add(k));
+    }
     const decisoesHeuristicas: Record<string, { status: string; razao: string; resumo: string; lead_type?: string }> = {};
     const skippedSemMudanca: string[] = [];
     const skippedCacheHit: string[] = []; // FILTRO 4: hash match → skip total
@@ -386,14 +400,19 @@ export async function POST(req: NextRequest) {
       // ───────── FILTRO 3: Heurística regex de casos óbvios ─────────
       // Aplica decisão direta SEM chamar IA quando o cliente disse algo
       // muito explícito. Padrões testados em conversas reais.
+      // ADAPTATIVO: usa o primeiro status TERMINAL do kanban do cliente (em
+      // vez de "sem_interesse"/"descartado" fixos). Assim funciona pra qualquer
+      // kanban, mesmo com nomes custom de coluna terminal.
+      const terminalRecusa = [...terminalSet][0] || "sem_interesse";
+      const terminalDescarte = [...terminalSet][1] || [...terminalSet][0] || "descartado";
       if (clienteRespondeuHoje && textoClienteHoje) {
         // Recusa explícita
         const recusa = /(n[ãa]o tenho interesse|n[ãa]o quero|n[ãa]o me liga|para de mandar|me tira|me remov|n[ãa]o me mande|j[áa] tenho|j[áa] uso|j[áa] sou)\b/i;
         if (recusa.test(textoClienteHoje)) {
           decisoesHeuristicas[jid] = {
-            status: "sem_interesse",
+            status: terminalRecusa,
             razao: "Heurística R1: cliente recusou explicitamente.",
-            resumo: `Cliente declarou recusa: "${textoClienteHoje.slice(0, 120)}". Lead movido para sem_interesse sem necessidade de IA.`,
+            resumo: `Cliente declarou recusa: "${textoClienteHoje.slice(0, 120)}". Lead movido para "${terminalRecusa}" (coluna terminal) sem necessidade de IA.`,
           };
           continue;
         }
@@ -401,9 +420,9 @@ export async function POST(req: NextRequest) {
         const errado = /(n[úu]mero errado|pessoa errada|n[ãa]o sou|n[ãa]o trabalho|n[ãa]o conhe[çc]o|enganou|engano)\b/i;
         if (errado.test(textoClienteHoje) && textoClienteHoje.length < 200) {
           decisoesHeuristicas[jid] = {
-            status: "descartado",
+            status: terminalDescarte,
             razao: "Heurística R2: cliente disse que é número errado / pessoa errada.",
-            resumo: `Cliente sinalizou contato indevido: "${textoClienteHoje.slice(0, 120)}". Descartado.`,
+            resumo: `Cliente sinalizou contato indevido: "${textoClienteHoje.slice(0, 120)}". Movido para "${terminalDescarte}" (coluna terminal).`,
           };
           continue;
         }
@@ -472,11 +491,11 @@ export async function POST(req: NextRequest) {
        if (recentlyTouchedByIa.has(jid)) {
          contexto.push(`⚑ ATENÇÃO ANTI-BOUNCING: a IA JÁ ALTEROU este lead nas últimas 24h. Só mude o status de novo se houver evidência MUITO clara hoje. Em dúvida, mantenha.`);
        }
-       if (statusAtual === "fechado") {
-         contexto.push(`⚑ CLIENTE JÁ FECHADO: este lead já comprou/contratou. Provavelmente é cliente recorrente tirando dúvida operacional. NÃO rebaixe (não mude pra "interessado" ou "primeiro_contato"). Use lead_type="cliente_ativo".`);
+       if (terminalSet.has(statusAtual) || /fechado|ganho|comprou|contratado|concluido/i.test(statusAtual)) {
+         contexto.push(`⚑ CLIENTE JÁ FECHADO/TERMINAL: este lead já comprou/contratou/fechou. Provavelmente é cliente recorrente tirando dúvida operacional. NÃO rebaixe. Use lead_type="cliente_ativo".`);
        }
-       if (statusAtual === "agendado") {
-         contexto.push(`⚑ JÁ AGENDADO: reunião marcada. Cliente entrando em contato pode ser confirmação, reagendamento ou dúvida. NÃO rebaixe.`);
+       if (/agendado|agendamento|reuniao|marcado|reservado|atendido/i.test(statusAtual) || (kanbanCols.length > 0 && (dynamicHierarquia[statusAtual] ?? -1) >= Math.floor(kanbanCols.length * 0.6))) {
+         contexto.push(`⚑ ESTÁGIO AVANÇADO: reunião marcada / negociação avançada. Cliente entrando em contato pode ser confirmação, reagendamento ou dúvida. NÃO rebaixe.`);
        }
        const meta2 = leadMetaMap[jid];
        if (meta2?.leadType === "cliente_ativo" || meta2?.leadType === "recorrente") {
@@ -712,10 +731,12 @@ export async function POST(req: NextRequest) {
 
        if (!jid || !numerosProcessados.includes(jid)) continue;
 
-       // Validação dinâmica: aceita status_keys do kanban do cliente OU os hardcoded (modo global).
+       // Validação dinâmica: aceita SÓ status_keys do kanban do cliente (não
+       // força "sem_interesse"/"descartado" se não existirem no kanban custom).
+       // Antes sempre adicionava esses dois — quebrava kanbans com nomes diferentes.
        const HARDCODED_VALID = new Set(["novo", "primeiro_contato", "interessado", "follow-up", "agendado", "fechado", "sem_interesse", "descartado"]);
        const validStatuses = kanbanCols.length > 0
-         ? new Set<string>([...dynamicStatusKeys, "sem_interesse", "descartado"]) // terminais universais sempre aceitos
+         ? new Set<string>(dynamicStatusKeys) // SÓ as colunas reais do kanban do cliente
          : HARDCODED_VALID;
        if (!validStatuses.has(novoStatus)) continue;
 
@@ -733,15 +754,19 @@ export async function POST(req: NextRequest) {
        const isClienteAtivo = leadType === "cliente_ativo" || leadType === "recorrente";
        const blockMoveByRecurringClient = isClienteAtivo && novoStatus !== statusAntigo && !isTerminal;
 
-       // R15/R16 hard-guard: lead em estágio AGENDADO / FECHADO / equivalente nunca volta
-       // pra estágios iniciais por causa de mensagem off-topic. Detecta "agendado"/"fechado"
-       // por nome OU por estar nos top 30% do kanban (estágios avançados).
+       // R15/R16 hard-guard: lead em estágio AVANÇADO nunca volta pra estágios
+       // iniciais por causa de mensagem off-topic. ADAPTATIVO: prioriza posição
+       // no kanban (top 40%) em vez de nome fixo — funciona pra qualquer kanban.
+       // Mantém o regex como BÔNUS (cobre bancos sem kanban configurado).
        const isAdvancedStage = (key: string): boolean => {
-         if (/agendado|agendamento|reuniao|atendido|comprou|contratado|fechado/i.test(key)) return true;
          if (kanbanCols.length > 0) {
            const idx = hierarquia[key];
-           if (typeof idx === "number" && idx >= Math.floor(kanbanCols.length * 0.6)) return true;
+           // Top 40% do kanban = avançado (era 60%, mas 40% é mais protetor).
+           if (typeof idx === "number" && idx >= Math.floor(kanbanCols.length * 0.4)) return true;
+           return false; // kanban existe: só posição define avançado (não nome)
          }
+         // Sem kanban: fallback pro regex de nomes B2B.
+         if (/agendado|agendamento|reuniao|atendido|comprou|contratado|fechado/i.test(key)) return true;
          return false;
        };
        const blockDowngradeFromAdvanced = !isLeadNovo

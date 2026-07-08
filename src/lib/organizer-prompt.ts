@@ -110,24 +110,28 @@ JSON array. Cada item:
 Nada além do JSON. Sem markdown, sem explicação.
 `.trim();
 
-export type KanbanColLite = { status_key: string; label: string; order_index: number };
+export type KanbanColLite = { status_key: string; label: string; order_index: number; is_terminal?: boolean };
 
 export function buildKanbanAppendix(cols: KanbanColLite[]): { kanbanAppendix: string; terminalKeys: string[] } {
   if (cols.length === 0) {
     return { kanbanAppendix: "", terminalKeys: [] };
   }
+  // TERMINAIS: prioriza o campo is_terminal (marcado pelo usuário). Fallback
+  // pro regex de nome (compat com bancos antigos). Assim QUALQUER kanban
+  // funciona — o usuário marca o que é terminal, não depende de nome fixo.
   const isTerminalKey = (k: string) => /sem_interesse|descartado|perdido|cancelado|recusou/i.test(k);
-  const terminalKeys = cols.map(c => c.status_key).filter(isTerminalKey);
+  const terminalKeys = cols.filter(c => c.is_terminal || isTerminalKey(c.status_key)).map(c => c.status_key);
 
   const appendix = `
 
 ## ESTÁGIOS DISPONÍVEIS NESTE KANBAN (use SOMENTE estes status_key — index 0 é o início do funil):
-${cols.map((c, i) => `  ${i}. status_key="${c.status_key}"  →  label exibido: "${c.label}"`).join("\n")}
+${cols.map((c, i) => `  ${i}. status_key="${c.status_key}"  →  label exibido: "${c.label}"${(c.is_terminal || isTerminalKey(c.status_key)) ? "  [TERMINAL — sem volta]" : ""}`).join("\n")}
 
 REGRAS ESPECÍFICAS PARA ESTE KANBAN:
 - Use o "status_key" EXATO (minúsculas com underscore) no campo "status". NÃO use o "label".
 - Hierarquia = ordem acima. NUNCA rebaixe exceto pra terminais.
-- Terminais detectados: ${terminalKeys.length > 0 ? terminalKeys.join(", ") : "(nenhum — não há terminal negativo neste kanban)"}.
+- Colunas marcadas [TERMINAL] são finais — lead não volta delas. Use quando cliente recusar/descartar.
+- Estágios no TOP 40% do kanban (índices altos) = avançados. NÃO rebaixa por mensagem off-topic.
 - Estágios que casam com "agendado/agendamento/reuniao/marcado/reservado" → ponto alto do funil. R15 vale: NÃO rebaixar.
 - Estágios que casam com "fechado/comprou/contratado/atendido/concluido/realizado" → conclusão positiva. R11 + R17 valem.
 `;

@@ -25,6 +25,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     patch.status_key = body.status_key.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "_");
   }
   if (typeof body.order_index === "number") patch.order_index = body.order_index;
+  if (typeof body.is_terminal === "boolean") patch.is_terminal = body.is_terminal;
 
   const { error } = await supabaseAdmin
     .from("kanban_columns")
