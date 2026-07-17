@@ -53,19 +53,30 @@ export function invalidateEvolutionGoCache(): void {
 }
 
 /**
- * Fetch pro Evolution GO. Headers iguais ao legado: `apikey`.
+ * Fetch pro Evolution GO. Autenticação DUAL (confirmada na prática):
+ *   - Header `apikey`: GLOBAL_API_KEY (autentica acesso ao servidor)
+ *   - Header `token`: token da instância específica (identifica QUAL instância)
+ *
+ * Sem o `token`, o middleware busca o GLOBAL_API_KEY na coluna `token` das
+ * instâncias e não acha (401 "not authorized"). Por isso criamos instâncias
+ * com token = GLOBAL_API_KEY (mais simples pra multi-tenant).
+ *
  * As rotas do GO são /send/text, /connect/status etc (mais RESTful).
  */
-async function goFetch(path: string, body?: unknown): Promise<any> {
+async function goFetch(path: string, body?: unknown, instanceToken?: string): Promise<any> {
   await loadConfig();
   if (!GO_URL) throw new Error("Evolution GO não configurado. Defina EVOLUTION_GO_URL nas configurações.");
   const url = GO_URL.replace(/\/+$/, "") + path;
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    apikey: GO_KEY,
+  };
+  // Token da instância — se não vier, usa o GLOBAL_API_KEY como fallback
+  // (funciona quando a instância foi criada com token = GLOBAL_API_KEY).
+  headers["token"] = instanceToken || GO_KEY;
   const res = await fetch(url, {
     method: body ? "POST" : "GET",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: GO_KEY,
-    },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(30000),
   });
@@ -78,18 +89,25 @@ async function goFetch(path: string, body?: unknown): Promise<any> {
 }
 
 /**
- * Resolve o instanceId do Evolution GO. O GO usa um UUID como instanceId
- * interno além do nome. Buscamos na lista de instâncias.
+ * Resolve o token da instância pelo nome. O Evolution GO exige um header
+ * `token` (token da instância específica) além do `apikey` (GLOBAL_API_KEY).
+ * Se não achar o token no banco, usa GLOBAL_API_KEY como fallback (funciona
+ * quando a instância foi criada com token = GLOBAL_API_KEY).
  */
-async function resolveInstanceId(instanceName: string): Promise<string> {
-  const all = await goFetch("/instance/all");
-  const list = Array.isArray(all) ? all : (all?.instances || all?.data || []);
-  const match = list.find((i: any) => {
-    const name = i.instanceName || i.name || i.instance?.instanceName || i.instance?.name;
-    return name === instanceName;
-  });
-  // O GO usa o instanceName direto nas rotas (não precisa do UUID).
-  return instanceName;
+async function resolveInstanceToken(instanceName: string): Promise<string> {
+  try {
+    const { supabaseAdmin } = await import("@/lib/supabase_admin");
+    if (!supabaseAdmin) return GO_KEY;
+    const { data } = await supabaseAdmin
+      .from("channel_connections")
+      .select("provider_config")
+      .eq("instance_name", instanceName)
+      .maybeSingle();
+    const cfg = (data as any)?.provider_config || {};
+    return cfg.evo_go_token || GO_KEY;
+  } catch {
+    return GO_KEY;
+  }
 }
 
 // ============================================================================
@@ -101,11 +119,12 @@ export const evolutionGo: WhatsAppProvider = {
 
   async sendText(remoteJid: string, text: string, instanceName: string): Promise<SendResult> {
     try {
+      const token = await resolveInstanceToken(instanceName);
       const res = await goFetch("/send/text", {
         instance: instanceName,
         number: remoteJid.replace(/@s\.whatsapp\.net$/, ""),
         text,
-      });
+      }, token);
       const msgId = res?.key?.id || res?.messageId || res?.id;
       return { ok: true, messageId: msgId, status: "sent" };
     } catch (e: any) {
@@ -115,6 +134,7 @@ export const evolutionGo: WhatsAppProvider = {
 
   async sendMedia(remoteJid: string, caption: string, media: MediaData, instanceName: string): Promise<SendResult> {
     try {
+      const token = await resolveInstanceToken(instanceName);
       // O GO unifica mídia em /send/media com campo "mediatype".
       const res = await goFetch("/send/media", {
         instance: instanceName,
@@ -124,7 +144,7 @@ export const evolutionGo: WhatsAppProvider = {
         fileName: media.fileName || `file.${media.type === "image" ? "jpg" : media.type === "audio" ? "mp3" : "bin"}`,
         mimetype: media.mimetype || "application/octet-stream",
         caption: caption || "",
-      });
+      }, token);
       const msgId = res?.key?.id || res?.messageId || res?.id;
       return { ok: true, messageId: msgId, status: "sent" };
     } catch (e: any) {
@@ -134,7 +154,8 @@ export const evolutionGo: WhatsAppProvider = {
 
   async getStatus(instanceName: string): Promise<ConnectionStatus> {
     try {
-      const res = await goFetch(`/connect/status`, { instance: instanceName });
+      const token = await resolveInstanceToken(instanceName);
+      const res = await goFetch(`/instance/status`, { instance: instanceName }, token);
       // O GO retorna { status: "open"|"close"|"connecting", ... }
       let state = (res?.status || res?.state || res?.instance?.status || "unknown").toLowerCase();
       if (state === "connected") state = "open";
@@ -150,7 +171,8 @@ export const evolutionGo: WhatsAppProvider = {
 
   async getQR(instanceName: string): Promise<QRCodeResult> {
     try {
-      const res = await goFetch("/connect", { instance: instanceName });
+      const token = await resolveInstanceToken(instanceName);
+      const res = await goFetch("/instance/qr", undefined, token);
       // O GO retorna { qrcode: { code: "...", base64: "..." } } ou pairing code.
       return {
         qr: res?.qrcode?.code || res?.qrcode,
@@ -164,10 +186,11 @@ export const evolutionGo: WhatsAppProvider = {
 
   async checkNumbers(numbers: string[], instanceName: string): Promise<Record<string, boolean>> {
     try {
+      const token = await resolveInstanceToken(instanceName);
       const res = await goFetch("/chat/whatsapp", {
         instance: instanceName,
         numbers: numbers.map(n => n.replace(/\D/g, "")),
-      });
+      }, token);
       // O GO retorna array de { jid, exists }
       const arr = Array.isArray(res) ? res : (res?.data || []);
       const map: Record<string, boolean> = {};
@@ -189,10 +212,11 @@ export const evolutionGo: WhatsAppProvider = {
     instanceName: string
   ): Promise<Record<string, { exists: boolean; jid: string | null }>> {
     try {
+      const token = await resolveInstanceToken(instanceName);
       const res = await goFetch("/chat/whatsapp", {
         instance: instanceName,
         numbers: numbers.map(n => n.replace(/\D/g, "")),
-      });
+      }, token);
       const arr = Array.isArray(res) ? res : (res?.data || []);
       const map: Record<string, { exists: boolean; jid: string | null }> = {};
       for (const item of arr) {
@@ -213,10 +237,11 @@ export const evolutionGo: WhatsAppProvider = {
 
   async fetchProfilePicture(remoteJid: string, instanceName: string): Promise<string | null> {
     try {
+      const token = await resolveInstanceToken(instanceName);
       const res = await goFetch("/message/avatar", {
         instance: instanceName,
         number: remoteJid.replace(/@s\.whatsapp\.net$/, ""),
-      });
+      }, token);
       return res?.pictureUrl || res?.url || res?.avatar || null;
     } catch {
       return null;
