@@ -143,6 +143,61 @@ export default function ConfiguracoesPage() {
   const [evoPairingCode, setEvoPairingCode] = useState<string | null>(null);
   const [evoCreated, setEvoCreated] = useState(false);
 
+  // Evolution GO (Go/whatsmeow) — provedor novo, mais rápido que Evolution API.
+  const [goUrl, setGoUrl] = useState("");
+  const [goApiKey, setGoApiKey] = useState("");
+  const [goStored, setGoStored] = useState<{ url: string; hasKey: boolean; apiKey: string } | null>(null);
+  const [goTestResult, setGoTestResult] = useState<null | { ok: boolean; message?: string; error?: string }>(null);
+  const [goTesting, setGoTesting] = useState(false);
+  const [goSaving, setGoSaving] = useState(false);
+
+  async function loadGoConfig() {
+    try {
+      const r = await fetch("/api/evolution-go/config", { cache: "no-store" });
+      const d = await r.json();
+      if (d.success) {
+        setGoStored({ url: d.url || "", hasKey: !!d.hasKey, apiKey: d.apiKey || "" });
+        setGoUrl(d.url || "");
+      }
+    } catch {}
+  }
+
+  async function saveGoConfig() {
+    setGoSaving(true);
+    try {
+      const payload: any = { url: goUrl.trim() };
+      if (goApiKey.trim()) payload.apiKey = goApiKey.trim();
+      const r = await fetch("/api/evolution-go/config", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const d = await r.json();
+      if (!d.success) throw new Error(d.error || "Falha");
+      setGoApiKey("");
+      await loadGoConfig();
+      alert("Evolution GO salvo! Cole a URL do webhook no .env do GO: " + window.location.origin + "/api/webhooks/evolution-go");
+    } catch (e: any) {
+      alert("Erro: " + e.message);
+    } finally {
+      setGoSaving(false);
+    }
+  }
+
+  async function testGoConfig() {
+    setGoTesting(true);
+    setGoTestResult(null);
+    try {
+      const r = await fetch("/api/evolution-go/config?test=1", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const d = await r.json();
+      setGoTestResult({ ok: !!d.success, message: d.message, error: d.error });
+    } catch (e: any) {
+      setGoTestResult({ ok: false, error: e.message });
+    } finally {
+      setGoTesting(false);
+    }
+  }
+
   async function loadEvolutionConfig() {
     try {
       const r = await fetch("/api/evolution/config", { cache: "no-store" });
@@ -252,6 +307,7 @@ export default function ConfiguracoesPage() {
   }
 
   useEffect(() => { loadEvolutionConfig(); }, []);
+  useEffect(() => { loadGoConfig(); }, []);
 
   // Setup do Banco (Supabase)
   const [dbSql, setDbSql] = useState<string>("");
@@ -2226,6 +2282,71 @@ export default function ConfiguracoesPage() {
                       </details>
                     </CardContent>
                   )}
+                </Card>
+
+                {/* ===== Evolution GO (provedor novo, Go/whatsmeow) ===== */}
+                <Card className="border-cyan-500/20 bg-cyan-500/[0.03] overflow-hidden transition-all duration-300">
+                  <CardHeader className="cursor-pointer hover:bg-white/[0.01] transition-all flex flex-row items-center justify-between space-y-0 p-5 select-none">
+                    <div className="flex items-center gap-3">
+                      <div className="w-9 h-9 rounded-lg bg-cyan-500/10 flex items-center justify-center text-cyan-400 border border-cyan-500/20">
+                        <Server className="w-5 h-5" />
+                      </div>
+                      <div className="flex flex-col gap-0.5">
+                        <CardTitle className="text-sm font-bold uppercase tracking-wider">
+                          Evolution GO (Go/whatsmeow)
+                        </CardTitle>
+                        <p className="text-[10px] text-muted-foreground font-medium">
+                          {goStored?.hasKey ? `Configurado · ${goStored.url}` : "Não configurado ·provedor novo, mais rápido"}
+                        </p>
+                      </div>
+                    </div>
+                    {goStored?.hasKey && (
+                      <span className="text-[9px] bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+                        Configurado
+                      </span>
+                    )}
+                  </CardHeader>
+                  <CardContent className="space-y-3 p-5 border-t border-cyan-500/10">
+                    <p className="text-[11px] text-muted-foreground leading-relaxed">
+                      O <strong className="text-cyan-300">Evolution GO</strong> é a versão nova da Evolution API, escrita em Go — mais leve e performática.
+                      Instale no Easypanel (Docker <code className="text-cyan-300">evoapicloud/evolution-go</code>), cole a URL e API Key aqui.
+                      O webhook já está pronto: <code className="text-cyan-300 break-all">{typeof window !== "undefined" ? window.location.origin : ""}/api/webhooks/evolution-go</code>
+                    </p>
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">URL do servidor Evolution GO</label>
+                      <Input
+                        value={goUrl}
+                        onChange={(e) => setGoUrl(e.target.value)}
+                        placeholder="https://evolution-go.seu-dominio.com:8080"
+                        className="bg-white/5 border-cyan-500/20 text-sm h-10"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">API Key (GLOBAL_API_KEY)</label>
+                      <Input
+                        type="password"
+                        value={goApiKey}
+                        onChange={(e) => setGoApiKey(e.target.value)}
+                        placeholder={goStored?.hasKey ? "••••••• (deixe em branco pra manter a atual)" : "GLOBAL_API_KEY do servidor"}
+                        className="bg-white/5 border-cyan-500/20 text-sm h-10"
+                      />
+                    </div>
+                    <div className="flex gap-2 flex-wrap">
+                      <Button onClick={saveGoConfig} disabled={goSaving} size="sm" className="bg-cyan-500/20 text-cyan-100 border border-cyan-400/40 hover:bg-cyan-500/30 gap-1.5">
+                        {goSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                        Salvar
+                      </Button>
+                      <Button onClick={testGoConfig} disabled={goTesting || !goStored?.url} size="sm" variant="outline" className="gap-1.5">
+                        {goTesting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                        Testar conexão
+                      </Button>
+                    </div>
+                    {goTestResult && (
+                      <p className={cn("text-[10px] font-medium", goTestResult.ok ? "text-green-400" : "text-red-400")}>
+                        {goTestResult.ok ? "✓ " : "✗ "}{goTestResult.message || goTestResult.error}
+                      </p>
+                    )}
+                  </CardContent>
                 </Card>
               </div>
             )}
