@@ -1,10 +1,12 @@
 /**
- * Channel router — unifica envio entre Evolution API (Baileys) e WhatsApp Cloud API (oficial Meta).
+ * Channel router — unifica envio entre Evolution API (Baileys), WhatsApp Cloud API
+ * (oficial Meta) e Evolution GO (Go/whatsmeow).
  *
  * Como decide:
  *  - Lê `channel_connections` por instance_name.
  *  - provider === "whatsapp_cloud"  → usa lib/whatsapp-cloud.ts com config em provider_config (JSONB).
- *  - caso contrário                 → usa lib/evolution.ts (default histórico).
+ *  - provider === "evolution_go"    → usa lib/providers/evolution-go.ts (novo, Go/whatsmeow).
+ *  - caso contrário                 → usa lib/evolution.ts (default histórico, Baileys).
  *
  * O resto do sistema (agent/process, send-message, follow-up, disparo) chama estes helpers
  * sem se importar com o provider. A chave estável é "instanceName".
@@ -13,10 +15,11 @@
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { evolution } from "@/lib/evolution";
 import { whatsappCloud, type WhatsAppCloudConfig } from "@/lib/whatsapp-cloud";
+import { evolutionGo } from "@/lib/providers/evolution-go";
 
 export type ResolvedChannel = {
   instance_name: string;
-  provider: "evolution" | "whatsapp_cloud" | string;
+  provider: "evolution" | "whatsapp_cloud" | "evolution_go" | string;
   agent_id?: number | null;
   status?: string | null;
   cloud?: WhatsAppCloudConfig | null;
@@ -99,6 +102,9 @@ export async function sendMessage(remoteJid: string, text: string, instanceName:
     const cfg = ensureCloudConfig(ch);
     return whatsappCloud.sendText(cfg, remoteJid, text);
   }
+  if (ch.provider === "evolution_go") {
+    return evolutionGo.sendText(remoteJid, text, instanceName);
+  }
   return evolution.sendMessage(remoteJid, text, instanceName);
 }
 
@@ -119,17 +125,21 @@ export async function sendMedia(
       caption,
     });
   }
+  if (ch.provider === "evolution_go") {
+    return evolutionGo.sendMedia(remoteJid, caption, mediaData, instanceName);
+  }
   return evolution.sendMedia(remoteJid, caption, mediaData as any, instanceName);
 }
 
 export async function checkWhatsAppNumbers(numbers: string[], instanceName: string): Promise<Record<string, boolean>> {
   const ch = await resolveChannel(instanceName);
   if (ch.provider === "whatsapp_cloud") {
-    // Cloud API não tem endpoint de "esse número existe?" — só descobrimos no envio.
-    // Retornamos todos como "presumed true" pra não bloquear o disparo.
     const map: Record<string, boolean> = {};
     for (const n of numbers) map[n.replace(/\D/g, "")] = true;
     return map;
+  }
+  if (ch.provider === "evolution_go") {
+    return evolutionGo.checkNumbers(numbers, instanceName);
   }
   return evolution.checkWhatsAppNumbers(numbers, instanceName);
 }
@@ -145,13 +155,15 @@ export async function checkWhatsAppNumbersDetailed(
 ): Promise<Record<string, { exists: boolean; jid: string | null }>> {
   const ch = await resolveChannel(instanceName);
   if (ch.provider === "whatsapp_cloud") {
-    // Cloud API não tem "esse número existe?" — presume true; jid = número limpo.
     const map: Record<string, { exists: boolean; jid: string | null }> = {};
     for (const n of numbers) {
       const d = n.replace(/\D/g, "");
       if (d) map[d] = { exists: true, jid: `${d}@s.whatsapp.net` };
     }
     return map;
+  }
+  if (ch.provider === "evolution_go") {
+    return evolutionGo.checkNumbersDetailed(numbers, instanceName);
   }
   return evolution.checkWhatsAppNumbersDetailed(numbers, instanceName);
 }
@@ -176,6 +188,9 @@ export async function fetchProfilePicture(remoteJid: string, instanceName: strin
   const ch = await resolveChannel(instanceName);
   if (ch.provider === "whatsapp_cloud") {
     return null;  // Cloud API não expõe foto de clientes (limitação da Meta)
+  }
+  if (ch.provider === "evolution_go") {
+    return evolutionGo.fetchProfilePicture(remoteJid, instanceName);
   }
   return evolution.fetchProfilePicture(remoteJid, instanceName);
 }
