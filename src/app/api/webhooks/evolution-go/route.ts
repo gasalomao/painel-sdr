@@ -125,13 +125,14 @@ export async function POST(req: NextRequest) {
     const clientId = ctx?.ok ? ctx.clientId : null;
 
     // ===== Salvar mensagem =====
+    // is_from_me é uma coluna GENERATED (computada de sender_type) — não
+    // podemos inserir valor nela. Só enviamos sender_type.
     const insertData: Record<string, any> = {
       remote_jid: remoteJid,
       instance_name: instanceName,
       message_id: messageId,
       sender_type: fromMe ? "ai" : "customer",
       content: text || (mediaType === "audio" ? "[🎤 Áudio]" : mediaType === "image" ? "[📷 Imagem]" : "[Mídia]"),
-      is_from_me: fromMe,
       created_at: new Date().toISOString(),
     };
     if (mediaType) insertData.media_type = mediaType;
