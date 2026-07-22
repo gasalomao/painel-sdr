@@ -88,31 +88,121 @@ export async function PATCH(req: NextRequest) {
   }
 }
 
-/** POST ?test=1 — testa a conexão com o servidor Evolution GO. */
+/**
+ * POST /api/evolution-go/config
+ *
+ * Actions:
+ *   ?test=1       → testa a conexão (health check GET /server/ok).
+ *   ?connect=1    → cria instância + conecta + devolve QR Code.
+ *   ?status=1     → status da instância.
+ *   (default)     → teste.
+ */
 export async function POST(req: NextRequest) {
   const guard = await requireAdmin(req);
   if (guard) return guard;
+
+  const action = req.nextUrl.searchParams.get("connect")
+    ? "connect"
+    : req.nextUrl.searchParams.get("status")
+    ? "status"
+    : "test";
+
   try {
     const map = await readSettings();
     const url = (map.evolution_go_url || "").replace(/\/+$/, "");
     const key = map.evolution_go_key || "";
     if (!url) return NextResponse.json({ success: false, error: "URL não configurada." }, { status: 400 });
 
-    // Health check do GO: GET /server/ok (não exige apikey).
-    const res = await fetch(`${url}/server/ok`, {
-      headers: key ? { apikey: key } : {},
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!res.ok) {
-      return NextResponse.json({ success: false, error: `Evolution GO respondeu HTTP ${res.status}` }, { status: 502 });
+    const headers: Record<string, string> = { "Content-Type": "application/json", apikey: key, token: key };
+
+    // ===== HEALTH CHECK =====
+    if (action === "test") {
+      const res = await fetch(`${url}/server/ok`, { headers, signal: AbortSignal.timeout(10000) });
+      if (!res.ok) return NextResponse.json({ success: false, error: `Evolution GO HTTP ${res.status}` }, { status: 502 });
+      const json = await res.json().catch(() => ({}));
+      return NextResponse.json({ success: true, message: "Evolution GO respondeu!", data: json });
     }
-    const json = await res.json().catch(() => ({}));
-    return NextResponse.json({
-      success: true,
-      message: "Evolution GO respondeu!",
-      data: json,
-    });
+
+    // ===== STATUS =====
+    if (action === "status") {
+      const body = await req.json().catch(() => ({}));
+      const inst = body.instance || "sdr";
+      const res = await fetch(`${url}/instance/status`, { headers, method: "GET", signal: AbortSignal.timeout(10000) });
+      const json = await res.json().catch(() => ({}));
+      const data = json?.data || {};
+      let state = String(data.Connected ? "open" : data.LoggedIn ? "open" : "close").toLowerCase();
+      return NextResponse.json({ success: true, state, data: json });
+    }
+
+    // ===== CONNECT (cria instância + gera QR) =====
+    if (action === "connect") {
+      const body = await req.json().catch(() => ({}));
+      const inst = body.instance || "sdr";
+
+      // 1. Cria instância (se não existir).
+      try {
+        await fetch(`${url}/instance/create`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ name: inst, token: key }),
+          signal: AbortSignal.timeout(15000),
+        });
+      } catch {}
+
+      // 2. Conecta (gera QR code).
+      const connRes = await fetch(`${url}/instance/connect`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({}),
+        signal: AbortSignal.timeout(30000),
+      });
+      const connJson = await connRes.json().catch(() => ({}));
+      if (!connRes.ok) {
+        return NextResponse.json({ success: false, error: connJson?.error || `Connect HTTP ${connRes.status}` }, { status: 502 });
+      }
+
+      // 3. Aguarda QR code (pode demorar 1-2s pra gerar).
+      let qrCode: string | null = null;
+      let pairingCode: string | null = null;
+      for (let i = 0; i < 5; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const qrRes = await fetch(`${url}/instance/qr`, { headers, signal: AbortSignal.timeout(10000) });
+        const qrJson = await qrRes.json().catch(() => ({}));
+        const qrData = qrJson?.data || {};
+        const qr = qrData.qrcode || qrData.qr;
+        if (qr && qr !== "") {
+          qrCode = qr.startsWith("data:") ? qr : `data:image/png;base64,${qr}`;
+          break;
+        }
+      }
+
+      // 4. Configura advanced settings (always online, read messages, etc).
+      try {
+        // Pega o instance ID da lista.
+        const allRes = await fetch(`${url}/instance/all`, { headers, signal: AbortSignal.timeout(10000) });
+        const allJson = await allRes.json().catch(() => ({}));
+        const list = allJson?.data || [];
+        const match = list.find((x: any) => x.name === inst);
+        if (match?.id) {
+          await fetch(`${url}/instance/${match.id}/advanced-settings`, {
+            method: "PUT",
+            headers,
+            body: JSON.stringify({ alwaysOnline: true, readMessages: true, rejectCall: true, ignoreGroups: true, ignoreStatus: true }),
+            signal: AbortSignal.timeout(10000),
+          });
+        }
+      } catch {}
+
+      return NextResponse.json({
+        success: true,
+        message: qrCode ? "QR Code gerado! Escaneie no WhatsApp." : "Instância conectada (sem QR — pode já estar logada).",
+        qrCode,
+        pairingCode,
+      });
+    }
+
+    return NextResponse.json({ success: false, error: "Ação desconhecida" }, { status: 400 });
   } catch (err: any) {
-    return NextResponse.json({ success: false, error: `Não conectou: ${err.message}` }, { status: 502 });
+    return NextResponse.json({ success: false, error: `Erro: ${err.message}` }, { status: 502 });
   }
 }

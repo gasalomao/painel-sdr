@@ -146,10 +146,14 @@ export default function ConfiguracoesPage() {
   // Evolution GO (Go/whatsmeow) — provedor novo, mais rápido que Evolution API.
   const [goUrl, setGoUrl] = useState("");
   const [goApiKey, setGoApiKey] = useState("");
+  const [goInstance, setGoInstance] = useState("sdr");
   const [goStored, setGoStored] = useState<{ url: string; hasKey: boolean; apiKey: string } | null>(null);
   const [goTestResult, setGoTestResult] = useState<null | { ok: boolean; message?: string; error?: string }>(null);
   const [goTesting, setGoTesting] = useState(false);
   const [goSaving, setGoSaving] = useState(false);
+  const [goConnecting, setGoConnecting] = useState(false);
+  const [goQrCode, setGoQrCode] = useState<string | null>(null);
+  const [goConnStatus, setGoConnStatus] = useState<string | null>(null);
 
   async function loadGoConfig() {
     try {
@@ -195,6 +199,31 @@ export default function ConfiguracoesPage() {
       setGoTestResult({ ok: false, error: e.message });
     } finally {
       setGoTesting(false);
+    }
+  }
+
+  async function connectGoInstance() {
+    setGoConnecting(true);
+    setGoQrCode(null);
+    setGoConnStatus(null);
+    try {
+      const r = await fetch("/api/evolution-go/config?connect=1", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instance: goInstance.trim() || "sdr" }),
+      });
+      const d = await r.json();
+      if (!d.success) throw new Error(d.error || "Falha ao conectar");
+      if (d.qrCode) {
+        setGoQrCode(d.qrCode);
+        setGoConnStatus("QR gerado — escaneie no WhatsApp");
+      } else {
+        setGoConnStatus("Instância conectada (já estava logada)");
+      }
+    } catch (e: any) {
+      setGoConnStatus("Erro: " + e.message);
+    } finally {
+      setGoConnecting(false);
     }
   }
 
@@ -2340,11 +2369,31 @@ export default function ConfiguracoesPage() {
                         {goTesting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
                         Testar conexão
                       </Button>
+                      <Button onClick={connectGoInstance} disabled={goConnecting || !goStored?.url} size="sm" className="bg-green-500/20 text-green-100 border border-green-400/40 hover:bg-green-500/30 gap-1.5">
+                        {goConnecting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plug className="w-3.5 h-3.5" />}
+                        Conectar e gerar QR
+                      </Button>
                     </div>
                     {goTestResult && (
                       <p className={cn("text-[10px] font-medium", goTestResult.ok ? "text-green-400" : "text-red-400")}>
                         {goTestResult.ok ? "✓ " : "✗ "}{goTestResult.message || goTestResult.error}
                       </p>
+                    )}
+                    {goConnStatus && (
+                      <p className={cn("text-[10px] font-medium", goQrCode ? "text-cyan-300" : "text-amber-300")}>
+                        {goConnStatus}
+                      </p>
+                    )}
+                    {goQrCode && (
+                      <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/[0.06] p-4 space-y-3">
+                        <p className="text-[11px] font-bold text-cyan-200">📱 Escaneie o QR Code no WhatsApp</p>
+                        <div className="flex flex-col items-center gap-2">
+                          <img src={goQrCode} alt="QR Code WhatsApp" className="w-56 h-56 rounded-lg bg-white p-2" />
+                          <p className="text-[10px] text-muted-foreground">
+                            WhatsApp → Configurações → Aparelhos conectados → Conectar aparelho. O QR expira em ~60s — clique "Conectar e gerar QR" de novo se precisar.
+                          </p>
+                        </div>
+                      </div>
                     )}
                   </CardContent>
                 </Card>
