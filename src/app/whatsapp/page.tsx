@@ -989,7 +989,7 @@ export default function WhatsAppPage() {
 
         {loading ? (
            <div className="flex justify-center p-12 text-muted-foreground">Carregando conexoes...</div>
-        ) : connections.filter(c => (c.provider || "evolution") === "evolution").length === 0 ? (
+        ) : connections.filter(c => !c.provider || c.provider === "evolution" || c.provider === "evolution_go").length === 0 ? (
           <Card className="col-span-2 border-dashed border-2 border-white/10 bg-transparent">
             <CardContent className="p-12 text-center">
               <Smartphone className="w-12 h-12 text-muted-foreground/30 mx-auto mb-4" />
@@ -999,7 +999,7 @@ export default function WhatsAppPage() {
           </Card>
         ) : (
            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-             {connections.filter(c => (c.provider || "evolution") === "evolution").map(conn => {
+             {connections.filter(c => !c.provider || c.provider === "evolution" || c.provider === "evolution_go").map(conn => {
                 let connState = (statusMap[conn.instance_name]?.state || "close").toLowerCase();
                 if (connState === "connected") connState = "open";
                 if (connState === "disconnected") connState = "close";

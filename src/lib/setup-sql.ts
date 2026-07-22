@@ -336,7 +336,7 @@ CREATE TABLE IF NOT EXISTS public.campaigns (
 
 CREATE TABLE IF NOT EXISTS public.channel_connections (
   id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  provider         text NOT NULL DEFAULT 'evolution'::text,
+  provider         text NOT NULL DEFAULT 'evolution_go'::text,
   instance_name    text NOT NULL UNIQUE,
   agent_id         integer,
   status           text DEFAULT 'disconnected'::text,

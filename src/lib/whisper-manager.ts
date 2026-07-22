@@ -65,7 +65,12 @@ const BINPATH_PATH = path.join(DIR, "bin-path.txt");
 
 // Releases oficiais: github.com/ggml-org/whisper.cpp/releases
 const WHISPER_VERSION = "v1.7.5"; // pinado pra estabilidade; bump manual
-const BIN_ASSET = "whisper-bin-ubuntu-x64.tar.gz";
+// Binário certo por plataforma — antes baixava só o binário Linux e QUEBRAVA
+// no Windows do usuário (wine não existe). Agora win32 baixa .zip com .exe.
+const IS_WINDOWS = process.platform === "win32";
+const BIN_ASSET = IS_WINDOWS
+  ? "whisper-bin-x64.zip"
+  : "whisper-bin-ubuntu-x64.tar.gz";
 const BIN_URL = `https://github.com/ggml-org/whisper.cpp/releases/download/${WHISPER_VERSION}/${BIN_ASSET}`;
 const MODEL_URL = `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${MODEL_NAME}`;
 
@@ -226,8 +231,14 @@ export async function transcribeAudioWithWhisper(
         "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
         wavPath,
       ], { timeout: 20000 });
-    } catch {
-      return null; // ffmpeg ausente ou áudio inválido
+    } catch (ffmpegErr: any) {
+      // ffmpeg ausente (comum em Windows sem instalar) ou áudio inválido.
+      // Retorna null pra chamar fallback Gemini (multimodal) — nunca perde áudio.
+      console.warn(
+        "[whisper] ffmpeg falhou (instale ffmpeg ou use WHISPER_DISABLED=1 pra pular direto pro Gemini):",
+        ffmpegErr?.message?.slice(0, 120)
+      );
+      return null;
     }
     if (!fs.existsSync(wavPath)) return null;
 

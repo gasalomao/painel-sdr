@@ -1,25 +1,23 @@
 /**
- * Channel router — unifica envio entre Evolution API (Baileys), WhatsApp Cloud API
- * (oficial Meta) e Evolution GO (Go/whatsmeow).
+ * Channel router — unifica envio entre Evolution API GO (Go/whatsmeow) e WhatsApp Cloud API
+ * (oficial Meta).
  *
  * Como decide:
  *  - Lê `channel_connections` por instance_name.
  *  - provider === "whatsapp_cloud"  → usa lib/whatsapp-cloud.ts com config em provider_config (JSONB).
- *  - provider === "evolution_go"    → usa lib/providers/evolution-go.ts (novo, Go/whatsmeow).
- *  - caso contrário                 → usa lib/evolution.ts (default histórico, Baileys).
+ *  - caso contrário (default)      → usa lib/providers/evolution-go.ts (Evolution GO / Go/whatsmeow).
  *
  * O resto do sistema (agent/process, send-message, follow-up, disparo) chama estes helpers
  * sem se importar com o provider. A chave estável é "instanceName".
  */
 
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
-import { evolution } from "@/lib/evolution";
 import { whatsappCloud, type WhatsAppCloudConfig } from "@/lib/whatsapp-cloud";
 import { evolutionGo } from "@/lib/providers/evolution-go";
 
 export type ResolvedChannel = {
   instance_name: string;
-  provider: "evolution" | "whatsapp_cloud" | "evolution_go" | string;
+  provider: "evolution_go" | "whatsapp_cloud" | "evolution" | string;
   agent_id?: number | null;
   status?: string | null;
   cloud?: WhatsAppCloudConfig | null;
@@ -40,7 +38,7 @@ export async function resolveChannel(instanceName: string, opts: { fresh?: boole
     .eq("instance_name", instanceName)
     .maybeSingle();
 
-  const provider = (data?.provider || "evolution") as ResolvedChannel["provider"];
+  const provider = (data?.provider || "evolution_go") as ResolvedChannel["provider"];
   let cloud: WhatsAppCloudConfig | null = null;
 
   if (provider === "whatsapp_cloud") {
@@ -102,10 +100,7 @@ export async function sendMessage(remoteJid: string, text: string, instanceName:
     const cfg = ensureCloudConfig(ch);
     return whatsappCloud.sendText(cfg, remoteJid, text);
   }
-  if (ch.provider === "evolution_go") {
-    return evolutionGo.sendText(remoteJid, text, instanceName);
-  }
-  return evolution.sendMessage(remoteJid, text, instanceName);
+  return evolutionGo.sendText(remoteJid, text, instanceName);
 }
 
 export async function sendMedia(
@@ -125,10 +120,7 @@ export async function sendMedia(
       caption,
     });
   }
-  if (ch.provider === "evolution_go") {
-    return evolutionGo.sendMedia(remoteJid, caption, mediaData, instanceName);
-  }
-  return evolution.sendMedia(remoteJid, caption, mediaData as any, instanceName);
+  return evolutionGo.sendMedia(remoteJid, caption, mediaData, instanceName);
 }
 
 export async function checkWhatsAppNumbers(numbers: string[], instanceName: string): Promise<Record<string, boolean>> {
@@ -138,18 +130,10 @@ export async function checkWhatsAppNumbers(numbers: string[], instanceName: stri
     for (const n of numbers) map[n.replace(/\D/g, "")] = true;
     return map;
   }
-  if (ch.provider === "evolution_go") {
-    return evolutionGo.checkNumbers(numbers, instanceName);
-  }
-  return evolution.checkWhatsAppNumbers(numbers, instanceName);
+  return evolutionGo.checkNumbers(numbers, instanceName);
 }
 
-/**
- * Igual ao checkWhatsAppNumbers, mas devolve também o JID canônico do
- * WhatsApp pra cada número (resolve o 9º dígito do Brasil). Usado pelo
- * disparo pra mandar/salvar no JID certo.
- */
-export async function checkWhatsAppNumbersDetailed(
+export async function checkNumbersDetailed(
   numbers: string[],
   instanceName: string
 ): Promise<Record<string, { exists: boolean; jid: string | null }>> {
@@ -162,35 +146,29 @@ export async function checkWhatsAppNumbersDetailed(
     }
     return map;
   }
-  if (ch.provider === "evolution_go") {
-    return evolutionGo.checkNumbersDetailed(numbers, instanceName);
-  }
-  return evolution.checkWhatsAppNumbersDetailed(numbers, instanceName);
+  return evolutionGo.checkNumbersDetailed(numbers, instanceName);
 }
+
+export const checkWhatsAppNumbersDetailed = checkNumbersDetailed;
 
 export function extractPhone(jid: string): string {
-  return evolution.extractPhone(jid);
+  if (!jid) return "";
+  const match = jid.match(/(\d+)/);
+  return match ? match[1] : "";
 }
 
-/**
- * Busca a foto de perfil de um número.
- *
- * - Evolution (Baileys/WPPConnect): consegue (via /chat/fetchProfilePictureUrl).
- * - WhatsApp Cloud API oficial: NÃO CONSEGUE — Meta restringe por privacidade.
- *   A Cloud API só expõe a foto da PRÓPRIA empresa (via /whatsapp_business_profile),
- *   nunca de clientes. Documentação:
- *   https://developers.facebook.com/community/threads/whatsapp-cloud-api-get-customer-profile-picture/
- *   Retornamos null e a UI cai no avatar de iniciais.
- *
- * Mesma assinatura entre providers — quem chama não precisa saber qual está ativo.
- */
+export async function getStatus(instanceName: string) {
+  const ch = await resolveChannel(instanceName);
+  if (ch.provider === "whatsapp_cloud") {
+    return { state: "open" as const, data: null };
+  }
+  return evolutionGo.getStatus(instanceName);
+}
+
 export async function fetchProfilePicture(remoteJid: string, instanceName: string): Promise<string | null> {
   const ch = await resolveChannel(instanceName);
   if (ch.provider === "whatsapp_cloud") {
-    return null;  // Cloud API não expõe foto de clientes (limitação da Meta)
+    return null;
   }
-  if (ch.provider === "evolution_go") {
-    return evolutionGo.fetchProfilePicture(remoteJid, instanceName);
-  }
-  return evolution.fetchProfilePicture(remoteJid, instanceName);
+  return evolutionGo.fetchProfilePicture(remoteJid, instanceName);
 }
