@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback } from "react";
+import { Suspense, useEffect, useState, useRef, useCallback } from "react";
 import { Header } from "@/components/layout/header";
 import { supabase } from "@/lib/supabase";
 import { useClientSession } from "@/lib/use-session";
@@ -14,7 +14,7 @@ import { cn } from "@/lib/utils";
 import { Wifi, WifiOff, RefreshCw, Layers, Bot } from "lucide-react";
 import { useSearchParams, useRouter } from "next/navigation";
 
-export default function ChatPage() {
+function ChatPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const deepLinkConvId = searchParams.get("c");
@@ -492,5 +492,22 @@ export default function ChatPage() {
         )}
       </div>
     </div>
+  );
+}
+
+export default function ChatPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-screen items-center justify-center bg-background">
+          <div className="flex flex-col items-center gap-2">
+            <RefreshCw className="h-8 w-8 animate-spin text-primary" />
+            <p className="text-sm text-muted-foreground font-medium">Carregando bate-papo...</p>
+          </div>
+        </div>
+      }
+    >
+      <ChatPageContent />
+    </Suspense>
   );
 }

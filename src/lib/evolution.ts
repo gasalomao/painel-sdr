@@ -424,7 +424,12 @@ export const evolution = {
     });
   },
 
-  async sendMedia(number: string, caption: string, mediaData: { type: "image" | "video" | "audio" | "document", base64: string, fileName?: string, mimetype?: string }, instance?: string) {
+  async sendMedia(
+    number: string,
+    caption: string,
+    mediaData: { type: "image" | "video" | "audio" | "document"; base64?: string; url?: string; mediaUrl?: string; fileName?: string; mimetype?: string },
+    instance?: string
+  ) {
     instance = await resolveInstance(instance);
     const targetJid = (number.includes("@") && (number.endsWith(".net") || number.endsWith(".us")))
        ? number
@@ -433,10 +438,12 @@ export const evolution = {
     // Simular digitação
     await this.sendPresence(targetJid, "composing", instance);
 
+    const mediaSource = mediaData.mediaUrl || mediaData.url || mediaData.base64 || "";
+
     if (mediaData.type === "audio") {
       return evoFetch(`/message/sendWhatsAppAudio/${instance}`, "POST", {
         number: targetJid,
-        audio: mediaData.base64,
+        audio: mediaSource,
         delay: 2000
       });
     }
@@ -444,7 +451,7 @@ export const evolution = {
     return evoFetch(`/message/sendMedia/${instance}`, "POST", {
       number: targetJid,
       mediatype: mediaData.type,
-      media: mediaData.base64,
+      media: mediaSource,
       fileName: mediaData.fileName || "midia",
       caption: caption || "",
       delay: 1500
