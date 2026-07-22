@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Sparkles, Hand, Play, Loader2, Timer, ChevronDown, Clock } from "lucide-react";
+import { Sparkles, Hand, Play, Loader2, Timer, ChevronDown, Clock, Bot, UserCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
@@ -61,7 +61,7 @@ export function AiThreadBanner({
 
       const hStr = h > 0 ? `${h}h ` : "";
       const mStr = m > 0 ? `${m}m ` : "";
-      const sStr = `${s}s`;
+      const sStr = `${s.toString().padStart(2, "0")}s`;
 
       setCountdown(`${hStr}${mStr}${sStr}`);
     };
@@ -182,59 +182,93 @@ export function AiThreadBanner({
   return (
     <div
       className={cn(
-        "flex items-center justify-between border-b px-4 py-2 text-xs transition-colors shrink-0",
+        "flex items-center justify-between border-b px-4 py-2.5 text-xs transition-all shrink-0 shadow-sm",
         isPaused
-          ? "border-amber-200/50 bg-amber-500/10 text-amber-800 dark:text-amber-400"
-          : "border-primary/20 bg-emerald-500/10 text-emerald-800 dark:text-emerald-400"
+          ? "border-amber-500/30 bg-gradient-to-r from-amber-500/15 via-amber-500/10 to-amber-500/5 text-amber-900 dark:text-amber-200"
+          : "border-emerald-500/30 bg-gradient-to-r from-emerald-500/15 via-emerald-500/10 to-emerald-500/5 text-emerald-900 dark:text-emerald-200"
       )}
     >
-      <div className="flex items-center gap-2 min-w-0">
-        <Sparkles className={cn("h-4 w-4 shrink-0", !isPaused && "animate-pulse")} />
-        <span className="font-medium truncate">
+      <div className="flex items-center gap-3 min-w-0 flex-1">
+        {/* Badge do Atendimento */}
+        <div
+          className={cn(
+            "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-bold tracking-wide shrink-0 shadow-sm uppercase",
+            isPaused
+              ? "bg-amber-600 text-white"
+              : "bg-emerald-600 text-white"
+          )}
+        >
+          {isPaused ? (
+            <>
+              <UserCheck className="h-3.5 w-3.5" />
+              <span>ATENDIMENTO HUMANO</span>
+            </>
+          ) : (
+            <>
+              <Bot className="h-3.5 w-3.5 animate-pulse" />
+              <span>ATENDIMENTO IA</span>
+            </>
+          )}
+        </div>
+
+        {/* Texto descritivo e Tempo Restante */}
+        <div className="flex items-center gap-2 min-w-0 flex-1 truncate">
           {isPaused ? (
             countdown ? (
-              <span className="flex items-center gap-1">
-                <Timer className="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
-                Robô silenciado temporariamente (reativa em: <strong className="font-mono">{countdown}</strong>)
-              </span>
+              <div className="flex items-center gap-1.5 font-medium truncate">
+                <span className="truncate">Pausa humana ativa. Tempo restante para a IA reativar:</span>
+                <span className="inline-flex items-center gap-1 rounded-md bg-amber-600/20 border border-amber-600/30 px-2 py-0.5 font-mono text-[11px] font-bold text-amber-900 dark:text-amber-100 shrink-0">
+                  <Timer className="h-3.5 w-3.5 text-amber-600 dark:text-amber-300 animate-spin" style={{ animationDuration: '4s' }} />
+                  {countdown}
+                </span>
+              </div>
             ) : (
-              "Robô silenciado. O atendimento está sob controle humano."
+              <span className="font-medium truncate">
+                IA silenciada indefinidamente. Atendimento mantido pelo operador humano.
+              </span>
             )
           ) : (
-            "Robô IA ativo e respondendo automaticamente."
+            <span className="font-medium truncate">
+              O robô de Inteligência Artificial está ativo e respondendo este chat automaticamente.
+            </span>
           )}
-        </span>
+        </div>
       </div>
 
-      <div className="shrink-0 pl-4">
+      {/* Botões de Ação */}
+      <div className="shrink-0 pl-3">
         {isPaused ? (
           <button
             onClick={handleResumeAi}
             disabled={busy}
-            className="inline-flex items-center justify-center gap-1 h-6 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white font-medium px-2.5 transition-colors cursor-pointer text-[10px] disabled:opacity-50"
+            className="inline-flex items-center justify-center gap-1.5 h-7 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-3 transition-colors cursor-pointer text-xs shadow-sm disabled:opacity-50"
           >
             {busy ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
-              <Play className="h-3 w-3 fill-current" />
+              <Play className="h-3.5 w-3.5 fill-current" />
             )}
-            Ativar Robô
+            Reativar IA
           </button>
         ) : (
           <DropdownMenu>
             <DropdownMenuTrigger
               disabled={busy}
-              className="inline-flex items-center justify-center gap-1 h-6 rounded-md bg-amber-600 hover:bg-amber-700 text-white font-medium px-2.5 transition-colors cursor-pointer text-[10px] disabled:opacity-50 outline-none"
+              className="inline-flex items-center justify-center gap-1.5 h-7 rounded-md bg-amber-600 hover:bg-amber-700 text-white font-semibold px-3 transition-colors cursor-pointer text-xs shadow-sm disabled:opacity-50 outline-none"
             >
               {busy ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
               ) : (
-                <Hand className="h-3 w-3" />
+                <Hand className="h-3.5 w-3.5" />
               )}
-              Silenciar Robô
-              <ChevronDown className="h-3 w-3 opacity-80" />
+              Silenciar Robô (Pausar IA)
+              <ChevronDown className="h-3.5 w-3.5 opacity-80" />
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" side="bottom" className="w-56 border-border bg-popover text-popover-foreground">
+            <DropdownMenuContent align="end" side="bottom" className="w-60 border-border bg-popover text-popover-foreground shadow-lg">
+              <div className="px-2 py-1.5 text-[11px] font-semibold text-muted-foreground">
+                Selecione a duração da pausa humana:
+              </div>
+              <DropdownMenuSeparator />
               <DropdownMenuItem className="cursor-pointer gap-2 text-xs" onClick={() => handlePauseAi(15)}>
                 <Clock className="h-3.5 w-3.5 text-amber-500" />
                 Pausar por 15 minutos
@@ -259,12 +293,12 @@ export function AiThreadBanner({
                 <Clock className="h-3.5 w-3.5 text-amber-500" />
                 Pausar por 12 horas
               </DropdownMenuItem>
-              <DropdownMenuItem className="cursor-pointer gap-2 text-xs" onClick={() => handlePauseAi(-1)}>
+              <DropdownMenuItem className="cursor-pointer gap-2 text-xs font-medium text-blue-600 dark:text-blue-400" onClick={() => handlePauseAi(-1)}>
                 <Timer className="h-3.5 w-3.5 text-blue-500" />
                 Definir tempo em minutos...
               </DropdownMenuItem>
               <DropdownMenuSeparator />
-              <DropdownMenuItem className="cursor-pointer gap-2 text-xs text-red-500 focus:text-red-500 font-medium" onClick={() => handlePauseAi(undefined)}>
+              <DropdownMenuItem className="cursor-pointer gap-2 text-xs text-red-600 dark:text-red-400 focus:text-red-600 font-semibold" onClick={() => handlePauseAi(undefined)}>
                 <Hand className="h-3.5 w-3.5" />
                 Silenciar Indefinidamente
               </DropdownMenuItem>
