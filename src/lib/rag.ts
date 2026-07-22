@@ -419,9 +419,12 @@ export async function searchKnowledge(opts: {
   topK?: number;
   minSimilarity?: number;
 }): Promise<RagMatch[]> {
-  const { query, agentId, clientId, apiKey, topK = 5, minSimilarity = 0.55 } = opts;
+  const { query, agentId, clientId, apiKey, topK = 5, minSimilarity = 0.20 } = opts;
   if (!query || !query.trim()) return [];
   if (!supabaseAdmin) return [];
+
+  const results: RagMatch[] = [];
+  const seenIds = new Set<string>();
 
   try {
     const qEmbed = await embedQuery(query.trim(), apiKey);
@@ -434,19 +437,55 @@ export async function searchKnowledge(opts: {
       min_similarity: minSimilarity,
     });
 
-    if (error) {
-      console.warn("[RAG] match_knowledge_chunks falhou:", error.message);
-      return [];
+    if (!error && Array.isArray(data)) {
+      for (const r of data) {
+        if (!seenIds.has(r.id)) {
+          seenIds.add(r.id);
+          results.push({
+            knowledgeId: r.knowledge_id,
+            title: r.title,
+            content: r.content,
+            similarity: Number(r.similarity),
+          });
+        }
+      }
     }
-
-    return (data || []).map((r: any) => ({
-      knowledgeId: r.knowledge_id,
-      title: r.title,
-      content: r.content,
-      similarity: Number(r.similarity),
-    }));
   } catch (e: any) {
-    console.warn("[RAG] searchKnowledge erro:", e.message);
-    return [];
+    console.warn("[RAG] Vector search failed, falling back to hybrid keyword search:", e.message);
   }
+
+  // Hybrid Fallback: Se a busca vetorial retornou poucos resultados, busca por termos/SKUs exatos
+  if (results.length < topK) {
+    try {
+      const cleanTerms = query.trim().split(/\s+/).filter((t) => t.length > 2);
+      if (cleanTerms.length > 0) {
+        let q = supabaseAdmin
+          .from("agent_knowledge")
+          .select("id, title, content")
+          .eq("agent_id", agentId);
+
+        const firstTerm = cleanTerms[0];
+        q = q.or(`title.ilike.%${firstTerm}%,content.ilike.%${firstTerm}%`);
+
+        const { data: kwMatches } = await q.limit(topK - results.length);
+        if (kwMatches) {
+          for (const k of kwMatches) {
+            if (!seenIds.has(k.id)) {
+              seenIds.add(k.id);
+              results.push({
+                knowledgeId: k.id,
+                title: k.title,
+                content: k.content || "",
+                similarity: 0.90,
+              });
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      console.warn("[RAG] Keyword fallback error:", err?.message);
+    }
+  }
+
+  return results;
 }

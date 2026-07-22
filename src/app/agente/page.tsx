@@ -660,44 +660,56 @@ export default function AgentePage() {
       return;
     }
     const titleToUse = novoKTitle.trim() || "Catálogo de Produtos";
-    const numAgentId = Number(activeAgentId) || activeAgentId;
-    const payload: any = {
-      agent_id: numAgentId,
-      title: titleToUse,
-      content: novoKContent.trim(),
-    };
-    if (clientId) {
-      payload.client_id = clientId;
-    }
+    const numAgentId = Number(activeAgentId) || 1;
 
-    const { data, error } = await supabase
-      .from("agent_knowledge")
-      .insert(payload)
-      .select("id")
-      .single();
+    try {
+      const res = await fetch("/api/agent/knowledge/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "create",
+          agent_id: numAgentId,
+          title: titleToUse,
+          content: novoKContent.trim(),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
 
-    if (!error) {
-      setNovoKTitle("");
-      setNovoKContent("");
-      setShowNovoK(false);
-      await loadAgent(activeAgentId);
-      // Indexa em background pro RAG vetorial (search semântica).
-      if (data?.id) {
-        fetch("/api/agent/knowledge/reindex", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ knowledge_id: data.id }),
-        }).catch(() => {});
+      if (res.ok && data.success) {
+        setNovoKTitle("");
+        setNovoKContent("");
+        setShowNovoK(false);
+        await loadAgent(activeAgentId);
+        toast.success("Base de conhecimento salva com sucesso!");
+      } else {
+        alert("Erro ao salvar base de conhecimento: " + (data.error || "Falha na requisição"));
       }
-    } else {
-      alert("Erro ao salvar base de conhecimento: " + error.message);
+    } catch (err: any) {
+      alert("Erro de conexão ao salvar: " + err.message);
     }
   };
 
   const deletarKnowledge = async (kid: string) => {
     if (!confirm("Excluir base de conhecimento?")) return;
-    const { error } = await supabase.from("agent_knowledge").delete().eq("id", kid);
-    if (!error) loadAgent(activeAgentId);
+    try {
+      const res = await fetch("/api/agent/knowledge/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "delete",
+          id: kid,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        await loadAgent(activeAgentId);
+        toast.success("Base de conhecimento removida!");
+      } else {
+        alert("Erro ao excluir: " + (data.error || "Falha"));
+      }
+    } catch (err: any) {
+      alert("Erro ao excluir: " + err.message);
+    }
   };
 
   const iniciarEdicaoKnowledge = (k: any) => {
@@ -713,30 +725,31 @@ export default function AgentePage() {
   const salvarEdicaoKnowledge = async () => {
     if (!editKId || !editKContent.trim()) return;
     const titleToUse = editKTitle.trim() || "Catálogo de Produtos";
-    const kidToReindex = editKId; // captura antes do reset
-    const payload: any = {
-      title: titleToUse,
-      content: editKContent.trim(),
-    };
-    if (clientId) {
-      payload.client_id = clientId;
-    }
-    const { error } = await supabase
-      .from("agent_knowledge")
-      .update(payload)
-      .eq("id", editKId);
+    const numAgentId = Number(activeAgentId) || 1;
 
-    if (!error) {
-      cancelarEdicaoKnowledge();
-      await loadAgent(activeAgentId);
-      // Re-indexa o doc (content_hash protege contra re-embed se nada mudou)
-      fetch("/api/agent/knowledge/reindex", {
+    try {
+      const res = await fetch("/api/agent/knowledge/save", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ knowledge_id: kidToReindex }),
-      }).catch(() => {});
-    } else {
-      alert("Erro ao atualizar base de conhecimento: " + error.message);
+        body: JSON.stringify({
+          action: "update",
+          id: editKId,
+          agent_id: numAgentId,
+          title: titleToUse,
+          content: editKContent.trim(),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (res.ok && data.success) {
+        cancelarEdicaoKnowledge();
+        await loadAgent(activeAgentId);
+        toast.success("Base de conhecimento atualizada!");
+      } else {
+        alert("Erro ao atualizar: " + (data.error || "Falha"));
+      }
+    } catch (err: any) {
+      alert("Erro ao atualizar: " + err.message);
     }
   };
 
