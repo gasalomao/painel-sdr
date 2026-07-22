@@ -121,7 +121,15 @@ export async function POST(req: NextRequest) {
       console.error("[SEND-MESSAGE] Erro Evolution API:", sendError);
     }
 
-    const msgId = evoData?.key?.id || evoData?.data?.key?.id || `manual-${Date.now()}`;
+    if (!sendError && evoData) {
+      if (evoData.ok === false) {
+        sendError = evoData.error || "Falha no envio via WhatsApp";
+      } else if (evoData.error && typeof evoData.error === "string") {
+        sendError = evoData.error;
+      }
+    }
+
+    const msgId = evoData?.key?.id || evoData?.data?.key?.id || evoData?.messageId || `manual-${Date.now()}`;
     if (!sendError) console.log(`[SEND-MESSAGE] Enviado com sucesso. MsgID: ${msgId}`);
 
     // === 1.5. Upload da mídia enviada para o bucket, pra que o próprio painel

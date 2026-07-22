@@ -248,6 +248,19 @@ export function MessageBubble({
         isAgent ? "items-end ml-auto" : "items-start mr-auto",
       )}
     >
+      {/* Badge "IA SDR" como HEADER ACIMA do balão (não sobre o texto).
+          ANTES: era `absolute -top-3 right-0` sobre o balão → tampava a 1ª linha
+          das mensagens da IA. Agora fica separado, sem overlap visual. */}
+      {isAi && (
+        <div className={cn(
+          "flex items-center gap-1 mb-1 text-[10px] font-semibold",
+          isAgent ? "justify-end text-primary dark:text-emerald-400" : "text-primary"
+        )}>
+          <Sparkles className="h-3 w-3 shrink-0" />
+          <span>IA SDR</span>
+        </div>
+      )}
+
       <div
         className={cn(
           "relative rounded-2xl px-3.5 py-2 shadow-sm border border-border/40",
@@ -256,13 +269,6 @@ export function MessageBubble({
             : "rounded-bl-none bg-card text-foreground",
         )}
       >
-        {isAi && (
-          <div className="absolute -top-3 right-0 flex items-center gap-0.5 bg-primary/25 dark:bg-primary/30 text-[9px] font-bold text-primary dark:text-emerald-400 rounded-full px-2 py-0.5 shadow-sm">
-            <Sparkles className="h-2.5 w-2.5 shrink-0" />
-            IA SDR
-          </div>
-        )}
-
         {reply && (
           <ReplyQuote
             authorLabel={reply.authorLabel}
