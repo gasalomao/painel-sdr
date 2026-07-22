@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { Book, Check, Info, Pencil, Plus, Save, Settings, Trash2, Wrench, X, Image as ImageIcon, Upload, Loader2 } from "lucide-react";
+import { Book, Check, Info, Pencil, Plus, Save, Settings, Trash2, Wrench, X, Image as ImageIcon, Upload, Loader2, Sparkles } from "lucide-react";
 import { SaveButton } from "../_components/save-button";
 import { EmptyState } from "../_components/empty-state";
 import { CopyButton } from "../_components/copy-button";
@@ -159,25 +159,216 @@ export type InfoTabProps = {
 
 async function uploadImageToStorage(file: File): Promise<string | null> {
   try {
-    const ext = file.name.split(".").pop() || "jpg";
-    const path = `kb_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.${ext}`;
-    const { data, error } = await supabase.storage.from("chat-media").upload(path, file, {
-      cacheControl: "3600",
-      upsert: true,
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await fetch("/api/upload-media", {
+      method: "POST",
+      body: formData,
     });
-    if (error) {
-      const retry = await supabase.storage.from("whatsapp_media").upload(path, file, {
-        cacheControl: "3600",
-        upsert: true,
-      });
-      if (retry.error) throw retry.error;
-      return supabase.storage.from("whatsapp_media").getPublicUrl(path).data.publicUrl;
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) {
+      toast.error(data.error || "Erro no upload da imagem.");
+      return null;
     }
-    return supabase.storage.from("chat-media").getPublicUrl(path).data.publicUrl;
+    return data.url;
   } catch (err: any) {
-    toast.error("Erro no upload da foto: " + err.message);
+    toast.error("Erro ao fazer upload da foto: " + err.message);
     return null;
   }
+}
+
+interface CatalogProduct {
+  id: string;
+  name: string;
+  price: string;
+  specs: string;
+  imageUrl: string;
+}
+
+function ProductCatalogBuilder({
+  onAppendCatalog,
+}: {
+  onAppendCatalog: (formattedText: string) => void;
+}) {
+  const [products, setProducts] = useState<CatalogProduct[]>([
+    { id: "1", name: "", price: "", specs: "", imageUrl: "" },
+  ]);
+  const [uploadingIdx, setUploadingIdx] = useState<number | null>(null);
+
+  const addProduct = () => {
+    setProducts((prev) => [
+      ...prev,
+      { id: String(Date.now()), name: "", price: "", specs: "", imageUrl: "" },
+    ]);
+  };
+
+  const removeProduct = (index: number) => {
+    setProducts((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const updateProduct = (index: number, patch: Partial<CatalogProduct>) => {
+    setProducts((prev) =>
+      prev.map((p, i) => (i === index ? { ...p, ...patch } : p))
+    );
+  };
+
+  const handleGenerate = () => {
+    const valid = products.filter((p) => p.name.trim().length > 0);
+    if (valid.length === 0) {
+      toast.error("Preencha o nome de pelo menos um produto.");
+      return;
+    }
+
+    const blocks = valid.map((p) => {
+      const lines = [`### PRODUTO: ${p.name.trim()}`];
+      if (p.price.trim()) lines.push(`- **Preço**: ${p.price.trim()}`);
+      if (p.specs.trim()) lines.push(`- **Especificações / Estado**: ${p.specs.trim()}`);
+      if (p.imageUrl.trim()) lines.push(`- **Foto Oficial**: [IMAGEM: ${p.imageUrl.trim()}]`);
+      return lines.join("\n");
+    });
+
+    const formatted = blocks.join("\n\n---\n\n");
+    onAppendCatalog(formatted);
+    toast.success(`${valid.length} produto(s) formatado(s) e inserido(s)!`);
+  };
+
+  return (
+    <div className="p-4 rounded-2xl bg-slate-900/90 border border-blue-500/30 space-y-4 shadow-xl">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <ImageIcon className="w-4 h-4 text-blue-400" />
+          <h4 className="text-xs font-black uppercase tracking-wider text-blue-400">
+            🛍️ Construtor Estruturado de Produtos com Foto (Anti-Alucinação)
+          </h4>
+        </div>
+        <Button
+          type="button"
+          onClick={addProduct}
+          variant="outline"
+          size="sm"
+          className="h-7 text-[10px] font-bold gap-1 bg-blue-500/10 border-blue-500/30 text-blue-300 hover:bg-blue-500/20"
+        >
+          <Plus className="w-3 h-3" /> + Adicionar Produto
+        </Button>
+      </div>
+
+      <div className="space-y-3 max-h-96 overflow-y-auto pr-1">
+        {products.map((prod, idx) => (
+          <div
+            key={prod.id}
+            className="p-3 bg-black/50 border border-white/10 rounded-xl space-y-3 relative group"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[10px] font-bold uppercase text-blue-400">
+                Produto #{idx + 1}
+              </span>
+              {products.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => removeProduct(idx)}
+                  className="text-red-400 hover:text-red-300 text-xs cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <div>
+                <label className="text-[9px] font-bold text-muted-foreground uppercase">
+                  Modelo / Produto *
+                </label>
+                <Input
+                  value={prod.name}
+                  onChange={(e) => updateProduct(idx, { name: e.target.value })}
+                  placeholder="Ex: iPhone 15 128GB"
+                  className="h-8 text-xs bg-black/60 border-white/10"
+                />
+              </div>
+              <div>
+                <label className="text-[9px] font-bold text-muted-foreground uppercase">
+                  Preço / Condições
+                </label>
+                <Input
+                  value={prod.price}
+                  onChange={(e) => updateProduct(idx, { price: e.target.value })}
+                  placeholder="Ex: R$ 4.599 ou 12x R$ 419"
+                  className="h-8 text-xs bg-black/60 border-white/10"
+                />
+              </div>
+              <div>
+                <label className="text-[9px] font-bold text-muted-foreground uppercase">
+                  Estado / Bateria / Specs
+                </label>
+                <Input
+                  value={prod.specs}
+                  onChange={(e) => updateProduct(idx, { specs: e.target.value })}
+                  placeholder="Ex: 87% Bateria, Seminovo"
+                  className="h-8 text-xs bg-black/60 border-white/10"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 pt-1">
+              <div className="flex-1 min-w-0">
+                <Input
+                  value={prod.imageUrl}
+                  onChange={(e) => updateProduct(idx, { imageUrl: e.target.value })}
+                  placeholder="Link da foto (ou envie a foto ao lado)"
+                  className="h-8 text-[11px] bg-black/60 border-white/10 font-mono"
+                />
+              </div>
+              <label className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white cursor-pointer transition-colors shrink-0 shadow-md">
+                {uploadingIdx === idx ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Upload className="w-3.5 h-3.5" />
+                )}
+                Anexar Foto
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  disabled={uploadingIdx === idx}
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    setUploadingIdx(idx);
+                    const url = await uploadImageToStorage(file);
+                    setUploadingIdx(null);
+                    if (url) {
+                      updateProduct(idx, { imageUrl: url });
+                      toast.success(`Foto anexada ao Produto #${idx + 1}!`);
+                    }
+                  }}
+                />
+              </label>
+
+              {prod.imageUrl && (
+                <div className="h-9 w-9 rounded-lg border border-blue-500/40 overflow-hidden bg-black shrink-0 relative">
+                  <img
+                    src={prod.imageUrl}
+                    alt={prod.name || "Foto produto"}
+                    className="h-full w-full object-cover"
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex justify-end pt-1">
+        <Button
+          type="button"
+          onClick={handleGenerate}
+          className="h-9 px-4 text-xs font-bold gap-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl shadow-lg"
+        >
+          <Sparkles className="w-3.5 h-3.5" /> Inserir Produtos Formatados no Conteúdo
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 export function InfoTab(p: InfoTabProps) {
@@ -1049,18 +1240,26 @@ export function InfoTab(p: InfoTabProps) {
         )}
 
         {p.showNovoK && (
-          <div className="p-6 bg-white/5 border border-white/10 rounded-2xl space-y-4">
+          <div className="p-6 bg-white/5 border border-white/10 rounded-2xl space-y-5">
             <div className="space-y-1">
-              <label className="text-[10px] font-black uppercase tracking-widest text-primary">Título (vira o gatilho)</label>
-              <Input value={p.novoKTitle} onChange={(e) => p.setNovoKTitle(e.target.value)} placeholder="Ex: iPhone 15, Preços de Celulares, Garantia..." className="bg-black/50 border-white/10" />
-              <p className="text-[9px] text-muted-foreground">Use o nome do produto ou categoria. Quando o cliente mencionar isso, a IA consulta o conteúdo abaixo.</p>
+              <label className="text-[10px] font-black uppercase tracking-widest text-primary">Título da Base / Gatilho</label>
+              <Input value={p.novoKTitle} onChange={(e) => p.setNovoKTitle(e.target.value)} placeholder="Ex: iPhone 15, Catálogo de Celulares, Preços..." className="bg-black/50 border-white/10" />
+              <p className="text-[9px] text-muted-foreground">Use o nome do produto ou palavra-chave. Quando o cliente perguntar disso, a IA lê este documento.</p>
             </div>
+
+            {/* Construtor Estruturado de Catálogo */}
+            <ProductCatalogBuilder
+              onAppendCatalog={(formattedText) => {
+                p.setNovoKContent(p.novoKContent ? `${p.novoKContent}\n\n${formattedText}` : formattedText);
+              }}
+            />
+
             <div className="space-y-1">
               <div className="flex items-center justify-between">
-                <label className="text-[10px] font-black uppercase tracking-widest text-primary">Conteúdo</label>
+                <label className="text-[10px] font-black uppercase tracking-widest text-primary">Conteúdo Final do Documento</label>
                 <label className="inline-flex items-center gap-1.5 text-[10px] font-bold text-blue-400 hover:text-blue-300 cursor-pointer bg-blue-500/10 border border-blue-500/20 px-2.5 py-1 rounded-lg transition-colors">
                   {uploadingImg ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
-                  Anexar Foto de Produto
+                  Anexar Foto Avulsa
                   <input
                     type="file"
                     accept="image/*"
@@ -1080,7 +1279,7 @@ export function InfoTab(p: InfoTabProps) {
                   />
                 </label>
               </div>
-              <Textarea value={p.novoKContent} onChange={(e) => p.setNovoKContent(e.target.value)} placeholder="Ex: iPhone 15 128GB - R$ 4.599 à vista [IMAGEM: https://...]" className="bg-black/50 border-white/10 h-36 resize-none" />
+              <Textarea value={p.novoKContent} onChange={(e) => p.setNovoKContent(e.target.value)} placeholder="O conteúdo gerado do catálogo ou texto livre aparecerá aqui..." className="bg-black/50 border-white/10 h-44 font-mono text-xs leading-relaxed" />
             </div>
             <SaveButton label="Adicionar ao Conhecimento" onSave={p.salvarNovoKnowledge} />
           </div>
@@ -1111,17 +1310,25 @@ export function InfoTab(p: InfoTabProps) {
           {p.knowledge.map((k) => (
             <div key={k.id} className="glass-panel border-white/10 rounded-2xl p-4 hover:bg-white/5 transition-colors group bg-white/[0.01]">
               {p.editKId === k.id ? (
-                <div className="space-y-3">
+                <div className="space-y-4">
                   <div className="space-y-1">
                     <label className="text-[10px] font-black uppercase tracking-widest text-primary">Título</label>
                     <Input value={p.editKTitle} onChange={(e) => p.setEditKTitle(e.target.value)} className="bg-black/50 border-white/10" />
                   </div>
+
+                  {/* Construtor Estruturado de Catálogo na Edição */}
+                  <ProductCatalogBuilder
+                    onAppendCatalog={(formattedText) => {
+                      p.setEditKContent(p.editKContent ? `${p.editKContent}\n\n${formattedText}` : formattedText);
+                    }}
+                  />
+
                   <div className="space-y-1">
                     <div className="flex items-center justify-between">
                       <label className="text-[10px] font-black uppercase tracking-widest text-primary">Conteúdo</label>
                       <label className="inline-flex items-center gap-1.5 text-[10px] font-bold text-blue-400 hover:text-blue-300 cursor-pointer bg-blue-500/10 border border-blue-500/20 px-2 py-0.5 rounded-md transition-colors">
                         {uploadingImg ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
-                        Anexar Foto de Produto
+                        Anexar Foto Avulsa
                         <input
                           type="file"
                           accept="image/*"
@@ -1141,7 +1348,7 @@ export function InfoTab(p: InfoTabProps) {
                         />
                       </label>
                     </div>
-                    <Textarea value={p.editKContent} onChange={(e) => p.setEditKContent(e.target.value)} className="bg-black/50 border-white/10 h-36 resize-none" />
+                    <Textarea value={p.editKContent} onChange={(e) => p.setEditKContent(e.target.value)} className="bg-black/50 border-white/10 h-44 font-mono text-xs leading-relaxed" />
                   </div>
                   <div className="flex gap-2">
                     <SaveButton label="Salvar alterações" onSave={p.salvarEdicaoKnowledge} className="flex-1" />
