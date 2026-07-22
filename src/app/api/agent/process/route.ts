@@ -1682,6 +1682,30 @@ ${capturedVariablesPrompt}
     const messageChunks = humanize ? splitMessage(finalAnswer) : [finalAnswer];
     console.log(`[AGENT] Enviando ${messageChunks.length} chunks para ${maskJid(remoteJid)} (Humanize: ${humanize})`);
 
+    // Busca histórico de mídias já enviadas nesta conversa para EVITAR REENVIO DUPLICADO
+    const dedupProductMedia = agentConfig?.options?.dedup_product_media ?? true;
+    const sentMediaUrls = new Set<string>();
+
+    if (dedupProductMedia && (sessionId || remoteJid)) {
+      try {
+        let q = supabase.from("messages").select("media_url, content").eq("sender", "ai");
+        if (sessionId) q = q.eq("session_id", sessionId);
+        const { data: pastMsgs } = await q;
+
+        for (const pm of pastMsgs || []) {
+          if (pm.media_url) sentMediaUrls.add(pm.media_url.trim());
+          if (pm.content) {
+            const pastTagMatches = Array.from(pm.content.matchAll(/https?:\/\/[^\s\]]+\.(?:jpg|jpeg|png|webp|gif)/gi));
+            for (const ptm of pastTagMatches) {
+              if (ptm[0]) sentMediaUrls.add(ptm[0].trim());
+            }
+          }
+        }
+      } catch (err: any) {
+        console.warn("[AGENT] Erro ao consultar histórico de mídias para dedup:", err?.message);
+      }
+    }
+
     for (let i = 0; i < messageChunks.length; i++) {
         let chunkText = messageChunks[i];
         let sendResult: any = null;
@@ -1692,7 +1716,14 @@ ${capturedVariablesPrompt}
         const mediaMatches = Array.from(chunkText.matchAll(mediaTagRegex));
 
         for (const match of mediaMatches) {
-          const mediaUrl = match[1];
+          const mediaUrl = match[1]?.trim();
+          if (!mediaUrl) continue;
+
+          if (dedupProductMedia && sentMediaUrls.has(mediaUrl)) {
+            console.log(`[AGENT] Mídia de produto ${mediaUrl} já foi enviada anteriormente para ${maskJid(remoteJid)}. Suprimindo reenvio duplicado.`);
+            continue;
+          }
+
           try {
             console.log(`[AGENT] Detectada foto de produto vinculada no RAG. Enviando mídia: ${mediaUrl}`);
             const mediaRes = await channelMod.sendMedia(
@@ -1707,6 +1738,7 @@ ${capturedVariablesPrompt}
               registerAiSend(mediaMsgId);
             } catch { /* ignore */ }
 
+            sentMediaUrls.add(mediaUrl);
             const nowIsoMedia = new Date().toISOString();
             if (sessionId) {
               await supabase.from("messages").insert({
