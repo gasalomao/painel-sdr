@@ -181,6 +181,7 @@ interface CatalogProduct {
   id: string;
   name: string;
   price: string;
+  stock: string;
   specs: string;
   imageUrl: string;
 }
@@ -191,14 +192,14 @@ function ProductCatalogBuilder({
   onAppendCatalog: (formattedText: string) => void;
 }) {
   const [products, setProducts] = useState<CatalogProduct[]>([
-    { id: "1", name: "", price: "", specs: "", imageUrl: "" },
+    { id: "1", name: "", price: "", stock: "5", specs: "", imageUrl: "" },
   ]);
   const [uploadingIdx, setUploadingIdx] = useState<number | null>(null);
 
   const addProduct = () => {
     setProducts((prev) => [
       ...prev,
-      { id: String(Date.now()), name: "", price: "", specs: "", imageUrl: "" },
+      { id: String(Date.now()), name: "", price: "", stock: "5", specs: "", imageUrl: "" },
     ]);
   };
 
@@ -222,7 +223,8 @@ function ProductCatalogBuilder({
     const blocks = valid.map((p) => {
       const lines = [`### PRODUTO: ${p.name.trim()}`];
       if (p.price.trim()) lines.push(`- **Preço**: ${p.price.trim()}`);
-      if (p.specs.trim()) lines.push(`- **Especificações / Estado**: ${p.specs.trim()}`);
+      if (p.stock.trim()) lines.push(`- **Estoque Disponível**: ${p.stock.trim()}`);
+      if (p.specs.trim()) lines.push(`- **Especificações / Detalhes**: ${p.specs.trim()}`);
       if (p.imageUrl.trim()) lines.push(`- **Foto Oficial**: [IMAGEM: ${p.imageUrl.trim()}]`);
       return lines.join("\n");
     });
@@ -238,7 +240,7 @@ function ProductCatalogBuilder({
         <div className="flex items-center gap-2">
           <ImageIcon className="w-4 h-4 text-blue-400" />
           <h4 className="text-xs font-black uppercase tracking-wider text-blue-400">
-            🛍️ Construtor Estruturado de Produtos com Foto (Anti-Alucinação)
+            🛍️ Construtor de Produtos & Estoque (Qualquer Nicho - Anti-Alucinação)
           </h4>
         </div>
         <Button
@@ -260,7 +262,7 @@ function ProductCatalogBuilder({
           >
             <div className="flex items-center justify-between gap-2">
               <span className="text-[10px] font-bold uppercase text-blue-400">
-                Produto #{idx + 1}
+                Item #{idx + 1}
               </span>
               {products.length > 1 && (
                 <button
@@ -273,37 +275,48 @@ function ProductCatalogBuilder({
               )}
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
               <div>
                 <label className="text-[9px] font-bold text-muted-foreground uppercase">
-                  Modelo / Produto *
+                  Produto / Serviço *
                 </label>
                 <Input
                   value={prod.name}
                   onChange={(e) => updateProduct(idx, { name: e.target.value })}
-                  placeholder="Ex: iPhone 15 128GB"
+                  placeholder="Ex: Camiseta Polo P, iPhone 15, Ap 302"
                   className="h-8 text-xs bg-black/60 border-white/10"
                 />
               </div>
               <div>
                 <label className="text-[9px] font-bold text-muted-foreground uppercase">
-                  Preço / Condições
+                  Preço / Valor
                 </label>
                 <Input
                   value={prod.price}
                   onChange={(e) => updateProduct(idx, { price: e.target.value })}
-                  placeholder="Ex: R$ 4.599 ou 12x R$ 419"
+                  placeholder="Ex: R$ 149 ou 10x R$ 15"
                   className="h-8 text-xs bg-black/60 border-white/10"
                 />
               </div>
               <div>
                 <label className="text-[9px] font-bold text-muted-foreground uppercase">
-                  Estado / Bateria / Specs
+                  Estoque Disponível
+                </label>
+                <Input
+                  value={prod.stock}
+                  onChange={(e) => updateProduct(idx, { stock: e.target.value })}
+                  placeholder="Ex: 5 unidades ou 1"
+                  className="h-8 text-xs bg-black/60 border-white/10"
+                />
+              </div>
+              <div>
+                <label className="text-[9px] font-bold text-muted-foreground uppercase">
+                  Detalhes / Estado / Specs
                 </label>
                 <Input
                   value={prod.specs}
                   onChange={(e) => updateProduct(idx, { specs: e.target.value })}
-                  placeholder="Ex: 87% Bateria, Seminovo"
+                  placeholder="Ex: 87% bateria, Cor Azul, Novo"
                   className="h-8 text-xs bg-black/60 border-white/10"
                 />
               </div>
@@ -314,7 +327,7 @@ function ProductCatalogBuilder({
                 <Input
                   value={prod.imageUrl}
                   onChange={(e) => updateProduct(idx, { imageUrl: e.target.value })}
-                  placeholder="Link da foto (ou envie a foto ao lado)"
+                  placeholder="Link da foto (ou envie o arquivo ao lado)"
                   className="h-8 text-[11px] bg-black/60 border-white/10 font-mono"
                 />
               </div>
@@ -338,7 +351,7 @@ function ProductCatalogBuilder({
                     setUploadingIdx(null);
                     if (url) {
                       updateProduct(idx, { imageUrl: url });
-                      toast.success(`Foto anexada ao Produto #${idx + 1}!`);
+                      toast.success(`Foto enviada com sucesso para Item #${idx + 1}!`);
                     }
                   }}
                 />
