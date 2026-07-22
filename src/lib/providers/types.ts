@@ -18,7 +18,9 @@ export interface SendResult {
 /** Mídia suportada por todos os provedores. */
 export interface MediaData {
   type: "image" | "audio" | "video" | "document";
-  base64: string;
+  base64?: string;
+  url?: string;
+  mediaUrl?: string;
   fileName?: string;
   mimetype?: string;
 }
