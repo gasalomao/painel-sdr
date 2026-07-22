@@ -1696,8 +1696,8 @@ ${capturedVariablesPrompt}
           if (pm.media_url) sentMediaUrls.add(pm.media_url.trim());
           if (pm.content) {
             const pastTagMatches = Array.from(pm.content.matchAll(/https?:\/\/[^\s\]]+\.(?:jpg|jpeg|png|webp|gif)/gi));
-            for (const ptm of pastTagMatches) {
-              if (ptm[0]) sentMediaUrls.add(ptm[0].trim());
+            for (const ptm of pastTagMatches as any[]) {
+              if (ptm && ptm[0]) sentMediaUrls.add(String(ptm[0]).trim());
             }
           }
         }
