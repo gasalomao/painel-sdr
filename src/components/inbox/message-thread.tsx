@@ -513,7 +513,11 @@ export function MessageThread({
         resumeAt={conversation.resume_at || null}
         instanceName={getSendInstanceName()}
         onChange={(patch) => {
-          onStatusChange(conversation.id, patch.bot_status === "bot_paused" ? "open" : "pending");
+          onStatusChange(
+            conversation.id,
+            patch.bot_status === "bot_active" ? "pending" : "open",
+            { bot_status: patch.bot_status, resume_at: patch.resume_at }
+          );
         }}
       />
 

@@ -177,7 +177,7 @@ export function AiThreadBanner({
     [conversationId, instanceName, onChange]
   );
 
-  const isPaused = botStatus === "bot_paused";
+  const isPaused = botStatus === "bot_paused" || botStatus === "human_takeover";
 
   return (
     <div
