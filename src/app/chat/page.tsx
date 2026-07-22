@@ -328,10 +328,15 @@ export default function ChatPage() {
   }, []);
 
   const handleStatusChange = useCallback(
-    (conversationId: string, status: ConversationStatus) => {
-      setConversations((prev) => prev.map((c) => (c.id === conversationId ? { ...c, status } : c)));
+    (conversationId: string, status: ConversationStatus, extra?: { bot_status?: string; resume_at?: string | null }) => {
+      const patch = {
+        status,
+        ...(extra?.bot_status ? { bot_status: extra.bot_status } : {}),
+        ...(extra?.resume_at !== undefined ? { resume_at: extra.resume_at } : {}),
+      };
+      setConversations((prev) => prev.map((c) => (c.id === conversationId ? { ...c, ...patch } : c)));
       if (activeConversation?.id === conversationId) {
-        setActiveConversation((prev: Conversation | null) => (prev ? { ...prev, status } : prev));
+        setActiveConversation((prev: Conversation | null) => (prev ? { ...prev, ...patch } : prev));
       }
     },
     [activeConversation]

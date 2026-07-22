@@ -73,27 +73,82 @@ export async function POST(req: NextRequest) {
     }
 
     // ===== AÇÕES POR CONTATO =====
-    if (!remoteJid || !instanceName) {
-      return NextResponse.json({ error: "remoteJid e instanceName são obrigatórios" }, { status: 400 });
+    if (!remoteJid) {
+      return NextResponse.json({ error: "remoteJid é obrigatório" }, { status: 400 });
     }
 
-    const { data: contact } = await supabase
+    // Busca contato — se não existir, tenta criar ou buscar por telefone
+    let { data: contact } = await supabase
       .from("contacts")
       .select("id")
       .eq("remote_jid", remoteJid)
-      .single();
+      .maybeSingle();
+
+    if (!contact) {
+      const phone = remoteJid.replace(/@.*$/, "").replace(/\D/g, "");
+      const { data: newContact } = await supabase
+        .from("contacts")
+        .insert({ client_id: auth.clientId, remote_jid: remoteJid, phone_number: phone })
+        .select("id")
+        .maybeSingle();
+      contact = newContact;
+    }
+
     if (!contact) {
       return NextResponse.json({ error: "Contato não encontrado" }, { status: 404 });
     }
 
-    const { data: session } = await supabase
+    // Resolve a instância do atendimento se não foi enviada
+    let targetInstance = instanceName;
+    if (!targetInstance) {
+      const { data: sessByContact } = await supabase
+        .from("sessions")
+        .select("instance_name")
+        .eq("contact_id", contact.id)
+        .order("last_message_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      targetInstance = sessByContact?.instance_name;
+    }
+
+    if (!targetInstance) {
+      const { data: firstConn } = await supabase
+        .from("channel_connections")
+        .select("instance_name")
+        .eq("client_id", auth.clientId)
+        .limit(1)
+        .maybeSingle();
+      targetInstance = firstConn?.instance_name;
+    }
+
+    if (!targetInstance) {
+      return NextResponse.json({ error: "Instância de envio não especificada e nenhuma ativa encontrada." }, { status: 400 });
+    }
+
+    // Busca sessão — se não existir, cria a sessão vinculada
+    let { data: session } = await supabase
       .from("sessions")
       .select("id, contact_id, instance_name, bot_status, paused_by, paused_at, resume_at")
       .eq("contact_id", contact.id)
-      .eq("instance_name", instanceName)
-      .single();
+      .eq("instance_name", targetInstance)
+      .maybeSingle();
+
     if (!session) {
-      return NextResponse.json({ error: "Sessão não encontrada" }, { status: 404 });
+      const { data: newSession } = await supabase
+        .from("sessions")
+        .insert({
+          client_id: auth.clientId,
+          contact_id: contact.id,
+          instance_name: targetInstance,
+          bot_status: "bot_active",
+        })
+        .select("id, contact_id, instance_name, bot_status, paused_by, paused_at, resume_at")
+        .maybeSingle();
+      session = newSession;
+    }
+
+    if (!session) {
+      return NextResponse.json({ error: "Sessão do chat não encontrada" }, { status: 404 });
     }
 
     switch (action) {

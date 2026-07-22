@@ -401,9 +401,13 @@ export async function POST(req: NextRequest) {
         windowed.forEach((m: any) => {
             const senderKey = m.sender || m.sender_type;
             const role = (m._skip_marker || senderKey !== 'customer') ? 'model' : 'user';
+            let prefix = "";
+            if (senderKey === "human" || senderKey === "user_panel" || senderKey === "operator") {
+              prefix = "[Atendente Humano da Empresa]: ";
+            }
             // Corta msgs individuais grandes (1000 chars já é bastante).
             const safeContent = m.content ? (m.content.length > 600 ? m.content.substring(0, 600) + "... [cortado]" : m.content) : "[Mídia/Comando]";
-            rawGeminiHistory.push({ role, parts: [{ text: safeContent }] });
+            rawGeminiHistory.push({ role, parts: [{ text: prefix + safeContent }] });
         });
     }
 
