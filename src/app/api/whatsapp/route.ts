@@ -3,6 +3,7 @@ import { evolution } from "@/lib/evolution";
 import { evolutionGo } from "@/lib/providers/evolution-go";
 import { verifySession } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabase_admin";
+import * as channel from "@/lib/channel";
 
 export const dynamic = 'force-dynamic';
 
@@ -176,9 +177,7 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    const statusData = ch?.provider === "evolution_go"
-      ? await evolutionGo.getStatus(instanceName)
-      : await evolution.getStatus(instanceName);
+    const statusData = await channel.getStatus(instanceName);
 
     // Fallback de auto-vínculo: se a instância está "open" mas o webhook
     // connection.update foi perdido (ex: webhook ainda não estava registrado
@@ -223,9 +222,7 @@ export async function POST(req: NextRequest) {
     switch (action) {
       case "connect": {
         // Já conectado? Não regera QR — devolve o estado pra UI mostrar "online".
-        const pre = providerType === "evolution_go"
-          ? await evolutionGo.getStatus(instanceName).catch(() => ({ state: "not_found" as const, data: null }))
-          : await evolution.getStatus(instanceName).catch(() => ({ state: "not_found" as const, data: null }));
+        const pre = await channel.getStatus(instanceName);
         if (pre.state === "open") {
           return NextResponse.json({ success: true, qrCode: null, pairingCode: null, state: "open", data: pre.data });
         }
@@ -238,11 +235,7 @@ export async function POST(req: NextRequest) {
             .eq("key", "public_url")
             .maybeSingle();
           if (data?.value && !data.value.includes("localhost")) publicUrl = data.value;
-        } catch { /* sem URL pública não trava o connect, só o webhook */ }
-        if (!publicUrl) {
-          const env = process.env.NEXT_PUBLIC_APP_URL;
-          if (env && !env.includes("localhost")) publicUrl = env;
-        }
+        } catch {}
 
         // Se for criação, garante que o client_id seja salvo na channel_connections
         const { data: existingConn } = await supabaseAdmin
@@ -276,8 +269,8 @@ export async function POST(req: NextRequest) {
             const { data: goCfg } = await sa.from("app_settings").select("key,value").in("key", ["evolution_go_url","evolution_go_key"]);
             const cfgMap: Record<string,string> = {};
             (goCfg||[]).forEach((r:any) => cfgMap[r.key] = r.value);
-            const goUrl = cfgMap.evolution_go_url?.replace(/\/+$/,"") || "";
-            const goKey = cfgMap.evolution_go_key || "";
+            const goUrl = cfgMap.evolution_go_url?.replace(/\/+$/,"") || process.env.EVOLUTION_GO_URL || "";
+            const goKey = cfgMap.evolution_go_key || process.env.EVOLUTION_GO_KEY || "";
             if (!goUrl) throw new Error("Evolution GO não configurado");
 
             const goHeaders: Record<string,string> = { "Content-Type": "application/json", apikey: goKey, token: goKey };
@@ -325,20 +318,20 @@ export async function POST(req: NextRequest) {
               }
             } catch {}
           } catch (e: any) {
-            console.warn("[WhatsApp/Connect] Evolution GO falhou:", e.message);
+            console.warn("[WhatsApp/Connect] Evolution GO falhou, tentando fallback Evolution API v2:", e.message);
           }
-        } else {
-          // Evolution API legada.
-          const res = await evolution.ensureInstanceConfigured(instanceName, publicUrl);
-          qrCode = res.qrcode?.base64 || res.base64 || res.qrcode?.code || res.code || null;
-          pairingCode = res.qrcode?.pairingCode || res.pairingCode || null;
         }
 
-        // Tenta extrair o QR de vários lugares possíveis (v1 vs v2 vs variações)
-        // BUG: este bloco era código DUPLICADO da migração Evolution GO —
-        // redeclarava `const qrCode` (conflito com `let qrCode` da linha 269) e
-        // referenciava `res` que não existe neste escopo (quebra o build).
-        // Removido: qrCode/pairingCode já foram atribuídos nos branches acima.
+        // Fallback / default: Evolution API v2
+        if (!qrCode && !pairingCode) {
+          try {
+            const res = await evolution.ensureInstanceConfigured(instanceName, publicUrl);
+            qrCode = res.qrcode?.base64 || res.base64 || res.qrcode?.code || res.code || null;
+            pairingCode = res.qrcode?.pairingCode || res.pairingCode || null;
+          } catch (err: any) {
+            console.warn("[WhatsApp/Connect] Evolution API v2 falhou:", err.message);
+          }
+        }
 
         return NextResponse.json({
           success: true,
@@ -354,15 +347,16 @@ export async function POST(req: NextRequest) {
           const { data: goCfg } = await sa.from("app_settings").select("key,value").in("key", ["evolution_go_url","evolution_go_key"]);
           const cfgMap: Record<string,string> = {};
           (goCfg||[]).forEach((r:any) => cfgMap[r.key] = r.value);
-          const goUrl = cfgMap.evolution_go_url?.replace(/\/+$/,"") || "";
-          const goKey = cfgMap.evolution_go_key || "";
-          await fetch(`${goUrl}/instance/disconnect`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", apikey: goKey, token: goKey },
-          }).catch(() => {});
-        } else {
-          await evolution.logout(instanceName);
+          const goUrl = cfgMap.evolution_go_url?.replace(/\/+$/,"") || process.env.EVOLUTION_GO_URL || "";
+          const goKey = cfgMap.evolution_go_key || process.env.EVOLUTION_GO_KEY || "";
+          if (goUrl) {
+            await fetch(`${goUrl}/instance/disconnect`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", apikey: goKey, token: goKey },
+            }).catch(() => {});
+          }
         }
+        await evolution.logout(instanceName).catch(() => {});
         return NextResponse.json({ success: true });
       }
 
@@ -372,32 +366,30 @@ export async function POST(req: NextRequest) {
           const { data: goCfg } = await sa.from("app_settings").select("key,value").in("key", ["evolution_go_url","evolution_go_key"]);
           const cfgMap: Record<string,string> = {};
           (goCfg||[]).forEach((r:any) => cfgMap[r.key] = r.value);
-          const goUrl = cfgMap.evolution_go_url?.replace(/\/+$/,"") || "";
-          const goKey = cfgMap.evolution_go_key || "";
-          // Busca o ID da instância.
-          const allRes = await fetch(`${goUrl}/instance/all`, {
-            headers: { "Content-Type": "application/json", apikey: goKey, token: goKey },
-          });
-          const allJson = await allRes.json().catch(() => ({}));
-          const list = allJson?.data || [];
-          const match = list.find((x:any) => x.name === instanceName);
-          if (match?.id) {
-            await fetch(`${goUrl}/instance/delete/${match.id}`, {
-              method: "DELETE",
+          const goUrl = cfgMap.evolution_go_url?.replace(/\/+$/,"") || process.env.EVOLUTION_GO_URL || "";
+          const goKey = cfgMap.evolution_go_key || process.env.EVOLUTION_GO_KEY || "";
+          if (goUrl) {
+            const allRes = await fetch(`${goUrl}/instance/all`, {
               headers: { "Content-Type": "application/json", apikey: goKey, token: goKey },
-            }).catch(() => {});
+            });
+            const allJson = await allRes.json().catch(() => ({}));
+            const list = allJson?.data || [];
+            const match = list.find((x:any) => x.name === instanceName);
+            if (match?.id) {
+              await fetch(`${goUrl}/instance/delete/${match.id}`, {
+                method: "DELETE",
+                headers: { "Content-Type": "application/json", apikey: goKey, token: goKey },
+              }).catch(() => {});
+            }
           }
-        } else {
-          try { await evolution.logout(instanceName); } catch { /* ignore */ }
-          await evolution.deleteInstance(instanceName);
         }
+        try { await evolution.logout(instanceName); } catch { /* ignore */ }
+        await evolution.deleteInstance(instanceName).catch(() => {});
         return NextResponse.json({ success: true });
       }
 
       case "status": {
-        const status = providerType === "evolution_go"
-          ? await evolutionGo.getStatus(instanceName)
-          : await evolution.getStatus(instanceName);
+        const status = await channel.getStatus(instanceName);
         return NextResponse.json({ success: true, state: status.state, data: status.data });
       }
 

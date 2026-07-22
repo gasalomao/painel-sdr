@@ -112,8 +112,6 @@ export function MessageThread({
   const [sending, setSending] = useState(false);
   const [replyTo, setReplyTo] = useState<ReplyDraft | null>(null);
 
-  const scrollRef = useRef<HTMLDivElement>(null);
-
   const onMessagesLoadedRef = useRef(onMessagesLoaded);
   useEffect(() => {
     onMessagesLoadedRef.current = onMessagesLoaded;
@@ -180,14 +178,53 @@ export function MessageThread({
   }, [clientId, contactId, hasUnread]);
 
   // Scroll automático para a última mensagem.
-  // ANTES: dependia só de [messages] → não rolava quando TROCAVA de conversa e
-  // a lista de mensagens vinha carregada do cache. Agora rola quando muda a
-  // conversa também.
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  //
+  // BUG HISTÓRICO RESOLVIDO: o `ref` estava sendo passado para o componente
+  // <ScrollArea> (Root do Base UI), mas o scroll acontece num elemento INTERNO
+  // (Viewport, marcado com `data-slot="scroll-area-viewport"`). Por isso
+  // `scrollRef.current.scrollTop` não fazia nada → o chat abria no meio.
+  //
+  // Solução: usar callback ref que captura o Viewport real. Além disso,
+  // aguardamos o próximo paint (requestAnimationFrame + setTimeout duplo)
+  // para garantir que o DOM está totalmente renderizado antes de scrollar.
+  const scrollViewportRef = useRef<HTMLDivElement | null>(null);
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
+    const el = scrollViewportRef.current;
+    if (!el) return;
+    // scrollTop alvo: final do conteúdo.
+    const target = el.scrollHeight;
+    // Aplica 2x com rAF — alguns navegadores precisam de 2 frames pra recalcular
+    // a altura após imagens/mídias carregarem.
+    requestAnimationFrame(() => {
+      if (!scrollViewportRef.current) return;
+      scrollViewportRef.current.scrollTo({ top: target, behavior });
+      requestAnimationFrame(() => {
+        if (!scrollViewportRef.current) return;
+        scrollViewportRef.current.scrollTo({ top: scrollViewportRef.current.scrollHeight, behavior });
+      });
+    });
+  }, []);
+
+  // Callback ref: busca o elemento Viewport dentro do ScrollArea.
+  const scrollAreaRef = useCallback((node: HTMLDivElement | null) => {
+    if (!node) {
+      scrollViewportRef.current = null;
+      return;
     }
-  }, [messages, conversationId, loading]);
+    // O Viewport é o elemento com `data-slot="scroll-area-viewport"`.
+    const viewport = node.querySelector('[data-slot="scroll-area-viewport"]') as HTMLDivElement | null;
+    scrollViewportRef.current = viewport || node;
+    // Scroll imediato ao montar/trocar de conversa.
+    if (viewport) {
+      viewport.scrollTop = viewport.scrollHeight;
+    }
+  }, []);
+
+  // Quando carrega mensagens OU troca de conversa → scroll pro fim.
+  useEffect(() => {
+    scrollToBottom("auto");
+  }, [messages, conversationId, loading, scrollToBottom]);
 
   // Envio de mensagem de texto simples pelo compositor
   const handleSend = useCallback(
@@ -228,13 +265,16 @@ export function MessageThread({
 
         onNewMessage(optimisticMsg);
         setReplyTo(null);
+        // Scroll suave pro fim pra ver a mensagem que acabou de ser enviada.
+        scrollToBottom("smooth");
 
-        // Ao responder manualmente, silencia o robô temporariamente para atendimento humano
+        // Ao responder manualmente, silencia o robô por 60 min para atendimento humano
         void fetch("/api/agent/control", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            action: "pause",
+            action: "snooze",
+            durationMinutes: 60,
             remoteJid: conversationId,
             instanceName: instName,
           }),
@@ -245,7 +285,7 @@ export function MessageThread({
         setSending(false);
       }
     },
-    [conversationId, clientId, getSendInstanceName, onNewMessage]
+    [conversationId, clientId, getSendInstanceName, onNewMessage, scrollToBottom]
   );
 
   // Envio de mensagens com mídia (Imagem, Áudio, Vídeo, Documentos)
@@ -296,13 +336,14 @@ export function MessageThread({
 
         onNewMessage(optimisticMsg);
         toast.success("Arquivo enviado!");
+        scrollToBottom("smooth");
       } catch (err: any) {
         toast.error("Erro ao processar mídia: " + err.message);
       } finally {
         setSending(false);
       }
     },
-    [conversationId, clientId, getSendInstanceName, onNewMessage]
+    [conversationId, clientId, getSendInstanceName, onNewMessage, scrollToBottom]
   );
 
   const handleUpdateStatus = useCallback(
@@ -478,7 +519,7 @@ export function MessageThread({
 
       {/* Área de Histórico das Mensagens */}
       <div className="flex-1 overflow-hidden relative bg-muted/20">
-        <ScrollArea ref={scrollRef} className="h-full p-4">
+        <ScrollArea ref={scrollAreaRef} className="h-full p-4">
           {loading ? (
             <div className="flex items-center justify-center py-12">
               <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />

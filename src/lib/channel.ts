@@ -1,19 +1,22 @@
 /**
- * Channel router — unifica envio entre Evolution API GO (Go/whatsmeow) e WhatsApp Cloud API
- * (oficial Meta).
+ * Channel router — unifica envio entre Evolution API v2 (Node.js/Baileys),
+ * Evolution API GO (Go/whatsmeow) e WhatsApp Cloud API (oficial Meta).
  *
  * Como decide:
  *  - Lê `channel_connections` por instance_name.
  *  - provider === "whatsapp_cloud"  → usa lib/whatsapp-cloud.ts com config em provider_config (JSONB).
- *  - caso contrário (default)      → usa lib/providers/evolution-go.ts (Evolution GO / Go/whatsmeow).
+ *  - provider === "evolution_go"    → tenta lib/providers/evolution-go.ts com fallback para evolution-v2.ts.
+ *  - provider === "evolution" (def) → usa lib/providers/evolution-v2.ts com fallback para evolution-go.ts.
  *
- * O resto do sistema (agent/process, send-message, follow-up, disparo) chama estes helpers
+ * O resto do sistema (agent/process, send-message, follow-up, disparo, workers) chama estes helpers
  * sem se importar com o provider. A chave estável é "instanceName".
  */
 
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { whatsappCloud, type WhatsAppCloudConfig } from "@/lib/whatsapp-cloud";
 import { evolutionGo } from "@/lib/providers/evolution-go";
+import { evolutionV2 } from "@/lib/providers/evolution-v2";
+import type { WhatsAppProvider, SendResult, MediaData, ConnectionStatus, QRCodeResult } from "@/lib/providers/types";
 
 export type ResolvedChannel = {
   instance_name: string;
@@ -38,7 +41,7 @@ export async function resolveChannel(instanceName: string, opts: { fresh?: boole
     .eq("instance_name", instanceName)
     .maybeSingle();
 
-  const provider = (data?.provider || "evolution_go") as ResolvedChannel["provider"];
+  const provider = (data?.provider || "evolution") as ResolvedChannel["provider"];
   let cloud: WhatsAppCloudConfig | null = null;
 
   if (provider === "whatsapp_cloud") {
@@ -89,26 +92,44 @@ function ensureCloudConfig(ch: ResolvedChannel): WhatsAppCloudConfig {
   return ch.cloud;
 }
 
+/** Helper para obter os provedores primário e secundário (fallback) para a instância. */
+export async function getProvider(instanceName: string): Promise<{ primary: WhatsAppProvider; fallback?: WhatsAppProvider }> {
+  const ch = await resolveChannel(instanceName);
+  if (ch.provider === "evolution_go") {
+    return { primary: evolutionGo, fallback: evolutionV2 };
+  }
+  return { primary: evolutionV2, fallback: evolutionGo };
+}
+
 /* ============================================================
-   API pública: send / sendMedia / setTyping / checkNumbers
-   Mesma assinatura nos dois providers.
+   API pública unificada: sendMessage / sendMedia / getStatus / checkNumbers
 ============================================================ */
 
-export async function sendMessage(remoteJid: string, text: string, instanceName: string) {
+export async function sendMessage(remoteJid: string, text: string, instanceName: string): Promise<SendResult> {
   const ch = await resolveChannel(instanceName);
   if (ch.provider === "whatsapp_cloud") {
     const cfg = ensureCloudConfig(ch);
     return whatsappCloud.sendText(cfg, remoteJid, text);
   }
-  return evolutionGo.sendText(remoteJid, text, instanceName);
+
+  const { primary, fallback } = await getProvider(instanceName);
+  const res = await primary.sendText(remoteJid, text, instanceName);
+  if (res.ok) return res;
+
+  if (fallback) {
+    const fallbackRes = await fallback.sendText(remoteJid, text, instanceName);
+    if (fallbackRes.ok) return fallbackRes;
+  }
+
+  return res;
 }
 
 export async function sendMedia(
   remoteJid: string,
   caption: string,
-  mediaData: { type: "image" | "audio" | "video" | "document"; base64: string; fileName?: string; mimetype?: string },
+  mediaData: MediaData,
   instanceName: string
-) {
+): Promise<SendResult> {
   const ch = await resolveChannel(instanceName);
   if (ch.provider === "whatsapp_cloud") {
     const cfg = ensureCloudConfig(ch);
@@ -120,7 +141,17 @@ export async function sendMedia(
       caption,
     });
   }
-  return evolutionGo.sendMedia(remoteJid, caption, mediaData, instanceName);
+
+  const { primary, fallback } = await getProvider(instanceName);
+  const res = await primary.sendMedia(remoteJid, caption, mediaData, instanceName);
+  if (res.ok) return res;
+
+  if (fallback) {
+    const fallbackRes = await fallback.sendMedia(remoteJid, caption, mediaData, instanceName);
+    if (fallbackRes.ok) return fallbackRes;
+  }
+
+  return res;
 }
 
 export async function checkWhatsAppNumbers(numbers: string[], instanceName: string): Promise<Record<string, boolean>> {
@@ -130,7 +161,15 @@ export async function checkWhatsAppNumbers(numbers: string[], instanceName: stri
     for (const n of numbers) map[n.replace(/\D/g, "")] = true;
     return map;
   }
-  return evolutionGo.checkNumbers(numbers, instanceName);
+
+  const { primary, fallback } = await getProvider(instanceName);
+  const map = await primary.checkNumbers(numbers, instanceName);
+  if (Object.keys(map).length > 0) return map;
+  if (fallback) {
+    const fallMap = await fallback.checkNumbers(numbers, instanceName);
+    if (Object.keys(fallMap).length > 0) return fallMap;
+  }
+  return map;
 }
 
 export async function checkNumbersDetailed(
@@ -146,7 +185,14 @@ export async function checkNumbersDetailed(
     }
     return map;
   }
-  return evolutionGo.checkNumbersDetailed(numbers, instanceName);
+
+  const { primary, fallback } = await getProvider(instanceName);
+  const map = await primary.checkNumbersDetailed(numbers, instanceName);
+  if (Object.keys(map).length > 0) return map;
+  if (fallback) {
+    return fallback.checkNumbersDetailed(numbers, instanceName);
+  }
+  return map;
 }
 
 export const checkWhatsAppNumbersDetailed = checkNumbersDetailed;
@@ -157,12 +203,20 @@ export function extractPhone(jid: string): string {
   return match ? match[1] : "";
 }
 
-export async function getStatus(instanceName: string) {
+export async function getStatus(instanceName: string): Promise<ConnectionStatus> {
   const ch = await resolveChannel(instanceName);
   if (ch.provider === "whatsapp_cloud") {
     return { state: "open" as const, data: null };
   }
-  return evolutionGo.getStatus(instanceName);
+
+  const { primary, fallback } = await getProvider(instanceName);
+  const res = await primary.getStatus(instanceName);
+  if (res.state !== "unknown" && res.state !== "not_found") return res;
+  if (fallback) {
+    const fallRes = await fallback.getStatus(instanceName);
+    if (fallRes.state !== "unknown" && fallRes.state !== "not_found") return fallRes;
+  }
+  return res;
 }
 
 export async function fetchProfilePicture(remoteJid: string, instanceName: string): Promise<string | null> {
@@ -170,5 +224,12 @@ export async function fetchProfilePicture(remoteJid: string, instanceName: strin
   if (ch.provider === "whatsapp_cloud") {
     return null;
   }
-  return evolutionGo.fetchProfilePicture(remoteJid, instanceName);
+
+  const { primary, fallback } = await getProvider(instanceName);
+  const pic = await primary.fetchProfilePicture(remoteJid, instanceName);
+  if (pic) return pic;
+  if (fallback) {
+    return fallback.fetchProfilePicture(remoteJid, instanceName);
+  }
+  return null;
 }

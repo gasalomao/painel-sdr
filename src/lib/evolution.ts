@@ -424,7 +424,7 @@ export const evolution = {
     });
   },
 
-  async sendMedia(number: string, caption: string, mediaData: { type: "image" | "audio" | "document", base64: string, fileName?: string, mimetype?: string }, instance?: string) {
+  async sendMedia(number: string, caption: string, mediaData: { type: "image" | "video" | "audio" | "document", base64: string, fileName?: string, mimetype?: string }, instance?: string) {
     instance = await resolveInstance(instance);
     const targetJid = (number.includes("@") && (number.endsWith(".net") || number.endsWith(".us")))
        ? number
