@@ -1236,17 +1236,16 @@ export function InfoTab(p: InfoTabProps) {
               <div className="flex items-center gap-2">
                 <ImageIcon className="w-4 h-4 text-blue-400" />
                 <p className="text-xs font-black uppercase tracking-wider text-blue-400">
-                  📷 Como Vincular Fotos aos Produtos (Anti-Alucinação)
+                  📷 Vinculação de Fotos aos Produtos (Anti-Alucinação - Qualquer Nicho)
                 </p>
               </div>
               <p className="text-[11px] text-blue-200/80 leading-relaxed">
-                Para cadastrar produtos (ex: <strong>iPhone 15, Galaxy S24, Celulares</strong>) e garantir que a IA envie as fotos reais dos aparelhos com preço correto via WhatsApp, use o botão <strong>&quot;Anexar Foto de Produto&quot;</strong> ou insira a tag <code className="text-blue-300 bg-black/40 px-1 py-0.5 rounded">[IMAGEM: https://...]</code>.
+                Para cadastrar produtos/itens de qualquer segmento (<strong>Moda, Eletrônicos, Imóveis, Veículos, Cursos, Serviços</strong>) e garantir que a IA envie as fotos reais dos itens com preço correto via WhatsApp, use o Construtor abaixo ou a tag <code className="text-blue-300 bg-black/40 px-1 py-0.5 rounded">[IMAGEM: https://...]</code>.
               </p>
               <div className="bg-black/40 p-3 rounded-xl border border-white/5 space-y-1 font-mono text-[10px] text-blue-200/90">
-                <p className="font-bold text-blue-400">Exemplo para Tópico &quot;iPhone 15&quot;:</p>
-                <p>• iPhone 15 128GB - R$ 4.599 [IMAGEM: https://sua-cdn.com/iphone15.jpg]</p>
-                <p>• iPhone 15 Pro 128GB - R$ 5.899 [IMAGEM: https://sua-cdn.com/iphone15pro.jpg]</p>
-                <p>• iPhone 15 Pro Max 256GB - R$ 6.999 [IMAGEM: https://sua-cdn.com/iphone15promax.jpg]</p>
+                <p className="font-bold text-blue-400">Exemplo Genérico para Tópico &quot;Catálogo de Produtos&quot;:</p>
+                <p>• Produto A (Modelo X) - R$ 199,00 | Estoque: 5 [IMAGEM: https://sua-cdn.com/item1.jpg]</p>
+                <p>• Produto B (Modelo Y) - R$ 299,00 | Estoque: 3 [IMAGEM: https://sua-cdn.com/item2.jpg]</p>
               </div>
             </div>
           </div>
@@ -1256,7 +1255,7 @@ export function InfoTab(p: InfoTabProps) {
           <div className="p-6 bg-white/5 border border-white/10 rounded-2xl space-y-5">
             <div className="space-y-1">
               <label className="text-[10px] font-black uppercase tracking-widest text-primary">Título da Base / Gatilho</label>
-              <Input value={p.novoKTitle} onChange={(e) => p.setNovoKTitle(e.target.value)} placeholder="Ex: iPhone 15, Catálogo de Celulares, Preços..." className="bg-black/50 border-white/10" />
+              <Input value={p.novoKTitle} onChange={(e) => p.setNovoKTitle(e.target.value)} placeholder="Ex: Catálogo de Produtos, Tabela de Preços, Serviços..." className="bg-black/50 border-white/10" />
               <p className="text-[9px] text-muted-foreground">Use o nome do produto ou palavra-chave. Quando o cliente perguntar disso, a IA lê este documento.</p>
             </div>
 
