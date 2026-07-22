@@ -216,9 +216,9 @@ export default function ConfiguracoesPage() {
       if (!d.success) throw new Error(d.error || "Falha ao conectar");
       if (d.qrCode) {
         setGoQrCode(d.qrCode);
-        setGoConnStatus("QR gerado — escaneie no WhatsApp");
+        setGoConnStatus("✓ Instância criada, conectada e sincronizada! Escaneie o QR Code abaixo.");
       } else {
-        setGoConnStatus("Instância conectada (já estava logada)");
+        setGoConnStatus("✓ Instância já estava conectada e sincronizada!");
       }
     } catch (e: any) {
       setGoConnStatus("Erro: " + e.message);

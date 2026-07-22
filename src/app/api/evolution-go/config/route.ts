@@ -193,6 +193,54 @@ export async function POST(req: NextRequest) {
         }
       } catch {}
 
+      // ===== SINCRONIZAÇÃO COM O PAINEL =====
+      // Garante que a instância existe em channel_connections com
+      // provider=evolution_go e todas as configurações necessárias pra
+      // o sistema funcionar (agente vinculado, webhook ativo, etc).
+      try {
+        const ctx = await requireClientId(req).catch(() => null);
+        const clientId = ctx?.ok ? ctx.clientId : "00000000-0000-0000-0000-000000000001";
+
+        // Upsert channel_connections com provider=evolution_go.
+        const { data: existing } = await supabaseAdmin
+          .from("channel_connections")
+          .select("id, agent_id")
+          .eq("instance_name", inst)
+          .maybeSingle();
+
+        if (existing) {
+          // Atualiza pro provider evolution_go + garante token.
+          await supabaseAdmin
+            .from("channel_connections")
+            .update({
+              provider: "evolution_go",
+              status: "open",
+              provider_config: { evo_go_token: key },
+            })
+            .eq("id", existing.id);
+        } else {
+          // Cria nova conexão.
+          await supabaseAdmin.from("channel_connections").insert({
+            instance_name: inst,
+            provider: "evolution_go",
+            status: "open",
+            client_id: clientId,
+            agent_id: 1, // agente default
+            provider_config: { evo_go_token: key },
+          });
+        }
+
+        // Auto-vincula agente se não tiver.
+        if (!existing?.agent_id) {
+          try {
+            const { autoLinkAgentOnConnect } = await import("@/lib/auto-link-agent");
+            await autoLinkAgentOnConnect(inst);
+          } catch {}
+        }
+      } catch (syncErr: any) {
+        console.warn("[evo-go-config] sync channel_connections falhou:", syncErr?.message);
+      }
+
       return NextResponse.json({
         success: true,
         message: qrCode ? "QR Code gerado! Escaneie no WhatsApp." : "Instância conectada (sem QR — pode já estar logada).",
