@@ -655,14 +655,15 @@ export default function AgentePage() {
      KNOWLEDGE BASE CRUD
   ==================================================================== */
   const salvarNovoKnowledge = async () => {
-    if (!activeAgentId || !novoKTitle.trim() || !novoKContent.trim()) {
-      alert("Por favor, preencha o título e o conteúdo da base de conhecimento.");
+    if (!activeAgentId || !novoKContent.trim()) {
+      alert("Por favor, preencha o conteúdo da base de conhecimento.");
       return;
     }
+    const titleToUse = novoKTitle.trim() || "Catálogo de Produtos";
     const numAgentId = Number(activeAgentId) || activeAgentId;
     const payload: any = {
       agent_id: numAgentId,
-      title: novoKTitle.trim(),
+      title: titleToUse,
       content: novoKContent.trim(),
     };
     if (clientId) {
@@ -710,10 +711,11 @@ export default function AgentePage() {
   };
 
   const salvarEdicaoKnowledge = async () => {
-    if (!editKId || !editKTitle.trim()) return;
+    if (!editKId || !editKContent.trim()) return;
+    const titleToUse = editKTitle.trim() || "Catálogo de Produtos";
     const kidToReindex = editKId; // captura antes do reset
     const payload: any = {
-      title: editKTitle.trim(),
+      title: titleToUse,
       content: editKContent.trim(),
     };
     if (clientId) {

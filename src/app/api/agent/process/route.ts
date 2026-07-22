@@ -11,6 +11,7 @@ import { hasInternalSecret } from "@/lib/internal-auth";
 import { maskJid } from "@/lib/pii";
 import { resolveFunnelStage, checkSchedulesSync, splitMessage } from "@/lib/agent-format";
 import { parseAgendaDateTime, isDuplicateSlot, hasAgentOverlapConflict } from "@/lib/agenda-logic";
+import { indexKnowledgeDocument } from "@/lib/rag";
 
 export const dynamic = 'force-dynamic';
 
@@ -662,6 +663,27 @@ ${capturedVariablesPrompt}
              required: ["query"],
           },
        });
+
+       // Ferramenta 1.2: Atualização Automática de Estoque após Venda
+       functionDeclarations.push({
+          name: "update_product_stock",
+          description:
+             "Atualiza a quantidade em estoque de um produto na base de conhecimento quando uma venda for concluída ou confirmada pelo cliente. Reduz a quantidade disponível no banco de dados.",
+          parameters: {
+             type: SchemaType.OBJECT,
+             properties: {
+                product_name: {
+                   type: SchemaType.STRING,
+                   description: "Nome do produto/modelo vendido (ex: 'iPhone 15 128GB', 'Camiseta Polo G', 'Apartamento 302')",
+                },
+                quantity_sold: {
+                   type: SchemaType.NUMBER,
+                   description: "Quantidade de unidades vendidas (padrão: 1)",
+                },
+             },
+             required: ["product_name"],
+          },
+       });
     }
 
     // Ferramenta 1.5: Web Search — opt-in pelo agente
@@ -1000,6 +1022,64 @@ ${capturedVariablesPrompt}
              };
           }
           callLogs.push({ role: "system", content: `[RAG] "${raw}" | method=${searchMethod} | hits=${matches.length}` });
+       } else if (call.name === "update_product_stock") {
+          const rawProd = String(callArgs.product_name || "").trim();
+          const qtySold = Number(callArgs.quantity_sold) || 1;
+          let updatedSuccess = false;
+
+          if (rawProd) {
+             const { data: docs } = await supabase
+                .from("agent_knowledge")
+                .select("id, title, content, client_id")
+                .eq("agent_id", agentId);
+
+             for (const d of docs || []) {
+                if (!d.content) continue;
+                const cleanName = rawProd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+                const stockRegex = new RegExp(`(${cleanName}[\\s\\S]*?Estoque(?:\\s*Disponível)?:\\s*)(\\d+)`, "i");
+                const genericRegex = new RegExp(`(Estoque(?:\\s*Disponível)?:\\s*)(\\d+)`, "i");
+                const match = d.content.match(stockRegex) || (d.content.toLowerCase().includes(rawProd.toLowerCase()) ? d.content.match(genericRegex) : null);
+
+                if (match) {
+                   const currentQty = parseInt(match[2], 10);
+                   const newQty = Math.max(0, currentQty - qtySold);
+                   const updatedContent = d.content.replace(match[0], `${match[1]}${newQty}`);
+
+                   await supabase
+                      .from("agent_knowledge")
+                      .update({ content: updatedContent })
+                      .eq("id", d.id);
+
+                   indexKnowledgeDocument({
+                      knowledgeId: d.id,
+                      agentId,
+                      clientId: d.client_id,
+                      title: d.title || "",
+                      content: updatedContent,
+                      apiKey: finalApiKey,
+                   }).catch(() => {});
+
+                   functionResultRes = {
+                      success: true,
+                      product: rawProd,
+                      previousStock: currentQty,
+                      newStock: newQty,
+                      message: `Estoque do item "${rawProd}" atualizado de ${currentQty} para ${newQty} unidades disponíveis.`,
+                   };
+                   updatedSuccess = true;
+                   callLogs.push({ role: "system", content: `[Estoque Atualizado] "${rawProd}" (${currentQty} -> ${newQty})` });
+                   break;
+                }
+             }
+          }
+
+          if (!updatedSuccess) {
+             functionResultRes = {
+                success: false,
+                message: `Item "${rawProd}" não encontrado para atualizar estoque.`,
+             };
+             callLogs.push({ role: "system", content: `[Estoque Erro] Item "${rawProd}" não encontrado` });
+          }
        } else if (call.name === "web_search") {
           const q = String(callArgs.query || "").trim();
           try {
