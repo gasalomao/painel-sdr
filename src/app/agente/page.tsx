@@ -228,7 +228,7 @@ export default function AgentePage() {
     try {
       const [settings, kb, conn, stagesRes] = await Promise.all([
         supabase.from("agent_settings").select("*").eq("id", id).eq("client_id", clientId).single(),
-        supabase.from("agent_knowledge").select("*").eq("agent_id", id).eq("client_id", clientId).order("created_at"),
+        supabase.from("agent_knowledge").select("*").eq("agent_id", id).order("created_at"),
         supabase.from("channel_connections")
           .select("instance_name, created_at")
           .eq("agent_id", id)
@@ -655,16 +655,32 @@ export default function AgentePage() {
      KNOWLEDGE BASE CRUD
   ==================================================================== */
   const salvarNovoKnowledge = async () => {
-    if (!activeAgentId || !novoKTitle || !novoKContent) return;
-    const { data, error } = await supabase.from("agent_knowledge").insert({
-      agent_id: activeAgentId, title: novoKTitle, content: novoKContent,
-    }).select("id").single();
+    if (!activeAgentId || !novoKTitle.trim() || !novoKContent.trim()) {
+      alert("Por favor, preencha o título e o conteúdo da base de conhecimento.");
+      return;
+    }
+    const numAgentId = Number(activeAgentId) || activeAgentId;
+    const payload: any = {
+      agent_id: numAgentId,
+      title: novoKTitle.trim(),
+      content: novoKContent.trim(),
+    };
+    if (clientId) {
+      payload.client_id = clientId;
+    }
+
+    const { data, error } = await supabase
+      .from("agent_knowledge")
+      .insert(payload)
+      .select("id")
+      .single();
+
     if (!error) {
-      setNovoKTitle(""); setNovoKContent(""); setShowNovoK(false);
-      loadAgent(activeAgentId);
+      setNovoKTitle("");
+      setNovoKContent("");
+      setShowNovoK(false);
+      await loadAgent(activeAgentId);
       // Indexa em background pro RAG vetorial (search semântica).
-      // Fire-and-forget — não bloqueia o UI; pior caso doc fica disponível
-      // só via fallback ILIKE até o admin clicar "Reindexar tudo".
       if (data?.id) {
         fetch("/api/agent/knowledge/reindex", {
           method: "POST",
@@ -672,7 +688,9 @@ export default function AgentePage() {
           body: JSON.stringify({ knowledge_id: data.id }),
         }).catch(() => {});
       }
-    } else alert("Erro: " + error.message);
+    } else {
+      alert("Erro ao salvar base de conhecimento: " + error.message);
+    }
   };
 
   const deletarKnowledge = async (kid: string) => {
@@ -694,19 +712,30 @@ export default function AgentePage() {
   const salvarEdicaoKnowledge = async () => {
     if (!editKId || !editKTitle.trim()) return;
     const kidToReindex = editKId; // captura antes do reset
-    const { error } = await supabase.from("agent_knowledge")
-      .update({ title: editKTitle.trim(), content: editKContent })
+    const payload: any = {
+      title: editKTitle.trim(),
+      content: editKContent.trim(),
+    };
+    if (clientId) {
+      payload.client_id = clientId;
+    }
+    const { error } = await supabase
+      .from("agent_knowledge")
+      .update(payload)
       .eq("id", editKId);
+
     if (!error) {
       cancelarEdicaoKnowledge();
-      loadAgent(activeAgentId);
+      await loadAgent(activeAgentId);
       // Re-indexa o doc (content_hash protege contra re-embed se nada mudou)
       fetch("/api/agent/knowledge/reindex", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ knowledge_id: kidToReindex }),
       }).catch(() => {});
-    } else alert("Erro: " + error.message);
+    } else {
+      alert("Erro ao atualizar base de conhecimento: " + error.message);
+    }
   };
 
   /* ====================================================================
