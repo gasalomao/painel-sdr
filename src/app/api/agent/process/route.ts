@@ -616,6 +616,7 @@ ${autoRulesBlock}
 4. O histórico da conversa e a mensagem atual do usuário serão fornecidos pelo sistema nativamente.
 5. CONTINUIDADE — NÃO RECOMECE: o <lead_context> (fornecido junto da mensagem) mostra exatamente o que o SDR já enviou (disparo inicial, follow-ups). Você JÁ se apresentou, JÁ disse o nome da empresa, JÁ tratou pelo nome do negócio. NÃO repita "Olá, sou da [empresa]" se isso já está no <lead_context>. Continue a conversa de onde parou. Use os dados de CRM (ramo, categoria, endereço) pra contextualizar — sem perguntar o que já está conhecido.
 6. Seja natural, humano e empático.
+7. ANCORAGEM DE MÍDIA/PRODUTO: Ao falar sobre produtos/itens da Base de Conhecimento que possuam foto/mídia vinculada no formato [IMAGEM: URL] ou [FOTO: URL], você DEVE OBRIGATORIAMENTE incluir essa tag exata na resposta. O sistema enviará a foto do produto automaticamente ao cliente. NUNCA altere ou invente URLs.
 </execution_directives>
 `;
 
@@ -1602,9 +1603,61 @@ ${capturedVariablesPrompt}
     console.log(`[AGENT] Enviando ${messageChunks.length} chunks para ${maskJid(remoteJid)} (Humanize: ${humanize})`);
 
     for (let i = 0; i < messageChunks.length; i++) {
-        const chunkText = messageChunks[i];
+        let chunkText = messageChunks[i];
         let sendResult: any = null;
         let sendError: string | null = null;
+
+        // Detecta e envia mídias/fotos de produtos vinculadas no RAG no formato [IMAGEM: url], [FOTO: url], [MEDIA: url]
+        const mediaTagRegex = /\[(?:IMAGEM|IMAGE|MEDIA|FOTO):\s*(https?:\/\/[^\s\]]+)\]/gi;
+        const mediaMatches = Array.from(chunkText.matchAll(mediaTagRegex));
+
+        for (const match of mediaMatches) {
+          const mediaUrl = match[1];
+          try {
+            console.log(`[AGENT] Detectada foto de produto vinculada no RAG. Enviando mídia: ${mediaUrl}`);
+            const mediaRes = await channelMod.sendMedia(
+              remoteJid,
+              "",
+              { mediaUrl, type: "image" },
+              instanceName
+            );
+            const mediaMsgId = mediaRes?.key?.id || `agent-media-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            try {
+              const { registerAiSend } = await import("@/lib/manual-send-registry");
+              registerAiSend(mediaMsgId);
+            } catch { /* ignore */ }
+
+            const nowIsoMedia = new Date().toISOString();
+            if (sessionId) {
+              await supabase.from("messages").insert({
+                session_id: sessionId,
+                message_id: mediaMsgId,
+                sender: "ai",
+                content: mediaUrl,
+                media_category: "image",
+                media_url: mediaUrl,
+                delivery_status: mediaRes?.ok === false ? "error" : "sent",
+                created_at: nowIsoMedia,
+              }).catch(() => {});
+            }
+
+            await supabase.from("chats_dashboard").insert({
+              message_id: mediaMsgId,
+              remote_jid: remoteJid,
+              sender_type: "ai",
+              content: `[Imagem] ${mediaUrl}`,
+              status_envio: mediaRes?.ok === false ? "error" : "sent",
+              instance_name: instanceName,
+              created_at: nowIsoMedia,
+            }).catch(() => {});
+          } catch (mErr: any) {
+            console.warn("[AGENT] Falha ao enviar foto vinculada de produto:", mErr?.message);
+          }
+        }
+
+        // Limpa as tags de mídia do texto para enviar a descrição do produto limpa
+        chunkText = chunkText.replace(mediaTagRegex, "").trim();
+        if (!chunkText) continue;
 
         try {
             // Se for o segundo chunk em diante, a gente espera um pouco a mais
