@@ -1618,10 +1618,10 @@ ${capturedVariablesPrompt}
             const mediaRes = await channelMod.sendMedia(
               remoteJid,
               "",
-              { mediaUrl, type: "image" },
+              { mediaUrl, url: mediaUrl, type: "image" },
               instanceName
             );
-            const mediaMsgId = mediaRes?.key?.id || `agent-media-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            const mediaMsgId = mediaRes?.messageId || (mediaRes as any)?.key?.id || `agent-media-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
             try {
               const { registerAiSend } = await import("@/lib/manual-send-registry");
               registerAiSend(mediaMsgId);
@@ -1638,7 +1638,7 @@ ${capturedVariablesPrompt}
                 media_url: mediaUrl,
                 delivery_status: mediaRes?.ok === false ? "error" : "sent",
                 created_at: nowIsoMedia,
-              }).catch(() => {});
+              }).then(() => {}, () => {});
             }
 
             await supabase.from("chats_dashboard").insert({
@@ -1649,7 +1649,7 @@ ${capturedVariablesPrompt}
               status_envio: mediaRes?.ok === false ? "error" : "sent",
               instance_name: instanceName,
               created_at: nowIsoMedia,
-            }).catch(() => {});
+            }).then(() => {}, () => {});
           } catch (mErr: any) {
             console.warn("[AGENT] Falha ao enviar foto vinculada de produto:", mErr?.message);
           }
