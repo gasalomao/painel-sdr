@@ -18,6 +18,7 @@ import { renderTemplate } from "@/lib/template-vars";
 import { cn } from "@/lib/utils";
 import { useClientSession } from "@/lib/use-session";
 import { Activity, FlaskConical, Info, ListTree, Settings } from "lucide-react";
+import { toast } from "sonner";
 
 import { AgentSwitcher } from "./_components/agent-switcher";
 import type { PreviewLead, PreviewSample } from "./_components/lead-selector";
