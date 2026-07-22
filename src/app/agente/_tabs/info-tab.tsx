@@ -1,11 +1,12 @@
 "use client";
 
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { Book, Check, Info, Pencil, Plus, Save, Settings, Trash2, Wrench, X } from "lucide-react";
+import { Book, Check, Info, Pencil, Plus, Save, Settings, Trash2, Wrench, X, Image as ImageIcon, Upload, Loader2 } from "lucide-react";
 import { SaveButton } from "../_components/save-button";
 import { EmptyState } from "../_components/empty-state";
 import { CopyButton } from "../_components/copy-button";
@@ -14,6 +15,8 @@ import { Toggle, type ToggleColor } from "../_components/toggle";
 import { WebhookGuide } from "../_components/webhook-guide";
 import type { PreviewLead, PreviewSample } from "../_components/lead-selector";
 import { ModelOptions } from "@/components/ai-module-shared";
+import { supabase } from "@/lib/supabase";
+import { toast } from "sonner";
 
 // Variáveis que aparecem como chips clicáveis no editor de prompt.
 const PROMPT_VARIABLES = [
@@ -154,7 +157,31 @@ export type InfoTabProps = {
   deletarKnowledge: (id: string) => void;
 };
 
+async function uploadImageToStorage(file: File): Promise<string | null> {
+  try {
+    const ext = file.name.split(".").pop() || "jpg";
+    const path = `kb_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.${ext}`;
+    const { data, error } = await supabase.storage.from("chat-media").upload(path, file, {
+      cacheControl: "3600",
+      upsert: true,
+    });
+    if (error) {
+      const retry = await supabase.storage.from("whatsapp_media").upload(path, file, {
+        cacheControl: "3600",
+        upsert: true,
+      });
+      if (retry.error) throw retry.error;
+      return supabase.storage.from("whatsapp_media").getPublicUrl(path).data.publicUrl;
+    }
+    return supabase.storage.from("chat-media").getPublicUrl(path).data.publicUrl;
+  } catch (err: any) {
+    toast.error("Erro no upload da foto: " + err.message);
+    return null;
+  }
+}
+
 export function InfoTab(p: InfoTabProps) {
+  const [uploadingImg, setUploadingImg] = useState(false);
   return (
     <div className="space-y-12 animate-in fade-in duration-500">
       {/* ========= SEÇÃO 1: IDENTIDADE ========= */}
@@ -988,16 +1015,36 @@ export function InfoTab(p: InfoTabProps) {
         </div>
 
         {p.knowledge.length > 0 && (
-          <div className="p-4 rounded-2xl bg-purple-500/5 border border-purple-500/15 space-y-2">
-            <div className="flex items-center gap-2">
-              <Wrench className="w-3.5 h-3.5 text-purple-400" />
-              <p className="text-[10px] font-black uppercase tracking-widest text-purple-400">Como a IA usa essa base</p>
+          <div className="space-y-3">
+            <div className="p-4 rounded-2xl bg-purple-500/5 border border-purple-500/15 space-y-2">
+              <div className="flex items-center gap-2">
+                <Wrench className="w-3.5 h-3.5 text-purple-400" />
+                <p className="text-[10px] font-black uppercase tracking-widest text-purple-400">Como a IA usa essa base</p>
+              </div>
+              <p className="text-[11px] text-purple-100/70 leading-relaxed">
+                Cada item abaixo vira um <strong>tópico-gatilho</strong>. Quando o cliente perguntar sobre ele, a IA chama
+                a tool <code className="text-purple-300 bg-black/30 px-1 rounded">search_knowledge_base</code> com a query
+                do tópico — assim ela só lê o conteúdo na hora certa, sem gastar tokens à toa.
+              </p>
             </div>
-            <p className="text-[11px] text-purple-100/70 leading-relaxed">
-              Cada item abaixo vira um <strong>tópico-gatilho</strong>. Quando o cliente perguntar sobre ele, a IA chama
-              a tool <code className="text-purple-300 bg-black/30 px-1 rounded">search_knowledge_base</code> com a query
-              do tópico — assim ela só lê o conteúdo na hora certa, sem gastar tokens à toa.
-            </p>
+
+            <div className="p-4 rounded-2xl bg-blue-500/10 border border-blue-500/20 space-y-2.5">
+              <div className="flex items-center gap-2">
+                <ImageIcon className="w-4 h-4 text-blue-400" />
+                <p className="text-xs font-black uppercase tracking-wider text-blue-400">
+                  📷 Como Vincular Fotos aos Produtos (Anti-Alucinação)
+                </p>
+              </div>
+              <p className="text-[11px] text-blue-200/80 leading-relaxed">
+                Para cadastrar produtos (ex: <strong>iPhone 15, Galaxy S24, Celulares</strong>) e garantir que a IA envie as fotos reais dos aparelhos com preço correto via WhatsApp, use o botão <strong>&quot;Anexar Foto de Produto&quot;</strong> ou insira a tag <code className="text-blue-300 bg-black/40 px-1 py-0.5 rounded">[IMAGEM: https://...]</code>.
+              </p>
+              <div className="bg-black/40 p-3 rounded-xl border border-white/5 space-y-1 font-mono text-[10px] text-blue-200/90">
+                <p className="font-bold text-blue-400">Exemplo para Tópico &quot;iPhone 15&quot;:</p>
+                <p>• iPhone 15 128GB - R$ 4.599 [IMAGEM: https://sua-cdn.com/iphone15.jpg]</p>
+                <p>• iPhone 15 Pro 128GB - R$ 5.899 [IMAGEM: https://sua-cdn.com/iphone15pro.jpg]</p>
+                <p>• iPhone 15 Pro Max 256GB - R$ 6.999 [IMAGEM: https://sua-cdn.com/iphone15promax.jpg]</p>
+              </div>
+            </div>
           </div>
         )}
 
@@ -1005,12 +1052,35 @@ export function InfoTab(p: InfoTabProps) {
           <div className="p-6 bg-white/5 border border-white/10 rounded-2xl space-y-4">
             <div className="space-y-1">
               <label className="text-[10px] font-black uppercase tracking-widest text-primary">Título (vira o gatilho)</label>
-              <Input value={p.novoKTitle} onChange={(e) => p.setNovoKTitle(e.target.value)} placeholder="Ex: Preço, Garantia, Horário de Atendimento..." className="bg-black/50 border-white/10" />
-              <p className="text-[9px] text-muted-foreground">Use 1-2 palavras. Quando o cliente mencionar isso, a IA consulta o conteúdo abaixo.</p>
+              <Input value={p.novoKTitle} onChange={(e) => p.setNovoKTitle(e.target.value)} placeholder="Ex: iPhone 15, Preços de Celulares, Garantia..." className="bg-black/50 border-white/10" />
+              <p className="text-[9px] text-muted-foreground">Use o nome do produto ou categoria. Quando o cliente mencionar isso, a IA consulta o conteúdo abaixo.</p>
             </div>
             <div className="space-y-1">
-              <label className="text-[10px] font-black uppercase tracking-widest text-primary">Conteúdo</label>
-              <Textarea value={p.novoKContent} onChange={(e) => p.setNovoKContent(e.target.value)} placeholder="Resposta detalhada que a IA verá quando consultar esse tópico..." className="bg-black/50 border-white/10 h-32 resize-none" />
+              <div className="flex items-center justify-between">
+                <label className="text-[10px] font-black uppercase tracking-widest text-primary">Conteúdo</label>
+                <label className="inline-flex items-center gap-1.5 text-[10px] font-bold text-blue-400 hover:text-blue-300 cursor-pointer bg-blue-500/10 border border-blue-500/20 px-2.5 py-1 rounded-lg transition-colors">
+                  {uploadingImg ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+                  Anexar Foto de Produto
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    disabled={uploadingImg}
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      setUploadingImg(true);
+                      const url = await uploadImageToStorage(file);
+                      setUploadingImg(false);
+                      if (url) {
+                        p.setNovoKContent(p.novoKContent ? `${p.novoKContent}\n[IMAGEM: ${url}]` : `[IMAGEM: ${url}]`);
+                        toast.success("Foto do produto anexada e vinculada!");
+                      }
+                    }}
+                  />
+                </label>
+              </div>
+              <Textarea value={p.novoKContent} onChange={(e) => p.setNovoKContent(e.target.value)} placeholder="Ex: iPhone 15 128GB - R$ 4.599 à vista [IMAGEM: https://...]" className="bg-black/50 border-white/10 h-36 resize-none" />
             </div>
             <SaveButton label="Adicionar ao Conhecimento" onSave={p.salvarNovoKnowledge} />
           </div>
@@ -1022,7 +1092,7 @@ export function InfoTab(p: InfoTabProps) {
             title="Sem base de conhecimento ainda"
             description={
               <>
-                Adicione documentos que a IA pode consultar quando precisar — <strong>preços, FAQ, políticas, horários, garantias</strong>.
+                Adicione documentos que a IA pode consultar quando precisar — <strong>catálogo de celulares, preços, fotos de produtos, garantias</strong>.
                 Ela só lê quando o cliente perguntar do tópico, então não gasta tokens à toa nem inventa resposta.
               </>
             }
@@ -1047,8 +1117,31 @@ export function InfoTab(p: InfoTabProps) {
                     <Input value={p.editKTitle} onChange={(e) => p.setEditKTitle(e.target.value)} className="bg-black/50 border-white/10" />
                   </div>
                   <div className="space-y-1">
-                    <label className="text-[10px] font-black uppercase tracking-widest text-primary">Conteúdo</label>
-                    <Textarea value={p.editKContent} onChange={(e) => p.setEditKContent(e.target.value)} className="bg-black/50 border-white/10 h-32 resize-none" />
+                    <div className="flex items-center justify-between">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-primary">Conteúdo</label>
+                      <label className="inline-flex items-center gap-1.5 text-[10px] font-bold text-blue-400 hover:text-blue-300 cursor-pointer bg-blue-500/10 border border-blue-500/20 px-2 py-0.5 rounded-md transition-colors">
+                        {uploadingImg ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
+                        Anexar Foto de Produto
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          disabled={uploadingImg}
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            if (!file) return;
+                            setUploadingImg(true);
+                            const url = await uploadImageToStorage(file);
+                            setUploadingImg(false);
+                            if (url) {
+                              p.setEditKContent(p.editKContent ? `${p.editKContent}\n[IMAGEM: ${url}]` : `[IMAGEM: ${url}]`);
+                              toast.success("Foto do produto anexada ao conteúdo!");
+                            }
+                          }}
+                        />
+                      </label>
+                    </div>
+                    <Textarea value={p.editKContent} onChange={(e) => p.setEditKContent(e.target.value)} className="bg-black/50 border-white/10 h-36 resize-none" />
                   </div>
                   <div className="flex gap-2">
                     <SaveButton label="Salvar alterações" onSave={p.salvarEdicaoKnowledge} className="flex-1" />
@@ -1061,7 +1154,14 @@ export function InfoTab(p: InfoTabProps) {
                     <div className="flex items-start gap-4 min-w-0">
                       <div className="p-3 bg-blue-500/10 text-blue-400 rounded-xl shrink-0"><Book className="w-5 h-5" /></div>
                       <div className="min-w-0">
-                        <h4 className="font-bold text-sm truncate">{k.title}</h4>
+                        <div className="flex items-center gap-2">
+                          <h4 className="font-bold text-sm truncate">{k.title}</h4>
+                          {/\[IMAGEM:\s*https?:\/\/[^\s\]]+\]/i.test(k.content || "") && (
+                            <span className="inline-flex items-center gap-1 rounded bg-blue-500/15 border border-blue-500/30 px-1.5 py-0.5 text-[9px] font-bold text-blue-400 shrink-0">
+                              <ImageIcon className="w-2.5 h-2.5" /> Foto Vinculada
+                            </span>
+                          )}
+                        </div>
                         <p className="text-xs text-muted-foreground mt-1 line-clamp-1">{(k.content || "").substring(0, 80)}...</p>
                       </div>
                     </div>
