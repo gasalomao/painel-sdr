@@ -467,6 +467,7 @@ function ConversationItem({
   const contact = conversation.contact;
   const displayName = contact?.name || contact?.phone || "Desconhecido";
   const initials = displayName.charAt(0).toUpperCase();
+  const isHumanTakeover = conversation.status === "open"; // bot_paused
 
   const handleClick = useCallback(() => {
     onSelect(conversation);
@@ -488,8 +489,8 @@ function ConversationItem({
     <button
       onClick={handleClick}
       className={cn(
-        "flex w-full items-start gap-3 px-3 py-3 text-left transition-colors hover:bg-muted/50 border-b border-border/40 cursor-pointer",
-        isActive && "border-l-2 border-primary bg-muted/70"
+        "flex w-full items-start gap-3 px-3 py-3 text-left transition-colors hover:bg-muted/50 border-b border-border/40 cursor-pointer relative",
+        isActive && "border-l-4 border-primary bg-muted/70"
       )}
     >
       {/* Avatar */}
@@ -503,34 +504,48 @@ function ConversationItem({
         ) : (
           initials
         )}
+        {/* Indicador de status IA vs Humano no avatar */}
+        <span
+          className={cn(
+            "absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full border-2 border-background flex items-center justify-center text-[9px] font-bold text-white shadow-sm",
+            isHumanTakeover ? "bg-amber-500" : "bg-emerald-500"
+          )}
+          title={isHumanTakeover ? "Atendimento Humano (IA Silenciada)" : "Atendimento IA (Robô Ativo)"}
+        >
+          {isHumanTakeover ? "👤" : "🤖"}
+        </span>
       </div>
 
       {/* Detalhes */}
       <div className="min-w-0 flex-1">
         <div className="flex items-center justify-between gap-2">
-          <span className="truncate text-sm font-medium text-foreground">
-            {displayName}
-          </span>
+          <div className="flex items-center gap-1.5 min-w-0 truncate">
+            <span className="truncate text-sm font-medium text-foreground">
+              {displayName}
+            </span>
+            {/* Tag visual de status */}
+            <span
+              className={cn(
+                "px-1.5 py-0.2 rounded text-[9px] font-bold uppercase tracking-wider shrink-0",
+                isHumanTakeover
+                  ? "bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30"
+                  : "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30"
+              )}
+            >
+              {isHumanTakeover ? "Humano" : "IA"}
+            </span>
+          </div>
           <span className="shrink-0 text-[10px] text-muted-foreground">{timeAgo}</span>
         </div>
-        <div className="mt-0.5 flex items-center justify-between gap-2">
+        <div className="mt-1 flex items-center justify-between gap-2">
           <p className="truncate text-xs text-muted-foreground flex-1">
             {conversation.last_message_text || "Nenhuma mensagem..."}
           </p>
-          <div className="flex shrink-0 items-center gap-1.5">
-            {conversation.unread_count > 0 && (
-              <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground">
-                {conversation.unread_count}
-              </span>
-            )}
-            <span
-              className={cn(
-                "h-2.5 w-2.5 rounded-full border border-card shadow-sm",
-                STATUS_COLORS[conversation.status]
-              )}
-              title={conversation.status === "open" ? "Humano (Pausado)" : (conversation.status === "pending" ? "Robô (Ativo)" : "Fechado")}
-            />
-          </div>
+          {conversation.unread_count > 0 && (
+            <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground shrink-0">
+              {conversation.unread_count}
+            </span>
+          )}
         </div>
       </div>
     </button>
