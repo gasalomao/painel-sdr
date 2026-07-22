@@ -129,7 +129,7 @@ async function preflightCheck(campaignId: string): Promise<{ ok: boolean; error?
         return { ok: false, error: `Conexão Cloud "${c.instance_name}" sem token/phone_number_id. Configure em /whatsapp.` };
       }
     } else {
-      const status = await evolution.getStatus(c.instance_name);
+      const status = await channel.getStatus(c.instance_name);
       if (status.state === "not_found") {
         return { ok: false, error: `Instância "${c.instance_name}" não existe na Evolution API. Vai em /whatsapp e cria/conecta.` };
       }
@@ -608,7 +608,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     const result = await channel.sendMessage(sendJid, text, c.instance_name);
     // Sufixo aleatório no fallback evita colisão quando vários disparos saem
     // no mesmo ms (Date.now era duplicável → unique violation no insert).
-    const msgId = result?.key?.id || result?.data?.key?.id || `bulk-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const msgId = (result as any)?.messageId || (result as any)?.key?.id || (result as any)?.data?.key?.id || `bulk-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     // Persiste no chat (sessions/messages/chats_dashboard) pra IA ter contexto.
     // Esse passo é "best-effort" — se falhar, não queremos marcar o envio como erro,

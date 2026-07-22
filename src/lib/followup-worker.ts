@@ -456,7 +456,7 @@ async function processTarget(
 
     const result = await channel.sendMessage(target.remote_jid, text, camp.instance_name);
     // Sufixo aleatório evita colisão quando vários follow-ups saem no mesmo ms.
-    const msgId = result?.key?.id || result?.data?.key?.id || `followup-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const msgId = (result as any)?.messageId || (result as any)?.key?.id || (result as any)?.data?.key?.id || `followup-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     // Persiste no chat pra IA ver contexto depois
     const sess = await findOrCreateContactSession(
