@@ -36,7 +36,11 @@ interface MessageThreadProps {
   onMessagesLoaded: (messages: Message[]) => void;
   onNewMessage: (message: Message) => void;
   onUpdateMessage: (id: string, updates: Partial<Message>) => void;
-  onStatusChange: (conversationId: string, status: ConversationStatus) => void;
+  onStatusChange: (
+    conversationId: string,
+    status: ConversationStatus,
+    extra?: { bot_status?: string; resume_at?: string | null }
+  ) => void;
   onBack?: () => void;
   resyncToken?: number;
   clientId: string | null;
