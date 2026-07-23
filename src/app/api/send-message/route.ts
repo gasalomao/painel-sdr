@@ -99,7 +99,15 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    console.log(`[SEND-MESSAGE] Enviando para ${remoteJid} via ${instanceName}`);
+    let cleanJid = String(remoteJid).trim();
+    if (cleanJid.startsWith("phone:")) {
+      cleanJid = cleanJid.replace(/^phone:/i, "");
+      if (!cleanJid.includes("@")) {
+        cleanJid = cleanJid + "@s.whatsapp.net";
+      }
+    }
+
+    console.log(`[SEND-MESSAGE] Enviando para ${cleanJid} (original: ${remoteJid}) via ${instanceName}`);
 
     // === 1. Enviar via Evolution API DIRETO ===
     // Se falhar, NÃO aborta — salva a mensagem com status 'error' pra não sumir da UI.
@@ -107,14 +115,14 @@ export async function POST(req: NextRequest) {
     let sendError: string | null = null;
     try {
       if (media && media.base64) {
-        evoData = await channel.sendMedia(remoteJid, text || "", {
+        evoData = await channel.sendMedia(cleanJid, text || "", {
           type: media.type,
           base64: media.base64,
           fileName: media.fileName,
           mimetype: media.mimetype,
         }, instanceName);
       } else {
-        evoData = await channel.sendMessage(remoteJid, text, instanceName);
+        evoData = await channel.sendMessage(cleanJid, text, instanceName);
       }
     } catch (evoErr: any) {
       sendError = evoErr.message;
