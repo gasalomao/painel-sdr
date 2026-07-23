@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS public.agent_knowledge_chunks (
   embedding     vector(768),
   token_count   integer,
   content_hash  text,
+  embedding_model text,
   created_at    timestamp with time zone NOT NULL DEFAULT now()
 );
 
@@ -623,6 +624,50 @@ CREATE INDEX IF NOT EXISTS idx_agent_knowledge_client              ON public.age
 CREATE INDEX IF NOT EXISTS idx_agent_knowledge_chunks_agent_id     ON public.agent_knowledge_chunks USING btree (agent_id);
 CREATE INDEX IF NOT EXISTS idx_agent_knowledge_chunks_knowledge_id ON public.agent_knowledge_chunks USING btree (knowledge_id);
 CREATE INDEX IF NOT EXISTS idx_agent_knowledge_chunks_embedding_hnsw ON public.agent_knowledge_chunks USING hnsw (embedding vector_cosine_ops) WITH (m='16', ef_construction='64');
+
+-- RPC pra busca vetorial (RAG). Sem essa função, o agente IA cai pra fallback
+-- ILIKE que não entende sinônimos (cliente pergunta "celular" mas base tem
+-- "smartphone"). Idempotente (CREATE OR REPLACE).
+-- Threshold default 0.35 (threshold de runtime pode ser passado na chamada).
+CREATE OR REPLACE FUNCTION public.match_knowledge_chunks(
+  query_embedding vector(768),
+  p_agent_id      INT,
+  p_client_id     UUID DEFAULT NULL,
+  match_count     INT  DEFAULT 5,
+  min_similarity  FLOAT DEFAULT 0.35
+)
+RETURNS TABLE (
+  id           UUID,
+  knowledge_id UUID,
+  title        TEXT,
+  content      TEXT,
+  chunk_index  INT,
+  similarity   FLOAT
+)
+LANGUAGE sql STABLE AS $$
+  SELECT
+    c.id,
+    c.knowledge_id,
+    k.title,
+    c.content,
+    c.chunk_index,
+    1 - (c.embedding <=> query_embedding) AS similarity
+  FROM public.agent_knowledge_chunks c
+  JOIN public.agent_knowledge k ON k.id = c.knowledge_id
+  WHERE c.agent_id = p_agent_id
+    AND (p_client_id IS NULL OR c.client_id = p_client_id)
+    AND c.embedding IS NOT NULL
+    AND (1 - (c.embedding <=> query_embedding)) >= min_similarity
+  ORDER BY c.embedding <=> query_embedding ASC
+  LIMIT match_count;
+$$;
+GRANT EXECUTE ON FUNCTION public.match_knowledge_chunks TO anon, authenticated, service_role;
+
+-- Modelo de embeddings default do RAG. Sem isso, rag.ts usa fallback hard-coded
+-- (gemini-embedding-001). INSERT ON CONFLICT pra ser idempotente.
+INSERT INTO public.app_settings (key, value, updated_at)
+VALUES ('rag_embedding_model', 'gemini-embedding-001', NOW())
+ON CONFLICT (key) DO NOTHING;
 
 -- agents
 CREATE INDEX IF NOT EXISTS idx_agent_settings_client ON public.agent_settings USING btree (client_id);

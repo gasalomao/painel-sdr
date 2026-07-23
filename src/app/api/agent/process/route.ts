@@ -619,6 +619,43 @@ ${autoRulesBlock}
 6. Seja natural, humano e empático.
 7. ANCORAGEM DE MÍDIA/PRODUTO: Ao falar sobre produtos/itens da Base de Conhecimento que possuam foto/mídia vinculada no formato [IMAGEM: URL] ou [FOTO: URL], você DEVE OBRIGATORIAMENTE incluir essa tag exata na resposta. O sistema enviará a foto do produto automaticamente ao cliente. NUNCA altere ou invente URLs.
 </execution_directives>
+
+<anti_hallucination_rules>
+## REGRA DE OURO — ZERO ALUCINAÇÃO EM PRODUTOS/PREÇOS/ESTOQUE
+
+Sua base de conhecimento (tool search_knowledge_base) é a ÚNICA fonte de verdade da empresa. Tudo que você disser sobre produto, preço, estoque, horário, política, garantia, entrega ou especificação TÉCNICA precisa vir DE LÁ — não da sua imaginação.
+
+### QUANDO CONSULTAR OBRIGATORIAMENTE:
+- Cliente pergunta "tem X?" / "vocês vendem Y?" → CONSULTE antes de responder.
+- Cliente pergunta preço, valor, parcelamento, desconto → CONSULTE sempre.
+- Cliente pergunta estoque, tamanho, cor, modelo disponível → CONSULTE sempre.
+- Cliente pergunta horário, endereço, entrega, prazo → CONSULTE sempre.
+- Cliente pergunta garantia, troca, reclamação, política → CONSULTE sempre.
+- Cliente cita um produto/modelo específico → CONSULTE pra confirmar que existe.
+
+### PROIBIDO (MESMO QUE PAREÇA INOFENSIVO):
+- INVENTAR preço ("acho que é R$ XX" → NUNCA).
+- INVENTAR produto/modelo/cor que não está na base.
+- INVENTAR estoque ("temos 3 unidades" sem consultar).
+- DAR "estimativa" de preço se a base não tem.
+- CHUTAR especificações técnicas (memória, bateria, dimensões).
+- Sugerir produto parecido em vez de consultar a base.
+
+### QUANDO A BASE NÃO TEM A RESPOSTA:
+- Seja honesto: "Vou confirmar isso pra você" / "Esse modelo específico não está no nosso catálogo atual".
+- NUNCA diga "sim, temos" se a busca não retornou o item.
+- NUNCA invente um substituto sem consultar a base antes.
+
+### EXEMPLOS CERTOS:
+✅ Cliente: "Tem iPhone 15 256GB?" → Consulta KB → Se tem: "Sim! R$ X em Y parcelas." → Se NÃO tem: "No momento só temos o iPhone 15 128GB. O de 256GB está sem estoque."
+✅ Cliente: "Qual o preço?" → Sempre consulta KB antes de responder.
+✅ Cliente: "Tem em vermelho?" → Consulta KB → Só confirma se a cor vermelho aparecer no chunk retornado.
+
+### EXEMPLOS ERRADOS (ALUCINAÇÃO):
+❌ "Acho que é uns R$ 2000" (chute)
+❌ "Sim, temos em outras cores também" (sem confirmar)
+❌ "O de 256GB custa R$ X" (inventando variante)
+</anti_hallucination_rules>
 `;
 
     // CONTEXTO DO TURNO (volátil) — vai anexado à mensagem do cliente, NÃO ao
@@ -644,20 +681,26 @@ ${capturedVariablesPrompt}
        functionDeclarations.push({
           name: "search_knowledge_base",
           description:
-             `Base de conhecimento OFICIAL da empresa. Tópicos disponíveis: ${topicList}. ` +
-             `REGRA CRÍTICA: SEMPRE que o cliente perguntar sobre PREÇO, VALOR, HORÁRIO, ENDEREÇO, ` +
-             `POLÍTICA, ENTREGA, GARANTIA, PROCEDIMENTO, ou qualquer tópico listado acima — você DEVE ` +
-             `chamar esta tool ANTES de responder. PROIBIDO inventar valores, datas, condições ou termos. ` +
-             `Se a base não retornar resultado, diga "vou verificar e te respondo" — nunca chute.`,
+             `Base de conhecimento OFICIAL da empresa (catálogo, preços, estoque, políticas). ` +
+             `Tópicos disponíveis: ${topicList}. ` +
+             `CHAMADA OBRIGATÓRIA quando o cliente perguntar sobre: PREÇO, VALOR, PARCELAMENTO, DESCONTO, ` +
+             `PRODUTO, MODELO, COR, TAMANHO, ESTOQUE, DISPONIBILIDADE, HORÁRIO, ENDEREÇO, ENTREGA, PRAZO, ` +
+             `GARANTIA, TROCA, RECLAMAÇÃO, POLÍTICA, ESPECIFICAÇÃO TÉCNICA, ou mencionar o nome de qualquer produto. ` +
+             `Também chame quando o cliente disser "tem X?" / "vocês vendem Y?" / "quanto custa" / "faz desconto?". ` +
+             `PROIBIDO responder sobre esses tópicos SEM chamar esta tool primeiro. ` +
+             `PROIBIDO INVENTAR informações (preço, estoque, especificação) que não vieram no retorno. ` +
+             `Se a base não retornar resultados, diga ao cliente que vai verificar — nunca chute.`,
           parameters: {
              type: SchemaType.OBJECT,
              properties: {
                 query: {
                    type: SchemaType.STRING,
                    description:
-                      `Palavras-chave da busca (3-5 palavras). Exemplos: "preço plano premium", ` +
-                      `"horário sábado", "política cancelamento". Use o vocabulário do cliente, ` +
-                      `não precisa bater literal com o título. Tópicos atuais: ${topicList}`,
+                      `Termos da busca (3-6 palavras-chave). Use o vocabulário do cliente, ` +
+                      `não precisa bater literal com o título. Exemplos: ` +
+                      `"preço iPhone 15", "estoque camiseta polo G", "horário sábado", ` +
+                      `"política cancelamento", "garantia notebook dell". ` +
+                      `Tópicos atuais na base: ${topicList}`,
                 },
              },
              required: ["query"],
@@ -945,17 +988,23 @@ ${capturedVariablesPrompt}
           let searchMethod = "none";
           let dbgError: string | null = null;
 
-          if (raw) {
-             try {
-                const { searchKnowledge } = await import("@/lib/rag");
-                const hits = await searchKnowledge({
-                   query: raw,
-                   agentId,
-                   clientId,
-                   apiKey: finalApiKey,
-                   topK: 5,
-                   minSimilarity: 0.55,
-                });
+           if (raw) {
+              try {
+                 const { searchKnowledge } = await import("@/lib/rag");
+                 // ⚠ THRESHOLD 0.35 — era 0.55 e PERDIA matches de catálogo.
+                 // Gemelli-embedding-001 (768-dim) produz similaridades 0.35-0.50
+                 // pra matches REAIS de catálogo (cliente pergunta "iPhone 15"
+                 // KB tem "iPhone 15 128GB"). 0.55 cortava metade das buscas → IA
+                 // caía no ILIKE (sem sinônimos) ou respondia sem consultar.
+                 // 0.35 equilibra precisão (sem lixo) + recall (sem perder item).
+                 const hits = await searchKnowledge({
+                    query: raw,
+                    agentId,
+                    clientId,
+                    apiKey: finalApiKey,
+                    topK: 5,
+                    minSimilarity: 0.35,
+                 });
                 if (hits.length > 0) {
                    matches = hits.map((h) => ({
                       title: h.title,
