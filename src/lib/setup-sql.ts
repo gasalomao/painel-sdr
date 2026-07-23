@@ -532,7 +532,16 @@ CREATE TABLE IF NOT EXISTS public.leads_extraidos (
   last_analysis_hash       text,
   last_analysis_at         timestamp with time zone,
   email                    text,
-  observacoes              text
+  observacoes              text,
+  -- ---- Captura profunda do Google Maps (Migration 009) ----
+  reviews_detalhes         jsonb,
+  business_details         jsonb,
+  opening_hours            jsonb,
+  attributes               jsonb,
+  price_range              text,
+  open_now                 text,
+  photos                   jsonb,
+  maps_url                 text
 );
 
 CREATE TABLE IF NOT EXISTS public.messages (
