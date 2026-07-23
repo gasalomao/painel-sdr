@@ -251,6 +251,9 @@ export interface AiUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** true quando o provedor não devolveu usage real (ex: DeepSeek via reverse
+   *  sem métrica no SSE). Caller repasse pra metadata.estimated do logTokenUsage. */
+  estimated?: boolean;
 }
 
 function emptyUsage(): AiUsage {
@@ -273,7 +276,8 @@ function openRouterUsage(json: any): AiUsage {
   const promptTokens = Number(u.prompt_tokens || 0);
   const completionTokens = Number(u.completion_tokens || 0);
   const totalTokens = Number(u.total_tokens || (promptTokens + completionTokens));
-  return { promptTokens, completionTokens, totalTokens };
+  const estimated = u?.estimated === true;
+  return { promptTokens, completionTokens, totalTokens, estimated };
 }
 
 // =====================================================================
@@ -372,6 +376,26 @@ async function resolveGatewayCreds(opts: {
   let apiKey = (opts.gatewayApiKey || "").trim() || null;
   let endpointId: string | undefined;
   let fallbackModelRef = (opts.fallbackModelRef || "").trim() || null;
+
+  // Auto-start do proxy CLIProxyAPI server-side. O proxy morre a cada reboot
+  // /dev-server restart, e sem isso as chamadas de IA via gateway falham
+  // silenciosamente e caem no `fallbackModelRef` (ex: deepseek-chat). O usuário
+  // herdava a mensagem de erro do fallback e achava que era problema no DeepSeek
+  // — mas a causa raiz era o gateway morto. Custo: ~12s só na 1ª chamada após
+  // restart (startProxy espera subir); demais chamadas só fazem fetch barato.
+  if (!baseUrl) {
+    try {
+      const { ensureProxyRunning } = await import("@/lib/gateway-proxy-manager");
+      const status = await ensureProxyRunning();
+      // Se o proxy tribal, nada a fazer aqui — resolveGatewayEndpointForModel
+      // abaixo não vai achar baseUrl e cai no caminho de fallback API key.
+      if (!status.running) {
+        console.warn(`[ai-provider] Proxy gateway não está rodando (installed=${status.installed}). Vai tentar fallback.`);
+      }
+    } catch (e: any) {
+      console.warn(`[ai-provider] ensureProxyRunning falhou: ${e?.message || e} — segue pro caminho normal.`);
+    }
+  }
 
   // Sem override explícito de baseURL: resolve a CONEXÃO específica do modelo.
   if (!baseUrl && model) {
@@ -537,7 +561,7 @@ export async function generateText(opts: GenerateTextOpts): Promise<GenerateText
     messages.push({ role: "user", content: opts.prompt });
     const body: Record<string, any> = { model, messages };
     if (opts.temperature != null && Number.isFinite(opts.temperature)) body.temperature = opts.temperature;
-    if (opts.maxOutputTokens != null) body.max_tokens = opts.maxOutputTokens;
+    body.max_tokens = opts.maxOutputTokens != null ? opts.maxOutputTokens : 4096;
     if (opts.jsonMode) body.response_format = { type: "json_object" };
     applyReasoning(body, resolveReasoningMode(opts.reasoningMode, opts.thinkingBudget), provider, model);
     const json = await openRouterChat(opts.openrouterApiKey, body);
@@ -685,6 +709,7 @@ export interface StartAiChatOpts {
   history: Array<{ role: "user" | "model"; text: string }>;
   tools: AiFunctionDecl[];
   temperature?: number | null;
+  maxOutputTokens?: number | null;
   /** Modo de raciocínio UNIVERSAL (0=Econômico, 1=Equilibrado, 2=Intenso). */
   reasoningMode?: 0 | 1 | 2 | null;
   thinkingBudget?: number | null;
@@ -853,6 +878,11 @@ function startOpenAICompatibleChat(opts: StartAiChatOpts, model: string, deps: O
     const body: Record<string, any> = { model, messages };
     if (tools && !toolsDisabled) { body.tools = tools; body.tool_choice = "auto"; }
     if (temp !== undefined) body.temperature = temp;
+    if (opts.maxOutputTokens != null) {
+      body.max_tokens = opts.maxOutputTokens;
+    } else if (deps.provider === "openrouter") {
+      body.max_tokens = 4096;
+    }
     applyReasoning(body, rMode, deps.provider, model);
 
     let json: any;

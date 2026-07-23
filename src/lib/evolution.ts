@@ -438,16 +438,33 @@ export const evolution = {
     // Simular digitação
     await this.sendPresence(targetJid, "composing", instance);
 
-    const mediaSource = mediaData.mediaUrl || mediaData.url || mediaData.base64 || "";
+    // PREFERÊNCIA DE FONTE DA MÍDIA:
+    //   1. base64 (se vier) — sempre funciona. Independente de URL pública,
+    //      CORS, redirect, auth. É o que o channel.ts já converte pra gente.
+    //   2. URL (fallback) — a Evolution API baixa sozinha, mas pode falhar se
+    //      a URL tiver redirect ou auth privada. Quando falha, mostra LINK como
+    //      texto em vez da imagem — é o bug "envia link em vez de imagem".
+    //
+    // Limpa prefixo data: se vier (defensivo — às vezes o caller já inclui).
+    const hasBase64 = mediaData.base64 && mediaData.base64.length > 100;
+    const cleanBase64 = hasBase64
+      ? mediaData.base64!.replace(/^data:[^;]+;base64,/, "")
+      : null;
+    const mediaSource = cleanBase64 || mediaData.mediaUrl || mediaData.url || mediaData.base64 || "";
 
     if (mediaData.type === "audio") {
+      // Áudio always via sendWhatsAppAudio (PTT com player nativo no WhatsApp).
+      // Aceita base64 OU URL (a Evolution baixa a URL pra PTT também).
       return evoFetch(`/message/sendWhatsAppAudio/${instance}`, "POST", {
         number: targetJid,
-        audio: mediaSource,
+        audio: cleanBase64 || mediaData.mediaUrl || mediaData.url || "",
         delay: 2000
       });
     }
 
+    // Para imagem/vídeo/documento: se temos base64, usa SEMPRE ele (mais robusto
+    // que URL — Evolution API mostrava link em vez de imagem quando URL falhava).
+    // Se só temos URL, manda URL (fallback). O channel.ts cuida de converter.
     return evoFetch(`/message/sendMedia/${instance}`, "POST", {
       number: targetJid,
       mediatype: mediaData.type,

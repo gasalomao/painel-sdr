@@ -1436,6 +1436,7 @@ export async function analyzeLead(opts: {
         promptTokens: thinkOut.usage.promptTokens,
         completionTokens: thinkOut.usage.completionTokens,
         totalTokens: thinkOut.usage.totalTokens,
+        clientId: opts.clientId || lead.client_id || undefined,
       });
     } catch {}
   } catch (e: any) {
@@ -1473,6 +1474,7 @@ export async function analyzeLead(opts: {
       promptTokens: jsonOut.usage.promptTokens,
       completionTokens: jsonOut.usage.completionTokens,
       totalTokens: jsonOut.usage.totalTokens,
+      clientId: opts.clientId || lead.client_id || undefined,
     });
   } catch {}
 

@@ -591,6 +591,7 @@ export async function POST(req: NextRequest) {
             promptTokens: Number(meta.promptTokenCount || 0),
             completionTokens: Number(meta.candidatesTokenCount || 0),
             totalTokens: Number(meta.totalTokenCount || 0),
+            clientId: clientIdScope || undefined,
             metadata: { triggered_by: triggerLabel, chats: chatsAnalyzed },
           });
         } catch (err: any) {
@@ -618,6 +619,7 @@ export async function POST(req: NextRequest) {
             promptTokens: out.usage.promptTokens,
             completionTokens: out.usage.completionTokens,
             totalTokens: out.usage.totalTokens,
+            clientId: clientIdScope || undefined,
             metadata: { triggered_by: triggerLabel, chats: chatsAnalyzed },
           });
         } catch (err: any) {
@@ -654,6 +656,7 @@ export async function POST(req: NextRequest) {
             promptTokens: Number(u.prompt_tokens || 0),
             completionTokens: Number(u.completion_tokens || 0),
             totalTokens: Number(u.total_tokens || 0),
+            clientId: clientIdScope || undefined,
             metadata: { triggered_by: triggerLabel, chats: chatsAnalyzed },
           });
         } catch (err: any) {

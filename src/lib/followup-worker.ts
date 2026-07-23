@@ -24,6 +24,7 @@ import {
 } from "@/lib/campaign-worker";
 import { logTokenUsage } from "@/lib/token-usage";
 import { registerPendingAutomatedSend } from "@/lib/manual-send-registry";
+import { clientIdFromInstance } from "@/lib/tenant";
 
 type FollowupStep = {
   day_offset: number;
@@ -235,6 +236,8 @@ export async function personalizeFollowupWithAI(opts: {
   campaignName?: string;
   /** remoteJid pra puxar o briefing IA cacheado (lead-intelligence). */
   remoteJid?: string;
+  /** instance_name da campanha — pra resolver o client_id dono do gasto de IA. */
+  instanceName?: string;
 }): Promise<string> {
   const { resolveModel } = await import("@/lib/ai-default-model");
   const modelId = await resolveModel(opts.model);
@@ -305,6 +308,16 @@ Antes de escrever, faça essa análise mental (não devolva, é só pra você):
     openrouterApiKey: keys.openrouter,
   });
 
+  // Resolve client_id dono da campanha pela instância — sem isso, o gasto
+  // cai no Default client e o /tokens do tenant fica sem custo de follow-up.
+  let clientIdForLog: string | undefined;
+  if (opts.instanceName) {
+    try {
+      const resolved = await clientIdFromInstance(opts.instanceName);
+      if (resolved) clientIdForLog = resolved;
+    } catch { /* não-fatal, loga como default */ }
+  }
+
   logTokenUsage({
     source: "followup",
     sourceId: opts.campaignId || null,
@@ -314,6 +327,7 @@ Antes de escrever, faça essa análise mental (não devolva, é só pra você):
     promptTokens: out.usage.promptTokens,
     completionTokens: out.usage.completionTokens,
     totalTokens: out.usage.totalTokens,
+    clientId: clientIdForLog,
     metadata: { stepNumber: opts.stepNumber, nome_empresa: opts.nome_empresa },
   });
 
@@ -420,6 +434,7 @@ async function processTarget(
         campaignId: camp.id,
         campaignName: camp.name,
         remoteJid: target.remote_jid,  // ← injeta briefing
+        instanceName: camp.instance_name,  // ← resolve clientId dono do gasto
       });
       if (ai && ai.trim()) {
         text = ai.trim();

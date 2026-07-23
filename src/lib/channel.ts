@@ -105,6 +105,92 @@ export async function getProvider(instanceName: string): Promise<{ primary: What
    API pública unificada: sendMessage / sendMedia / getStatus / checkNumbers
 ============================================================ */
 
+/**
+ * Baixa uma URL pública (Supabase Storage, etc) e devolve como base64.
+ *
+ * POR QUE EXISTE: o Evolution GO exige SEMPRE base64 no payload (não suporta
+ * URL direta). O Evolution V2 aceita URL, mas se a URL tiver redirect, auth
+ * privada, ou se a Evolution não conseguir baixar (CORS/timeout), ela envia
+ * o LINK da imagem como texto em vez da imagem em si — é o bug que o usuário
+ * reportou ("envia o link da imagem, não a imagem").
+ *
+ * Solução robusta: baixamos server-side e SEMPRE enviamos base64 pro provider.
+ * Nunca mais o cliente recebe link no lugar da imagem.
+ *
+ * Cache simples em memória (LRU de 50 itens) pra não baixar a mesma foto
+ * de produto 100x por dia (produtos do catálogo são re-enviados a cada pergunta).
+ */
+const mediaBase64Cache = new Map<string, { base64: string; mimetype: string; ts: number }>();
+const MEDIA_CACHE_TTL_MS = 6 * 3600 * 1000; // 6h — produtos mudam raramente
+const MEDIA_CACHE_MAX = 50;
+
+async function fetchUrlAsBase64(url: string): Promise<{ base64: string; mimetype: string } | null> {
+  if (!url || !/^https?:\/\//.test(url)) return null;
+
+  // Cache hit?
+  const cached = mediaBase64Cache.get(url);
+  if (cached && Date.now() - cached.ts < MEDIA_CACHE_TTL_MS) {
+    return { base64: cached.base64, mimetype: cached.mimetype };
+  }
+
+  try {
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(15000),
+      headers: { "User-Agent": "painel-sdr-media/1.0" },
+    });
+    if (!res.ok) {
+      console.warn(`[channel] fetchUrlAsBase64 falhou pra ${url}: HTTP ${res.status}`);
+      return null;
+    }
+    const mimetype = res.headers.get("content-type") || "image/jpeg";
+    const buf = Buffer.from(await res.arrayBuffer());
+    // Limite 15MB — Evolution/WhatsApp rejeitam anexos maiores.
+    if (buf.length > 15 * 1024 * 1024) {
+      console.warn(`[channel] Mídia ${url} tem ${buf.length}B (>15MB) — pode ser rejeitada.`);
+    }
+    const base64 = buf.toString("base64");
+
+    // Cache (LRU simples — quando encher, remove o mais antigo).
+    if (mediaBase64Cache.size >= MEDIA_CACHE_MAX) {
+      const oldest = Array.from(mediaBase64Cache.entries()).sort((a, b) => a[1].ts - b[1].ts)[0];
+      if (oldest) mediaBase64Cache.delete(oldest[0]);
+    }
+    mediaBase64Cache.set(url, { base64, mimetype, ts: Date.now() });
+
+    return { base64, mimetype };
+  } catch (err: any) {
+    console.warn(`[channel] fetchUrlAsBase64 erro pra ${url}:`, err?.message);
+    return null;
+  }
+}
+
+/**
+ * Garante que mediaData tenha base64. Se só vier URL, baixa e converte.
+ * Retorna uma NOVA MediaData completa (não muta a original).
+ */
+async function ensureBase64(media: MediaData): Promise<MediaData> {
+  // Já tem base64 direto → segue.
+  if (media.base64 && media.base64.length > 100) {
+    return media;
+  }
+
+  const url = media.mediaUrl || media.url;
+  if (!url) return media;
+
+  const fetched = await fetchUrlAsBase64(url);
+  if (!fetched) {
+    // Não conseguiu baixar — retorna como veio (provider pode tentar URL direta).
+    return media;
+  }
+
+  return {
+    ...media,
+    base64: fetched.base64,
+    mimetype: media.mimetype || fetched.mimetype,
+    // Mantém URL pra fallback do provider, mas base64 é a via principal agora.
+  };
+}
+
 export async function sendMessage(remoteJid: string, text: string, instanceName: string): Promise<SendResult> {
   const ch = await resolveChannel(instanceName);
   if (ch.provider === "whatsapp_cloud") {
@@ -130,24 +216,31 @@ export async function sendMedia(
   mediaData: MediaData,
   instanceName: string
 ): Promise<SendResult> {
+  // GARANTIA ANTI-LINK: baixa a URL server-side e converte pra base64 ANTES
+  // de chamar o provider. Sem isso, quando o agente IA envia uma foto de
+  // produto do catálogo via tag [IMAGEM: url], a Evolution API (especialmente
+  // a GO) recebe `base64: undefined` e acaba mostrando o link como texto
+  // em vez da imagem propriamente dita.
+  const resolvedMedia = await ensureBase64(mediaData);
+
   const ch = await resolveChannel(instanceName);
   if (ch.provider === "whatsapp_cloud") {
     const cfg = ensureCloudConfig(ch);
     return whatsappCloud.sendMedia(cfg, remoteJid, {
-      type: mediaData.type === "audio" ? "audio" : (mediaData.type as any),
-      base64: mediaData.base64,
-      fileName: mediaData.fileName,
-      mimetype: mediaData.mimetype,
+      type: resolvedMedia.type === "audio" ? "audio" : (resolvedMedia.type as any),
+      base64: resolvedMedia.base64,
+      fileName: resolvedMedia.fileName,
+      mimetype: resolvedMedia.mimetype,
       caption,
     });
   }
 
   const { primary, fallback } = await getProvider(instanceName);
-  const res = await primary.sendMedia(remoteJid, caption, mediaData, instanceName);
+  const res = await primary.sendMedia(remoteJid, caption, resolvedMedia, instanceName);
   if (res.ok) return res;
 
   if (fallback) {
-    const fallbackRes = await fallback.sendMedia(remoteJid, caption, mediaData, instanceName);
+    const fallbackRes = await fallback.sendMedia(remoteJid, caption, resolvedMedia, instanceName);
     if (fallbackRes.ok) return fallbackRes;
   }
 

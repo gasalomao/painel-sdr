@@ -135,16 +135,38 @@ export const evolutionGo: WhatsAppProvider = {
   async sendMedia(remoteJid: string, caption: string, media: MediaData, instanceName: string): Promise<SendResult> {
     try {
       const token = await resolveInstanceToken(instanceName);
+
+      // Determina a fonte da mídia: prefere base64 (garantia de imagem chega,
+      // não vira link). Se só vier URL, é responsabilidade do channel.ts já ter
+      // baixado e preenchido base64. Aqui só ACEITA o que vier.
+      const hasBase64 = media.base64 && media.base64.length > 100;
+
       // O GO unifica mídia em /send/media com campo "mediatype".
-      const res = await goFetch("/send/media", {
+      // IMPORTANTE: o campo "base64" DEVE estar presente (string base64 pura,
+      // sem prefixo data:). Se mandar URL em "media" sem base64, a API GO envia
+      // a URL como TEXTO (não baixa automaticamente) — é o bug que mostra link
+      // ao invés da imagem. Por isso o channel.ts SEMPRE converte URL→base64.
+      const payload: Record<string, any> = {
         instance: instanceName,
         number: remoteJid.replace(/@s\.whatsapp\.net$/, ""),
         mediatype: media.type,
-        base64: media.base64,
         fileName: media.fileName || `file.${media.type === "image" ? "jpg" : media.type === "audio" ? "mp3" : "bin"}`,
         mimetype: media.mimetype || "application/octet-stream",
         caption: caption || "",
-      }, token);
+      };
+      if (hasBase64) {
+        // Limpa prefixo data: se vier (defensivo).
+        payload.base64 = media.base64!.replace(/^data:[^;]+;base64,/, "");
+      } else if (media.mediaUrl || media.url) {
+        // Sem base64 — último recurso (URL). Pode virar link na hora de receber
+        // mas é melhor que nada. O channel.ts já deveria ter convertido.
+        payload.media = media.mediaUrl || media.url;
+        console.warn("[EvolutionGO] sendMedia chamado sem base64 — usando URL (pode aparecer como link). URL:", media.mediaUrl || media.url);
+      } else {
+        return { ok: false, error: "Mídia sem base64 nem URL — nada pra enviar." };
+      }
+
+      const res = await goFetch("/send/media", payload, token);
       const msgId = res?.key?.id || res?.messageId || res?.id;
       return { ok: true, messageId: msgId, status: "sent" };
     } catch (e: any) {
