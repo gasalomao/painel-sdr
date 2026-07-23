@@ -110,6 +110,12 @@ async function resolveInstanceToken(instanceName: string): Promise<string> {
   }
 }
 
+function formatNumberForGo(remoteJid: string): string {
+  if (!remoteJid) return "";
+  if (remoteJid.includes("@g.us")) return remoteJid;
+  return remoteJid.replace(/^phone:/i, "").replace(/@.*$/, "").replace(/\D/g, "");
+}
+
 // ============================================================================
 // Implementação da interface
 // ============================================================================
@@ -120,14 +126,19 @@ export const evolutionGo: WhatsAppProvider = {
   async sendText(remoteJid: string, text: string, instanceName: string): Promise<SendResult> {
     try {
       const token = await resolveInstanceToken(instanceName);
+      const cleanNumber = formatNumberForGo(remoteJid);
+      if (!cleanNumber) {
+        return { ok: false, error: `Número de destino inválido: "${remoteJid}"` };
+      }
       const res = await goFetch("/send/text", {
         instance: instanceName,
-        number: remoteJid.replace(/@s\.whatsapp\.net$/, ""),
+        number: cleanNumber,
         text,
       }, token);
       const msgId = res?.key?.id || res?.messageId || res?.id;
       return { ok: true, messageId: msgId, status: "sent" };
     } catch (e: any) {
+      console.error("[EvolutionGO] Falha no sendText:", e?.message || e);
       return { ok: false, error: e.message };
     }
   },
@@ -135,31 +146,27 @@ export const evolutionGo: WhatsAppProvider = {
   async sendMedia(remoteJid: string, caption: string, media: MediaData, instanceName: string): Promise<SendResult> {
     try {
       const token = await resolveInstanceToken(instanceName);
+      const cleanNumber = formatNumberForGo(remoteJid);
+      if (!cleanNumber) {
+        return { ok: false, error: `Número de destino inválido: "${remoteJid}"` };
+      }
 
       // Determina a fonte da mídia: prefere base64 (garantia de imagem chega,
       // não vira link). Se só vier URL, é responsabilidade do channel.ts já ter
       // baixado e preenchido base64. Aqui só ACEITA o que vier.
       const hasBase64 = media.base64 && media.base64.length > 100;
 
-      // O GO unifica mídia em /send/media com campo "mediatype".
-      // IMPORTANTE: o campo "base64" DEVE estar presente (string base64 pura,
-      // sem prefixo data:). Se mandar URL em "media" sem base64, a API GO envia
-      // a URL como TEXTO (não baixa automaticamente) — é o bug que mostra link
-      // ao invés da imagem. Por isso o channel.ts SEMPRE converte URL→base64.
       const payload: Record<string, any> = {
         instance: instanceName,
-        number: remoteJid.replace(/@s\.whatsapp\.net$/, ""),
+        number: cleanNumber,
         mediatype: media.type,
         fileName: media.fileName || `file.${media.type === "image" ? "jpg" : media.type === "audio" ? "mp3" : "bin"}`,
         mimetype: media.mimetype || "application/octet-stream",
         caption: caption || "",
       };
       if (hasBase64) {
-        // Limpa prefixo data: se vier (defensivo).
         payload.base64 = media.base64!.replace(/^data:[^;]+;base64,/, "");
       } else if (media.mediaUrl || media.url) {
-        // Sem base64 — último recurso (URL). Pode virar link na hora de receber
-        // mas é melhor que nada. O channel.ts já deveria ter convertido.
         payload.media = media.mediaUrl || media.url;
         console.warn("[EvolutionGO] sendMedia chamado sem base64 — usando URL (pode aparecer como link). URL:", media.mediaUrl || media.url);
       } else {
@@ -170,6 +177,7 @@ export const evolutionGo: WhatsAppProvider = {
       const msgId = res?.key?.id || res?.messageId || res?.id;
       return { ok: true, messageId: msgId, status: "sent" };
     } catch (e: any) {
+      console.error("[EvolutionGO] Falha no sendMedia:", e?.message || e);
       return { ok: false, error: e.message };
     }
   },

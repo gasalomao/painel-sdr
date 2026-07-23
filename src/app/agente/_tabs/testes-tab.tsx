@@ -97,6 +97,8 @@ export function TestesTab(props: {
   sandboxUseWebSearch: boolean;
   setSandboxUseWebSearch: (v: boolean) => void;
   sandboxSimulating: boolean;
+  sandboxSimulationEnabled: boolean;
+  setSandboxSimulationEnabled: (v: boolean) => void;
   simulateInitialMessage: () => void;
   targetModel: string;
 
@@ -136,6 +138,25 @@ export function TestesTab(props: {
               <p className="text-[10px] text-muted-foreground mt-1">
                 Escolha um lead para preencher as variáveis e simular a primeira mensagem (Disparo Inicial).
               </p>
+            </div>
+            <div className="flex items-center gap-3 bg-[#202c33] px-3 py-2 rounded-xl border border-white/5">
+              <div className="text-right">
+                <div className="text-[10px] font-bold text-white">
+                  {props.sandboxSimulationEnabled ? "Simulação Ativa" : "Simulação Pausada"}
+                </div>
+                <div className="text-[9px] text-muted-foreground mt-0.5">
+                  {props.sandboxSimulationEnabled
+                    ? "IA será acionada ao disparar."
+                    : "Disparo bloqueado (teste sem IA)."}
+                </div>
+              </div>
+              <Toggle
+                checked={props.sandboxSimulationEnabled}
+                onCheckedChange={props.setSandboxSimulationEnabled}
+                color="cyan"
+                size="md"
+                aria-label="Ativar/desativar Simulação de Lead"
+              />
             </div>
           </div>
 
@@ -262,11 +283,13 @@ export function TestesTab(props: {
               <div className="flex justify-end pt-2">
                 <Button
                   onClick={props.simulateInitialMessage}
-                  disabled={props.sandboxSimulating || !props.previewSample.telefone}
-                  className="bg-cyan-500 hover:bg-cyan-600 text-white font-bold h-10 px-6 rounded-xl shadow-lg shadow-cyan-500/20"
+                  disabled={props.sandboxSimulating || !props.previewSample.telefone || !props.sandboxSimulationEnabled}
+                  className="bg-cyan-500 hover:bg-cyan-600 text-white font-bold h-10 px-6 rounded-xl shadow-lg shadow-cyan-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {props.sandboxSimulating ? (
                     <span className="flex items-center"><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Gerando Mensagem...</span>
+                  ) : !props.sandboxSimulationEnabled ? (
+                    <span className="flex items-center"><FlaskConical className="w-4 h-4 mr-2" /> Simulação Pausada</span>
                   ) : (
                     <span className="flex items-center"><Send className="w-4 h-4 mr-2" /> Disparar Primeira Mensagem</span>
                   )}

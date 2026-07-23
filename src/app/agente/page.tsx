@@ -193,6 +193,7 @@ export default function AgentePage() {
   const [sandboxAiPrompt, setSandboxAiPrompt] = useState(DEFAULT_SANDBOX_AI_PROMPT);
   const [sandboxUseWebSearch, setSandboxUseWebSearch] = useState(false);
   const [sandboxSimulating, setSandboxSimulating] = useState(false);
+  const [sandboxSimulationEnabled, setSandboxSimulationEnabled] = useState(true);
 
   // ============= LOGS =============
   const [webhookLogs, setWebhookLogs] = useState<any[]>([]);
@@ -889,6 +890,7 @@ export default function AgentePage() {
   ==================================================================== */
   const simulateInitialMessage = async () => {
     if (!sandboxTemplate.trim()) return;
+    if (!sandboxSimulationEnabled) return;
     setSandboxSimulating(true);
     try {
       const baseMessage = renderTemplate(sandboxTemplate, previewSample as any);
@@ -1165,6 +1167,7 @@ export default function AgentePage() {
                 sandboxAiPrompt={sandboxAiPrompt} setSandboxAiPrompt={setSandboxAiPrompt}
                 sandboxUseWebSearch={sandboxUseWebSearch} setSandboxUseWebSearch={setSandboxUseWebSearch}
                 sandboxSimulating={sandboxSimulating}
+                sandboxSimulationEnabled={sandboxSimulationEnabled} setSandboxSimulationEnabled={setSandboxSimulationEnabled}
                 simulateInitialMessage={simulateInitialMessage}
                 targetModel={targetModel}
 

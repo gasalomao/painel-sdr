@@ -431,9 +431,10 @@ export const evolution = {
     instance?: string
   ) {
     instance = await resolveInstance(instance);
-    const targetJid = (number.includes("@") && (number.endsWith(".net") || number.endsWith(".us")))
-       ? number
-       : number.replace(/\D/g, "") + "@s.whatsapp.net";
+    const cleanNum = number.replace(/^phone:/i, "").trim();
+    const targetJid = (cleanNum.includes("@") && (cleanNum.endsWith(".net") || cleanNum.endsWith(".us") || cleanNum.endsWith(".g.us")))
+       ? cleanNum
+       : cleanNum.replace(/\D/g, "") + "@s.whatsapp.net";
 
     // Simular digitação
     await this.sendPresence(targetJid, "composing", instance);
