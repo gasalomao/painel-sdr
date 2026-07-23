@@ -43,11 +43,15 @@ const CHUNK_OVERLAP_CHARS = CHUNK_OVERLAP_TOKENS * APPROX_CHARS_PER_TOKEN; // 20
  * chunks pra não cortar contexto em transições.
  *
  * Estratégia:
- *   1. Divide por parágrafos (\n\n)
- *   2. Agrupa parágrafos até chegar perto do target
- *   3. Se um parágrafo sozinho passa do target (ex: lista de preços em
- *      única linha), divide por sentenças (. ! ?)
- *   4. Se ainda passa (linha de 5K chars), corta por chars com overlap
+ *   1. **Chunks semânticos especiais pra catálogos**: detecta blocos iniciados
+ *      por "### PRODUTO:" ou "---" (separador do construtor de catálogos) e
+ *      PRESERVA cada produto como uma unidade atômica (não corta no meio).
+ *      Sem isso, um produto "iPhone 15 128GB" podia ter o preço num chunk e o
+ *      estoque noutro → IA achava preço mas não estoque (alucinação).
+ *   2. Divide por parágrafos (\n\n)
+ *   3. Agrupa parágrafos até chegar perto do target
+ *   4. Se um parágrafo sozinho passa do target, divide por sentenças (. ! ?)
+ *   5. Se ainda passa (linha de 5K chars), corta por chars com overlap
  */
 export function chunkText(text: string): string[] {
   if (!text || !text.trim()) return [];
@@ -56,6 +60,21 @@ export function chunkText(text: string): string[] {
   // Caso simples: doc inteiro cabe em 1 chunk
   if (cleanText.length <= CHUNK_TARGET_CHARS) {
     return [cleanText];
+  }
+
+  // Detecta catálogo de produtos (formato do ProductCatalogBuilder da UI):
+  //   ### PRODUTO: iPhone 15
+  //   - **Preço**: R$ 5000
+  //   - **Estoque Disponível**: 5
+  //   - **Especificações**: ...
+  //   - **Foto Oficial**: [IMAGEM: ...]
+  // Separados por "\n\n---\n\n" entre produtos.
+  //
+  // Cada produto vira seu próprio chunk (ou agrupados se muito curtos) — nunca
+  // corta UM produto no meio (perderia a foto ou o preço). Isso garante que a
+  // busca vetorial sempre retorne o produto COMPLETO.
+  if (/\n#{2,3}\s+PRODUTO:|^-{3,}$/m.test(cleanText)) {
+    return chunkProductCatalog(cleanText);
   }
 
   const chunks: string[] = [];
@@ -86,6 +105,60 @@ export function chunkText(text: string): string[] {
 
   // Adiciona overlap entre chunks adjacentes (ajuda buscas que caem na borda)
   return addOverlap(chunks);
+}
+
+/**
+ * Chunker ESPECIALIZADO em catálogos de produtos (formato da UI).
+ * Cada "### PRODUTO: X" vira uma unidade que não pode ser cortada.
+ * Agrupa produtos pequenos (≤ 600 chars) até 4 por chunk. Produtos grandes
+ * (> 2000 chars) ficam sozinhos (mesmo que passem do target — preferimos
+ * exceder o chunk a perder dados do produto).
+ */
+function chunkProductCatalog(text: string): string[] {
+  // Split por separadores de produto: "### PRODUTO:" ou "\n---\n"
+  // Mantém o separador no início de cada bloco.
+  const blocks: string[] = [];
+  const roughBlocks = text.split(/\n(?=#{2,3}\s+PRODUTO:)|\n-{3,}\n/);
+  for (const rb of roughBlocks) {
+    const trimmed = rb.trim();
+    if (trimmed) blocks.push(trimmed);
+  }
+  if (blocks.length === 0) return [text];
+
+  const chunks: string[] = [];
+  let current = "";
+  let itemsInCurrent = 0;
+
+  for (const block of blocks) {
+    const blockTooBig = block.length > CHUNK_TARGET_CHARS;
+    const wouldOverflow = current && (current.length + block.length + 4) > CHUNK_TARGET_CHARS;
+    const tooManyItems = itemsInCurrent >= 4;
+
+    if (blockTooBig) {
+      // Produto sozinho é maior que o chunk target — vai inteiro (não corta).
+      if (current) {
+        chunks.push(current.trim());
+        current = "";
+        itemsInCurrent = 0;
+      }
+      chunks.push(block);
+      continue;
+    }
+
+    if (wouldOverflow || tooManyItems) {
+      if (current) chunks.push(current.trim());
+      current = block;
+      itemsInCurrent = 1;
+    } else {
+      current = current ? `${current}\n\n---\n\n${block}` : block;
+      itemsInCurrent++;
+    }
+  }
+  if (current) chunks.push(current.trim());
+
+  // SEM overlap em catálogo — overlap criaria duplicação de produto com
+  // preços/estoque errados na fronteira.
+  return chunks;
 }
 
 function splitBySentences(text: string): string[] {
