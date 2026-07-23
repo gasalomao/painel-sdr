@@ -56,3 +56,46 @@ O RTK intercepta comandos Bash e comprime a saída ANTES de mandar pra IA, econo
 - Resuma dados antes de processar
 - Priorize ações diretas sobre análises exaustivas e loops de diagnóstico
 - Use as ferramentas de economia do RTK sempre que disponíveis
+
+## Protocolo Fable Method Obrigatório (Fable 5 Workflow - Todos os Modelos)
+
+> **MANDATO DE EXECUÇÃO**: Todos os modelos e agentes de IA que operam neste projeto (Antigravity, Claude Code, OpenCode, Zcode, Freebuff, Cursor, Codebuff, etc.) DEVEM seguir estritamente o protocolo **Fable Method** (`skills/fable-method/SKILL.md`) em todas as tarefas, garantindo raciocínio e execução de alto nível independente da capacidade individual do modelo.
+
+### Ciclo Fable Method (0 ➔ 1 ➔ 2 ➔ 3 ➔ 4 ➔ 5 ➔ 6)
+
+```
+ask ──► 0 Classificar ──► 1 Definir Pronto ──► 2 Evidências ──► 3 Decidir ──► 4 Agir ──► 5 Verificar ──► 6 Reportar
+```
+
+1. **Gate Trivial vs Completo**:
+   - Tarefas triviais (1 arquivo, <10 linhas alteradas, sem comportamento novo e sem busca): fazer a alteração, executar 1 checagem óbvia (re-ler ou rodar build/lint) e reportar em 1-2 frases.
+   - Todas as outras tarefas: EXECUTAR O LOOP FABLE COMPLETO.
+
+2. **Passo 0 — Classificar o Pedido**:
+   - **Pergunta/Diagnóstico**: Analisar fontes primárias, apontar causas/achados, propor recomendação. NÃO alterar código.
+   - **Plano-Primeiro**: Se o escopo for ambíguo, ações forem irreversíveis/externas ou plano foi solicitado ➔ montar o plano e PARAR para aprovação.
+   - **Tarefa**: Executar as mudanças necessárias e verificar por observação real.
+
+3. **Passo 1 — Definir "Pronto" (Define Done)**:
+   - Nomear o critério de verificação exato (ex: `npx tsc --noEmit` passa com 0 erros, teste específico passa, rota devolve 200).
+
+4. **Passo 2 — Coletar Evidências (Primary Sources Beat Memory)**:
+   - NUNCA adivinhar assinaturas, rotas, tipos ou arquivos de memória.
+   - Ler os arquivos e documentações reais do projeto antes de alterar qualquer código.
+   - **Portão de Intenção**: Se um teste falhar ou algo divergir da especificação, verificar a intenção real no README/docstring antes de alterar. NUNCA enfraquecer testes para "forçar aprovação".
+
+5. **Passo 3 — Decidir e Comprometer**:
+   - Escolher UMA recomendação clara e cirúrgica. Respeitar o escopo declarado.
+
+6. **Passo 4 — Agir de Forma Cirúrgica (Surgical Edits)**:
+   - Menor alteração correta possível. Preservar o estilo do código existente.
+   - Proibição estrita: NUNCA enfraquecer asserções de testes para fazer passar, NUNCA expor/apagar secrets, NUNCA alterar fora do escopo.
+
+7. **Passo 5 — Verificar por Observação (Prove / Fable Judge)**:
+   - Executar os comandos de verificação (`npx tsc --noEmit`, testes, builds ou chamadas) e observar a saída REAL.
+   - **Verificação Gêmea (Twin Check)**: Ao corrigir um bug, buscar no projeto se o mesmo padrão incorreto se repete em outros locais (`TWINS: searched <pattern> - found <N> sites`).
+
+8. **Passo 6 — Reportar Focado em Resultados (Outcome-First)**:
+   - A primeira frase responde "o que aconteceu / qual o resultado".
+   - Reportar evidências reais e ressalvas/caveats honestos.
+
