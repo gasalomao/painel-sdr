@@ -119,6 +119,7 @@ export async function POST(
             history,
             apiKey,
             stepNumber: stepIdx + 1,
+            instanceName: camp.instance_name,
           });
         } catch (e: any) {
           ai_error = e?.message || String(e);

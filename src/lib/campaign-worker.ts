@@ -19,7 +19,7 @@ import * as channel from "@/lib/channel";
 import { renderTemplate } from "@/lib/template-vars";
 import { webSearch } from "@/lib/web-search";
 import { logTokenUsage } from "@/lib/token-usage";
-import { DEFAULT_CLIENT_ID } from "@/lib/tenant";
+import { DEFAULT_CLIENT_ID, clientIdFromInstance } from "@/lib/tenant";
 import { registerAiSend, registerPendingAutomatedSend } from "@/lib/manual-send-registry";
 
 type CampaignRow = {
@@ -572,6 +572,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
         campaignId: c.id,
         campaignName: c.name,
         remoteJid: target.remote_jid,  // ← injeta briefing cacheado
+        instanceName: c.instance_name,  // ← resolve clientId dono do gasto
       });
       await addCampaignLog(campaignId, `IA gerou: "${text.slice(0, 140)}${text.length > 140 ? "…" : ""}"`, "success");
     } catch (e: any) {
@@ -1006,6 +1007,8 @@ async function personalizeWithAI(opts: {
   campaignName?: string;
   /** remoteJid pra puxar o briefing cacheado de lead-intelligence (se houver). */
   remoteJid?: string;
+  /** instance_name da campanha — pra resolver o client_id dono do gasto de IA. */
+  instanceName?: string;
 }): Promise<string> {
   // API keys centrais — mesmas que o resto do sistema usa (Configurações).
   const { getAiKeys } = await import("@/lib/ai-keys");
@@ -1121,6 +1124,16 @@ ${opts.useWebSearch ? "- Se útil, use a tool web_search pra confirmar UM detalh
     }
   }
 
+  // Resolve client_id dono da campanha pela instância — sem isso, o gasto
+  // cai no Default client e o /tokens do tenant fica sem custo de disparo.
+  let clientIdForLog: string | undefined;
+  if (opts.instanceName) {
+    try {
+      const resolved = await clientIdFromInstance(opts.instanceName);
+      if (resolved) clientIdForLog = resolved;
+    } catch { /* não-fatal, loga como default */ }
+  }
+
   logTokenUsage({
     source: "disparo",
     sourceId: opts.campaignId || null,
@@ -1130,6 +1143,7 @@ ${opts.useWebSearch ? "- Se útil, use a tool web_search pra confirmar UM detalh
     promptTokens: tp,
     completionTokens: tc,
     totalTokens: tt,
+    clientId: clientIdForLog,
     metadata: { useWebSearch: opts.useWebSearch, nomeEmpresa: opts.nomeEmpresa },
   });
 

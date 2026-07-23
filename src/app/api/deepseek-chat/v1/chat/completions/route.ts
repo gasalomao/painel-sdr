@@ -41,9 +41,19 @@ export async function POST(req: NextRequest) {
 
   const tok = pickToken();
   if (!tok) {
+    // Dica de diagnóstico: quem cê chega aqui geralmente é um fallback vindo do
+    // gateway (modelo "gateway:..." escolhido no sandbox/agente), e o gateway
+    // (CLIProxyAPI na porta 8317) está morto. Sem isso o user vê só
+    // "Nenhuma conta DeepSeek ativa" e acha que precisa ir conectar DeepSeek —
+    // quando na verdade a causa raiz pode ser o proxy desligado.
     return NextResponse.json({
       error: {
-        message: "Nenhuma conta DeepSeek ativa. Conecte uma em Configurações → DeepSeek Chat (sessão da conta).",
+        message:
+          "Nenhuma conta DeepSeek ativa pra servir este modelo. " +
+          "Se você selecionou um modelo do Gateway (ex: gateway:gemini-...), " +
+          "verifique em Configurações → Contas Grátis (Gateway) se o conector está LIGADO — " +
+          "o gateway morto faz a IA cair pro DeepSeek como fallback. " +
+          "Conecte uma conta DeepSeek em Configurações → DeepSeek Chat (sessão da conta).",
         type: "no_active_account",
       },
     }, { status: 503 });
@@ -52,7 +62,7 @@ export async function POST(req: NextRequest) {
   // Recupera o token COMPLETO (com fingerprint) — pickToken só devolveu o
   // suficiente pra rotação, mas precisamos da fingerprint estável dele.
   const fullTok = getFullToken(tok.id) || tok;
-  let result: { content: string; usage: { promptTokens: number; completionTokens: number } };
+  let result: { content: string; usage: { promptTokens: number; completionTokens: number; estimated?: boolean } };
   try {
     result = await chatComplete({
       tokenId: tok.id,
@@ -120,6 +130,7 @@ export async function POST(req: NextRequest) {
       prompt_tokens: result.usage.promptTokens,
       completion_tokens: result.usage.completionTokens,
       total_tokens: result.usage.promptTokens + result.usage.completionTokens,
+      estimated: result.usage.estimated === true,
     },
   });
 }

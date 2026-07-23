@@ -347,7 +347,7 @@ async function getGeminiModelChain(): Promise<string[]> {
   return buildFallbackChain();
 }
 
-async function transcribeAudioWithGemini(base64: string, mimetype: string, debugMessageId?: string): Promise<string | null> {
+async function transcribeAudioWithGemini(base64: string, mimetype: string, debugMessageId?: string, clientId?: string): Promise<string | null> {
   const cfgResult = await supabase.from("ai_organizer_config").select("api_key").eq("id", 1).maybeSingle();
   const apiKey = cfgResult.data?.api_key;
 
@@ -418,6 +418,7 @@ async function transcribeAudioWithGemini(base64: string, mimetype: string, debug
               promptTokens: u.promptTokens,
               completionTokens: u.completionTokens,
               totalTokens: u.totalTokens,
+              clientId: clientId || undefined,
               metadata: { kind: "audio_transcription", mime: tryMime, msgId: debugMessageId },
             });
           }
@@ -452,7 +453,7 @@ async function transcribeAudioWithGemini(base64: string, mimetype: string, debug
  *   1) Preencher o content da msg (em vez de "[sem conteúdo]")
  *   2) Dar contexto visual pro agente IA no próximo turno
  */
-async function describeImageWithGemini(base64: string, mimetype: string): Promise<string | null> {
+async function describeImageWithGemini(base64: string, mimetype: string, clientId?: string): Promise<string | null> {
   const { data: cfg } = await supabase.from("ai_organizer_config").select("api_key").eq("id", 1).maybeSingle();
   const apiKey = cfg?.api_key;
   if (!apiKey) return null;
@@ -483,6 +484,7 @@ async function describeImageWithGemini(base64: string, mimetype: string): Promis
           promptTokens: u.promptTokens,
           completionTokens: u.completionTokens,
           totalTokens: u.totalTokens,
+          clientId: clientId || undefined,
           metadata: { kind: "image_description", mime: effMime },
         });
         return text;
@@ -505,7 +507,7 @@ async function describeImageWithGemini(base64: string, mimetype: string): Promis
  *
  * Retorna o conteúdo do documento resumido + texto principal extraído.
  */
-async function describeDocumentWithGemini(base64: string, mimetype: string, fileName: string | null): Promise<string | null> {
+async function describeDocumentWithGemini(base64: string, mimetype: string, fileName: string | null, clientId?: string): Promise<string | null> {
   const { data: cfg } = await supabase.from("ai_organizer_config").select("api_key").eq("id", 1).maybeSingle();
   const apiKey = cfg?.api_key;
   if (!apiKey) return null;
@@ -561,6 +563,7 @@ async function describeDocumentWithGemini(base64: string, mimetype: string, file
           promptTokens: u.promptTokens,
           completionTokens: u.completionTokens,
           totalTokens: u.totalTokens,
+          clientId: clientId || undefined,
           metadata: { kind: "document_extraction", mime: cleanMime, fileName, sizeBytes },
         });
         return text;
@@ -1067,7 +1070,7 @@ export async function POST(req: NextRequest) {
               // Fallback: Gemini multimodal (gasta token, mas nunca falha).
               if (!transcript) {
                 console.log("[Media] Transcrevendo áudio com Gemini (fallback)...");
-                transcript = await transcribeAudioWithGemini(base64Media, effMimetype, finalId);
+                transcript = await transcribeAudioWithGemini(base64Media, effMimetype, finalId, clientId);
                 if (transcript) transcribeProvider = "gemini";
               }
               if (transcript) {
@@ -1081,7 +1084,7 @@ export async function POST(req: NextRequest) {
               }
             } else if (msgType === "image") {
               console.log("[Media] Descrevendo imagem com Gemini...");
-              const desc = await describeImageWithGemini(base64Media, effMimetype);
+              const desc = await describeImageWithGemini(base64Media, effMimetype, clientId);
               if (desc) {
                 enrichedContent = `📷 ${desc}`;
                 console.log("[Media] Descrição:", desc.slice(0, 80));
@@ -1090,7 +1093,7 @@ export async function POST(req: NextRequest) {
             } else if (msgType === "document") {
               console.log("[Media] Extraindo conteúdo de documento com Gemini...");
               const fileName = extractFileName(message);
-              const desc = await describeDocumentWithGemini(base64Media, effMimetype, fileName);
+              const desc = await describeDocumentWithGemini(base64Media, effMimetype, fileName, clientId);
               if (desc) {
                 enrichedContent = `📄 ${fileName ? `[${fileName}] ` : ""}${desc}`;
                 console.log("[Media] Documento:", desc.slice(0, 80));

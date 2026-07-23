@@ -617,7 +617,13 @@ ${autoRulesBlock}
 4. O histórico da conversa e a mensagem atual do usuário serão fornecidos pelo sistema nativamente.
 5. CONTINUIDADE — NÃO RECOMECE: o <lead_context> (fornecido junto da mensagem) mostra exatamente o que o SDR já enviou (disparo inicial, follow-ups). Você JÁ se apresentou, JÁ disse o nome da empresa, JÁ tratou pelo nome do negócio. NÃO repita "Olá, sou da [empresa]" se isso já está no <lead_context>. Continue a conversa de onde parou. Use os dados de CRM (ramo, categoria, endereço) pra contextualizar — sem perguntar o que já está conhecido.
 6. Seja natural, humano e empático.
-7. ANCORAGEM DE MÍDIA/PRODUTO: Ao falar sobre produtos/itens da Base de Conhecimento que possuam foto/mídia vinculada no formato [IMAGEM: URL] ou [FOTO: URL], você DEVE OBRIGATORIAMENTE incluir essa tag exata na resposta. O sistema enviará a foto do produto automaticamente ao cliente. NUNCA altere ou invente URLs.
+7. ENVIO DE FOTO/IMAGEM DE PRODUTO (CRÍTICO):
+   - Quando o cliente pedir foto/ver o produto, ou quando você for descrever um produto cuja ficha na base contiver uma linha "- **Foto Oficial**: [IMAGEM: URL]", você DEVE incluir a tag EXATA na sua resposta.
+   - COPIE a tag CARACTERE POR CARACTERE do que veio na base — não digite a URL solta, não use markdown ![](url), não coloque entre parênteses, não resuma.
+   - Formato VÁLIDO (único aceito): [IMAGEM: https://endereco.exato.da.base.jpg]
+   - Coloque a tag UMA vez, preferencialmente ao FINAL da mensagem.
+   - PROIBIDO inventar/modificar URL. Se a ficha do produto NÃO trouxe uma tag [IMAGEM:], NÃO escreva nenhuma — diga apenas que vai enviar a foto depois.
+   - Exemplo: a base trouxe "### PRODUTO: Camiseta Polo\\n- **Preço**: R$ 99\\n- **Foto Oficial**: [IMAGEM: https://cdn.loja.com/polo.jpg]" → sua resposta: "Tenho a Camiseta Polo por R$ 99! Olha a foto:\\n[IMAGEM: https://cdn.loja.com/polo.jpg]"
 </execution_directives>
 
 <anti_hallucination_rules>
@@ -655,6 +661,46 @@ Sua base de conhecimento (tool search_knowledge_base) é a ÚNICA fonte de verda
 ❌ "Acho que é uns R$ 2000" (chute)
 ❌ "Sim, temos em outras cores também" (sem confirmar)
 ❌ "O de 256GB custa R$ X" (inventando variante)
+
+## FORMATO DE RESPOSTA COM MÚLTIPLOS PRODUTOS (CATÁLOGO):
+
+Quando o cliente perguntar sobre VÁRIOS produtos ("quais iPhones vc tem?", "me mostra os modelos", "catálogo"), siga EXATAMENTE este formato:
+
+1. **NÃO liste mais que 6 produtos por mensagem**. Mais que isso cansa o cliente e parece spam. Se tiver mais, ofereça categorias ("temos 12 modelos, quer primeiro os de até R$3000 ou os Pro?").
+2. **Para cada produto**, escreva UM parágrafo curto com: Nome + Variação (cor/storage) + Preço + 1 detalhe relevante. Depois coloque a tag de imagem.
+3. **Formato exato** (respeite as quebras de linha). Use UM BLOCO por produto:
+
+   📱 [NOME DO PRODUTO]
+   [PREÇO à vista ou parcelamento]
+   [1 detalhe relevante: cores, specs, etc.]
+   [IMAGEM: URL_DA_FOTO]
+
+4. **A tag [IMAGEM: URL] DEVE vir DEPOIS do texto do produto** (na linha seguinte), nunca no meio de uma frase. O sistema usa o texto que vem ANTES da tag como legenda da foto.
+5. **Use UMA tag [IMAGEM: URL] por produto** — nunca duplique a mesma foto.
+6. **NUNCA repita o mesmo produto duas vezes** na mesma resposta.
+7. Se um produto da base NÃO tem foto vinculada, descreva normalmente sem a tag [IMAGEM:].
+8. Termine com uma pergunta de fechamento ("Qual desses te chamou atenção?", "Quer que eu detalhe algum?").
+
+### EXEMPLO DE RESPOSTA IDEAL (use exatamente esse formato):
+
+Claro! Temos estes modelos disponíveis:
+
+📱 iPhone 15 128GB
+R$ 4.999 à vista ou 12x R$ 499
+Cores: azul, preto, verde
+[IMAGEM: https://storage.supabase.co/.../iphone15-128.jpg]
+
+📱 iPhone 15 256GB
+R$ 5.499 à vista ou 12x R$ 549
+Cores: azul, preto, rosa
+[IMAGEM: https://storage.supabase.co/.../iphone15-256.jpg]
+
+📱 iPhone 15 Pro 256GB
+R$ 7.999 à vista ou 12x R$ 799
+Câmera telefoto 3x, titânio
+[IMAGEM: https://storage.supabase.co/.../iphone15pro.jpg]
+
+Qual te chamou mais a atenção? Quer ver algum com mais detalhes?
 </anti_hallucination_rules>
 `;
 
@@ -963,8 +1009,25 @@ ${capturedVariablesPrompt}
 
     let finalAnswer = turn.text;
 
+    // WHITELIST de URLs de imagem VÁLIDAS neste turno = as que vieram REALMENTE
+    // em chunks do RAG (tool search_knowledge_base). Usada depois pra:
+    //  (a) converter URL/markdown solto que a IA emitiu de volta pra tag [IMAGEM:];
+    //  (b) REMOVER qualquer URL de imagem que a IA inventou (anti-alucinação).
+    // Só confiamos em fotos que existem de fato na base — nunca na imaginação do modelo.
+    const validImageUrls = new Set<string>();
+    const collectImageUrls = (text: string) => {
+      if (!text) return;
+      const re = /\[(?:IMAGEM|IMAGE|MEDIA|FOTO):\s*(https?:\/\/[^\s\]]+)\]/gi;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text)) !== null) {
+        if (m[1]) validImageUrls.add(m[1].trim());
+      }
+    };
+
     // Acumula tokens dessa interação (1 inicial + N de tool-loop)
     let totalPrompt = turn.usage.promptTokens, totalCompletion = turn.usage.completionTokens, totalAll = turn.usage.totalTokens;
+    // Estimado = se QUALQUER turn não trouxe usage real (ex: DeepSeek via reverse).
+    let usageEstimated = turn.usage.estimated === true;
 
     // Tratamento de Function Call MCP — loop pra permitir CHAIN de tools
     // (ex: list_google_calendar_events → cancel_google_calendar_event).
@@ -997,12 +1060,23 @@ ${capturedVariablesPrompt}
                  // KB tem "iPhone 15 128GB"). 0.55 cortava metade das buscas → IA
                  // caía no ILIKE (sem sinônimos) ou respondia sem consultar.
                  // 0.35 equilibra precisão (sem lixo) + recall (sem perder item).
+                 //
+                 // ⚠ TOPK ADAPTATIVO: 10 (antes 5). Catálogo de loja tem MUITOS
+                 // variantes do mesmo produto (iPhone 15 128GB, 256GB, Pro, Pro
+                 // Max = 4 modelos). Se cliente pergunta "quais iPhones 15 vc
+                 // tem?" e topK=5, ele SÓ vê 5 variantes — perde venda dos outros.
+                 // 10 cobre 95% dos catálogos reais sem inflar tokens.
+                 //
+                 // BONUS: se a query parece listar tudo ("todos", "quais", "lista",
+                 // "catálogo", "modelos", "opções"), puxa mais 15 resultados.
+                 const listIntent = /\b(todos|todas|quais?|lista|listar|cat[aá]logo|modelos?|op[cç][oõ]es?|varia[a-z]+|vers[oõ]es?)\b/i.test(raw);
+                 const topK = listIntent ? 15 : 10;
                  const hits = await searchKnowledge({
                     query: raw,
                     agentId,
                     clientId,
                     apiKey: finalApiKey,
-                    topK: 5,
+                    topK,
                     minSimilarity: 0.35,
                  });
                 if (hits.length > 0) {
@@ -1054,6 +1128,9 @@ ${capturedVariablesPrompt}
           }
 
           if (matches.length > 0) {
+             // Coleta as URLs de imagem VÁLIDAS que vieram nos chunks do RAG.
+             // Só estas podem ser enviadas como foto — trava anti-alucinação.
+             for (const m of matches) collectImageUrls(String(m.content || ""));
              functionResultRes = {
                 found: true,
                 method: searchMethod,
@@ -1682,6 +1759,7 @@ ${capturedVariablesPrompt}
        turn = await session.sendToolResults(toolResults);
        finalAnswer = turn.text;
        totalPrompt += turn.usage.promptTokens; totalCompletion += turn.usage.completionTokens; totalAll += turn.usage.totalTokens;
+       if (turn.usage.estimated) usageEstimated = true;
     }
 
     // Loga consumo total de tokens dessa interação
@@ -1697,7 +1775,7 @@ ${capturedVariablesPrompt}
       promptTokens: totalPrompt,
       completionTokens: totalCompletion,
       totalTokens: totalAll,
-      metadata: { remoteJid, instanceName, isTestMode },
+      metadata: { remoteJid, instanceName, isTestMode, estimated: usageEstimated || undefined },
     });
 
     finalAnswer = finalAnswer.replace(/^```\w*\n?/g, "").replace(/\n?```$/g, "");
@@ -1731,22 +1809,43 @@ ${capturedVariablesPrompt}
     const messageChunks = humanize ? splitMessage(finalAnswer) : [finalAnswer];
     console.log(`[AGENT] Enviando ${messageChunks.length} chunks para ${maskJid(remoteJid)} (Humanize: ${humanize})`);
 
-    // Busca histórico de mídias já enviadas nesta conversa para EVITAR REENVIO DUPLICADO
+    // ============================================================
+    // DEDUP BASEADO EM TEMPO (não mais "pra sempre").
+    // ANTES: qualquer foto já enviada na conversa era SUPRIMIDA pra sempre.
+    //   → Cliente pedia "me manda foto do iPhone 15" DE NOVO depois de 1h e
+    //     a foto não vinha (bug crítico pra vendas).
+    // AGORA: só suprime se foi enviada nos últimos 5min (default). Impede
+    //   duplicação imediata (IA repete 2x no mesmo turno) mas permite
+    //   reenvio legítimo quando cliente pede explicitamente mais tarde.
+    // ============================================================
     const dedupProductMedia = agentConfig?.options?.dedup_product_media ?? true;
-    const sentMediaUrls = new Set<string>();
+    const dedupWindowMs = Number(agentConfig?.options?.dedup_media_window_minutes) > 0
+      ? Number(agentConfig?.options?.dedup_media_window_minutes) * 60_000
+      : 5 * 60_000; // 5 minutos default
+    const sentMediaRecently = new Map<string, number>(); // url → timestamp ms
 
     if (dedupProductMedia && (sessionId || remoteJid)) {
       try {
-        let q = supabase.from("messages").select("media_url, content").eq("sender", "ai");
+        const sinceIso = new Date(Date.now() - dedupWindowMs).toISOString();
+        let q = supabase.from("messages")
+          .select("media_url, content, created_at")
+          .eq("sender", "ai")
+          .gte("created_at", sinceIso);
         if (sessionId) q = q.eq("session_id", sessionId);
         const { data: pastMsgs } = await q;
 
         for (const pm of pastMsgs || []) {
-          if (pm.media_url) sentMediaUrls.add(pm.media_url.trim());
+          if (pm.media_url) {
+            const ts = pm.created_at ? new Date(pm.created_at).getTime() : 0;
+            sentMediaRecently.set(pm.media_url.trim(), ts);
+          }
           if (pm.content) {
             const pastTagMatches = Array.from(pm.content.matchAll(/https?:\/\/[^\s\]]+\.(?:jpg|jpeg|png|webp|gif)/gi));
             for (const ptm of pastTagMatches as any[]) {
-              if (ptm && ptm[0]) sentMediaUrls.add(String(ptm[0]).trim());
+              if (ptm && ptm[0]) {
+                const ts = pm.created_at ? new Date(pm.created_at).getTime() : 0;
+                sentMediaRecently.set(String(ptm[0]).trim(), ts);
+              }
             }
           }
         }
@@ -1755,157 +1854,219 @@ ${capturedVariablesPrompt}
       }
     }
 
-    for (let i = 0; i < messageChunks.length; i++) {
-        let chunkText = messageChunks[i];
-        let sendResult: any = null;
-        let sendError: string | null = null;
-
-        // Detecta e envia mídias/fotos de produtos vinculadas no RAG no formato [IMAGEM: url], [FOTO: url], [MEDIA: url]
-        const mediaTagRegex = /\[(?:IMAGEM|IMAGE|MEDIA|FOTO):\s*(https?:\/\/[^\s\]]+)\]/gi;
-        const mediaMatches = Array.from(chunkText.matchAll(mediaTagRegex));
-
-        for (const match of mediaMatches) {
-          const mediaUrl = match[1]?.trim();
-          if (!mediaUrl) continue;
-
-          if (dedupProductMedia && sentMediaUrls.has(mediaUrl)) {
-            console.log(`[AGENT] Mídia de produto ${mediaUrl} já foi enviada anteriormente para ${maskJid(remoteJid)}. Suprimindo reenvio duplicado.`);
-            continue;
-          }
-
-          try {
-            console.log(`[AGENT] Detectada foto de produto vinculada no RAG. Enviando mídia: ${mediaUrl}`);
-            const mediaRes = await channelMod.sendMedia(
-              remoteJid,
-              "",
-              { mediaUrl, url: mediaUrl, type: "image" },
-              instanceName
-            );
-            const mediaMsgId = mediaRes?.messageId || (mediaRes as any)?.key?.id || `agent-media-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-            try {
-              const { registerAiSend } = await import("@/lib/manual-send-registry");
-              registerAiSend(mediaMsgId);
-            } catch { /* ignore */ }
-
-            sentMediaUrls.add(mediaUrl);
-            const nowIsoMedia = new Date().toISOString();
-            if (sessionId) {
-              await supabase.from("messages").insert({
-                session_id: sessionId,
-                message_id: mediaMsgId,
-                sender: "ai",
-                content: mediaUrl,
-                media_category: "image",
-                media_url: mediaUrl,
-                delivery_status: mediaRes?.ok === false ? "error" : "sent",
-                created_at: nowIsoMedia,
-              }).then(() => {}, () => {});
-            }
-
-            await supabase.from("chats_dashboard").insert({
-              message_id: mediaMsgId,
-              remote_jid: remoteJid,
-              sender_type: "ai",
-              content: `[Imagem] ${mediaUrl}`,
-              status_envio: mediaRes?.ok === false ? "error" : "sent",
-              instance_name: instanceName,
-              created_at: nowIsoMedia,
-            }).then(() => {}, () => {});
-          } catch (mErr: any) {
-            console.warn("[AGENT] Falha ao enviar foto vinculada de produto:", mErr?.message);
-          }
+    // Helper pra enviar UMA foto com caption (legenda).
+    // Retorna true se enviado com sucesso, false caso contrário.
+    const sendProductPhoto = async (mediaUrl: string, caption: string): Promise<boolean> => {
+      try {
+        const mediaRes = await channelMod.sendMedia(
+          remoteJid,
+          caption,
+          {
+            mediaUrl,
+            url: mediaUrl,
+            type: "image",
+            mimetype: /\.(jpg|jpeg)$/i.test(mediaUrl) ? "image/jpeg"
+              : /\.png$/i.test(mediaUrl) ? "image/png"
+              : /\.webp$/i.test(mediaUrl) ? "image/webp"
+              : /\.gif$/i.test(mediaUrl) ? "image/gif"
+              : "image/jpeg",
+            fileName: mediaUrl.split("/").pop()?.split("?")[0] || `produto-${Date.now()}.jpg`,
+          },
+          instanceName
+        );
+        if (mediaRes?.ok === false) {
+          console.warn(`[AGENT] Provider rejeitou mídia (${mediaRes.error}). URL: ${mediaUrl}`);
         }
-
-        // Limpa as tags de mídia do texto para enviar a descrição do produto limpa
-        chunkText = chunkText.replace(mediaTagRegex, "").trim();
-        if (!chunkText) continue;
-
+        const mediaMsgId = mediaRes?.messageId || (mediaRes as any)?.key?.id || `agent-media-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         try {
-            // Se for o segundo chunk em diante, a gente espera um pouco a mais
-            if (i > 0) {
-                const typingSeconds = Math.min(Math.max(chunkText.length / 15, 2), 5); // Simula velocidade de digitação
-                console.log(`[AGENT] Delay entre mensagens: ${typingSeconds}s...`);
-                await new Promise(r => setTimeout(r, typingSeconds * 1000));
-            }
+          const { registerAiSend } = await import("@/lib/manual-send-registry");
+          registerAiSend(mediaMsgId);
+        } catch { /* ignore */ }
 
-            try {
-                const { registerPendingAutomatedSend } = await import("@/lib/manual-send-registry");
-                registerPendingAutomatedSend(instanceName, remoteJid, chunkText);
-            } catch (regErr) {
-                console.warn("[AGENT] Falha ao registrar envio pendente:", regErr);
-            }
-
-            sendResult = await channelMod.sendMessage(remoteJid, chunkText, instanceName);
-            lastSendResult = sendResult;
-        } catch (err: any) {
-            sendError = err.message;
-            anySendError = sendError;
-            console.error(`[AGENT] Falha ao enviar chunk ${i+1}:`, sendError);
+        sentMediaRecently.set(mediaUrl, Date.now());
+        const nowIsoMedia = new Date().toISOString();
+        if (sessionId) {
+          await supabase.from("messages").insert({
+            session_id: sessionId,
+            message_id: mediaMsgId,
+            sender: "ai",
+            content: caption || mediaUrl,
+            media_category: "image",
+            media_url: mediaUrl,
+            delivery_status: mediaRes?.ok === false ? "error" : "sent",
+            created_at: nowIsoMedia,
+          }).then(() => {}, () => {});
         }
 
-        // CRÍTICO: msgId precisa ser único E definido. Antes, se o Evolution
-        // não retornasse key.id (acontece em alguns response shapes), msgId
-        // virava `undefined` → insert no chats_dashboard com message_id=NULL
-        // → silenciosa coleção de duplicatas. Sufixo aleatório blinda isso.
+        await supabase.from("chats_dashboard").insert({
+          message_id: mediaMsgId,
+          remote_jid: remoteJid,
+          sender_type: "ai",
+          content: caption || `[Imagem] ${mediaUrl}`,
+          status_envio: mediaRes?.ok === false ? "error" : "sent",
+          instance_name: instanceName,
+          media_url: mediaUrl,
+          media_type: "image",
+          created_at: nowIsoMedia,
+        }).then(() => {}, () => {});
+        return mediaRes?.ok !== false;
+      } catch (mErr: any) {
+        console.warn("[AGENT] Falha ao enviar foto vinculada de produto:", mErr?.message);
+        return false;
+      }
+    };
+
+    // Helper pra enviar e PERSISTIR um texto (seja intro, produto, ou closing).
+    // Retorna o msgId gerado (ou null em erro).
+    const sendAndPersistText = async (text: string): Promise<string | null> => {
+      if (!text.trim()) return null;
+      try {
+        try {
+          const { registerPendingAutomatedSend } = await import("@/lib/manual-send-registry");
+          registerPendingAutomatedSend(instanceName, remoteJid, text);
+        } catch { /* ignore */ }
+        const sendResult: any = await channelMod.sendMessage(remoteJid, text, instanceName);
         const msgId = sendResult?.key?.id
           || sendResult?.data?.key?.id
+          || sendResult?.messageId
           || `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-        // Registra o msgId como envio da IA — assim o webhook, ao receber o
-        // echo fromMe, sabe que foi a PRÓPRIA IA e NÃO aciona a auto-pausa
-        // (que é só pra quando um HUMANO assume a conversa).
         try {
           const { registerAiSend } = await import("@/lib/manual-send-registry");
           registerAiSend(msgId);
-        } catch { /* não-fatal */ }
+        } catch { /* ignore */ }
+        lastSendResult = sendResult;
 
-        // CRÍTICO: AWAIT os inserts. Em Next 16 standalone, fire-and-forget
-        // pode ser cortado quando a função retorna a resposta. Sem await,
-        // a mensagem da IA NÃO chegava no chats_dashboard mesmo o WhatsApp
-        // tendo entregue. Por isso "nada aparecia em /chat".
         const nowIso = new Date().toISOString();
-
         if (sessionId) {
-            const { error: msgErr } = await supabase.from("messages").insert({
-                session_id: sessionId,
-                message_id: msgId,
-                sender: 'ai',
-                content: chunkText,
-                media_category: 'text',
-                delivery_status: sendError ? 'error' : 'sent',
-                created_at: nowIso,
-            });
-            if (msgErr) console.warn("[AGENT] messages insert:", msgErr.message);
+          await supabase.from("messages").insert({
+            session_id: sessionId,
+            message_id: msgId,
+            sender: "ai",
+            content: text,
+            delivery_status: sendResult?.ok === false ? "error" : "sent",
+            created_at: nowIso,
+          }).then(() => {}, () => {});
+        }
+        await supabase.from("chats_dashboard").insert({
+          message_id: msgId,
+          remote_jid: remoteJid,
+          sender_type: "ai",
+          content: text,
+          status_envio: sendResult?.ok === false ? "error" : "sent",
+          instance_name: instanceName,
+          created_at: nowIso,
+        }).then(() => {}, () => {});
+
+        if (sendResult?.ok === false) {
+          anySendError = sendResult.error || "Falha no envio";
+        }
+        return msgId;
+      } catch (err: any) {
+        console.error(`[AGENT] Falha ao enviar texto:`, err.message);
+        anySendError = err.message;
+        return null;
+      }
+    };
+
+    for (let i = 0; i < messageChunks.length; i++) {
+        const chunkText = messageChunks[i];
+
+        // ============================================================
+        // NOVA ORDENAÇÃO DE ENVIO: texto + imagem INTERCALADOS.
+        // ANTES: enviava TODAS as imagens primeiro, depois o texto.
+        //   → Cliente recebia 5 fotos sem contexto, depois o texto "Temos
+        //     estes iPhones". Péssimo pra venda (confusão visual).
+        // AGORA: cada produto vira um "bloco" com texto + foto juntos.
+        //   → Cliente vê "iPhone 15 128GB - R$ 5000" + foto dele na sequência.
+        // ============================================================
+        const mediaTagRegex = /\[(?:IMAGEM|IMAGE|MEDIA|FOTO):\s*(https?:\/\/[^\s\]]+)\]/gi;
+
+        // PASSO 1: divide o chunk em segmentos ORDENADOS.
+        // Cada segmento é ou "texto" ou "imagem" (URL).
+        type Segment =
+          | { kind: "text"; content: string }
+          | { kind: "image"; url: string; caption: string };
+        const segments: Segment[] = [];
+        let lastIndex = 0;
+        let m: RegExpExecArray | null;
+        const re = new RegExp(mediaTagRegex.source, "gi");
+        while ((m = re.exec(chunkText)) !== null) {
+          const before = chunkText.slice(lastIndex, m.index).trim();
+          if (before) segments.push({ kind: "text", content: before });
+          segments.push({ kind: "image", url: m[1].trim(), caption: "" });
+          lastIndex = m.index + m[0].length;
+        }
+        const tail = chunkText.slice(lastIndex).trim();
+        if (tail) segments.push({ kind: "text", content: tail });
+
+        // CASO: chunk NÃO tem imagem. Fluxo simples — manda texto e persiste.
+        if (!segments.some(s => s.kind === "image")) {
+          // Delay de digitação em chunks 2+.
+          if (i > 0) {
+            const typingSeconds = Math.min(Math.max(chunkText.length / 15, 2), 5);
+            await new Promise(r => setTimeout(r, typingSeconds * 1000));
+          }
+          await sendAndPersistText(chunkText);
+          continue;
         }
 
-        // chats_dashboard — fonte que /chat lê. Se falhar (ex: msgId duplicado),
-        // tenta de novo com sufixo aleatório. Não pode falhar silencioso.
-        const dashPayload = {
-            message_id: msgId,
-            remote_jid: remoteJid,
-            sender_type: 'ai',
-            content: chunkText,
-            status_envio: sendError ? 'error' : 'sent',
-            instance_name: instanceName,
-            created_at: nowIso,
-        };
-        const { error: dashErr } = await supabase.from("chats_dashboard").insert(dashPayload);
-        if (dashErr) {
-            if ((dashErr as any).code === "23505") {
-                // Unique violation → tenta com sufixo aleatório.
-                const retryId = `${msgId}-${Math.random().toString(36).slice(2, 8)}`;
-                const retry = await supabase.from("chats_dashboard").insert({ ...dashPayload, message_id: retryId });
-                if (retry.error) console.warn("[AGENT] chats_dashboard retry falhou:", retry.error.message);
-            } else {
-                console.warn("[AGENT] chats_dashboard insert:", dashErr.message);
-                // Loga em webhook_logs pra usuário poder debugar via Configurações.
-                await supabase.from("webhook_logs").insert({
-                    instance_name: instanceName,
-                    event: "AGENT_DASH_INSERT_FAIL",
-                    payload: { remote_jid: remoteJid, error: dashErr.message, code: (dashErr as any).code, msg_id: msgId },
-                    created_at: nowIso,
-                }).then(() => {}, () => {});
+        // PASSO 2: resolve captions inteligentes.
+        // Texto curto ANTES de uma imagem vira a CAPTION dela (legenda).
+        // Assim a foto chega com a descrição correta no WhatsApp.
+        for (let idx = 0; idx < segments.length; idx++) {
+          const s = segments[idx];
+          if (s.kind !== "image") continue;
+          if (idx === 0) continue;
+          const prev = segments[idx - 1];
+          if (prev.kind !== "text") continue;
+          if ((prev as any)._consumed) continue;
+          const lines = prev.content.split(/\n+/).filter(Boolean);
+          const lastLine = lines[lines.length - 1] || "";
+          if (lines.length <= 3 && prev.content.length <= 250) {
+            // Texto inteiro curto vira caption.
+            s.caption = prev.content;
+            (prev as any)._consumed = true;
+          } else if (lastLine.length > 0 && lastLine.length <= 200) {
+            // Só a última linha vira caption.
+            s.caption = lastLine;
+            lines.pop();
+            prev.content = lines.join("\n").trim();
+            if (!prev.content) (prev as any)._consumed = true;
+          }
+        }
+
+        // PASSO 3: envia segmentos NA ORDEM.
+        let photosSent = 0;
+        const MAX_PHOTOS_PER_TURN = 10; // anti-spam / WhatsApp ban protection
+        for (const s of segments) {
+          if (s.kind === "text") {
+            if ((s as any)._consumed) continue;
+            if (!s.content.trim()) continue;
+            // Delay natural de digitação (2-5s).
+            const typingSeconds = Math.min(Math.max(s.content.length / 15, 2), 5);
+            await new Promise(r => setTimeout(r, typingSeconds * 1000));
+            await sendAndPersistText(s.content);
+          } else {
+            // Segmento de imagem.
+            if (photosSent >= MAX_PHOTOS_PER_TURN) {
+              console.warn(`[AGENT] Limite de ${MAX_PHOTOS_PER_TURN} fotos/turno atingido. Restante suprimido.`);
+              break;
             }
+            // Dedup baseado em tempo.
+            const lastSentTs = sentMediaRecently.get(s.url);
+            const recent = lastSentTs && (Date.now() - lastSentTs < dedupWindowMs);
+            if (dedupProductMedia && recent) {
+              console.log(`[AGENT] Mídia ${s.url} enviada há ${Math.round((Date.now() - (lastSentTs || 0)) / 1000)}s — suprimindo duplicação imediata.`);
+              continue;
+            }
+            // Delay entre fotos: 2s (evita burst que parece spam).
+            if (photosSent > 0) {
+              await new Promise(r => setTimeout(r, 2000));
+            }
+            console.log(`[AGENT] Enviando foto ${photosSent + 1}: ${s.url}${s.caption ? ` (caption: "${s.caption.slice(0, 50)}...")` : ""}`);
+            const sentOk = await sendProductPhoto(s.url, s.caption);
+            if (sentOk) photosSent++;
+          }
         }
     }
 

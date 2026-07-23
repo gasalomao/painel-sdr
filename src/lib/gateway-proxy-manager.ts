@@ -533,6 +533,46 @@ export async function startProxy(): Promise<ProxyStatus> {
   return st;
 }
 
+// Mutex em memória: múltiplas requests de IA podem chegar junto e todas verem
+// a porta vazia ao mesmo tempo. Sem o mutex, todas chamariam startProxy em
+// paralelo e produziriam N processos filhos. Uma vez populado, próximas
+// chamadas só fazem fetch (barato).
+let ENSURE_PROMISE: Promise<ProxyStatus> | null = null;
+
+/**
+ * Garante que o proxy CLIProxyAPI está respondendo antes de continuar.
+ * Idempotente. Server-side: qualquer rota que bata no gateway (via resolveGatewayCreds
+ * no ai-provider) chama isso — não depende mais da aba de Configurações estar aberta
+ * pra o auto-start da UI rodar. Resolve o caso onde o(dev server reinicia → proxy morto
+ * → hostia a chamada de IA cai no fallback DeepSeek → parece que "DeepSeek quebrou"
+ * quando na verdade o gateway que precisava estar vivo).
+ *
+ * - Sem binPath/config instalado: não-fatal, retorna { running: false, installed: false }.
+ *   resolveGatewayCreds vai ver baseUrl vazio e cair pro fallback como antes.
+ * - Porta já responde: atalha pros fetches (não re-spawna).
+ * - Start falha (binário corrompido, porta ocupida por outro): também não-fatal,
+ *   retorna mas não lança. Caller decide o que fazer quando `running: false`.
+ */
+export async function ensureProxyRunning(): Promise<ProxyStatus> {
+  if (ENSURE_PROMISE) return ENSURE_PROMISE;
+  if (!isInstalled()) return getProxyStatus();
+  if (await isPortResponding()) return getProxyStatus();
+
+  ENSURE_PROMISE = (async () => {
+    try {
+      return await startProxy();
+    } finally {
+      ENSURE_PROMISE = null;
+    }
+  })();
+
+  try {
+    return await ENSURE_PROMISE;
+  } finally {
+    ENSURE_PROMISE = null;
+  }
+}
+
 export async function stopProxy(): Promise<ProxyStatus> {
   const pid = Number(readText(PID_PATH) || 0);
   if (pid > 0) {

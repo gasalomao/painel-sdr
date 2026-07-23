@@ -132,7 +132,7 @@ Sem aspas, sem títulos, sem markdown.`;
 
     // Telemetria de tokens — best-effort.
     try {
-      logTokenUsage({
+      await logTokenUsage({
         source: "other",
         sourceId: null,
         sourceLabel: "Resumo de agendamento p/ dono",
@@ -141,6 +141,7 @@ Sem aspas, sem títulos, sem markdown.`;
         promptTokens: out.usage.promptTokens,
         completionTokens: out.usage.completionTokens,
         totalTokens: out.usage.totalTokens,
+        clientId: opts.clientId || undefined,
         metadata: { kind: opts.kind },
       });
     } catch { /* não-fatal */ }

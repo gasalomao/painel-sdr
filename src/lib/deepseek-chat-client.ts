@@ -224,7 +224,7 @@ export async function chatComplete(args: {
   model: string;     // "deepseek-chat" | "deepseek-reasoner"
   prompt: string;
   signal?: AbortSignal;
-}): Promise<{ content: string; usage: { promptTokens: number; completionTokens: number } }> {
+}): Promise<{ content: string; usage: { promptTokens: number; completionTokens: number; estimated?: boolean } }> {
   await rateLimit(args.tokenId);
   const fp = args.fingerprint || DEFAULT_FINGERPRINT;
   const thinking = /reason/i.test(args.model);
@@ -313,10 +313,13 @@ export async function chatComplete(args: {
       if (typeof j?.usage?.completion_tokens === "number") completionTokens = j.usage.completion_tokens;
     }
   }
-  // Estimativa rude (4 chars ≈ 1 token) só pra OpenAI-shape ficar completo.
-  if (!promptTokens) promptTokens = Math.ceil(args.prompt.length / 4);
-  if (!completionTokens) completionTokens = Math.ceil(content.length / 4);
-  return { content, usage: { promptTokens, completionTokens } };
+  // Quando o upstream do DeepSeek não envia usage no SSE, NÃO inventamos
+  // estimativa chars/4 — isso polui o /tokens com números fictícios. Mantemos
+  // 0 e marcamos `estimated: true` pra o caller saber que não houve contagem
+  // real (caller pode logar com metadata.estimated=true). Custo fica 0 no
+  // painel (honesto: "chamada fez mas tokens não confirmados pelo DeepSeek").
+  const estimated = promptTokens === 0 && completionTokens === 0;
+  return { content, usage: { promptTokens, completionTokens, estimated } };
 }
 
 /**
