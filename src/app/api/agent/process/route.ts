@@ -1017,10 +1017,11 @@ ${capturedVariablesPrompt}
     const validImageUrls = new Set<string>();
     const collectImageUrls = (text: string) => {
       if (!text) return;
-      const re = /\[(?:IMAGEM|IMAGE|MEDIA|FOTO):\s*(https?:\/\/[^\s\]]+)\]/gi;
+      const re = /(?:\[(?:IMAGEM|IMAGE|MEDIA|FOTO):\s*(https?:\/\/[^\s\]]+)\]|!\[[^\]]*\]\((https?:\/\/[^\s\)]+)\)|(https?:\/\/[^\s\]\)]+(?:\.(?:jpg|jpeg|png|webp|gif)|\/chat-media\/[^\s\]\)]+)))/gi;
       let m: RegExpExecArray | null;
       while ((m = re.exec(text)) !== null) {
-        if (m[1]) validImageUrls.add(m[1].trim());
+        const u = (m[1] || m[2] || m[3] || "").trim();
+        if (u) validImageUrls.add(u);
       }
     };
 
@@ -1779,6 +1780,14 @@ ${capturedVariablesPrompt}
     });
 
     finalAnswer = finalAnswer.replace(/^```\w*\n?/g, "").replace(/\n?```$/g, "");
+
+    // Normaliza qualquer imagem em markdown (![alt](url)) ou URL solta de imagem para o formato [IMAGEM: url]
+    finalAnswer = finalAnswer.replace(/!\[[^\]]*\]\((https?:\/\/[^\s\)]+)\)/gi, "[IMAGEM: $1]");
+    for (const validUrl of validImageUrls) {
+      if (finalAnswer.includes(validUrl) && !new RegExp(`\\[(?:IMAGEM|IMAGE|MEDIA|FOTO):\\s*${validUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\]`, "i").test(finalAnswer)) {
+        finalAnswer = finalAnswer.replace(validUrl, `\n[IMAGEM: ${validUrl}]\n`);
+      }
+    }
 
     // 9. Envio: roteia pelo provider do canal (Evolution OU WhatsApp Cloud).
     // Import dinâmico pra evitar ciclos.

@@ -26,6 +26,55 @@ const TOOL_COLOR: Record<string, string> = {
   gray: "bg-white/5 border-white/10 text-white/80",
 };
 
+function renderSandboxMessageContent(content: string) {
+  if (!content) return null;
+  const imageRegex = /(?:\[(?:IMAGEM|IMAGE|MEDIA|FOTO):\s*(https?:\/\/[^\s\]]+)\]|!\[[^\]]*\]\((https?:\/\/[^\s\)]+)\))/gi;
+  const parts: React.ReactNode[] = [];
+  let lastIdx = 0;
+  let match: RegExpExecArray | null;
+  const re = new RegExp(imageRegex.source, "gi");
+
+  while ((match = re.exec(content)) !== null) {
+    const textBefore = content.slice(lastIdx, match.index);
+    if (textBefore) {
+      parts.push(<span key={`text-${lastIdx}`}>{textBefore}</span>);
+    }
+    const imageUrl = (match[1] || match[2] || "").trim();
+    if (imageUrl) {
+      parts.push(
+        <div key={`img-${match.index}`} className="my-2 space-y-1">
+          <a href={imageUrl} target="_blank" rel="noreferrer" className="block group">
+            <img
+              src={imageUrl}
+              alt="Foto do Produto"
+              className="rounded-xl border border-white/20 max-h-60 max-w-full object-cover shadow-lg group-hover:opacity-90 transition-opacity"
+              onError={(e) => {
+                (e.target as HTMLElement).style.display = "none";
+              }}
+            />
+          </a>
+          <div className="inline-flex items-center gap-1.5 text-[10px] text-emerald-400 font-mono bg-emerald-950/60 px-2 py-0.5 rounded-md border border-emerald-500/30">
+            <span>📷</span>
+            <span>Mídia enviada como foto via WhatsApp</span>
+          </div>
+        </div>
+      );
+    }
+    lastIdx = match.index + match[0].length;
+  }
+
+  const textAfter = content.slice(lastIdx);
+  if (textAfter) {
+    parts.push(<span key={`text-${lastIdx}`}>{textAfter}</span>);
+  }
+
+  if (parts.length === 0) {
+    return content;
+  }
+
+  return <>{parts}</>;
+}
+
 export function TestesTab(props: {
   // Lead picker
   previewSample: PreviewSample;
@@ -286,7 +335,7 @@ export function TestesTab(props: {
                         : "bg-[#202c33] text-[#e9edef]"
                     )}
                   >
-                    {msg.content}
+                    {renderSandboxMessageContent(msg.content)}
                   </div>
                 </div>
               );
