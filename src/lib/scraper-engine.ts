@@ -520,40 +520,16 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
               await detailsPage.goto(lead.url, { waitUntil: "domcontentloaded", timeout: 15000 });
               await sleep(2000);
 
-              // ---- Captura profunda: rolar seção de reviews pra carregar tudo ----
-              // Google Maps carrega reviews em lazy-load. Rola até a seção de
-              // avaliações e expande o painel scrollável pra coletar o máximo.
-              try {
-                await detailsPage.evaluate(() => {
-                  // Tenta achar o botão "Avaliações" / "Reviews" no painel.
-                  const tabBtns = Array.from(document.querySelectorAll('button[role="tab"], [role="tab"], a[role="tab"]'));
-                  const reviewsBtn = tabBtns.find((b) => {
-                    const t = (b as HTMLElement).textContent || "";
-                    return /avaliaç|reviews/i.test(t);
-                  });
-                  if (reviewsBtn) (reviewsBtn as HTMLElement).click();
-                });
-                await sleep(1200);
-                // Rola o contêiner de reviews (vários seletores possíveis, Maps muda sempre).
-                for (let i = 0; i < 8; i++) {
-                  await detailsPage.evaluate(() => {
-                    const scrollers = [
-                      document.querySelector(`div[role="feed"]`),
-                      document.querySelector(`div.m6QErb[role="region"]`),
-                      document.querySelector(`div[aria-label*="avalia" i]`),
-                      document.querySelector(`div[aria-label*="review" i]`),
-                      document.querySelector(`div[jsaction*="pane"]`),
-                    ].filter(Boolean);
-                    const sc = (scrollers[0] as HTMLElement) || document.scrollingElement;
-                    if (sc) sc.scrollBy(0, 1500);
-                  });
-                  await sleep(700);
-                }
-              } catch {
-                // se a rolagem falhar, segue com que estiver carregado
-              }
-
-              const extracted = await detailsPage.evaluate(() => {
+              // ============================================================
+              // FASE 1 — Captura do PAINEL PRINCIPAL (antes de qualquer
+              // clique em abas). Aqui estão phone, website, instagram,
+              // facebook, priceRange, openNow, horários, atributos, fotos,
+              // bloco "Sobre" e qualquer review já renderizada no card
+              // inicial (Google mostra as 2-3 mais recentes no topo).
+              // NÃO clica em nada — clique em "Avaliações" muda o painel
+              // e esconde o botão de telefone, quebrando a captura.
+              // ============================================================
+              const mainExtracted = await detailsPage.evaluate(() => {
                 let phone = "";
                 let website = "";
                 let instagram = "";
@@ -572,11 +548,18 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 const authorityEl = document.querySelector('a[data-item-id="authority"]') as HTMLAnchorElement;
                 if (authorityEl?.href && !authorityEl.href.includes("google.com")) website = authorityEl.href;
 
-                const tooltipEls = Array.from(document.querySelectorAll('[data-tooltip*="telefone" i], [aria-label*="telefone" i], [data-tooltip*="phone" i], [aria-label*="phone" i]'));
+                // Telefone — vários seletores. Primeiro pelos botões com
+                // data-tooltip/aria-label; depois pelo body text (fallback).
+                const tooltipEls = Array.from(document.querySelectorAll('[data-item-id^="phone:tls"], [data-item-id^="phone"], [data-tooltip*="telefone" i], [aria-label*="telefone" i], [data-tooltip*="phone" i], [aria-label*="phone" i]'));
                 for (const item of tooltipEls) {
-                  const labelText = (item as HTMLElement).ariaLabel || item.getAttribute("data-tooltip") || "";
+                  // 1) Tenta aria-label do botão (Google coloca o número aqui).
+                  const labelText = (item as HTMLElement).ariaLabel || item.getAttribute("data-tooltip") || item.getAttribute("data-item-id") || "";
                   const match = labelText.match(/(?:\+?55\s?)?(?:\(?0?\d{2}\)?\s?)?(?:9\s?)?\d{4,5}[-\s.]?\d{4}/);
                   if (match) { phone = match[0].trim(); break; }
+                  // 2) Tenta o texto do próprio botão (algumas versões do Maps).
+                  const btnText = (item as HTMLElement).textContent || "";
+                  const btnMatch = btnText.match(/(?:\+?55\s?)?(?:\(?0?\d{2}\)?\s?)?(?:9\s?)?\d{4,5}[-\s.]?\d{4}/);
+                  if (btnMatch) { phone = btnMatch[0].trim(); break; }
                 }
 
                 if (!phone) {
@@ -585,13 +568,11 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                   if (bodyMatch) phone = bodyMatch[0].trim();
                 }
 
-                // ---- Captura profunda do painel de detalhe do Maps ----
-                // Tenta múltiplos seletores — Google Maps muda DOM a cada trimestre.
+                // ---- Demais campos do painel principal ----
                 const mapsUrl = (document.querySelector('a[data-item-id="place_id"]') as HTMLAnchorElement)?.href
                   || (document.querySelector('link[rel="canonical"]') as HTMLLinkElement)?.href
                   || location.href;
 
-                // Faixa de preço ($, $$, $$$, $$$$) e "Aberto agora"/"Fechado"
                 let priceRange = "";
                 const bodyTxt = document.body.innerText || "";
                 const priceMatch = bodyTxt.match(/\${1,4}\s*·/) || bodyTxt.match(/\b(\${1,4})\b/);
@@ -600,32 +581,27 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 const openMatch = bodyTxt.match(/(Aberto agora|Fechado|Fechado temporariamente|Aberto 24 horas|Aberto .*?horas)/i);
                 if (openMatch) openNow = openMatch[1];
 
-                // Horários — painel costuma ter aria-label "Horário de funcionamento: ..."
                 const openingHours: any = {};
                 const hoursEls = Array.from(document.querySelectorAll('[aria-label*="horário" i], [aria-label*="hours" i], [data-tooltip*="horário" i]'));
                 if (hoursEls.length > 0) {
                   const txt = (hoursEls[0] as HTMLElement).textContent || "";
-                  // Tabela semanal —Sun: 00:00–00:00 etc.
                   const dayRe = /(Dom|Seg|Ter|Qua|Qui|Sex|S[aá]b|Sun|Mon|Tue|Wed|Thu|Fri|Sat)[\s:]+([0-9h:.\-–\s]+[0-9h:.\-–\s ]*)/gi;
                   let m: RegExpExecArray | null;
                   while ((m = dayRe.exec(txt))) openingHours[m[1]] = m[2].trim();
                   if (Object.keys(openingHours).length === 0) openingHours.raw = txt.slice(0, 500);
                 }
 
-                // Atributos (delivery, acessibilidade, estacionamento) — badges
                 const attributes: string[] = [];
                 const attrEls = Array.from(document.querySelectorAll('div[role="button"][aria-label], button[aria-label]'));
                 for (const el of attrEls) {
                   const t = (el as HTMLElement).getAttribute("aria-label") || "";
                   if (!t) continue;
-                  // só coeficientes úteis — heurística por palavra-chave PT/EN
                   if (/(delivery|entrega|retirada|takeout|dine-in|balcão|reserva|wheelchair|cadeira|estacionamento|parking|acessib|wifi|ar condicionado|pet friendly|aceita)/i.test(t)) {
                     if (!attributes.includes(t) && t.length < 80) attributes.push(t);
                   }
                   if (attributes.length >= 25) break;
                 }
 
-                // Fotos — imagens com URL do lh3.googleusercontent
                 const photoSeen = new Set<string>();
                 const photos: string[] = [];
                 const imgEls = Array.from(document.querySelectorAll('img[src*="googleusercontent"]'));
@@ -637,7 +613,6 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                   }
                 }
 
-                // Bloco "Sobre" — descrição + serviços listados na página
                 const businessDetails: any = {};
                 const aboutEl = document.querySelector('[aria-label*="sobre" i], [aria-label*="about" i], section[data-id="about"]');
                 if (aboutEl) businessDetails.about = ((aboutEl as HTMLElement).innerText || "").slice(0, 2000);
@@ -650,34 +625,53 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 }
                 if (services.length) businessDetails.services = services;
 
-                // ---- REVIEWS (texto das avaliações) ----
-                // Cada review costuma estar num container com aria-label
-                // começando "Avaliação de <nome>: <nota> estrelas".
-                const reviewEls = Array.from(document.querySelectorAll('div[role="article"][aria-label], div[data-review-id], div[jslog*="review"]'));
-                const reviews: any[] = [];
+                // ---- Avaliação agregada (estrelas + nº de reviews) ----
+                // Google coloca isso no painel principal como "4,8 (1.235)".
+                // Tentamos extrair e devolver tb — caso o scraper principal
+                // (cardData) não tenha pego (DOM mudou).
+                let ratingAggregate: string = "";
+                let reviewCountAggregate: string = "";
+                const rEl = document.querySelector('[role="img"][aria-label*="estrela" i], [role="img"][aria-label*="star" i], .F6sie, .MW4l2');
+                if (rEl) {
+                  const aria = (rEl as HTMLElement).getAttribute("aria-label") || "";
+                  const m1 = aria.match(/(\d(?:[.,]\d)?)\s*(?:estrela|star)/i);
+                  if (m1) ratingAggregate = m1[1].replace(",", ".");
+                  const m2 = aria.match(/(\d[\d.,]*)\s*(?:avaliaç|review)/i);
+                  if (m2) reviewCountAggregate = m2[1].replace(/\./g, "");
+                }
+                // fallback pra animation "4.8 stars · 1,235 reviews" no body text
+                if (!ratingAggregate) {
+                  const bMatch = bodyTxt.match(/(\d[.,]\d)\s*(?:estrela|star)/i);
+                  if (bMatch) ratingAggregate = bMatch[1].replace(",", ".");
+                }
+                if (!reviewCountAggregate) {
+                  const bMatch = bodyTxt.match(/([\d.,]+)\s*(?:avaliaç|review)/i);
+                  if (bMatch) reviewCountAggregate = bMatch[1].replace(/\./g, "");
+                }
+
+                // ---- Reviews que já vêm renderizadas no painel principal ----
+                // (Google coloca as 2-3 mais recentes no topo do card).
+                const reviewEls0 = Array.from(document.querySelectorAll('div[role="article"][aria-label], div[data-review-id], div[jslog*="review"]'));
+                const reviewsInitial: any[] = [];
                 const reviewSeen = new Set<string>();
-                for (const r of reviewEls) {
+                for (const r of reviewEls0) {
                   const aria = r.getAttribute("aria-label") || "";
-                  // autor: entre "Avaliação de " e ":"
-                  const authorMatch = aria.match(/(?:avaliaç(?:ão)?\s+de|review\s+by)\s+(.+?)(?::|\s+5\s)/i);
+                  const authorMatch = aria.match(/(?:avaliaç(?:ão)?\s+de|review\s+by)\s+(.+?)(?::|\s+\d\s)/i);
                   const author = authorMatch ? authorMatch[1].trim() : "";
-                  // nota: "5 estrelas" / "5 stars"
                   const ratingMatch = aria.match(/(\d(?:[.,]\d)?)\s*(?:estrela|star)/i);
                   const rating = ratingMatch ? ratingMatch[1] : "";
                   const text = ((r as HTMLElement).innerText || "").slice(0, 1200).trim();
-                  // dedupe por texto curto — Google duplica o mesmo card
                   const sig = text.slice(0, 80);
                   if (!text || reviewSeen.has(sig)) continue;
                   reviewSeen.add(sig);
-                  // data dentro do texto: "há 2 semanas" / "2 weeks ago" no início do card
                   const dateMatch = text.match(/(há\s+\d+\s+\w+|\d+\s+(?:dias?|semanas?|meses|anos?|day|week|month|year)s?\s+ago)/i);
-                  reviews.push({
+                  reviewsInitial.push({
                     autor: author,
                     nota: rating,
                     data: dateMatch ? dateMatch[1] : "",
                     texto: text,
                   });
-                  if (reviews.length >= 50) break;
+                  if (reviewsInitial.length >= 50) break;
                 }
 
                 return {
@@ -689,23 +683,96 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                   attributes,
                   photos,
                   businessDetails,
-                  reviews,
+                  reviews: reviewsInitial,
+                  ratingAggregate,
+                  reviewCountAggregate,
                 };
               });
 
-              if (extracted) {
-                phoneStr = extracted.phone;
-                websiteStr = extracted.website;
-                instagramStr = extracted.instagram;
-                facebookStr = extracted.facebook;
-                if (Array.isArray(extracted.reviews) && extracted.reviews.length > 0) reviewsDetalhes = extracted.reviews;
-                if (extracted.businessDetails && Object.keys(extracted.businessDetails).length > 0) businessDetails = extracted.businessDetails;
-                if (extracted.openingHours && Object.keys(extracted.openingHours).length > 0) openingHours = extracted.openingHours;
-                if (Array.isArray(extracted.attributes) && extracted.attributes.length > 0) attributes = extracted.attributes;
-                if (extracted.priceRange) priceRange = extracted.priceRange;
-                if (extracted.openNow) openNow = extracted.openNow;
-                if (Array.isArray(extracted.photos) && extracted.photos.length > 0) photos = extracted.photos;
-                if (extracted.mapsUrl) mapsUrl = extracted.mapsUrl;
+              if (mainExtracted) {
+                phoneStr = mainExtracted.phone;
+                websiteStr = mainExtracted.website;
+                instagramStr = mainExtracted.instagram;
+                facebookStr = mainExtracted.facebook;
+                if (Array.isArray(mainExtracted.reviews) && mainExtracted.reviews.length > 0) reviewsDetalhes = mainExtracted.reviews;
+                if (mainExtracted.businessDetails && Object.keys(mainExtracted.businessDetails).length > 0) businessDetails = mainExtracted.businessDetails;
+                if (mainExtracted.openingHours && Object.keys(mainExtracted.openingHours).length > 0) openingHours = mainExtracted.openingHours;
+                if (Array.isArray(mainExtracted.attributes) && mainExtracted.attributes.length > 0) attributes = mainExtracted.attributes;
+                if (mainExtracted.priceRange) priceRange = mainExtracted.priceRange;
+                if (mainExtracted.openNow) openNow = mainExtracted.openNow;
+                if (Array.isArray(mainExtracted.photos) && mainExtracted.photos.length > 0) photos = mainExtracted.photos;
+                if (mainExtracted.mapsUrl) mapsUrl = mainExtracted.mapsUrl;
+                // fallback: se o scraper principal (cardData) não tiver pego
+                // rating/reviews, usa o que veio do painel de detalhe.
+                if (!cardData.averageRating && mainExtracted.ratingAggregate) cardData.averageRating = mainExtracted.ratingAggregate;
+                if (!cardData.reviewCount && mainExtracted.reviewCountAggregate) cardData.reviewCount = mainExtracted.reviewCountAggregate;
+              }
+
+              // ============================================================
+              // FASE 2 — Capturar reviews profundas (opcional).
+              // Só rola se tentar abrir a aba de avaliações. Se falhar ou se
+              // já temos 50+ reviews da FASE 1, pula — não arrisca perder
+              // dados do painel principal (já capturado).
+              // ============================================================
+              if (reviewsDetalhes.length < 50) {
+                try {
+                  // Tenta abrir a página de reviews (URL com /reviews no final).
+                  const reviewsUrl = lead.url.endsWith("/reviews") ? lead.url : lead.url.replace(/\/?$/, "/reviews");
+                  await detailsPage.goto(reviewsUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+                  await sleep(1500);
+                  // Rola contêiner de reviews em lazy-load.
+                  for (let i = 0; i < 8; i++) {
+                    await detailsPage.evaluate(() => {
+                      const scrollers = [
+                        document.querySelector(`div[role="feed"]`),
+                        document.querySelector(`div.m6QErb[role="region"]`),
+                        document.querySelector(`div[aria-label*="avalia" i]`),
+                        document.querySelector(`div[aria-label*="review" i]`),
+                        document.querySelector(`div[jsaction*="pane"]`),
+                      ].filter(Boolean);
+                      const sc = (scrollers[0] as HTMLElement) || (document.scrollingElement as HTMLElement);
+                      if (sc) sc.scrollBy(0, 1500);
+                    });
+                    await sleep(700);
+                  }
+                  const reviewExtracted = await detailsPage.evaluate(() => {
+                    const reviewEls = Array.from(document.querySelectorAll('div[role="article"][aria-label], div[data-review-id], div[jslog*="review"]'));
+                    const out: any[] = [];
+                    const seen = new Set<string>();
+                    for (const r of reviewEls) {
+                      const aria = r.getAttribute("aria-label") || "";
+                      const authorMatch = aria.match(/(?:avaliaç(?:ão)?\s+de|review\s+by)\s+(.+?)(?::|\s+\d\s)/i);
+                      const author = authorMatch ? authorMatch[1].trim() : "";
+                      const ratingMatch = aria.match(/(\d(?:[.,]\d)?)\s*(?:estrela|star)/i);
+                      const rating = ratingMatch ? ratingMatch[1] : "";
+                      const text = ((r as HTMLElement).innerText || "").slice(0, 1200).trim();
+                      const sig = text.slice(0, 80);
+                      if (!text || seen.has(sig)) continue;
+                      seen.add(sig);
+                      const dateMatch = text.match(/(há\s+\d+\s+\w+|\d+\s+(?:dias?|semanas?|meses|anos?|day|week|month|year)s?\s+ago)/i);
+                      out.push({
+                        autor: author,
+                        nota: rating,
+                        data: dateMatch ? dateMatch[1] : "",
+                        texto: text,
+                      });
+                      if (out.length >= 50) break;
+                    }
+                    return out;
+                  });
+                  if (Array.isArray(reviewExtracted) && reviewExtracted.length > 0) {
+                    // merge (dedupe por sig 80 chars)
+                    const merged = new Map<string, any>();
+                    for (const rv of [...reviewsDetalhes, ...reviewExtracted]) {
+                      const sig = (rv.text || "").slice(0, 80);
+                      merged.set(sig, rv);
+                    }
+                    reviewsDetalhes = Array.from(merged.values()).slice(0, 50);
+                  }
+                } catch {
+                  // se falhar导航gação pra /reviews, mantém as reviews já
+                  // capturadas na FASE 1 — não perdemos informação.
+                }
               }
             }
           } catch {
