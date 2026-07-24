@@ -99,3 +99,17 @@ ask ──► 0 Classificar ──► 1 Definir Pronto ──► 2 Evidências �
    - A primeira frase responde "o que aconteceu / qual o resultado".
    - Reportar evidências reais e ressalvas/caveats honestos.
 
+## Suíte de Marketing Skills Integrada (coreyhaines31/marketingskills)
+
+> **MANDATO DE MARKETING**: Todas as IAs e modelos que operam no projeto DEVEM utilizar as 48 sub-skills de marketing disponíveis em `skills/` e `.agents/skills/` sempre que o usuário solicitar tarefas de marketing, copywriting, anúncios, emails, SEO, CRO, precificação, landing pages, lead magnets, estratégias de conteúdo e growth.
+
+### Regras de Execução de Marketing:
+1. **Ativação Automática**: Se o usuário pedir para escrever copy, planejar campanhas, criar emails de prospecção, otimizar conversão (CRO), fazer auditoria SEO ou criar ofertas, a IA DEVE consultar a respectiva skill em `skills/<skill_name>/SKILL.md` antes de gerar o conteúdo.
+2. **Exemplos de Mapeamento**:
+   - Copywriting / Páginas de Vendas ➔ `skills/copywriting/SKILL.md`
+   - Cold Email / Prospecção ➔ `skills/cold-email/SKILL.md` & `skills/prospecting/SKILL.md`
+   - Otimização de Anúncios ➔ `skills/ads/SKILL.md` & `skills/ad-creative/SKILL.md`
+   - SEO & Conteúdo ➔ `skills/seo-audit/SKILL.md`, `skills/ai-seo/SKILL.md` & `skills/content-strategy/SKILL.md`
+   - Taxas de Conversão & Ofertas ➔ `skills/cro/SKILL.md` & `skills/offers/SKILL.md`
+
+

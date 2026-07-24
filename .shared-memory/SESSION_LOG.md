@@ -1,5 +1,14 @@
 # Log de Sessões
 
+## [2026-07-24 01:25] Antigravity — Instalação Universal da Suíte de Marketing Skills (coreyhaines31/marketingskills)
+- **O que foi feito**:
+  - Clonadas e instaladas todas as **48 sub-skills de marketing** do repositório `coreyhaines31/marketingskills` em `skills/`, `.agents/skills/` e `C:\Users\Salomao\.gemini\config\skills\`.
+  - Atualizado `AGENTS.md` com o mandato de execução de marketing universal para Antigravity, Claude Code, OpenCode, Zcode, Freebuff, Cursor, Codebuff.
+- **Arquivos alterados**: `AGENTS.md`, `skills/*` (48 novas skills), `.agents/skills/*` (48 novas skills), `C:\Users\Salomao\.gemini\config\skills\*`, `.shared-memory/CONTEXT.md`, `.shared-memory/SESSION_LOG.md`
+- **Decisões**: Instalação tripla (projeto + `.agents` + global) garante que qualquer agente/IDE ative automaticamente o framework de marketing para copywriting, cold email, ads, CRO, SEO e ofertas.
+- **Problemas**: Corrigida duplicata no `scraper-engine.ts`. TypeScript verificado com 0 erros.
+- **Estado ao sair**: 48 marketing skills instaladas e ativas universalmente.
+
 ## [2026-07-23 19:30] Claude Code — Captura profunda do Google Maps (reviews + tudo do painel de detalhe)
 - **O que foi feito**:
   - Criada Migration 009 `migrations/009_leads_reviews_detalhes.sql` adicionando em `leads_extraidos`: `reviews_detalhes jsonb`, `business_details jsonb`, `opening_hours jsonb`, `attributes jsonb`, `price_range text`, `open_now text`, `photos jsonb`, `maps_url text` (idempotente, tudo nullable).

@@ -427,3 +427,10 @@ Este projeto (`painel-sdr`) é um Painel de SDR construído com Next.js (versão
   - `src/lib/evolution.ts`: Atualizado `targetJid` em `sendMedia` para sanitizar prefixos `phone:`.
   - `src/app/api/send-message/route.ts`: Sanitização de `cleanJid` na rota POST de envio manual antes de acionar o envio no canal.
 - **Validação**: TypeScript validado com `npx tsc --noEmit` (**0 erros**).
+
+## [2026-07-24 01:25] Antigravity — Instalação Universal da Suíte de Marketing Skills (coreyhaines31/marketingskills)
+- **Diagnóstico**: O usuário solicitou a instalação completa do repositório `coreyhaines31/marketingskills` para que todos os agentes e modelos (Claude Code, Antigravity, OpenCode, Zcode, Freebuff, Cursor, Codebuff) usem as 48 habilidades de marketing automaticamente.
+- **Ações**:
+  - Baixadas e instaladas todas as **48 sub-skills de marketing** em `skills/`, `.agents/skills/` e no diretório global `C:\Users\Salomao\.gemini\config\skills\`.
+  - Atualizado o arquivo `AGENTS.md` com o mandato explícito de execução de marketing, instruindo todas as IAs e modelos a ativarem as skills de copywriting, cold email, ads, CRO, SEO, ofertas, precificação e estratégias de vendas.
+- **Validação**: `npx tsc --noEmit` zerado (**0 erros**).
