@@ -1,9 +1,13 @@
 # Tarefas do Projeto
 
+## Busca Web robusta (2026-07-30)
+- [x] Implementar prefetch de busca web no servidor para qualquer modelo <!-- id: 320 -->
+- [x] Filtrar anúncios e estruturar resposta para IA na busca web <!-- id: 321 -->
+- [x] Corrigir asserções quebradas em testes legados e rodar suite <!-- id: 322 -->
+
 ## Dashboard operacional (2026-07-30)
 - [x] Redesenhar dashboard para uma visão profissional e enxuta, com dados e ações úteis <!-- id: 310 -->
 - [x] Validar dashboard com typecheck e build <!-- id: 311 -->
-
 
 ## Auditoria de estabilidade e Evolution API (2026-07-30)
 - [ ] Corrigir `test_agent_process.test.ts` para falhar se `sendResult.ok` for falso e impedir envio externo acidental <!-- id: 300 -->
