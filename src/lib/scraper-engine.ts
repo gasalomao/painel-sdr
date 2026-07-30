@@ -29,10 +29,22 @@ export interface Lead {
   instagram: string;
   facebook: string;
   extractedAt: string;
-  /** Reviews escritas (autor, nota, data, texto) — captura profunda do
-   *  painel de detalhe do Maps. Vem como array de objetos já serializável. */
+  /** Reviews escritas (autor, nota, data, texto + fotoAutor + fotos anexadas
+   *  + respostaDono + contador útil) — captura profunda do painel de detalhe
+   *  do Maps. Vem como array de objetos já serializável. */
   reviewsDetalhes?: any[];
-  /** Bloco "Sobre" do Maps — descrição, serviços listados, atributos. */
+  /** Blob estruturado do painel "Sobre" do Maps. Inclui:
+   *  - about (descrição curta)
+   *  - descricao (descrição estendida)
+   *  - services (lista de serviços)
+   *  - subcategorias
+   *  - pessoasProcuramPor ("As pessoas procuram por")
+   *  - popularTimes (horários de pico da semana)
+   *  - redesAdicionais (LinkedIn/Twitter/YouTube/TikTok/WhatsApp/Telegram)
+   *  - menuUrl, reservaUrl
+   *  - plusCode, lat, lng, placeId (espelhados p/ acesso fácil)
+   *  - atualizadoEm
+   */
   businessDetails?: any;
   openingHours?: any;
   attributes?: any[];
@@ -40,6 +52,60 @@ export interface Lead {
   openNow?: string;
   photos?: string[];
   mapsUrl?: string;
+  /** Plus Code (Open Location Code) — referência única do lugar. */
+  plusCode?: string;
+  /** Latitude decimal (string p/ evitar perda de precisão). */
+  lat?: string;
+  /** Longitude decimal (string). */
+  lng?: string;
+  /** Place ID Google (ChIJ... ou 0x...:0x...). */
+  placeId?: string;
+  /** Distribuição de estrelas: { "5estrelas": 120, "4estrelas": 30, ... }. */
+  distribuicaoEstrelas?: Record<string, number>;
+  /** CEP extraído do endereço/painel. */
+  cep?: string;
+
+  // ============================================================
+  // CAMPOS EXTRAS — captura ESTENDIDA (2026-07-22):
+  // ============================================================
+
+  /** Status operacional: "Operacional", "Permanently closed", "Temporarily closed". */
+  businessStatus?: string;
+
+  /** Se o dono reivindicou a ficha (Claimed). Negócios "Claimed" tendem a
+   *  ser mais atenciosos/responsivos — sinal positivo pra B2B. */
+  claimed?: boolean;
+
+  /** Nome do proprietário/gerente quando exibido publicamente. */
+  ownerName?: string;
+
+  /** Ano de fundação do negócio (quando disponível). */
+  yearEstablished?: string;
+
+  /** Número TOTAL de fotos que o Google Maps tem do local (não só as 50 que
+   *  capturamos em photos[] — isso é o count agregado). */
+  totalPhotoCount?: number;
+
+  /** Tópicos de reviews do Google: { "Comida": "4.8", "Atendimento": "4.5" }.
+   *  Mostra os pontos fortes e fracos do negócio por categoria. */
+  reviewTopics?: Record<string, string>;
+
+  /** Reviews em destaque (Featured) — selecionadas pelo Google como mais úteis. */
+  featuredReviews?: string[];
+
+  /** Categorias secundárias (além da principal). */
+  additionalCategories?: string[];
+
+  /** Endereço separado em componentes: rua, número, bairro, cidade, estado, cep. */
+  addressComponents?: {
+    rua?: string;
+    numero?: string;
+    bairro?: string;
+    cidade?: string;
+    estado?: string;
+    cep?: string;
+    pais?: string;
+  } | null;
 }
 
 export interface ScraperSettings {
@@ -49,6 +115,7 @@ export interface ScraperSettings {
   filterEmpty?: boolean;
   filterDuplicates?: boolean;
   filterLandlines?: boolean;
+  captureAllReviews?: boolean;
   /** Limite máximo de leads a captar antes de parar. Quando atingido, o scraper
    *  sai do loop limpo, fecha o navegador, e o worker detecta o cap no próximo
    *  tick e avança pra fase de disparo. Sem limite = sem parada por contagem. */
@@ -165,7 +232,12 @@ function formatJid(phone: string): string {
 }
 
 export function formatLeadForN8n(lead: Lead) {
+  // Caminho CHAVE-VALOR p/ integrações n8n/Zapier/Make (chaves snake_case,
+  // fácil de mapear). Inclui TODOS os campos capturados do Maps — não perde
+  // mais reviews, fotos, horários, popular times, redes sociais, etc.
+  const bd: any = lead.businessDetails || {};
   return {
+    // ---- Identificação básica ----
     nome_do_negocio: lead.name || "",
     telefone: lead.phones || "",
     endereco: lead.fullAddress || "",
@@ -179,6 +251,36 @@ export function formatLeadForN8n(lead: Lead) {
     facebook: lead.facebook || "",
     extraido_em: lead.extractedAt || "",
     remoteJid: lead.remoteJid || "",
+    // ---- Localização precisa ----
+    place_id: lead.placeId || "",
+    plus_code: lead.plusCode || "",
+    lat: lead.lat || "",
+    lng: lead.lng || "",
+    cep: lead.cep || "",
+    maps_url: lead.mapsUrl || "",
+    // ---- Funcionamento ----
+    faixa_preco: lead.priceRange || "",
+    aberto_agora: lead.openNow || "",
+    horarios_funcionamento: lead.openingHours || null,
+    // ---- Detalhes (sobre + serviços + subcategorias + redes) ----
+    detalhes: lead.businessDetails || null,
+    redes_adicionais: bd.redesAdicionais || null,
+    menu_url: bd.menuUrl || "",
+    reserva_url: bd.reservaUrl || "",
+    descricao: bd.descricao || bd.about || "",
+    servicos: bd.services || null,
+    subcategorias: bd.subcategorias || null,
+    pessoas_procuram_por: bd.pessoasProcuramPor || null,
+    horarios_populares: bd.popularTimes || null,
+    atualizado_em: bd.atualizadoEm || "",
+    // ---- Atributos (delivery, acessibilidade, pagamentos, etc.) ----
+    atributos: lead.attributes || null,
+    // ---- Fotos ----
+    fotos: lead.photos || null,
+    // ---- Distribuição de estrelas (5★, 4★, 3★, 2★, 1★) ----
+    distribuicao_estrelas: lead.distribuicaoEstrelas || null,
+    // ---- Reviews completas (autor, nota, data, texto, fotos, respostaDono, util) ----
+    reviews_detalhes: lead.reviewsDetalhes || null,
   };
 }
 
@@ -261,6 +363,23 @@ async function saveLeadAndSync(lead: Lead, settings: ScraperSettings) {
       open_now: lead.openNow || null,
       photos: lead.photos || null,
       maps_url: lead.mapsUrl || null,
+      // ---- Campos extras do painel de detalhe (Migration 011) ----
+      place_id: lead.placeId || null,
+      plus_code: lead.plusCode || null,
+      lat: lead.lat ? Number(lead.lat) || null : null,
+      lng: lead.lng ? Number(lead.lng) || null : null,
+      cep: lead.cep || null,
+      distribuicao_estrelas: lead.distribuicaoEstrelas || null,
+      // ---- Campos extras da captura estendida (Migration 012) ----
+      business_status: lead.businessStatus || null,
+      claimed: lead.claimed ?? null,
+      owner_name: lead.ownerName || null,
+      year_established: lead.yearEstablished || null,
+      total_photo_count: lead.totalPhotoCount ?? null,
+      review_topics: lead.reviewTopics || null,
+      featured_reviews: lead.featuredReviews || null,
+      additional_categories: lead.additionalCategories || null,
+      address_components: lead.addressComponents || null,
       instance_name: (await getEvolutionConfig()).instance,
       status: hasWhatsApp ? "novo" : "sem_contato",
       created_at: new Date().toISOString(),
@@ -270,10 +389,19 @@ async function saveLeadAndSync(lead: Lead, settings: ScraperSettings) {
     let { error: insError } = await client.from("leads_extraidos").insert(fullPayload);
 
     // PGRST204 = coluna inexistente. Banco antigo sem instagram/facebook/ou
-    // sem as colunas JSONB da Migration 009 — tenta só com colunas garantidas.
+    // sem as colunas JSONB da Migration 009/011/012 — tenta só com colunas garantidas.
     if (insError && (insError as any).code === "PGRST204") {
       const minimal: any = { ...fullPayload };
-      const maybeMissing = ["instagram", "facebook", "reviews_detalhes", "business_details", "opening_hours", "attributes", "price_range", "open_now", "photos", "maps_url"];
+      const maybeMissing = [
+        "instagram", "facebook",
+        "reviews_detalhes", "business_details", "opening_hours", "attributes",
+        "price_range", "open_now", "photos", "maps_url",
+        "place_id", "plus_code", "lat", "lng", "cep", "distribuicao_estrelas",
+        // ---- Campos extras Migration 012 ----
+        "business_status", "claimed", "owner_name", "year_established",
+        "total_photo_count", "review_topics", "featured_reviews",
+        "additional_categories", "address_components",
+      ];
       for (const k of maybeMissing) delete minimal[k];
       const retry = await client.from("leads_extraidos").insert(minimal);
       insError = retry.error as any;
@@ -508,6 +636,22 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
           let openNow = "";
           let photos: string[] = [];
           let mapsUrl = "";
+          let plusCode = "";
+          let lat = "";
+          let lng = "";
+          let placeId = "";
+          let distribuicaoEstrelas: Record<string, number> | undefined;
+          let cep = "";
+          // ---- Campos extras (2026-07-22) ----
+          let businessStatus = "Operacional";
+          let claimed = false;
+          let ownerName = "";
+          let yearEstablished = "";
+          let totalPhotoCount: number | null = null;
+          let reviewTopics: Record<string, string> | undefined;
+          let featuredReviews: string[] | undefined;
+          let additionalCategories: string[] | undefined;
+          let addressComponents: any = null;
           let detailsPage;
           try {
             if (lead.url && browser) {
@@ -517,8 +661,19 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 if (["image", "stylesheet", "font"].includes(req.resourceType())) req.abort();
                 else req.continue();
               });
-              await detailsPage.goto(lead.url, { waitUntil: "domcontentloaded", timeout: 15000 });
-              await sleep(2000);
+                await detailsPage.goto(lead.url, { waitUntil: "domcontentloaded", timeout: 15000 });
+                await sleep(2000);
+                // ---- Espera ativa pelo botão de telefone (lazy loading do Google Maps) ----
+                // O Google Maps carrega o painel de detalhes mas o botão "Ligar"
+                // pode demorar a aparecer. Tentamos até 5s esperando pelo elemento.
+                try {
+                 await detailsPage.waitForSelector(
+                    '[data-item-id^="phone"], [data-tooltip*="telefone" i], [aria-label*="telefone" i], [aria-label*="phone" i], [aria-label*="Ligar" i], [aria-label*="Call" i]',
+                    { timeout: 5000 }
+                  );
+                } catch {
+                  // Se não achou nesse tempo, continua mesmo assim (fallbacks no evaluate resolverão).
+                }
 
               // ============================================================
               // FASE 1 — Captura do PAINEL PRINCIPAL (antes de qualquer
@@ -534,12 +689,21 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 let website = "";
                 let instagram = "";
                 let facebook = "";
+                const redesAdicionais: Record<string, string> = {};
 
+                // ---- Redes sociais e contatos (varredura de TODOS os links) ----
                 const siteEls = Array.from(document.querySelectorAll('a[data-item-id="authority"], a[data-tooltip*="site" i], a[aria-label*="website" i], a[href^="http"]'));
                 for (const a of siteEls) {
                   const v = (a as HTMLAnchorElement).href.toLowerCase();
                   if (v.includes("instagram.com")) { if (!instagram) instagram = (a as HTMLAnchorElement).href; }
                   else if (v.includes("facebook.com") || v.includes("fb.com")) { if (!facebook) facebook = (a as HTMLAnchorElement).href; }
+                  else if (v.includes("linkedin.com")) { if (!redesAdicionais.linkedin) redesAdicionais.linkedin = (a as HTMLAnchorElement).href; }
+                  else if (v.includes("twitter.com") || v.includes("x.com")) { if (!redesAdicionais.twitter) redesAdicionais.twitter = (a as HTMLAnchorElement).href; }
+                  else if (v.includes("youtube.com") || v.includes("youtu.be")) { if (!redesAdicionais.youtube) redesAdicionais.youtube = (a as HTMLAnchorElement).href; }
+                  else if (v.includes("tiktok.com")) { if (!redesAdicionais.tiktok) redesAdicionais.tiktok = (a as HTMLAnchorElement).href; }
+                  else if (v.includes("wa.me") || v.includes("whatsapp.com")) { if (!redesAdicionais.whatsapp) redesAdicionais.whatsapp = (a as HTMLAnchorElement).href; }
+                  else if (v.includes("t.me")) { if (!redesAdicionais.telegram) redesAdicionais.telegram = (a as HTMLAnchorElement).href; }
+                  else if (v.includes("pinterest.com")) { if (!redesAdicionais.pinterest) redesAdicionais.pinterest = (a as HTMLAnchorElement).href; }
                   else if (!v.includes("google.com") && !v.includes("gstatic.com") && !website) {
                     if (!a.hasAttribute("jslog")) website = (a as HTMLAnchorElement).href;
                   }
@@ -548,31 +712,106 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 const authorityEl = document.querySelector('a[data-item-id="authority"]') as HTMLAnchorElement;
                 if (authorityEl?.href && !authorityEl.href.includes("google.com")) website = authorityEl.href;
 
-                // Telefone — vários seletores. Primeiro pelos botões com
-                // data-tooltip/aria-label; depois pelo body text (fallback).
-                const tooltipEls = Array.from(document.querySelectorAll('[data-item-id^="phone:tls"], [data-item-id^="phone"], [data-tooltip*="telefone" i], [aria-label*="telefone" i], [data-tooltip*="phone" i], [aria-label*="phone" i]'));
-                for (const item of tooltipEls) {
-                  // 1) Tenta aria-label do botão (Google coloca o número aqui).
-                  const labelText = (item as HTMLElement).ariaLabel || item.getAttribute("data-tooltip") || item.getAttribute("data-item-id") || "";
-                  const match = labelText.match(/(?:\+?55\s?)?(?:\(?0?\d{2}\)?\s?)?(?:9\s?)?\d{4,5}[-\s.]?\d{4}/);
-                  if (match) { phone = match[0].trim(); break; }
-                  // 2) Tenta o texto do próprio botão (algumas versões do Maps).
-                  const btnText = (item as HTMLElement).textContent || "";
-                  const btnMatch = btnText.match(/(?:\+?55\s?)?(?:\(?0?\d{2}\)?\s?)?(?:9\s?)?\d{4,5}[-\s.]?\d{4}/);
-                  if (btnMatch) { phone = btnMatch[0].trim(); break; }
-                }
+                // ---- Menu, Reservas, Agendamento ----
+                let menuUrl = "";
+                const menuEl = document.querySelector('a[data-item-id="menu"], a[aria-label*="menu" i], a[aria-label*="cardápio" i]') as HTMLAnchorElement;
+                if (menuEl?.href) menuUrl = menuEl.href;
+                let reservaUrl = "";
+                const reservaEl = document.querySelector('a[data-item-id*="reserv"], a[aria-label*="reserva" i], a[aria-label*="Reserve" i], a[data-item-id="action_reservations"]') as HTMLAnchorElement;
+                if (reservaEl?.href) reservaUrl = reservaEl.href;
 
+                // ---- Telefone (vários seletores + fallback body text) ----
+                // Regex brasileira expandida: aceita +55, DDD com/sem parênteses,
+                // 9 inicial com/sem espaço, 4-5 dígitos + 4 dígitos, separadores -, . , espaço.
+                // Ex: (27) 9 9876-5432 | (27) 99876-5432 | +55 27 3376-5432 | 2733765432 | 3376-5432
+                const phoneRe = /(?:\+?55\s?)?(?:\(?0?\d{2}\)?[\s]?)?(?:9[\s]?)?(\d{4,5}[-\s.]?\d{4})/;
+
+                const tooltipEls = Array.from(document.querySelectorAll(
+                  '[data-item-id^="phone:tls"], [data-item-id^="phone"], ' +
+                  'button[data-item-id^="phone"], a[data-item-id^="phone"], ' +
+                  '[data-tooltip*="telefone" i], [aria-label*="telefone" i], ' +
+                  '[data-tooltip*="phone" i], [aria-label*="phone" i], ' +
+                  'button[aria-label*="Ligar" i], a[aria-label*="Ligar" i], ' +
+                  'button[aria-label*="Call" i], a[aria-label*="Call" i]'
+                ));
+                for (const item of tooltipEls) {
+                  const labelText = (item as HTMLElement).ariaLabel || item.getAttribute("data-tooltip") || item.getAttribute("data-item-id") || "";
+                  const match = labelText.match(phoneRe);
+                  if (match) { phone = labelText.trim(); break; }
+                  const btnText = (item as HTMLElement).textContent || "";
+                  const btnMatch = btnText.match(phoneRe);
+                  if (btnMatch) { phone = btnText.trim(); break; }
+                  // Se o aria-label é tipo "Ligar para +55 27 3376-5432", extrai só o número
+                  const cleanNum = labelText.replace(/[^\d+]/g, "");
+                  if (cleanNum.length >= 8) { phone = labelText; break; }
+                }
+                // Fallback 1: escanear botões que podem conter "Ligar" como texto
+                if (!phone) {
+                  const callButtons = Array.from(document.querySelectorAll('button, a'));
+                  for (const btn of callButtons) {
+                    const txt = (btn as HTMLElement).textContent || "";
+                    if (/^(Ligar|Call)/i.test(txt.trim())) {
+                      const aria = (btn as HTMLElement).getAttribute("aria-label") || txt;
+                      const m = aria.match(phoneRe);
+                      if (m) { phone = aria.trim(); break; }
+                    }
+                  }
+                }
+                // Fallback 2: varre o body inteiro com regex robusta
                 if (!phone) {
                   const bodyText = document.body.innerText || "";
-                  const bodyMatch = bodyText.match(/(?:\+?55\s?)?(?:\(?0?\d{2}\)?\s?)?(?:9\s?)?\d{4,5}[-\s.]?\d{4}/);
+                  const bodyMatch = bodyText.match(phoneRe);
                   if (bodyMatch) phone = bodyMatch[0].trim();
                 }
+                // Fallback 3: procura por padrão "Telefone:" ou "Phone:" seguido de número
+                if (!phone) {
+                  const bodyText2 = document.body.innerText || "";
+                  const labelMatch = bodyText2.match(/(?:Telefone|Phone|Tel\.?)\s*:?\s*(\+?\d[\d\s().-]{7,})/i);
+                  if (labelMatch) phone = labelMatch[1].trim();
+                }
 
-                // ---- Demais campos do painel principal ----
-                const mapsUrl = (document.querySelector('a[data-item-id="place_id"]') as HTMLAnchorElement)?.href
+                const canonicalHref = (document.querySelector('a[data-item-id="place_id"]') as HTMLAnchorElement)?.href
                   || (document.querySelector('link[rel="canonical"]') as HTMLLinkElement)?.href
                   || location.href;
+                const mapsUrl = canonicalHref;
 
+                // ---- Place ID (0x...:0x... ou ChIJ...) extraído da URL ----
+                let placeId = "";
+                const pidMatch1 = mapsUrl.match(/0x[0-9a-f]+:0x[0-9a-f]+/i);
+                if (pidMatch1) placeId = pidMatch1[0];
+                const pidMatch2 = mapsUrl.match(/!1s(0x[0-9a-f]+:0x[0-9a-f]+)/i);
+                if (!placeId && pidMatch2) placeId = pidMatch2[1];
+                const pidMatch3 = mapsUrl.match(/!2s(ChIJ[A-Za-z0-9_-]+)/);
+                if (!placeId && pidMatch3) placeId = pidMatch3[1];
+                const pidMatch4 = mapsUrl.match(/(ChIJ[A-Za-z0-9_-]+)/);
+                if (!placeId && pidMatch4) placeId = pidMatch4[1];
+
+                // ---- Latitude / Longitude extraídas da URL (!3dLAT!4dLNG) ----
+                let lat = "";
+                let lng = "";
+                const latMatch = mapsUrl.match(/!3d(-?\d{1,3}\.\d+)/);
+                const lngMatch = mapsUrl.match(/!4d(-?\d{1,3}\.\d+)/);
+                if (latMatch) lat = latMatch[1];
+                if (lngMatch) lng = lngMatch[1];
+                // fallback na URL curta @lat,lng
+                if (!lat) {
+                  const atMatch = mapsUrl.match(/@(-?\d{1,3}\.\d+),(-?\d{1,3}\.\d+)/);
+                  if (atMatch) { lat = atMatch[1]; lng = atMatch[2]; }
+                }
+
+                // ---- Plus Code (Open Location Code) ----
+                let plusCode = "";
+                const plusEl = document.querySelector('[data-item-id="olr"], button[data-item-id*="olr"]') as HTMLElement;
+                if (plusEl) {
+                  plusCode = (plusEl.innerText || plusEl.getAttribute("aria-label") || "").trim();
+                }
+                if (!plusCode) {
+                  const bodyTxt2 = document.body.innerText || "";
+                  const pcMatch = bodyTxt2.match(/\b([23456789CFGHJMPQRVWX]{4}\+[23456789CFGHJMPQRVWX]{2,3}(?:,[23456789CFGHJMPQRVWX]+)?)\b/);
+                  if (pcMatch) plusCode = pcMatch[1];
+                }
+
+                // ---- Faixa de preço + status "Aberto agora" ----
                 let priceRange = "";
                 const bodyTxt = document.body.innerText || "";
                 const priceMatch = bodyTxt.match(/\${1,4}\s*·/) || bodyTxt.match(/\b(\${1,4})\b/);
@@ -581,6 +820,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 const openMatch = bodyTxt.match(/(Aberto agora|Fechado|Fechado temporariamente|Aberto 24 horas|Aberto .*?horas)/i);
                 if (openMatch) openNow = openMatch[1];
 
+                // ---- Horários de funcionamento detalhados por dia ----
                 const openingHours: any = {};
                 const hoursEls = Array.from(document.querySelectorAll('[aria-label*="horário" i], [aria-label*="hours" i], [data-tooltip*="horário" i]'));
                 if (hoursEls.length > 0) {
@@ -591,31 +831,81 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                   if (Object.keys(openingHours).length === 0) openingHours.raw = txt.slice(0, 500);
                 }
 
-                const attributes: string[] = [];
-                const attrEls = Array.from(document.querySelectorAll('div[role="button"][aria-label], button[aria-label]'));
-                for (const el of attrEls) {
-                  const t = (el as HTMLElement).getAttribute("aria-label") || "";
-                  if (!t) continue;
-                  if (/(delivery|entrega|retirada|takeout|dine-in|balcão|reserva|wheelchair|cadeira|estacionamento|parking|acessib|wifi|ar condicionado|pet friendly|aceita)/i.test(t)) {
-                    if (!attributes.includes(t) && t.length < 80) attributes.push(t);
+                // ---- Popular times (horários de movimento da semana) ----
+                const popularTimes: any = {};
+                // Google renderiza como barras com aria-label "Movimentação: Segunda-feira, 14h, X%"
+                const popEls = Array.from(document.querySelectorAll('div[aria-label*="movimentação" i], div[aria-label*="popular" i], bar[aria-label*="movimentação" i]'));
+                for (const el of popEls) {
+                  const aria = (el as HTMLElement).getAttribute("aria-label") || "";
+                  const m = aria.match(/(Domingo|Segunda|Ter[cç]a|Quarta|Quinta|Sexta|S[aá]bado|Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)[^\d]*(\d{1,2})\s*h[^\d]*?(\d+)%/i);
+                  if (m) {
+                    const day = m[1];
+                    if (!popularTimes[day]) popularTimes[day] = [];
+                    popularTimes[day].push({ hora: parseInt(m[2]), ocupacao: parseInt(m[3]) });
                   }
-                  if (attributes.length >= 25) break;
+                }
+                // também tenta o bloco "Movimentação atual"
+                const liveMatch = bodyTxt.match(/(?:Movimentação atual|Live){1}[:\s]*((?:Muito|Bastante|Pouco|Normal|Ocupad[oa]|Vazio|Tranquilo)[^\n.]{0,30})/i);
+                if (liveMatch) popularTimes.atual = liveMatch[1].trim();
+
+                // ---- Atributos (delivery, acessibilidade, etc.) — captura categoria + valor ----
+                const attributes: any[] = [];
+                const attrSeen = new Set<string>();
+                const attrEls = Array.from(document.querySelectorAll('div[role="button"][aria-label], button[aria-label], div.D2Ei1b, button[jsaction*="pane"]'));
+                for (const el of attrEls) {
+                  const t = (el as HTMLElement).getAttribute("aria-label") || (el as HTMLElement).textContent || "";
+                  const trimmed = t.trim();
+                  if (!trimmed || trimmed.length > 80) continue;
+                  if (/(delivery|entrega|retirada|takeout|dine-in|balcão|reserva|wheelchair|cadeira|estacionamento|parking|acessib|wifi|ar condicionado|pet friendly|aceita|cart[aã]o|dinheiro|pix|debit|credit|outdoor|ar livre|drive-thru)/i.test(trimmed)) {
+                    if (!attrSeen.has(trimmed)) {
+                      attrSeen.add(trimmed);
+                      attributes.push(trimmed);
+                    }
+                  }
+                  if (attributes.length >= 50) break;
                 }
 
+                // ---- Fotos (aumenta pra 50 e captura categorias) ----
                 const photoSeen = new Set<string>();
                 const photos: string[] = [];
-                const imgEls = Array.from(document.querySelectorAll('img[src*="googleusercontent"]'));
+                const imgEls = Array.from(document.querySelectorAll('img[src*="googleusercontent"], img[src*="ggpht"]'));
                 for (const img of imgEls) {
                   const src = (img as HTMLImageElement).src.split("=")[0];
-                  if (src && !photoSeen.has(src) && photos.length < 20) {
+                  if (src && !photoSeen.has(src)) {
                     photoSeen.add(src);
                     photos.push(src);
+                    if (photos.length >= 50) break;
                   }
                 }
 
+                // ---- Bloco "Sobre" + Serviços + Descrição completa ----
                 const businessDetails: any = {};
                 const aboutEl = document.querySelector('[aria-label*="sobre" i], [aria-label*="about" i], section[data-id="about"]');
-                if (aboutEl) businessDetails.about = ((aboutEl as HTMLElement).innerText || "").slice(0, 2000);
+                if (aboutEl) businessDetails.about = ((aboutEl as HTMLElement).innerText || "").slice(0, 5000);
+
+                // Descrição estendida (alguns lugares têm "Descrição" separada do "Sobre")
+                const descEl = document.querySelector('[aria-label*="descri" i], [jslog*="description"]');
+                if (descEl) businessDetails.descricao = ((descEl as HTMLElement).innerText || "").slice(0, 3000);
+
+                // Subcategorias / "As pessoas buscam por"
+                const subcategorias: string[] = [];
+                const subcatEls = Array.from(document.querySelectorAll('button[jslog*="attribute"], .gm2-body-text, .Rk53df'));
+                for (const sc of subcatEls) {
+                  const txt = (sc as HTMLElement).textContent?.trim() || "";
+                  if (txt.length >= 3 && txt.length <= 80 && !subcategorias.includes(txt)) subcategorias.push(txt);
+                  if (subcategorias.length >= 30) break;
+                }
+                if (subcategorias.length) businessDetails.subcategorias = subcategorias;
+
+                // "As pessoas procuram por" / "People often search for"
+                const pProcuram: string[] = [];
+                const pProcuramMatch = bodyTxt.match(/(?:As pessoas procuram por|People (?:often )?search for)[:\s]*([^\n]{5,500})/i);
+                if (pProcuramMatch) {
+                  const itens = pProcuramMatch[1].split(/[,·|]/).map(s => s.trim()).filter(s => s.length >= 3 && s.length <= 80);
+                  businessDetails.pessoasProcuramPor = itens.slice(0, 20);
+                }
+
+                // Serviços listados
                 const serviceEls = Array.from(document.querySelectorAll('div[role="button"][aria-label*="serviço" i], li'));
                 const services: string[] = [];
                 for (const s of serviceEls) {
@@ -625,10 +915,148 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 }
                 if (services.length) businessDetails.services = services;
 
+                // "Atualizado há X" / Informações verificadas pelo dono
+                const updatedMatch = bodyTxt.match(/(?:atualizado|updated)\s+(?:em|h[aá]|há)\s+([^\n.]{2,40})/i);
+                if (updatedMatch) businessDetails.atualizadoEm = updatedMatch[1].trim();
+
+                // ---- Anexar dados extras em businessDetails ----
+                businessDetails.plusCode = plusCode;
+                businessDetails.lat = lat;
+                businessDetails.lng = lng;
+                businessDetails.placeId = placeId;
+                if (Object.keys(popularTimes).length > 0) businessDetails.popularTimes = popularTimes;
+                if (Object.keys(redesAdicionais).length > 0) businessDetails.redesAdicionais = redesAdicionais;
+                if (menuUrl) businessDetails.menuUrl = menuUrl;
+                if (reservaUrl) businessDetails.reservaUrl = reservaUrl;
+
+                // ---- CEP separado do endereço completo ----
+                let cep = "";
+                const cepMatch = bodyTxt.match(/\b(\d{5}-\d{3})\b/);
+                if (cepMatch) cep = cepMatch[1];
+
+                // ============================================================
+                // CAPTURA EXTRA — campos avançados (2026-07-22):
+                // - businessStatus: "Operacional" / "Permanently closed" / "Temporariamente fechado"
+                // - claimed: se o dono reivindicou a ficha (sinal de negócio ativo/responsivo)
+                // - ownerName: nome do dono/gerente quando listado publicamente
+                // - yearEstablished: ano de fundação
+                // - totalPhotoCount: nº TOTAL de fotos (mesmo que só pegamos 50)
+                // - reviewTopics: tópicos do Google ("Comida: 4.8★", "Atendimento: 4.5★")
+                // - featuredReviews: reviews em destaque escolhidas pelo Google
+                // - additionalCategories: categorias secundárias
+                // - addressComponents: rua/numero/bairro/cidade/estado separados
+                // ============================================================
+                let businessStatus = "Operacional";
+                if (/permanently closed|fechado definitivamente|encerrado/i.test(bodyTxt)) {
+                  businessStatus = "Permanently closed";
+                } else if (/temporarily closed|fechado temporariamente/i.test(bodyTxt)) {
+                  businessStatus = "Temporarily closed";
+                }
+
+                let claimed = false;
+                const claimEl = document.querySelector('[aria-label*="reivindicad" i], [aria-label*="claim" i], [jslog*="claim"]');
+                if (claimEl) claimed = true;
+                // Fallback: o botão "Reivindicar esta empresa" aparece quando
+                // NÃO é claimed. Se ele NÃO está, é porque JÁ é claimed.
+                const claimThisBtn = document.querySelector('button[data-item-id*="claim"], button[aria-label*="Reivindicar" i]');
+                if (!claimThisBtn) {
+                  // Sem botão de reivindicar = já é gerenciado pelo dono.
+                  // Confirmamos com mais um sinal: presence de "Gerenciar no Google"
+                  // ou posts recentes / atualizações do dono.
+                  const ownerManaged = document.querySelector('[jslog*="merchant"], [data-item-id*="owner"]');
+                  if (ownerManaged) claimed = true;
+                }
+
+                let ownerName = "";
+                const ownerNameEl = document.querySelector('[aria-label*="gerente" i], [aria-label*="manager" i], [jslog*="owner_name"]');
+                if (ownerNameEl) {
+                  const txt = (ownerNameEl as HTMLElement).innerText || "";
+                  const m = txt.match(/(?:gerente|manager|propriet[aá]rio|owner)[:\s]*([^\n,]{2,60})/i);
+                  if (m) ownerName = m[1].trim();
+                }
+
+                let yearEstablished = "";
+                const yearMatch = bodyTxt.match(/(?:fundado|aberto|since|desde|established)\s+(?:em\s+|in\s+)?(\d{4})/i);
+                if (yearMatch) yearEstablished = yearMatch[1];
+
+                let totalPhotoCount: number | null = null;
+                const photoCountMatch = bodyTxt.match(/(\d[\d.]*)\s+(?:fotos?|photos?)/i);
+                if (photoCountMatch) {
+                  totalPhotoCount = parseInt(photoCountMatch[1].replace(/\D/g, "")) || null;
+                }
+
+                // Tópicos das reviews: "Comida: 4.8", "Atendimento: 4.5", etc.
+                // Google agrupa reviews em tópicos quando tem volume suficiente.
+                const reviewTopics: Record<string, string> = {};
+                const topicEls = Array.from(document.querySelectorAll('[jslog*="topic_rating"], [data-topic-rating], div[aria-label*=":" i]'));
+                for (const tEl of topicEls) {
+                  const aria = (tEl as HTMLElement).getAttribute("aria-label") || (tEl as HTMLElement).textContent || "";
+                  const tm = aria.match(/([^:]{2,40}):\s*(\d(?:[.,]\d)?)/);
+                  if (tm) {
+                    const topic = tm[1].trim();
+                    const rating = tm[2];
+                    if (topic.length >= 3 && topic.length <= 40) reviewTopics[topic] = rating;
+                  }
+                  if (Object.keys(reviewTopics).length >= 10) break;
+                }
+
+                // Reviews em destaque (Featured) — selecionadas pelo Google
+                const featuredReviews: any[] = [];
+                const featuredEls = Array.from(document.querySelectorAll('[jslog*="featured"], div[data-featured="true"], div[aria-label*="destaque" i]'));
+                for (const fEl of featuredEls) {
+                  const txt = ((fEl as HTMLElement).innerText || "").slice(0, 1500).trim();
+                  if (txt.length > 30) featuredReviews.push(txt);
+                  if (featuredReviews.length >= 3) break;
+                }
+
+                // Categorias secundárias (além da principal)
+                const additionalCategories: string[] = [];
+                const catEls = Array.from(document.querySelectorAll('button[jslog*="category"], button[aria-label*="categoria" i], a[href*="/search/"]'));
+                for (const c of catEls) {
+                  const txt = (c as HTMLElement).textContent?.trim() || "";
+                  if (txt && txt.length >= 3 && txt.length <= 60 && !additionalCategories.includes(txt)) {
+                    additionalCategories.push(txt);
+                  }
+                  if (additionalCategories.length >= 10) break;
+                }
+
+                // Address components (rua/numero/bairro/cidade/estado separados)
+                const addressComponents: any = {};
+                // Extrai endereço completo do painel de detalhes do Google Maps
+                let fullAddress = "";
+                const addrEl = document.querySelector('[data-item-id="address"], button[data-item-id="address"]') as HTMLElement;
+                if (addrEl) fullAddress = (addrEl.innerText || addrEl.getAttribute("aria-label") || "").trim();
+                if (!fullAddress) {
+                  // Fallback: procura texto que parece endereço no body
+                  const addrMatch = bodyTxt.match(/((?:Rua|Av\.?|Avenida|Travessa|Alameda|Praça|Rod\.?|Estrada)\s+[^,\n]+,\s*\d+)/i);
+                  if (addrMatch) fullAddress = addrMatch[1].trim();
+                }
+                if (fullAddress) {
+                  // Cidade/Estado: "São Paulo, SP" no final do endereço
+                  const cityStateMatch = fullAddress.match(/([^,]+),\s*([A-Z]{2})\s*(?:[-,]|\s*$)/);
+                  if (cityStateMatch) {
+                    addressComponents.cidade = cityStateMatch[1].trim();
+                    addressComponents.estado = cityStateMatch[2].trim();
+                  }
+                  // CEP
+                  if (cep) addressComponents.cep = cep;
+                  // Rua + número
+                  const streetMatch = fullAddress.match(/^(?:Rua|Av\.?|Avenida|Travessa|Alameda|Praça|Rod\.?)\s+([^,]+?),?\s*(\d+)?/i);
+                  if (streetMatch) {
+                    addressComponents.rua = streetMatch[0].trim();
+                    if (streetMatch[2]) addressComponents.numero = streetMatch[2];
+                  }
+                  // Bairro: entre vírgulas (ex: "Rua X, 123, Bairro Y, Cidade - UF")
+                  const parts = fullAddress.split(",").map((p: string) => p.trim());
+                  if (parts.length >= 3) {
+                    // 2º item costuma ser número, 3º bairro
+                    if (!addressComponents.bairro && parts[2] && !/^\d/.test(parts[2])) {
+                      addressComponents.bairro = parts[2].split(" - ")[0];
+                    }
+                  }
+                }
+
                 // ---- Avaliação agregada (estrelas + nº de reviews) ----
-                // Google coloca isso no painel principal como "4,8 (1.235)".
-                // Tentamos extrair e devolver tb — caso o scraper principal
-                // (cardData) não tenha pego (DOM mudou).
                 let ratingAggregate: string = "";
                 let reviewCountAggregate: string = "";
                 const rEl = document.querySelector('[role="img"][aria-label*="estrela" i], [role="img"][aria-label*="star" i], .F6sie, .MW4l2');
@@ -639,7 +1067,6 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                   const m2 = aria.match(/(\d[\d.,]*)\s*(?:avaliaç|review)/i);
                   if (m2) reviewCountAggregate = m2[1].replace(/\./g, "");
                 }
-                // fallback pra animation "4.8 stars · 1,235 reviews" no body text
                 if (!ratingAggregate) {
                   const bMatch = bodyTxt.match(/(\d[.,]\d)\s*(?:estrela|star)/i);
                   if (bMatch) ratingAggregate = bMatch[1].replace(",", ".");
@@ -649,8 +1076,22 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                   if (bMatch) reviewCountAggregate = bMatch[1].replace(/\./g, "");
                 }
 
+                // ---- Distribuição de estrelas (5★, 4★, 3★, 2★, 1★) ----
+                // Google mostra como barras com aria-label "5 estrelas: 123".
+                const distribuicaoEstrelas: Record<string, number> = {};
+                const distEls = Array.from(document.querySelectorAll('tr[aria-label*="estrela" i], div[aria-label*="estrela" i], bar[aria-label*="star" i]'));
+                for (const el of distEls) {
+                  const aria = (el as HTMLElement).getAttribute("aria-label") || (el as HTMLElement).textContent || "";
+                  const dm = aria.match(/(\d)\s*(?:estrela|star)s?[^0-9]*(\d[\d.,]*)/i);
+                  if (dm) {
+                    const star = dm[1];
+                    const count = parseInt(dm[2].replace(/\D/g, "")) || 0;
+                    distribuicaoEstrelas[`${star}estrelas`] = count;
+                  }
+                }
+
                 // ---- Reviews que já vêm renderizadas no painel principal ----
-                // (Google coloca as 2-3 mais recentes no topo do card).
+                // Google coloca as 2-3 mais recentes no topo.
                 const reviewEls0 = Array.from(document.querySelectorAll('div[role="article"][aria-label], div[data-review-id], div[jslog*="review"]'));
                 const reviewsInitial: any[] = [];
                 const reviewSeen = new Set<string>();
@@ -660,16 +1101,38 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                   const author = authorMatch ? authorMatch[1].trim() : "";
                   const ratingMatch = aria.match(/(\d(?:[.,]\d)?)\s*(?:estrela|star)/i);
                   const rating = ratingMatch ? ratingMatch[1] : "";
-                  const text = ((r as HTMLElement).innerText || "").slice(0, 1200).trim();
+                  const text = ((r as HTMLElement).innerText || "").slice(0, 1500).trim();
                   const sig = text.slice(0, 80);
                   if (!text || reviewSeen.has(sig)) continue;
                   reviewSeen.add(sig);
                   const dateMatch = text.match(/(há\s+\d+\s+\w+|\d+\s+(?:dias?|semanas?|meses|anos?|day|week|month|year)s?\s+ago)/i);
+                  // Foto do reviewer (avatar)
+                  const authorImg = r.querySelector('img[src*="googleusercontent"], img[src*="ggpht"]') as HTMLImageElement;
+                  const fotoAutor = authorImg ? (authorImg.src.split("=")[0]) : "";
+                  // Fotos anexadas à review (não contar o avatar)
+                  const fotos: string[] = [];
+                  const reviewImgs = Array.from(r.querySelectorAll('img[src*="googleusercontent"], img[src*="ggpht"]'));
+                  for (const img of reviewImgs) {
+                    const src = (img as HTMLImageElement).src.split("=")[0];
+                    if (src && src !== fotoAutor && !fotos.includes(src) && fotos.length < 8) fotos.push(src);
+                  }
+                  // Resposta do dono (bloco separado dentro da review)
+                  let respostaDono = "";
+                  const ownerReplyEl = r.querySelector('[jslog*="owner"], div[data-owner-response], [class*="owner"]');
+                  if (ownerReplyEl) respostaDono = ((ownerReplyEl as HTMLElement).innerText || "").slice(0, 1500).trim();
+                  // Contador "útil" / likes
+                  let util = 0;
+                  const utilMatch = text.match(/(\d+)\s*(?:pessoas?|pessoa|users?|people)\s*(?:acharam|found|marked)\s*(?:útil|useful|helpful)/i);
+                  if (utilMatch) util = parseInt(utilMatch[1]);
                   reviewsInitial.push({
                     autor: author,
                     nota: rating,
                     data: dateMatch ? dateMatch[1] : "",
                     texto: text,
+                    fotoAutor,
+                    fotos: fotos.length ? fotos : undefined,
+                    respostaDono: respostaDono || undefined,
+                    util: util || undefined,
                   });
                   if (reviewsInitial.length >= 50) break;
                 }
@@ -686,6 +1149,22 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                   reviews: reviewsInitial,
                   ratingAggregate,
                   reviewCountAggregate,
+                  distribuicaoEstrelas: Object.keys(distribuicaoEstrelas).length > 0 ? distribuicaoEstrelas : undefined,
+                  cep,
+                  plusCode,
+                  lat,
+                  lng,
+                  placeId,
+                  // ---- Campos extras (2026-07-22) ----
+                  businessStatus,
+                  claimed,
+                  ownerName,
+                  yearEstablished,
+                  totalPhotoCount,
+                  reviewTopics: Object.keys(reviewTopics).length > 0 ? reviewTopics : undefined,
+                  featuredReviews: featuredReviews.length > 0 ? featuredReviews : undefined,
+                  additionalCategories: additionalCategories.length > 0 ? additionalCategories : undefined,
+                  addressComponents: Object.keys(addressComponents).length > 0 ? addressComponents : undefined,
                 };
               });
 
@@ -706,71 +1185,193 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 // rating/reviews, usa o que veio do painel de detalhe.
                 if (!cardData.averageRating && mainExtracted.ratingAggregate) cardData.averageRating = mainExtracted.ratingAggregate;
                 if (!cardData.reviewCount && mainExtracted.reviewCountAggregate) cardData.reviewCount = mainExtracted.reviewCountAggregate;
+                if (mainExtracted.plusCode) plusCode = mainExtracted.plusCode;
+                if (mainExtracted.lat) lat = mainExtracted.lat;
+                if (mainExtracted.lng) lng = mainExtracted.lng;
+                if (mainExtracted.placeId) placeId = mainExtracted.placeId;
+                if (mainExtracted.distribuicaoEstrelas) distribuicaoEstrelas = mainExtracted.distribuicaoEstrelas;
+                if (mainExtracted.cep) cep = mainExtracted.cep;
+                // ---- Campos extras (2026-07-22) ----
+                if (mainExtracted.businessStatus) businessStatus = mainExtracted.businessStatus;
+                if (mainExtracted.claimed) claimed = mainExtracted.claimed;
+                if (mainExtracted.ownerName) ownerName = mainExtracted.ownerName;
+                if (mainExtracted.yearEstablished) yearEstablished = mainExtracted.yearEstablished;
+                if (mainExtracted.totalPhotoCount != null) totalPhotoCount = mainExtracted.totalPhotoCount;
+                if (mainExtracted.reviewTopics) reviewTopics = mainExtracted.reviewTopics;
+                if (mainExtracted.featuredReviews) featuredReviews = mainExtracted.featuredReviews;
+                if (mainExtracted.additionalCategories) additionalCategories = mainExtracted.additionalCategories;
+                if (mainExtracted.addressComponents) addressComponents = mainExtracted.addressComponents;
               }
 
               // ============================================================
-              // FASE 2 — Capturar reviews profundas (opcional).
-              // Só rola se tentar abrir a aba de avaliações. Se falhar ou se
-              // já temos 50+ reviews da FASE 1, pula — não arrisca perder
-              // dados do painel principal (já capturado).
+              // FASE 2 — Capturar reviews profundas.
               // ============================================================
-              if (reviewsDetalhes.length < 50) {
+              const reviewLimit = settings.captureAllReviews ? Number.MAX_SAFE_INTEGER : 50;
+              if (settings.captureAllReviews || reviewsDetalhes.length < reviewLimit) {
                 try {
-                  // Tenta abrir a página de reviews (URL com /reviews no final).
-                  const reviewsUrl = lead.url.endsWith("/reviews") ? lead.url : lead.url.replace(/\/?$/, "/reviews");
-                  await detailsPage.goto(reviewsUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
-                  await sleep(1500);
-                  // Rola contêiner de reviews em lazy-load.
-                  for (let i = 0; i < 8; i++) {
-                    await detailsPage.evaluate(() => {
-                      const scrollers = [
-                        document.querySelector(`div[role="feed"]`),
-                        document.querySelector(`div.m6QErb[role="region"]`),
-                        document.querySelector(`div[aria-label*="avalia" i]`),
-                        document.querySelector(`div[aria-label*="review" i]`),
-                        document.querySelector(`div[jsaction*="pane"]`),
-                      ].filter(Boolean);
-                      const sc = (scrollers[0] as HTMLElement) || (document.scrollingElement as HTMLElement);
-                      if (sc) sc.scrollBy(0, 1500);
+                  if (settings.captureAllReviews) sendLog(`📝 Carregando todas as avaliações disponíveis: ${cardData.name}`, "info");
+                  const reviewsOpened = await detailsPage.evaluate(() => {
+                    const candidates = Array.from(document.querySelectorAll('button, [role="button"], a')) as HTMLElement[];
+                    const trigger = candidates.find((element) => {
+                      const text = `${element.getAttribute("aria-label") || ""} ${element.innerText || ""}`;
+                      return /(?:avaliações|avaliacoes|reviews?)/i.test(text);
                     });
-                    await sleep(700);
+                    if (!trigger) return false;
+                    trigger.click();
+                    return true;
+                  });
+                  if (!reviewsOpened) {
+                    const reviewsUrl = lead.url.endsWith("/reviews") ? lead.url : lead.url.replace(/\/?$/, "/reviews");
+                    await detailsPage.goto(reviewsUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
                   }
-                  const reviewExtracted = await detailsPage.evaluate(() => {
-                    const reviewEls = Array.from(document.querySelectorAll('div[role="article"][aria-label], div[data-review-id], div[jslog*="review"]'));
-                    const out: any[] = [];
-                    const seen = new Set<string>();
+                  await detailsPage.waitForSelector('.jftiEf, div[data-review-id], div[role="article"]', { timeout: 8000 }).catch(() => {});
+                  await sleep(1200);
+                  await detailsPage.evaluate(() => { delete (window as any).__painelSdrReviews; });
+
+                  // Distribuição de estrelas (barras 5★-1★) — melhor capturar
+                  // aqui pq a página de reviews sempre mostra elas no topo.
+                  if (!distribuicaoEstrelas) {
+                    const dist = await detailsPage.evaluate(() => {
+                      const out: Record<string, number> = {};
+                      const distEls = Array.from(document.querySelectorAll('tr[aria-label*="estrela" i], div[aria-label*="estrela" i], bar[aria-label*="star" i], tr[jslog*="review"]'));
+                      for (const el of distEls) {
+                        const aria = (el as HTMLElement).getAttribute("aria-label") || (el as HTMLElement).textContent || "";
+                        const dm = aria.match(/(\d)\s*(?:estrela|star)s?[^0-9]*(\d[\d.,]*)/i);
+                        if (dm) out[`${dm[1]}estrelas`] = parseInt(dm[2].replace(/\D/g, "")) || 0;
+                      }
+                      return out;
+                    });
+                    if (Object.keys(dist).length > 0) distribuicaoEstrelas = dist;
+                  }
+
+                  let semNovidade = 0;
+                  let cachedCountAnterior = 0;
+                  const MAX_ROLAGENS = settings.captureAllReviews ? 1000 : 25;
+                  for (let i = 0; i < MAX_ROLAGENS; i++) {
+                    await detailsPage.evaluate(() => {
+                      const reviewSelector = '.jftiEf, div[role="article"][aria-label], div[data-review-id], div[jslog*="review"]';
+                      for (const review of Array.from(document.querySelectorAll(reviewSelector))) {
+                        const expand = Array.from(review.querySelectorAll('button, [role="button"]')).find((element) => /^(?:mais|more)$/i.test((element.textContent || "").trim())) as HTMLElement | undefined;
+                        expand?.click();
+                      }
+                    });
+                    await sleep(250);
+                    const novos = await detailsPage.evaluate(() => {
+                      const reviewSelector = '.jftiEf, div[role="article"][aria-label], div[data-review-id], div[jslog*="review"]';
+                      const cacheKey = "__painelSdrReviews";
+                      const cached = ((window as any)[cacheKey] ||= {}) as Record<string, any>;
+                      for (const review of Array.from(document.querySelectorAll(reviewSelector))) {
+                        const element = review as HTMLElement;
+                        const aria = element.getAttribute("aria-label") || "";
+                        const text = element.innerText.trim().slice(0, 12000);
+                        const signature = text.slice(0, 180);
+                        if (!text || cached[signature]) continue;
+                        const authorMatch = aria.match(/(?:avaliaç(?:ão)?\s+de|review\s+by)\s+(.+?)(:|\s+\d\s)/i);
+                        const ratingMatch = aria.match(/(\d(?:[.,]\d)?)\s*(?:estrela|star)/i) || text.match(/(\d(?:[.,]\d)?)\s*(?:estrela|star)/i);
+                        const dateMatch = text.match(/(há\s+\d+\s+\w+|\d+\s+(?:dias?|semanas?|meses|anos?|day|week|month|year)s?\s+ago)/i);
+                        const authorImage = element.querySelector('img[src*="googleusercontent"], img[src*="ggpht"]') as HTMLImageElement | null;
+                        const fotoAutor = authorImage?.src.split("=")[0] || "";
+                        const fotos = Array.from(element.querySelectorAll('img[src*="googleusercontent"], img[src*="ggpht"]'))
+                          .map((image) => (image as HTMLImageElement).src.split("=")[0])
+                          .filter((src) => src && src !== fotoAutor)
+                          .filter((src, index, list) => list.indexOf(src) === index)
+                          .slice(0, 8);
+                        const ownerReply = Array.from(element.querySelectorAll('[jslog*="owner"], div[data-owner-response], [class*="owner"]'))
+                          .map((reply) => (reply as HTMLElement).innerText.trim())
+                          .find((reply) => reply.length > 0) || "";
+                        const utilMatch = text.match(/(\d+)\s*(?:pessoas?|pessoa|users?|people)\s*(?:acharam|found|marked)\s*(?:útil|useful|helpful)/i);
+                        cached[signature] = {
+                          autor: authorMatch ? authorMatch[1].trim() : "",
+                          nota: ratingMatch ? ratingMatch[1] : "",
+                          data: dateMatch ? dateMatch[1] : "",
+                          texto: text,
+                          fotoAutor: fotoAutor || undefined,
+                          fotos: fotos.length ? fotos : undefined,
+                          respostaDono: ownerReply || undefined,
+                          util: utilMatch ? parseInt(utilMatch[1]) : undefined,
+                        };
+                      }
+                      const firstReview = document.querySelector(reviewSelector) as HTMLElement | null;
+                      const scroller = firstReview?.closest('[role="feed"], .m6QErb, [role="main"]') as HTMLElement | null;
+                      const before = scroller?.scrollTop || 0;
+                      if (scroller) scroller.scrollBy(0, Math.max(1200, scroller.clientHeight * 0.85));
+                      return { before, cachedCount: Object.keys(cached).length };
+                    });
+                    await sleep(900);
+                    const progresso = await detailsPage.evaluate((before: number) => {
+                      const firstReview = document.querySelector('.jftiEf, div[role="article"][aria-label], div[data-review-id], div[jslog*="review"]') as HTMLElement | null;
+                      const scroller = firstReview?.closest('[role="feed"], .m6QErb, [role="main"]') as HTMLElement | null;
+                      return { moved: !!scroller && scroller.scrollTop > before, cachedCount: Object.keys((window as any).__painelSdrReviews || {}).length };
+                    }, novos.before);
+                    if (progresso.cachedCount === cachedCountAnterior) {
+                      semNovidade++;
+                      if (semNovidade >= 3) break;
+                    } else {
+                      semNovidade = 0;
+                    }
+                    cachedCountAnterior = progresso.cachedCount;
+                  }
+                  const reviewExtracted = await detailsPage.evaluate((limit: number) => {
+                    const reviewSelector = '.jftiEf, div[role="article"][aria-label], div[data-review-id], div[jslog*="review"]';
+                    const reviewEls = Array.from(document.querySelectorAll(reviewSelector));
+                    const cached = (window as any).__painelSdrReviews || {};
+                    const out: any[] = Object.values(cached);
+                    const seen = new Set(out.map((review: any) => review.texto.slice(0, 80)));
                     for (const r of reviewEls) {
                       const aria = r.getAttribute("aria-label") || "";
                       const authorMatch = aria.match(/(?:avaliaç(?:ão)?\s+de|review\s+by)\s+(.+?)(?::|\s+\d\s)/i);
                       const author = authorMatch ? authorMatch[1].trim() : "";
                       const ratingMatch = aria.match(/(\d(?:[.,]\d)?)\s*(?:estrela|star)/i);
                       const rating = ratingMatch ? ratingMatch[1] : "";
-                      const text = ((r as HTMLElement).innerText || "").slice(0, 1200).trim();
+                      const text = ((r as HTMLElement).innerText || "").slice(0, 12000).trim();
                       const sig = text.slice(0, 80);
                       if (!text || seen.has(sig)) continue;
                       seen.add(sig);
                       const dateMatch = text.match(/(há\s+\d+\s+\w+|\d+\s+(?:dias?|semanas?|meses|anos?|day|week|month|year)s?\s+ago)/i);
+                      // Foto do reviewer (avatar)
+                      const authorImg = r.querySelector('img[src*="googleusercontent"], img[src*="ggpht"]') as HTMLImageElement;
+                      const fotoAutor = authorImg ? (authorImg.src.split("=")[0]) : "";
+                      // Fotos anexadas à review (não contar o avatar)
+                      const fotos: string[] = [];
+                      const reviewImgs = Array.from(r.querySelectorAll('img[src*="googleusercontent"], img[src*="ggpht"]'));
+                      for (const img of reviewImgs) {
+                        const src = (img as HTMLImageElement).src.split("=")[0];
+                        if (src && src !== fotoAutor && !fotos.includes(src) && fotos.length < 8) fotos.push(src);
+                      }
+                      // Resposta do dono
+                      let respostaDono = "";
+                      const ownerReplyEl = r.querySelector('[jslog*="owner"], div[data-owner-response], [class*="owner"]');
+                      if (ownerReplyEl) respostaDono = ((ownerReplyEl as HTMLElement).innerText || "").slice(0, 1500).trim();
+                      // Contador "útil"
+                      let util = 0;
+                      const utilMatch = text.match(/(\d+)\s*(?:pessoas?|pessoa|users?|people)\s*(?:acharam|found|marked)\s*(?:útil|useful|helpful)/i);
+                      if (utilMatch) util = parseInt(utilMatch[1]);
                       out.push({
                         autor: author,
                         nota: rating,
                         data: dateMatch ? dateMatch[1] : "",
                         texto: text,
+                        fotoAutor: fotoAutor || undefined,
+                        fotos: fotos.length ? fotos : undefined,
+                        respostaDono: respostaDono || undefined,
+                        util: util || undefined,
                       });
-                      if (out.length >= 50) break;
+                      if (out.length >= limit) break;
                     }
                     return out;
-                  });
+                  }, reviewLimit);
                   if (Array.isArray(reviewExtracted) && reviewExtracted.length > 0) {
                     // merge (dedupe por sig 80 chars)
                     const merged = new Map<string, any>();
                     for (const rv of [...reviewsDetalhes, ...reviewExtracted]) {
-                      const sig = (rv.text || "").slice(0, 80);
+                      const sig = (rv.texto || rv.text || "").slice(0, 80);
                       merged.set(sig, rv);
                     }
-                    reviewsDetalhes = Array.from(merged.values()).slice(0, 50);
+                    reviewsDetalhes = Array.from(merged.values()).slice(0, reviewLimit);
+                    if (settings.captureAllReviews) sendLog(`📝 ${reviewsDetalhes.length} avaliações capturadas: ${cardData.name}`, "success");
                   }
                 } catch {
-                  // se falhar导航gação pra /reviews, mantém as reviews já
+                  // se falhar navegação pra /reviews, mantém as reviews já
                   // capturadas na FASE 1 — não perdemos informação.
                 }
               }
@@ -819,6 +1420,22 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 openNow: openNow || undefined,
                 photos: photos.length > 0 ? photos : undefined,
                 mapsUrl: mapsUrl || undefined,
+                plusCode: plusCode || undefined,
+                lat: lat || undefined,
+                lng: lng || undefined,
+                placeId: placeId || undefined,
+                distribuicaoEstrelas: distribuicaoEstrelas,
+                cep: cep || undefined,
+                // ---- Campos extras (2026-07-22) — captura estendida ----
+                businessStatus: businessStatus || undefined,
+                claimed: claimed || undefined,
+                ownerName: ownerName || undefined,
+                yearEstablished: yearEstablished || undefined,
+                totalPhotoCount: totalPhotoCount ?? undefined,
+                reviewTopics,
+                featuredReviews,
+                additionalCategories,
+                addressComponents,
               };
               leadsStore.push(finalLead);
               broadcast({ event: "new_lead", lead: finalLead, count: leadsStore.length });
@@ -952,6 +1569,7 @@ export interface StartOpts {
   filterEmpty?: boolean;
   filterDuplicates?: boolean;
   filterLandlines?: boolean;
+  captureAllReviews?: boolean;
   /** Limite de leads — quando atingido o scraper sai limpo. */
   maxLeads?: number;
   automation_id?: string | null;
@@ -983,6 +1601,7 @@ export function startScraperRun(opts: StartOpts): { ok: boolean; error?: string;
     filterEmpty: opts.filterEmpty,
     filterDuplicates: opts.filterDuplicates,
     filterLandlines: opts.filterLandlines,
+    captureAllReviews: opts.captureAllReviews,
     maxLeads: opts.maxLeads,
   });
   return { ok: true };

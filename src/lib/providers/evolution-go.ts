@@ -268,10 +268,15 @@ export const evolutionGo: WhatsAppProvider = {
   async fetchProfilePicture(remoteJid: string, instanceName: string): Promise<string | null> {
     try {
       const token = await resolveInstanceToken(instanceName);
+      // Sanitiza o JID: remove prefixo phone:, sufixos @s.whatsapp.net, etc.
+      // Aceita JID de grupo (@g.us) intacto.
+      const cleanNumber = formatNumberForGo(remoteJid);
+      if (!cleanNumber) return null;
       const res = await goFetch("/message/avatar", {
         instance: instanceName,
-        number: remoteJid.replace(/@s\.whatsapp\.net$/, ""),
+        number: cleanNumber,
       }, token);
+      // O GO pode retornar URL ou base64. Tenta todos os campos possíveis.
       return res?.pictureUrl || res?.url || res?.avatar || null;
     } catch {
       return null;

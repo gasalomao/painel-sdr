@@ -2,6 +2,26 @@
 
 Este projeto (`painel-sdr`) é um Painel de SDR construído com Next.js (versão 16.2.3), conectado ao Supabase e Evolution API (WhatsApp), com uso de Redis para filas e inteligência artificial (Google Gemini).
 
+## [2026-07-29] Correção: Fotos de perfil não apareciam no chat
+- **Problema**: O chat não mostrava a foto de perfil da maioria dos contatos. As fotos só apareciam se `contacts.profile_pic_url` já estivesse no banco — e em 90% dos contatos esse campo estava vazio.
+- **Causas identificadas (6 pontos)**:
+  1. **Webhook não buscava foto**: `findOrCreateContact` criava contato sem buscar `profilePictureUrl`.
+  2. **Frontend não hidratava avatares**: `conversation-list.tsx` carregava conversas mas nunca chamava `/api/contacts/avatars`.
+  3. **Endpoint `/api/contacts/avatars` tinha limite de 16 JIDs**: Processava 2 chunks de 8 e saía — o resto nunca era buscado.
+  4. **Evolution GO `fetchProfilePicture` não sanitizava prefixos `phone:`**: Mandava JID sujo pro `/message/avatar`.
+  5. **Sem bulk sync**: Não havia forma de buscar todas as fotos de uma vez (findContacts da V2 ou /message/contacts do GO).
+  6. **next.config.ts não permitia domínios do WhatsApp**: `remotePatterns` só tinha `i.ibb.co`.
+- **Correções aplicadas (6 arquivos)**:
+  - `src/app/api/webhooks/shared-helpers.ts`: Nova função `refreshProfilePicIfStale` — busca foto fire-and-forget ao receber msg, com TTL 24h.
+  - `src/app/api/webhooks/evolution-go/route.ts` + `whatsapp/route.ts`: Chamam `refreshProfilePicIfStale` após criar contato.
+  - `src/components/inbox/conversation-list.tsx`: Hidratar avatares após carregar conversas via POST `/api/contacts/avatars`. Botão "Fotos" que dispara sync bulk.
+  - `src/app/api/contacts/avatars/route.ts`: Removido limite de 16 JIDs — processa todos os stale.
+  - `src/lib/providers/evolution-go.ts`: `fetchProfilePicture` usa `formatNumberForGo` para sanitizar JID.
+  - `src/lib/channel.ts`: Nova função `bulkSyncProfilePics` — usa `POST /chat/findContacts/{instance}` (V2) ou `GET /message/contacts` (GO) para buscar fotos em bulk.
+  - `src/app/api/contacts/sync-avatars/route.ts`: Endpoint POST que dispara bulk sync.
+  - `next.config.ts`: Adicionados `mmg.whatsapp.net`, `pps.whatsapp.net`, `**.whatsapp.net`, `**.googleusercontent.com` em `remotePatterns`.
+- **Validação**: `npx tsc --noEmit` zero erros.
+
 ## [2026-07-23 19:30] Captura profunda do Google Maps (reviews + tudo do painel de detalhe)
 - **Objetivo do usuário**: "no capturar maps ele consiga capturar reviews e avaliações, tem que capturar o máximo de informação que conseguir, máximo que estiver disponível".
 - **Escopo escolhido pelo usuário**: Capturar reviews + tudo do painel de detalhe (horários, faixa de preço, status "aberto agora", atributos, fotos).
@@ -29,6 +49,13 @@ Este projeto (`painel-sdr`) é um Painel de SDR construído com Next.js (versão
   - `token-usage.ts:68-71` — pula insert quando `totalTokens=0` (mantido: honesto, DeepSeek sem usage fica invisível ao invés de inventar). Se quiser ver essas chamadas, mudar pra insert com metadata.estimated=true.
   - `ai-organize/route.ts:584-594` ainda lê `response.data?.usageMetadata` na mão (não usa `extractGeminiUsage`) — não quebra, mas é duplicação frágil.
 - `npx tsc --noEmit` **zero erros**.
+
+## [2026-07-30] Dashboard operacional enxuta e profissional
+- `src/app/page.tsx` foi redesenhada para reduzir ruído visual e priorizar decisão operacional.
+- A tela agora exibe somente quatro métricas principais: novos leads, conversas movimentadas hoje, agendamentos de hoje e números WhatsApp conectados.
+- Adicionadas prioridades acionáveis para WhatsApp desconectado, agenda do dia, follow-ups e disparos em andamento; todos os itens levam diretamente ao módulo correspondente.
+- Mantidos leads recentes, agenda e um resumo operacional compacto. Removidos hero decorativo, métricas redundantes, status estático do Supabase, medidor fictício de tokens e atalhos duplicados.
+- Validação: `npx tsc --noEmit` e `npm run build` passaram. `npm run lint` segue falhando por 1.218 erros legados globais, principalmente `no-explicit-any`.
 
 ## Estado Atual
 - Projeto rodando localmente no dev server do usuário.
@@ -434,3 +461,17 @@ Este projeto (`painel-sdr`) é um Painel de SDR construído com Next.js (versão
   - Baixadas e instaladas todas as **48 sub-skills de marketing** em `skills/`, `.agents/skills/` e no diretório global `C:\Users\Salomao\.gemini\config\skills\`.
   - Atualizado o arquivo `AGENTS.md` com o mandato explícito de execução de marketing, instruindo todas as IAs e modelos a ativarem as skills de copywriting, cold email, ads, CRO, SEO, ofertas, precificação e estratégias de vendas.
 - **Validação**: `npx tsc --noEmit` zerado (**0 erros**).
+
+## [2026-07-29] Captar Maps — captura de todas as avaliações
+- Adicionado toggle "Capturar todas as avaliações" ao lado de "Filtros Automáticos" em `src/app/captador/page.tsx`.
+- Quando ativado, o valor segue para `/api/scraper` e `scraper-engine.ts` percorre o feed de avaliações até três tentativas consecutivas sem novos itens, preservando comentários, notas, fotos, respostas do dono e contagem de útil. O modo desligado mantém o limite de 50 avaliações.
+- Verificação: `npx tsc --noEmit` passou com 0 erros. O lint global permanece com falhas legadas de `no-explicit-any`.
+- **Correções posteriores**: o Google Maps virtualiza a lista e mantinha só ~3 cards no DOM ao fim da rolagem. O modo completo acumula cada lote de reviews no contexto da página durante a rolagem, amplia o seletor para `.jftiEf` e só termina após três ciclos sem avaliações novas. Como a rota `/reviews` pode manter o painel principal, o scraper agora clica primeiro no botão real de Avaliações e rola o contêiner ancestral dos cards de review. Antes de cada coleta, clica em todos os botões "Mais"/"More" visíveis e elevou o armazenamento do texto para 12.000 caracteres.
+- O modal de detalhes ganhou uma seção de comentários completos com cards maiores, metadados legíveis, fotos e bloco verde destacado para "Resposta do estabelecimento".
+
+## [2026-07-30] OpenCode — Auditoria de estabilidade, performance e Evolution API
+- `npx tsc --noEmit` passou; `npm run build` compilou todas as 39 páginas.
+- `npm test`: 185/187 testes passaram; 2 falharam por asserções desatualizadas (`estimated: false` em `ai-provider.test.ts` e ausência da palavra `nenhum` em `organizer-prompt.test.ts`).
+- Achado crítico de Evolution: `test_agent_process.test.ts` é uma integração externa que chama IA, Supabase e Evolution reais, mas só valida HTTP 200/success. Na execução, Evolution V2 retornou instância inexistente e o fallback Evolution GO retornou `not authorized`; o teste ainda passou. Logo, entrega real de WhatsApp não está comprovada.
+- `npm run lint` falha com 1.223 erros (1.480 problemas total), principalmente `no-explicit-any`, e também analisa o backup `temp_wacrm/` e scripts raiz. Build emite 27 avisos de rastreamento Turbopack por `next.config.ts` importado pelo scraper.
+- Endpoint local `/api/test-evo` não pôde ser chamado pois não havia servidor em `127.0.0.1:3000` durante a auditoria. Nenhuma mensagem externa foi enviada intencionalmente.

@@ -541,7 +541,24 @@ CREATE TABLE IF NOT EXISTS public.leads_extraidos (
   price_range              text,
   open_now                 text,
   photos                   jsonb,
-  maps_url                 text
+  maps_url                 text,
+  -- ---- Campos extras do painel de detalhe (Migration 011) ----
+  place_id                 text,
+  plus_code                text,
+  lat                      numeric,
+  lng                      numeric,
+  cep                      text,
+  distribuicao_estrelas    jsonb,
+  -- ---- Captura estendida (Migration 012) — campos avançados do Maps ----
+  business_status          text,
+  claimed                  boolean,
+  owner_name               text,
+  year_established         text,
+  total_photo_count        integer,
+  review_topics            jsonb,
+  featured_reviews         jsonb,
+  additional_categories    jsonb,
+  address_components       jsonb
 );
 
 CREATE TABLE IF NOT EXISTS public.messages (

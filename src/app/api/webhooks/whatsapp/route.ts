@@ -6,6 +6,7 @@ import { isManualSend, isAiSend, isPendingAutomatedSend } from "@/lib/manual-sen
 import { clientIdFromInstance, DEFAULT_CLIENT_ID } from "@/lib/tenant";
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
 import { maskJid, truncForLog } from "@/lib/pii";
+import { refreshProfilePicIfStale } from "../shared-helpers";
 
 export const dynamic = 'force-dynamic';
 
@@ -944,6 +945,10 @@ export async function POST(req: NextRequest) {
         // estiver vazio/placeholder — sem sobrescrever nomes reais (scraper).
         if (!fromMe && pushName) {
           await healLeadNameFromPushName(remoteJid, pushName, clientId);
+        }
+        // Buscar foto de perfil (fire-and-forget — não bloqueia a mensagem).
+        if (!fromMe && instanceName) {
+          refreshProfilePicIfStale(remoteJid, instanceName).catch(() => {});
         }
       } catch (sessErr: any) {
         console.error(">>> [Webhook] ⚠ Falha ao criar contact/session (não-fatal):", sessErr?.message);

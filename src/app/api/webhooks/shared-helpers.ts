@@ -362,4 +362,57 @@ export async function healLeadNameFromPushName(remoteJid: string, pushName: stri
   } catch {}
 }
 
+/**
+ * Busca a foto de perfil de um contato na Evolution API/GO e salva no banco.
+ * Fire-and-forget — NUNCA bloqueia o processamento da mensagem.
+ *
+ * Só busca se:
+ *   - O contato NÃO tem profile_pic_url (nunca buscou antes).
+ *   - Ou tem mas passou de 24h (URL assinada pode ter expirado).
+ *
+ * Evita martelar a Evolution: se já tem URL fresca, pula.
+ */
+export async function refreshProfilePicIfStale(remoteJid: string, instanceName?: string): Promise<void> {
+  if (!instanceName) return;
+  try {
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("profile_pic_url, profile_pic_fetched_at")
+      .eq("remote_jid", remoteJid)
+      .maybeSingle();
+
+    if (!contact) return;
+
+    const has = !!contact.profile_pic_url;
+    const fetchedAt = contact.profile_pic_fetched_at
+      ? new Date(contact.profile_pic_fetched_at).getTime()
+      : 0;
+    const stale = Date.now() - fetchedAt > 24 * 60 * 60 * 1000;
+
+    // Só busca se não tem URL ou está stale (>24h).
+    if (has && !stale) return;
+
+    const { fetchProfilePicture } = await import("@/lib/channel");
+    const url = await fetchProfilePicture(remoteJid, instanceName);
+
+    if (url) {
+      await supabase
+        .from("contacts")
+        .update({
+          profile_pic_url: url,
+          profile_pic_fetched_at: new Date().toISOString(),
+        })
+        .eq("remote_jid", remoteJid);
+    } else {
+      // Marca como buscado mesmo sem URL (evita retry a cada mensagem).
+      await supabase
+        .from("contacts")
+        .update({ profile_pic_fetched_at: new Date().toISOString() })
+        .eq("remote_jid", remoteJid);
+    }
+  } catch {
+    // Fire-and-forget — nunca propaga erro.
+  }
+}
+
 export { requireClientId };

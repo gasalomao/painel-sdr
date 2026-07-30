@@ -95,19 +95,17 @@ async function handle(jids: string[], instanceParam: string | null, force: boole
     if (force || isStale) stale.push(jid);
   }
 
-  // Refresh em paralelo MAS limitado em chunks de 8 (evita martelar a Evolution).
-  // Espera o primeiro chunk pra retornar dados frescos; chunks restantes ficam
-  // best-effort em background se houver tempo da função.
-  const CHUNK = 8;
+  // Refresh em paralelo MAS limitado em chunks de 10 (evita martelar a Evolution).
+  // Processa TODOS os staleJids — antes parava em 16 e o resto nunca era buscado.
+  // Como é fire-and-forget pro cliente (devolve cache imediato), o tempo de processamento
+  // em background não afeta a experiência do usuário.
+  const CHUNK = 10;
   for (let i = 0; i < stale.length; i += CHUNK) {
     const batch = stale.slice(i, i + CHUNK);
     const settled = await Promise.allSettled(batch.map(jid => refreshOne(jid, instance)));
     settled.forEach((s, idx) => {
       if (s.status === "fulfilled") result[batch[idx]] = s.value;
     });
-    // Limita o tempo total do request: depois do 1º batch, se já demoramos
-    // muito, pára e devolve o que tem (resto re-tenta no próximo request).
-    if (i + CHUNK < stale.length && i >= CHUNK) break;
   }
 
   return { success: true, avatars: result, refreshed: stale.length, instance };

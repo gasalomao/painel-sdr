@@ -69,6 +69,7 @@ export async function POST(req: NextRequest) {
         filterEmpty: body.filterEmpty,
         filterDuplicates: body.filterDuplicates,
         filterLandlines: body.filterLandlines,
+        captureAllReviews: body.captureAllReviews === true,
         maxLeads: body.maxLeads,            // /captador também pode passar limite
         automation_id: body.automation_id,
         client_id: session.clientId,
