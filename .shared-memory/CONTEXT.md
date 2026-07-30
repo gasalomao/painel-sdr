@@ -50,14 +50,15 @@ Este projeto (`painel-sdr`) é um Painel de SDR construído com Next.js (versão
   - `ai-organize/route.ts:584-594` ainda lê `response.data?.usageMetadata` na mão (não usa `extractGeminiUsage`) — não quebra, mas é duplicação frágil.
 - `npx tsc --noEmit` **zero erros**.
 
-## [2026-07-30] Dashboard operacional enxuta e profissional
-- `src/app/page.tsx` foi redesenhada para reduzir ruído visual e priorizar decisão operacional.
-- A tela agora exibe somente quatro métricas principais: novos leads, conversas movimentadas hoje, agendamentos de hoje e números WhatsApp conectados.
-- Adicionadas prioridades acionáveis para WhatsApp desconectado, agenda do dia, follow-ups e disparos em andamento; todos os itens levam diretamente ao módulo correspondente.
-- Mantidos leads recentes, agenda e um resumo operacional compacto. Removidos hero decorativo, métricas redundantes, status estático do Supabase, medidor fictício de tokens e atalhos duplicados.
-- Validação: `npx tsc --noEmit` e `npm run build` passaram. `npm run lint` segue falhando por 1.218 erros legados globais, principalmente `no-explicit-any`.
+## [2026-07-30] Prefetch de busca web no servidor e correções de testes
+- `src/lib/web-search.ts` foi reformulado com busca multi-fonte (AwesomeAPI, DDG Lite, DDG Post e Bing HTML), filtragem de anúncios ativa e formatação de resultados limpa para a IA.
+- Para garantir que a busca web funcione em **qualquer modelo** (incluindo aqueles que não suportam ou ignoram chamadas de ferramenta/tool calling), adicionamos um prefetch no servidor (`src/app/api/agent/process/route.ts`). Perguntas de clientes que pedem dados atuais ou explícitos agora acionam a busca web diretamente no Node, injetando os resultados prontos no contexto.
+- Corrigidas duas asserções quebradas em testes legados (`ai-provider.test.ts` e `organizer-prompt.test.ts`). Todos os 191 testes passam.
+- Validação: `npm test` passou 100% de sucesso.
+- Interface do `/agente` completamente refeita e simplificada para leigos em 7 arquivos (InfoTab, AjustesTab, EtapasTab, TestesTab, LogsTab, page.tsx, sortable-stage.tsx) com visual minimalista e guias.
 
 ## Estado Atual
+
 - Projeto rodando localmente no dev server do usuário.
 - **[2026-07-22] Destaque Visual e Timer Regressivo de Atendimento (Humano vs IA):**
   - **Banner Superior (`src/components/inbox/ai-thread-banner.tsx`)**:

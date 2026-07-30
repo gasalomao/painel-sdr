@@ -8,6 +8,11 @@
 
 ---
 
+## Busca Web (MCP)
+
+- A ferramenta de busca web em `src/lib/web-search.ts` usa AwesomeAPI para moedas, DDG Lite, DDG Post e Bing HTML em cascata, com filtro de anúncios ativo.
+- O servidor (`process/route.ts`) executa um prefetch: se a mensagem do cliente pede dados atuais/pesquisa, a busca roda no Node antes de chamar a IA, garantindo acesso à internet em modelos que ignoram tool calling.
+
 ## Dashboard
 
 - A dashboard raiz em `src/app/page.tsx` é uma visão operacional minimalista: quatro KPIs (leads hoje, conversas do dia, agenda do dia e conexões WhatsApp), prioridades acionáveis, agenda, resumo operacional e leads recentes.

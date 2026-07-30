@@ -73,6 +73,70 @@ function filterAds(results: SearchResult[]): SearchResult[] {
   });
 }
 
+export async function webFetchPage(url: string): Promise<{ success: boolean; title?: string; content?: string; error?: string }> {
+  if (!url?.startsWith("http")) return { success: false, error: "URL inválida. Deve iniciar com http/https." };
+  
+  const cleanUrl = url.trim();
+  const key = process.env.JINA_API_KEY;
+  try {
+    // 1. Tenta o Jina AI Reader (ideal para LLM: markdown direto de SPA renderizado no Puppeteer)
+    const res = await fetch(`https://r.jina.ai/${cleanUrl}`, {
+      signal: AbortSignal.timeout(18000),
+      headers: {
+        ...(key ? { "Authorization": `Bearer ${key}` } : {}),
+        "Accept": "application/json",
+        "X-Return-Format": "markdown",
+        "X-With-Generated-Alt": "true"
+      }
+    });
+
+    if (res.ok) {
+      const data: any = await res.json().catch(() => null);
+      const md = data?.data?.content || data?.content || "";
+      if (md && md.length > 50) {
+        return {
+          success: true,
+          title: data?.data?.title || data?.title || "",
+          content: md.slice(0, 15000) // limita para não estourar contexto
+        };
+      }
+    }
+  } catch {
+    // Falha do Jina passa pro fallback
+  }
+
+  // 2. Fallback: Fetch direto de HTML e limpeza de tags
+  try {
+    const res = await fetch(cleanUrl, {
+      headers: { "User-Agent": BROWSER_UA },
+      signal: AbortSignal.timeout(10000)
+    });
+    if (!res.ok) return { success: false, error: `Falha no acesso direto: HTTP ${res.status}` };
+    const html = await res.text();
+    
+    // Extrai o body ou pega o texto inteiro limpo
+    const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+    const contentHtml = bodyMatch ? bodyMatch[1] : html;
+    
+    // Remove scripts e estilos antes de limpar tags
+    const cleanHtml = contentHtml
+      .replace(/<script[^>]*>([\s\S]*?)<\/script>/gi, "")
+      .replace(/<style[^>]*>([\s\S]*?)<\/style>/gi, "");
+    
+    const text = stripTags(cleanHtml);
+    if (text.length > 50) {
+      return {
+        success: true,
+        content: text.slice(0, 8000)
+      };
+    }
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+
+  return { success: false, error: "Nenhum conteúdo pôde ser extraído desta página." };
+}
+
 function resolveDdgUrl(rawHref: string): string {
   const uddg = rawHref.match(/uddg=([^&]+)/);
   if (uddg) return decodeURIComponent(uddg[1]);

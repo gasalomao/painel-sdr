@@ -789,6 +789,17 @@ ${capturedVariablesPrompt}
              required: ["query"],
           },
        });
+       functionDeclarations.push({
+          name: "web_fetch",
+          description: "Acessa e lê o conteúdo completo de uma página web (URL). Use sempre após a busca (web_search) retornar links úteis, para ler o site oficial da empresa do lead, detalhes de notícias ou especificações completas de produtos.",
+          parameters: {
+             type: SchemaType.OBJECT,
+             properties: {
+                url: { type: SchemaType.STRING, description: "A URL completa do site para ler (ex: https://exemplo.com)" },
+             },
+             required: ["url"],
+          },
+       });
     }
 
     // Ferramenta 2: Google Calendar — schedule com duração padrão + campos opcionais
@@ -1238,6 +1249,19 @@ ${capturedVariablesPrompt}
            } catch (e: any) {
               functionResultRes = { found: false, error: e.message };
               callLogs.push({ role: "system", content: `[Web Search] "${q}" | FALHA: ${e.message}` });
+           }
+        } else if (call.name === "web_fetch") {
+           const u = String(callArgs.url || "").trim();
+           try {
+              const { webFetchPage } = await import("@/lib/web-search");
+              const result = await webFetchPage(u);
+              functionResultRes = result.success
+                 ? { success: true, title: result.title, content: result.content }
+                 : { success: false, error: result.error };
+              callLogs.push({ role: "system", content: `[Web Fetch] ${u} | ${result.success ? "SUCESSO" : "FALHA"}` });
+           } catch (e: any) {
+              functionResultRes = { success: false, error: e.message };
+              callLogs.push({ role: "system", content: `[Web Fetch] ${u} | FALHA: ${e.message}` });
            }
        } else if (call.name === "schedule_google_calendar") {
           console.log("[MCP] Iniciando Agendamento no Google Calendar ->", callArgs);
