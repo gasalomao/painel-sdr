@@ -118,7 +118,7 @@ describe("generateText", () => {
     });
     expect(out.text).toBe("olá mundo");
     expect(out.provider).toBe("openrouter");
-    expect(out.usage).toEqual({ promptTokens: 10, completionTokens: 5, totalTokens: 15 });
+    expect(out.usage).toEqual({ promptTokens: 10, completionTokens: 5, totalTokens: 15, estimated: false });
 
     const [url, opts] = fetchMock.mock.calls[0];
     expect(url).toContain("/chat/completions");

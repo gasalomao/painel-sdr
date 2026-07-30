@@ -17,7 +17,7 @@ import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { evolution } from "@/lib/evolution";
 import * as channel from "@/lib/channel";
 import { renderTemplate } from "@/lib/template-vars";
-import { webSearch } from "@/lib/web-search";
+import { webSearch, formatResultsForAI } from "@/lib/web-search";
 import { logTokenUsage } from "@/lib/token-usage";
 import { DEFAULT_CLIENT_ID, clientIdFromInstance } from "@/lib/tenant";
 import { registerAiSend, registerPendingAutomatedSend } from "@/lib/manual-send-registry";
@@ -1112,10 +1112,10 @@ ${opts.useWebSearch ? "- Se útil, use a tool web_search pra confirmar UM detalh
   if (call && opts.useWebSearch && call.name === "web_search") {
     const q = String((call.args as any)?.query || "");
     try {
-      const results = await webSearch(q, 3);
-      const summary = results.length > 0
-        ? results.map(r => `${r.title}: ${r.snippet}`).join("\n")
-        : "Nenhum resultado.";
+const results = await webSearch(q, 8);
+        const summary = results.length > 0
+          ? formatResultsForAI(results)
+          : "Nenhum resultado.";
       turn = await session.sendToolResults([{ name: "web_search", id: call.id, response: { results: summary } }]);
       tp += turn.usage.promptTokens; tc += turn.usage.completionTokens; tt += turn.usage.totalTokens;
       finalText = turn.text.replace(/^["']|["']$/g, "");

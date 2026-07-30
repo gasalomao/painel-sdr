@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
-import { webSearch } from "@/lib/web-search";
+import { webSearch, formatResultsForAI } from "@/lib/web-search";
 import { logTokenUsage } from "@/lib/token-usage";
 import { requireClientId } from "@/lib/tenant";
 import { startAiChat, providerOf, providerDisplayName } from "@/lib/ai-provider";
@@ -74,9 +74,9 @@ export async function POST(req: NextRequest) {
     if (call && useWebSearch && call.name === "web_search") {
       const q = String((call.args as any)?.query || "");
       try {
-        const results = await webSearch(q, 3);
+        const results = await webSearch(q, 8);
         const summary = results.length > 0
-          ? results.map(r => `${r.title}: ${r.snippet}`).join("\n")
+          ? formatResultsForAI(results)
           : "Nenhum resultado.";
         turn = await session.sendToolResults([{ name: "web_search", id: call.id, response: { results: summary } }]);
         tp += turn.usage.promptTokens; tc += turn.usage.completionTokens; tt += turn.usage.totalTokens;
