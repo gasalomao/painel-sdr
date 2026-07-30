@@ -1,5 +1,19 @@
 # Tarefas do Projeto
 
+## Dashboard operacional (2026-07-30)
+- [x] Redesenhar dashboard para uma visão profissional e enxuta, com dados e ações úteis <!-- id: 310 -->
+- [x] Validar dashboard com typecheck e build <!-- id: 311 -->
+
+
+## Auditoria de estabilidade e Evolution API (2026-07-30)
+- [ ] Corrigir `test_agent_process.test.ts` para falhar se `sendResult.ok` for falso e impedir envio externo acidental <!-- id: 300 -->
+- [ ] Criar testes unitários para roteamento/fallback de `channel.sendMessage` e `channel.sendMedia` (V2/GO) <!-- id: 301 -->
+- [ ] Validar a instância Evolution configurada em runtime: status `open`, webhook e envio controlado para número de teste autorizado <!-- id: 302 -->
+- [ ] Atualizar as duas asserções desatualizadas em `ai-provider.test.ts` e `organizer-prompt.test.ts` após confirmar a intenção <!-- id: 303 -->
+- [ ] Restringir ESLint ao código do produto e criar plano incremental para os 1.223 erros restantes <!-- id: 304 -->
+- [ ] Corrigir avisos Turbopack de rastreamento causado pelo acoplamento entre `next.config.ts` e `scraper-engine.ts` <!-- id: 305 -->
+
+
 - [x] Criar arquivo `.env.local` com as variáveis fornecidas pelo usuário <!-- id: 0 -->
 - [x] Orientar o usuário como instalar dependências e rodar o projeto localmente (`npm install` e `npm run dev`) <!-- id: 1 -->
 - [x] Explicar como gerenciar e atualizar o repositório git localmente e fazer push para o GitHub <!-- id: 2 -->
@@ -99,4 +113,13 @@
 - [ ] Criar os componentes de chat em `src/components/inbox/` (compositor de áudio, balões de mídia, sidebar de contato com kanban/anotações) <!-- id: 204 -->
 - [ ] Atualizar a página `src/app/chat/page.tsx` conectando à Evolution API e IAs <!-- id: 205 -->
 - [ ] Corrigir erros de tipos TypeScript e validar build final <!-- id: 206 -->
+
+## Captar Maps — Todas as avaliações (sessão 2026-07-29)
+
+- [x] Adicionar toggle de captura completa de avaliações ao lado dos filtros <!-- id: 210 -->
+- [x] Propagar opção até a engine e remover limite de 50 no modo completo <!-- id: 211 -->
+- [ ] **TESTAR**: capturar um negócio com mais de 50 avaliações e confirmar no painel/exportação que todas as avaliações disponíveis foram salvas <!-- id: 212 -->
+- [x] Corrigir acúmulo incremental de cards virtualizados pelo Google Maps <!-- id: 213 -->
+- [x] Expandir "Mais"/"More" e redesenhar visual de avaliações e respostas <!-- id: 214 -->
+- [ ] **TESTAR**: validar em captura real comentário longo expandido e resposta do estabelecimento no modal <!-- id: 215 -->
 

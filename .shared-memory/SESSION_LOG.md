@@ -1,5 +1,31 @@
 # Log de Sessões
 
+## [2026-07-30] OpenCode — Redesenho da Dashboard Operacional
+- **O que foi feito**: substituída a dashboard visualmente carregada por uma visão operacional profissional e minimalista com KPIs úteis, prioridades acionáveis, agenda, resumo e leads recentes.
+- **Arquivos alterados**: `src/app/page.tsx`, `.shared-memory/CONTEXT.md`, `.shared-memory/MEMORY.md`, `.shared-memory/SESSION_LOG.md`, `.shared-memory/TASKS.md`.
+- **Decisões**: removidos hero decorativo, métricas redundantes, status estático de Supabase, barra fictícia de tokens e atalhos duplicados; mantidas ações com navegação direta e feature gating.
+- **Problemas**: `npm run lint` continua falhando por 1.218 erros legados globais; build emite avisos legados de rastreamento Turbopack relacionados a `scraper-engine.ts`.
+- **Estado ao sair**: `npx tsc --noEmit` e `npm run build` passaram; alteração local, sem commit ou deploy.
+
+
+## [2026-07-30 13:30] OpenCode — Auditoria de estabilidade, testes e Evolution API
+- **O que foi feito**: mapeado o roteamento Evolution V2/GO/Cloud, executados typecheck, testes, lint e build; tentado health check local sem envio externo.
+- **Arquivos alterados**: `.shared-memory/CONTEXT.md`, `.shared-memory/SESSION_LOG.md`, `.shared-memory/TASKS.md`.
+- **Decisões**: não enviar mensagens reais nem alterar código nesta auditoria.
+- **Problemas**: 2 testes falham (185/187 passam); lint falha com 1.223 erros; integração do agente retornou `success` apesar de Evolution V2 indicar instância inexistente e GO `not authorized`, portanto não valida entrega real.
+- **Estado ao sair**: build e typecheck passaram; correção prioritária é tornar o teste de integração assertivo e criar teste seguro/mocado do envio Evolution antes de validar a instância conectada em runtime.
+
+
+## [2026-07-24 04:35] Antigravity — Validação de Build e Deploy no Easypanel / GitHub
+- **O que foi feito**:
+  - Verificação de integridade e tipo do código (`npx tsc --noEmit`) — 0 erros.
+  - Execução e validação completa do build de produção Next.js standalone (`npm run build`) — compilado com 100% de sucesso.
+  - Verificação do repositório Git (`origin/main`) — sincronizado com todas as últimas features e correções.
+- **Arquivos alterados**: `.shared-memory/SESSION_LOG.md`, `.shared-memory/CONTEXT.md`
+- **Decisões**: O projeto já está totalmente commitado e sincronizado com o GitHub (`gasalomao/painel-sdr`). Qualquer novo push ou ação no Easypanel aciona o deploy via Docker.
+- **Estado ao sair**: Validação de build concluída com sucesso. Informações e instruções de deploy fornecidas ao usuário.
+
+
 ## [2026-07-24 01:25] Antigravity — Instalação Universal da Suíte de Marketing Skills (coreyhaines31/marketingskills)
 - **O que foi feito**:
   - Clonadas e instaladas todas as **48 sub-skills de marketing** do repositório `coreyhaines31/marketingskills` em `skills/`, `.agents/skills/` e `C:\Users\Salomao\.gemini\config\skills\`.
@@ -540,3 +566,31 @@
 - **Decisões**: Aplicar limites estritos e consultas paralelas para evitar tráfego de dados volumosos sem necessidade no frontend.
 - **Problemas**: Nenhum. Compilação do TypeScript `npx tsc --noEmit` confirmada com **zero erros**.
 - **Estado ao sair**: Carregamento instantâneo do chat e thread de mensagens.
+
+## [2026-07-29] OpenCode — Captar Maps: todas as avaliações
+- **O que foi feito**: Adicionado o toggle "Capturar todas as avaliações" ao lado de Filtros Automáticos; a opção é transmitida para a API e habilita a leitura do feed completo de avaliações do Google Maps.
+- **Arquivos alterados**: `src/app/captador/page.tsx`, `src/app/api/scraper/route.ts`, `src/lib/scraper-engine.ts`, `.shared-memory/*`.
+- **Decisões**: O modo normal conserva o limite de 50 avaliações; o modo completo para após três rolagens sem novos itens, com proteção máxima de 1000 rolagens.
+- **Problemas**: `npm run lint` falha por erros legados distribuídos pelo repositório; typecheck passou.
+- **Estado ao sair**: `npx tsc --noEmit` com 0 erros. Falta teste ponta a ponta no Google Maps.
+
+## [2026-07-29] OpenCode — Correção da captura completa de avaliações
+- **O que foi feito**: Corrigido o modo completo que retornava apenas cerca de três reviews. A lista do Google Maps é virtualizada; agora cada lote é acumulado durante a rolagem antes que o DOM descarte cards antigos.
+- **Arquivos alterados**: `src/lib/scraper-engine.ts`, `.shared-memory/*`.
+- **Decisões**: Seletor inclui `.jftiEf`; a parada acontece após três ciclos sem novas avaliações no cache, não pela quantidade de cards no DOM.
+- **Problemas**: Requer teste real em um negócio com muitas avaliações.
+- **Estado ao sair**: `npx tsc --noEmit` com 0 erros.
+
+## [2026-07-30] OpenCode — Reviews completas e leitura do modal
+- **O que foi feito**: O scraper clica em todos os controles "Mais"/"More" antes de registrar cada lote, elevando o texto capturado para 12.000 caracteres. O modal de detalhes foi redesenhado para cards de leitura, com autor, nota, data, texto integral, fotos e resposta do estabelecimento destacada.
+- **Arquivos alterados**: `src/lib/scraper-engine.ts`, `src/app/captador/page.tsx`, `.shared-memory/*`.
+- **Decisões**: A resposta do negócio é preservada já no cache incremental, evitando perdê-la quando o Maps virtualiza cards antigos.
+- **Problemas**: `npx eslint` ainda aponta erros legados de `no-explicit-any`; a interface não pôde ser validada visualmente sem uma execução de captura real.
+- **Estado ao sair**: `npx tsc --noEmit` com 0 erros.
+
+## [2026-07-30] OpenCode — Captar Maps: abertura da lista real de avaliações
+- **O que foi feito**: O scraper agora clica no botão real de Avaliações antes de recorrer à rota `/reviews`, espera pelos cards e rola o contêiner ancestral deles, em vez de escolher um painel genérico.
+- **Arquivos alterados**: `src/lib/scraper-engine.ts`, `.shared-memory/*`.
+- **Decisões**: Mantido o cache incremental; o clique resolve o caso em que `/reviews` não muda o painel e só deixa os três comentários de destaque.
+- **Problemas**: Precisa teste real no Google Maps com negócio que tenha muitas avaliações.
+- **Estado ao sair**: `npx tsc --noEmit` com 0 erros.

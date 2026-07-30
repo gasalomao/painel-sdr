@@ -8,6 +8,11 @@
 
 ---
 
+## Dashboard
+
+- A dashboard raiz em `src/app/page.tsx` é uma visão operacional minimalista: quatro KPIs (leads hoje, conversas do dia, agenda do dia e conexões WhatsApp), prioridades acionáveis, agenda, resumo operacional e leads recentes.
+- Dados são carregados diretamente do Supabase com filtro `client_id`, preservando o bypass intencional do admin não-impersonado. Atualização automática a cada 30 segundos.
+
 ## Arquitetura de provedores de IA
 
 - **Roteador central**: `src/lib/ai-provider.ts` decide Gemini × OpenRouter × Gateway baseado no prefixo do `modelRef` (`openrouter:`, `gateway:`, sem prefixo = Gemini).
@@ -58,3 +63,6 @@
 - Erros em banners vermelhos com ícone + whitespace-pre-wrap.
 - Loading states com `Loader2` da lucide-react animado.
 - Apelido editável: input inline com botão "Salvar" que só aparece quando dirty.
+
+## Captador Maps
+- O toggle `captureAllReviews` do `/captador` é enviado à API `/api/scraper` e à `ScraperSettings`. Ligado, o scraper percorre o feed e acumula cada lote de avaliações em `window.__painelSdrReviews`, pois o Google Maps virtualiza a lista e pode deixar apenas ~3 cards no DOM ao final. Antes da coleta de cada lote clica em "Mais"/"More" para extrair o texto completo (até 12.000 chars). Desligado, mantém o limite padrão de 50 avaliações.

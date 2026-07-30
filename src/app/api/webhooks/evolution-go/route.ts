@@ -27,6 +27,7 @@ import {
   mediaPlaceholder, uploadMediaBase64,
   transcribeAudio, describeImage, describeDocument,
   findOrCreateContact, findOrCreateSession, healLeadNameFromPushName,
+  refreshProfilePicIfStale,
   requireClientId,
 } from "../shared-helpers";
 
@@ -105,6 +106,13 @@ export async function POST(req: NextRequest) {
     const session = contact
       ? await findOrCreateSession(contact.id, instanceName, remoteJid, clientId)
       : null;
+
+    // ===== Buscar foto de perfil (fire-and-forget) =====
+    // Não bloqueia o processamento da mensagem. Só busca se o contato
+    // não tem foto ou a URL está stale (>24h).
+    if (!fromMe && instanceName) {
+      refreshProfilePicIfStale(remoteJid, instanceName).catch(() => {});
+    }
 
     // ===== Salvar mensagem básica PRIMEIRO (não bloqueia com processamento de mídia) =====
     const placeholderContent = text || mediaPlaceholder(msgType);

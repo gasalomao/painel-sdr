@@ -10,6 +10,11 @@ const nextConfig: NextConfig = {
   images: {
     remotePatterns: [
       { protocol: "https", hostname: "i.ibb.co" },
+      { protocol: "https", hostname: "mmg.whatsapp.net" },
+      { protocol: "https", hostname: "pps.whatsapp.net" },
+      { protocol: "https", hostname: "**.whatsapp.net" },
+      { protocol: "https", hostname: "**.googleusercontent.com" },
+      { protocol: "https", hostname: "lh3.googleusercontent.com" },
     ],
   },
   // Type-check e ESLint são pesados pra caramba no Next 16 (Turbopack roda

@@ -8,7 +8,7 @@ import {
 } from "@/lib/inbox/conversations";
 import { cn } from "@/lib/utils";
 import type { Conversation, ConversationStatus, Tag } from "@/types";
-import { Search, ChevronDown, X } from "lucide-react";
+import { Search, ChevronDown, X, RefreshCw } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { Input } from "@/components/ui/input";
@@ -92,6 +92,38 @@ export function ConversationList({
     onConversationsLoadedRef.current = onConversationsLoaded;
   });
 
+  // Hidrata fotos de perfil via /api/contacts/avatars.
+  // Atualiza o state das conversas com as URLs recebidas, sem recarregar tudo.
+  const hydrateAvatars = useCallback(async (jids: string[], instance?: string) => {
+    if (jids.length === 0) return;
+    try {
+      const res = await fetch("/api/contacts/avatars", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jids: jids.slice(0, 100), instance }),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data?.avatars) return;
+      const avatars: Record<string, string> = data.avatars;
+      // Atualiza só os contatos que receberam URL válida.
+      const updates = Object.entries(avatars).filter(([, url]) => !!url);
+      if (updates.length === 0) return;
+      const avatarMap = new Map(updates);
+      onConversationsLoadedRef.current(
+        conversations.map((c) => {
+          if (!c.contact) return c;
+          const url = avatarMap.get(c.id);
+          if (!url) return c;
+          return {
+            ...c,
+            contact: { ...c.contact, avatar_url: url },
+          };
+        })
+      );
+    } catch {}
+  }, [conversations]);
+
   useEffect(() => {
     if (!clientId) return;
     let cancelled = false;
@@ -146,6 +178,20 @@ export function ConversationList({
 
       onConversationsLoadedRef.current(normalized);
       setLoading(false);
+
+      // ===== Hidratar fotos de perfil =====
+      // Busca avatares de contatos que NÃO têm profile_pic_url no banco.
+      // O endpoint /api/contacts/avatars processa em batch: lê cache,
+      // atualiza stale em background e devolve o que tem no momento.
+      // Roda fire-and-forget — não bloqueia a UI.
+      const jidsSemFoto = normalized
+        .filter((c) => !c.contact?.avatar_url)
+        .map((c) => c.id)
+        .filter(Boolean) as string[];
+      if (jidsSemFoto.length > 0 && instances.length > 0) {
+        const instanceName = instances[0]?.instance_name;
+        hydrateAvatars(jidsSemFoto, instanceName).catch(() => {});
+      }
     })();
 
     return () => {
@@ -255,6 +301,35 @@ export function ConversationList({
     },
     [onSelect]
   );
+
+  // Sync bulk de fotos de perfil via /api/contacts/sync-avatars.
+  const [syncingAvatars, setSyncingAvatars] = useState(false);
+  const handleSyncAvatars = useCallback(async () => {
+    if (syncingAvatars) return;
+    setSyncingAvatars(true);
+    try {
+      const instanceName = instances[0]?.instance_name;
+      await fetch("/api/contacts/sync-avatars", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instance: instanceName }),
+      });
+      // Após sync, re-hidrata os avatares das conversas atuais.
+      const jidsSemFoto = conversations
+        .filter((c) => !c.contact?.avatar_url)
+        .map((c) => c.id)
+        .filter(Boolean) as string[];
+      if (jidsSemFoto.length > 0) {
+        await hydrateAvatars(jidsSemFoto, instanceName);
+      }
+      // Dispara reload das conversas para pegar as fotos atualizadas do banco.
+      onConversationsLoadedRef.current(conversations.map((c) => ({
+        ...c,
+        contact: c.contact ? { ...c.contact } : c.contact,
+      })));
+    } catch {}
+    setSyncingAvatars(false);
+  }, [syncingAvatars, instances, conversations, hydrateAvatars]);
 
   const activeFilter = FILTER_OPTIONS.find((o) => o.value === filter);
 
@@ -423,8 +498,21 @@ export function ConversationList({
               Limpar filtros
             </button>
           </div>
-        )}
-      </div>
+          )}
+
+          <button
+            onClick={handleSyncAvatars}
+            disabled={syncingAvatars}
+            title="Sincronizar fotos de perfil de todos os contatos"
+            className={cn(
+              "inline-flex items-center justify-center h-7 gap-1 px-2 text-xs rounded-md hover:bg-muted outline-none cursor-pointer ml-auto",
+              syncingAvatars ? "text-muted-foreground cursor-wait" : "text-muted-foreground hover:text-foreground"
+            )}
+          >
+            <RefreshCw className={cn("h-3 w-3", syncingAvatars && "animate-spin")} />
+            {syncingAvatars ? "Sincronizando..." : "Fotos"}
+          </button>
+        </div>
 
       {/* Lista de conversas */}
       <ScrollArea className="min-h-0 flex-1">
