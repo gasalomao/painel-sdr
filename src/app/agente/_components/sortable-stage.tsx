@@ -50,7 +50,7 @@ export function SortableStage({
   };
 
   return (
-    <div ref={setNodeRef} style={style} className="glass-card p-6 rounded-[2rem] border-white/10 space-y-4 bg-white/[0.02]">
+    <div ref={setNodeRef} style={style} className="border border-white/[0.08] bg-card/80 rounded-xl shadow-none p-5 space-y-4">
       {/* Header: drag handle + title + delete */}
       <div className="flex items-center justify-between border-b border-white/5 pb-3">
         <div className="flex items-center gap-2">
@@ -65,19 +65,19 @@ export function SortableStage({
       </div>
 
       {/* Instrução */}
-      <div className="space-y-2">
-        <label className="text-[10px] font-black uppercase tracking-widest text-primary">Instrução / O que o agente deve fazer</label>
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium text-muted-foreground">Instrução — o que o agente deve fazer</label>
         <Textarea
           value={stage.goal_prompt}
           onChange={(e) => updateStage({ goal_prompt: e.target.value })}
-          className="bg-black/30 h-20 text-xs"
+          className="bg-white/[0.02] border-white/[0.08] h-20 text-sm"
         />
       </div>
 
       {/* Condição */}
-      <div className="space-y-3 p-4 bg-yellow-500/5 border border-yellow-500/20 rounded-xl">
-        <div className="flex items-center justify-between mb-2">
-          <label className="text-[10px] font-black uppercase tracking-widest text-yellow-400">Condição para executar</label>
+      <div className="space-y-3 p-4 bg-amber-500/5 border border-amber-500/15 rounded-lg">
+        <div className="flex items-center justify-between">
+          <label className="text-xs font-medium text-amber-300">Condição para executar</label>
           <div className="flex items-center gap-2">
             <Toggle
               checked={!!stage.condition_variable}
@@ -126,16 +126,16 @@ export function SortableStage({
       </div>
 
       {/* Capturar variáveis */}
-      <div className="space-y-3 p-4 bg-blue-500/5 border border-blue-500/20 rounded-xl">
+      <div className="space-y-3 p-4 bg-blue-500/5 border border-blue-500/15 rounded-lg">
         <div className="flex items-center justify-between">
-          <label className="text-[10px] font-black uppercase tracking-widest text-blue-400">Capturar variáveis</label>
+          <label className="text-xs font-medium text-blue-300">Variáveis para capturar</label>
           <Button
             size="sm"
             variant="ghost"
             onClick={() => updateStage({ captured_variables: [...capturedVars, { name: "", description: "", type: "fixa" }] })}
-            className="h-6 text-[10px] gap-1 text-blue-400 hover:text-blue-300 hover:bg-blue-400/10"
+            className="h-7 text-xs gap-1 text-blue-300 hover:bg-blue-400/10"
           >
-            <Plus className="w-3 h-3" /> Adicionar variável
+            <Plus className="w-3.5 h-3.5" /> Adicionar
           </Button>
         </div>
         {capturedVars.map((v, vIdx) => (
@@ -144,18 +144,18 @@ export function SortableStage({
               placeholder="Nome (ex: nome)"
               value={v.name}
               onChange={(e) => updateCapturedVar(vIdx, { name: e.target.value })}
-              className="bg-black/50 border-white/10 text-xs h-8 flex-1"
+              className="bg-white/[0.02] border-white/[0.08] text-xs h-8 flex-1"
             />
             <Input
               placeholder="O que captar (ex: nome completo do cliente)"
               value={v.description}
               onChange={(e) => updateCapturedVar(vIdx, { description: e.target.value })}
-              className="bg-black/50 border-white/10 text-xs h-8 flex-1"
+              className="bg-white/[0.02] border-white/[0.08] text-xs h-8 flex-1"
             />
             <select
               value={v.type || "fixa"}
               onChange={(e) => updateCapturedVar(vIdx, { type: e.target.value })}
-              className="bg-black/50 border border-white/10 text-white rounded-md text-[10px] px-2 h-8 w-24"
+              className="bg-white/[0.02] border border-white/[0.08] text-foreground rounded-md text-[10px] px-2 h-8 w-24 focus:outline-none"
             >
               <option value="fixa">Fixa</option>
               <option value="volatil">Volátil</option>
@@ -165,7 +165,7 @@ export function SortableStage({
               size="icon"
               variant="ghost"
               onClick={() => updateStage({ captured_variables: capturedVars.filter((_, i) => i !== vIdx) })}
-              className="h-8 w-8 text-red-400 hover:bg-red-500/10"
+              className="h-8 w-8 text-muted-foreground hover:text-red-400 hover:bg-red-500/10"
             >
               <X className="w-4 h-4" />
             </Button>
@@ -176,9 +176,9 @@ export function SortableStage({
       <Button
         size="sm"
         onClick={() => onSaveStage(stage)}
-        className="w-full h-8 text-[10px] bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20"
+        className="w-full h-9 text-xs font-medium rounded-lg bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 gap-2"
       >
-        Salvar Alterações da Etapa
+        Salvar alterações da etapa
       </Button>
     </div>
   );

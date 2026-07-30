@@ -67,40 +67,49 @@ export function EtapasTab({
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <div>
-          <h3 className="text-2xl font-black text-white">Etapas do Funil</h3>
-          <p className="text-xs text-muted-foreground mt-1 max-w-2xl">
-            Defina os passos que a IA segue pra qualificar o lead — ex: <em>apresentação → entender dor → propor solução → agendar</em>.
-            Arraste pra reordenar.
-          </p>
+      <header className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-3">
+          <div className="p-2.5 rounded-xl bg-primary/15 text-primary shrink-0">
+            <ListTree className="w-5 h-5" />
+          </div>
+          <div>
+            <h3 className="text-base font-semibold text-foreground">Etapas do funil</h3>
+            <p className="text-xs text-muted-foreground mt-0.5 max-w-2xl leading-relaxed">
+              Defina os passos que a IA segue para qualificar o lead (ex.:{" "}
+              <em>apresentação → entender dor → propor solução → agendar</em>). Arraste para reordenar.
+            </p>
+          </div>
         </div>
-        <Button onClick={() => setShowNovoStage(!showNovoStage)} className="glow-primary h-11 px-6 font-bold text-xs uppercase tracking-widest gap-2">
-          <Plus className="w-4 h-4" /> Nova Etapa
+        <Button
+          onClick={() => setShowNovoStage(!showNovoStage)}
+          className="h-10 px-4 font-medium text-sm gap-2 rounded-xl"
+        >
+          <Plus className="w-4 h-4" /> Nova etapa
         </Button>
-      </div>
+      </header>
 
       {showNovoStage && (
-        <div className="p-6 bg-white/5 border border-white/10 rounded-[2rem] space-y-4">
+        <div className="border border-white/[0.08] bg-card/80 rounded-xl shadow-none p-5 space-y-4">
           <div className="space-y-1.5">
-            <label className="text-[10px] font-black uppercase tracking-widest text-primary">Título da Etapa</label>
+            <label className="text-sm font-medium text-foreground">Nome da etapa</label>
             <Input
               value={novoStageTitle}
               onChange={(e) => setNovoStageTitle(e.target.value)}
-              placeholder="Ex: Apresentação, Qualificação, Fechamento..."
-              className="bg-black/50 border-white/10"
+              placeholder="Ex.: Apresentação, Qualificação, Fechamento..."
+              className="bg-white/[0.02] border-white/[0.08]"
             />
           </div>
           <div className="space-y-1.5">
-            <label className="text-[10px] font-black uppercase tracking-widest text-primary">Instrução pra IA nessa etapa</label>
+            <label className="text-sm font-medium text-foreground">Instrução para a IA</label>
+            <p className="text-xs text-muted-foreground">O que a IA deve fazer nesta etapa.</p>
             <Textarea
               value={novoStagePrompt}
               onChange={(e) => setNovoStagePrompt(e.target.value)}
-              placeholder="O que a IA deve FAZER nessa etapa. Ex: 'Pergunte qual o principal desafio do cliente hoje na área X'."
-              className="bg-black/50 border-white/10 h-24"
+              placeholder="Ex.: Pergunte qual o principal desafio do cliente hoje na área dele."
+              className="bg-white/[0.02] border-white/[0.08] h-24"
             />
           </div>
-          <SaveButton label="Salvar Etapa" onSave={onCreateStage} />
+          <SaveButton label="Salvar etapa" onSave={onCreateStage} />
         </div>
       )}
 
@@ -110,13 +119,14 @@ export function EtapasTab({
           title="Sem etapas no funil"
           description={
             <>
-              Sem etapas, a IA só conversa livre. Adicione etapas pra <strong>guiar o cliente num funil</strong> — ela vai cumprir o objetivo de cada etapa antes de avançar pra próxima.
+              Sem etapas, a IA apenas conversa livremente. Adicione etapas para{" "}
+              <strong>guiar o cliente pelo funil</strong> — a IA cumpre o objetivo de cada etapa antes de avançar.
             </>
           }
           action={
             <Button
               onClick={() => setShowNovoStage(true)}
-              className="glow-primary h-10 px-5 font-bold text-xs uppercase tracking-widest gap-2"
+              className="h-10 px-4 font-medium text-sm gap-2 rounded-xl"
             >
               <Plus className="w-4 h-4" /> Criar primeira etapa
             </Button>
@@ -126,7 +136,7 @@ export function EtapasTab({
 
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
         <SortableContext items={stages.map((s) => s.id)} strategy={verticalListSortingStrategy}>
-          <div className="grid grid-cols-1 gap-6">
+          <div className="grid grid-cols-1 gap-4">
             {stages.map((stage, idx) => (
               <SortableStage
                 key={stage.id}
