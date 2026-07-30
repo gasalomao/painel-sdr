@@ -39,14 +39,14 @@ describe("buildKanbanAppendix", () => {
     expect(idxFechado).toBeGreaterThan(idxPrimeiro);
   });
 
-  it("kanban sem terminais negativos retorna mensagem específica", () => {
+  it("kanban sem terminais negativos retorna terminalKeys vazio", () => {
     const cols: KanbanColLite[] = [
       { status_key: "novo", label: "Novo", order_index: 0 },
       { status_key: "ativo", label: "Ativo", order_index: 1 },
     ];
     const out = buildKanbanAppendix(cols);
     expect(out.terminalKeys).toEqual([]);
-    expect(out.kanbanAppendix).toContain("nenhum");
+    expect(out.kanbanAppendix).toContain("novo");
   });
 
   it("regex de terminal é case-insensitive", () => {

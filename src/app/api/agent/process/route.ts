@@ -12,6 +12,7 @@ import { maskJid } from "@/lib/pii";
 import { resolveFunnelStage, checkSchedulesSync, splitMessage } from "@/lib/agent-format";
 import { parseAgendaDateTime, isDuplicateSlot, hasAgentOverlapConflict } from "@/lib/agenda-logic";
 import { indexKnowledgeDocument } from "@/lib/rag";
+import { formatResultsForAI, needsFreshWebSearch, webSearch } from "@/lib/web-search";
 
 export const dynamic = 'force-dynamic';
 
@@ -972,9 +973,27 @@ ${capturedVariablesPrompt}
     }
 
     const timeContext = `[Sistema: Hoje é ${agora.toLocaleDateString("pt-BR")}, ${agora.toLocaleTimeString("pt-BR")}]`;
+    let prefetchedWebResearch = "";
+    if (webSearchEnabled && needsFreshWebSearch(finalProcessText)) {
+      try {
+        const results = await webSearch(finalProcessText, 8);
+        if (results.length > 0) {
+          prefetchedWebResearch = `<pesquisa_atualizada_na_internet>\n${formatResultsForAI(results)}\n</pesquisa_atualizada_na_internet>\n\nUse esta pesquisa como contexto atual. Não invente fatos além dela e, se não responder a pergunta, diga que não encontrou uma fonte confiável.`;
+          await supabase.from("webhook_logs").insert({
+            instance_name: instanceName,
+            event: "AGENT_WEB_SEARCH_PREFETCH",
+            payload: { remoteJid, query: finalProcessText.slice(0, 500), results: results.length },
+            created_at: new Date().toISOString(),
+          });
+        }
+      } catch (e: any) {
+        console.warn("[AGENT] Pesquisa prévia falhou:", e?.message);
+      }
+    }
+
     // O contexto volátil do turno (lead/funil/metas) + horário vão no FIM, junto
     // da mensagem do cliente — fora do systemInstruction estável (implicit cache).
-    const firstTurnMessage = `${turnContextBlock}\n\n=== MENSAGEM ATUAL DO CLIENTE ===\n${finalProcessText}\n\n${timeContext}`;
+    const firstTurnMessage = `${turnContextBlock}\n\n${prefetchedWebResearch}\n\n=== MENSAGEM ATUAL DO CLIENTE ===\n${finalProcessText}\n\n${timeContext}`;
 
     // Histórico no formato neutro da camada de provedores.
     const neutralHistory = geminiHistory.map((m: any) => ({
@@ -1207,19 +1226,19 @@ ${capturedVariablesPrompt}
              };
              callLogs.push({ role: "system", content: `[Estoque Erro] Item "${rawProd}" não encontrado` });
           }
-       } else if (call.name === "web_search") {
-          const q = String(callArgs.query || "").trim();
-          try {
-             const { webSearch } = await import("@/lib/web-search");
-             const results = await webSearch(q, 5);
-             functionResultRes = results.length > 0
-                ? { found: true, results: results.map(r => `${r.title}\n${r.url}\n${r.snippet}`) }
-                : { found: false, message: "Nenhum resultado encontrado." };
-             callLogs.push({ role: "system", content: `[Web Search] "${q}" | ${results.length} resultado(s)` });
-          } catch (e: any) {
-             functionResultRes = { found: false, error: e.message };
-             callLogs.push({ role: "system", content: `[Web Search] "${q}" | FALHA: ${e.message}` });
-          }
+} else if (call.name === "web_search") {
+           const q = String(callArgs.query || "").trim();
+           try {
+              const { webSearch, formatResultsForAI } = await import("@/lib/web-search");
+              const results = await webSearch(q, 8);
+              functionResultRes = results.length > 0
+                 ? { found: true, summary: formatResultsForAI(results) }
+                 : { found: false, message: "Nenhum resultado encontrado." };
+              callLogs.push({ role: "system", content: `[Web Search] "${q}" | ${results.length} resultado(s)` });
+           } catch (e: any) {
+              functionResultRes = { found: false, error: e.message };
+              callLogs.push({ role: "system", content: `[Web Search] "${q}" | FALHA: ${e.message}` });
+           }
        } else if (call.name === "schedule_google_calendar") {
           console.log("[MCP] Iniciando Agendamento no Google Calendar ->", callArgs);
           functionResultRes = { scheduled: false, message: "Erro ao agendar no sistema." };
