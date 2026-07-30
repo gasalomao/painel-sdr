@@ -1,5 +1,13 @@
 # Log de Sessões
 
+## [2026-07-30] OpenCode — Prefetch de Busca Web no Servidor e Interfaces do Agente
+- **O que foi feito**: adicionado prefetch de busca web no servidor para garantir dados em qualquer modelo sem depender de tool calling; corrigidos anúncios esnippets da busca; corrigidas asserções de testes legados; reescrita toda a UI do /agente e suas 5 tabs com visual limpo e guias para leigos.
+- **Arquivos alterados**: `src/lib/web-search.ts`, `src/app/api/agent/process/route.ts`, `src/app/api/agent/rewrite/route.ts`, `src/lib/campaign-worker.ts`, `src/lib/__tests__/ai-provider.test.ts`, `src/lib/__tests__/organizer-prompt.test.ts`, `src/lib/__tests__/web-search.test.ts` (novo), e 7 arquivos da UI do agente.
+- **Decisões**: a busca web agora roda proativamente no Node se a pergunta do cliente demandar dados externos, fornecendo contexto limpo e estruturado.
+- **Problemas**: nenhum novo.
+- **Estado ao sair**: 191 testes passando (`npm test` OK); `npx tsc --noEmit` passou; push realizado com deploy automático no Easypanel.
+
+
 ## [2026-07-30] OpenCode — Redesenho da Dashboard Operacional
 - **O que foi feito**: substituída a dashboard visualmente carregada por uma visão operacional profissional e minimalista com KPIs úteis, prioridades acionáveis, agenda, resumo e leads recentes.
 - **Arquivos alterados**: `src/app/page.tsx`, `.shared-memory/CONTEXT.md`, `.shared-memory/MEMORY.md`, `.shared-memory/SESSION_LOG.md`, `.shared-memory/TASKS.md`.
