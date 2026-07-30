@@ -555,8 +555,38 @@ let ENSURE_PROMISE: Promise<ProxyStatus> | null = null;
  */
 export async function ensureProxyRunning(): Promise<ProxyStatus> {
   if (ENSURE_PROMISE) return ENSURE_PROMISE;
-  if (!isInstalled()) return getProxyStatus();
   if (await isPortResponding()) return getProxyStatus();
+
+  // Auto-install: se o proxy não está instalado mas há endpoints de gateway
+  // configurados no banco E auth-files com backup no Supabase, instala
+  // automaticamente (download + config), restaura as credenciais e sobe o
+  // processo. Garante que a IA funcione no deploy sem intervenção manual.
+  if (!isInstalled()) {
+    try {
+      const { getAiKeys } = await import("@/lib/ai-keys");
+      const keys = await getAiKeys();
+      const hasEndpoints = (keys.gatewayEndpoints || []).some((e) => e.baseUrl && e.baseUrl !== "undefined");
+      if (!hasEndpoints) return getProxyStatus();
+
+      console.log("[ensureProxyRunning] Proxy não instalado mas endpoints existem — auto-instalando...");
+      ENSURE_PROMISE = (async () => {
+        try {
+          await installProxy();
+          const { restoreAllCredentialsFromSupabase } = await import("@/lib/gateway-auth-backup");
+          await restoreAllCredentialsFromSupabase();
+          return await startProxy();
+        } catch (e: any) {
+          console.warn("[ensureProxyRunning] Auto-install falhou:", e?.message || e);
+          return getProxyStatus();
+        } finally {
+          ENSURE_PROMISE = null;
+        }
+      })();
+      return await ENSURE_PROMISE;
+    } catch {
+      return getProxyStatus();
+    }
+  }
 
   ENSURE_PROMISE = (async () => {
     try {
