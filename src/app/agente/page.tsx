@@ -1046,7 +1046,7 @@ export default function AgentePage() {
           clientId={clientId}
         />
 
-        <div className="max-w-6xl mx-auto p-3 sm:p-8 space-y-4 sm:space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500 mobile-safe-bottom">
+        <div className="max-w-6xl mx-auto p-3 sm:p-8 space-y-6 sm:space-y-8 mobile-safe-bottom">
           {/* Tabs nav */}
           <TabsNav active={activeTab} onChange={setActiveTab} />
 
@@ -1216,7 +1216,7 @@ function TabsNav({ active, onChange }: { active: Tab; onChange: (t: Tab) => void
   ];
 
   return (
-    <div className="flex bg-white/5 border border-white/10 p-1 rounded-2xl mobile-tabs-scroll shadow-inner">
+    <div className="flex gap-1 overflow-x-auto border-b border-white/[0.06] mobile-tabs-scroll pb-px">
       {tabs.map((t) => {
         const Icon = t.icon;
         const isActive = active === t.id;
@@ -1225,11 +1225,13 @@ function TabsNav({ active, onChange }: { active: Tab; onChange: (t: Tab) => void
             key={t.id}
             onClick={() => onChange(t.id)}
             className={cn(
-              "flex items-center gap-1.5 sm:gap-2 px-3 sm:px-5 py-2 sm:py-2.5 text-xs sm:text-sm font-bold rounded-xl transition-all whitespace-nowrap",
-              isActive ? "bg-primary text-primary-foreground shadow-lg shadow-primary/20" : "text-muted-foreground hover:text-white hover:bg-white/5"
+              "flex items-center gap-2 px-4 py-2.5 text-sm font-medium rounded-t-lg whitespace-nowrap transition-colors border-b-2 -mb-px",
+              isActive
+                ? "border-primary text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground hover:bg-white/[0.03]"
             )}
           >
-            <Icon className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+            <Icon className="w-4 h-4" />
             {t.shortLabel ? (
               <>
                 <span className="hidden sm:inline">{t.label}</span>

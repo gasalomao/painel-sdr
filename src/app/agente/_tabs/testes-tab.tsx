@@ -5,25 +5,39 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { greetingFor, renderTemplate, TEMPLATE_VARIABLES } from "@/lib/template-vars";
-import { Bot, Check, FlaskConical, Globe, Loader2, Send, Sparkles, Trash2 } from "lucide-react";
+import {
+  BookOpen,
+  Bot,
+  Calendar,
+  Check,
+  FlaskConical,
+  Globe,
+  Loader2,
+  Plug,
+  Send,
+  Sparkles,
+  Trash2,
+  Wrench,
+} from "lucide-react";
 import { LeadSelectorUI, type PreviewLead, type PreviewSample } from "../_components/lead-selector";
 import { Toggle } from "../_components/toggle";
 
 type TestMessage = { role: "user" | "agent" | "tool"; content: string; isError?: boolean };
 
-// Detecta o tipo de tool a partir do conteúdo do log → pra colorir o card.
-function toolMeta(content: string): { label: string; color: "purple" | "blue" | "amber" | "gray"; icon: string } {
-  if (/RAG|search_knowledge_base/i.test(content)) return { label: "Base de conhecimento", color: "purple", icon: "📚" };
-  if (/Google Calendar|calendar/i.test(content)) return { label: "Google Calendar (MCP)", color: "blue", icon: "📅" };
-  if (/Webhook Custom/i.test(content)) return { label: "Tool customizada", color: "amber", icon: "🔌" };
-  return { label: "Tool", color: "gray", icon: "⚙️" };
+type ToolColor = "purple" | "blue" | "amber" | "gray";
+
+function toolMeta(content: string): { label: string; color: ToolColor; Icon: React.ComponentType<{ className?: string }> } {
+  if (/RAG|search_knowledge_base/i.test(content)) return { label: "Base de conhecimento", color: "purple", Icon: BookOpen };
+  if (/Google Calendar|calendar/i.test(content)) return { label: "Google Calendar (MCP)", color: "blue", Icon: Calendar };
+  if (/Webhook Custom/i.test(content)) return { label: "Tool customizada", color: "amber", Icon: Plug };
+  return { label: "Tool", color: "gray", Icon: Wrench };
 }
 
-const TOOL_COLOR: Record<string, string> = {
-  purple: "bg-purple-500/10 border-purple-500/30 text-purple-200",
-  blue: "bg-blue-500/10 border-blue-500/30 text-blue-200",
-  amber: "bg-amber-500/10 border-amber-500/30 text-amber-200",
-  gray: "bg-white/5 border-white/10 text-white/80",
+const TOOL_COLOR: Record<ToolColor, string> = {
+  purple: "bg-purple-500/10 border-purple-500/20 text-purple-200",
+  blue: "bg-blue-500/10 border-blue-500/20 text-blue-200",
+  amber: "bg-amber-500/10 border-amber-500/20 text-amber-200",
+  gray: "bg-white/5 border-white/[0.08] text-white/80",
 };
 
 function renderSandboxMessageContent(content: string) {
@@ -43,20 +57,19 @@ function renderSandboxMessageContent(content: string) {
     if (imageUrl) {
       parts.push(
         <div key={`img-${match.index}`} className="my-2 space-y-1">
-          <a href={imageUrl} target="_blank" rel="noreferrer" className="block group">
+          <a href={imageUrl} target="_blank" rel="noreferrer" className="block">
             <img
               src={imageUrl}
-              alt="Foto do Produto"
-              className="rounded-xl border border-white/20 max-h-60 max-w-full object-cover shadow-lg group-hover:opacity-90 transition-opacity"
+              alt="Mídia enviada"
+              className="rounded-lg border border-white/[0.08] max-h-56 max-w-full object-cover"
               onError={(e) => {
                 (e.target as HTMLElement).style.display = "none";
               }}
             />
           </a>
-          <div className="inline-flex items-center gap-1.5 text-[10px] text-emerald-400 font-mono bg-emerald-950/60 px-2 py-0.5 rounded-md border border-emerald-500/30">
-            <span>📷</span>
-            <span>Mídia enviada como foto via WhatsApp</span>
-          </div>
+          <span className="inline-flex items-center gap-1.5 text-[10px] text-emerald-300 bg-emerald-500/10 px-2 py-0.5 rounded-md border border-emerald-500/20">
+            <span className="font-medium">Mídia enviada via WhatsApp</span>
+          </span>
         </div>
       );
     }
@@ -125,198 +138,190 @@ export function TestesTab(props: {
   );
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="space-y-6">
       {/* ============= SIMULAÇÃO DE LEAD / DISPARO ============= */}
-      <div className="bg-[#0b141a] border border-white/10 rounded-[2.5rem] p-6 shadow-2xl relative overflow-hidden">
-        <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/[0.02] to-transparent pointer-events-none" />
-        <div className="relative z-10 space-y-4">
-          <div className="flex items-center justify-between gap-4 flex-wrap">
+      <section className="border border-white/[0.08] bg-card/80 rounded-xl shadow-none p-6 space-y-4">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div className="flex items-start gap-3">
+            <div className="p-2.5 rounded-xl bg-cyan-500/15 text-cyan-300 shrink-0">
+              <FlaskConical className="w-5 h-5" />
+            </div>
             <div>
-              <h4 className="font-bold text-white flex items-center gap-2">
-                <FlaskConical className="w-5 h-5 text-cyan-400" /> Simulação de Lead / Disparo
-              </h4>
-              <p className="text-[10px] text-muted-foreground mt-1">
-                Escolha um lead para preencher as variáveis e simular a primeira mensagem (Disparo Inicial).
+              <h4 className="text-sm font-semibold text-foreground">Simulação de lead / disparo</h4>
+              <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
+                Escolha um lead para preencher as variáveis e simular a primeira mensagem.
               </p>
             </div>
-            <div className="flex items-center gap-3 bg-[#202c33] px-3 py-2 rounded-xl border border-white/5">
-              <div className="text-right">
-                <div className="text-[10px] font-bold text-white">
-                  {props.sandboxSimulationEnabled ? "Simulação Ativa" : "Simulação Pausada"}
-                </div>
-                <div className="text-[9px] text-muted-foreground mt-0.5">
-                  {props.sandboxSimulationEnabled
-                    ? "IA será acionada ao disparar."
-                    : "Disparo bloqueado (teste sem IA)."}
+          </div>
+          <div className="flex items-center gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-2 px-3">
+            <span className="text-xs font-medium text-foreground">
+              {props.sandboxSimulationEnabled ? "Simulação ativa" : "Simulação pausada"}
+            </span>
+            <Toggle
+              checked={props.sandboxSimulationEnabled}
+              onCheckedChange={props.setSandboxSimulationEnabled}
+              color="cyan"
+              size="md"
+              aria-label="Ativar/desativar Simulação de Lead"
+            />
+          </div>
+        </div>
+
+        <LeadSelectorUI
+          sample={props.previewSample}
+          setSample={props.setPreviewSample}
+          leads={props.previewLeads}
+          leadsLoading={props.previewLeadsLoading}
+          selectedLeadId={props.previewSelectedLeadId}
+          onSelectLead={props.applyLeadToSample}
+          leadQuery={props.previewLeadQuery}
+          setLeadQuery={props.setPreviewLeadQuery}
+        />
+
+        {props.previewLeads.length === 0 ? (
+          <div className="text-center">
+            <Button onClick={props.loadPreviewLeads} className="h-9 px-4 text-sm font-medium rounded-lg gap-2">
+              Carregar leads
+            </Button>
+          </div>
+        ) : (
+          <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 space-y-4">
+            {/* Template */}
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-foreground">Mensagem inicial (template)</label>
+
+              <div className="flex flex-wrap gap-1.5">
+                {TEMPLATE_VARIABLES.map((v) => (
+                  <button
+                    key={v.key}
+                    type="button"
+                    onClick={() => props.setSandboxTemplate(props.sandboxTemplate + `{{${v.key}}}`)}
+                    draggable
+                    onDragStart={(e) => e.dataTransfer.setData("text/plain", `{{${v.key}}}`)}
+                    className="text-[10px] font-mono px-2 py-1 rounded-md bg-purple-500/10 border border-purple-500/20 text-purple-200 hover:bg-purple-500/15 transition-colors"
+                    title={v.hint}
+                  >
+                    {`{{${v.key}}}`}
+                  </button>
+                ))}
+              </div>
+
+              <textarea
+                value={props.sandboxTemplate}
+                onChange={(e) => props.setSandboxTemplate(e.target.value)}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  const v = e.dataTransfer.getData("text/plain");
+                  if (!v) return;
+                  const ta = e.currentTarget;
+                  const start = ta.selectionStart ?? props.sandboxTemplate.length;
+                  const end = ta.selectionEnd ?? props.sandboxTemplate.length;
+                  props.setSandboxTemplate(props.sandboxTemplate.slice(0, start) + v + props.sandboxTemplate.slice(end));
+                }}
+                className="w-full bg-white/[0.02] border border-white/[0.08] text-white font-mono text-xs p-3 rounded-lg min-h-[60px] focus:outline-none focus:border-cyan-500/40"
+              />
+
+              <div className="rounded-lg bg-emerald-500/5 border border-emerald-500/15 p-3">
+                <p className="text-[10px] uppercase font-medium tracking-wide text-emerald-300 mb-1">
+                  Pré-visualização
+                </p>
+                <p className="text-xs text-emerald-100/90 whitespace-pre-wrap font-mono">{previewSandboxMessage}</p>
+                <p className="text-[10px] text-emerald-100/50 mt-2 italic">
+                  Saudação atual: <strong>{greetingFor()}</strong>
+                </p>
+              </div>
+            </div>
+
+            {/* Personalizar com IA */}
+            <div className="flex items-center justify-between gap-4 rounded-lg border border-white/[0.06] bg-white/[0.02] p-3">
+              <div className="flex items-center gap-2 min-w-0">
+                <Sparkles className="w-4 h-4 text-purple-300 shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-foreground">Personalizar com IA</p>
+                  <p className="text-xs text-muted-foreground leading-relaxed">
+                    Reescreve a mensagem usando o modelo definido (
+                    <span className="text-purple-200 font-mono">{props.targetModel || "padrão"}</span>).
+                  </p>
                 </div>
               </div>
               <Toggle
-                checked={props.sandboxSimulationEnabled}
-                onCheckedChange={props.setSandboxSimulationEnabled}
-                color="cyan"
+                checked={props.sandboxPersonalizeAI}
+                onCheckedChange={props.setSandboxPersonalizeAI}
+                color="purple"
                 size="md"
-                aria-label="Ativar/desativar Simulação de Lead"
+                aria-label="Personalizar com IA"
               />
             </div>
-          </div>
 
-          <LeadSelectorUI
-            sample={props.previewSample}
-            setSample={props.setPreviewSample}
-            leads={props.previewLeads}
-            leadsLoading={props.previewLeadsLoading}
-            selectedLeadId={props.previewSelectedLeadId}
-            onSelectLead={props.applyLeadToSample}
-            leadQuery={props.previewLeadQuery}
-            setLeadQuery={props.setPreviewLeadQuery}
-          />
+            {/* Configurações da personalização IA */}
+            {props.sandboxPersonalizeAI && (
+              <div className="space-y-3 rounded-lg border border-purple-500/15 bg-purple-500/5 p-3">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-foreground">Prompt da IA</label>
+                  <textarea
+                    value={props.sandboxAiPrompt}
+                    onChange={(e) => props.setSandboxAiPrompt(e.target.value)}
+                    className="w-full bg-white/[0.02] border border-purple-500/20 text-white text-xs p-3 rounded-lg min-h-[100px] focus:outline-none focus:border-purple-500/40"
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-4 rounded-lg border border-white/[0.06] bg-white/[0.02] p-3">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Globe className="w-3.5 h-3.5 text-purple-300 shrink-0" />
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium text-foreground">Usar Web Search</p>
+                      <p className="text-[11px] text-muted-foreground leading-relaxed">
+                        Permite à IA pesquisar na web informações da empresa do lead.
+                      </p>
+                    </div>
+                  </div>
+                  <Toggle
+                    checked={props.sandboxUseWebSearch}
+                    onCheckedChange={props.setSandboxUseWebSearch}
+                    color="purple"
+                    size="sm"
+                    aria-label="Usar Web Search"
+                  />
+                </div>
+              </div>
+            )}
 
-          {props.previewLeads.length === 0 ? (
-            <div className="text-center">
-              <Button onClick={props.loadPreviewLeads} className="bg-cyan-500 hover:bg-cyan-600 text-white font-bold text-[10px] h-7 px-4 rounded-full">
-                Carregar Leads
+            <div className="flex justify-end pt-1">
+              <Button
+                onClick={props.simulateInitialMessage}
+                disabled={props.sandboxSimulating || !props.previewSample.telefone || !props.sandboxSimulationEnabled}
+                className="h-10 px-5 font-medium text-sm rounded-lg gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {props.sandboxSimulating ? (
+                  <span className="flex items-center"><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Gerando mensagem...</span>
+                ) : !props.sandboxSimulationEnabled ? (
+                  <span className="flex items-center"><FlaskConical className="w-4 h-4 mr-2" /> Simulação pausada</span>
+                ) : (
+                  <span className="flex items-center"><Send className="w-4 h-4 mr-2" /> Disparar primeira mensagem</span>
+                )}
               </Button>
             </div>
-          ) : (
-            <div className="bg-black/30 p-4 rounded-xl border border-white/5 space-y-4 mt-4">
-              {/* Template */}
-              <div>
-                <label className="text-[10px] font-bold uppercase text-cyan-400 tracking-widest block mb-2">
-                  Template da Mensagem Inicial
-                </label>
-
-                <div className="flex flex-wrap gap-1.5 mb-2">
-                  {TEMPLATE_VARIABLES.map((v) => (
-                    <button
-                      key={v.key}
-                      type="button"
-                      onClick={() => props.setSandboxTemplate(props.sandboxTemplate + `{{${v.key}}}`)}
-                      draggable
-                      onDragStart={(e) => e.dataTransfer.setData("text/plain", `{{${v.key}}}`)}
-                      className="text-[10px] font-mono px-2 py-1 rounded-md bg-purple-500/10 border border-purple-500/30 text-purple-200 hover:bg-purple-500/20 transition-colors"
-                      title={v.hint}
-                    >
-                      {`{{${v.key}}}`}
-                    </button>
-                  ))}
-                </div>
-
-                <textarea
-                  value={props.sandboxTemplate}
-                  onChange={(e) => props.setSandboxTemplate(e.target.value)}
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    const v = e.dataTransfer.getData("text/plain");
-                    if (!v) return;
-                    const ta = e.currentTarget;
-                    const start = ta.selectionStart ?? props.sandboxTemplate.length;
-                    const end = ta.selectionEnd ?? props.sandboxTemplate.length;
-                    props.setSandboxTemplate(props.sandboxTemplate.slice(0, start) + v + props.sandboxTemplate.slice(end));
-                  }}
-                  className="w-full bg-[#202c33] border border-white/10 text-white font-mono text-xs p-3 rounded-xl min-h-[60px] focus:outline-none focus:border-cyan-500/50"
-                />
-
-                <div className="mt-2 p-3 rounded-lg bg-emerald-500/5 border border-emerald-500/15">
-                  <p className="text-[9px] uppercase font-black tracking-widest text-emerald-400 mb-1">
-                    Pré-visualização do Template Base
-                  </p>
-                  <p className="text-[11px] text-emerald-100/90 whitespace-pre-wrap font-mono">{previewSandboxMessage}</p>
-                  <p className="text-[9px] text-emerald-100/50 mt-2 italic">
-                    Saudação atual: <strong>{greetingFor()}</strong>
-                  </p>
-                </div>
-              </div>
-
-              {/* Toggle: Personalizar com IA */}
-              <div className="flex items-center justify-between bg-[#202c33] p-3 rounded-xl border border-white/5">
-                <div>
-                  <div className="text-xs font-bold text-white flex items-center gap-2">
-                    <Sparkles className="w-4 h-4 text-purple-400" /> Personalizar com IA
-                  </div>
-                  <div className="text-[10px] text-muted-foreground mt-1">
-                    Reescreve a mensagem usando o modelo definido (<span className="text-purple-300 font-mono">{props.targetModel}</span>)
-                  </div>
-                </div>
-                <Toggle
-                  checked={props.sandboxPersonalizeAI}
-                  onCheckedChange={props.setSandboxPersonalizeAI}
-                  color="purple"
-                  size="md"
-                  aria-label="Personalizar com IA"
-                />
-              </div>
-
-              {/* Configurações da personalização IA (collapsible) */}
-              {props.sandboxPersonalizeAI && (
-                <div className="space-y-4 animate-in fade-in slide-in-from-top-2 p-3 bg-purple-500/5 rounded-xl border border-purple-500/20">
-                  <div>
-                    <label className="text-[10px] font-bold uppercase text-purple-400 tracking-widest block mb-2">
-                      Prompt da IA
-                    </label>
-                    <textarea
-                      value={props.sandboxAiPrompt}
-                      onChange={(e) => props.setSandboxAiPrompt(e.target.value)}
-                      className="w-full bg-[#202c33] border border-purple-500/20 text-white text-xs p-3 rounded-xl min-h-[100px] focus:outline-none focus:border-purple-500/50"
-                    />
-                  </div>
-                  <div className="flex items-center justify-between bg-[#202c33] p-3 rounded-xl border border-purple-500/20">
-                    <div>
-                      <div className="text-[10px] font-bold text-white flex items-center gap-1">
-                        <Globe className="w-3 h-3 text-purple-400" /> Usar Web Search
-                      </div>
-                      <div className="text-[9px] text-muted-foreground mt-0.5">
-                        Permite à IA pesquisar na web informações da empresa do lead.
-                      </div>
-                    </div>
-                    <Toggle
-                      checked={props.sandboxUseWebSearch}
-                      onCheckedChange={props.setSandboxUseWebSearch}
-                      color="purple"
-                      size="sm"
-                      aria-label="Usar Web Search"
-                    />
-                  </div>
-                </div>
-              )}
-
-              <div className="flex justify-end pt-2">
-                <Button
-                  onClick={props.simulateInitialMessage}
-                  disabled={props.sandboxSimulating || !props.previewSample.telefone || !props.sandboxSimulationEnabled}
-                  className="bg-cyan-500 hover:bg-cyan-600 text-white font-bold h-10 px-6 rounded-xl shadow-lg shadow-cyan-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  {props.sandboxSimulating ? (
-                    <span className="flex items-center"><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Gerando Mensagem...</span>
-                  ) : !props.sandboxSimulationEnabled ? (
-                    <span className="flex items-center"><FlaskConical className="w-4 h-4 mr-2" /> Simulação Pausada</span>
-                  ) : (
-                    <span className="flex items-center"><Send className="w-4 h-4 mr-2" /> Disparar Primeira Mensagem</span>
-                  )}
-                </Button>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
+          </div>
+        )}
+      </section>
 
       {/* ============= CHAT + TIMELINE ============= */}
-      <div className="flex flex-col md:flex-row gap-6 h-[550px]">
+      <div className="flex flex-col md:flex-row gap-4 h-[560px]">
         {/* Chat */}
-        <div className="flex-1 bg-[#0b141a] border border-white/10 rounded-[2.5rem] overflow-hidden flex flex-col relative shadow-2xl">
-          <div className="bg-[#202c33] p-4 flex items-center justify-between border-b border-white/5">
-            <div className="flex items-center gap-3">
-              <Bot className="w-5 h-5 text-primary" />
+        <div className="flex-1 border border-white/[0.08] bg-card/80 rounded-xl shadow-none overflow-hidden flex flex-col">
+          <div className="px-4 py-3 flex items-center justify-between border-b border-white/[0.06] bg-white/[0.02]">
+            <div className="flex items-center gap-2.5">
+              <div className="p-1.5 rounded-lg bg-primary/15 text-primary">
+                <Bot className="w-4 h-4" />
+              </div>
               <div>
-                <h4 className="text-white font-medium text-sm">{props.nomeAgente} (Sandbox)</h4>
-                <p className="text-[9px] text-white/40">
-                  Modelo: <span className="text-white/70 font-mono">{props.targetModel || "—"}</span>
+                <h4 className="text-sm font-medium text-foreground">{props.nomeAgente || "Agente"} (Sandbox)</h4>
+                <p className="text-[11px] text-muted-foreground">
+                  Modelo: <span className="text-foreground/70 font-mono">{props.targetModel || "—"}</span>
                   {" · "}
-                  {props.humanizeMessages
-                    ? <span className="text-[#00ffcc]">Picote ON (msgs quebradas)</span>
-                    : <span className="text-white/40">Picote OFF</span>}
+                  {props.humanizeMessages ? "Mensagens quebradas: ON" : "Mensagens quebradas: OFF"}
                   {props.messageBufferSeconds > 0 && (
-                    <span className="text-white/40"> · Buffer {props.messageBufferSeconds}s</span>
+                    <span> · Buffer {props.messageBufferSeconds}s</span>
                   )}
                 </p>
               </div>
@@ -325,23 +330,31 @@ export function TestesTab(props: {
               onClick={props.clearTestSession}
               variant="ghost"
               size="icon"
-              className="text-white/40"
+              className="text-muted-foreground hover:text-foreground"
               title="Limpar conversa de teste"
             >
               <Trash2 className="w-4 h-4" />
             </Button>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar">
+          <div className="flex-1 overflow-y-auto p-4 space-y-3">
+            {props.testMessages.length === 0 && (
+              <div className="h-full flex items-center justify-center">
+                <p className="text-xs text-muted-foreground text-center">
+                  Dispare a primeira mensagem ou envie uma resposta abaixo para testar o agente.
+                </p>
+              </div>
+            )}
             {props.testMessages.map((msg, i) => {
               if (msg.role === "tool") {
                 const meta = toolMeta(msg.content);
+                const { Icon } = meta;
                 return (
                   <div key={i} className="flex justify-center">
-                    <div className={cn("max-w-[90%] rounded-xl p-2.5 border text-[11px] font-mono leading-relaxed", TOOL_COLOR[meta.color])}>
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="text-base">{meta.icon}</span>
-                        <span className="text-[9px] font-black uppercase tracking-widest opacity-80">Tool · {meta.label}</span>
+                    <div className={cn("max-w-[90%] rounded-lg p-2.5 border text-[11px] font-mono leading-relaxed", TOOL_COLOR[meta.color])}>
+                      <div className="flex items-center gap-1.5 mb-1">
+                        <Icon className="w-3.5 h-3.5" />
+                        <span className="text-[10px] font-medium uppercase tracking-wide opacity-80">{meta.label}</span>
                       </div>
                       <div className="opacity-90">{msg.content}</div>
                     </div>
@@ -353,9 +366,11 @@ export function TestesTab(props: {
                   <div
                     className={cn(
                       "max-w-[85%] text-sm p-3 rounded-2xl whitespace-pre-wrap",
-                      msg.role === "user" ? "bg-[#005c4b] text-white"
-                        : msg.isError ? "bg-red-500/15 border border-red-500/40 text-red-200"
-                        : "bg-[#202c33] text-[#e9edef]"
+                      msg.role === "user"
+                        ? "bg-[#005c4b] text-white rounded-br-md"
+                        : msg.isError
+                          ? "bg-red-500/15 border border-red-500/30 text-red-200 rounded-bl-md"
+                          : "bg-white/[0.06] text-foreground rounded-bl-md"
                     )}
                   >
                     {renderSandboxMessageContent(msg.content)}
@@ -363,39 +378,43 @@ export function TestesTab(props: {
                 </div>
               );
             })}
-            {props.testLoading && <div className="text-[10px] text-muted-foreground animate-pulse pl-4">Digitando...</div>}
+            {props.testLoading && (
+              <div className="flex items-center gap-2 pl-2 text-xs text-muted-foreground">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Digitando...
+              </div>
+            )}
           </div>
 
-          <form onSubmit={props.handleTestSubmit} className="bg-[#2a3942] p-3 flex gap-2">
+          <form onSubmit={props.handleTestSubmit} className="flex gap-2 p-3 border-t border-white/[0.06] bg-white/[0.02]">
             <Input
               value={props.testInput}
               onChange={(e) => props.setTestInput(e.target.value)}
-              placeholder="Envie uma mensagem..."
-              className="bg-transparent border-none text-white h-10 flex-1 px-4"
+              placeholder="Digite uma mensagem..."
+              className="bg-white/[0.02] border-white/[0.08] text-foreground h-10 flex-1 rounded-lg"
             />
-            <Button type="submit" disabled={props.testLoading} className="bg-[#00a884] h-10 w-10 p-0 rounded-full shrink-0">
+            <Button type="submit" disabled={props.testLoading} className="h-10 w-10 p-0 rounded-lg shrink-0">
               <Send className="w-4 h-4" />
             </Button>
           </form>
         </div>
 
         {/* Timeline sidebar */}
-        <div className="w-full md:w-80 bg-white/5 border border-white/10 rounded-[2.5rem] overflow-hidden flex flex-col p-6 shadow-xl">
-          <div className="flex items-center justify-between pb-2">
-            <h4 className="font-bold text-sm text-white">Progresso</h4>
-            <span className="text-[10px] font-bold text-blue-400 bg-blue-500/20 px-2 py-0.5 rounded-full font-mono">
+        <div className="w-full md:w-72 border border-white/[0.08] bg-card/80 rounded-xl shadow-none flex flex-col p-5 overflow-hidden">
+          <div className="flex items-center justify-between pb-3">
+            <h4 className="text-sm font-medium text-foreground">Progresso</h4>
+            <span className="text-xs font-mono text-blue-300 bg-blue-500/15 px-2 py-0.5 rounded-md">
               {Math.min(props.testStageIndex, props.stages.length || 0)}/{props.stages.length || 0}
             </span>
           </div>
 
-          <div className="w-full bg-white/10 h-1 rounded-full mb-6 overflow-hidden">
+          <div className="w-full bg-white/[0.06] h-1 rounded-full mb-5 overflow-hidden">
             <div
               className="bg-blue-500 h-full rounded-full transition-all duration-500"
               style={{ width: `${props.stages.length > 0 ? (Math.min(props.testStageIndex, props.stages.length) / props.stages.length) * 100 : 0}%` }}
             />
           </div>
 
-          <div className="flex-1 overflow-y-auto space-y-6 custom-scrollbar pr-2">
+          <div className="flex-1 overflow-y-auto space-y-3">
             {props.stages.length === 0 && (
               <p className="text-xs text-muted-foreground italic text-center mt-4">Nenhuma etapa cadastrada.</p>
             )}
@@ -405,63 +424,62 @@ export function TestesTab(props: {
               const isSkipped = props.testSkippedStages.includes(idx);
 
               return (
-                <div key={stage.id} className="relative flex gap-4">
+                <div key={stage.id} className="relative flex gap-3">
                   {idx !== props.stages.length - 1 && (
-                    <div className={cn("absolute left-3.5 top-8 bottom-[-24px] w-0.5", isCompleted ? "bg-green-500" : "bg-white/10")} />
+                    <div className={cn("absolute left-3 top-8 bottom-[-12px] w-0.5", isCompleted ? "bg-emerald-500" : "bg-white/[0.08]")} />
                   )}
 
                   <div className={cn(
-                    "w-7 h-7 rounded-full flex items-center justify-center shrink-0 z-10 border-2 transition-all duration-300",
+                    "w-7 h-7 rounded-full flex items-center justify-center shrink-0 z-10 border-2 transition-colors",
                     isCompleted
-                      ? "bg-green-500 border-green-500 text-white shadow-[0_0_10px_rgba(34,197,94,0.3)]"
+                      ? "bg-emerald-500 border-emerald-500 text-white"
                       : isActive
-                        ? "bg-blue-500 border-blue-500 text-white shadow-[0_0_10px_rgba(59,130,246,0.3)]"
-                        : "bg-black border-white/20 text-muted-foreground"
+                        ? "bg-blue-500 border-blue-500 text-white"
+                        : "bg-card border-white/[0.12] text-muted-foreground"
                   )}>
                     {isCompleted ? (
                       <Check className="w-3.5 h-3.5" />
                     ) : isActive ? (
                       <div className="w-1.5 h-1.5 bg-white rounded-full" />
                     ) : (
-                      <span className="text-[10px] font-bold">{idx + 1}</span>
+                      <span className="text-[10px] font-medium">{idx + 1}</span>
                     )}
                   </div>
 
                   <div className={cn(
-                    "min-w-0 pb-2 flex-1 rounded-2xl p-3.5 transition-all duration-300",
-                    isActive ? "bg-blue-500/10 border border-blue-500/30" : "bg-transparent"
+                    "min-w-0 pb-2 flex-1 rounded-lg p-3 transition-colors",
+                    isActive ? "bg-blue-500/10 border border-blue-500/20" : "bg-transparent"
                   )}>
                     <h5 className={cn(
-                      "text-xs font-bold",
-                      isCompleted ? "text-green-500" : isActive ? "text-blue-400" : "text-white/40"
+                      "text-xs font-medium",
+                      isCompleted ? "text-emerald-300" : isActive ? "text-blue-300" : "text-muted-foreground"
                     )}>
                       {stage.title}
                     </h5>
 
-                    {isCompleted && <p className="text-[10px] text-green-500/70 mt-0.5">Concluída</p>}
+                    {isCompleted && <p className="text-[10px] text-emerald-400/70 mt-0.5">Concluída</p>}
 
                     {isActive && (
                       <>
                         <p className="text-[10px] text-muted-foreground mt-1 line-clamp-2 italic">{stage.goal_prompt}</p>
-                        <p className="text-[10px] text-blue-400 font-bold mt-2 flex items-center gap-1 animate-pulse">
-                          <span className="w-1 h-1 bg-blue-400 rounded-full inline-block" /> Em andamento...
+                        <p className="text-[10px] text-blue-300 font-medium mt-2 flex items-center gap-1.5">
+                          <span className="w-1 h-1 bg-blue-400 rounded-full inline-block" /> Em andamento
                         </p>
                       </>
                     )}
 
-                    {isSkipped && <p className="text-[9px] text-muted-foreground mt-0.5">Pulada (condição não atendida)</p>}
+                    {isSkipped && <p className="text-[10px] text-muted-foreground mt-0.5">Pulada (condição não atendida)</p>}
 
-                    {/* Variáveis coletadas */}
                     {(isCompleted || isActive) && !isSkipped && (
                       <div className="mt-2 flex flex-wrap gap-1">
                         {(Array.isArray(stage.captured_variables) ? stage.captured_variables : []).map((v: any, vi: number) => {
                           const val = props.testVariables[v.name];
                           if (!val) return null;
                           return (
-                            <div key={vi} className="text-[9px] bg-blue-500/20 text-blue-300 px-2 py-0.5 rounded-full border border-blue-500/30 flex items-center gap-1">
+                            <span key={vi} className="text-[10px] bg-blue-500/15 text-blue-200 px-2 py-0.5 rounded-md border border-blue-500/20 inline-flex items-center gap-1">
                               <span className="opacity-70">{v.name}:</span>
-                              <span className="font-bold truncate">{val}</span>
-                            </div>
+                              <span className="font-medium truncate">{val}</span>
+                            </span>
                           );
                         })}
                       </div>
