@@ -1,5 +1,51 @@
 # Log de Sessões
 
+## [2026-07-31 18:00] Claude Code (combo-principal) — Channel routing fallback + agent test fix
+- **O que foi feito**:
+  - Criado `src/lib/__tests__/channel-routing-fallback.test.ts` (13 testes): resolveChannel (cache + fresh), sendMessage (V2↔GO primário/fallback), sendMedia (conversão base64 + fallback), getStatus, fetchProfilePicture, checkNumbersDetailed — tudo mockado via `vi.hoisted` (supabase_admin, evolution-go, evolution-v2, whatsapp-cloud).
+  - Corrigido `src/lib/__tests__/test_agent_process.test.ts`: mock de `@/lib/channel` com `sendMessage`/`sendMedia` retornando `{ ok: true, messageId: 'msg_mock_id' }` — impede envio WhatsApp real durante teste. Assertadas `sendResult.ok === true` + `sendError === null`.
+  - Corrigido `src/lib/__tests__/test_webhook_process.test.ts`: timeout 60s (default 5s estourava) + `finalId` com sufixo `Date.now()` (duplicate key em `chats_dashboard_message_id_key` quando rodava 2x).
+  - Adicionado teste `is_terminal` flag explícita em `organizer-prompt.test.ts` (15 tests, +1).
+- **Arquivos alterados**:
+  - `src/lib/__tests__/channel-routing-fallback.test.ts` (novo)
+  - `src/lib/__tests__/test_agent_process.test.ts`
+  - `src/lib/__tests__/test_webhook_process.test.ts`
+  - `src/lib/__tests__/organizer-prompt.test.ts`
+  - `.shared-memory/TASKS.md`, `.shared-memory/SESSION_LOG.md`
+- **Decisões**:
+  - `vi.hoisted` necessário: mocks referenciados dentro de `vi.mock` factory (hoisting restrito do Vitest).
+  - Agent test usa `sessionId` real (583ce268...) — mock de channel impede qualquer chamada externa, IA roda normal mas envio é falso.
+  - Webhook test: `finalId = data.key.id + "-" + Date.now()` porque unique constraint `chats_dashboard_message_id_key` impedia re-rodar teste.
+- **Problemas**:
+  - Heap OOM no `npm test` completo (suite inteira + live integration test_agent) — rodando arquivos isolados passa. Recomendado `NODE_OPTIONS=--max-old-space-size=4096` ou excluir live tests do batch comum.
+  - Task #302 (validar instância Evolution runtime) requer UI/DB live — usuário precisa testar manual.
+  - Task #303 `ai-provider.test.ts` — não identifiquei asserções falhando; se há, são doc/TODO já comentadas.
+  - Task #304 ESLint 1.223 erros `no-explicit-any` — débito técnico real, não de teste.
+  - Task #305 Turbopack acoplamento next.config.ts↔scraper-engine.ts: não reproduzi em `npm run build`.
+- **Estado ao sair**: 4 tarefas auditoria concluídas (#300, #301, #357, #358). Restam #302-305 em aberto (sempre foram pendentes usuário-testar). Próximo: commit + push.
+
+## [2026-07-31] Claude Code — Testes exaustivos IA (envio/recepção/troca de modelo)
+- **O que foi feito**:
+  - Mapeado fluxo IA: webhook route (extractors puros), ai-models/route (3-layer config), agent/process/route (dispatch), send-message/route, bot-status, manual-send-registry.
+  - Identificados 3 gaps de cobertura: pure extractors só tinham test integration live-DB; registry sem unit tests; modelo-change sem roundtrip test.
+  - Criado `src/lib/__tests__/whatsapp-extractors.test.ts` (45 casos) — extractText/extractMessageType/extractMimetype/extractFileName/extractFileSize/extractQuoted em todos os formatos (conversation, extendedText, image/video/audio/document/sticker, location, contact, poll, reaction, emoji, ephemeral/viewOnce wrappers, templateMessage, interactiveMessage com URL).
+  - Criado `src/lib/__tests__/manual-send-registry.test.ts` (14 casos) — manual send disambiguation, IA send disambiguation, pending automated send com normalização de texto e cleanJid (race-condition echo).
+  - Criado `src/lib/__tests__/model-change-roundtrip.test.ts` (21 casos) — roundtrip parseModelRef ⇄ formatModelRef, retrocompat Gemini bare/models:/gemini:, bordas (null/undefined/empty/trim), providerDisplayName.
+  - Configurado `setupFiles` no `vitest.config.ts` carregando `.env.local` via `src/lib/__tests__/setup.ts` — necessário porque webhook route.ts importa `supabase_admin` no top-level, que valida `supabaseUrl` no construtor.
+- **Arquivos alterados**:
+  - `src/lib/__tests__/whatsapp-extractors.test.ts` (novo)
+  - `src/lib/__tests__/manual-send-registry.test.ts` (novo)
+  - `src/lib/__tests__/model-change-roundtrip.test.ts` (novo)
+  - `src/lib/__tests__/setup.ts` (novo)
+  - `vitest.config.ts` (setupFiles)
+  - `.shared-memory/TASKS.md`
+- **Decisões**:
+  - Extratores testam o nó interno `message` (igual caller real), não o envelope externo — pegar errado = todos falham com `''`.
+  - Snapshot `stored` no roundtrip só testa o caminho que `formatModelRef` realmente produz (Gemini fica bare); parse converte variações (`gemini:`, `models/`) pelo caminho inverso testado em `parseModelRef — bordas`.
+  - Não mochar supabase admin — carregar env é mais barato e dá paridade ambiente dev.
+- **Problemas**: nenhum — `tsc --noEmit` 0 erros, 349/349 testes passando (antes 269).
+- **Estado ao sair**: tarefa #11 concluída. Próximo: commit + push GitHub para deploy Easy Panel.
+
 ## [2026-07-31] Claude Code — Fix 3 bugs /chat (última msg + realtime + IA)
 - **O que foi feito**:
   - Webhook 23505 duplicata path agora bumpa `sessions.last_message_at` (+unread_count se customer) antes return early.

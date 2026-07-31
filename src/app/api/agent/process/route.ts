@@ -30,7 +30,8 @@ export async function POST(req: NextRequest) {
   try {
     const payloadBody = await req.json();
     const defaultInstance = (await getEvolutionConfig()).instance;
-    const { remoteJid, isStatusUpdate, instanceName = defaultInstance, text, isTestMode = false, testHistory = [], sessionId, testState, testLeadData, forceActive = false } = payloadBody;
+    const { remoteJid, isStatusUpdate, instanceName: reqInstanceName, text, isTestMode = false, testHistory = [], sessionId, testState, testLeadData, forceActive = false } = payloadBody;
+    let instanceName = reqInstanceName || defaultInstance;
 
     if (!remoteJid || !text) {
        return NextResponse.json({ success: false, error: "Missing remoteJid or text" });
@@ -1982,7 +1983,41 @@ ${capturedVariablesPrompt}
           const { registerPendingAutomatedSend } = await import("@/lib/manual-send-registry");
           registerPendingAutomatedSend(instanceName, remoteJid, text);
         } catch { /* ignore */ }
-        const sendResult: any = await channelMod.sendMessage(remoteJid, text, instanceName);
+
+        let sendResult: any = await channelMod.sendMessage(remoteJid, text, instanceName);
+
+        const checkInstanceError = (res: any) => {
+          if (!res || res.ok === false) {
+            const errStr = String(res?.error || "").toLowerCase();
+            return errStr.includes("does not exist") || errStr.includes("not found") || errStr.includes("404");
+          }
+          return false;
+        };
+
+        if (checkInstanceError(sendResult) && !isTestMode) {
+          console.warn(`[AGENT] Instância "${instanceName}" falhou (não existe/404). Tentando auto-migrar conexão...`);
+          const { data: activeConns } = await supabase
+            .from("channel_connections")
+            .select("instance_name")
+            .eq("client_id", clientId)
+            .in("status", ["open", "CONNECTED", "connected"])
+            .limit(1);
+
+          const altInstance = activeConns?.[0]?.instance_name;
+          if (altInstance && altInstance !== instanceName) {
+            console.log(`[AGENT] Auto-migrando sessão ${sessionId} de "${instanceName}" para "${altInstance}" ativo.`);
+            await supabase.from("sessions").update({ instance_name: altInstance }).eq("id", sessionId);
+            instanceName = altInstance;
+
+            try {
+              const { registerPendingAutomatedSend } = await import("@/lib/manual-send-registry");
+              registerPendingAutomatedSend(instanceName, remoteJid, text);
+            } catch {}
+
+            sendResult = await channelMod.sendMessage(remoteJid, text, instanceName);
+          }
+        }
+
         const msgId = sendResult?.key?.id
           || sendResult?.data?.key?.id
           || sendResult?.messageId
@@ -2019,6 +2054,52 @@ ${capturedVariablesPrompt}
         }
         return msgId;
       } catch (err: any) {
+        const msg = String(err?.message || err || "").toLowerCase();
+        const is404 = msg.includes("does not exist") || msg.includes("not found") || msg.includes("404");
+        if (is404 && !isTestMode) {
+          try {
+            console.warn(`[AGENT] Instância "${instanceName}" falhou (catch não existe/404). Tentando auto-migrar conexão...`);
+            const { data: activeConns } = await supabase
+              .from("channel_connections")
+              .select("instance_name")
+              .eq("client_id", clientId)
+              .in("status", ["open", "CONNECTED", "connected"])
+              .limit(1);
+
+            const altInstance = activeConns?.[0]?.instance_name;
+            if (altInstance && altInstance !== instanceName) {
+              console.log(`[AGENT] Auto-migrando sessão ${sessionId} de "${instanceName}" para "${altInstance}" ativo.`);
+              await supabase.from("sessions").update({ instance_name: altInstance }).eq("id", sessionId);
+              instanceName = altInstance;
+
+              const sendResult: any = await channelMod.sendMessage(remoteJid, text, instanceName);
+              const msgId = sendResult?.key?.id || sendResult?.messageId || `agent-${Date.now()}`;
+              const nowIso = new Date().toISOString();
+              if (sessionId) {
+                await supabase.from("messages").insert({
+                  session_id: sessionId,
+                  message_id: msgId,
+                  sender: "ai",
+                  content: text,
+                  delivery_status: "sent",
+                  created_at: nowIso,
+                }).then(() => {}, () => {});
+              }
+              await supabase.from("chats_dashboard").insert({
+                message_id: msgId,
+                remote_jid: remoteJid,
+                sender_type: "ai",
+                content: text,
+                status_envio: "sent",
+                instance_name: instanceName,
+                created_at: nowIso,
+              }).then(() => {}, () => {});
+              return msgId;
+            }
+          } catch (migErr: any) {
+            console.error("[AGENT] Falha na auto-migração de instância:", migErr.message);
+          }
+        }
         console.error(`[AGENT] Falha ao enviar texto:`, err.message);
         anySendError = err.message;
         return null;
