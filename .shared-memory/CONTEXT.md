@@ -2,6 +2,10 @@
 
 Este projeto (`painel-sdr`) é um Painel de SDR construído com Next.js (versão 16.2.3), conectado ao Supabase e Evolution API (WhatsApp), com uso de Redis para filas e inteligência artificial (Google Gemini).
 
+## [2026-07-31 18:00] Auditoria channel-routing + agent test fix
+- **Status**: 4 tarefas concluídas (#300, #301, #357, #358). Testes `channel-routing-fallback.test.ts` (13), `test_agent_process.test.ts` (1), `test_webhook_process.test.ts` (1), `organizer-prompt.test.ts` (15) — todos verdes.
+- **Próximo passo**: commit + push. Restam #302-305 (validação runtime live pelo usuário + débito técnico ESLint/Turbopack).
+
 ## [2026-07-31] Fix 3 bugs /chat — última mensagem não salva + realtime + IA não responde
 - **Solicitação**: última mensagem não aparece no card "Salomao"; mensagens não caem em tempo real (só após sair/entrar conversa); IA ativa mas não responde.
 - **Diagnóstico**:

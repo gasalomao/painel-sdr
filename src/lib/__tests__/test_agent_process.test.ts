@@ -1,6 +1,11 @@
 import './setupEnv';
-import { test, expect } from 'vitest';
+import { test, expect, vi } from 'vitest';
 import { createClient } from '@supabase/supabase-js';
+
+vi.mock("@/lib/channel", () => ({
+  sendMessage: vi.fn().mockResolvedValue({ ok: true, messageId: 'msg_mock_id', status: 'sent' }),
+  sendMedia: vi.fn().mockResolvedValue({ ok: true, messageId: 'media_mock_id', status: 'sent' }),
+}));
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://sistema-supabase.ridnii.easypanel.host';
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -16,7 +21,7 @@ test("simulate agent processing", async () => {
   const sessionId = '583ce268-704e-4dbb-bd87-d45cf2bc83ee';
 
   console.log("Starting agent process simulation...");
-  
+
   const payload = {
     instanceName,
     remoteJid,
@@ -37,12 +42,15 @@ test("simulate agent processing", async () => {
     console.log("Calling agent route POST handler...");
     const res = await POST(fakeReq as any);
     console.log("Agent response status:", res.status);
-    
+
     const body = await res.json();
     console.log("Agent response body:", JSON.stringify(body, null, 2));
-    
+
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
+    expect(body.sendResult).toBeDefined();
+    expect(body.sendResult.ok).toBe(true);
+    expect(body.sendError).toBeNull();
   } catch (err: any) {
     console.error("Agent simulation failed with error:", err);
     throw err;

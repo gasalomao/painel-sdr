@@ -732,6 +732,11 @@ export async function startAiChat(opts: StartAiChatOpts): Promise<AiChatSession>
     return startOpenAICompatibleChat(opts, model, {
       provider: "openrouter",
       post: (body) => openRouterChat(apiKey, body),
+      makeFallback: opts.geminiApiKey ? async () => {
+        const gemModel = "gemini-2.5-flash"; // Modelo padrão resiliente e barato
+        console.warn(`[ai-provider] OpenRouter falhou. Fazendo fallback de último caso para Gemini (${gemModel}).`);
+        return startAiChat({ ...opts, modelRef: gemModel });
+      } : undefined
     });
   }
 

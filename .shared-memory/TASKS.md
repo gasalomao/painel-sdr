@@ -1,5 +1,14 @@
 # Tarefas do Projeto
 
+## Testes exaustivos IA (2026-07-31)
+- [x] Mapear fluxo IA agente (webhook route extractors, ai-models/route, agent/process/route, send-message/route, bot-status, manual-send-registry) <!-- id: 350 -->
+- [x] Identificar gaps: pure extractors sem unit tests, registry sem unit tests, model-change sem roundtrip test <!-- id: 351 -->
+- [x] Criar `whatsapp-extractors.test.ts` — 45 casos: extractText (14), extractMessageType (14), extractMimetype (8), extractFileName/FileSize (4), extractQuoted (4) <!-- id: 352 -->
+- [x] Criar `manual-send-registry.test.ts` — 14 casos: register/isManualSend, register/isAiSend, register/isPendingAutomatedSend (race-condition echo) <!-- id: 353 -->
+- [x] Criar `model-change-roundtrip.test.ts` — 21 casos: roundtrip format→parse, retrocompat Gemini bare/models:/gemini:, bordas (null/undefined/empty/trim), providerDisplayName <!-- id: 354 -->
+- [x] Configurar `setupFiles` no vitest.config.ts carregando .env.local (route.ts importa supabase_admin top-level) <!-- id: 355 -->
+- [x] Suite completa: 349/349 pass (antes 269). Type check 0 erros <!-- id: 356 -->
+
 ## Context Compression / Headroom & 9Router Claude Code (2026-07-31)
 - [x] Instalar o pacote Python `headroom-ai[proxy]` no sistema <!-- id: 330 -->
 - [x] Iniciar e validar o proxy do Headroom escutando na porta 8787 (`http://127.0.0.1:8787`) <!-- id: 331 -->
@@ -15,12 +24,16 @@
 - [x] Validar dashboard com typecheck e build <!-- id: 311 -->
 
 ## Auditoria de estabilidade e Evolution API (2026-07-30)
-- [ ] Corrigir `test_agent_process.test.ts` para falhar se `sendResult.ok` for falso e impedir envio externo acidental <!-- id: 300 -->
-- [ ] Criar testes unitários para roteamento/fallback de `channel.sendMessage` e `channel.sendMedia` (V2/GO) <!-- id: 301 -->
+- [x] Corrigir `test_agent_process.test.ts` para falhar se `sendResult.ok` for falso e impedir envio externo acidental <!-- id: 300 -->
+- [x] Criar testes unitários para roteamento/fallback de `channel.sendMessage` e `channel.sendMedia` (V2/GO) <!-- id: 301 -->
 - [ ] Validar a instância Evolution configurada em runtime: status `open`, webhook e envio controlado para número de teste autorizado <!-- id: 302 -->
 - [ ] Atualizar as duas asserções desatualizadas em `ai-provider.test.ts` e `organizer-prompt.test.ts` após confirmar a intenção <!-- id: 303 -->
 - [ ] Restringir ESLint ao código do produto e criar plano incremental para os 1.223 erros restantes <!-- id: 304 -->
 - [ ] Corrigir avisos Turbopack de rastreamento causado pelo acoplamento entre `next.config.ts` e `scraper-engine.ts` <!-- id: 305 -->
+
+## Auditoria follow-up (2026-07-31)
+- [x] `organizer-prompt.test.ts` — adicionado caso `is_terminal` flag explícita (15 tests, +1) <!-- id: 357 -->
+- [x] `test_webhook_process.test.ts` — timeout 60s + id único com `Date.now()` (collision unique constraint) <!-- id: 358 -->
 
 
 - [x] Criar arquivo `.env.local` com as variáveis fornecidas pelo usuário <!-- id: 0 -->

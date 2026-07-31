@@ -31,6 +31,16 @@ describe("buildKanbanAppendix", () => {
     expect(out.terminalKeys).not.toContain("fechado");
   });
 
+  it("detecta terminais por flag is_terminal explicitamente", () => {
+    const customCols = [
+      { status_key: "estagio_custom", label: "Custom", order_index: 0, is_terminal: true },
+      { status_key: "normal", label: "Normal", order_index: 1 }
+    ];
+    const out = buildKanbanAppendix(customCols);
+    expect(out.terminalKeys).toContain("estagio_custom");
+    expect(out.terminalKeys).not.toContain("normal");
+  });
+
   it("inclui todos os status_key no apêndice em ordem", () => {
     const out = buildKanbanAppendix(COLS);
     const idxPrimeiro = out.kanbanAppendix.indexOf("primeiro_contato");

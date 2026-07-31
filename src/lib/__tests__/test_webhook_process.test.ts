@@ -43,7 +43,7 @@ test("simulate webhook for Marcio Medeiros Advocacia", async () => {
 
   const data = body.data;
   const message = data.message || {};
-  const finalId = data.key?.id;
+  const finalId = data.key?.id + "-" + Date.now();
   const remoteJid = data.key?.remoteJid;
   const fromMe = data.key?.fromMe ?? false;
   const pushName = data.pushName;
@@ -125,4 +125,4 @@ test("simulate webhook for Marcio Medeiros Advocacia", async () => {
   await supabase.from("chats_dashboard").delete().eq("message_id", finalId);
   await supabase.from("messages").delete().eq("message_id", finalId);
   console.log("Cleanup complete!");
-});
+}, 60000);
