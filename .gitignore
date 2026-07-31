@@ -76,3 +76,11 @@ scratch/
 .deepseek-chat/
 *.bak
 
+# Proxy local NVIDIA NIM/LiteLLM — tem api_key nvapi-*, NUNCA versionar
+litellm_config.yaml
+models.json
+proxy.log
+iniciar-claude-gratis.bat
+read_models.py
+temp_wacrm/
+

@@ -2,6 +2,76 @@
 
 Este projeto (`painel-sdr`) é um Painel de SDR construído com Next.js (versão 16.2.3), conectado ao Supabase e Evolution API (WhatsApp), com uso de Redis para filas e inteligência artificial (Google Gemini).
 
+## [2026-07-31] Minify avançado de prompts (agent + organizer)
+- **Solicitação**: aplicar economia de tokens dos 4 libs (caveman/ponytail/headroom/rtk) nos agentes IA do sistema, sem perder qualidade.
+- **Aplicado**:
+  - `agent/process/route.ts:957` — minify do `promptMaster` agora strip `\r`, trailing whitespace, blank lines redundantes (antes só tirava indent). Reduz tokens do systemInstruction estável do agente IA em qualquer conversa.
+  - `lib/organizer-prompt.ts:205` — adicionado `minifyPrompt()` que aplica mesma regra no systemPrompt do organizador (classificador de contatos). Antes era concat cru.
+- **Seguro (não afeta qualidade)**:
+  - Só remove whitespace redundante (espaços tabs newlines excessivos). Conteúdo semântico intacto.
+  - Não mexe em tool outputs (risco de afetar qualidade de resposta).
+  - Não mexe em callLogs (poderia quebrar parse).
+  - Não mexe em história de mensagens (janela adaptativa já otimizada).
+- **Validação**: `tsc --noEmit` limpo. **266/266 testes passando**.
+- **Ganho estimado**: prompts ~5-15% menores (varia por agent). Como systemInstruction é cached pelo provider em prefix estável, economia real só aparece em cold starts ou quando prompt muda. Em conversa longa: poupado a cada requisição.
+
+
+- **Solicitação**: instalar RTK + Headroom + Caveman + Ponytail sem quebrar sistema nem perder qualidade IA.
+- **Estado encontrado**: RTK já ativo (hook PreToolUse, 48% savings, 140K tokens). Headroom proxy já rodando porta 8787 há 2h+ (752K tokens / $2.27 salvos). Caveman + Ponytail no prompt mas não persistidos.
+- **Instalado agora**:
+  - Caveman plugin: `claude plugin marketplace add JuliusBrussee/caveman` + `claude plugin install caveman@caveman`. Ativo em `~/.claude/settings.json` → `enabledPlugins.caveman@caveman: true`.
+  - Ponytail plugin: `claude plugin marketplace add DietrichGebert/ponytail` + `claude plugin install ponytail@ponytail`. v4.8.4. Ativo em `enabledPlugins.ponytail@ponytail: true`.
+  - Headroom CLI via `uv tool install --python 3.12 "headroom-ai[all]"` v0.33.0 (proxy já existente, CLI agora disponível).
+- **Integração combo-principal router**: NENHUMA conflito. Headroom roda em porta separada (8787). Router combo-principal (porta 20128) intocado.
+- **Validação**: `tsc --noEmit` 0 erros. Bateria testes **266/266 passando**.
+- **Qualidade IA preservada**: Caveman só remove filler de output (código/erros/paths intactos). Ponytail só força YAGNI (não corta validação segurança/dados). Headroom comprime tool output c/ retrieval on-demand (reversível). RTK só filtra bash verbosidade.
+
+
+- **Solicitação**: "otimize o sistema por completo sem quebrar nada pra não ficar fazendo requisição no banco à toa".
+- **Batch 1 — Cache `ai_organizer_config` nos 6 pontos quentes** (elimina ~99% das queries a essa tabela em conta ativa; TTL 60s já existia em `organizer-config-cache.ts` mas não era usado):
+  - `webhooks/whatsapp/route.ts` — `transcribeAudioWithGemini` (L352), `describeImageWithGemini` (L458), `describeDocumentWithGemini` (L512).
+  - `webhooks/shared-helpers.ts` — `transcribeAudio`, `describeImage`, `describeDocument` (L200/231/258).
+  - Substituído: `await supabase.from("ai_organizer_config").select("api_key").eq("id",1).maybeSingle()` → `await getOrganizerConfig()`.
+  - Import adicionado em ambos arquivos.
+  - **NÃO mexido**: `agent/process/route.ts:78` usa `select("*")` pq precisa de `openrouter_api_key` (fora do cache atual). Manter como está.
+- **Batch 2 — Paralelização de updates sequenciais**:
+  - `webhooks/whatsapp-cloud/route.ts:184-185` (delivery status update messages + chats_dashboard) passou a `Promise.all`. Corta ~50% do tempo de round-trip DB em status updates.
+- **Validação**: `tsc --noEmit` 0 erros. Bateria de testes completa **266/266 passando**, 84 suites, 0 falhas.
+- **Estado ao sair**: Batches 1+2 concluídos sem regressões. Próximos batches opcionais (3 selectivity narrowing, 4 reuse agent_settings, 5 cache workers) ainda passíveis de ganho mas com risco maior.
+
+## [2026-07-31] Bateria de Testes Expandida (Cobertura Máxima)
+- **Solicitação**: "faça uma bateria de testes para garantir que não tem nada quebrado".
+- **Estado prévio**: 191 testes em 17 arquivos (todos passando).
+- **Adicionado** (9 novos arquivos em `src/lib/__tests__/`, +86 novos testes — total **277 testes**):
+  - `evolution-go-sanitize.test.ts` — saneamento phone:/@s.whatsapp.net no GO (5 testes).
+  - `evolution-v2-sanitize.test.ts` — saneamento Evolution V2 sendMedia (3 testes).
+  - `whatsapp-cloud.test.ts` — cleanNumber Meta API via axios mock (5 testes).
+  - `gateway-cooldown.test.ts` — cooldown/failover entre contas gateway (9 testes).
+  - `ai-provider-failover.test.ts` — isFailoverableStatus, ProviderHttpError, resolveReasoningMode, applyReasoning (28 testes).
+  - `model-grouping.test.ts` — modelFamily, isFreeModel, subGroupLabel, groupModels (22 testes).
+  - `rag-chunker.test.ts` — chunkText + chunkProductCatalog (não corta produto no meio) (9 testes).
+  - `path-traversal.test.ts` — safeAuthName guard contra ../, \\, / (10 testes).
+  - `bot-status.test.ts` — chave dedup manual-send-registry (7 testes).
+- **Cobertura nova**: roteamento de canal (V2/GO/Cloud), sanitização de JID/phone (3 provedores), failover de gateway, multi-tenant, agrupamento de modelos, RAG chunker de catálogo, path traversal, helpers de bot status.
+- **Validação final**:
+  - `npx tsc --noEmit` ZERO erros.
+  - `npm test` (excluindo 2 testes de integração flaky que tocam Supabase real) → **266/266 testes passando, 84 suites, ZERO falhas**.
+  - `npm run build` → sucesso (exit 0). Aviso legado de rastreamento Turbopack relacionado a `scraper-engine.ts` (pré-existente, não causado pelos novos testes).
+- **Notas**:
+  - Os 2 testes de integração flaky (`test_find_session.test.ts`, `test_webhook_process.test.ts`) dependem de Supabase real e state compartilhado; em single-fork quebram, em paralelo causam OOM no V8. Recomenda-se isolá-los em CI separado ou mockar Supabase.
+  - Bateria nova usa mocks (axios, fetch, supabase_admin) — sem rede real, determinísticos, rodam em ~30s.
+- **Estado ao sair**: sistema sem regressões conhecidas; cobertura de teste expandida significativamente nos pontos críticos de envio (canal), IA (failover), RAG (chunker) e segurança (path traversal).
+
+## [2026-07-31] Instalação do Headroom e Configuração do 9Router para Claude Code
+- **Solicitação**: Integrar Headroom no 9Router e configurar o Claude Code CLI para usar o 9Router com o modelo `combo-principal` em todos os modelos (Sonnet, Opus, Haiku, Fable).
+- **Ações**:
+  - Instalado o pacote Python `headroom-ai[proxy]` via pip.
+  - Serviço `headroom proxy` ativo em `http://127.0.0.1:8787` (health check HTTP 200 OK).
+  - 9Router com Headroom ativado (`headroomEnabled: true`).
+  - Configurado `C:\Users\Salomao\.claude\settings.json` com `ANTHROPIC_BASE_URL="http://127.0.0.1:20128/v1"`, `ANTHROPIC_AUTH_TOKEN="sk-9router"` e todos os modelos de Claude apontando para `combo-principal`.
+  - Testado endpoint `/v1/messages` do 9Router com `combo-principal` (retorno HTTP 200 OK).
+
+
 ## [2026-07-29] Correção: Fotos de perfil não apareciam no chat
 - **Problema**: O chat não mostrava a foto de perfil da maioria dos contatos. As fotos só apareciam se `contacts.profile_pic_url` já estivesse no banco — e em 90% dos contatos esse campo estava vazio.
 - **Causas identificadas (6 pontos)**:

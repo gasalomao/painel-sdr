@@ -1,5 +1,10 @@
 # Tarefas do Projeto
 
+## Context Compression / Headroom & 9Router Claude Code (2026-07-31)
+- [x] Instalar o pacote Python `headroom-ai[proxy]` no sistema <!-- id: 330 -->
+- [x] Iniciar e validar o proxy do Headroom escutando na porta 8787 (`http://127.0.0.1:8787`) <!-- id: 331 -->
+- [x] Configurar o Claude Code CLI (`.claude/settings.json`) para usar o 9Router (`http://127.0.0.1:20128/v1`) com o modelo `combo-principal` para todos os modelos (Sonnet, Opus, Haiku, Fable) <!-- id: 332 -->
+
 ## Busca Web robusta (2026-07-30)
 - [x] Implementar prefetch de busca web no servidor para qualquer modelo <!-- id: 320 -->
 - [x] Filtrar anúncios e estruturar resposta para IA na busca web <!-- id: 321 -->

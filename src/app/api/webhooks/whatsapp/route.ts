@@ -7,6 +7,7 @@ import { clientIdFromInstance, DEFAULT_CLIENT_ID } from "@/lib/tenant";
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
 import { maskJid, truncForLog } from "@/lib/pii";
 import { refreshProfilePicIfStale } from "../shared-helpers";
+import { getOrganizerConfig } from "@/lib/organizer-config-cache";
 
 export const dynamic = 'force-dynamic';
 
@@ -349,8 +350,8 @@ async function getGeminiModelChain(): Promise<string[]> {
 }
 
 async function transcribeAudioWithGemini(base64: string, mimetype: string, debugMessageId?: string, clientId?: string): Promise<string | null> {
-  const cfgResult = await supabase.from("ai_organizer_config").select("api_key").eq("id", 1).maybeSingle();
-  const apiKey = cfgResult.data?.api_key;
+  const cfg = await getOrganizerConfig();
+  const apiKey = cfg?.api_key;
 
   const logFail = async (reason: string, extra: any = {}) => {
     console.error(`[Transcription] ❌ ${reason}`, extra);
@@ -455,7 +456,7 @@ async function transcribeAudioWithGemini(base64: string, mimetype: string, debug
  *   2) Dar contexto visual pro agente IA no próximo turno
  */
 async function describeImageWithGemini(base64: string, mimetype: string, clientId?: string): Promise<string | null> {
-  const { data: cfg } = await supabase.from("ai_organizer_config").select("api_key").eq("id", 1).maybeSingle();
+  const cfg = await getOrganizerConfig();
   const apiKey = cfg?.api_key;
   if (!apiKey) return null;
 
@@ -509,7 +510,7 @@ async function describeImageWithGemini(base64: string, mimetype: string, clientI
  * Retorna o conteúdo do documento resumido + texto principal extraído.
  */
 async function describeDocumentWithGemini(base64: string, mimetype: string, fileName: string | null, clientId?: string): Promise<string | null> {
-  const { data: cfg } = await supabase.from("ai_organizer_config").select("api_key").eq("id", 1).maybeSingle();
+  const cfg = await getOrganizerConfig();
   const apiKey = cfg?.api_key;
   if (!apiKey) return null;
 

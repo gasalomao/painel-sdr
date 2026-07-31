@@ -13,6 +13,7 @@ import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
 import { createClient } from "@supabase/supabase-js";
 import type { NextRequest } from "next/server";
+import { getOrganizerConfig } from "@/lib/organizer-config-cache";
 
 // ============================================================================
 // EXTRAÇÃO DE MENSAGEM (formato whatsmeow — igual nos dois provedores)
@@ -197,8 +198,8 @@ export async function transcribeAudio(base64: string, mimetype: string, debugMes
     // A função não é exportada — usamos a versão inline do módulo.
     // Pra evitar duplicação, fazemos uma chamada direta ao Gemini aqui.
     const { GoogleGenerativeAI } = await import("@google/generative-ai");
-    const cfgResult = await supabase.from("ai_organizer_config").select("api_key").eq("id", 1).maybeSingle();
-    const apiKey = cfgResult.data?.api_key;
+    const cfg = await getOrganizerConfig();
+    const apiKey = cfg?.api_key;
     if (!apiKey) return null;
     const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");
     const tryMimes = Array.from(new Set([sanitizeMimetype(mimetype, "audio/ogg"), "audio/ogg", "audio/mpeg", "audio/wav"]));
@@ -228,8 +229,8 @@ export async function transcribeAudio(base64: string, mimetype: string, debugMes
 export async function describeImage(base64: string, mimetype: string): Promise<string | null> {
   try {
     const { GoogleGenerativeAI } = await import("@google/generative-ai");
-    const cfgResult = await supabase.from("ai_organizer_config").select("api_key").eq("id", 1).maybeSingle();
-    const apiKey = cfgResult.data?.api_key;
+    const cfg = await getOrganizerConfig();
+    const apiKey = cfg?.api_key;
     if (!apiKey) return null;
     const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");
     const { buildFallbackChain } = await import("@/lib/gemini-model-discovery");
@@ -255,8 +256,8 @@ export async function describeImage(base64: string, mimetype: string): Promise<s
 export async function describeDocument(base64: string, mimetype: string, fileName: string | null): Promise<string | null> {
   try {
     const { GoogleGenerativeAI } = await import("@google/generative-ai");
-    const cfgResult = await supabase.from("ai_organizer_config").select("api_key").eq("id", 1).maybeSingle();
-    const apiKey = cfgResult.data?.api_key;
+    const cfg = await getOrganizerConfig();
+    const apiKey = cfg?.api_key;
     if (!apiKey) return null;
     const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");
     const { buildFallbackChain } = await import("@/lib/gemini-model-discovery");

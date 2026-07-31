@@ -181,8 +181,10 @@ export async function POST(req: NextRequest) {
       sent: "sent", delivered: "delivered", read: "read", failed: "error",
     };
     const norm = map[s.status] || s.status;
-    await supabase.from("messages").update({ delivery_status: norm }).eq("message_id", s.messageId);
-    await supabase.from("chats_dashboard").update({ status_envio: norm }).eq("message_id", s.messageId);
+    await Promise.all([
+      supabase.from("messages").update({ delivery_status: norm }).eq("message_id", s.messageId),
+      supabase.from("chats_dashboard").update({ status_envio: norm }).eq("message_id", s.messageId),
+    ]);
   }
 
   // ====== INCOMING MESSAGES ======

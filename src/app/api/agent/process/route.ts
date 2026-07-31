@@ -954,7 +954,12 @@ ${capturedVariablesPrompt}
     }
     console.log(`[AGENT] Usando modelo: ${modelId} (provider=${agentProvider})`);
 
-    const minifiedPromptMaster = promptMaster.replace(/\n\s+/g, '\n').trim();
+    const minifiedPromptMaster = promptMaster
+      .replace(/\r/g, "")
+      .replace(/\n[ \t]+/g, "\n")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
 
     // THINKING BUDGET — Gemini 2.5 Flash liga "thinking" por padrão, e esses
     // tokens são cobrados como SAÍDA (o token mais caro). Pra um SDR de chat o
