@@ -487,6 +487,7 @@ function ChatPageContent() {
               clientId={clientId}
               aiAgents={aiAgents}
               onContactUpdate={handleContactUpdate}
+              sessionId={activeConversation.session_id}
             />
           </div>
         )}
