@@ -4,9 +4,12 @@
  * O OpenRouter expõe 300+ modelos; o gateway de assinatura pode expor dezenas
  * (Gemini + Claude + GPT da sua conta). Pra não virar uma lista gigante e
  * indistinta, agrupamos por PROVEDOR e, dentro dele, por SUBGRUPO:
- *   - OpenRouter → "Grátis" (ids terminando em :free) + por família (Claude, GPT…)
  *   - Gateway    → por família (Claude, GPT, Gemini…) da sua assinatura
+ *   - OpenRouter → "Grátis" (ids terminando em :free) + por família (Claude, GPT…)
  *   - Gemini     → sem subgrupo (lista curta)
+ *
+ * Ordem definida pelo cliente: GATEWAY primeiro (assinatura, mais estável),
+ * OpenRouter no meio (tem free), Gemini nativo por último (acesso limitado).
  *
  * Funções puras, sem React — usadas tanto pelo dropdown rico
  * (ai-module-shared) quanto pelos <select> nativos inline das páginas.
@@ -98,10 +101,10 @@ export function subGroupLabel(m: GroupableModel): string {
 export type SubGroup<T extends GroupableModel = GroupableModel> = { label: string; items: T[] };
 export type ProviderGroup<T extends GroupableModel = GroupableModel> = { provider: string; subgroups: SubGroup<T>[] };
 
-const PROVIDER_ORDER = ["gemini", "openrouter", "gateway"];
+const PROVIDER_ORDER = ["gateway", "openrouter", "gemini"];
 
 /**
- * Agrupa por provedor (na ordem gemini → openrouter → gateway) e, dentro de cada
+ * Agrupa por provedor (na ordem gateway → openrouter → gemini) e, dentro de cada
  * um, por subgrupo. "Grátis" vem primeiro; subgrupos sem rótulo, por último.
  */
 export function groupModels<T extends GroupableModel>(models: T[]): ProviderGroup<T>[] {
@@ -131,7 +134,7 @@ export function groupModels<T extends GroupableModel>(models: T[]): ProviderGrou
 
 /** Rótulo amigável de cada provedor (compartilhado entre os seletores). */
 export const PROVIDER_LABEL: Record<string, string> = {
-  gemini: "Google Gemini",
-  openrouter: "OpenRouter",
   gateway: "Gateway (Assinatura)",
+  openrouter: "OpenRouter",
+  gemini: "Google Gemini",
 };
