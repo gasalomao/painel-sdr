@@ -118,6 +118,7 @@ export type InfoTabProps = {
   // Auto-mover kanban: De [coluna] → Para [coluna]
   autoPromoteFrom: string; setAutoPromoteFrom: (v: string) => void;
   autoPromoteTo: string; setAutoPromoteTo: (v: string) => void;
+  autoPromoteDisabled: boolean; setAutoPromoteDisabled: (v: boolean) => void;
   // Pausa a IA após agendar com sucesso para um contato (minutos). 0 = off.
   pauseAfterSchedule: number; setPauseAfterSchedule: (n: number) => void;
   kanbanColumns: { status_key: string; label: string }[];
@@ -957,9 +958,22 @@ export function InfoTab(p: InfoTabProps) {
 
                   {/* Auto-promote kanban — De [coluna] → Para [coluna] */}
                   <div className="pt-3 border-t border-white/5">
-                    <label className="text-[11px] font-semibold uppercase tracking-wider text-emerald-400">Auto-mover cliente no kanban</label>
-                    <p className="text-[10px] text-muted-foreground mt-0.5">Depois que o agendamento termina, move o cliente de uma coluna pra outra do seu kanban.</p>
-                    <div className="flex gap-2 items-center mt-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <label className="text-[11px] font-semibold uppercase tracking-wider text-emerald-400">Auto-mover cliente no kanban</label>
+                        <p className="text-[10px] text-muted-foreground mt-0.5">Depois que o agendamento termina, move o cliente de uma coluna pra outra do seu kanban vinculado.</p>
+                      </div>
+                      <label className="flex items-center gap-1.5 cursor-pointer select-none shrink-0" title="Desativa totalmente o auto-mover">
+                        <input
+                          type="checkbox"
+                          checked={p.autoPromoteDisabled}
+                          onChange={(e) => p.setAutoPromoteDisabled(e.target.checked)}
+                          className="accent-emerald-500 h-3.5 w-3.5"
+                        />
+                        <span className="text-[10px] text-muted-foreground">Desativar</span>
+                      </label>
+                    </div>
+                    <div className="flex gap-2 items-center mt-2" style={{ opacity: p.autoPromoteDisabled ? 0.4 : 1, pointerEvents: p.autoPromoteDisabled ? "none" : "auto" }}>
                       <NumberInput
                         min={0}
                         max={1440}
@@ -991,7 +1005,7 @@ export function InfoTab(p: InfoTabProps) {
                         <span className="text-[10px] text-muted-foreground uppercase font-semibold">minutos (padrão 120 = 2h)</span>
                       </div>
                     </div>
-                    <div className="grid grid-cols-2 gap-2 mt-3">
+                    <div className="grid grid-cols-2 gap-2 mt-3" style={{ opacity: p.autoPromoteDisabled ? 0.4 : 1, pointerEvents: p.autoPromoteDisabled ? "none" : "auto" }}>
                       <div>
                         <label className="text-[10px] uppercase font-semibold text-muted-foreground">De (coluna de origem)</label>
                         <select
