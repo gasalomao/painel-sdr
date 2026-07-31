@@ -2,6 +2,19 @@
 
 Este projeto (`painel-sdr`) é um Painel de SDR construído com Next.js (versão 16.2.3), conectado ao Supabase e Evolution API (WhatsApp), com uso de Redis para filas e inteligência artificial (Google Gemini).
 
+## [2026-07-31] Fix 3 bugs /chat — última mensagem não salva + realtime + IA não responde
+- **Solicitação**: última mensagem não aparece no card "Salomao"; mensagens não caem em tempo real (só após sair/entrar conversa); IA ativa mas não responde.
+- **Diagnóstico**:
+  - Bug (a) — webhook cai no path `23505` (duplicata) quando `fromMe=true` do painel e RETURNS EARLY sem bumpar `sessions.last_message_at`. Card lateral fica desatualizado até reload manual.
+  - Bug (b) — `chats_dashboard` e `sessions` não estavam na publication `supabase_realtime`. Hook `useRealtime` (Supabase channel) nunca recebe INSERT/UPDATE → UI não atualiza até reabrir conversa.
+  - Bug (c) — `message-thread` chama `/api/agent/control snooze 60min` após enviar manual → sessão `human_takeover`. Cliente responde → webhook vê `effectiveActive=false` → IA não dispatcha (by design). UI mostra badge "IA" quando `bot_status==='bot_active'`, mas sessão atual está snoozed. Possível confusão visual.
+- **Fix (a)** — `src/app/api/webhooks/whatsapp/route.ts:1232`: path 23505 agora bumpa `sessions.last_message_at` (+ `unread_count++` se `!fromMe`) antes de retornar.
+- **Fix (a.2)** — `src/app/api/send-message/route.ts:282`: após insert/update chats_dashboard, bumpa `sessions.last_message_at` + `last_message`. Cobre caso webhook echo demora / não chega.
+- **Fix (b)** — novo SQL `fix_realtime_chats_sessions.sql` (idempotente): adiciona `chats_dashboard` + `sessions` à publication `supabase_realtime`. **Cliente precisa rodar no SQL Editor do Supabase**.
+- **Fix (c)** — parcial: bug (c) raiz é pausa automática snooze 60min. Não alterei comportamento (risco IA+humano responderem juntos). Usuário precisa trigar `forceActive` manualmente ou esperar vencer. Ação: se persistir reclamação, expor toggle de pausa automática no UI (`human_pause_enabled` em `app_settings` já existe — `getHumanPauseConfig()` botão desabilitar).
+- **Validação**: `tsc --noEmit` 0 erros. **269/269 testes passando**.
+- **Próximos passos**: usuário rodar SQL no Supabase Studio. Se IA seguir sem responder após isso, depurar via `/api/webhooks/diagnose` (mostra AGENT_INACTIVE / AGENT_NO_API_KEY / AGENT_DISPATCH_*).
+
 ## [2026-07-31] Minify avançado de prompts (agent + organizer)
 - **Solicitação**: aplicar economia de tokens dos 4 libs (caveman/ponytail/headroom/rtk) nos agentes IA do sistema, sem perder qualidade.
 - **Aplicado**:

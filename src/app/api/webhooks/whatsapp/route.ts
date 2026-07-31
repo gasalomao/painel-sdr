@@ -1229,6 +1229,16 @@ export async function POST(req: NextRequest) {
       if (dashErr) {
         if ((dashErr as any).code === "23505") {
           console.log(">>> [Webhook] chats_dashboard duplicata (msg já salva, abortando fluxo concorrente):", finalId);
+          // Mesmo sendo duplicata, atualiza last_message_at na session — antes
+          // esse return early pulava o update em mensagens fromMe vindas do
+          // painel (/api/send-message já inseriu a dash mas não bumpa sessions).
+          // Resultado: card da conversa não atualizava "última mensagem" nem
+          // ordem na lista até um re-fetch manual.
+          if (session?.id) {
+            const bumpPayload: any = { last_message_at: new Date().toISOString() };
+            if (!fromMe) bumpPayload.unread_count = (session as any).unread_count ? (session as any).unread_count + 1 : 1;
+            supabase.from("sessions").update(bumpPayload).eq("id", session.id).then(() => {}, () => {});
+          }
           return NextResponse.json({ success: true, message: "Já processada (duplicata concorrente 23505)" });
         } else {
           console.error(">>> [Webhook] ❌ FALHA chats_dashboard:", dashErr.message, "| Details:", JSON.stringify(dashErr));

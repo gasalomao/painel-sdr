@@ -1,5 +1,20 @@
 # Log de Sessões
 
+## [2026-07-31] Claude Code — Fix 3 bugs /chat (última msg + realtime + IA)
+- **O que foi feito**:
+  - Webhook 23505 duplicata path agora bumpa `sessions.last_message_at` (+unread_count se customer) antes return early.
+  - `/api/send-message` após insert/update chats_dashboard bumpa `sessions.last_message_at` + `last_message` — card lateral atualiza instantâneo.
+  - Novo SQL `fix_realtime_chats_sessions.sql` — adiciona `chats_dashboard` + `sessions` à publication `supabase_realtime` (idempotente).
+- **Arquivos alterados**:
+  - `src/app/api/webhooks/whatsapp/route.ts`
+  - `src/app/api/send-message/route.ts`
+  - `fix_realtime_chats_sessions.sql` (novo)
+  - `.shared-memory/CONTEXT.md`
+- **Decisões**:
+  - Bug (c) IA não responde: raiz é snooze automático 60min após enviar manual. Mantido (risco IA+humano responderem juntos). Se usuário reportar de novo, expor toggle `human_pause_enabled` no UI.
+- **Problemas**: nenhum — `tsc --noEmit` 0 erros, 269/269 testes passando.
+- **Estado ao sair**: bugs (a) e (b) corrigidos no código. Bug (b) exige cliente rodar SQL no Supabase Studio. Bug (c) pendente decisão produto.
+
 ## [2026-07-31 18:00] Claude Code (combo-principal) — Bateria de Testes de Software (Cobertura Máxima)
 - **Solicitação**: "faça uma bateria de testes para garantir que não tem nada quebrado".
 - **Escopo**: cobertura máxima (escolhida pelo usuário entre 3 opções).
