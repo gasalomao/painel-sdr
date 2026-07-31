@@ -24,9 +24,13 @@ interface ContactSidebarProps {
   clientId: string | null;
   aiAgents?: { id: number | string; name: string }[];
   onContactUpdate?: (updatedContact: Contact) => void;
+  /** ID da sessão ativa (conversation.session_id). Quando fornecido,
+   * busca/atualiza o agent_id DIRETO por id — evita ambiguidade quando
+   * o contato tem múltiplas sessões (várias instâncias conectadas). */
+  sessionId?: string;
 }
 
-export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpdate }: ContactSidebarProps) {
+export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpdate, sessionId }: ContactSidebarProps) {
   const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(false);
   
@@ -61,15 +65,26 @@ export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpda
         .order("order_index", { ascending: true });
       if (cols) setKanbanColumns(cols);
 
-      // 2. Busca o Agente de IA atribuído na tabela sessions
-      const { data: sessionData } = await supabase
-        .from("sessions")
-        .select("agent_id")
-        .eq("contact_id", contact.id)
-        .maybeSingle();
+      // 2. Busca o Agente de IA atribuído na sessão ATIVA.
+      //    Usa sessionId quando fornecido (id exato da sessão corrente) —
+      //    antes usava só contact_id com maybeSingle, que falha quando o
+      //    contato tem múltiplas sessões (várias instâncias conectadas):
+      //    maybeSingle retorna erro e agent_id aparecia vazio ao reabrir.
+      let sessionQuery = supabase.from("sessions").select("agent_id");
+      if (sessionId) {
+        sessionQuery = (sessionQuery as any).eq("id", sessionId).maybeSingle();
+      } else {
+        // Fallback: sessão mais recente do contato (ordena por last_message_at).
+        sessionQuery = (sessionQuery as any)
+          .eq("contact_id", contact.id)
+          .order("last_message_at", { ascending: false, nullsFirst: false })
+          .limit(1)
+          .single();
+      }
+      const { data: sessionData } = await sessionQuery;
 
-      if (sessionData?.agent_id) {
-        setAssignedAgentId(String(sessionData.agent_id));
+      if ((sessionData as any)?.agent_id) {
+        setAssignedAgentId(String((sessionData as any).agent_id));
       } else {
         setAssignedAgentId("");
       }
@@ -106,7 +121,7 @@ export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpda
     } finally {
       setLoading(false);
     }
-  }, [contact, clientId]);
+  }, [contact, clientId, sessionId]);
 
   useEffect(() => {
     fetchLeadAndKanbanData();
@@ -127,12 +142,25 @@ export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpda
 
     try {
       const agentIdNum = newAgentId ? Number(newAgentId) : null;
-      
-      // 1. Atualiza na tabela sessions
-      const { error: sessionErr } = await supabase
-        .from("sessions")
-        .update({ agent_id: agentIdNum })
-        .eq("contact_id", contact.id);
+
+      // 1. Atualiza na tabela sessions:
+      //    - Se sessionId fornecido: update exato por id (sessão ativa).
+      //    - Senão: update por contact_id (legado, cobre todas as sessões).
+      //    Antes só havia o caminho contact_id, que bagunçava sessão errada
+      //    quando o contato tinha múltiplos connects (instância velha + nova).
+      let updatePromise;
+      if (sessionId) {
+        updatePromise = supabase
+          .from("sessions")
+          .update({ agent_id: agentIdNum })
+          .eq("id", sessionId);
+      } else {
+        updatePromise = supabase
+          .from("sessions")
+          .update({ agent_id: agentIdNum })
+          .eq("contact_id", contact.id);
+      }
+      const { error: sessionErr } = await updatePromise;
 
       if (sessionErr) throw sessionErr;
 
@@ -143,7 +171,7 @@ export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpda
     } finally {
       setUpdatingAgent(false);
     }
-  }, [contact, clientId]);
+  }, [contact, clientId, sessionId]);
 
   // Salvar anotação direto em contacts.notes
   const handleSaveNote = useCallback(async () => {
