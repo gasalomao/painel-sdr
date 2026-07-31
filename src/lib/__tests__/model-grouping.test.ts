@@ -112,9 +112,14 @@ describe("groupModels — ordem provedor + subgrupos", () => {
     { id: "gpt-4o-mini", rawId: "gpt-4o-mini", provider: "gateway" },
   ];
 
-  it("ordena provedores: gemini → openrouter → gateway", () => {
+  it("ordena provedores: gateway → openrouter → gemini", () => {
     const groups = groupModels(models);
-    expect(groups.map((g) => g.provider)).toEqual(["gemini", "openrouter", "gateway"]);
+    expect(groups.map((g) => g.provider)).toEqual(["gateway", "openrouter", "gemini"]);
+  });
+
+  it("gateway vem primeiro (assinatura priorizada)", () => {
+    const groups = groupModels(models);
+    expect(groups[0].provider).toBe("gateway");
   });
 
   it("openrouter: 'Grátis' vem antes de famílias pagas", () => {

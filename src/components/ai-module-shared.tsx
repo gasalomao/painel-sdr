@@ -25,16 +25,16 @@ interface AIModelSelectProps {
 }
 
 const PROVIDER_LABEL: Record<string, string> = {
-  gemini: "Google Gemini",
-  openrouter: "OpenRouter",
   gateway: "Gateway (Assinatura)",
+  openrouter: "OpenRouter",
+  gemini: "Google Gemini",
 };
 
 // Cor do cabeçalho de cada grupo de provedor no dropdown.
 const PROVIDER_COLOR: Record<string, string> = {
-  gemini: "text-blue-400",
-  openrouter: "text-purple-400",
   gateway: "text-emerald-400",
+  openrouter: "text-purple-400",
+  gemini: "text-blue-400",
 };
 
 // Dropdown de modelos — 100% em tempo real via /api/ai-models. Agrupa por
