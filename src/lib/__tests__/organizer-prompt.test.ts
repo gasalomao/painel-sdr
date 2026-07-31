@@ -86,9 +86,14 @@ describe("buildOrganizerSystemPrompt", () => {
     expect(b.systemPrompt).toContain("classificador SÊNIOR");
   });
 
-  it("retorna systemPrompt = base + kanban + data + appointments", () => {
+  it("retorna systemPrompt = base + kanban + data + appointments (minified)", () => {
     const out = buildOrganizerSystemPrompt(null, COLS, new Date("2026-05-17"));
-    expect(out.systemPrompt).toBe(out.defaultBasePrompt + out.kanbanAppendix + out.dateContext + out.appointmentsContext);
+    // systemPrompt é minificado (sem whitespace redundante) mas conteúdo preserva partes
+    expect(out.systemPrompt).toContain(out.defaultBasePrompt.trim().slice(0, 50));
+    expect(out.systemPrompt).toContain("DATA DE HOJE");
+    expect(out.systemPrompt).not.toMatch(/\n{3,}/); // sem 3+ quebras seguidas
+    // sem tabs/espaços trailing
+    expect(out.systemPrompt).not.toMatch(/[ \t]+\n/);
   });
 
   it("appointmentsContext vazio quando não há agendamentos", () => {

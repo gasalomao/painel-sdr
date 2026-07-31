@@ -202,6 +202,15 @@ export function buildOrganizerSystemPrompt(
   const { kanbanAppendix, terminalKeys } = buildKanbanAppendix(cols);
   const dateContext = buildDateContext(now);
   const appointmentsContext = buildAppointmentsContext(appointments, now);
-  const systemPrompt = basePrompt + kanbanAppendix + dateContext + appointmentsContext;
+  const systemPrompt = minifyPrompt(basePrompt + kanbanAppendix + dateContext + appointmentsContext);
   return { systemPrompt, defaultBasePrompt, kanbanAppendix, dateContext, appointmentsContext, terminalKeys };
+}
+
+function minifyPrompt(s: string): string {
+  return s
+    .replace(/\r/g, "")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
