@@ -271,6 +271,16 @@ export async function POST(req: NextRequest) {
       console.warn("[SEND-MESSAGE] chats_dashboard insert:", dashErr.message);
     }
 
+    // Bump sessions.last_message_at — sem isso, card da conversa não atualiza
+    // "última mensagem" nem reordena a lista até o webhook echo (fromMe) chegar.
+    // Em Salomao isso causava "mensagem não salva" visível até reabrir a conversa.
+    if (sessionId) {
+      await supabase
+        .from("sessions")
+        .update({ last_message_at: now, last_message: text || "" })
+        .eq("id", sessionId);
+    }
+
     // === 4. Resposta ===
     if (sendError) {
       return NextResponse.json(
