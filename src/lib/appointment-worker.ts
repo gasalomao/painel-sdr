@@ -40,6 +40,7 @@ type SchedulerConfig = {
   notify_owner?: boolean;
   owner_phone?: string | null;
   auto_promote_kanban_after_minutes?: number;
+  auto_promote_disabled?: boolean;
   business_hours?: { tz?: string };
 };
 
@@ -321,6 +322,8 @@ export async function tickAutoPromote(): Promise<{ promoted: number; errors: num
         sched = (ag?.scheduler_config || {}) as any;
       }
       const promoteAfterMin = sched.auto_promote_kanban_after_minutes ?? 30;
+      // Dono da conta pode desativar o auto-mover totalmente (toggle no painel).
+      if (sched.auto_promote_disabled) continue;
       const dueAt = new Date(appt.end_at).getTime() + promoteAfterMin * 60_000;
       if (nowMs < dueAt) continue;
 

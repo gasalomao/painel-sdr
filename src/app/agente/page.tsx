@@ -119,6 +119,8 @@ export default function AgentePage() {
   // Auto-mover kanban: De [coluna] → Para [coluna]
   const [autoPromoteFrom, setAutoPromoteFrom] = useState(""); // "" = qualquer coluna
   const [autoPromoteTo, setAutoPromoteTo] = useState("");      // "" = automático (heurística)
+  // Desativar auto-mover totalmente (cliente não quer que o sistema mova no kanban sozinho).
+  const [autoPromoteDisabled, setAutoPromoteDisabled] = useState(false);
   const [kanbanColumns, setKanbanColumns] = useState<{ status_key: string; label: string }[]>([]);
   useEffect(() => {
     fetch("/api/kanban-columns", { cache: "no-store" })
@@ -282,6 +284,7 @@ export default function AgentePage() {
         setOwnerSummaryModel(schedCfg.owner_summary_model || "");
         setAutoPromoteFrom(schedCfg.auto_promote_from_status || "");
         setAutoPromoteTo(schedCfg.auto_promote_to_status || "");
+        setAutoPromoteDisabled(!!schedCfg.auto_promote_disabled);
         setCalendarAutoCapture({
           telefone:          opts.calendar_auto_capture?.telefone    ?? true,
           empresa:           opts.calendar_auto_capture?.empresa     ?? true,
@@ -586,6 +589,7 @@ export default function AgentePage() {
         // Auto-mover kanban: De → Para
         auto_promote_from_status: autoPromoteFrom || "",
         auto_promote_to_status: autoPromoteTo || "",
+        auto_promote_disabled: !!autoPromoteDisabled,
         // Pausa pós-agendamento (minutos). 0 = não pausa.
         pause_after_schedule_minutes: Number(pauseAfterSchedule) || 0,
       },
@@ -1088,6 +1092,7 @@ export default function AgentePage() {
                 isScheduler={isScheduler} setIsScheduler={setIsScheduler}
                 reminders={reminders} setReminders={setReminders}
                 autoPromoteAfter={autoPromoteAfter} setAutoPromoteAfter={setAutoPromoteAfter}
+                autoPromoteDisabled={autoPromoteDisabled} setAutoPromoteDisabled={setAutoPromoteDisabled}
                 notifyOwner={notifyOwner} setNotifyOwner={setNotifyOwner}
                 ownerPhone={ownerPhone} setOwnerPhone={setOwnerPhone}
                 ownerSummaryEnabled={ownerSummaryEnabled} setOwnerSummaryEnabled={setOwnerSummaryEnabled}
