@@ -1,5 +1,26 @@
 # Log de Sessões
 
+## [2026-08-03] Claude Code (combo-principal) — Realtime /chat + IA Evolution GO
+- **O que foi feito**:
+  - Diagnóstico completo: realtime sem publication das tabelas `chats_dashboard`/`sessions`; webhook Evolution GO desalinhado do legado em 5 pontos críticos (secret, await, clientId, anti-eco, persistência V2).
+  - Editado `src/app/api/webhooks/evolution-go/route.ts`: imports tenant/internal-auth/manual-send-registry; `clientIdFromInstance`; classificação `sender`; insert `messages` V2 + bump `sessions`; snooze só humano com anti-eco 30s; dispatch IA `await agentMod.POST` + `INTERNAL_SECRET_HEADER` + `getInternalSecret()` + logs (`AGENT_DISPATCH_NO_SECRET`/`AGENT_DISPATCH_FETCH_FAIL`/`AGENT_SKIP_PAUSED`); aceita `messages.upsert`.
+  - Marcado `banco_dados_fix_realtime.sql` como DEPRECATED no topo (orientação usar `fix_realtime_chats_sessions.sql` idempotente).
+- **Arquivos alterados**:
+  - `src/app/api/webhooks/evolution-go/route.ts`
+  - `banco_dados_fix_realtime.sql`
+  - `.shared-memory/CONTEXT.md`, `.shared-memory/SESSION_LOG.md`, `.shared-memory/TASKS.md`
+- **Decisões**:
+  - Espelhar padrão legado (`whatsapp/route.ts`) em vez de refatorar para handler compartilhado (YAGNI; 2 webhooks em paridade manual).
+  - `await` no dispatch IA (fix Next 16 standalone cancela fire-and-forget).
+  - Anti-eco duplo (registro in-memory + check DB 30s texto idêntico) — mesma estratégia do legado.
+- **Problemas**:
+  - Bug 1 realtime: publicação Supabase faltando tabelas —corrige só com SQL, sem diff TS.
+  - Bug 2 IA: 5 desalinhamentos do webhook Evolution GO vs legado, todos corrigidos.
+- **Estado ao sair**:
+  - Código TypeScript compilando (0 erros no tsc --noEmit).
+  - Usuário precisa rodar `fix_realtime_chats_sessions.sql` no SQL Editor do Supabase.
+  - Próximo: teste WhatsApp real — msg do cliente deve refletir no /chat sem reload; IA deve responder sem cair em snooze do próprio eco.
+
 ## [2026-07-31 18:00] Claude Code (combo-principal) — Channel routing fallback + agent test fix
 - **O que foi feito**:
   - Criado `src/lib/__tests__/channel-routing-fallback.test.ts` (13 testes): resolveChannel (cache + fresh), sendMessage (V2↔GO primário/fallback), sendMedia (conversão base64 + fallback), getStatus, fetchProfilePicture, checkNumbersDetailed — tudo mockado via `vi.hoisted` (supabase_admin, evolution-go, evolution-v2, whatsapp-cloud).
