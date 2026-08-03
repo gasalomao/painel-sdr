@@ -1,3 +1,14 @@
+-- ============================================================
+-- ⚠️  DEPRECATED — NÃO RODE ESTE SCRIPT  ⚠️
+-- ------------------------------------------------------------
+-- O bloco abaixo faz `DROP PUBLICATION supabase_realtime` e
+-- recria com lista INCOMPLETA (sem chats_dashboard, sessions,
+-- messages, leads, etc). Isso quebra o realtime do /chat e
+-- vários outros recursos que dependem de publicação completa.
+--
+-- Use `fix_realtime_chats_sessions.sql` (idempotente, só ADD)
+-- caso precise adicionar tabelas à publication.
+-- ============================================================
 -- COPIE E COLE ESTE BLOCO NO SQL EDITOR DO SEU SUPABASE:
 
 -- 1. Cria a tabela com as colunas corretas se não existir
