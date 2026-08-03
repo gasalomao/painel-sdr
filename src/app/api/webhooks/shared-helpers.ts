@@ -290,6 +290,7 @@ export async function findOrCreateContact(remoteJid: string, pushName: string | 
       .from("contacts")
       .select("id, push_name, phone_number")
       .eq("remote_jid", remoteJid)
+      .eq("client_id", clientId)
       .maybeSingle();
 
     if (existing) {
@@ -327,6 +328,7 @@ export async function findOrCreateSession(contactId: string, instanceName: strin
       .select("id, bot_status")
       .eq("contact_id", contactId)
       .eq("instance_name", instanceName)
+      .eq("client_id", clientId)
       .maybeSingle();
 
     if (existing) return existing;

@@ -2,6 +2,25 @@
 
 Este projeto (`painel-sdr`) é um Painel de SDR construído com Next.js (versão 16.2.3), conectado ao Supabase e Evolution API (WhatsApp), com uso de Redis para filas e inteligência artificial (Google Gemini).
 
+## [2026-08-03] Realtime /chat + IA no webhook Evolution GO
+- **Solicitação**: chat não atualiza em tempo real (só após sair/entrar); IA ligada não responde no webhook Evolution GO.
+- **Diagnóstico**:
+  - Realtime: publicação `supabase_realtime` sem `chats_dashboard`/`sessions` → hook `use-realtime.ts` não recebe eventos Postgres → UI só atualiza em refetch.
+  - IA Evolution GO (`src/app/api/webhooks/evolution-go/route.ts`): dispatch fire-and-forget sem `await` (Next standalone cancela), header `x-internal-secret` com fallback `"internal"` não bate em `getInternalSecret()` (`AUTH_SECRET || SUPABASE_SERVICE_ROLE_KEY`), echo da própria IA cai em `fromMe` e snooze sessão por 30min, `clientId` resolvido via cookie inexistente (caiu em DEFAULT UUID), não persistia em `messages` V2 nem bumpava `sessions`.
+- **Fix código** — `src/app/api/webhooks/evolution-go/route.ts`:
+  - imports de `@/lib/tenant`, `@/lib/internal-auth`, `@/lib/manual-send-registry`.
+  - `clientId = (await clientIdFromInstance(instanceName)) || DEFAULT_CLIENT_ID`.
+  - classificação `sender` customer/ai/human via `isAiSend`/`isManualSend`/`isPendingAutomatedSend`.
+  - insert em `messages` V2 + bump `sessions.last_message_at`/`unread_count` (fire-and-forget).
+  - snooze só `sender === "human"` + guarda anti-eco (texto idêntico IA 30s).
+  - dispatch IA com `await agentMod.POST(fakeReq)` + `INTERNAL_SECRET_HEADER` + `getInternalSecret()`. Loga `AGENT_DISPATCH_NO_SECRET` / `AGENT_DISPATCH_FETCH_FAIL` / `AGENT_SKIP_PAUSED` em `webhook_logs`.
+  - aceita events `MESSAGES_UPSERT` / `messages.upsert`.
+- **Fix DB** — `fix_realtime_chats_sessions.sql` (idempotente) ADD `chats_dashboard`+`sessions` à publication. **Usuário precisa rodar no SQL Editor**.
+- **Débito documentado** — `banco_dados_fix_realtime.sql` marcado DEPRECATED no topo (faz DROP publication e recria incompleto — origem provável do bug 1).
+- **Validação**: `npx tsc --noEmit` 0 erros.
+- **Próximos passos**: usuário rodar SQL no Supabase Studio + testar envio WhatsApp real (msg do cliente deve aparecer no /chat sem reload e IA deve responder sem pausar via eco).
+
+
 ## [2026-07-31 18:00] Auditoria channel-routing + agent test fix
 - **Status**: 4 tarefas concluídas (#300, #301, #357, #358). Testes `channel-routing-fallback.test.ts` (13), `test_agent_process.test.ts` (1), `test_webhook_process.test.ts` (1), `organizer-prompt.test.ts` (15) — todos verdes.
 - **Próximo passo**: commit + push. Restam #302-305 (validação runtime live pelo usuário + débito técnico ESLint/Turbopack).
