@@ -106,6 +106,19 @@ export default function CalendarGrid({
     []
   );
 
+  // Día pasada en month view: clase CSS para distinguir visualmente.
+  // ponytail: RBC no expone "past" nativo — dayPropGetter inyecta clase propia.
+  const dayPropGetter = useCallback((date: Date) => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const cellDay = new Date(date);
+    cellDay.setHours(0, 0, 0, 0);
+    if (cellDay.getTime() < today.getTime()) {
+      return { className: "rbc-past-day" };
+    }
+    return {};
+  }, []);
+
   const handleEventDrop = useCallback(
     (data: { event: any; start: Date | string; end: Date | string }) => {
       onEventDropOrResize(data);
@@ -144,6 +157,7 @@ export default function CalendarGrid({
         timeslots={2}
         scrollToTime={new Date(1970, 0, 1, 7, 0, 0)}
         eventPropGetter={eventPropGetter}
+        dayPropGetter={dayPropGetter}
         onSelectEvent={onSelectEvent}
         onSelectSlot={onSelectSlot}
         onEventDrop={handleEventDrop}
