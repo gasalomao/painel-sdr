@@ -98,13 +98,13 @@ export default function LeadsPage() {
   // Colunas do Kanban — fonte única é a tabela kanban_columns (editável no
   // Organizador). Começa com o fallback hardcoded e troca pelo que vier da API
   // pra CRM, Organizador e auto-promote do agente sempre baterem.
-  const [columns, setColumns] = useState<{ id: string; label: string; color: string }[]>(KANBAN_COLUMNS);
+  const [columns, setColumns] = useState<{ id: string; uuid: string; label: string; color: string; isTerminal: boolean }[]>(KANBAN_COLUMNS.map((c: any) => ({ id: c.status_key, uuid: "", label: c.label, color: c.color, isTerminal: false })));
   useEffect(() => {
     fetch("/api/kanban-columns", { cache: "no-store" })
       .then((r) => r.json())
       .then((j) => {
         if (j?.ok && Array.isArray(j.columns) && j.columns.length > 0) {
-          setColumns(j.columns.map((c: any) => ({ id: c.status_key, label: c.label, color: c.color })));
+          setColumns(j.columns.map((c: any) => ({ id: c.status_key, uuid: c.id, label: c.label, color: c.color, isTerminal: !!c.is_terminal })));
         }
       })
       .catch(() => {});
