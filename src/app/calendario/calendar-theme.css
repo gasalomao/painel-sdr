@@ -60,6 +60,16 @@
 .calendar-dark .rbc-off-range { color: rgba(255, 255, 255, 0.25); }
 .calendar-dark .rbc-today { background: rgba(99, 102, 241, 0.10); }
 
+/* Día pasada en month view — leve tono cálido para distinguir días que
+   já se passaron sin distraer de eventos futuros. Google usa grises;
+   nosotros usamos un sutil warm-gray que diferencia sinbots visuales. */
+.calendar-dark .rbc-past-day:not(.rbc-off-range-bg) {
+  background: rgba(120, 120, 120, 0.07);
+}
+.calendar-dark .rbc-past-day .rbc-date-cell {
+  color: rgba(255, 255, 255, 0.42);
+}
+
 /* Slots de hora (week/day) */
 .calendar-dark .rbc-time-gutter,
 .calendar-dark .rbc-time-gutter .rbc-timeslot-group {
