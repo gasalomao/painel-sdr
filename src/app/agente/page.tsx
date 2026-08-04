@@ -76,9 +76,9 @@ export default function AgentePage() {
   const [messageBufferSeconds, setMessageBufferSeconds] = useState(0);
   const [humanizeMessages, setHumanizeMessages] = useState(false);
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
-  // Modo de raciocínio UNIVERSAL: 0=Econômico, 1=Equilibrado, 2=Intenso.
+  // Modo de raciocínio UNIVERSAL: 0=Econômico, 1=Equilibrado, 2=Intenso, 3=Think Máximo.
   // Funciona em todos os modelos (o ai-provider mapeia pro param de cada um).
-  const [reasoningMode, setReasoningMode] = useState<0 | 1 | 2>(0);
+  const [reasoningMode, setReasoningMode] = useState<0 | 1 | 2 | 3>(0);
   // Lead Intelligence é POR AGENTE — não é mais um flag global da campanha/automação.
   // Cliente quer ativar só nos agentes que precisam de análise profunda do lead.
   const [leadIntelligenceEnabled, setLeadIntelligenceEnabled] = useState(false);

@@ -79,7 +79,7 @@ export type InfoTabProps = {
   messageBufferSeconds: number; setMessageBufferSeconds: (n: number) => void;
   humanizeMessages: boolean; setHumanizeMessages: (v: boolean) => void;
   webSearchEnabled: boolean; setWebSearchEnabled: (v: boolean) => void;
-  reasoningMode: 0 | 1 | 2; setReasoningMode: (n: 0 | 1 | 2) => void;
+  reasoningMode: 0 | 1 | 2 | 3; setReasoningMode: (n: 0 | 1 | 2 | 3) => void;
   leadIntelligenceEnabled: boolean; setLeadIntelligenceEnabled: (v: boolean) => void;
   saveIdentity: () => void;
   savingConfig: boolean;
@@ -618,15 +618,16 @@ export function InfoTab(p: InfoTabProps) {
             <label className="text-[11px] font-semibold uppercase tracking-wider text-amber-400">Modo de Raciocínio (custo) — vale para todos os modelos</label>
             <select
               value={p.reasoningMode}
-              onChange={(e) => p.setReasoningMode(Number(e.target.value) as 0 | 1 | 2)}
+              onChange={(e) => p.setReasoningMode(Number(e.target.value) as 0 | 1 | 2 | 3)}
               className="w-full bg-white/5 border border-amber-400/20 text-white h-12 rounded-xl text-sm px-3 focus:outline-none focus:ring-1 focus:ring-amber-400/50"
             >
               <option value={0} className="bg-neutral-900 text-white">Econômico — sem raciocínio extra (recomendado p/ SDR)</option>
               <option value={1} className="bg-neutral-900 text-white">Equilibrado — pouco raciocínio (tools/agendamento)</option>
               <option value={2} className="bg-neutral-900 text-white">Intenso — raciocínio total (casos complexos, mais caro)</option>
+              <option value={3} className="bg-neutral-900 text-white">Think Máximo — força máxima inteligência + max tokens (mais caro, qualquer modelo)</option>
             </select>
             <p className="text-[11px] text-white/40 leading-relaxed">
-              Controla quanto a IA &quot;pensa&quot; antes de responder — <strong>em qualquer modelo</strong> (GPT, Claude, Gemini, DeepSeek). No modo <strong>Econômico</strong> responde direto (gasta menos token, ideal pra SDR). Suba pra <strong>Equilibrado</strong> se usar agendamento/tools, ou <strong>Intenso</strong> em casos complexos. Modelos sem suporte ignoram.
+              Controla quanto a IA &quot;pensa&quot; antes de responder — <strong>em qualquer modelo</strong> (GPT, Claude, Gemini, DeepSeek). No modo <strong>Econômico</strong> responde direto (gasta menos token, ideal pra SDR). Suba pra <strong>Equilibrado</strong> se usar agendamento/tools, ou <strong>Intenso</strong> em casos complexos. <strong>Think Máximo</strong> força máxima inteligência (boost tokens + temperatura otimizada) em qualquer provedor. Modelos sem suporte ignoram silencioso.
             </p>
           </div>
 

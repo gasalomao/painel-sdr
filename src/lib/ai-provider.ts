@@ -96,8 +96,8 @@ export function isFailoverableStatus(status: number, message?: string): boolean 
  * vier mas `thinkingBudget` sim, deriva dele (0→econômico, >0→equilibrado,
  * -1→intenso). Devolve sempre 0/1/2.
  */
-export function resolveReasoningMode(mode?: 0 | 1 | 2 | null, thinkingBudget?: number | null): 0 | 1 | 2 {
-  if (mode === 0 || mode === 1 || mode === 2) return mode;
+export function resolveReasoningMode(mode?: 0 | 1 | 2 | 3 | null, thinkingBudget?: number | null): 0 | 1 | 2 | 3 {
+  if (mode === 0 || mode === 1 || mode === 2 || mode === 3) return mode;
   if (thinkingBudget != null && Number.isFinite(thinkingBudget)) {
     if (thinkingBudget < 0) return 2;   // -1 dinâmico = intenso
     if (thinkingBudget > 0) return 1;   // 256 etc = equilibrado
@@ -126,11 +126,23 @@ export function resolveReasoningMode(mode?: 0 | 1 | 2 | null, thinkingBudget?: n
  */
 export function applyReasoning(
   body: Record<string, any>,
-  mode: 0 | 1 | 2,
+  mode: 0 | 1 | 2 | 3,
   provider: AiProvider,
   model: string,
 ): void {
   const m = (model || "").toLowerCase();
+  // THINK MÁXIMO (mode 3): força max_tokens alto + temperatura otimizada em
+  // qualquer provedor. Além do reasoning nativo, expande janela de saída pra
+  // modelo usar toda inteligência disponível. Universal — nunca quebra provedor.
+  if (mode === 3) {
+    // Dobra max_tokens (ou seta 8k se vier 0/undefined) — modelo tem espaço pra
+    // pensar + responder completo. ponytail: 8k cobre 99% casos; ampliar exige
+    // checagem de limite por provedor.
+    const cur = Number(body.max_tokens || body.max_completion_tokens || 0);
+    if (cur < 8000) body.max_tokens = 8000;
+    // Temperatura 0.7 = balanço criativo×preciso. Mode 3 prioriza qualidade.
+    if (body.temperature == null) body.temperature = 0.7;
+  }
   if (provider === "gemini") {
     // Gemini usa thinkingBudget no generationConfig (tratado à parte nas funções
     // Gemini). Aqui é no-op — o Gemini lê opts.reasoningMode direto.
@@ -138,28 +150,32 @@ export function applyReasoning(
   }
   // OpenAI-compatible (openrouter + gateway): ramos por família de modelo.
   if (/^(o1|o3|o4|gpt-5|gpt-4o-)/.test(m) || /openai/.test(m)) {
-    body.reasoning = { effort: mode === 0 ? "minimal" : mode === 1 ? "medium" : "high" };
+    body.reasoning = { effort: mode === 0 ? "minimal" : mode === 1 ? "medium" : (mode === 2 || mode === 3) ? "high" : "high" };
     return;
   }
   // Anthropic/Claude (via gateway OpenAI-compat — CLIProxyAPI traduz).
   if (/claude|anthropic/.test(m)) {
     if (mode === 0) {
       // Econômico: sem thinking explícito (Claude usa adaptive por padrão).
+    } else if (mode === 3) {
+      // THINK MÁXIMO: budget máximo Claude (32k tokens thinking).
+      body.thinking = { type: "enabled", budget_tokens: 32000 };
     } else {
       body.thinking = { type: "enabled", budget_tokens: mode === 1 ? 4096 : 16000 };
     }
     return;
   }
   // DeepSeek / outros: sem nível de raciocínio no body. DeepSeek-reasoner é
-  // acionado pelo modelRef, não por aqui.
+  // acionado pelo modelRef, não por aqui. Mode 3 ainda expande max_tokens.
 }
 
 /**
  * Converte reasoningMode (0/1/2) em thinkingBudget do Gemini. Centraliza o
  * mapeamento pras funções Gemini (generateText + startGeminiChat).
  */
-export function reasoningModeToThinkingBudget(mode: 0 | 1 | 2): number {
-  if (mode === 2) return -1;   // dinâmico (intenso)
+export function reasoningModeToThinkingBudget(mode: 0 | 1 | 2 | 3): number {
+  if (mode === 3) return -1;   // THINK MÁXIMO — dinâmico + boost tokens (força máxima inteligência)
+  if (mode === 2) return -1;   // intenso — dinâmico
   if (mode === 1) return 8192; // equilibrado
   return 0;                    // econômico (sem raciocínio extra)
 }
@@ -520,7 +536,7 @@ export interface GenerateTextOpts {
    * reasoning.effort, Anthropic thinking/effort, DeepSeek deepseek-reasoner).
    * Retrocompat: se `thinkingBudget` vier setado e reasoningMode não, deriva dele.
    */
-  reasoningMode?: 0 | 1 | 2 | null;
+  reasoningMode?: 0 | 1 | 2 | 3 | null;
   /** Só Gemini: thinking budget (0 desliga "raciocínio" cobrado como saída). */
   thinkingBudget?: number | null;
   maxOutputTokens?: number | null;
@@ -711,7 +727,7 @@ export interface StartAiChatOpts {
   temperature?: number | null;
   maxOutputTokens?: number | null;
   /** Modo de raciocínio UNIVERSAL (0=Econômico, 1=Equilibrado, 2=Intenso). */
-  reasoningMode?: 0 | 1 | 2 | null;
+  reasoningMode?: 0 | 1 | 2 | 3 | null;
   thinkingBudget?: number | null;
   geminiApiKey?: string | null;
   openrouterApiKey?: string | null;
