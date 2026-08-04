@@ -925,7 +925,16 @@ ${capturedVariablesPrompt}
     // Inicializa o roteamento de provedor (Gemini ou OpenRouter) pelo modelo.
     const { resolveModel } = await import("@/lib/ai-default-model");
     const { startAiChat, providerOf } = await import("@/lib/ai-provider");
-    const modelId = await resolveModel(agentConfig.target_model, clientId);
+    // target_model do agente é setado pelo admin em /agente (info-tab admin-only).
+    // resolveModel ignora optsModel se clientId non-admin — burlaria controle custo.
+    // Mas agente é recurso do tenant: target_model amarrado ao agente é decisão
+    // admin explícita, não override arbitrário do caller. Logo: se target_model
+    // estiver setado, usa direto (mapModelAsync valida/faz fallback); senão cai
+    // no resolveModel com clientId (default do cliente ou global).
+    const agentTarget = (agentConfig.target_model || "").trim();
+    const modelId = agentTarget
+      ? await (await import("@/lib/ai-default-model")).mapModelAsync(agentTarget)
+      : await resolveModel(null, clientId);
     if (!modelId) {
       await supabase.from("webhook_logs").insert({
          instance_name: instanceName,

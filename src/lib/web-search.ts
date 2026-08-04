@@ -13,11 +13,21 @@ export function needsFreshWebSearch(text: string): boolean {
   const query = String(text || "").trim();
   if (!query) return false;
 
+  // Gatilho explícito: usuário pede busca/web/google/online.
   const asksForSearch = /\b(pesquis[ea]|busc[ae]|procure|veja\s+(?:na\s+)?internet|na\s+web|online|google|site\s+oficial)\b/i.test(query);
-  const currentTopic = /\b(cotação|d[oó]lar|euro|c[aâ]mbio|not[ií]cia|clima|tempo|previs[aã]o|placar|resultado|eleiç[aã]o|presidente|data\s+de\s+hoje)\b/i.test(query);
-  const asksCurrentFact = /\b(qual|quanto|quem|quando|onde|como\s+(?:est[aá]|estão)|me\s+(?:diga|fale|informe)|atual(?:izado)?|recent(?:e|es)|últim[ao]s?)\b/i.test(query) && /\b(hoje|agora|atual(?:izado)?)\b/i.test(query);
 
-  return asksForSearch || currentTopic || asksCurrentFact;
+  // Tópicos que exigem dado vivo (preço, câmbio, notícia, clima, placar, eleição).
+  const currentTopic = /\b(cotaç[aã]o|d[oó]lar|euro|c[aâ]mbio|not[ií]cia|clima|tempo|previs[aã]o|placar|resultado|eleiç[aã]o|presidente|data\s+de\s+hoje|pre[çc]o\s+(?:atual|de\s+hoje)|hor[aá]rio\s+(?:de\s+hoje|atual)|endereç[oa]|telefone|funcionamento)\b/i.test(query);
+
+  // Pergunta factual + marcador de atualidade — disparado mesmo sem palavra "hoje"
+  // quando cliente menciona info típica de web (site, cidade, quem é, que ano).
+  const asksCurrentFact =
+    (/\b(qual|quanto|quem|quando|onde|como\s+(?:est[aá]|estão)|me\s+(?:diga|fale|informe)|atual(?:izado)?|recent(?:e|es)|[uú]ltim[ao]s?)\b/i.test(query) &&
+     /\b(hoje|agora|atual(?:izado)?|esse\s+ano|[12]\d{3})\b/i.test(query));
+  const asksImplicitFact =
+    /\b(qual\s+(?:o|a)?\s*(?:endereç[oa]|telefone|site|hor[aá]rio|pre[çc]o)|onde\s+(?:fica|est[aá]|é)|quem\s+é|que\s+ano|em\s+qual\s+(?:cidade|pa[ií]s|estado)|site\s+da\s+empresa|p[aá]gina\s+da\s+empresa)\b/i.test(query);
+
+  return asksForSearch || currentTopic || asksCurrentFact || asksImplicitFact;
 }
 
 export async function webSearch(query: string, maxResults = 8): Promise<SearchResult[]> {
@@ -25,25 +35,57 @@ export async function webSearch(query: string, maxResults = 8): Promise<SearchRe
   const q = query.trim().slice(0, 500);
   const limit = Math.min(Math.max(Math.floor(maxResults) || 8, 1), 10);
 
+  // 0. Cotação de moeda — fonte especializada (AwesomeAPI), 100% confiável.
   const fx = detectCurrencyQuery(q);
   if (fx) {
     const r = await fetchExchangeRate(fx.from, fx.to).catch(() => null);
     if (r) return [r];
   }
 
+  // 1. Brave Search API — se BRAVE_API_KEY setado, melhor opção (JSON limpo,
+  //    2k queries/mês grátis, sem HTML scraping nem block). Sem chave = pula.
+  const braveKey = process.env.BRAVE_API_KEY;
+  if (braveKey) {
+    const brave = await tryBrave(q, limit, braveKey).catch(() => [] as SearchResult[]);
+    if (brave.length > 0) return brave.slice(0, limit);
+  }
+
+  // 2. DuckDuckGo Instant Answer (resumo curado direto).
   const inst = await tryInstantAnswer(q).catch(() => [] as SearchResult[]);
   if (inst.length > 0) return inst.slice(0, limit);
 
+  // 3. DDG lite (HTML enxuto, menos block).
   const lite = filterAds(await tryDdgLite(q, limit).catch(() => [] as SearchResult[]));
   if (lite.length > 0) return lite;
 
+  // 4. DDG html POST (fallback do lite).
   const ddgHtml = filterAds(await tryDdgHtmlPost(q, limit).catch(() => [] as SearchResult[]));
   if (ddgHtml.length > 0) return ddgHtml;
 
+  // 5. Bing (último recurso).
   const bing = filterAds(await tryBing(q, limit).catch(() => [] as SearchResult[]));
   if (bing.length > 0) return bing;
 
   return [];
+}
+
+async function tryBrave(query: string, maxResults: number, apiKey: string): Promise<SearchResult[]> {
+  const res = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${maxResults}&country=BR&search_lang=pt-br`, {
+    headers: {
+      "Accept": "application/json",
+      "Accept-Encoding": "gzip",
+      "X-Subscription-Token": apiKey,
+    },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!res.ok) throw new Error(`Brave HTTP ${res.status}`);
+  const d: any = await res.json();
+  const web = Array.isArray(d?.web?.results) ? d.web.results : [];
+  return web.slice(0, maxResults).map((r: any): SearchResult => ({
+    title: String(r.title || "").trim(),
+    url: String(r.url || "").trim(),
+    snippet: String(r.description || r.extra_snippets?.[0] || "").trim(),
+  })).filter((r: SearchResult) => r.url && r.title);
 }
 
 export function formatResultsForAI(results: SearchResult[]): string {
@@ -75,11 +117,14 @@ function filterAds(results: SearchResult[]): SearchResult[] {
 
 export async function webFetchPage(url: string): Promise<{ success: boolean; title?: string; content?: string; error?: string }> {
   if (!url?.startsWith("http")) return { success: false, error: "URL inválida. Deve iniciar com http/https." };
-  
+
   const cleanUrl = url.trim();
   const key = process.env.JINA_API_KEY;
+  const MAX_CHARS = 30000; // ponytail: 30k cobre ~6k tokens Gemini; ampliar exige chunking
+  let title = "";
+  let mainContent = "";
+
   try {
-    // 1. Tenta o Jina AI Reader (ideal para LLM: markdown direto de SPA renderizado no Puppeteer)
     const res = await fetch(`https://r.jina.ai/${cleanUrl}`, {
       signal: AbortSignal.timeout(18000),
       headers: {
@@ -94,47 +139,92 @@ export async function webFetchPage(url: string): Promise<{ success: boolean; tit
       const data: any = await res.json().catch(() => null);
       const md = data?.data?.content || data?.content || "";
       if (md && md.length > 50) {
-        return {
-          success: true,
-          title: data?.data?.title || data?.title || "",
-          content: md.slice(0, 15000) // limita para não estourar contexto
-        };
+        title = data?.data?.title || data?.title || "";
+        mainContent = md;
       }
     }
-  } catch {
-    // Falha do Jina passa pro fallback
-  }
+  } catch {}
 
-  // 2. Fallback: Fetch direto de HTML e limpeza de tags
-  try {
-    const res = await fetch(cleanUrl, {
-      headers: { "User-Agent": BROWSER_UA },
-      signal: AbortSignal.timeout(10000)
-    });
-    if (!res.ok) return { success: false, error: `Falha no acesso direto: HTTP ${res.status}` };
-    const html = await res.text();
-    
-    // Extrai o body ou pega o texto inteiro limpo
-    const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
-    const contentHtml = bodyMatch ? bodyMatch[1] : html;
-    
-    // Remove scripts e estilos antes de limpar tags
-    const cleanHtml = contentHtml
-      .replace(/<script[^>]*>([\s\S]*?)<\/script>/gi, "")
-      .replace(/<style[^>]*>([\s\S]*?)<\/style>/gi, "");
-    
-    const text = stripTags(cleanHtml);
-    if (text.length > 50) {
-      return {
-        success: true,
-        content: text.slice(0, 8000)
-      };
+  if (!mainContent) {
+    try {
+      const res = await fetch(cleanUrl, {
+        headers: { "User-Agent": BROWSER_UA },
+        signal: AbortSignal.timeout(10000)
+      });
+      if (res.ok) {
+        const html = await res.text();
+        const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+        const contentHtml = bodyMatch ? bodyMatch[1] : html;
+        const cleanHtml = contentHtml
+          .replace(/<script[^>]*>([\s\S]*?)<\/script>/gi, "")
+          .replace(/<style[^>]*>([\s\S]*?)<\/style>/gi, "");
+        const text = stripTags(cleanHtml);
+        if (text.length > 50) mainContent = text;
+      }
+    } catch (err: any) {
+      return { success: false, error: err.message };
     }
-  } catch (err: any) {
-    return { success: false, error: err.message };
   }
 
-  return { success: false, error: "Nenhum conteúdo pôde ser extraído desta página." };
+  if (!mainContent) {
+    return { success: false, error: "Nenhum conteúdo pôde ser extraído desta página." };
+  }
+
+  // Crawl 1 nível: se conteúdo curto (<4k chars), puxa 2-3 sub-páginas
+  // internas relevantes (sobre, produtos, serviços, contato) pra enriquecer.
+  if (mainContent.length < 4000) {
+    const subLinks = extractRelevantSubLinks(cleanUrl, mainContent);
+    for (const sub of subLinks.slice(0, 3)) {
+      try {
+        const subRes = await fetch(`https://r.jina.ai/${sub}`, {
+          signal: AbortSignal.timeout(10000),
+          headers: {
+            ...(key ? { "Authorization": `Bearer ${key}` } : {}),
+            "Accept": "application/json",
+            "X-Return-Format": "markdown",
+          }
+        });
+        if (!subRes.ok) continue;
+        const subData: any = await subRes.json().catch(() => null);
+        const subMd = subData?.data?.content || subData?.content || "";
+        if (subMd && subMd.length > 200) {
+          mainContent += `\n\n--- ${sub} ---\n${subMd.slice(0, 6000)}`;
+        }
+      } catch {}
+      if (mainContent.length > 16000) break;
+    }
+  }
+
+  return {
+    success: true,
+    title,
+    content: mainContent.slice(0, MAX_CHARS)
+  };
+}
+
+function extractRelevantSubLinks(baseUrl: string, content: string): string[] {
+  const links = new Set<string>();
+  try {
+    const base = new URL(baseUrl);
+    const mdRe = /\[([^\]]+)\]\((https?:\/\/[^\s\)]+)\)/g;
+    let m: RegExpExecArray | null;
+    while ((m = mdRe.exec(content)) !== null) {
+      const label = m[1].toLowerCase();
+      if (/sobre|quem somos|produtos?|serviços?|servicos?|contato|preços?|precos?|local|endereç|enderec/i.test(label)) {
+        links.add(m[2]);
+      }
+    }
+    const rawRe = /https?:\/\/[^\s\)\]"'<>]+/g;
+    while ((m = rawRe.exec(content)) !== null) {
+      try {
+        const u = new URL(m[0]);
+        if (u.hostname === base.hostname && u.pathname && u.pathname !== "/" && u.pathname !== base.pathname) {
+          links.add(u.href);
+        }
+      } catch {}
+    }
+  } catch {}
+  return Array.from(links);
 }
 
 function resolveDdgUrl(rawHref: string): string {
