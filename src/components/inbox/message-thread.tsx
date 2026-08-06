@@ -21,7 +21,8 @@ import {
   XCircle,
   PanelRightOpen,
   PanelRightClose,
-  Bot
+  Bot,
+  ChevronDown
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -233,43 +234,71 @@ export function MessageThread({
   // aguardamos o próximo paint (requestAnimationFrame + setTimeout duplo)
   // para garantir que o DOM está totalmente renderizado antes de scrollar.
   const scrollViewportRef = useRef<HTMLDivElement | null>(null);
+  const [userIsScrolledUp, setUserIsScrolledUp] = useState(false);
 
-  const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
+  // Scroll suave ou instantâneo até o fim do histórico
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     const el = scrollViewportRef.current;
     if (!el) return;
-    // scrollTop alvo: final do conteúdo.
     const target = el.scrollHeight;
-    // Aplica 2x com rAF — alguns navegadores precisam de 2 frames pra recalcular
-    // a altura após imagens/mídias carregarem.
     requestAnimationFrame(() => {
       if (!scrollViewportRef.current) return;
       scrollViewportRef.current.scrollTo({ top: target, behavior });
-      requestAnimationFrame(() => {
-        if (!scrollViewportRef.current) return;
-        scrollViewportRef.current.scrollTo({ top: scrollViewportRef.current.scrollHeight, behavior });
-      });
     });
   }, []);
 
-  // Callback ref: busca o elemento Viewport dentro do ScrollArea.
+  // Monitora o evento de scroll no Viewport para detectar se o usuário rolou para cima
+  const handleScroll = useCallback(() => {
+    const el = scrollViewportRef.current;
+    if (!el) return;
+    const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const isUp = distanceToBottom > 150;
+    setUserIsScrolledUp(isUp);
+  }, []);
+
+  // Callback ref: busca e acopla o listener de scroll no elemento Viewport do ScrollArea
   const scrollAreaRef = useCallback((node: HTMLDivElement | null) => {
     if (!node) {
+      if (scrollViewportRef.current) {
+        scrollViewportRef.current.removeEventListener("scroll", handleScroll);
+      }
       scrollViewportRef.current = null;
       return;
     }
-    // O Viewport é o elemento com `data-slot="scroll-area-viewport"`.
-    const viewport = node.querySelector('[data-slot="scroll-area-viewport"]') as HTMLDivElement | null;
-    scrollViewportRef.current = viewport || node;
-    // Scroll imediato ao montar/trocar de conversa.
-    if (viewport) {
+
+    const viewport = (node.querySelector('[data-slot="scroll-area-viewport"]') as HTMLDivElement | null) || node;
+    
+    if (scrollViewportRef.current !== viewport) {
+      if (scrollViewportRef.current) {
+        scrollViewportRef.current.removeEventListener("scroll", handleScroll);
+      }
+      scrollViewportRef.current = viewport;
+      viewport.addEventListener("scroll", handleScroll, { passive: true });
       viewport.scrollTop = viewport.scrollHeight;
     }
-  }, []);
+  }, [handleScroll]);
 
-  // Quando carrega mensagens OU troca de conversa → scroll pro fim.
+  // Ao trocar de conversa -> reseta estado de scroll e desce instantaneamente pro fim
+  const prevConvIdRef = useRef<string | null>(null);
   useEffect(() => {
-    scrollToBottom("auto");
-  }, [messages, conversationId, loading, scrollToBottom]);
+    if (conversationId && conversationId !== prevConvIdRef.current) {
+      prevConvIdRef.current = conversationId;
+      setUserIsScrolledUp(false);
+      scrollToBottom("auto");
+    }
+  }, [conversationId, scrollToBottom]);
+
+  // Quando o histórico de mensagens atualiza (mensagens novas/polling):
+  // SÓ rola pra baixo se o usuário JÁ estiver na base da conversa!
+  const prevMessagesLengthRef = useRef(messages.length);
+  useEffect(() => {
+    const lengthChanged = messages.length !== prevMessagesLengthRef.current;
+    prevMessagesLengthRef.current = messages.length;
+
+    if (!userIsScrolledUp) {
+      scrollToBottom(lengthChanged ? "smooth" : "auto");
+    }
+  }, [messages, userIsScrolledUp, scrollToBottom]);
 
   // Envio de mensagem de texto simples pelo compositor
   const handleSend = useCallback(
@@ -590,6 +619,20 @@ export function MessageThread({
             </div>
           )}
         </ScrollArea>
+
+        {/* Botão Flutuante Estilo WhatsApp para Voltar à Última Mensagem */}
+        {userIsScrolledUp && (
+          <button
+            onClick={() => {
+              setUserIsScrolledUp(false);
+              scrollToBottom("smooth");
+            }}
+            className="absolute bottom-4 right-6 flex h-9 w-9 items-center justify-center rounded-full bg-card/90 text-foreground border border-border shadow-lg backdrop-blur hover:bg-card transition-all duration-200 hover:scale-105 cursor-pointer z-10"
+            title="Ir para a mensagem mais recente"
+          >
+            <ChevronDown className="h-4 w-4 text-primary" />
+          </button>
+        )}
       </div>
 
       {/* Compositor de Mensagens */}

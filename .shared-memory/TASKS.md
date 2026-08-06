@@ -1,5 +1,16 @@
 # Tarefas do Projeto
 
+## Chat (/chat) — Rótulo do Badge da IA (2026-08-06)
+- [x] Alterar o badge no cabeçalho das mensagens geradas pela IA de "IA SDR" para "IA" (`src/components/inbox/message-bubble.tsx`) <!-- id: 460 -->
+- [x] `npx tsc --noEmit` 0 erros <!-- id: 461 -->
+
+## Chat (/chat) — Rolagem Fluida Nativa Estilo WhatsApp (2026-08-06)
+- [x] Adicionar listener de scroll com cálculo de distância até o fim (`distanceToBottom > 150px`) <!-- id: 450 -->
+- [x] Preservar a posição de rolagem quando o usuário subir na conversa (evitar puxões de scroll ao atualizar estado) <!-- id: 451 -->
+- [x] Aplicar rolagem suave (`behavior: "smooth"`) para novas mensagens quando o usuário estiver na base <!-- id: 452 -->
+- [x] Criar botão flutuante circular estilo WhatsApp `[ 🠇 ]` para rolar até a mensagem mais recente <!-- id: 453 -->
+- [x] `npx tsc --noEmit` 0 erros <!-- id: 454 -->
+
 ## Chat (/chat) — Mensagens em Tempo Real (2026-08-06)
 - [x] Criar helpers `isSameJid` e `getPossibleJids` em `conversations.ts` para casar JIDs do WhatsApp em todas as variações <!-- id: 440 -->
 - [x] Atualizar `handleMessageEvent` e `handleConversationEvent` com `isSameJid` (0ms WebSocket update) <!-- id: 441 -->

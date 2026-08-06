@@ -2,6 +2,32 @@
 
 Este projeto (`painel-sdr`) é um Painel de SDR construído com Next.js (versão 16.2.3), conectado ao Supabase e Evolution API (WhatsApp), com uso de Redis para filas e inteligência artificial (Google Gemini).
 
+## [2026-08-06] Chat (/chat) — Rótulo de Respostas da IA alterado de "IA SDR" para "IA"
+
+**Solicitação**: "tire esse ia sdr, e deixe somente o ia nas resposta q a ia gera".
+
+**Fix Aplicado (`src/components/inbox/message-bubble.tsx`)**:
+- Atualizado o texto do badge no cabeçalho dos balões de mensagens geradas pela Inteligência Artificial de `IA SDR` para `IA`.
+
+**Validação**: `npx tsc --noEmit` 0 erros.
+
+## [2026-08-06] Chat (/chat) — Rolagem Fluida Nativa Estilo WhatsApp (sem saltos bruscos)
+
+**Solicitação**: "quando eu dou uma leve scrolada para baixo no chat, ele em vez de descer gradativo ele desce logo para ultima mensagem faça ser fluido iqual whatszap".
+
+**Causas**:
+1. O `useEffect` do `MessageThread` executava `scrollToBottom("auto")` a cada atualização do estado `messages` (inclusive em pollings ou atualizações de status), forçando o scroll para a última mensagem com valor `auto` (salto seco).
+2. Não havia detecção da intenção do usuário (se o usuário rolou para cima/leitura).
+
+**Fix Aplicado (`src/components/inbox/message-thread.tsx`)**:
+- Listener de scroll no Viewport com detecção de distância da base (`distanceToBottom > 150px` ➔ `userIsScrolledUp = true`).
+- **Respeito à rolagem do usuário**: Se `userIsScrolledUp` for verdadeiro, atualizações de mensagens/polling **NÃO** forçam scroll para o fim, permitindo rolagem leve, suave e gradual sem puxões.
+- **Scroll suave**: Quando o usuário está na base da conversa, novas mensagens rolam com `behavior: "smooth"`.
+- **Botão Flutuante (Estilo WhatsApp)**: Quando o usuário rola para cima, exibe um botão circular flutuante `[ 🠇 ]` no canto inferior direito para voltar suavemente à última mensagem com 1 clique.
+- **Troca de Conversa**: Ao mudar de conversa (`conversationId`), faz scroll imediato (`auto`) para a última mensagem.
+
+**Validação**: `npx tsc --noEmit` 0 erros.
+
 ## [2026-08-06] Chat (/chat) — Atualização de Mensagens 100% Tempo Real (Híbrido Ultra-Otimizado)
 
 **Solicitação**: "é de extrena importancia que aqui as mensagem seja atualizada em tempo real, pois so atualiza quando saio da conversa e entro denovo faça isso de maneria otimizada para nao pesar tanto mas se trata d uma interface praticamente de whatszap entao e fundamental q as mensagem seja atualiza em tempo real".
