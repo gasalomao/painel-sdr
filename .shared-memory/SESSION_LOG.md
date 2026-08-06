@@ -1,5 +1,18 @@
 # Log de Sessões
 
+## [2026-08-06 17:38] Antigravity — Chat (/chat): Suporte a Pré-visualização de Mídias (Áudio, Imagem, Documento) na Barra Lateral
+- **O que foi feito**:
+  - **Causa Raiz Identificada**: As consultas ao `chats_dashboard` na lista de conversas (`ConversationList`) não selecionavam as colunas `media_type` e `media_url`. Quando a última mensagem era um áudio ou imagem sem texto/legenda, o conteúdo vinha como `""`, fazendo com que a barra lateral exibisse `"Nenhuma mensagem..."`.
+  - **Helper `formatLastMessagePreview` (`src/lib/inbox/conversations.ts`)**: Mapeia mídias sem legenda em rótulos amigáveis (`📷 Imagem`, `🎵 Áudio`, `🎥 Vídeo`, `📄 Documento`, `🎨 Figurinha`, `📍 Localização`, `👤 Contato`).
+  - **Consultas do `chats_dashboard`**: Atualizadas para `select("remote_jid, content, created_at, media_type, media_url")` em `ConversationList`.
+  - **Eventos Realtime**: Atualizado `handleMessageEvent` no `/chat` para usar `formatLastMessagePreview`.
+- **Arquivos alterados**:
+  - `src/lib/inbox/conversations.ts`
+  - `src/components/inbox/conversation-list.tsx`
+  - `src/app/chat/page.tsx`
+  - `.shared-memory/CONTEXT.md`, `.shared-memory/TASKS.md`, `.shared-memory/SESSION_LOG.md`
+- **Estado ao sair**: `npx tsc --noEmit` 0 erros. A barra lateral agora exibe `🎵 Áudio`, `📷 Imagem`, `📄 Documento` etc. quando a última mensagem for uma mídia.
+
 ## [2026-08-06 17:16] Antigravity — Chat (/chat): Rótulo do Badge da IA Alterado para "IA"
 - **O que foi feito**:
   - Atualizado o componente de balão de mensagem (`src/components/inbox/message-bubble.tsx`).

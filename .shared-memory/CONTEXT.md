@@ -2,6 +2,21 @@
 
 Este projeto (`painel-sdr`) é um Painel de SDR construído com Next.js (versão 16.2.3), conectado ao Supabase e Evolution API (WhatsApp), com uso de Redis para filas e inteligência artificial (Google Gemini).
 
+## [2026-08-06] Chat (/chat) — Pré-visualização de Mídias (Áudio, Imagem, Documento, Vídeo) na Barra Lateral
+
+**Solicitação**: "no chat quando a ultima mensagem e um audio ou uma imagem ele aparece na lateral nenhuma mensagem. faça aparecer se for por ultimo audio, imagem , documento enfim ao inves de nenhuma mensagem".
+
+**Causas**:
+1. As consultas ao `chats_dashboard` em `ConversationList` buscavam apenas `remote_jid, content, created_at`. Sem a seleção de `media_type` e `media_url`, mensagens de áudio/imagem que não tinham legenda/texto retornavam `content: ""`.
+2. Como o valor de `last_message_text` ficava vazio, o fallback da UI exibia `"Nenhuma mensagem..."`.
+
+**Fix Aplicado**:
+- **Helper `formatLastMessagePreview` (`src/lib/inbox/conversations.ts`)**: Mapeia mídias sem legenda para rótulos visuais legíveis e amigáveis (`📷 Imagem`, `🎵 Áudio`, `🎥 Vídeo`, `📄 Documento`, `🎨 Figurinha`, `📍 Localização`, `👤 Contato`). Se houver legenda/texto (ex: "Foto do comprovante"), exibe `📷 Foto do comprovante`.
+- **Inclusão de Colunas de Mídia (`src/components/inbox/conversation-list.tsx`)**: Atualizadas as buscas inicial e de polling em background para selecionar `select("remote_jid, content, created_at, media_type, media_url")`.
+- **Eventos em Tempo Real (`src/app/chat/page.tsx`)**: `handleMessageEvent` atualizado para formatar mídias instantaneamente com `formatLastMessagePreview`.
+
+**Validação**: `npx tsc --noEmit` 0 erros.
+
 ## [2026-08-06] Chat (/chat) — Rótulo de Respostas da IA alterado de "IA SDR" para "IA"
 
 **Solicitação**: "tire esse ia sdr, e deixe somente o ia nas resposta q a ia gera".

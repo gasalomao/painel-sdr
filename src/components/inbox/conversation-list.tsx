@@ -6,10 +6,11 @@ import {
   matchesContactFilters,
   normalizeConversations,
   CONVERSATION_SELECT,
+  formatLastMessagePreview,
 } from "@/lib/inbox/conversations";
 import { cn } from "@/lib/utils";
 import type { Conversation, ConversationStatus, Tag } from "@/types";
-import { Search, ChevronDown, X, RefreshCw } from "lucide-react";
+import { Search, ChevronDown, X, RefreshCw, Trash2, MoreVertical } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { Input } from "@/components/ui/input";
@@ -27,6 +28,7 @@ interface ConversationListProps {
   onSelect: (conversation: Conversation) => void;
   conversations: Conversation[];
   onConversationsLoaded: (conversations: Conversation[]) => void;
+  onDeleteConversation?: (conversationId: string) => void;
   resyncToken?: number;
   clientId: string | null;
   activeInstance?: string;
@@ -47,6 +49,7 @@ export function ConversationList({
   onSelect,
   conversations,
   onConversationsLoaded,
+  onDeleteConversation,
   resyncToken = 0,
   clientId,
   activeInstance = "__all__",
@@ -142,7 +145,7 @@ export function ConversationList({
           .limit(100),
         supabase
           .from("chats_dashboard")
-          .select("remote_jid, content, created_at")
+          .select("remote_jid, content, created_at, media_type, media_url")
           .eq("client_id", clientId)
           .order("created_at", { ascending: false })
           .limit(300),
@@ -160,8 +163,12 @@ export function ConversationList({
       if (msgsRes.data) {
         for (const msg of msgsRes.data) {
           if (msg.remote_jid && !latestMap.has(msg.remote_jid)) {
+            const previewText = formatLastMessagePreview(
+              msg.content,
+              msg.media_type || (msg.media_url ? "image" : undefined)
+            );
             latestMap.set(msg.remote_jid, {
-              content: msg.content || "",
+              content: previewText,
               created_at: msg.created_at
             });
           }
@@ -170,9 +177,10 @@ export function ConversationList({
 
       const normalized = normalizeConversations(sessionsRes.data ?? []).map((c) => {
         const lastMsgObj = latestMap.get(c.id);
+        const text = lastMsgObj?.content || formatLastMessagePreview(c.last_message_text) || "";
         return {
           ...c,
-          last_message_text: lastMsgObj?.content || c.last_message_text || "",
+          last_message_text: text,
           last_message_at: lastMsgObj?.created_at || c.last_message_at,
         };
       });
@@ -216,7 +224,7 @@ export function ConversationList({
           .limit(100),
         supabase
           .from("chats_dashboard")
-          .select("remote_jid, content, created_at")
+          .select("remote_jid, content, created_at, media_type, media_url")
           .eq("client_id", clientId)
           .order("created_at", { ascending: false })
           .limit(300),
@@ -228,8 +236,12 @@ export function ConversationList({
       if (msgsRes.data) {
         for (const msg of msgsRes.data) {
           if (msg.remote_jid && !latestMap.has(msg.remote_jid)) {
+            const previewText = formatLastMessagePreview(
+              msg.content,
+              msg.media_type || (msg.media_url ? "image" : undefined)
+            );
             latestMap.set(msg.remote_jid, {
-              content: msg.content || "",
+              content: previewText,
               created_at: msg.created_at,
             });
           }
@@ -238,9 +250,10 @@ export function ConversationList({
 
       const normalized = normalizeConversations(sessionsRes.data).map((c) => {
         const lastMsgObj = latestMap.get(c.id);
+        const text = lastMsgObj?.content || formatLastMessagePreview(c.last_message_text) || "";
         return {
           ...c,
-          last_message_text: lastMsgObj?.content || c.last_message_text || "",
+          last_message_text: text,
           last_message_at: lastMsgObj?.created_at || c.last_message_at,
         };
       });
@@ -584,6 +597,7 @@ export function ConversationList({
                 conversation={conv}
                 isActive={conv.id === activeConversationId}
                 onSelect={handleSelect}
+                onDelete={onDeleteConversation}
               />
             ))}
           </div>
@@ -597,12 +611,14 @@ interface ConversationItemProps {
   conversation: Conversation;
   isActive: boolean;
   onSelect: (conversation: Conversation) => void;
+  onDelete?: (conversationId: string) => void;
 }
 
 function ConversationItem({
   conversation,
   isActive,
   onSelect,
+  onDelete,
 }: ConversationItemProps) {
   const contact = conversation.contact;
   const displayName = contact?.name || contact?.phone || "Desconhecido";
@@ -612,6 +628,14 @@ function ConversationItem({
   const handleClick = useCallback(() => {
     onSelect(conversation);
   }, [onSelect, conversation]);
+
+  const handleDelete = useCallback(() => {
+    if (!onDelete) return;
+    const ok = window.confirm(
+      `Apagar conversa com ${displayName}? Todas as mensagens serão removidas do painel. Esta ação não pode ser desfeita.`
+    );
+    if (ok) onDelete(conversation.id);
+  }, [onDelete, conversation.id, displayName]);
 
   const timeAgo = useMemo(() => {
     if (!conversation.last_message_at) return "";
@@ -626,10 +650,18 @@ function ConversationItem({
   }, [conversation.last_message_at]);
 
   return (
-    <button
+    <div
+      role="button"
+      tabIndex={0}
       onClick={handleClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          handleClick();
+        }
+      }}
       className={cn(
-        "flex w-full items-start gap-3 px-3 py-3 text-left transition-colors hover:bg-muted/50 border-b border-border/40 cursor-pointer relative",
+        "group flex w-full items-start gap-3 px-3 py-3 text-left transition-colors hover:bg-muted/50 border-b border-border/40 cursor-pointer relative",
         isActive && "border-l-4 border-primary bg-muted/70"
       )}
     >
@@ -688,6 +720,26 @@ function ConversationItem({
           )}
         </div>
       </div>
-    </button>
+      {onDelete && (
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            onClick={(e: React.MouseEvent) => e.stopPropagation()}
+            className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 focus:opacity-100 p-1.5 rounded-md hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-opacity z-10"
+            aria-label="Mais opções"
+          >
+            <MoreVertical className="h-4 w-4" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              onSelect={handleDelete}
+              className="text-destructive focus:text-destructive focus:bg-destructive/10 cursor-pointer"
+            >
+              <Trash2 className="h-4 w-4 mr-2" />
+              Apagar conversa
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
+    </div>
   );
 }
