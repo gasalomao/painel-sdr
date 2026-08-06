@@ -14,7 +14,7 @@ import {
 import {
   Send, Play, Pause, Square, Loader2, Search, Globe, BarChart3,
   CheckCircle2, XCircle, Star, Ban, RefreshCw, ShieldAlert,
-  Rocket, Terminal, Filter, TrendingUp, Building2, Link2, Link2Off, Trash2,
+  Rocket, Terminal, Filter, TrendingUp, Building2, Link2, Link2Off, Trash2, MapPin,
 } from "lucide-react";
 import { renderTemplate, type TemplateContext } from "@/lib/template-vars";
 import { cn } from "@/lib/utils";
@@ -29,6 +29,8 @@ type Lead = {
   rating: string | null;
   reviews: string | null;
   website: string | null;
+  maps_url: string | null;
+  place_id: string | null;
   created_at: string;
   opt_out: boolean;
 };
@@ -669,6 +671,7 @@ export default function ProspeccaoSitesPage() {
                         <th className="p-2 text-left">Nota</th>
                         <th className="p-2 text-left">Avaliações</th>
                         <th className="p-2 text-left">Site</th>
+                        <th className="p-2 text-left">Maps</th>
                         <th className="p-2 text-left">Descadastro</th>
                         <th className="p-2"></th>
                       </tr>
@@ -682,7 +685,17 @@ export default function ProspeccaoSitesPage() {
                             <td className="p-2 text-white/30 font-mono">{idx + 1}</td>
                             <td className="p-2 font-bold text-white">
                               <Building2 className="w-3 h-3 inline mr-1 text-white/40" />
-                              {l.nome_negocio || "—"}
+                              {(() => {
+                                const mapsUrl = l.maps_url || (l.place_id ? `https://www.google.com/maps/place/?q=place_id:${l.place_id}` : null);
+                                if (mapsUrl) {
+                                  return (
+                                    <a href={mapsUrl} target="_blank" rel="noopener noreferrer" className="hover:text-blue-400 hover:underline" title="Abrir no Google Maps">
+                                      {l.nome_negocio || "—"}
+                                    </a>
+                                  );
+                                }
+                                return l.nome_negocio || "—";
+                              })()}
                             </td>
                             <td className="p-2">{l.ramo_negocio || "—"}</td>
                             <td className="p-2 font-mono text-green-300">{l.telefone || l.remoteJid.split("@")[0]}</td>
@@ -708,6 +721,19 @@ export default function ProspeccaoSitesPage() {
                                   <Link2Off className="w-3 h-3 mr-1" />sem
                                 </Badge>
                               )}
+                            </td>
+                            <td className="p-2">
+                              {(() => {
+                                const mapsUrl = l.maps_url || (l.place_id ? `https://www.google.com/maps/place/?q=place_id:${l.place_id}` : null);
+                                if (!mapsUrl) return <span className="text-white/20">—</span>;
+                                return (
+                                  <a href={mapsUrl} target="_blank" rel="noopener noreferrer" title="Abrir no Google Maps">
+                                    <Badge variant="outline" className="text-blue-400 border-blue-500/30 cursor-pointer hover:bg-blue-500/10">
+                                      <MapPin className="w-3 h-3 mr-1" />Maps
+                                    </Badge>
+                                  </a>
+                                );
+                              })()}
                             </td>
                             <td className="p-2">
                               {l.opt_out ? (

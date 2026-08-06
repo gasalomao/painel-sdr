@@ -43,23 +43,30 @@ export async function GET(req: NextRequest) {
     sort === "reviews" ? "reviews" :
     "created_at";
 
-  let q = supabaseAdmin
-    .from("leads_extraidos")
-    .select("id, remoteJid, nome_negocio, telefone, ramo_negocio, endereco, avaliacao, reviews, website, created_at, opt_out", { count: "exact" })
-    .eq("client_id", ctx.clientId) as any;
+  const baseSelect = "id, remoteJid, nome_negocio, telefone, ramo_negocio, endereco, avaliacao, reviews, website, maps_url, place_id, created_at, opt_out";
 
-  if (hasWebsite === "only_empty") q = q.or("website.is.null,website.eq.");
-  else if (hasWebsite === "only_with") q = q.not("website", "is", null).neq("website", "");
+  const buildQuery = (select: string) => {
+    let qq = supabaseAdmin
+      .from("leads_extraidos")
+      .select(select, { count: "exact" })
+      .eq("client_id", ctx.clientId) as any;
+    if (hasWebsite === "only_empty") qq = qq.or("website.is.null,website.eq.");
+    else if (hasWebsite === "only_with") qq = qq.not("website", "is", null).neq("website", "");
+    if (ignoreOptOut) qq = qq.eq("opt_out", false);
+    if (ratingMin > 0) qq = qq.gte("avaliacao", ratingMin);
+    if (reviewsMin > 0) qq = qq.gte("reviews", reviewsMin);
+    if (ramo) qq = qq.ilike("ramo_negocio", `%${ramo}%`);
+    if (region) qq = qq.ilike("endereco", `%${region}%`);
+    return qq.order(sortCol, { ascending: order === "asc" }).range(offset, offset + limit - 1);
+  };
 
-  if (ignoreOptOut) q = q.eq("opt_out", false);
-  if (ratingMin > 0) q = q.gte("avaliacao", ratingMin);
-  if (reviewsMin > 0) q = q.gte("reviews", reviewsMin);
-  if (ramo) q = q.ilike("ramo_negocio", `%${ramo}%`);
-  if (region) q = q.ilike("endereco", `%${region}%`);
-
-  q = q.order(sortCol, { ascending: order === "asc" }).range(offset, offset + limit - 1);
-
-  const { data, error, count } = await q;
+  let { data, error, count } = await buildQuery(baseSelect);
+  // ponytail: se coluna maps_url/place_id não existe no DB, retry sem elas
+  if (error && /maps_url|place_id/.test(error.message)) {
+    const fallbackSelect = "id, remoteJid, nome_negocio, telefone, ramo_negocio, endereco, avaliacao, reviews, website, created_at, opt_out";
+    const r2 = await buildQuery(fallbackSelect);
+    data = r2.data; error = r2.error; count = r2.count;
+  }
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
 
   // Normaliza campo `rating` no payload (front espera `rating` + `reviews`)
