@@ -5,6 +5,7 @@ import { supabase } from "@/lib/supabase";
 import {
   matchesContactFilters,
   normalizeConversations,
+  CONVERSATION_SELECT,
 } from "@/lib/inbox/conversations";
 import { cn } from "@/lib/utils";
 import type { Conversation, ConversationStatus, Tag } from "@/types";
@@ -198,6 +199,57 @@ export function ConversationList({
       cancelled = true;
     };
   }, [resyncToken, clientId]);
+
+  // Polling em background silencioso (5s) para manter a lista de conversas e contadores atualizados
+  useEffect(() => {
+    if (!clientId) return;
+
+    const interval = setInterval(async () => {
+      if (document.hidden) return;
+
+      const [sessionsRes, msgsRes] = await Promise.all([
+        supabase
+          .from("sessions")
+          .select(CONVERSATION_SELECT)
+          .eq("client_id", clientId)
+          .order("last_message_at", { ascending: false, nullsFirst: false })
+          .limit(100),
+        supabase
+          .from("chats_dashboard")
+          .select("remote_jid, content, created_at")
+          .eq("client_id", clientId)
+          .order("created_at", { ascending: false })
+          .limit(300),
+      ]);
+
+      if (!sessionsRes.data) return;
+
+      const latestMap = new Map<string, { content: string; created_at: string }>();
+      if (msgsRes.data) {
+        for (const msg of msgsRes.data) {
+          if (msg.remote_jid && !latestMap.has(msg.remote_jid)) {
+            latestMap.set(msg.remote_jid, {
+              content: msg.content || "",
+              created_at: msg.created_at,
+            });
+          }
+        }
+      }
+
+      const normalized = normalizeConversations(sessionsRes.data).map((c) => {
+        const lastMsgObj = latestMap.get(c.id);
+        return {
+          ...c,
+          last_message_text: lastMsgObj?.content || c.last_message_text || "",
+          last_message_at: lastMsgObj?.created_at || c.last_message_at,
+        };
+      });
+
+      onConversationsLoadedRef.current(normalized);
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [clientId]);
 
   // Empresas extraídas derivam das conversas carregadas
   const companies = useMemo(() => {

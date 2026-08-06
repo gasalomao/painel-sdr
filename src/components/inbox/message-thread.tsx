@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "@/lib/supabase";
 import type { Conversation, Contact, Message, ConversationStatus } from "@/types";
+import { getPossibleJids } from "@/lib/inbox/conversations";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { MessageBubble } from "./message-bubble";
@@ -132,18 +133,19 @@ export function MessageThread({
     return "sdr";
   }, [activeInstance, conversation]);
 
-  // Carrega mensagens do chats_dashboard
+  // Carrega mensagens do chats_dashboard com busca flexível de JIDs
   useEffect(() => {
     if (!conversationId || !clientId) return;
     let cancelled = false;
 
     (async () => {
       setLoading(true);
+      const posiblesJids = getPossibleJids(conversationId);
       const { data, error } = await supabase
         .from("chats_dashboard")
         .select("*")
         .eq("client_id", clientId)
-        .eq("remote_jid", conversationId)
+        .in("remote_jid", posiblesJids)
         .order("created_at", { ascending: false })
         .limit(100);
 
@@ -164,6 +166,45 @@ export function MessageThread({
       cancelled = true;
     };
   }, [conversationId, clientId, resyncToken]);
+
+  // Polling ultra-leve em background (2.5s) para a conversa ativa.
+  // Garante atualização em tempo real mesmo se o WebSocket Realtime reconectar ou atrasar.
+  useEffect(() => {
+    if (!conversationId || !clientId) return;
+
+    const interval = setInterval(async () => {
+      if (document.hidden) return;
+
+      const posiblesJids = getPossibleJids(conversationId);
+      const { data } = await supabase
+        .from("chats_dashboard")
+        .select("*")
+        .eq("client_id", clientId)
+        .in("remote_jid", posiblesJids)
+        .order("created_at", { ascending: false })
+        .limit(20);
+
+      if (!data || data.length === 0) return;
+
+      const norm = (data || []).reverse().map(normalizeDbMessage);
+      const existingIds = new Set((messages || []).map((m: Message) => m.id));
+      const newMsgs = norm.filter((m: Message) => !existingIds.has(m.id));
+      if (newMsgs.length === 0) return;
+
+      const merged = [...(messages || []), ...newMsgs];
+      const uniqueMap = new Map<string, Message>();
+      for (const m of merged) {
+        uniqueMap.set(m.id, m);
+      }
+      const sorted = Array.from(uniqueMap.values()).sort(
+        (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+      );
+      onMessagesLoadedRef.current(sorted);
+    }, 2500);
+
+    return () => clearInterval(interval);
+  }, [conversationId, clientId]);
+
 
   // Marca como lido no banco ao abrir a conversa.
   // ANTES: rodava mesmo quando contact_id era vazio → update em todas sessions

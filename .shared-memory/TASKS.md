@@ -1,5 +1,26 @@
 # Tarefas do Projeto
 
+## Chat (/chat) — Mensagens em Tempo Real (2026-08-06)
+- [x] Criar helpers `isSameJid` e `getPossibleJids` em `conversations.ts` para casar JIDs do WhatsApp em todas as variações <!-- id: 440 -->
+- [x] Atualizar `handleMessageEvent` e `handleConversationEvent` com `isSameJid` (0ms WebSocket update) <!-- id: 441 -->
+- [x] Adicionar busca flexível por `.in("remote_jid", posiblesJids)` em `MessageThread` <!-- id: 442 -->
+- [x] Adicionar polling em background ultra-leve (2.5s) na conversa ativa (`MessageThread`) para garantia de 0% de lag <!-- id: 443 -->
+- [x] Adicionar polling em background silencioso (5s) na barra lateral (`ConversationList`) para ordenação e contadores <!-- id: 444 -->
+- [x] Suporte a pausa automática do polling quando a aba estiver oculta (`document.hidden`) <!-- id: 445 -->
+- [x] `npx tsc --noEmit` 0 erros <!-- id: 446 -->
+
+## Prospecção Sites — Rótulos dos Filtros em Português (2026-08-06)
+- [x] Criar dicionários de mapeamento `HAS_WEBSITE_LABELS`, `SORT_LABELS` e `ORDER_LABELS` <!-- id: 435 -->
+- [x] Injetar os rótulos amigáveis dentro dos componentes `<SelectValue>` em Leads, Revisão e Disparo <!-- id: 436 -->
+- [x] `npx tsc --noEmit` 0 erros <!-- id: 437 -->
+
+## Prospecção Sites — Seta Google Maps em Leads (2026-08-06)
+- [x] Criar helper `mapsUrlFor(lead)` com fallback inteligente para buscas no Google Maps (`maps_url` -> `place_id` -> busca por nome + endereço) <!-- id: 430 -->
+- [x] Adicionar ícone de seta (`ExternalLink`) ao lado do nome do negócio na coluna NEGÓCIO da aba Leads <!-- id: 431 -->
+- [x] Atualizar a coluna MAPS para renderizar Badge clicável com `MapPin` e `ExternalLink` para 100% dos leads <!-- id: 432 -->
+- [x] Adicionar botão de ação com ícone de seta (`ExternalLink`) na coluna de Ações (lado do botão Deletar) <!-- id: 433 -->
+- [x] Adicionar ícone de seta (`ExternalLink`) nos cards de leads da aba Revisão <!-- id: 434 -->
+
 ## 9Router & Headroom Proxy Dashboard (2026-08-06)
 - [x] Diagnóstico da interface bugada em `http://localhost:20128/api/headroom/proxy/dashboard` (caminhos absolutos `/static/*` e `/api/stats` sem repasse + bloqueio de autenticação no `middleware.js`) <!-- id: 420 -->
 - [x] Implementação de rota catch-all proxy em `app/api/headroom/proxy/[...path]/route.js` no 9Router com reescrita de caminhos de scripts/CSS no HTML <!-- id: 421 -->
