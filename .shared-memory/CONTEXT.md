@@ -2,6 +2,111 @@
 
 Este projeto (`painel-sdr`) é um Painel de SDR construído com Next.js (versão 16.2.3), conectado ao Supabase e Evolution API (WhatsApp), com uso de Redis para filas e inteligência artificial (Google Gemini).
 
+## [2026-08-06] Chat (/chat) — Correção da Causa Raiz do Reativar IA (Busca Resiliente por Variações de JID & Multi-Update)
+
+**Solicitação**: "ele nao esta reativando a ia ele carrega e volta a aparecer reativar teste a fundo isso arrume sme quberar a funcionallidade".
+
+**Causa Raiz Identificada**:
+1. **Falha na Busca Estrita de Contatos**: A rota `/api/agent/control` tentava buscar o contato estritamente por `.eq("remote_jid", remoteJid)`. Quando a conversa enviava o JID em um formato diferente (ex: número sem `@s.whatsapp.net`), a busca falhava e a rota tentava inserir um novo contato por telefone.
+2. **Violação de Chave Única (Erro Postgres 23505)**: Como o contato com aquele telefone já existia, a inserção falhava, a rota devolvia erro 404, e o front-end revertia o estado otimista de volta para "Reativar IA".
+
+**Fix Aplicado**:
+- **Busca Resiliente de Contato (`src/app/api/agent/control/route.ts`)**: A API extrai todas as variações de JIDs (`@s.whatsapp.net`, `@c.us`, número puro, `phone:`) e busca em `contacts` por `remote_jid.in(...)` OU `phone_number.eq`. Se o contato já existe no banco em qualquer formato, ele é reutilizado sem dar erro 404 nem violar chaves.
+- **Atualização Abrangente de Sessões**: Ao reativar (ou pausar/snooze) a IA, a API atualiza **todas** as sessões ligadas ao contato (`sessionIds`, `contact_id` e `jids`), garantindo que nenhuma sessão remanescente mantenha o status `bot_paused`.
+- **Manutenção do Estado Verde ("ATENDIMENTO IA")**: Com o retorno 200 de sucesso da API, a tela mantém o banner em verde permanentemente.
+
+**Validação**: `npx tsc --noEmit` 0 erros.
+
+## [2026-08-06] Chat (/chat) — Otimização do Botão "Reativar IA" (0ms Latency / Optimistic UI & Multi-Session Sync)
+
+**Solicitação**: "fica carregando muito demora demais o reativar ia em chat conserte isso sem quebrar nada teste tambem. faça ser rapido e atualiza rapido e funcionar sme quebrar nada".
+
+**Causas Identificadas**:
+1. **Falta de Atualização Otimista**: O botão "Reativar IA" acionava `setBusy(true)` e aguardava o término da requisição de rede HTTP `/api/agent/control` antes de alterar o estado do banner na tela, deixando o botão girando em carregamento.
+2. **PostgREST `.maybeSingle()` em Sessões Duplicadas**: A rota `/api/agent/control` usava `.maybeSingle()` na busca por `contact_id` + `instance_name`. Quando o contato possuía múltiplas instâncias ou sessões legadas no banco, o Supabase retornava erro `PGRST116`, atrasando a resposta ou falhando a atualização.
+
+**Fix Aplicado**:
+- **Atualização Otimista Instantânea (`src/components/inbox/ai-thread-banner.tsx`)**: `handleResumeAi` e `handlePauseAi` agora disparam `onChange?.({ bot_status: "bot_active" })` em 0ms no momento do clique, alterando imediatamente a cor e o badge do banner de "ATENDIMENTO HUMANO" (laranja) para "ATENDIMENTO IA" (verde) sem travar a interface. Em caso de falha de rede, o estado é revertido automaticamente.
+- **Otimização no Backend (`src/app/api/agent/control/route.ts`)**: Substituído `.maybeSingle()` por `.limit(1)` com ordenação por `last_message_at`, e adicionada sincronização em lote para todas as sessões irmãs do mesmo contato (`contact_id` ou `remote_jid`).
+- **Atualização de Estado Flexível (`src/app/chat/page.tsx`)**: `handleStatusChange` atualiza tanto o card na sidebar quanto o chat aberto usando correspondência por `isSameJid` e `session_id`.
+
+**Validação**: `npx tsc --noEmit` 0 erros.
+
+## [2026-08-06] Chat (/chat) — Correção da Causa Raiz de Reaparecimento ("Nenhuma mensagem...") & Validação de Sintaxe UUID
+
+**Solicitação**: "eu apaguei essas conversas mas elas nao esta sumindo do chat da dashbord e para elas sumi nao fica assim iqual e no whatszap" (imagem com contatos mostrando "Nenhuma mensagem...").
+
+**Causa Raiz Identificada**:
+1. **Erro de Sintaxe de Tipo UUID no Postgres**: No backend `DELETE /api/chat/messages`, a consulta `.or("id.eq.${conversationId},remote_jid.eq.${conversationId}")` tentava comparar `id` (coluna UUID do Postgres) com um JID (string como `55279936124677@s.whatsapp.net`). O Postgres lançava erro `invalid input syntax for type uuid`, falhando silenciosamente a exclusão da tabela `sessions`.
+2. **Resultado**: As mensagens em `chats_dashboard` eram apagadas, mas o registro em `sessions` sobrevivia no banco, fazendo o contato reaparecer na sidebar com o texto **"Nenhuma mensagem..."**.
+
+**Fix Aplicado**:
+- **Validação de Sintaxe UUID (`src/app/api/chat/messages/route.ts`)**: Adicionada verificação com regex de UUID antes de passar `id.eq` na query do PostgREST. Se for um JID/telefone, consulta por `remote_jid` ou `contacts.phone_number`.
+- **Exclusão de Todas as Sessões do Contato**: Deleta por `remote_jid`, por `contact_id` e por `id`, limpando 100% dos registros de `sessions` e `chats_dashboard`.
+- **Filtro Otimista Estendido (`src/components/inbox/conversation-list.tsx`)**: Remove o card da lista instantaneamente ao clicar em confirmar, sem esperar o retorno do backend.
+
+**Validação**: `npx tsc --noEmit` 0 erros.
+
+## [2026-08-06] Chat (/chat) — Exclusão Instantânea com Saída da Conversa e Limpeza de Sessões no Supabase (Estilo WhatsApp)
+
+**Solicitação**: "ele apaga mas nao esta sumindo do chat fica aparecendo o contato la, tem q ser parecido com whatszap, quando apaga deleta todas as conversa e sai da pagina de conversas e sai na hora. arrume isso e teste".
+
+**Causas Identificadas**:
+1. **Sessões Múltiplas / contact_id Incompleto no DELETE**: A API `DELETE /api/chat/messages` apenas limpava por `remote_jid` pontual. Se a sessão possuía `contact_id` ou variações de formato no Supabase, a busca por `sessions` no reload recuperava a linha e restaurava o contato na sidebar.
+2. **Endereçamento na URL sem Redirecionamento**: Ao apagar a conversa aberta, o estado limpava as mensagens, mas a URL se mantinha em `/chat?c=ID`, o que fazia o deep link do React re-selecionar o contato se recarregado.
+
+**Fix Aplicado**:
+- **Busca Prévia de Sessões e Limpeza de `contact_id` (`src/app/api/chat/messages/route.ts`)**: A API de exclusão agora consulta previamente a tabela `sessions` por `id` ou `remote_jid`, obtém o `contact_id` e o `phone_number` real do contato, e deleta **TODAS** as instâncias de mensagens em `chats_dashboard` e registros em `sessions` associadas àquele contato.
+- **Saída Instantânea do Chat Ativo (`src/app/chat/page.tsx`)**: `handleDeleteConversation` limpa o painel ativo (`setActiveConversation(null)`, `setActiveContact(null)`, `setMessages([])`), limpa a referência de deep-link e redireciona via `router.replace("/chat", { scroll: false })` exatamente como no WhatsApp Web.
+- **Remoção Otimista Estendida**: Filtra o array de conversas por `c.id`, `c.session_id`, `c.contact_id` e `isSameJid`, removendo o card do contato da barra lateral na hora sem aguardar a resposta da rede.
+
+**Validação**: `npx tsc --noEmit` 0 erros.
+
+## [2026-08-06] Chat (/chat) — Modal de Confirmação e Exclusão Definitiva (Isolamento de Eventos & Top-Level Dialog)
+
+**Solicitação**: "quando eu clico em apagar conversa acontece nada teste e nao quebre nada faça funcionar".
+
+**Causas Identificadas**:
+1. **Conflito de Propagação de Eventos (Event Bubbling)**: O item da conversa tinha um `<div onClick={handleClick}>` englobando todo o card. O clique no item do menu (`DropdownMenuItem`) borbulhava para o container pai e executava a seleção de conversa em vez de abrir a confirmação.
+2. **Modal Aninhado em Item de Lista**: O `<Dialog>` de confirmação era renderizado dentro do próprio `ConversationItem`, sofrendo com limitações de captura de eventos e portais do Radix/Base UI.
+
+**Fix Aplicado**:
+- **Elevação do Estado do Modal (`ConversationList`)**: O estado `deletingConversation` foi elevado para o componente raiz `ConversationList`. O `<Dialog>` é renderizado no nível superior da lista, completamente isolado do HTML de cada card.
+- **Cancelamento Estrito de Propagação (`onClick` + `onSelect`)**: `DropdownMenuItem` agora possui tratamento explícito com `e.stopPropagation()` e `e.preventDefault()`, chamando `onDeleteRequest(conversation)` sem disparar a seleção do chat.
+- **Suporte a `clientId` Fallback (`/api/chat/messages/route.ts`)**: O backend DELETE extrai `clientId` tanto da sessão quanto do corpo da requisição (`body.clientId`), garantindo permissão em qualquer ambiente de execução.
+
+**Validação**: `npx tsc --noEmit` 0 erros.
+
+## [2026-08-06] Chat (/chat) — Modal de Confirmação e Exclusão Completa do Banco ao Apagar Conversa
+
+**Solicitação**: "quando clico em apagar conversa deve vir pop up de confirmaçao antes de apagar, e nao esta deletando ela do banco de dados e do chat quando clico".
+
+**Causas Identificadas**:
+1. **Sem Pop-up Modal Amigável**: Usava um `window.confirm` simples de navegador que muitas vezes era ignorado/bloqueado por gerenciadores de foco do Radix.
+2. **Exclusão Incompleta no Banco**: A API `DELETE /api/chat/messages` executava apenas `.eq("remote_jid", conversationId)`. Como o JID podia estar gravado como apenas números (`55279936124677`), `@s.whatsapp.net` ou `phone:`, a consulta não apagava mensagens e sessões com variações do JID. Como o polling em background re-buscava as mensagens ativas, a conversa reaparecia em tela.
+
+**Fix Aplicado**:
+- **Modal de Confirmação Moderno (`<Dialog>`)**: Ao clicar em "Apagar conversa", abre um modal centralizado com ícone de alerta vermelho, nome do contato em destaque, avisos de exclusão irreversível, botão "Cancelar" e botão "Sim, apagar conversa" com spinner de carregamento ("Apagando...").
+- **Exclusão por JIDs Estendidos (`src/app/api/chat/messages/route.ts`)**: `DELETE /api/chat/messages` agora usa `Array.from(new Set([conversationId, cleanPhone, ${cleanPhone}@s.whatsapp.net, ...]))` para apagar **TODAS** as mensagens em `chats_dashboard` e registros de `sessions` do contato.
+- **Atualização Instantânea da UI (`src/app/chat/page.tsx`)**: Remove a conversa imediatamente da lista, limpa a conversa ativa (se aberta) e dispara `toast.success("Conversa excluída com sucesso!")`.
+
+**Validação**: `npx tsc --noEmit` 0 erros.
+
+## [2026-08-06] Chat (/chat) — Redesign do Botão dos 3 Pontos (Menu Opções / Apagar Conversa) Estilo WhatsApp Web
+
+**Solicitação**: "esta vendo os 3 pontos em apagar a conversa em chat possicione os tres pontos melhor pois ai na imagem esta visualmente desagradavel e meio bugado se inspire no whatszap para possicionar ele pouco melhor faça os 3 pontos melhor de ver e agradavel e amigavel ao usario".
+
+**Causas**:
+1. O botão dos 3 pontos (`MoreVertical`) estava com posicionamento absoluto fixo `absolute right-2 top-2`, colidindo diretamente por cima do texto do horário da mensagem ("cerca de 1 hora" / "1 min"), gerando sobreposição poluída e visualmente bugada.
+
+**Fix Aplicado (`src/components/inbox/conversation-list.tsx`)**:
+- **Design Estilo WhatsApp Web**: O botão dos 3 pontos agora é renderizado na mesma área reservada para o horário no canto superior direito do card da conversa.
+- **Transição Suave no Hover (`opacity-0` ➔ `opacity-100`)**: Quando o usuário passa o mouse por cima do card da conversa, o horário desaparece suavemente (`transition-opacity duration-150`) e o botão dos 3 pontos surge no exato lugar do horário com um fundo circular arredondado (`p-1 rounded-full hover:bg-muted`), totalmente sem sobreposição de texto.
+- **Manutenção de Estado (`menuOpen`)**: Ao clicar e abrir o menu de dropdown, o botão dos 3 pontos permanece visível e destacado com um fundo discreto enquanto o menu de contexto ("Apagar conversa") está aberto.
+- **Dropdown Estilizado**: Dropdown de "Apagar conversa" formatado com bordas arredondadas modernas, sombra suave e cor destrutiva amigável.
+
+**Validação**: `npx tsc --noEmit` 0 erros.
+
 ## [2026-08-06] Chat (/chat) — Pré-visualização de Mídias (Áudio, Imagem, Documento, Vídeo) na Barra Lateral
 
 **Solicitação**: "no chat quando a ultima mensagem e um audio ou uma imagem ele aparece na lateral nenhuma mensagem. faça aparecer se for por ultimo audio, imagem , documento enfim ao inves de nenhuma mensagem".

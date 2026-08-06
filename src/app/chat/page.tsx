@@ -13,6 +13,7 @@ import type { Conversation, Message, Contact, ConversationStatus } from "@/types
 import { cn } from "@/lib/utils";
 import { Wifi, WifiOff, RefreshCw, Layers, Bot } from "lucide-react";
 import { useSearchParams, useRouter } from "next/navigation";
+import { toast } from "sonner";
 
 function ChatPageContent() {
   const router = useRouter();
@@ -365,34 +366,51 @@ function ChatPageContent() {
   }, [activeConversation]);
 
   const handleDeleteConversation = useCallback(async (conversationId: string) => {
-    const target = conversations.find((c) => isSameJid(c.id, conversationId));
-    // Otimista: remove da lista + limpa active se for a ativa
-    setConversations((prev) => prev.filter((c) => !isSameJid(c.id, conversationId)));
-    if (activeConversation && isSameJid(activeConversation.id, conversationId)) {
+    // 1. Remove da lista de conversas da barra lateral imediatamente
+    setConversations((prev) =>
+      prev.filter(
+        (c) =>
+          !isSameJid(c.id, conversationId) &&
+          c.id !== conversationId &&
+          c.session_id !== conversationId &&
+          c.contact_id !== conversationId
+      )
+    );
+
+    // 2. Se a conversa aberta for a conversa deletada, limpa a tela e sai da conversa (estilo WhatsApp)
+    const isCurrentActive =
+      activeConversation &&
+      (isSameJid(activeConversation.id, conversationId) ||
+        activeConversation.id === conversationId ||
+        activeConversation.session_id === conversationId ||
+        activeConversation.contact_id === conversationId);
+
+    if (isCurrentActive) {
       setActiveConversation(null);
       setActiveContact(null);
       setMessages([]);
+      autoSelectedForDeepLinkRef.current = null;
+      router.replace("/chat", { scroll: false });
     }
 
     try {
       const res = await fetch("/api/chat/messages", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversationId }),
+        body: JSON.stringify({ conversationId, clientId }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error || `HTTP ${res.status}`);
       }
-      // Toast silencioso — purposo: confirmação via remoção da lista
-      void target;
-    } catch (err) {
+      toast.success("Conversa excluída com sucesso!");
+    } catch (err: any) {
       console.error("[chat] delete conversation error:", err);
-      alert("Falha ao apagar conversa: " + (err as Error).message);
-      // Revert: força reload
+      toast.error("Falha ao apagar conversa: " + err.message);
+      // Reverte apenas se houve erro real no servidor
       setResyncToken((t) => t + 1);
     }
-  }, [conversations, activeConversation]);
+  }, [activeConversation, clientId, router]);
 
   const handleStatusChange = useCallback(
     (conversationId: string, status: ConversationStatus, extra?: { bot_status?: string; resume_at?: string | null }) => {
@@ -401,8 +419,12 @@ function ChatPageContent() {
         ...(extra?.bot_status ? { bot_status: extra.bot_status } : {}),
         ...(extra?.resume_at !== undefined ? { resume_at: extra.resume_at } : {}),
       };
-      setConversations((prev) => prev.map((c) => (c.id === conversationId ? { ...c, ...patch } : c)));
-      if (activeConversation?.id === conversationId) {
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === conversationId || isSameJid(c.id, conversationId) || c.session_id === conversationId ? { ...c, ...patch } : c
+        )
+      );
+      if (activeConversation && (activeConversation.id === conversationId || isSameJid(activeConversation.id, conversationId) || activeConversation.session_id === conversationId)) {
         setActiveConversation((prev: Conversation | null) => (prev ? { ...prev, ...patch } : prev));
       }
     },

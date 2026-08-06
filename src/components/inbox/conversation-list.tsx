@@ -7,6 +7,7 @@ import {
   normalizeConversations,
   CONVERSATION_SELECT,
   formatLastMessagePreview,
+  isSameJid,
 } from "@/lib/inbox/conversations";
 import { cn } from "@/lib/utils";
 import type { Conversation, ConversationStatus, Tag } from "@/types";
@@ -22,6 +23,15 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 interface ConversationListProps {
   activeConversationId: string | null;
@@ -68,6 +78,36 @@ export function ConversationList({
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<InboxFilter>("all");
   const [loading, setLoading] = useState(true);
+  const [deletingConversation, setDeletingConversation] = useState<Conversation | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  const handleConfirmDelete = useCallback(async () => {
+    if (!deletingConversation || !onDeleteConversation) return;
+    const targetId = deletingConversation.id;
+    const targetPhone = deletingConversation.contact?.phone?.replace(/\D/g, "");
+    
+    // Otimista: remove da lista imediatamente
+    onConversationsLoadedRef.current(
+      conversations.filter(
+        (c) =>
+          !isSameJid(c.id, targetId) &&
+          c.id !== targetId &&
+          c.session_id !== targetId &&
+          c.contact_id !== targetId &&
+          (!targetPhone || !c.contact?.phone || !c.contact.phone.replace(/\D/g, "").includes(targetPhone))
+      )
+    );
+
+    setDeletingConversation(null);
+    setIsDeleting(true);
+    try {
+      await onDeleteConversation(targetId);
+    } catch (err: any) {
+      console.error("Erro ao apagar conversa:", err);
+    } finally {
+      setIsDeleting(false);
+    }
+  }, [deletingConversation, onDeleteConversation, conversations]);
   
   // As tags são computadas dinamicamente a partir dos contatos carregados
   const tags = useMemo(() => {
@@ -597,12 +637,65 @@ export function ConversationList({
                 conversation={conv}
                 isActive={conv.id === activeConversationId}
                 onSelect={handleSelect}
-                onDelete={onDeleteConversation}
+                onDeleteRequest={(conversation) => setDeletingConversation(conversation)}
               />
             ))}
           </div>
         )}
       </ScrollArea>
+
+      {/* Pop-up Modal de Confirmação de Exclusão no nível superior do ConversationList */}
+      <Dialog
+        open={!!deletingConversation}
+        onOpenChange={(open) => {
+          if (!open && !isDeleting) setDeletingConversation(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-md border-border bg-card shadow-2xl rounded-2xl p-6 z-50">
+          <DialogHeader className="flex flex-col items-center text-center gap-3">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-destructive/15 text-destructive border border-destructive/20">
+              <Trash2 className="h-6 w-6 text-destructive" />
+            </div>
+            <DialogTitle className="text-base font-semibold text-foreground">
+              Apagar conversa com {deletingConversation?.contact?.name || deletingConversation?.contact?.phone || "este contato"}?
+            </DialogTitle>
+            <DialogDescription className="text-xs text-muted-foreground leading-relaxed">
+              Esta ação apagará permanentemente todas as mensagens e a sessão com <strong className="text-foreground">{deletingConversation?.contact?.name || deletingConversation?.contact?.phone || "este contato"}</strong> do painel e do banco de dados. Essa ação não pode ser desfeita.
+            </DialogDescription>
+          </DialogHeader>
+
+          <DialogFooter className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 mt-4">
+            <Button
+              variant="outline"
+              type="button"
+              onClick={() => setDeletingConversation(null)}
+              className="w-full sm:w-auto text-xs cursor-pointer"
+              disabled={isDeleting}
+            >
+              Cancelar
+            </Button>
+            <Button
+              variant="destructive"
+              type="button"
+              onClick={handleConfirmDelete}
+              className="w-full sm:w-auto text-xs font-semibold gap-1.5 cursor-pointer"
+              disabled={isDeleting}
+            >
+              {isDeleting ? (
+                <>
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                  <span>Apagando...</span>
+                </>
+              ) : (
+                <>
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>Sim, apagar conversa</span>
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -611,15 +704,17 @@ interface ConversationItemProps {
   conversation: Conversation;
   isActive: boolean;
   onSelect: (conversation: Conversation) => void;
-  onDelete?: (conversationId: string) => void;
+  onDeleteRequest?: (conversation: Conversation) => void;
 }
 
 function ConversationItem({
   conversation,
   isActive,
   onSelect,
-  onDelete,
+  onDeleteRequest,
 }: ConversationItemProps) {
+  const [menuOpen, setMenuOpen] = useState(false);
+
   const contact = conversation.contact;
   const displayName = contact?.name || contact?.phone || "Desconhecido";
   const initials = displayName.charAt(0).toUpperCase();
@@ -628,14 +723,6 @@ function ConversationItem({
   const handleClick = useCallback(() => {
     onSelect(conversation);
   }, [onSelect, conversation]);
-
-  const handleDelete = useCallback(() => {
-    if (!onDelete) return;
-    const ok = window.confirm(
-      `Apagar conversa com ${displayName}? Todas as mensagens serão removidas do painel. Esta ação não pode ser desfeita.`
-    );
-    if (ok) onDelete(conversation.id);
-  }, [onDelete, conversation.id, displayName]);
 
   const timeAgo = useMemo(() => {
     if (!conversation.last_message_at) return "";
@@ -707,8 +794,54 @@ function ConversationItem({
               {isHumanTakeover ? "Humano" : "IA"}
             </span>
           </div>
-          <span className="shrink-0 text-[10px] text-muted-foreground">{timeAgo}</span>
+
+          {/* Horário / 3 Pontos no estilo WhatsApp Web */}
+          <div className="relative shrink-0 flex items-center justify-end min-h-5 min-w-[45px]">
+            <span
+              className={cn(
+                "text-[10px] text-muted-foreground transition-opacity duration-150 select-none",
+                menuOpen ? "opacity-0" : "group-hover:opacity-0"
+              )}
+            >
+              {timeAgo}
+            </span>
+
+            {onDeleteRequest && (
+              <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+                <DropdownMenuTrigger
+                  onClick={(e: React.MouseEvent) => e.stopPropagation()}
+                  className={cn(
+                    "absolute right-0 p-1 rounded-full text-muted-foreground hover:text-foreground hover:bg-muted transition-all cursor-pointer outline-none border border-transparent hover:border-border/50",
+                    menuOpen ? "opacity-100 bg-muted border-border/50" : "opacity-0 group-hover:opacity-100"
+                  )}
+                  aria-label="Mais opções"
+                >
+                  <MoreVertical className="h-4 w-4" />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-44 border-border/80 bg-popover shadow-xl rounded-xl p-1 z-50">
+                  <DropdownMenuItem
+                    onClick={(e: React.MouseEvent) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      setMenuOpen(false);
+                      onDeleteRequest(conversation);
+                    }}
+                    onSelect={(e) => {
+                      e.preventDefault();
+                      setMenuOpen(false);
+                      onDeleteRequest(conversation);
+                    }}
+                    className="text-destructive focus:text-destructive focus:bg-destructive/10 cursor-pointer rounded-lg text-xs font-medium py-2 px-2.5 flex items-center gap-2"
+                  >
+                    <Trash2 className="h-4 w-4 text-destructive" />
+                    <span>Apagar conversa</span>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+          </div>
         </div>
+
         <div className="mt-1 flex items-center justify-between gap-2">
           <p className="truncate text-xs text-muted-foreground flex-1">
             {conversation.last_message_text || "Nenhuma mensagem..."}
@@ -720,26 +853,6 @@ function ConversationItem({
           )}
         </div>
       </div>
-      {onDelete && (
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            onClick={(e: React.MouseEvent) => e.stopPropagation()}
-            className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 focus:opacity-100 p-1.5 rounded-md hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-opacity z-10"
-            aria-label="Mais opções"
-          >
-            <MoreVertical className="h-4 w-4" />
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem
-              onSelect={handleDelete}
-              className="text-destructive focus:text-destructive focus:bg-destructive/10 cursor-pointer"
-            >
-              <Trash2 className="h-4 w-4 mr-2" />
-              Apagar conversa
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      )}
     </div>
   );
 }

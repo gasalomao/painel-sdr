@@ -1,5 +1,24 @@
 # Tarefas do Projeto
 
+## Chat (/chat) — Correção da Causa Raiz do Reaparecimento de Contatos sem Mensagens (2026-08-06)
+- [x] Corrigir erro de sintaxe UUID do Postgres no `DELETE /api/chat/messages` validando se o `conversationId` é um UUID antes de buscar `id.eq` no PostgREST <!-- id: 500 -->
+- [x] Deletar todas as sessões por `remote_jid`, `contact_id` e `id` no Supabase para impedir que contatos continuem exibindo "Nenhuma mensagem..." <!-- id: 501 -->
+- [x] Atualizar remoção otimista no `ConversationList` e `page.tsx` para fechar a tela e apagar o card instantaneamente <!-- id: 502 -->
+- [x] `npx tsc --noEmit` 0 erros <!-- id: 503 -->
+
+## Chat (/chat) — Modal de Confirmação e Exclusão Completa do Banco (2026-08-06)
+- [x] Criar modal de confirmação `<Dialog>` em `ConversationItem` com o nome do contato, aviso irreversível e spinner "Apagando..." <!-- id: 490 -->
+- [x] Atualizar `DELETE /api/chat/messages` para apagar todas as mídias/mensagens no `chats_dashboard` e sessões no `sessions` considerando todas as variações de JIDs <!-- id: 491 -->
+- [x] Atualizar `handleDeleteConversation` no `page.tsx` para feedback visual com `toast.success` e limpeza de estado otimista <!-- id: 492 -->
+- [x] `npx tsc --noEmit` 0 erros <!-- id: 493 -->
+
+## Chat (/chat) — Redesign do Botão de 3 Pontos Estilo WhatsApp Web (2026-08-06)
+- [x] Reposicionar o botão de 3 pontos para a área do horário no canto superior direito do card <!-- id: 480 -->
+- [x] Aplicar transição suave no hover (`opacity-0` ➔ `opacity-100`) ocultando o horário para evitar sobreposição <!-- id: 481 -->
+- [x] Manter o botão de 3 pontos ativo enquanto o menu dropdown estiver aberto (`menuOpen`) <!-- id: 482 -->
+- [x] Estilizar o DropdownMenuContent com cantos arredondados, sombras modernas e item de exclusão limpo <!-- id: 483 -->
+- [x] `npx tsc --noEmit` 0 erros <!-- id: 484 -->
+
 ## Chat (/chat) — Pré-visualização de Mídias na Barra Lateral (2026-08-06)
 - [x] Criar e exportar helper `formatLastMessagePreview` em `conversations.ts` para formatar áudios, imagens, vídeos e documentos <!-- id: 470 -->
 - [x] Selecionar `media_type` e `media_url` nas consultas ao `chats_dashboard` em `ConversationList` <!-- id: 471 -->
