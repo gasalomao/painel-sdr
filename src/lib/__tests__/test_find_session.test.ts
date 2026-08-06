@@ -48,6 +48,7 @@ async function findOrCreateSession(contactId: string, instanceName: string, remo
   return newSession;
 }
 
+// ponytail: 30s timeout — 3 chamadas Supabase remotas em série excedem 5s default.
 test("findOrCreateSession test", async () => {
   const contactId = '91e8565d-479d-4fbb-acac-ae6817f252c2';
   const instanceName = '00000_sao_paulo';
@@ -58,4 +59,4 @@ test("findOrCreateSession test", async () => {
   const session = await findOrCreateSession(contactId, instanceName, remoteJid, clientId);
   console.log("Resolved session:", session);
   expect(session).toBeDefined();
-});
+}, 30000);

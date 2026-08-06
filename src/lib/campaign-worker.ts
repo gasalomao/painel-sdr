@@ -399,6 +399,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     .select("id")
     .eq("campaign_id", campaignId)
     .eq("status", "pending")
+    .order("priority", { ascending: false })
     .order("created_at", { ascending: true })
     .limit(1)
     .maybeSingle();
@@ -426,6 +427,26 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     return "continue";
   }
   const target = claimed;
+
+  // Opt-out check — lead pediu parar. Pula + loga. Anti-spam + LGPD.
+  const { data: optRow } = await supabase
+    .from("leads_extraidos")
+    .select("opt_out")
+    .eq("remoteJid", target.remote_jid)
+    .maybeSingle();
+  if (optRow?.opt_out) {
+    await supabase.from("campaign_targets").update({
+      status: "skipped",
+      error_message: "Opt-out (lead pediu parar)",
+      attempts: (target.attempts || 0) + 1,
+    }).eq("id", target.id);
+    await supabase.from("campaigns").update({
+      skipped_count: (c.skipped_count || 0) + 1,
+      updated_at: new Date().toISOString(),
+    }).eq("id", campaignId);
+    await addCampaignLog(campaignId, `⊘ Pulado ${target.remote_jid} — opt-out`, "warning");
+    return "continue";
+  }
 
   await addCampaignLog(campaignId, `Processando lead: ${target.nome_negocio || target.remote_jid}`, "info");
 

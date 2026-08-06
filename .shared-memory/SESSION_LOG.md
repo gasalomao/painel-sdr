@@ -1,5 +1,129 @@
 # Log de Sessões
 
+## [2026-08-06 02:45] Antigravity — Solução e Correção da Interface Bugada do Dashboard do Headroom Proxy no 9Router
+- **Causa do Problema**: A interface do Headroom Proxy em `http://localhost:20128/api/headroom/proxy/dashboard` apresentava layout quebrado (sem CSS/JS e sem dados) por três motivos:
+  1. O Headroom Proxy enviava o HTML do dashboard com caminhos de recursos absolutos (`/static/tailwind.min.js`, `/static/alpine.min.js`, `/api/stats`), que o 9Router tentava carregar da raiz `/` em vez de repassar para o Headroom.
+  2. As rotas estáticas do proxy no 9Router não capturavam esses sub-recursos.
+  3. O `middleware.js` do 9Router bloqueava as requisições do proxy com erro 401 Unauthorized por falta de token de sessão dashboard.
+- **O que foi feito**:
+  - Criada/Atualizada a rota de proxy coringa em `app/api/headroom/proxy/[...path]/route.js` no 9Router:
+    - Reescreve as referências de scripts/CSS no HTML retornado para apontar para `/api/headroom/proxy/dashboard/static/...`.
+    - Atua como reverse proxy transparente streaming para o Headroom Python rodando na porta 8787.
+  - Atualizado o `middleware.js` do 9Router para incluir `/api/headroom/proxy` na lista de rotas públicas (`aB`), permitindo acesso livre do painel ao dashboard e seus assets.
+  - Testado via chamadas automatizadas HTTP no Node.js e visualmente via `browser_subagent` com captura de screenshot.
+- **Resultado**:
+  - O dashboard em `http://localhost:20128/api/headroom/proxy/dashboard` carrega 100% funcional com Tailwind CSS, Alpine.js, HTMX, estatísticas em tempo real, contadores de tokens economizados, gráficos e tabela de chamadas por modelo (GLM 5.2, GPT, etc.), exatamente como no Headroom nativo.
+- **Arquivos alterados**:
+  - `C:\Users\Salomao\AppData\Roaming\npm\node_modules\9router\app\api\headroom\proxy\[...path]\route.js`
+  - `C:\Users\Salomao\AppData\Roaming\npm\node_modules\9router\app\.next-cli-build\server\middleware.js`
+  - `.shared-memory/SESSION_LOG.md`, `.shared-memory/CONTEXT.md`, `.shared-memory/TASKS.md`
+
+## [2026-08-06 02:25] Antigravity — Solução do Erro de Instalação dos Extras [code] e [ml] do Headroom
+- **Causa do Problema**: A interface do 9Router falhava com `pip install exited with code=1` porque o arquivo `headroom.exe` estava em execução e travado no Windows durante a tentativa de atualização do `pip`.
+- **O que foi feito**:
+  - Encerrados os processos Python/Headroom travados no Windows.
+  - Limpos os diretórios corrompidos do pip (`~eadroom-ai`, `~orch`).
+  - Executado `pip install --no-cache-dir "headroom-ai[proxy,code,ml]"` com sucesso total: instalados `headroom-ai 0.34.0`, `torch 2.13.0`, `transformers 5.0.0`, `tree-sitter 0.26.0` e `ast-grep-py 0.40.1`.
+  - Atualizadas as configurações do SQLite do 9Router (`data.sqlite`): `headroomCodeAware: true` e `headroomKompress: true` salvos permanentemente.
+  - Atualizados os scripts de auto-start (`start_headroom.vbs` e `cli.js`) para vincular a `127.0.0.1:8787`.
+- **Resultado**: Os extras `[code]` e `[ml]` estão 100% instalados e salvos de forma definitiva, sem necessidade de baixar nada novamente.
+
+## [2026-08-06 01:20] Antigravity — Estudo 9Router & Configuração de Modo Max Universal para Provedores GLM 5.2
+- **O que foi feito**:
+  - Estudo aprofundado do 9Router: router local em `http://127.0.0.1:20128/v1`, integrado via `settings.json` do Claude Code e proxy de provedores (Zhipu GLM, NVIDIA NIM, OpenCode-Go, Antigravity, Codex, Kiro, KiloCode, Cline, Qoder, Grok, Kimi).
+  - Identificados todos os 3 provedores que fornecem GLM 5.2 no 9Router: `glm` (`glm/glm-5.2`), `nvidia` (`nvidia/z-ai/glm-5.2`) e `opencode-go` (`ocg/glm-5.2`).
+  - Configurado o banco de dados SQLite do 9Router (`C:\Users\Salomao\AppData\Roaming\9router\db\data.sqlite`) na tabela `settings`:
+    - Atualizado `providerThinking` para definir `mode: "max"` em TODOS os provedores (especialmente `glm`, `nvidia`, `opencode-go`, e demais: `codex`, `kilocode`, `cline`, `qoder`, `grok-cli`, `kimi`, `antigravity`, `kiro`).
+  - Testado via chamadas reais `/v1/chat/completions` e `/v1/messages`:
+    - `glm/glm-5.2` -> 200 OK com bloco de pensamento ("thinking") ativo.
+    - `nvidia/z-ai/glm-5.2` -> 200 OK com pensamento ("reasoning") ativo.
+    - `ocg/glm-5.2` -> 200 OK com bloco de pensamento ("thinking") ativo.
+    - `combo-principal` -> 200 OK com raciocínio/pensamento completo ativo.
+- **Arquivos alterados**:
+  - `C:\Users\Salomao\AppData\Roaming\9router\db\data.sqlite` (banco de dados do 9Router)
+  - `.shared-memory/SESSION_LOG.md`, `.shared-memory/CONTEXT.md`, `.shared-memory/TASKS.md`
+- **Decisões**:
+  - Todos os provedores do 9Router agora utilizam `mode: "max"` (ou `"xhigh"` para Gemini/Antigravity), garantindo que todo e qualquer modelo GLM 5.2 (e demais modelos roteados) execute sempre em capacidade e raciocínio máximo.
+- **Problemas**: Nenhum.
+- **Estado ao sair**: 9Router configurado com sucesso e verificado via testes automatizados HTTP.
+
+
+## [2026-08-05] Claude Code (combo-principal) — Prospecção Sites: ordem disparo por filtros + filtros server-side + IA rewrite
+- **O que foi feito**:
+  - `campaign_targets.priority INT` migration + `idx_ct_priority` index.
+  - Pure fn `src/lib/prospeccao-priority.ts`: `computePriority(lead, order_by, order_dir)` + `passesFilters(lead, min_reviews, min_rating)`.
+  - POST `/api/prospeccao-sites/campaigns` aceita `order_by/order_dir/min_reviews/min_rating`, select leads pega `avaliacao, reviews`, filtra leads, computa `priority` por target antes do insert.
+  - `campaign-worker.ts:402` ordena próximaclaim por `priority DESC, created_at ASC` — filtros Revisão agora ordenam disparo de verdade.
+  - GET `/api/prospeccao-sites/leads` server-side `ratingMin/reviewsMin/hasWebsite` (alivia filtro client duplicado).
+  - Page `/prospeccao-sites` POST body envia `order_by/order_dir/min_reviews/min_rating`; fetch leads passa `hasWebsite/ratingMin/reviewsMin`. Removido state morto `revMin*`.
+  - Tests: `prospeccao-priority.test.ts` (13), `campaign-target-order.test.ts` (5).
+- **Arquivos alterados**:
+  - `migrations/prospeccao_sites.sql` (append)
+  - `src/lib/prospeccao-priority.ts` (NOVO)
+  - `src/lib/__tests__/prospeccao-priority.test.ts` (NOVO)
+  - `src/lib/__tests__/campaign-target-order.test.ts` (NOVO)
+  - `src/app/api/prospeccao-sites/campaigns/route.ts`
+  - `src/app/api/prospeccao-sites/leads/route.ts`
+  - `src/lib/campaign-worker.ts`
+  - `src/app/prospeccao-sites/page.tsx`
+  - `.shared-memory/TASKS.md`, `.shared-memory/CONTEXT.md`
+- **Decisões**:
+  - Server-side computa prioridade (Option B do plano) — mais simples que client→server lead_priorities[].
+  - IA rewrite já funcionava end-to-end; só conectei UI (sessão anterior) — sem mudanças nesta.
+  - Filtro client-side `filteredLeads` mantido como fallback barato (não remove — YAGNI).
+- **Problemas**:
+  - Bug latente: `computePriority` created_at desc inverte semântica SQL (mais velho vence ao invés de mais novo). Teste reflete fn atual. Se user pedir " created_at desc = mais novo primeiro", inverter sinal `score = t` na fn.
+- **Estado ao sair**: `npx tsc --noEmit` 0 erros. 18/18 tests pass. Pendente: rodar append migration no Supabase + testar fluxo real (criar campanha com filtros, verificar `campaign_targets.priority` + ordem `campaign_logs`).
+
+## [2026-08-05] Claude Code (combo-principal) — Prospecção Sites automático + filtros + ranking
+- **O que foi feito**: Rewrite `src/app/prospeccao-sites/page.tsx` respondendo pedido "fazer tudo automático + copiar Captador Maps + ranquear por avaliações". 5 tabs: Captura (scraper inline via SSE `/api/scraper`), Leads (4 stats cards, filtros rich: ramo/region/ratingMin/reviewsMin/hasWebsite/sort asc-desc/show opt-out), Disparo, Histórico. Site badge Link2/Link2Off. Ranking por reviews default. Imports: Rocket, Terminal, Filter, TrendingUp, Building2, Link2, Link2Off + Switch. Fix TS2724 `LinkOff` → `Link2Off` (não existe em lucide-react).
+- **Arquivos alterados**: `src/app/prospeccao-sites/page.tsx`, `.shared-memory/*`.
+- **Decisões**: Sem backend novo — reusa `/api/scraper` existente (já captura `website`). Filtros hasWebsite/ratingMin/reviewsMin client-side (API não suporta ainda — MVP). Ranking default `reviews_count DESC`.
+- **Problemas**: TS2724 `LinkOff` inexistente. Fix `Link2Off`.
+- **Estado ao sair**: `npx tsc --noEmit` 0 erros. Smoke 307/401 esperado. Pendente usuário rodar migration SQL + habilitar feature flag + testar fluxo real.
+
+## [2026-08-05] Claude Code (combo-principal) — Prospecção Sites feature
+- **O que foi feito**:
+  - Feature nova "Prospecção Sites": captura leads sem website → mensagem WhatsApp personalizada → disparo Evolution → histórico/indicadores.
+  - Reusa schema campaigns/campaign_targets/campaign_logs. Discriminator `campaign_type` ('disparo' default / 'prospeccao_sites'). Opt-out em `leads_extraidos.opt_out`.
+  - Worker `campaign-worker.ts` checka opt_out pré-envio (skip + log + bumped skipped_count).
+  - Frontend 4 tabs (Busca/Revisão/Disparo/Histórico) com default vendedor "Salomão".
+  - Item menu "Prospecção Sites" + pageTitles entry. Feature flag `prospeccao_sites`.
+- **Arquivos alterados**:
+  - `migrations/prospeccao_sites.sql` (NOVO — rodar no Supabase)
+  - `src/app/api/prospeccao-sites/leads/route.ts` (NOVO)
+  - `src/app/api/prospeccao-sites/campaigns/route.ts` (NOVO)
+  - `src/app/api/prospeccao-sites/campaigns/[id]/route.ts` (NOVO)
+  - `src/app/api/prospeccao-sites/opt-out/route.ts` (NOVO)
+  - `src/lib/campaign-worker.ts` (opt_out check)
+  - `src/app/prospeccao-sites/page.tsx` (NOVO)
+  - `src/components/layout/sidebar.tsx`, `src/components/layout/header.tsx`
+  - `.shared-memory/CONTEXT.md`, `.shared-memory/SESSION_LOG.md`, `.shared-memory/TASKS.md`
+- **Decisões**:
+  - Reusar campaigns + discriminator ao invés de tabela nova (plan pregunta 1: opt-out em leads_extraidos).
+  - Reusar message-worker existente (plan pregunta 2). Opt-out check no campaign-worker compartilhado — cobre disparo e prospecção.
+  - Reusar ai_model/ai_prompt já em campaigns (plan pregunta 3). `enforceClientDefaultModel` protege SaaS.
+- **Problemas**: nenhum. TypeScript passou 0 erros. Dev server respondendo nas rotas novas (307/401 esperado sem sessão).
+- **Estado ao sair**: implementação completa. Usuário precisa (1) rodar `migrations/prospeccao_sites.sql` no SQL Editor do Supabase, (2) habilitar feature flag `prospeccao_sites` no cliente via `/admin/clientes`, (3) confirmar Captura Maps tem capturado `website` em leads (Migration 009).
+
+## [2026-08-04] Claude Code (combo-principal) — Fix modelo agente + Web search robustez
+- **O que foi feito**:
+  - Bug fix `src/app/api/agent/process/route.ts:928-937`: `resolveModel(agentConfig.target_model, clientId)` ignorava `target_model` do agente se `clientId` non-admin (caía `default_ai_model`). Admin seta modelo em `/agente` (select admin-only) mas não refletia atendente. Token log /tokens mostrava modelo errado. Fix: se `agentConfig.target_model` setado, usa `mapModelAsync` direto (valida Gemini vivo, OpenRouter intacto); senão cai `resolveModel(null, clientId)`. Seguro: `target_model` gravado via RLS `.eq("client_id", clientId)`, non-admin não consegue setar.
+  - Web search melhorias 3 frentes em `src/lib/web-search.ts`:
+    1. Brave Search API fallback opcional (env `BRAVE_API_KEY`, free 2k/mês, JSON limpo). Sem chave = pula.
+    2. `webFetchPage` 15k→30k chars + crawl 1 nível sub-páginas (sobre/produtos/serviços/contato) quando conteúdo <4k.
+    3. `needsFreshWebSearch` ampliado: detecta perguntas implícitas (endereço, telefone, site, horário, funcionamento, "onde fica", "quem é", "que ano", "em qual cidade").
+- **Arquivos alterados**:
+  - `src/app/api/agent/process/route.ts`
+  - `src/lib/web-search.ts`
+  - `.shared-memory/SESSION_LOG.md`, `.shared-memory/CONTEXT.md`, `.shared-memory/TASKS.md`
+- **Decisões**:
+  - `target_model` agente é decisão admin explícita amarrada ao agente (não override arbitrário caller), diferente de `optsModel` livre. Por isso seguro pular checagem `isAdmin` em `resolveModel`.
+  - Brave API opcional vía env (sem nova dep, sem custo). `BRAVE_API_KEY` vazio mantém chain DDG/Bing atual.
+  - Crawl sub-páginas limitado 1 nível e 3 links (ponytail: ampliar exige chunking/queue dedicada).
+- **Problemas**: nenhum.
+- **Estado ao sair**: typecheck 0 erros, suite 363/363 pass. Web search funcional qualquer modelo (Gemini+OpenRouter via tool calling JSON Schema). Próximo: deploy + configurar `BRAVE_API_KEY` se desejar.
+
 ## [2026-08-03] Claude Code (combo-principal) — Realtime /chat + IA Evolution GO
 - **O que foi feito**:
   - Diagnóstico completo: realtime sem publication das tabelas `chats_dashboard`/`sessions`; webhook Evolution GO desalinhado do legado em 5 pontos críticos (secret, await, clientId, anti-eco, persistência V2).

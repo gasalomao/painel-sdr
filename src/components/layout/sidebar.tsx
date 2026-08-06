@@ -25,6 +25,7 @@ import {
   Trophy,
   LogOut,
   CalendarDays,
+  Globe,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
@@ -59,6 +60,7 @@ const navItems: NavItem[] = [
   { href: "/agente",         label: "Agente IA",        icon: Bot,             feature: "agente" },
   { href: "/automacao",      label: "Automação",        icon: Cpu,             feature: "automacao" },
   { href: "/disparo",        label: "Disparo em Massa", icon: Zap,             feature: "disparo" },
+  { href: "/prospeccao-sites", label: "Prospecção Sites", icon: Globe,        feature: "prospeccao_sites" },
   { href: "/follow-up",      label: "Follow-up",        icon: Repeat,          feature: "followup" },
   { href: "/captador",       label: "Captador Maps",    icon: MapPin,          feature: "captador" },
   { href: "/whatsapp",       label: "WhatsApp",         icon: Smartphone,      feature: "whatsapp" },

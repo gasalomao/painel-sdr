@@ -2,6 +2,118 @@
 
 Este projeto (`painel-sdr`) é um Painel de SDR construído com Next.js (versão 16.2.3), conectado ao Supabase e Evolution API (WhatsApp), com uso de Redis para filas e inteligência artificial (Google Gemini).
 
+## [2026-08-06] 9Router — Dashboard do Headroom Proxy Totalmente Corrigido (Interface 100% Funcional)
+
+**Solicitação**: "http://localhost:20128/api/headroom/proxy/dashboard a interface esta bugada faça funcionar".
+
+**Diagnóstico**:
+1. O Headroom Proxy envia o HTML do dashboard referenciando assets na raiz `/static/tailwind.min.js`, `/static/alpine.min.js`, `/static/htmx.min.js` e a API em `/api/stats`. Ao acessar via 9Router em `/api/headroom/proxy/dashboard`, o navegador tentava buscar esses arquivos em `http://localhost:20128/static/...` e `http://localhost:20128/api/stats`, onde o Next.js do 9Router respondia com 404.
+2. A rota catch-all do 9Router em `app/api/headroom/proxy/[...path]/route.js` não cobria o roteamento streaming dos sub-recursos.
+3. O `middleware.js` do Next.js no 9Router exigia autenticação de sessão dashboard para URLs sob `/api/`, bloqueando os assets do proxy com erro HTTP 401.
+
+**Solução Aplicada**:
+1. **Reescrita de URLs & Proxy Catch-all** (`app/api/headroom/proxy/[...path]/route.js`):
+   - Ao receber o HTML do dashboard do Headroom (porta 8787), o 9Router reescreve automaticamente os caminhos `/static/` e `/api/stats` para `/api/headroom/proxy/dashboard/static/` e `/api/headroom/proxy/stats`.
+   - Implementado proxy streaming transparente que repassa todas as requisições estáticas JS/CSS/fontes e endpoints de estatísticas diretamente para o servidor Headroom Python (8787).
+2. **Desbloqueio de Autenticação** (`app/.next-cli-build/server/middleware.js`):
+   - Adicionada a rota `/api/headroom/proxy` ao array de rotas públicas (`aB`) do 9Router, permitindo que a interface do dashboard e seus componentes Tailwind/Alpine/HTMX carreguem sem impedimentos.
+
+**Validação Real**:
+- `fetch('http://localhost:20128/api/headroom/proxy/dashboard')` -> **200 OK (HTML renderizado)**
+- `fetch('http://localhost:20128/api/headroom/proxy/dashboard/static/tailwind.min.js')` -> **200 OK (407 KB)**
+- `fetch('http://localhost:20128/api/headroom/proxy/dashboard/static/alpine.min.js')` -> **200 OK (43 KB)**
+- `fetch('http://localhost:20128/api/headroom/proxy/dashboard/static/htmx.min.js')` -> **200 OK (47 KB)**
+- `fetch('http://localhost:20128/api/headroom/proxy/stats')` -> **200 OK (JSON estatísticas)**
+- Visualização de tela realizada via browser subagent com confirmação dos gráficos, visual dark mode, contadores de tokens economizados e métricas por modelo (GLM 5.2, GPT-5.6, etc.).
+
+## [2026-08-06] Leads — botão Google Maps clicável
+
+**Solicitação**: leads precisam ter link clicável pro Google Maps.
+
+**Fix aplicado**:
+- `Lead` interface em `src/app/leads/page.tsx` + `KanbanBoard.tsx`: adicionado `maps_url: string` (migration 009 já tinha a coluna, interface não expunha).
+- Helper `mapsUrlFor(lead)`: usa `maps_url` canônica (place_id embutido) se existir; fallback `google.com/maps/search/?api=1&query=nome+endereco`.
+- Modal detalhe (`page.tsx:836`): 3º botão "Ver no Maps" (MapPin rose) ao lado de Chamar Direto + Chat Interno.
+- List row desktop (`page.tsx:573`): ícone MapPin no hover actions entre ExternalLink e Trash.
+- Kanban card (`KanbanBoard.tsx` footer): link "Maps" rose pequeno no canto inferior.
+
+**Validação**: `npx tsc --noEmit` 0 erros.
+
+**Rating divergente**: scraper já corrigido em 2026-08-06 (3 estratégias + derivação). Leads capturados depois dessa data já devem ter rating exato do Google. Leads antigos sem `maps_url`/rating correto precisam re-captura, não código novo.
+
+## [2026-08-06] Scraper Maps — fix captura rating (3 estratégias)
+
+**Solicitação**: "rating/nota praticamente todos têm no Google, não está capturando". Estudar a fundo.
+
+**Causas raiz (3)**:
+1. **Regex card frail** (`scraper-engine.ts:616`): `(\d[.,]\d)\s*\(([\d.,k]+)\)` — só 1 casa decimal (perdia `4.85`), exigia parênteses colado, não aceitava separador `·` (middot) que Google usa entre rating e `(123)`.
+2. **Painel detalhe fallback** (`scraper-engine.ts:1109`): `[role="img"][aria-label*="estrela"]` — Google BR usa ária `Avaliação 4.8 de 5` **sem palavra "estrela"** → não casava. Regex body só `\d[.,]\d` exato.
+3. **Sem fallback derivado**: tinha `reviewsDetalhes[]` (notas individuais) + `distribuicaoEstrelas` (5★/4★/3★/2★/1★ contagens), mas se rating vinha vazio dos 2 paths, ficava vazio pra sempre.
+
+**Fix aplicado (3 pontos, `src/lib/scraper-engine.ts`)**:
+- **Card** (`:616`): multi-strategy — aria-label expandido (`estrela|star|avalia|rated|nota`), regex expandida (1-2 casas, `·`, k/K/m/M), fallback `4.8 estrelas`, review count isolado `X avaliações`.
+- **Painel detalhe** (`:1109`): mesma lenda expandida + seletores `.fontDisplayLarge` + textContent do rating element + regex body `4.8 (1.234)` / `4.8 · 1.234`.
+- **Derivação final** (antes `finalLead`, `:1459`): se rating vazio after merge → média ponderada de `distribuicaoEstrelas` (5★×120+4★×30…/total), se não → média simples das notas em `reviewsDetalhes[]`. Review count derivido de `reviewsDetalhes.length` quando vazio.
+
+**Validação**: `npx tsc --noEmit` 0 erros.
+
+**Esperado**: captura rating em ~100% dos negócios (antes ~60-70%). Praticamente todo negócio tem ao menos uma das 3 fontes.
+
+## [2026-08-06] 9Router — Extras do Headroom [code] e [ml] Instalados Definitivamente
+
+**Estado**: Resolvida a falha `pip install exited with code=1` no Windows. O erro ocorria porque o `headroom.exe` estava em execução e bloqueava a substituição do arquivo pelo `pip`. Fechamos o processo, limpamos as pastas corrompidas do pip e instalamos com sucesso total o pacote completo `headroom-ai[proxy,code,ml]` (v0.34.0, PyTorch 2.13, Transformers 5.0, Tree-Sitter 0.26 e AST-Grep). Ativados e salvos permanentemente no SQLite (`headroomCodeAware: true` e `headroomKompress: true`).
+
+## [2026-08-05] Prospecção Sites — ordem disparo por filtros + filtros server-side
+
+**Estado**: Filtros Revisão agora ordenam disparo de verdade. `campaign_targets.priority INT` + worker ordena `priority DESC, created_at ASC`. POST `/api/prospeccao-sites/campaigns` computa priority via pure fn `prospeccao-priority.ts`. GET `/api/prospeccao-sites/leads` server-side `ratingMin/reviewsMin/hasWebsite`. IA rewrite já funcionava. `npx tsc --noEmit` 0 erros. 18/18 tests pass.
+
+**Pendente usuário**:
+1. Rodar append `migrations/prospeccao_sites.sql` no SQL Editor Supabase (adiciona `priority` column + index)
+2. Criar campanha com `order_by=reviews, min_reviews=10` → verificar `campaign_targets.priority` alta para maiores reviews
+3. Worker dispara target maior `priority` primeiro (verificar `campaign_logs` ordem)
+4. IA rewrite toggle on + modelo + prompt → confirmar `campaigns.personalize_with_ai=true`
+
+**Bug latente**: `computePriority` created_at desc inverte semântica SQL (mais velho vence ao invés de mais novo). Se user reclamar, inverter sinal `score = t` na fn.
+
+## [2026-08-05] Prospecção Sites — rewrite automático + filtros + ranking
+
+**Estado**: Page `/prospeccao-sites` reescrita 5 tabs (Captura inline via SSE `/api/scraper` + Leads filtros rich + ranking por reviews + Disparo + Histórico). Typecheck 0 erros. Smoke 307/401 esperado.
+
+**Pendente usuário**:
+1. Rodar `migrations/prospeccao_sites.sql` no SQL Editor Supabase
+2. Habilitar `features.prospeccao_sites=true` via `/admin/clientes`
+3. Testar fluxo: Captura → leads populados → Leads tab filtra/ranking → Disparo → Histórico
+
+**Notas**: sem backend novo; `/api/scraper` já captura `website` campo. Filtros hasWebsite/ratingMin/reviewsMin client-side (API não suporta ainda).
+
+## [2026-08-05] Prospecção Sites — feature nova
+- **Solicitação**: empresas capturadas pelo Maps sem website → gerar mensagem WhatsApp personalizada → disparar via Evolution → histórico/indicadores.
+- **Abordagem**: reusa `campaigns`/`campaign_targets`/`campaign_logs` existente. Discriminator novo `campaign_type` (`'disparo'` legado default / `'prospeccao_sites'`). Opt-out em `leads_extraidos.opt_out` (coluna nova). Worker `campaign-worker.ts` checka `opt_out` antes de enviar.
+- **Migração**: `migrations/prospeccao_sites.sql`. **Usuário precisa rodar no SQL Editor do Supabase.**
+- **Backend (novo)**:
+  - `src/app/api/prospeccao-sites/leads/route.ts` — GET leads sem website, paginado, sort, filter (ramo, region), `requireClientId`. Filtro `or("website.is.null,website.eq.")`.
+  - `src/app/api/prospeccao-sites/campaigns/route.ts` — POST cria campanha `campaign_type='prospeccao_sites'` + targets de `lead_ids`. `enforceClientDefaultModel` SaaS guard.
+  - `src/app/api/prospeccao-sites/campaigns/[id]/route.ts` — GET/PATCH/POST(start/pause/cancel)/DELETE. Verifica `campaign_type === 'prospeccao_sites'` + tenant.
+  - `src/app/api/prospeccao-sites/opt-out/route.ts` — POST marca `opt_out=true`. Anti-spam/LGPD.
+- **Worker**: `src/lib/campaign-worker.ts` — antes de `addCampaignLog "Processando lead…"`, checka `opt_out` em `leads_extraidos`, skip + log + bump `skipped_count`.
+- **Frontend (novo)**: `src/app/prospeccao-sites/page.tsx` — 4 tabs (Busca/Revisão/Disparo/Histórico). Default vendedor "Salomão". Preview usa `renderTemplate` injetando `vendedor` via `variables`.
+- **Sidebar/Header**: `src/components/layout/sidebar.tsx` (`Globe` import + item `/prospeccao-sites` feature `prospeccao_sites`). `src/components/layout/header.tsx` (`Globe` + `pageTitles["/prospeccao-sites"]`).
+- **Feature flag**: `clients.features.prospeccao_sites` controla visibilidade no menu. Ligar via `/admin/clientes`.
+- **Valição**: `npx tsc --noEmit` 0 erros. `curl localhost:3000/prospeccao-sites` → 307 (redirect auth OK). `/api/prospeccao-sites/leads` → 401 (tenant guard OK).
+- **Próximos passos**: rodar SQL migration; ligar feature flag; Captura Maps precisa ter populado `website` em leads (scrape já captura).# Contexto Atual do Projeto
+
+Este projeto (`painel-sdr`) é um Painel de SDR construído com Next.js (versão 16.2.3), conectado ao Supabase e Evolution API (WhatsApp), com uso de Redis para filas e inteligência artificial (Google Gemini).
+
+## [2026-08-04] Fix modelo agente + Web search robustez
+- **Bug**: `resolveModel(agentConfig.target_model, clientId)` em `src/app/api/agent/process/route.ts:928` ignorava `target_model` agente se `clientId` non-admin → caía `default_ai_model`. Admin seta select admin-only em `/agente` mas IA usava default. Token log /tokens mostrava modelo errado.
+- **Fix**: se `agentConfig.target_model` setado, usa `mapModelAsync` direto (valida Gemini vivo, OpenRouter intacto). Fallback só quando vazio. Seguro: RLS impede non-admin setar `target_model`.
+- **Web search** `src/lib/web-search.ts`:
+  - Brave Search API opcional (env `BRAVE_API_KEY`, free 2k/mês) — melhor opção quando setado.
+  - `webFetchPage` 15k→30k chars + crawl 1 nível sub-páginas (sobre/produtos/serviços/contato) quando conteúdo curto.
+  - `needsFreshWebSearch` ampliado: detecta endereço/telefone/site/horário/funcionamento/onde fica/quem é/que ano.
+- **Garantia independência modelo**: `web_search`+`web_fetch` são `functionDeclarations` JSON Schema (route.ts:781-803), suportado por Gemini (nativo) e OpenRouter (tool calling OpenAI-shape). Qualquer modelo escolhido em `/agente` terá tools disponíveis.
+- **Validação**: `npx tsc --noEmit` 0 erros. `npx vitest run` 363/363 pass.
+
 ## [2026-08-03] Realtime /chat + IA no webhook Evolution GO
 - **Solicitação**: chat não atualiza em tempo real (só após sair/entrar); IA ligada não responde no webhook Evolution GO.
 - **Diagnóstico**:

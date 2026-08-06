@@ -17,7 +17,8 @@ import {
 import {
     Search, Download, ChevronLeft, ChevronRight, Phone, Building2,
     Calendar, ExternalLink, Globe, Star, MessageSquare, LayoutGrid, List,
-    Clock, Trash2, Filter, Bot, X, CheckSquare, Loader2, UserPlus
+    Clock, Trash2, Filter, Bot, X, CheckSquare, Loader2, UserPlus,
+    MapPin,
 } from "lucide-react";
 import { AddLeadDialog } from "@/components/add-lead-dialog";
 import { supabase } from "@/lib/supabase";
@@ -61,12 +62,21 @@ interface Lead {
   website: string;
   instagram: string;
   facebook: string;
+  maps_url: string;
   status: string; // 'novo', 'interessado', 'follow-up', 'agendado', 'fechado', 'sem_interesse', 'descartado'
   next_follow_up: string | null;
   justificativa_ia: string | null;
   resumo_ia: string | null;
   ia_last_analyzed_at: string | null;
   created_at: string;
+}
+
+// helper: constroi URL Maps canônica — usa maps_url salvo (place_id embutido);
+// fallback busca por nome+endereço se lead antigo sem maps_url.
+function mapsUrlFor(lead: Pick<Lead, "maps_url" | "nome_negocio" | "endereco">): string {
+  if (lead.maps_url) return lead.maps_url;
+  const q = encodeURIComponent(`${lead.nome_negocio || ""} ${lead.endereco || ""}`.trim());
+  return `https://www.google.com/maps/search/?api=1&query=${q}`;
 }
 
 const KANBAN_COLUMNS = [
@@ -98,16 +108,17 @@ export default function LeadsPage() {
   // Colunas do Kanban — fonte única é a tabela kanban_columns (editável no
   // Organizador). Começa com o fallback hardcoded e troca pelo que vier da API
   // pra CRM, Organizador e auto-promote do agente sempre baterem.
-  const [columns, setColumns] = useState<{ id: string; uuid: string; label: string; color: string; isTerminal: boolean }[]>(KANBAN_COLUMNS.map((c: any) => ({ id: c.status_key, uuid: "", label: c.label, color: c.color, isTerminal: false })));
+  const [columns, setColumns] = useState<{ id: string; uuid: string; label: string; color: string; isTerminal: boolean }[]>(KANBAN_COLUMNS.map((c: any) => ({ id: c.id, uuid: "", label: c.label, color: c.color, isTerminal: false })));
   useEffect(() => {
     fetch("/api/kanban-columns", { cache: "no-store" })
-      .then((r) => r.json())
-      .then((j) => {
+      .then(async (r) => {
+        const j = await r.json();
+        console.log("[kanban-cols] GET", r.status, j);
         if (j?.ok && Array.isArray(j.columns) && j.columns.length > 0) {
           setColumns(j.columns.map((c: any) => ({ id: c.status_key, uuid: c.id, label: c.label, color: c.color, isTerminal: !!c.is_terminal })));
         }
       })
-      .catch(() => {});
+      .catch((e) => console.error("[kanban-cols] GET erro", e));
   }, []);
 
   // Modal Confirm Delete
@@ -556,13 +567,16 @@ export default function LeadsPage() {
                           </TableCell>
                           <TableCell className="text-right py-4 pr-6">
                               <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                                  <Button size="icon" variant="ghost" className="h-8 w-8 hover:bg-white/10" onClick={(e) => { e.stopPropagation(); setSelectedLead(lead); }}>
+                                  <Button size="icon" variant="ghost" className="h-8 w-8 hover:bg-white/10" onClick={(e) => { e.stopPropagation(); setSelectedLead(lead); }} title="Detalhes">
                                       <ExternalLink className="w-3.5 h-3.5 text-blue-400" />
                                   </Button>
-                                  <Button size="icon" variant="ghost" className="h-8 w-8 hover:bg-red-500/20" onClick={(e) => { 
-                                      e.stopPropagation(); 
-                                      setLeadToDelete(lead); 
-                                      setShowConfirmDelete(true); 
+                                  <Button size="icon" variant="ghost" className="h-8 w-8 hover:bg-rose-500/15" onClick={(e) => { e.stopPropagation(); window.open(mapsUrlFor(lead), "_blank"); }} title="Ver no Maps">
+                                      <MapPin className="w-3.5 h-3.5 text-rose-400" />
+                                  </Button>
+                                  <Button size="icon" variant="ghost" className="h-8 w-8 hover:bg-red-500/20" onClick={(e) => {
+                                      e.stopPropagation();
+                                      setLeadToDelete(lead);
+                                      setShowConfirmDelete(true);
                                   }}>
                                       <Trash2 className="w-3.5 h-3.5 text-red-400" />
                                   </Button>
@@ -637,6 +651,7 @@ export default function LeadsPage() {
             onLeadClick={setSelectedLead}
             formatPhone={formatPhone}
             onLeadsUpdated={handleKanbanLeadsUpdated}
+            onColumnsChange={(cols) => setColumns(cols.map((c) => ({ id: c.id, uuid: c.uuid, label: c.label, color: c.color, isTerminal: !!c.isTerminal })))}
           />
         )}
       </div>
@@ -815,9 +830,6 @@ export default function LeadsPage() {
                         className="flex-1 gap-2 h-12 rounded-xl font-bold bg-white/10 hover:bg-white/20 text-white transition-all duration-300 hover:scale-[1.02]"
                         onClick={() => {
                             if (selectedLead) {
-                                // Passa instance_name pra o /chat trocar pra ela
-                                // automaticamente (senão abria na lista geral
-                                // se a instância ativa fosse outra).
                                 const params = new URLSearchParams({
                                   session: selectedLead.remoteJid,
                                 });
@@ -829,8 +841,18 @@ export default function LeadsPage() {
                         }}
                     >
                         <MessageSquare className="w-4 h-4 text-purple-300" />
-                        Abrir Chat Interno
+                        Chat Interno
                     </Button>
+                    {selectedLead && (
+                        <Button
+                            variant="secondary"
+                            className="gap-2 h-12 rounded-xl font-bold bg-white/10 hover:bg-white/20 text-white transition-all duration-300 hover:scale-[1.02]"
+                            onClick={() => window.open(mapsUrlFor(selectedLead), "_blank")}
+                            title="Ver no Google Maps"
+                        >
+                            <MapPin className="w-4 h-4 text-rose-400" />
+                        </Button>
+                    )}
                 </div>
             </div>
           </div>
