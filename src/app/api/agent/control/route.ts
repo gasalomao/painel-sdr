@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
-import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
 import {
   pauseSession,
   snoozeSession,
@@ -162,77 +161,13 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ success: true, ...r, minutes, blocked: true, permanent: false });
       }
       case "resume": {
+        // ponytail: só ativa a IA pra mensagens FUTURAS. Não responde msg antiga
+        // do cliente (mesmo que seja a última da conversa) — isso faz a IA
+        // responder algo de 3 dias atrás. Contexto histórico é preservado:
+        // /api/agent/process lê chats_dashboard por remote_jid (linha ~133),
+        // então quando o cliente mandar próxima mensagem a IA tem todo o
+        // histórico (incluindo mensagens entre humanos).
         const r = await resumeSession(session.id);
-
-        // E se a última mensagem da conversa for do cliente (ainda sem resposta da IA),
-        // dispara a IA imediatamente para responder e assumir o atendimento de forma proativa.
-        try {
-          const { data: lastMsg } = await supabase
-            .from("chats_dashboard")
-            .select("content, sender_type, created_at")
-            .eq("remote_jid", remoteJid)
-            .eq("instance_name", instanceName)
-            .order("created_at", { ascending: false })
-            .limit(1)
-            .maybeSingle();
-
-          if (lastMsg && lastMsg.sender_type === "customer") {
-            // Anti-double-fire: se a IA já respondeu nos últimos 30s, não dispara de novo.
-            // Isso previne mensagens duplicadas por cliques rápidos múltiplos no "Retomar".
-            const { data: recentAi } = await supabase
-              .from("chats_dashboard")
-              .select("id")
-              .eq("remote_jid", remoteJid)
-              .eq("instance_name", instanceName)
-              .eq("sender_type", "ai")
-              .gte("created_at", new Date(Date.now() - 30_000).toISOString())
-              .limit(1);
-
-            if (recentAi && recentAi.length > 0) {
-              console.log("[Agent Control] IA já respondeu nos últimos 30s — skip para evitar duplicata.");
-            } else {
-              const internalSecretValue = getInternalSecret();
-              const INTERNAL_BASE = `http://localhost:${process.env.PORT || 3000}`;
-              const agentMod = await import("@/app/api/agent/process/route");
-
-              const fakeReq = new Request(`${INTERNAL_BASE}/api/agent/process`, {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  [INTERNAL_SECRET_HEADER]: internalSecretValue,
-                },
-                body: JSON.stringify({
-                  instanceName,
-                  remoteJid,
-                  text: lastMsg.content,
-                  sessionId: session.id,
-                  forceActive: true, // Bypass pause check during manual resume
-                }),
-              });
-
-              // CRÍTICO: await. Em Next 16 standalone, fire-and-forget
-              // (.then().catch()) é cancelado quando esta função retorna a
-              // resposta HTTP — a IA era "disparada" mas o processo morria
-              // antes de gerar a resposta. Por isso o "Retomar" não voltava
-              // a IA. Bloqueia 3-7s pro agente rodar; o usuário que clicou
-              // espera por isso mesmo.
-              try {
-                const res = await agentMod.POST(fakeReq as any);
-                if (!res.ok) {
-                  const txt = await res.text().catch(() => "");
-                  console.error(`[Agent Control] Falha ao processar IA no resume (Status: ${res.status}):`, txt);
-                } else {
-                  console.log("[Agent Control] IA disparada e processada com sucesso no resume.");
-                }
-              } catch (e: any) {
-                console.error("[Agent Control] Falha ao processar IA no resume:", e?.message);
-              }
-            }
-          }
-        } catch (e: any) {
-          console.error("[Agent Control] Falha ao verificar/disparar IA no resume:", e?.message);
-        }
-
         return NextResponse.json({ success: true, ...r, blocked: false, permanent: false });
       }
       case "check": {
