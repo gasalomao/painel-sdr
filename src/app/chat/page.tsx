@@ -5,7 +5,7 @@ import { Header } from "@/components/layout/header";
 import { supabase } from "@/lib/supabase";
 import { useClientSession } from "@/lib/use-session";
 import { useRealtime } from "@/hooks/use-realtime";
-import { normalizeConversation } from "@/lib/inbox/conversations";
+import { normalizeConversation, isSameJid } from "@/lib/inbox/conversations";
 import { ConversationList } from "@/components/inbox/conversation-list";
 import { MessageThread } from "@/components/inbox/message-thread";
 import { ContactSidebar } from "@/components/inbox/contact-sidebar";
@@ -124,7 +124,7 @@ function ChatPageContent() {
         : "customer";
 
       if (event.eventType === "INSERT") {
-        if (currentActive && msg.remote_jid === currentActive.id) {
+        if (currentActive && isSameJid(msg.remote_jid, currentActive.id)) {
           setMessages((prev) => {
             // Deduplicação: otimista + webhook podem chegar na mesma msg.
             if (prev.some((m) =>
@@ -148,8 +148,8 @@ function ChatPageContent() {
         // Atualiza a última mensagem da conversa no card lateral.
         setConversations((prev) =>
           prev.map((c) => {
-            if (c.id !== msg.remote_jid) return c;
-            const isCurrent = currentActive?.id === msg.remote_jid;
+            if (!isSameJid(c.id, msg.remote_jid)) return c;
+            const isCurrent = currentActive && isSameJid(currentActive.id, msg.remote_jid);
             return {
               ...c,
               last_message_text: msg.content || msg.content_text || c.last_message_text,
@@ -160,7 +160,7 @@ function ChatPageContent() {
         );
       } else if (event.eventType === "UPDATE") {
         // Update de status (sent → delivered → read) ou enriquecimento de mídia.
-        if (currentActive && msg.remote_jid === currentActive.id) {
+        if (currentActive && isSameJid(msg.remote_jid, currentActive.id)) {
           setMessages((prev) =>
             prev.map((m) => {
               if (m.id !== String(msg.id) && (!m.message_id || !msg.message_id || m.message_id !== msg.message_id)) return m;
@@ -188,15 +188,15 @@ function ChatPageContent() {
       const currentActive = activeConvRef.current;
 
       setConversations((prev: Conversation[]) => {
-        const exists = prev.some((c) => c.id === updated.id);
+        const exists = prev.some((c) => isSameJid(c.id, updated.id));
         if (exists) {
           return prev.map((c) =>
-            c.id === updated.id
+            isSameJid(c.id, updated.id)
               ? {
                   ...c,
                   ...updated,
                   last_message_text: updated.last_message_text || c.last_message_text,
-                  unread_count: currentActive?.id === updated.id ? 0 : updated.unread_count,
+                  unread_count: currentActive && isSameJid(currentActive.id, updated.id) ? 0 : updated.unread_count,
                 }
               : c
           );
@@ -208,8 +208,7 @@ function ChatPageContent() {
         }
       });
 
-      // CORREÇÃO CRÍTICA DO PISCA-PISCA: Apenas atualiza a conversa ativa se a sessão pertencer exatamente a ela!
-      if (currentActive && updated.id === currentActive.id) {
+      if (currentActive && isSameJid(updated.id, currentActive.id)) {
         setActiveConversation((prev: Conversation | null) => (prev ? { ...prev, ...updated } : prev));
       }
     },

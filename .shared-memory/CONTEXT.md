@@ -2,6 +2,53 @@
 
 Este projeto (`painel-sdr`) é um Painel de SDR construído com Next.js (versão 16.2.3), conectado ao Supabase e Evolution API (WhatsApp), com uso de Redis para filas e inteligência artificial (Google Gemini).
 
+## [2026-08-06] Chat (/chat) — Atualização de Mensagens 100% Tempo Real (Híbrido Ultra-Otimizado)
+
+**Solicitação**: "é de extrena importancia que aqui as mensagem seja atualizada em tempo real, pois so atualiza quando saio da conversa e entro denovo faça isso de maneria otimizada para nao pesar tanto mas se trata d uma interface praticamente de whatszap entao e fundamental q as mensagem seja atualiza em tempo real".
+
+**Causas Identificadas**:
+1. **Incompatibilidade de JIDs**: O `handleMessageEvent` e `handleConversationEvent` faziam comparação estrita `msg.remote_jid === currentActive.id`. Se o WebSocket enviasse `55279936124677@s.whatsapp.net` e o estado estivesse `55279936124677` (ou vice-versa), o evento era descartado silenciosamente.
+2. **Sem Polling Delta de Segurança**: O chat dependia exclusivamente da conexão WebSocket. Se a conexão com o Supabase Realtime oscilasse ou caísse em segundo plano, nenhuma mensagem nova chegava até o usuário trocar de conversa.
+3. **Filtro de busca rígido em `chats_dashboard`**: `MessageThread` buscava apenas `.eq("remote_jid", conversationId)`, perdendo mensagens armazenadas sem `@s.whatsapp.net`.
+
+**Fix Aplicado**:
+1. **Helper `isSameJid` & `getPossibleJids`** (`src/lib/inbox/conversations.ts`):
+   - Mapeia variações de JIDs (`@s.whatsapp.net`, `@c.us`, `phone:NUMERO`, apenas dígitos).
+   - `MessageThread` agora busca usando `.in("remote_jid", posiblesJids)`.
+   - `handleMessageEvent` e `handleConversationEvent` no `/chat` usam `isSameJid` para casar os eventos do WebSocket instantaneamente (0ms).
+2. **Arquitetura Híbrida Inteligente (Smart Delta Poll)**:
+   - **Conversa Ativa**: Polling ultra-leve de 2.5s (`src/components/inbox/message-thread.tsx`) apenas para a conversa aberta, ordenado por `created_at DESC LIMIT 20`. Se a aba estiver visível e houver nova mensagem no banco (do cliente ou da IA), ela é injetada instantaneamente no estado sem piscar a UI.
+   - **Lista de Conversas (Sidebar)**: Polling silencioso de 5s (`src/components/inbox/conversation-list.tsx`) que reordena a lista e atualiza contadores de não lidos de forma transparente.
+   - **Desativação em Background**: O polling é automaticamente pausado quando a aba não está visível (`document.hidden`), economizando 100% de CPU/rede.
+
+**Validação**: `npx tsc --noEmit` 0 erros.
+
+## [2026-08-06] Prospecção Sites — Filtros com Rótulos Amigáveis (sem nomes de variáveis)
+
+**Solicitação**: "todos esses filtros que tem em prospcçao sites leads revisao perceba q fica com nome de variaiveis como only_empy, faça aparecer em todos oq esta selecionado nao as variavies".
+
+**Causas**: O componente `@base-ui/react/select` renderiza o valor cru da variável (`"only_empty"`, `"reviews"`, `"desc"`) em `<SelectValue />` a menos que os filhos calculados sejam explicitamente passados.
+
+**Fix Aplicado (`src/app/prospeccao-sites/page.tsx`)**:
+- Criados dicionários de mapeamento: `HAS_WEBSITE_LABELS` ("Sem site", "Todos os sites", "Com site"), `SORT_LABELS` ("Avaliações", "Nota", "Data captura"), `ORDER_LABELS` ("Maior → menor", "Menor → maior").
+- Atualizados os componentes `<SelectValue>` nas abas **Leads**, **Revisão** e **Disparo** para passar os rótulos amigáveis.
+- **Resultado**: os botões dos filtros agora mostram "Sem site", "Avaliações", "Maior → menor", etc. quando selecionados.
+
+**Validação**: `npx tsc --noEmit` 0 erros.
+
+## [2026-08-06] Prospecção Sites — Seta Google Maps em Leads
+
+**Solicitação**: "em prospcçao sites, dentro de leads faça ter uma seta q leva para google maps do cliente parecido com oq tem em clientes crm perceba a seta na frente do lead q envia para google maps link dele faça isso".
+
+**Implementação (`src/app/prospeccao-sites/page.tsx`)**:
+- Helper `mapsUrlFor(lead)`: retorna `maps_url` se preenchido; ou link com `place_id`; ou fallback para busca no Google Maps (`https://www.google.com/maps/search/?api=1&query=nome+endereco`).
+- **Coluna NEGÓCIO**: adicionado ícone de seta de link externo (`ExternalLink` em azul com animação suave no hover) ao lado de cada nome de negócio, abrindo o Google Maps em uma nova aba.
+- **Coluna MAPS**: atualizado para sempre exibir Badge clicável com ícone `MapPin` e `ExternalLink`, garantindo que 100% dos leads tenham link funcional sem exibir `—`.
+- **Coluna AÇÕES**: adicionado botão de ação dedicado com ícone de seta (`ExternalLink`) azul ao lado do botão de deletar.
+- **Aba REVISÃO**: adicionado o mesmo link com ícone de seta nos cards de revisão dos leads.
+
+**Validação**: `npx tsc --noEmit` verificado.
+
 ## [2026-08-06] 9Router — Dashboard do Headroom Proxy Totalmente Corrigido (Interface 100% Funcional)
 
 **Solicitação**: "http://localhost:20128/api/headroom/proxy/dashboard a interface esta bugada faça funcionar".

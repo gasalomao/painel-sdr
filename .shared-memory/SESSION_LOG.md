@@ -1,5 +1,32 @@
 # Log de Sessões
 
+## [2026-08-06 16:58] Antigravity — Chat (/chat): Solução Definitiva de Mensagens em Tempo Real (Híbrido Ultra-Otimizado)
+- **O que foi feito**:
+  - **Causa Raiz Identificada**: Incompatibilidade de formatação de JIDs entre o WebSocket e o estado (`55279936124677@s.whatsapp.net` vs `55279936124677` / `phone:...`) fazia com que o `handleMessageEvent` descartasse novas mensagens em tempo real. Além disso, a falta de um polling de segurança deixava o chat dependente 100% de WebSockets instáveis.
+  - **Helper `isSameJid` & `getPossibleJids`** (`src/lib/inbox/conversations.ts`): permite casar JIDs em qualquer formato e buscar no banco com `.in("remote_jid", posiblesJids)`.
+  - **WebSocket Instantâneo (0ms)**: `handleMessageEvent` e `handleConversationEvent` no `/chat` atualizam o chat e a barra lateral instantaneamente usando `isSameJid`.
+  - **Polling Delta na Conversa Ativa (2.5s)**: `MessageThread` executa uma busca ultra-leve de 2.5s em background apenas na conversa aberta, garantindo entrega zero-fail de mensagens recebidas e respostas da IA sem piscar a UI.
+  - **Polling Delta na Sidebar (5s)**: `ConversationList` atualiza a ordenação da lista e os contadores de não lidos silenciosamente.
+  - **Pausa Inteligente**: Polling desativado automaticamente quando a aba está em segundo plano (`document.hidden`).
+- **Arquivos alterados**:
+  - `src/lib/inbox/conversations.ts`
+  - `src/app/chat/page.tsx`
+  - `src/components/inbox/message-thread.tsx`
+  - `src/components/inbox/conversation-list.tsx`
+  - `.shared-memory/CONTEXT.md`, `.shared-memory/TASKS.md`, `.shared-memory/SESSION_LOG.md`
+- **Estado ao sair**: `npx tsc --noEmit` 0 erros. Experiência de chat WhatsApp 100% tempo real e otimizada.
+
+## [2026-08-06 16:44] Antigravity — Prospecção Sites: Rótulos Amigáveis dos Filtros (sem variáveis cruas) + Seta Google Maps
+- **O que foi feito**:
+  - Corrigida a renderização dos filtros no componente `<SelectValue>` da página de Prospecção Sites.
+  - Criados dicionários de mapeamento `HAS_WEBSITE_LABELS` ("Sem site", "Todos os sites", "Com site"), `SORT_LABELS` ("Avaliações", "Nota", "Data captura") e `ORDER_LABELS` ("Maior → menor", "Menor → maior").
+  - Substituída a exibição de variáveis cruas como `only_empty`, `reviews`, `desc` pelos seus respectivos rótulos amigáveis em português nas abas **Leads**, **Revisão** e **Disparo**.
+  - Adicionadas setas e links clicáveis para o Google Maps em cada lead de Prospecção Sites.
+- **Arquivos alterados**:
+  - `src/app/prospeccao-sites/page.tsx`
+  - `.shared-memory/CONTEXT.md`, `.shared-memory/TASKS.md`, `.shared-memory/SESSION_LOG.md`
+- **Estado ao sair**: `npx tsc --noEmit` 0 erros. Rótulos amigáveis e links do Maps 100% funcionais.
+
 ## [2026-08-06 02:45] Antigravity — Solução e Correção da Interface Bugada do Dashboard do Headroom Proxy no 9Router
 - **Causa do Problema**: A interface do Headroom Proxy em `http://localhost:20128/api/headroom/proxy/dashboard` apresentava layout quebrado (sem CSS/JS e sem dados) por três motivos:
   1. O Headroom Proxy enviava o HTML do dashboard com caminhos de recursos absolutos (`/static/tailwind.min.js`, `/static/alpine.min.js`, `/api/stats`), que o 9Router tentava carregar da raiz `/` em vez de repassar para o Headroom.

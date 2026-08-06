@@ -14,7 +14,7 @@ import {
 import {
   Send, Play, Pause, Square, Loader2, Search, Globe, BarChart3,
   CheckCircle2, XCircle, Star, Ban, RefreshCw, ShieldAlert,
-  Rocket, Terminal, Filter, TrendingUp, Building2, Link2, Link2Off, Trash2, MapPin,
+  Rocket, Terminal, Filter, TrendingUp, Building2, Link2, Link2Off, Trash2, MapPin, ExternalLink,
 } from "lucide-react";
 import { renderTemplate, type TemplateContext } from "@/lib/template-vars";
 import { cn } from "@/lib/utils";
@@ -72,6 +72,31 @@ Notei que sua empresa {{ramo}} ainda não tem site — isso tá te fazendo perde
 Queria te mostrar como podemos resolver rápido. Tem 2 min pra um papo? — {{vendedor}}`;
 
 const VENDEDOR_DEFAULT = "Salomão";
+
+const HAS_WEBSITE_LABELS: Record<string, string> = {
+  only_empty: "Sem site",
+  all: "Todos os sites",
+  only_with: "Com site",
+};
+
+const SORT_LABELS: Record<string, string> = {
+  reviews: "Avaliações",
+  rating: "Nota",
+  created_at: "Data captura",
+};
+
+const ORDER_LABELS: Record<string, string> = {
+  desc: "Maior → menor",
+  asc: "Menor → maior",
+};
+
+function mapsUrlFor(lead: { maps_url?: string | null; place_id?: string | null; nome_negocio?: string | null; endereco?: string | null }): string {
+  if (lead.maps_url && lead.maps_url.trim()) return lead.maps_url;
+  if (lead.place_id && lead.place_id.trim()) return `https://www.google.com/maps/place/?q=place_id:${lead.place_id}`;
+  const q = `${lead.nome_negocio || ""} ${lead.endereco || ""}`.trim();
+  if (q) return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`;
+  return "https://maps.google.com";
+}
 
 export default function ProspeccaoSitesPage() {
   const [tab, setTab] = useState<TabKey>("captura");
@@ -599,15 +624,15 @@ export default function ProspeccaoSitesPage() {
                   <Input placeholder="Nota mín (0-5)" type="number" step="0.1" min="0" max="5" value={ratingMin} onChange={(e) => setRatingMin(e.target.value)} className="w-28" />
                   <Input placeholder="Avaliações mín" type="number" min="0" value={reviewsMin} onChange={(e) => setReviewsMin(e.target.value)} className="w-32" />
                   <Select value={hasWebsite} onValueChange={(v: string | null) => setHasWebsite((v as any) || "only_empty")}>
-                    <SelectTrigger className="w-40"><SelectValue placeholder="Presença site" /></SelectTrigger>
+                    <SelectTrigger className="w-40"><SelectValue placeholder="Presença site">{HAS_WEBSITE_LABELS[hasWebsite] || "Presença site"}</SelectValue></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="only_empty">Sem site</SelectItem>
-                      <SelectItem value="all">Todos</SelectItem>
+                      <SelectItem value="all">Todos os sites</SelectItem>
                       <SelectItem value="only_with">Com site</SelectItem>
                     </SelectContent>
                   </Select>
                   <Select value={sort} onValueChange={(v: string | null) => setSort((v as any) || "reviews")}>
-                    <SelectTrigger className="w-36"><SelectValue /></SelectTrigger>
+                    <SelectTrigger className="w-36"><SelectValue placeholder="Ordenar por">{SORT_LABELS[sort] || "Avaliações"}</SelectValue></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="reviews">Avaliações</SelectItem>
                       <SelectItem value="rating">Nota</SelectItem>
@@ -615,7 +640,7 @@ export default function ProspeccaoSitesPage() {
                     </SelectContent>
                   </Select>
                   <Select value={order} onValueChange={(v: string | null) => setOrder((v as any) || "desc")}>
-                    <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+                    <SelectTrigger className="w-36"><SelectValue placeholder="Ordem">{ORDER_LABELS[order] || "Maior → menor"}</SelectValue></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="desc">Maior → menor</SelectItem>
                       <SelectItem value="asc">Menor → maior</SelectItem>
@@ -679,23 +704,25 @@ export default function ProspeccaoSitesPage() {
                     <tbody>
                       {rankedLeads.map((l, idx) => {
                         const hasW = !!(l.website && l.website.trim());
+                        const mUrl = mapsUrlFor(l);
                         return (
                           <tr key={l.id} className={cn("border-t border-white/5 hover:bg-white/[0.03]", selected.has(l.id) && "bg-primary/[0.05]")}>
                             <td className="p-2"><input type="checkbox" checked={selected.has(l.id)} onChange={() => toggleSelect(l)} /></td>
                             <td className="p-2 text-white/30 font-mono">{idx + 1}</td>
                             <td className="p-2 font-bold text-white">
-                              <Building2 className="w-3 h-3 inline mr-1 text-white/40" />
-                              {(() => {
-                                const mapsUrl = l.maps_url || (l.place_id ? `https://www.google.com/maps/place/?q=place_id:${l.place_id}` : null);
-                                if (mapsUrl) {
-                                  return (
-                                    <a href={mapsUrl} target="_blank" rel="noopener noreferrer" className="hover:text-blue-400 hover:underline" title="Abrir no Google Maps">
-                                      {l.nome_negocio || "—"}
-                                    </a>
-                                  );
-                                }
-                                return l.nome_negocio || "—";
-                              })()}
+                              <div className="flex items-center gap-1.5">
+                                <Building2 className="w-3.5 h-3.5 text-white/40 shrink-0" />
+                                <a
+                                  href={mUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1.5 hover:text-blue-400 group/link transition-colors"
+                                  title="Abrir no Google Maps"
+                                >
+                                  <span className="hover:underline">{l.nome_negocio || "—"}</span>
+                                  <ExternalLink className="w-3.5 h-3.5 text-blue-400 shrink-0 opacity-80 group-hover/link:opacity-100 group-hover/link:translate-x-0.5 transition-all" />
+                                </a>
+                              </div>
                             </td>
                             <td className="p-2">{l.ramo_negocio || "—"}</td>
                             <td className="p-2 font-mono text-green-300">{l.telefone || l.remoteJid.split("@")[0]}</td>
@@ -723,17 +750,11 @@ export default function ProspeccaoSitesPage() {
                               )}
                             </td>
                             <td className="p-2">
-                              {(() => {
-                                const mapsUrl = l.maps_url || (l.place_id ? `https://www.google.com/maps/place/?q=place_id:${l.place_id}` : null);
-                                if (!mapsUrl) return <span className="text-white/20">—</span>;
-                                return (
-                                  <a href={mapsUrl} target="_blank" rel="noopener noreferrer" title="Abrir no Google Maps">
-                                    <Badge variant="outline" className="text-blue-400 border-blue-500/30 cursor-pointer hover:bg-blue-500/10">
-                                      <MapPin className="w-3 h-3 mr-1" />Maps
-                                    </Badge>
-                                  </a>
-                                );
-                              })()}
+                              <a href={mUrl} target="_blank" rel="noopener noreferrer" title="Abrir no Google Maps">
+                                <Badge variant="outline" className="text-blue-400 border-blue-500/30 cursor-pointer hover:bg-blue-500/10 gap-1">
+                                  <MapPin className="w-3 h-3" />Maps <ExternalLink className="w-2.5 h-2.5 opacity-70" />
+                                </Badge>
+                              </a>
                             </td>
                             <td className="p-2">
                               {l.opt_out ? (
@@ -745,9 +766,16 @@ export default function ProspeccaoSitesPage() {
                               )}
                             </td>
                             <td className="p-2">
-                              <Button variant="ghost" size="sm" onClick={() => deleteLeads([l.id])} title="Deletar lead">
-                                <Trash2 className="w-3 h-3 text-red-400" />
-                              </Button>
+                              <div className="flex items-center gap-1">
+                                <a href={mUrl} target="_blank" rel="noopener noreferrer" title="Ver no Google Maps">
+                                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0 text-blue-400 hover:bg-blue-500/10 hover:text-blue-300">
+                                    <ExternalLink className="w-3.5 h-3.5" />
+                                  </Button>
+                                </a>
+                                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => deleteLeads([l.id])} title="Deletar lead">
+                                  <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                                </Button>
+                              </div>
                             </td>
                           </tr>
                         );
@@ -806,7 +834,7 @@ export default function ProspeccaoSitesPage() {
                     <Input placeholder="Nota mín (0-5)" type="number" step="0.1" min="0" max="5" value={ratingMin} onChange={(e) => setRatingMin(e.target.value)} className="w-28" />
                     <Input placeholder="Avaliações mín" type="number" min="0" value={reviewsMin} onChange={(e) => setReviewsMin(e.target.value)} className="w-32" />
                     <Select value={sort} onValueChange={(v: string | null) => setSort((v as any) || "reviews")}>
-                      <SelectTrigger className="w-36"><SelectValue placeholder="Ordenar por" /></SelectTrigger>
+                      <SelectTrigger className="w-36"><SelectValue placeholder="Ordenar por">{SORT_LABELS[sort] || "Avaliações"}</SelectValue></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="reviews">Avaliações</SelectItem>
                         <SelectItem value="rating">Nota</SelectItem>
@@ -814,7 +842,7 @@ export default function ProspeccaoSitesPage() {
                       </SelectContent>
                     </Select>
                     <Select value={order} onValueChange={(v: string | null) => setOrder((v as any) || "desc")}>
-                      <SelectTrigger className="w-40"><SelectValue placeholder="Ordem" /></SelectTrigger>
+                      <SelectTrigger className="w-40"><SelectValue placeholder="Ordem">{ORDER_LABELS[order] || "Maior → menor"}</SelectValue></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="desc">Maior → menor</SelectItem>
                         <SelectItem value="asc">Menor → maior</SelectItem>
@@ -839,7 +867,18 @@ export default function ProspeccaoSitesPage() {
                     <Card key={lead.id} className="border-white/10 bg-white/[0.02]"><CardContent className="p-3">
                       <div className="flex justify-between items-start mb-2">
                         <div>
-                          <div className="font-bold text-white text-sm">{lead.nome_negocio || "—"}</div>
+                          <div className="font-bold text-white text-sm flex items-center gap-1.5">
+                            <a
+                              href={mapsUrlFor(lead)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1.5 hover:text-blue-400 group/link transition-colors"
+                              title="Abrir no Google Maps"
+                            >
+                              <span className="hover:underline">{lead.nome_negocio || "—"}</span>
+                              <ExternalLink className="w-3.5 h-3.5 text-blue-400 shrink-0 opacity-80 group-hover/link:opacity-100" />
+                            </a>
+                          </div>
                           <div className="text-xs text-white/50">
                             {lead.ramo_negocio} · {lead.telefone || lead.remoteJid.split("@")[0]} · {lead.rating || "—"} ★ ({lead.reviews || "0"})
                           </div>
@@ -879,7 +918,7 @@ export default function ProspeccaoSitesPage() {
                 <div>
                   <label className="text-xs text-white/60">Instância WhatsApp</label>
                   <Select value={instanceName} onValueChange={(v: string | null) => setInstanceName(v || "")}>
-                    <SelectTrigger><SelectValue placeholder="Selecione…" /></SelectTrigger>
+                    <SelectTrigger><SelectValue placeholder="Selecione…">{instanceName || "Selecione…"}</SelectValue></SelectTrigger>
                     <SelectContent>
                       {instances.map((i) => (
                         <SelectItem key={i.instance_name} value={i.instance_name}>

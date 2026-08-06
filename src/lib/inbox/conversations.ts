@@ -135,3 +135,33 @@ export function matchesContactFilters(
 
   return true;
 }
+
+/**
+ * Compara dois JIDs/telefones de forma flexível (aceita formato completo, raw number, phone: prefix).
+ */
+export function isSameJid(a?: string | null, b?: string | null): boolean {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const numA = a.replace(/\D/g, "");
+  const numB = b.replace(/\D/g, "");
+  if (numA && numB && numA === numB) return true;
+  return false;
+}
+
+/**
+ * Retorna lista de variações de JIDs possíveis para busca no banco (ex: com @s.whatsapp.net, raw digits, etc.)
+ */
+export function getPossibleJids(jid?: string | null): string[] {
+  if (!jid) return [];
+  const cleanPhone = jid.replace(/\D/g, "");
+  const set = new Set<string>();
+  set.add(jid);
+  if (cleanPhone) {
+    set.add(cleanPhone);
+    set.add(`${cleanPhone}@s.whatsapp.net`);
+    set.add(`${cleanPhone}@c.us`);
+    set.add(`phone:${cleanPhone}`);
+  }
+  return Array.from(set).filter(Boolean);
+}
+
