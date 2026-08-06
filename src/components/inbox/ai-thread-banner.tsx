@@ -74,12 +74,19 @@ export function AiThreadBanner({
     };
   }, [resumeAt, botStatus, conversationId, onChange]);
 
-  // Função para Ativar a IA
+  // Função para Ativar a IA (com atualização OTIMISTA instantânea)
   const handleResumeAi = useCallback(async () => {
     if (!conversationId) {
       toast.error("Contato inválido para alteração do agente.");
       return;
     }
+    
+    // 1. Atualização OTIMISTA imediata (0ms de espera no botão)
+    onChange?.({
+      bot_status: "bot_active",
+      resume_at: null,
+    });
+
     setBusy(true);
     try {
       const res = await fetch("/api/agent/control", {
@@ -94,25 +101,30 @@ export function AiThreadBanner({
 
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success) {
+        // Reverte estado se o backend retornar erro
+        onChange?.({
+          bot_status: "bot_paused",
+          resume_at: null,
+        });
         toast.error(data.error || "Erro ao ativar o agente.");
         return;
       }
 
-      onChange?.({
-        bot_status: "bot_active",
-        resume_at: null,
-      });
-
       toast.success("Robô IA Ativado! (IA responderá as mensagens)");
     } catch (err) {
       console.error("Erro ao ativar controle de IA:", err);
+      // Reverte estado em caso de falha de rede
+      onChange?.({
+        bot_status: "bot_paused",
+        resume_at: null,
+      });
       toast.error("Falha de rede ao configurar o agente.");
     } finally {
       setBusy(false);
     }
   }, [conversationId, instanceName, onChange]);
 
-  // Função para Silenciar/Pausar a IA por tempo específico em minutos (ou indefinido)
+  // Função para Silenciar/Pausar a IA (com atualização OTIMISTA instantânea)
   const handlePauseAi = useCallback(
     async (durationMinutes?: number) => {
       if (!conversationId) {
@@ -134,6 +146,14 @@ export function AiThreadBanner({
         minutes = parsed;
       }
 
+      const tempResumeAt = minutes ? new Date(Date.now() + minutes * 60 * 1000).toISOString() : null;
+
+      // 1. Atualização OTIMISTA imediata
+      onChange?.({
+        bot_status: "bot_paused",
+        resume_at: tempResumeAt,
+      });
+
       setBusy(true);
       try {
         const action = minutes ? "snooze" : "pause";
@@ -150,12 +170,17 @@ export function AiThreadBanner({
 
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.success) {
+          // Reverte estado se falhou
+          onChange?.({
+            bot_status: "bot_active",
+            resume_at: null,
+          });
           toast.error(data.error || "Erro ao atualizar controle do agente.");
           return;
         }
 
         const newStatus = "bot_paused";
-        const newResumeAt = data.resumeAt || data.resume_at || null;
+        const newResumeAt = data.resumeAt || data.resume_at || tempResumeAt;
 
         onChange?.({
           bot_status: newStatus,
@@ -169,6 +194,11 @@ export function AiThreadBanner({
         );
       } catch (err) {
         console.error("Erro ao pausar controle de IA:", err);
+        // Reverte estado se falhou a rede
+        onChange?.({
+          bot_status: "bot_active",
+          resume_at: null,
+        });
         toast.error("Falha de rede ao configurar o agente.");
       } finally {
         setBusy(false);

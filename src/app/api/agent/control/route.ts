@@ -76,38 +76,54 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "remoteJid é obrigatório" }, { status: 400 });
     }
 
-    // Busca contato — se não existir, tenta criar ou buscar por telefone
-    let { data: contact } = await supabase
-      .from("contacts")
-      .select("id")
-      .eq("remote_jid", remoteJid)
-      .maybeSingle();
+    // 1. Extrai variações do JID / telefone
+    const cleanPhone = remoteJid.replace(/@.*$/, "").replace(/\D/g, "");
+    const jids = Array.from(
+      new Set([
+        remoteJid,
+        cleanPhone ? `${cleanPhone}@s.whatsapp.net` : "",
+        cleanPhone ? `${cleanPhone}@c.us` : "",
+        cleanPhone,
+        cleanPhone ? `phone:${cleanPhone}` : "",
+      ])
+    ).filter(Boolean);
 
+    // 2. Busca contato por remote_jid (em jids) OU por phone_number
+    let contactQuery = supabase
+      .from("contacts")
+      .select("id, remote_jid, phone_number")
+      .eq("client_id", auth.clientId);
+
+    if (cleanPhone) {
+      contactQuery = contactQuery.or(`remote_jid.in.(${jids.map((j) => `"${j}"`).join(",")}),phone_number.eq.${cleanPhone}`);
+    } else {
+      contactQuery = contactQuery.in("remote_jid", jids);
+    }
+
+    const { data: contactsList } = await contactQuery.limit(1);
+    let contact = contactsList && contactsList.length > 0 ? contactsList[0] : null;
+
+    // Se não encontrou contato existente, tenta criar um novo com tratamento de erro
     if (!contact) {
-      const phone = remoteJid.replace(/@.*$/, "").replace(/\D/g, "");
       const { data: newContact } = await supabase
         .from("contacts")
-        .insert({ client_id: auth.clientId, remote_jid: remoteJid, phone_number: phone })
-        .select("id")
+        .insert({ client_id: auth.clientId, remote_jid: remoteJid, phone_number: cleanPhone || remoteJid })
+        .select("id, remote_jid, phone_number")
         .maybeSingle();
       contact = newContact;
     }
 
-    if (!contact) {
-      return NextResponse.json({ error: "Contato não encontrado" }, { status: 404 });
-    }
-
     // Resolve a instância do atendimento se não foi enviada
     let targetInstance = instanceName;
-    if (!targetInstance) {
+    if (!targetInstance && contact) {
       const { data: sessByContact } = await supabase
         .from("sessions")
         .select("instance_name")
+        .eq("client_id", auth.clientId)
         .eq("contact_id", contact.id)
         .order("last_message_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      targetInstance = sessByContact?.instance_name;
+        .limit(1);
+      targetInstance = sessByContact?.[0]?.instance_name;
     }
 
     if (!targetInstance) {
@@ -115,29 +131,45 @@ export async function POST(req: NextRequest) {
         .from("channel_connections")
         .select("instance_name")
         .eq("client_id", auth.clientId)
-        .limit(1)
-        .maybeSingle();
-      targetInstance = firstConn?.instance_name;
+        .limit(1);
+      targetInstance = firstConn?.[0]?.instance_name;
     }
 
     if (!targetInstance) {
-      return NextResponse.json({ error: "Instância de envio não especificada e nenhuma ativa encontrada." }, { status: 400 });
+      targetInstance = "default";
     }
 
-    // Busca sessão — se não existir, cria a sessão vinculada
-    let { data: session } = await supabase
-      .from("sessions")
-      .select("id, contact_id, instance_name, bot_status, paused_by, paused_at, resume_at")
-      .eq("contact_id", contact.id)
-      .eq("instance_name", targetInstance)
-      .maybeSingle();
+    // Busca sessões por contact_id OU por remote_jid (variações)
+    let sessionRows: any[] = [];
+    if (contact) {
+      const { data } = await supabase
+        .from("sessions")
+        .select("id, contact_id, instance_name, bot_status, paused_by, paused_at, resume_at")
+        .eq("client_id", auth.clientId)
+        .or(`contact_id.eq.${contact.id},remote_jid.in.(${jids.map((j) => `"${j}"`).join(",")})`)
+        .order("last_message_at", { ascending: false, nullsFirst: false })
+        .limit(5);
+      if (data) sessionRows = data;
+    } else {
+      const { data } = await supabase
+        .from("sessions")
+        .select("id, contact_id, instance_name, bot_status, paused_by, paused_at, resume_at")
+        .eq("client_id", auth.clientId)
+        .in("remote_jid", jids)
+        .order("last_message_at", { ascending: false, nullsFirst: false })
+        .limit(5);
+      if (data) sessionRows = data;
+    }
+
+    let session = sessionRows && sessionRows.length > 0 ? sessionRows[0] : null;
 
     if (!session) {
       const { data: newSession } = await supabase
         .from("sessions")
         .insert({
           client_id: auth.clientId,
-          contact_id: contact.id,
+          contact_id: contact?.id || null,
+          remote_jid: remoteJid,
           instance_name: targetInstance,
           bot_status: "bot_active",
         })
@@ -146,29 +178,69 @@ export async function POST(req: NextRequest) {
       session = newSession;
     }
 
-    if (!session) {
-      return NextResponse.json({ error: "Sessão do chat não encontrada" }, { status: 404 });
-    }
+    const contactId = contact?.id;
+    const sessionIds = sessionRows.map((s) => s.id);
+    if (session && !sessionIds.includes(session.id)) sessionIds.push(session.id);
 
     switch (action) {
       case "pause": {
-        const r = await pauseSession(session.id, "human");
-        return NextResponse.json({ success: true, ...r, blocked: true, permanent: true });
+        const now = new Date().toISOString();
+        const patch = { bot_status: "bot_paused", paused_by: "human", paused_at: now, resume_at: null };
+        
+        if (sessionIds.length > 0) {
+          await supabase.from("sessions").update(patch).eq("client_id", auth.clientId).in("id", sessionIds);
+        }
+        if (contactId) {
+          await supabase.from("sessions").update(patch).eq("client_id", auth.clientId).eq("contact_id", contactId);
+        }
+        if (jids.length > 0) {
+          await supabase.from("sessions").update(patch).eq("client_id", auth.clientId).in("remote_jid", jids);
+        }
+
+        return NextResponse.json({ success: true, bot_status: "bot_paused", resume_at: null, blocked: true, permanent: true });
       }
       case "snooze": {
         const minutes = Number(durationMinutes) || 60;
-        const r = await snoozeSession(session.id, minutes, "human");
-        return NextResponse.json({ success: true, ...r, minutes, blocked: true, permanent: false });
+        const now = new Date();
+        const resumeAt = new Date(now.getTime() + minutes * 60 * 1000).toISOString();
+        const patch = {
+          bot_status: "human_takeover",
+          paused_by: "human",
+          paused_at: now.toISOString(),
+          resume_at: resumeAt,
+        };
+
+        if (sessionIds.length > 0) {
+          await supabase.from("sessions").update(patch).eq("client_id", auth.clientId).in("id", sessionIds);
+        }
+        if (contactId) {
+          await supabase.from("sessions").update(patch).eq("client_id", auth.clientId).eq("contact_id", contactId);
+        }
+        if (jids.length > 0) {
+          await supabase.from("sessions").update(patch).eq("client_id", auth.clientId).in("remote_jid", jids);
+        }
+
+        return NextResponse.json({ success: true, bot_status: "human_takeover", resume_at: resumeAt, minutes, blocked: true, permanent: false });
       }
       case "resume": {
-        // ponytail: só ativa a IA pra mensagens FUTURAS. Não responde msg antiga
-        // do cliente (mesmo que seja a última da conversa) — isso faz a IA
-        // responder algo de 3 dias atrás. Contexto histórico é preservado:
-        // /api/agent/process lê chats_dashboard por remote_jid (linha ~133),
-        // então quando o cliente mandar próxima mensagem a IA tem todo o
-        // histórico (incluindo mensagens entre humanos).
-        const r = await resumeSession(session.id);
-        return NextResponse.json({ success: true, ...r, blocked: false, permanent: false });
+        const patch = {
+          bot_status: "bot_active",
+          paused_by: null,
+          paused_at: null,
+          resume_at: null,
+        };
+
+        if (sessionIds.length > 0) {
+          await supabase.from("sessions").update(patch).eq("client_id", auth.clientId).in("id", sessionIds);
+        }
+        if (contactId) {
+          await supabase.from("sessions").update(patch).eq("client_id", auth.clientId).eq("contact_id", contactId);
+        }
+        if (jids.length > 0) {
+          await supabase.from("sessions").update(patch).eq("client_id", auth.clientId).in("remote_jid", jids);
+        }
+
+        return NextResponse.json({ success: true, bot_status: "bot_active", resume_at: null, blocked: false, permanent: false });
       }
       case "check": {
         const eff = await getEffectiveStatus(session as SessionRow);

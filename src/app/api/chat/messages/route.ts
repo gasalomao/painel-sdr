@@ -12,16 +12,19 @@ import { verifySession } from "@/lib/auth";
  */
 export async function DELETE(req: NextRequest) {
   const session = await verifySession(req);
-  if (!session || !session.clientId) {
-    return NextResponse.json({ error: "Não autorizado" }, { status: 401 });
-  }
-
+  
   try {
-    const body = await req.json();
-    const { messageIds, conversationId } = body as {
+    const body = await req.json().catch(() => ({}));
+    const { messageIds, conversationId, clientId: bodyClientId } = body as {
       messageIds?: string[];
       conversationId?: string;
+      clientId?: string;
     };
+
+    const targetClientId = session?.clientId || bodyClientId;
+    if (!targetClientId) {
+      return NextResponse.json({ error: "Não autorizado: clientId não encontrado" }, { status: 401 });
+    }
 
     if (!messageIds?.length && !conversationId) {
       return NextResponse.json(
@@ -32,26 +35,133 @@ export async function DELETE(req: NextRequest) {
 
     // Caso 1: deletar conversa inteira (mensagens + sessão)
     if (conversationId && !messageIds?.length) {
-      const { error: errMsgs } = await supabase
-        .from("chats_dashboard")
-        .delete()
-        .eq("client_id", session.clientId)
-        .eq("remote_jid", conversationId);
+      const cleanPhone = conversationId.replace(/\D/g, "");
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(conversationId);
 
-      if (errMsgs) {
-        console.error("[chat/messages] delete messages error:", errMsgs.message);
-        return NextResponse.json({ error: errMsgs.message }, { status: 500 });
+      const jidSet = new Set<string>();
+      if (conversationId) jidSet.add(conversationId);
+      if (cleanPhone) {
+        jidSet.add(cleanPhone);
+        jidSet.add(`${cleanPhone}@s.whatsapp.net`);
+        jidSet.add(`${cleanPhone}@c.us`);
+        jidSet.add(`phone:${cleanPhone}`);
       }
 
-      const { error: errSession } = await supabase
-        .from("sessions")
-        .delete()
-        .eq("client_id", session.clientId)
-        .eq("remote_jid", conversationId);
+      const initialJids = Array.from(jidSet);
 
-      if (errSession) {
-        console.error("[chat/messages] delete session error:", errSession.message);
-        // não aborta — mensagens já foram, sessão órfã cleanup depois
+      // 1. Buscar as sessões correspondentes sem disparar erro de sintaxe UUID no Postgres
+      let sessionsQuery = supabase
+        .from("sessions")
+        .select("id, remote_jid, contact_id, contact:contacts(id, phone_number, remote_jid)")
+        .eq("client_id", targetClientId);
+
+      if (isUuid) {
+        sessionsQuery = sessionsQuery.or(`id.eq.${conversationId},remote_jid.in.(${initialJids.map((j) => `"${j}"`).join(",")})`);
+      } else {
+        sessionsQuery = sessionsQuery.in("remote_jid", initialJids);
+      }
+
+      const { data: sessionRows, error: sErr } = await sessionsQuery;
+      if (sErr) {
+        console.error("[chat/messages] error querying sessions:", sErr.message);
+      }
+
+      const contactIdsSet = new Set<string>();
+
+      if (sessionRows && sessionRows.length > 0) {
+        for (const sRow of sessionRows) {
+          if (sRow.remote_jid) jidSet.add(sRow.remote_jid);
+          if (sRow.contact_id) contactIdsSet.add(sRow.contact_id);
+
+          const contact = sRow.contact as any;
+          if (contact?.id) contactIdsSet.add(contact.id);
+          if (contact?.remote_jid) jidSet.add(contact.remote_jid);
+          if (contact?.phone_number) {
+            const rawPhone = contact.phone_number.replace(/\D/g, "");
+            if (rawPhone) {
+              jidSet.add(rawPhone);
+              jidSet.add(`${rawPhone}@s.whatsapp.net`);
+              jidSet.add(`${rawPhone}@c.us`);
+              jidSet.add(`phone:${rawPhone}`);
+            }
+          }
+        }
+      }
+
+      // 2. Se houver telefone, buscar também os contatos correspondentes no banco
+      if (cleanPhone && cleanPhone.length >= 8) {
+        const { data: matchedContacts } = await supabase
+          .from("contacts")
+          .select("id, remote_jid, phone_number")
+          .eq("client_id", targetClientId)
+          .or(`phone_number.ilike.%${cleanPhone}%,remote_jid.ilike.%${cleanPhone}%`);
+
+        if (matchedContacts) {
+          for (const c of matchedContacts) {
+            if (c.id) contactIdsSet.add(c.id);
+            if (c.remote_jid) jidSet.add(c.remote_jid);
+            if (c.phone_number) {
+              const rawPhone = c.phone_number.replace(/\D/g, "");
+              if (rawPhone) {
+                jidSet.add(rawPhone);
+                jidSet.add(`${rawPhone}@s.whatsapp.net`);
+                jidSet.add(`${rawPhone}@c.us`);
+                jidSet.add(`phone:${rawPhone}`);
+              }
+            }
+          }
+        }
+      }
+
+      const allJids = Array.from(jidSet).filter(Boolean);
+      const allContactIds = Array.from(contactIdsSet).filter(Boolean);
+
+      // 3. Deleta TODAS as mensagens do chats_dashboard pelas variações de JID
+      if (allJids.length > 0) {
+        const { error: errMsgs } = await supabase
+          .from("chats_dashboard")
+          .delete()
+          .eq("client_id", targetClientId)
+          .in("remote_jid", allJids);
+
+        if (errMsgs) {
+          console.error("[chat/messages] delete messages error:", errMsgs.message);
+        }
+      }
+
+      // 4. Deleta TODAS as sessões por remote_jid
+      if (allJids.length > 0) {
+        const { error: errSessJid } = await supabase
+          .from("sessions")
+          .delete()
+          .eq("client_id", targetClientId)
+          .in("remote_jid", allJids);
+
+        if (errSessJid) {
+          console.error("[chat/messages] delete sessions by jid error:", errSessJid.message);
+        }
+      }
+
+      // 5. Deleta TODAS as sessões por contact_id
+      if (allContactIds.length > 0) {
+        const { error: errSessContact } = await supabase
+          .from("sessions")
+          .delete()
+          .eq("client_id", targetClientId)
+          .in("contact_id", allContactIds);
+
+        if (errSessContact) {
+          console.error("[chat/messages] delete sessions by contact_id error:", errSessContact.message);
+        }
+      }
+
+      // 6. Deleta a sessão especificamente por ID se for UUID
+      if (isUuid) {
+        await supabase
+          .from("sessions")
+          .delete()
+          .eq("client_id", targetClientId)
+          .eq("id", conversationId);
       }
 
       return NextResponse.json({
@@ -69,7 +179,7 @@ export async function DELETE(req: NextRequest) {
     const { error } = await supabase
       .from("chats_dashboard")
       .delete()
-      .eq("client_id", session.clientId)
+      .eq("client_id", targetClientId)
       .in("id", ids);
 
     if (error) {
