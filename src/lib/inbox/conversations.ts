@@ -58,7 +58,7 @@ export function normalizeConversation(raw: any): Conversation {
     contact_id: raw.contact_id || "",
     status,
     assigned_agent_id: raw.agent_id ? String(raw.agent_id) : undefined,
-    last_message_text: raw.last_message || "",
+    last_message_text: formatLastMessagePreview(raw.last_message, raw.last_message_type || raw.media_type),
     last_message_at: raw.last_message_at || raw.updated_at || raw.created_at,
     unread_count: raw.unread_count || 0,
     created_at: raw.created_at,
@@ -163,5 +163,66 @@ export function getPossibleJids(jid?: string | null): string[] {
     set.add(`phone:${cleanPhone}`);
   }
   return Array.from(set).filter(Boolean);
+}
+
+/**
+ * Formata o texto de pré-visualização da última mensagem na barra lateral.
+ * Converte mídias sem legenda em rótulos amigáveis ("📷 Imagem", "🎵 Áudio", etc.)
+ * em vez de exibir "Nenhuma mensagem...".
+ */
+export function formatLastMessagePreview(
+  content?: string | null,
+  mediaType?: string | null,
+): string {
+  const trimmed = content?.trim() || "";
+
+  if (
+    trimmed.startsWith("📷") ||
+    trimmed.startsWith("🎵") ||
+    trimmed.startsWith("🎥") ||
+    trimmed.startsWith("📄") ||
+    trimmed.startsWith("🎨") ||
+    trimmed.startsWith("📍") ||
+    trimmed.startsWith("👤")
+  ) {
+    return trimmed;
+  }
+
+  const normType = (mediaType || "").toLowerCase();
+
+  if (normType.includes("image") || normType.includes("foto") || normType.includes("picture")) {
+    return trimmed ? `📷 ${trimmed}` : "📷 Imagem";
+  }
+  if (
+    normType.includes("audio") ||
+    normType.includes("ptt") ||
+    normType.includes("voice") ||
+    normType.includes("som") ||
+    normType.includes("voz")
+  ) {
+    return trimmed ? `🎵 ${trimmed}` : "🎵 Áudio";
+  }
+  if (normType.includes("video")) {
+    return trimmed ? `🎥 ${trimmed}` : "🎥 Vídeo";
+  }
+  if (
+    normType.includes("document") ||
+    normType.includes("file") ||
+    normType.includes("pdf") ||
+    normType.includes("doc")
+  ) {
+    return trimmed ? `📄 ${trimmed}` : "📄 Documento";
+  }
+  if (normType.includes("sticker") || normType.includes("figurinha")) {
+    return "🎨 Figurinha";
+  }
+  if (normType.includes("location") || normType.includes("localizacao")) {
+    return "📍 Localização";
+  }
+  if (normType.includes("contact") || normType.includes("contato")) {
+    return "👤 Contato";
+  }
+
+  return trimmed;
 }
 

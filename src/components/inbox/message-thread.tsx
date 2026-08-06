@@ -19,6 +19,7 @@ import {
   CheckCircle2,
   Clock,
   XCircle,
+  Trash2,
   PanelRightOpen,
   PanelRightClose,
   Bot,
@@ -38,6 +39,8 @@ interface MessageThreadProps {
   onMessagesLoaded: (messages: Message[]) => void;
   onNewMessage: (message: Message) => void;
   onUpdateMessage: (id: string, updates: Partial<Message>) => void;
+  onDeleteMessage?: (messageId: string) => void;
+  onDeleteConversation?: () => void;
   onStatusChange: (
     conversationId: string,
     status: ConversationStatus,
@@ -106,6 +109,8 @@ export function MessageThread({
   onMessagesLoaded,
   onNewMessage,
   onUpdateMessage,
+  onDeleteMessage,
+  onDeleteConversation,
   onStatusChange,
   onBack,
   resyncToken = 0,
@@ -559,6 +564,23 @@ export function MessageThread({
                 <XCircle className="h-3.5 w-3.5 text-muted-foreground mr-2" />
                 Marcar como Fechado
               </DropdownMenuItem>
+              {onDeleteConversation && (
+                <DropdownMenuItem
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        "Apagar esta conversa? Todas as mensagens serão removidas do painel."
+                      )
+                    ) {
+                      onDeleteConversation();
+                    }
+                  }}
+                  className="text-xs text-destructive focus:text-destructive focus:bg-destructive/10 cursor-pointer"
+                >
+                  <Trash2 className="h-3.5 w-3.5 mr-2" />
+                  Apagar conversa
+                </DropdownMenuItem>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
 
@@ -611,6 +633,7 @@ export function MessageThread({
             <div className="flex flex-col space-y-3 max-w-4xl mx-auto w-full">
               {messages.map((msg) => (
                 <MessageBubble
+                  onDelete={onDeleteMessage ? () => onDeleteMessage(msg.id) : undefined}
                   key={msg.id}
                   message={msg}
                   currentUserId={clientId || undefined}

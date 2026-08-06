@@ -13,6 +13,7 @@ import {
   ImageOff,
   CornerDownLeft,
   Sparkles,
+  Trash2,
 } from "lucide-react";
 import { format } from "date-fns";
 import { ReplyQuote } from "./reply-quote";
@@ -24,6 +25,7 @@ interface MessageBubbleProps {
   reactions?: MessageReaction[];
   currentUserId?: string;
   onToggleReaction?: (emoji: string) => void;
+  onDelete?: (messageId: string) => void;
 }
 
 function StatusIcon({ status }: { status: Message["status"] }) {
@@ -228,6 +230,7 @@ export function MessageBubble({
   reactions,
   currentUserId,
   onToggleReaction,
+  onDelete,
 }: MessageBubbleProps) {
   const isAgent = message.sender_type === "agent" || message.sender_type === "bot";
   
@@ -244,7 +247,7 @@ export function MessageBubble({
   return (
     <div
       className={cn(
-        "flex flex-col max-w-[85%] sm:max-w-[70%]",
+        "group/msg relative flex flex-col max-w-[85%] sm:max-w-[70%]",
         isAgent ? "items-end ml-auto" : "items-start mr-auto",
       )}
     >
@@ -297,6 +300,23 @@ export function MessageBubble({
           </div>
         )}
       </div>
+      {onDelete && (
+        <button
+          onClick={() => {
+            if (window.confirm("Deletar esta mensagem do painel?")) {
+              onDelete(message.id);
+            }
+          }}
+          className={cn(
+            "absolute top-0 opacity-0 group-hover/msg:opacity-100 focus:opacity-100 transition-opacity p-1 rounded-md bg-card/95 backdrop-blur border border-border shadow-sm text-muted-foreground hover:text-destructive hover:bg-destructive/10 z-10",
+            isAgent ? "-left-8" : "-right-8"
+          )}
+          aria-label="Deletar mensagem"
+          title="Deletar mensagem"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      )}
     </div>
   );
 }

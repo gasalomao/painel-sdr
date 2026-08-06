@@ -5,7 +5,7 @@ import { Header } from "@/components/layout/header";
 import { supabase } from "@/lib/supabase";
 import { useClientSession } from "@/lib/use-session";
 import { useRealtime } from "@/hooks/use-realtime";
-import { normalizeConversation, isSameJid } from "@/lib/inbox/conversations";
+import { normalizeConversation, isSameJid, formatLastMessagePreview } from "@/lib/inbox/conversations";
 import { ConversationList } from "@/components/inbox/conversation-list";
 import { MessageThread } from "@/components/inbox/message-thread";
 import { ContactSidebar } from "@/components/inbox/contact-sidebar";
@@ -150,9 +150,13 @@ function ChatPageContent() {
           prev.map((c) => {
             if (!isSameJid(c.id, msg.remote_jid)) return c;
             const isCurrent = currentActive && isSameJid(currentActive.id, msg.remote_jid);
+            const preview = formatLastMessagePreview(
+              msg.content || msg.content_text,
+              msg.media_type || msg.message_type || (msg.media_url ? "image" : undefined)
+            ) || c.last_message_text;
             return {
               ...c,
-              last_message_text: msg.content || msg.content_text || c.last_message_text,
+              last_message_text: preview,
               last_message_at: msg.created_at || c.last_message_at,
               unread_count: isCurrent ? 0 : c.unread_count + (senderType === "customer" ? 1 : 0),
             };
@@ -326,6 +330,70 @@ function ChatPageContent() {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...updates } : m)));
   }, []);
 
+  const handleDeleteMessage = useCallback(async (messageId: string) => {
+    // Otimista: remove da UI imediatamente
+    setMessages((prev) => prev.filter((m) => String(m.id) !== String(messageId)));
+
+    try {
+      const res = await fetch("/api/chat/messages", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messageIds: [String(messageId)] }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+      // Atualiza última mensagem da conversa na sidebar
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === activeConversation?.id
+            ? {
+                ...c,
+                last_message_text: "",
+                last_message_at: new Date().toISOString(),
+              }
+            : c
+        )
+      );
+    } catch (err) {
+      console.error("[chat] delete message error:", err);
+      alert("Falha ao deletar mensagem: " + (err as Error).message);
+      // Revert: força reload das mensagens
+      setResyncToken((t) => t + 1);
+    }
+  }, [activeConversation]);
+
+  const handleDeleteConversation = useCallback(async (conversationId: string) => {
+    const target = conversations.find((c) => isSameJid(c.id, conversationId));
+    // Otimista: remove da lista + limpa active se for a ativa
+    setConversations((prev) => prev.filter((c) => !isSameJid(c.id, conversationId)));
+    if (activeConversation && isSameJid(activeConversation.id, conversationId)) {
+      setActiveConversation(null);
+      setActiveContact(null);
+      setMessages([]);
+    }
+
+    try {
+      const res = await fetch("/api/chat/messages", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversationId }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+      // Toast silencioso — purposo: confirmação via remoção da lista
+      void target;
+    } catch (err) {
+      console.error("[chat] delete conversation error:", err);
+      alert("Falha ao apagar conversa: " + (err as Error).message);
+      // Revert: força reload
+      setResyncToken((t) => t + 1);
+    }
+  }, [conversations, activeConversation]);
+
   const handleStatusChange = useCallback(
     (conversationId: string, status: ConversationStatus, extra?: { bot_status?: string; resume_at?: string | null }) => {
       const patch = {
@@ -446,6 +514,7 @@ function ChatPageContent() {
             onSelect={handleSelectConversation}
             conversations={conversations}
             onConversationsLoaded={handleConversationsLoaded}
+            onDeleteConversation={handleDeleteConversation}
             resyncToken={resyncToken}
             clientId={clientId}
             activeInstance={activeInstance}
@@ -468,6 +537,8 @@ function ChatPageContent() {
             onMessagesLoaded={handleMessagesLoaded}
             onNewMessage={handleNewMessage}
             onUpdateMessage={handleUpdateMessage}
+            onDeleteMessage={handleDeleteMessage}
+            onDeleteConversation={() => activeConversation && handleDeleteConversation(activeConversation.id)}
             onStatusChange={handleStatusChange}
             onBack={handleCloseConversation}
             resyncToken={resyncToken}

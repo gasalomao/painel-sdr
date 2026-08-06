@@ -1,5 +1,11 @@
 # Tarefas do Projeto
 
+## Chat (/chat) — Pré-visualização de Mídias na Barra Lateral (2026-08-06)
+- [x] Criar e exportar helper `formatLastMessagePreview` em `conversations.ts` para formatar áudios, imagens, vídeos e documentos <!-- id: 470 -->
+- [x] Selecionar `media_type` e `media_url` nas consultas ao `chats_dashboard` em `ConversationList` <!-- id: 471 -->
+- [x] Atualizar `handleMessageEvent` no `/chat` com `formatLastMessagePreview` para exibição instantânea em tempo real <!-- id: 472 -->
+- [x] `npx tsc --noEmit` 0 erros <!-- id: 473 -->
+
 ## Chat (/chat) — Rótulo do Badge da IA (2026-08-06)
 - [x] Alterar o badge no cabeçalho das mensagens geradas pela IA de "IA SDR" para "IA" (`src/components/inbox/message-bubble.tsx`) <!-- id: 460 -->
 - [x] `npx tsc --noEmit` 0 erros <!-- id: 461 -->
