@@ -1,5 +1,25 @@
 # Log de Sessões
 
+## [2026-08-06 17:16] Antigravity — Chat (/chat): Rótulo do Badge da IA Alterado para "IA"
+- **O que foi feito**:
+  - Atualizado o componente de balão de mensagem (`src/components/inbox/message-bubble.tsx`).
+  - O rótulo exibido no badge do cabeçalho acima das respostas geradas pela Inteligência Artificial foi alterado de `IA SDR` para apenas `IA`, mantendo o ícone de faísca (`Sparkles`).
+- **Arquivos alterados**:
+  - `src/components/inbox/message-bubble.tsx`
+  - `.shared-memory/CONTEXT.md`, `.shared-memory/TASKS.md`, `.shared-memory/SESSION_LOG.md`
+- **Estado ao sair**: `npx tsc --noEmit` 0 erros. Rótulo exibindo "IA".
+
+## [2026-08-06 17:09] Antigravity — Chat (/chat): Rolagem Fluida Nativa Estilo WhatsApp & Preservação da Posição de Scroll
+- **O que foi feito**:
+  - **Causa Raiz Identificada**: Sempre que o estado de `messages` sofria mutation (como no polling em tempo real de 2.5s ou atualizações de status de envio), o `useEffect` forçava um `scrollToBottom("auto")` incondicional, dando um "pulo/salto seco" diretamente para o final da conversa e impedindo a rolagem suave e gradual.
+  - **Identificação da Intenção de Rolagem do Usuário**: Adicionado listener de scroll no elemento Viewport real da `<ScrollArea>` (`src/components/inbox/message-thread.tsx`) para monitorar a distância até a base (`distanceToBottom > 150px` ➔ `userIsScrolledUp = true`).
+  - **Scroll Suave e Respeito à Rolagem**: Se o usuário rolou para cima/meio do chat, novas atualizações de mensagens **NÃO** forçam mais a descida abrupta. Se o usuário estiver na base da conversa, novas mensagens descem suavemente com animação nativa (`behavior: "smooth"`).
+  - **Botão Flutuante Estilo WhatsApp**: Quando o usuário rola para cima para ler mensagens antigas, surge um botão flutuante circular com ícone de seta para baixo `[ 🠇 ]` no canto inferior direito que permite retornar à mensagem mais recente com um toque.
+- **Arquivos alterados**:
+  - `src/components/inbox/message-thread.tsx`
+  - `.shared-memory/CONTEXT.md`, `.shared-memory/TASKS.md`, `.shared-memory/SESSION_LOG.md`
+- **Estado ao sair**: `npx tsc --noEmit` 0 erros. Rolagem no chat 100% fluida, gradual e sem saltos bruscos.
+
 ## [2026-08-06 16:58] Antigravity — Chat (/chat): Solução Definitiva de Mensagens em Tempo Real (Híbrido Ultra-Otimizado)
 - **O que foi feito**:
   - **Causa Raiz Identificada**: Incompatibilidade de formatação de JIDs entre o WebSocket e o estado (`55279936124677@s.whatsapp.net` vs `55279936124677` / `phone:...`) fazia com que o `handleMessageEvent` descartasse novas mensagens em tempo real. Além disso, a falta de um polling de segurança deixava o chat dependente 100% de WebSockets instáveis.

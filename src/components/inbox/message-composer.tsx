@@ -242,14 +242,20 @@ export function MessageComposer({
     }
     try {
       const { default: Recorder } = await import("opus-recorder");
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!Recorder.isRecordingSupported()) {
+        toast.error("Gravação de áudio não suportada neste navegador.");
+        return;
+      }
 
+      // ponytail: opus-recorder cria AudioContext + SourceNode internamente quando
+      // não recebe `stream`. Passar MediaStream externo faz a lib postar o objeto
+      // pro Worker → DataCloneError. Deixar a lib gerenciar o ciclo de vida.
       const recorder = new Recorder({
         encoderPath: OPUS_ENCODER_PATH,
         numberOfChannels: 1,
         encoderSampleRate: 16000,
         encoderApplication: 2048, // voice
-        stream,
+        mediaTrackConstraints: { audio: true },
       });
 
       recorder.ondataavailable = (bytes: Uint8Array) => {
@@ -270,11 +276,10 @@ export function MessageComposer({
           clearInterval(recordTimerRef.current);
           recordTimerRef.current = null;
         }
-        stream.getTracks().forEach((t) => t.stop());
       };
 
       recorderRef.current = recorder;
-      recorder.start();
+      await recorder.start();
     } catch (err: any) {
       console.error("Falha ao iniciar gravação de áudio:", err);
       toast.error("Permissão de microfone negada ou indisponível.");
@@ -297,6 +302,10 @@ export function MessageComposer({
   useEffect(() => {
     return () => {
       if (recordTimerRef.current) clearInterval(recordTimerRef.current);
+      if (recorderRef.current) {
+        try { recorderRef.current.close(); } catch { /* ignore */ }
+        recorderRef.current = null;
+      }
     };
   }, []);
 
