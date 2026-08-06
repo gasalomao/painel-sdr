@@ -5,6 +5,10 @@
 - **Hospedagem**: Easypanel na Hostinger.
 - **Estrutura de Build**: Build com Dockerfile e Build Args para injeção de variáveis públicas do Supabase em tempo de compilação.
 - **Redis**: O aplicativo possui tratamento de erros robusto para conexão de Redis para evitar crashes locais.
+- **Campaigns discriminator**: tabela `campaigns` tem `campaign_type` ('disparo' default legado, 'prospeccao_sites' novo). Reusar em vez de tabela nova quando surgir类似 tipo de campanha futura.
+- **Opt-out**: `leads_extraidos.opt_out BOOLEAN`. Worker `campaign-worker.ts` checka pré-envio. Aplicado a todas campanhas (disparo e prospecção).
+- **Prospecção Sites**: leads sem `website` (filtro `or("website.is.null,website.eq.")`). Frontend 4 tabs. Default vendedor "Salomão" hardcoded em `src/app/prospeccao-sites/page.tsx`. Feature flag `prospeccao_sites` em `clients.features`.
+- **9Router**: Roteador local na porta 20128 (`http://127.0.0.1:20128/v1`). Configuração salva no SQLite `C:\Users\Salomao\AppData\Roaming\9router\db\data.sqlite`. Suporta override de raciocínio por provedor (`providerThinking`). Configurado universalmente em `mode: "max"` (especialmente para os 3 provedores de GLM 5.2: `glm`, `nvidia`, `opencode-go`).
 
 ---
 

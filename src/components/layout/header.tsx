@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import {
   LayoutDashboard, Users, MessageSquare, MapPin, Smartphone, History,
   Bot, Zap, Cpu, LogOut, ArrowLeftRight, Loader2, Shield, ChevronDown,
-  CalendarDays,
+  CalendarDays, Globe,
 } from "lucide-react";
 import { NgrokQuickConnect } from "@/components/ngrok-quick-connect";
 import { cn } from "@/lib/utils";
@@ -21,6 +21,7 @@ const pageTitles: Record<string, { title: string; description: string; icon: Rea
   "/disparo": { title: "Disparo em Massa", description: "Primeira mensagem automática com intervalo aleatório", icon: Zap },
   "/automacao": { title: "Automação", description: "Captação → disparo → follow-up no piloto automático", icon: Cpu },
   "/calendario": { title: "Calendário", description: "Agendamentos dos leads — sincronizado com Google Calendar", icon: CalendarDays },
+  "/prospeccao-sites": { title: "Prospecção Sites", description: "Empresas sem site — disparo personalizado", icon: Globe },
 };
 
 type Session = {

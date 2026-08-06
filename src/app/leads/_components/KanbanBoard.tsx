@@ -13,7 +13,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Phone, Clock, Star, Plus, MoreVertical, Pencil, Trash2 } from "lucide-react";
+import { Phone, Clock, Star, Plus, MoreVertical, Pencil, Trash2, MapPin } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/lib/supabase";
 
@@ -37,12 +37,19 @@ interface Lead {
   website: string;
   instagram: string;
   facebook: string;
+  maps_url: string;
   status: string;
   next_follow_up: string | null;
   justificativa_ia: string | null;
   resumo_ia: string | null;
   ia_last_analyzed_at: string | null;
   created_at: string;
+}
+
+function mapsUrlFor(lead: Pick<Lead, "maps_url" | "nome_negocio" | "endereco">): string {
+  if (lead.maps_url) return lead.maps_url;
+  const q = encodeURIComponent(`${lead.nome_negocio || ""} ${lead.endereco || ""}`.trim());
+  return `https://www.google.com/maps/search/?api=1&query=${q}`;
 }
 
 interface KanbanBoardProps {
@@ -76,8 +83,15 @@ export default function KanbanBoard({ leads, columns, onLeadClick, formatPhone, 
 
   // --- CRUD colunas (otimista + rollback) ---
   const persistColumn = useCallback(async (uuid: string, patch: Partial<KanbanColumnDef>) => {
-    const prev = localCols;
-    setLocalCols(prev.map((c) => (c.uuid === uuid ? { ...c, ...patch } : c)));
+    if (!uuid) {
+      alert("Coluna ainda carregando do servidor. Recarregue a página e tente novamente.");
+      return;
+    }
+    let prev: KanbanColumnDef[] = [];
+    setLocalCols((cur) => {
+      prev = cur;
+      return cur.map((c) => (c.uuid === uuid ? { ...c, ...patch } : c));
+    });
     onColumnsChange?.(prev.map((c) => (c.uuid === uuid ? { ...c, ...patch } : c)));
     try {
       const body: Record<string, any> = {};
@@ -88,13 +102,16 @@ export default function KanbanBoard({ leads, columns, onLeadClick, formatPhone, 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error(`PATCH ${res.status}`);
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        throw new Error(`PATCH ${res.status}: ${errText.slice(0, 200)}`);
+      }
     } catch (err) {
       console.error("coluna patch rollback", err);
       setLocalCols(prev);
-      onColumnsChange?.(prev);
+      onColumnsChange?.(prev.map((c) => ({ id: c.id, uuid: c.uuid, label: c.label, color: c.color, isTerminal: !!c.isTerminal })));
     }
-  }, [localCols, onColumnsChange]);
+  }, [onColumnsChange]);
 
   const addColumn = useCallback(async () => {
     const label = prompt("Nome da nova coluna:");
@@ -177,7 +194,7 @@ export default function KanbanBoard({ leads, columns, onLeadClick, formatPhone, 
         <div className="flex gap-3 sm:gap-4 min-w-max p-2 h-full min-h-[calc(100vh-250px)] items-start">
           {localCols.map((col) => (
             <SortableContext
-              key={col.uuid || col.id}
+              key={col.uuid || col.id || col.label}
               items={displayLeads.filter((l) => (l.status || "novo") === col.id).map((l) => l.id)}
               strategy={verticalListSortingStrategy}
             >
@@ -448,6 +465,20 @@ function KanbanCard({ lead, onClick, isOverlay, formatPhone }: any) {
             </span>
           </div>
         )}
+
+        <div className="mt-2 flex justify-end">
+          <a
+            href={mapsUrlFor(lead)}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="inline-flex items-center gap-1 text-[9px] font-bold text-rose-300/80 hover:text-rose-200 hover:bg-rose-500/10 px-1.5 py-0.5 rounded-md transition-colors"
+            title="Ver no Google Maps"
+          >
+            <MapPin className="w-3 h-3" />
+            Maps
+          </a>
+        </div>
       </CardContent>
     </Card>
   );

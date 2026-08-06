@@ -42,9 +42,12 @@ export async function GET(req: NextRequest) {
   if (!ctx.ok) return ctx.response;
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
 
+  const COLS = "id, status_key, label, color, order_index, is_system" as const;
+  const selectCols = (rows: any[] | null) => (rows || []).map((r) => ({ ...r, is_terminal: !!(r as any).is_terminal }));
+
   const { data, error } = await supabaseAdmin
     .from("kanban_columns")
-    .select("id, status_key, label, color, order_index, is_system, is_terminal")
+    .select(COLS)
     .eq("client_id", ctx.clientId)
     .order("order_index");
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
@@ -53,16 +56,16 @@ export async function GET(req: NextRequest) {
     const { data: seeded, error: seedErr } = await supabaseAdmin!
       .from("kanban_columns")
       .insert(DEFAULT_KANBAN_COLUMNS.map((c) => ({ ...c, client_id: ctx.clientId })))
-      .select("id, status_key, label, color, order_index, is_system, is_terminal");
+      .select(COLS);
     if (seedErr) {
       const { data: reread } = await supabaseAdmin!
         .from("kanban_columns")
-        .select("id, status_key, label, color, order_index, is_system, is_terminal")
+        .select(COLS)
         .eq("client_id", ctx.clientId)
         .order("order_index");
-      return NextResponse.json({ ok: true, columns: reread || [], seeded: false });
+      return NextResponse.json({ ok: true, columns: selectCols(reread), seeded: false });
     }
-    return NextResponse.json({ ok: true, columns: seeded || [], seeded: true });
+    return NextResponse.json({ ok: true, columns: selectCols(seeded), seeded: true });
   };
 
   // Auto-seed lazy: tenant sem nenhuma coluna (conta antiga/admin que não passou
@@ -83,7 +86,7 @@ export async function GET(req: NextRequest) {
     return seedDefaults();
   }
 
-  return NextResponse.json({ ok: true, columns: data });
+  return NextResponse.json({ ok: true, columns: selectCols(data) });
 }
 
 export async function POST(req: NextRequest) {

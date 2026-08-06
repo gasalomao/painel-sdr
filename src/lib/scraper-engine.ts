@@ -115,6 +115,7 @@ export interface ScraperSettings {
   filterEmpty?: boolean;
   filterDuplicates?: boolean;
   filterLandlines?: boolean;
+  filterWithWebsite?: boolean;
   captureAllReviews?: boolean;
   /** Limite máximo de leads a captar antes de parar. Quando atingido, o scraper
    *  sai do loop limpo, fecha o navegador, e o worker detecta o cap no próximo
@@ -612,13 +613,62 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
             const category = spans.find((s) => s.length > 2 && !s.includes("·") && !s.match(/\d/)) || "";
             const address = spans.find((s) => s.includes(",") || s.includes("Av.") || s.includes("Rua")) || spans[spans.length - 1] || "";
             const textC = item.textContent || "";
-            const rMatch = textC.match(/(\d[.,]\d)\s*\(([\d.,k]+)\)/i);
+
+            // ---- Rating/reviews: multi-strategy (praticamente todos os cards
+            // de Maps têm rating — regex antiga `(\d[.,]\d)\s*\(([\d.,k]+)\)`
+            // perdia ~30% por exigir 1 casa decimal exata, colar parênteses
+            // e não tolerar separador middot `·`. Agora tentamos:
+            //   1) aria-label direto (role="img" com nota)
+            //   2) regex expandida aceita `·`, 1-2 casas, k/K/m/M
+            //   3) número isolado `4.8` seguido de parênteses solto
+            //   4) fallback `X.Y estrelas` no textContent
+            // Review count usa janela separada (não exige vínculo posicional
+            // ao rating) — pega primeiro `(...)` ou `X avaliações`.
+            // -----------------------------------------------------------
+            let rating = "";
+            let reviews = "";
+
+            // (1) aria-label: "Avaliação 4.8 de 5", "4.8 stars", "Rated 4.8"
+            const ariaEl = item.querySelector('[role="img"][aria-label], [aria-label*="estrela" i], [aria-label*="star" i], [aria-label*="avalia" i], [aria-label*="rated" i]') as HTMLElement | null;
+            if (ariaEl) {
+              const aria = ariaEl.getAttribute("aria-label") || "";
+              const rm = aria.match(/(\d(?:[.,]\d{1,2})?)\s*(?:de\s*5\s*)?(?:estrela|star)/i)
+                      || aria.match(/(?:avalia(?:ç|c)(?:ã|a)o|rated|rating|nota)\s*[:\s]*(\d(?:[.,]\d{1,2})?)/i);
+              if (rm) rating = (rm[1] || rm[2] || "").replace(",", ".");
+              const rcm = aria.match(/([\d.,]+[kKmM]?)\s*(?:avaliaç|review)/i);
+              if (rcm) reviews = rcm[1];
+            }
+
+            // (2) regex expandida sobre textContent
+            if (!rating) {
+              const rMatch = textC.match(/(\d(?:[.,]\d{1,2})?)\s*(?:·|\s)*\(([\d.,]+[kKmM]?)\)/i);
+              if (rMatch) { rating = rMatch[1].replace(",", "."); reviews = rMatch[2]; }
+            }
+            // (3) nota isolada seguida de parênteses em qualquer posição
+            if (!rating) {
+              const rMatch2 = textC.match(/(\d\.\d{1,2}|\d,\d{1,2})\s*[\(]?\s*(\d[\d.,]*[kKmM]?)\s*[\)]?/);
+              if (rMatch2 && parseFloat(rMatch2[1].replace(",", ".")) <= 5) {
+                rating = rMatch2[1].replace(",", ".");
+                if (rMatch2[2] && /\d/.test(rMatch2[2])) reviews = rMatch2[2];
+              }
+            }
+            // (4) fallback `4.8 estrelas` solto
+            if (!rating) {
+              const rMatch3 = textC.match(/(\d(?:[.,]\d{1,2})?)\s*(?:estrela|star)/i);
+              if (rMatch3) rating = rMatch3[1].replace(",", ".");
+            }
+            // review count isolado: "1.234 avaliações" / "1.2k reviews"
+            if (!reviews) {
+              const rcMatch = textC.match(/([\d.,]+[kKmM]?)\s*(?:avaliaç|review)/i);
+              if (rcMatch) reviews = rcMatch[1];
+            }
+
             return {
               name: leadName,
               fullAddress: address,
               categories: category || "Comércio",
-              averageRating: rMatch ? rMatch[1] : "",
-              reviewCount: rMatch ? rMatch[2] : "",
+              averageRating: rating,
+              reviewCount: reviews,
             };
           }, lead.name);
 
@@ -1057,23 +1107,38 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 }
 
                 // ---- Avaliação agregada (estrelas + nº de reviews) ----
+                // Google BR usa ária "Avaliação 4.8 de 5" (sem "estrela") e
+                // `.F6sie`/`.MW4l2` nem sempre tem — multi-strategy igual ao
+                // card. Praticamente todo negócio tem rating no painel detalhe.
                 let ratingAggregate: string = "";
                 let reviewCountAggregate: string = "";
-                const rEl = document.querySelector('[role="img"][aria-label*="estrela" i], [role="img"][aria-label*="star" i], .F6sie, .MW4l2');
+                const rEl = document.querySelector(
+                  '[role="img"][aria-label], [aria-label*="estrela" i], [aria-label*="star" i], [aria-label*="avalia" i], [aria-label*="rated" i], .F6sie, .MW4l2, .fontDisplayLarge'
+                );
                 if (rEl) {
                   const aria = (rEl as HTMLElement).getAttribute("aria-label") || "";
-                  const m1 = aria.match(/(\d(?:[.,]\d)?)\s*(?:estrela|star)/i);
-                  if (m1) ratingAggregate = m1[1].replace(",", ".");
-                  const m2 = aria.match(/(\d[\d.,]*)\s*(?:avaliaç|review)/i);
-                  if (m2) reviewCountAggregate = m2[1].replace(/\./g, "");
+                  const m1 = aria.match(/(\d(?:[.,]\d{1,2})?)\s*(?:de\s*5\s*)?(?:estrela|star)/i)
+                          || aria.match(/(?:avalia(?:ç|c)(?:ã|a)o|rated|rating|nota)\s*[:\s]*(\d(?:[.,]\d{1,2})?)/i);
+                  if (m1) ratingAggregate = (m1[1] || m1[2] || "").replace(",", ".");
+                  const m2 = aria.match(/(\d[\d.,]*[kKmM]?)\s*(?:avaliaç|review)/i);
+                  if (m2) reviewCountAggregate = m2[1];
                 }
+                // textContent do próprio elemento rating (caso ária vazia)
+                if (!ratingAggregate && rEl) {
+                  const rt = (rEl as HTMLElement).textContent || "";
+                  const tm = rt.match(/(\d(?:[.,]\d{1,2})?)/);
+                  if (tm && parseFloat(tm[1].replace(",", ".")) <= 5) ratingAggregate = tm[1].replace(",", ".");
+                }
+                // bodyTxt: forma `4.8 (1.234)` / `4.8 · 1.234` / `4.8 estrelas`
                 if (!ratingAggregate) {
-                  const bMatch = bodyTxt.match(/(\d[.,]\d)\s*(?:estrela|star)/i);
+                  const bMatch = bodyTxt.match(/(\d(?:[.,]\d{1,2})?)\s*(?:·|\s)*[\(]?\s*(\d[\d.,]*[kKmM]?)\s*[\)]?/)
+                              || bodyTxt.match(/(\d(?:[.,]\d{1,2})?)\s*(?:estrela|star)/i);
                   if (bMatch) ratingAggregate = bMatch[1].replace(",", ".");
                 }
                 if (!reviewCountAggregate) {
-                  const bMatch = bodyTxt.match(/([\d.,]+)\s*(?:avaliaç|review)/i);
-                  if (bMatch) reviewCountAggregate = bMatch[1].replace(/\./g, "");
+                  const bMatch = bodyTxt.match(/([\d.,]+[kKmM]?)\s*(?:avaliaç|review)/i)
+                              || bodyTxt.match(/[\(]\s*([\d.,]+[kKmM]?)\s*[\)]/);
+                  if (bMatch) reviewCountAggregate = bMatch[1];
                 }
 
                 // ---- Distribuição de estrelas (5★, 4★, 3★, 2★, 1★) ----
@@ -1390,6 +1455,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
             if (leadsStore.find((l) => l.phones.replace(/\D/g, "") === cleanPhone)) { pass = false; reason = "Telefone duplicado"; }
           }
           if (pass && settings.filterLandlines && cleanPhone !== "" && isLandline(cleanPhone)) { pass = false; reason = "Telefone fixo"; }
+          if (pass && settings.filterWithWebsite && websiteStr) { pass = false; reason = "Com site"; }
 
           if (pass) {
             const jid = formatJid(phoneStr);
@@ -1400,6 +1466,31 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
               crmSkipped++;
               sendLog(`⏭️ Já no CRM (${dupSource}): ${cardData.name}`, "info");
             } else {
+              // ---- Fallback final de rating: se nem card nem painel detalhe
+              // devolveram nota (raro, mas acontece em variantes de DOM),
+              // deriva média ponderada da distribuicaoEstrelas ou média
+              // simples das notas individuais em reviewsDetalhes.
+              // Praticamente todo negócio no Maps tem ao menos uma nota
+              // alcançável por algum desses caminhos.
+              // -----------------------------------------------------------
+              if (!cardData.averageRating) {
+                if (distribuicaoEstrelas && Object.keys(distribuicaoEstrelas).length > 0) {
+                  let total = 0, sum = 0;
+                  for (const [k, v] of Object.entries(distribuicaoEstrelas)) {
+                    const star = parseInt(k) || 0;
+                    if (star > 0 && v > 0) { total += v; sum += star * v; }
+                  }
+                  if (total > 0) cardData.averageRating = (sum / total).toFixed(1);
+                } else if (reviewsDetalhes.length > 0) {
+                  const rates = reviewsDetalhes
+                    .map((r: any) => parseFloat(String(r?.rating || "").replace(",", ".")))
+                    .filter((n: number) => !isNaN(n) && n > 0);
+                  if (rates.length > 0) cardData.averageRating = (rates.reduce((a: number, b: number) => a + b, 0) / rates.length).toFixed(1);
+                }
+              }
+              if (!cardData.reviewCount && reviewsDetalhes.length > 0) {
+                cardData.reviewCount = String(reviewsDetalhes.length);
+              }
               const finalLead: Lead = {
                 name: cardData.name,
                 fullAddress: cardData.fullAddress,
@@ -1569,6 +1660,7 @@ export interface StartOpts {
   filterEmpty?: boolean;
   filterDuplicates?: boolean;
   filterLandlines?: boolean;
+  filterWithWebsite?: boolean;
   captureAllReviews?: boolean;
   /** Limite de leads — quando atingido o scraper sai limpo. */
   maxLeads?: number;
@@ -1601,6 +1693,7 @@ export function startScraperRun(opts: StartOpts): { ok: boolean; error?: string;
     filterEmpty: opts.filterEmpty,
     filterDuplicates: opts.filterDuplicates,
     filterLandlines: opts.filterLandlines,
+    filterWithWebsite: opts.filterWithWebsite,
     captureAllReviews: opts.captureAllReviews,
     maxLeads: opts.maxLeads,
   });

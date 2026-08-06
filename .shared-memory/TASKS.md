@@ -1,5 +1,69 @@
 # Tarefas do Projeto
 
+## 9Router & Headroom Proxy Dashboard (2026-08-06)
+- [x] Diagnóstico da interface bugada em `http://localhost:20128/api/headroom/proxy/dashboard` (caminhos absolutos `/static/*` e `/api/stats` sem repasse + bloqueio de autenticação no `middleware.js`) <!-- id: 420 -->
+- [x] Implementação de rota catch-all proxy em `app/api/headroom/proxy/[...path]/route.js` no 9Router com reescrita de caminhos de scripts/CSS no HTML <!-- id: 421 -->
+- [x] Atualização de `middleware.js` liberando `/api/headroom/proxy` na whitelist de rotas públicas (`aB`) <!-- id: 422 -->
+- [x] Testes de verificação automatizada (status 200 OK em dashboard HTML, tailwind.min.js, alpine.min.js, htmx.min.js, stats API) e captura de screenshot via subagente <!-- id: 423 -->
+
+## 9Router & Modo Max (2026-08-06)
+- [x] Estudo aprofundado do 9Router (arquitetura, SQLite `settings`, `providerThinking` e endpoints `/v1/chat/completions`, `/v1/messages`) <!-- id: 410 -->
+- [x] Mapeamento dos provedores GLM 5.2 no 9Router (`glm`, `nvidia`, `opencode-go`) e demais provedores (`antigravity`, `codex`, `kiro`, `kilocode`, `cline`, `qoder`, `grok-cli`, `kimi`) <!-- id: 411 -->
+- [x] Atualização da tabela `settings` no SQLite `data.sqlite` configurando `providerThinking` com `mode: "max"` universal <!-- id: 412 -->
+- [x] Testes de verificação com retorno dos blocos de raciocínio/pensamento completo ("thinking") em todos os provedores GLM 5.2 (`glm/glm-5.2`, `nvidia/z-ai/glm-5.2`, `ocg/glm-5.2`) e no `combo-principal` <!-- id: 413 -->
+
+## Prospecção Sites — Fix Captura Rating/Nota (2026-08-06)
+- [x] Estudar regex card (`scraper-engine.ts:616`) — identificada frail: 1 casa decimal, sem middot, sem aria-label fallback <!-- id: 410 -->
+- [x] Estudar painel detalhe (`scraper-engine.ts:1109`) — aria-label só buscava "estrela", Google BR usa "Avaliação X de 5" <!-- id: 411 -->
+- [x] Fix card: multi-strategy (aria-label expandido + regex 1-2 casas + `·` + fallback `X estrelas` + review count isolado) <!-- id: 412 -->
+- [x] Fix painel detalhe: seletores `.fontDisplayLarge` + textContent + regex `4.8 (1.234)` / `4.8 · 1.234` <!-- id: 413 -->
+- [x] Derivação final: se vazio → média ponderada de `distribuicaoEstrelas` ou média de `reviewsDetalhes[]` <!-- id: 414 -->
+- [x] `npx tsc --noEmit` 0 erros <!-- id: 415 -->
+- [ ] **TESTAR**: buscar termo retorne negócios → confirmar rating preenchido em ~100% (antes ~60-70%) <!-- id: 416 -->
+- [ ] **TESTAR**: capturar negócio sem rating aparente → confirmar derivação via distribuicao/reviewsDetalhes <!-- id: 417 -->
+
+## Prospecção Sites (2026-08-05)
+- [x] Migration `prospeccao_sites.sql` (campaign_type, prospeccao_lead, opt_out, indices) <!-- id: 370 -->
+- [x] API `/api/prospeccao-sites/leads` (GET paginado, sort, filter, tenant) <!-- id: 371 -->
+- [x] API `/api/prospeccao-sites/campaigns` (GET/POST) + `/[id]/route.ts` (GET/PATCH/POST/DELETE) <!-- id: 372 -->
+- [x] API `/api/prospeccao-sites/opt-out` (POST) <!-- id: 373 -->
+- [x] Worker `campaign-worker.ts` checka `opt_out` pré-envio (skip + log) <!-- id: 374 -->
+- [x] Page `/prospeccao-sites` 4 tabs (Busca/Revisão/Disparo/Histórico) <!-- id: 375 -->
+- [x] Rewrite page 5 tabs (Captura inline + Leads filtros/ranking + Disparo + Histórico) <!-- id: 382 -->
+- [x] Sidebar item + Header pageTitles entry (import `Globe`) <!-- id: 376 -->
+- [x] `npx tsc --noEmit` 0 erros + dev server smoke (307/401 esperado) <!-- id: 377 -->
+- [ ] **TESTAR**: rodar `migrations/prospeccao_sites.sql` no SQL Editor Supabase <!-- id: 378 -->
+- [ ] **TESTAR**: habilitar `features.prospeccao_sites=true` no cliente via `/admin/clientes` <!-- id: 379 -->
+- [ ] **TESTAR**: Captura Maps que tenha populado `website` em leads (Migration 009) <!-- id: 380 -->
+- [ ] **TESTAR**: fluxo completo — Busca → selecionar → Revisão → Disparo → Histórico <!-- id: 381 -->
+
+## Prospecção Sites — Filtros Revisão + Ordem Disparo + IA Rewrite (2026-08-05)
+- [x] Migration `prospeccao_sites.sql` append `priority INT` + `idx_ct_priority` <!-- id: 390 -->
+- [x] `src/lib/prospeccao-priority.ts` pure fn `computePriority` + `passesFilters` <!-- id: 391 -->
+- [x] POST `/api/prospeccao-sites/campaigns` aceita `order_by/order_dir/min_reviews/min_rating`, computa `priority` por target <!-- id: 392 -->
+- [x] `campaign-worker.ts:402` ordena `priority DESC, created_at ASC` (maior priority dispara primeiro) <!-- id: 393 -->
+- [x] GET `/api/prospeccao-sites/leads` server-side `ratingMin/reviewsMin/hasWebsite` (alívio client) <!-- id: 394 -->
+- [x] Page `/prospeccao-sites` POST body envia `order_by/order_dir/min_reviews/min_rating`; fetch leads passa `hasWebsite/ratingMin/reviewsMin` <!-- id: 395 -->
+- [x] Removido state morto `revMinReviews/revMinRating/revOrderBy/revOrder` <!-- id: 396 -->
+- [x] IA rewrite end-to-end já funcionava (schema/worker/UI/POST) — sem mudanças <!-- id: 397 -->
+- [x] Tests `prospeccao-priority.test.ts` (13) + `campaign-target-order.test.ts` (5) pass <!-- id: 398 -->
+- [x] `npx tsc --noEmit` 0 erros <!-- id: 399 -->
+- [ ] **TESTAR**: rodar append `migrations/prospeccao_sites.sql` (priority + index) no Supabase <!-- id: 400 -->
+- [ ] **TESTAR**: criar campanha `order_by=reviews, min_reviews=10` → confirmar targets com maior `reviews` têm `priority` alta <!-- id: 401 -->
+- [ ] **TESTAR**: worker dispara target maior `priority` primeiro (verificar `campaign_logs` ordem) <!-- id: 402 -->
+- [ ] **TESTAR**: IA rewrite toggle on + modelo + prompt → `campaigns.personalize_with_ai=true` salvou + worker chama IA <!-- id: 403 -->
+- [ ] **BUG LATENTE**: `created_at desc` na fn inverte semântica SQL (mais velho vence). Se user reclamar, inverter sinal `score = t` <!-- id: 404 -->
+
+## Modelo agente independente + Web search robustez (2026-08-04)
+- [x] Bug fix: `agentConfig.target_model` ignorado em non-admin → `mapModelAsync` direto quando setado <!-- id: 360 -->
+- [x] Brave Search API opcional (`BRAVE_API_KEY` env, free 2k/mês, fallback DDG/Bing) <!-- id: 361 -->
+- [x] `webFetchPage` 15k→30k + crawl 1 nível sub-páginas (sobre/produtos/contato) <!-- id: 362 -->
+- [x] `needsFreshWebSearch` ampliado: endereço/telefone/site/horário/funcionamento/onde fica/quem é <!-- id: 363 -->
+- [x] Typecheck 0 erros + suite 363/363 pass <!-- id: 364 -->
+- [ ] **TESTAR**: setar `BRAVE_API_KEY` .env.local → confirmar Brave cai como 1ª fonte <!-- id: 365 -->
+- [ ] **TESTAR**: /agente admin trocar modelo → /tokens linhas refletir modelo escolhido <!-- id: 366 -->
+- [ ] **TESTAR**: agente recebe pergunta "qual endereço?" → web_search dispara autofetch <!-- id: 367 -->
+
 ## Testes exaustivos IA (2026-07-31)
 - [x] Mapear fluxo IA agente (webhook route extractors, ai-models/route, agent/process/route, send-message/route, bot-status, manual-send-registry) <!-- id: 350 -->
 - [x] Identificar gaps: pure extractors sem unit tests, registry sem unit tests, model-change sem roundtrip test <!-- id: 351 -->
