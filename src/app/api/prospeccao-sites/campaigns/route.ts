@@ -93,11 +93,17 @@ export async function POST(req: NextRequest) {
     if (cErr || !camp) return NextResponse.json({ success: false, error: cErr?.message || "Falha ao criar" }, { status: 500 });
 
     // Resolve leads → targets (filtra tenant p/ evitar cross-tenant injection)
-    const { data: leads } = await supabase
+    const numericLeadIds = (lead_ids || []).map((id: any) => Number(id)).filter((n: number) => !isNaN(n) && n > 0);
+    let leadsQuery = supabase
       .from("leads_extraidos")
       .select("id, remoteJid, nome_negocio, ramo_negocio, telefone, opt_out, avaliacao, reviews, created_at")
-      .eq("client_id", ctx.clientId)
-      .in("id", lead_ids);
+      .in("id", numericLeadIds.length > 0 ? numericLeadIds : lead_ids);
+
+    if (!ctx.isAdmin) {
+      leadsQuery = leadsQuery.eq("client_id", ctx.clientId);
+    }
+
+    const { data: leads } = await leadsQuery;
 
     const targetsRows = (leads || [])
       .filter((l: any) => !l.opt_out && l.remoteJid)
@@ -109,6 +115,7 @@ export async function POST(req: NextRequest) {
         ramo_negocio: l.ramo_negocio,
         status: "pending",
         priority: computePriority(l, orderBy, orderDir),
+        client_id: ctx.clientId,
       }));
 
     if (targetsRows.length === 0) {

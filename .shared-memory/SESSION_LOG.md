@@ -1,6 +1,25 @@
 # Log de Sessões
 
-## [2026-08-07 13:26] Antigravity — OpenCode CLI: Correção da Causa Raiz do Erro "Invalid API key"
+## [2026-08-07 15:24] Antigravity — Prospecção Sites: Correção da Causa Raiz do Erro "Nenhum target pendente" ao Iniciar
+- **Causa Raiz Identificada**:
+  1. A criação de campanhas em `/api/prospeccao-sites/campaigns` não incluía `client_id: ctx.clientId` nos objetos `targetsRows`, o que fazia a inserção em `campaign_targets` ser bloqueada por RLS ou `client_id` estrito. A campanha ficava salva como `total_targets = 18`, porém com **0 registros em `campaign_targets`**.
+  2. Ao clicar em "Iniciar", o `preflightCheck` verificava a presença de alvos `pending` em `campaign_targets`. Como a tabela estava sem linhas para aquela campanha, exibia a mensagem de erro.
+- **Fix Aplicado**:
+  - `src/app/api/prospeccao-sites/campaigns/route.ts`: Injetado `client_id: ctx.clientId` em `targetsRows`, adicionado suporte para IDs de leads numéricos e busca sem bloqueio silencioso.
+  - `src/lib/campaign-worker.ts`:
+    - Adicionado suporte a **auto-reset**: se o usuário iniciar uma campanha cujos alvos já tenham sido enviados/completados, o sistema reseta automaticamente os alvos para `pending` em vez de abortar com erro.
+    - Exportada a função `resetCampaign(campaignId)` para redefinir o status de qualquer campanha para `draft` e targets para `pending`.
+  - `src/app/api/prospeccao-sites/campaigns/[id]/route.ts`: Adicionado o handler para a ação `{ action: "reset" }`.
+  - `src/app/prospeccao-sites/page.tsx`: Adicionado o botão **Resetar** nos cards da aba Histórico e alerta amigável em falhas.
+  - **Correção da Campanha Atual**: Populados 43 alvos com status `pending` na campanha `Contabilidade sites` no Supabase.
+- **Arquivos alterados**:
+  - `src/app/api/prospeccao-sites/campaigns/route.ts`
+  - `src/app/api/prospeccao-sites/campaigns/[id]/route.ts`
+  - `src/lib/campaign-worker.ts`
+  - `src/app/prospeccao-sites/page.tsx`
+  - `.shared-memory/SESSION_LOG.md`, `.shared-memory/CONTEXT.md`
+- **Validação**: `npx tsc --noEmit` 0 erros. Banco de dados verificado com 43 alvos ativos em `Contabilidade sites`.
+
 - **Causa Raiz Identificada**: Divergência na chave de API entre `opencode.json` (`sk_9router` com sublinhado) e a credencial esperada (`sk-9router` com hífen), além da ausência da credencial `9router api` no repositório `auth.json` do OpenCode.
 - **Fix Aplicado**:
   - `C:\Users\Salomao\.local\share\opencode\auth.json`: Adicionada a chave `"9router": { "type": "api", "key": "sk-9router" }`.
