@@ -2,6 +2,32 @@
 
 Este projeto (`painel-sdr`) é um Painel de SDR construído com Next.js (versão 16.2.3), conectado ao Supabase e Evolution API (WhatsApp), com uso de Redis para filas e inteligência artificial (Google Gemini).
 
+## [2026-08-07] OpenCode CLI — Correção do Erro "Invalid API key"
+
+- **Causa Raiz**: Divergência na chave de API entre `opencode.json` (`sk_9router` com sublinhado) e `sk-9router` (com hífen), além da falta do registro da credencial do 9Router no arquivo `auth.json` do OpenCode.
+- **Fix Aplicado**:
+  - `C:\Users\Salomao\.local\share\opencode\auth.json`: Injetada a credencial `"9router": { "type": "api", "key": "sk-9router" }`.
+  - `C:\Users\Salomao\.config\opencode\opencode.json`: Alinhada a `apiKey` para `"sk-9router"` + adicionado `"headers": { "authorization": "Bearer sk-9router" }`.
+- **Validação**: `opencode providers list` confirmou `9router api` ativo com 2 credenciais registradas. Erro resolvido.
+
+
+
+## [2026-08-07] 9Router & OpenCode CLI — Configuração e Garantia da Versão MAX (GLM 5.2 / Combo)
+
+- **Testes Efetuados**: Executadas chamadas diretas à API do 9Router (`http://localhost:20128/v1/chat/completions`) com os modelos da lista do combo.
+- **Resultado dos Testes**:
+  1. `glm/glm-5.2`: **HTTP 200 OK** (`model: "glm-5.2"`, raciocínio ativo).
+  2. `ocg/glm-5.2`: **HTTP 429** (Limite mensal do OpenCode-Go atingido).
+  3. `nvidia/z-ai/glm-5.2`: **Timeout** (Indisponível temporariamente).
+  4. `combo-principal`: **HTTP 200 OK**! O 9Router ignorou automaticamente o 429 e o timeout e entregou a resposta do **GLM-5.2 MAX** sem erros.
+- **Configuração do OpenCode CLI (`C:\Users\Salomao\.config\opencode\opencode.json`)**:
+  - `model`: `9router/combo-principal`
+  - `small_model`: `9router/combo-principal` (100% via 9Router)
+  - `agent.explorer`: `9router/combo-principal`
+  - `limit`: `context: 128000`, `output: 16384`
+
+
+
 ## [2026-08-06] Chat (/chat) — Correção da Causa Raiz do Reativar IA (Busca Resiliente por Variações de JID & Multi-Update)
 
 **Solicitação**: "ele nao esta reativando a ia ele carrega e volta a aparecer reativar teste a fundo isso arrume sme quberar a funcionallidade".

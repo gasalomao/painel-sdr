@@ -115,11 +115,37 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: "Nenhum lead válido (todos opt-out ou sem JID)" }, { status: 400 });
     }
 
-    const { error: tErr } = await supabase.from("campaign_targets").upsert(targetsRows, { onConflict: "campaign_id,remote_jid", ignoreDuplicates: true });
-    if (tErr) console.warn("[prospeccao-sites] erro targets:", tErr.message);
-    await supabase.from("campaigns").update({ total_targets: targetsRows.length }).eq("id", camp.id);
+    let tErr: any = null;
+    let upsertRes = await supabase.from("campaign_targets").upsert(targetsRows, { onConflict: "campaign_id,remote_jid", ignoreDuplicates: true });
+    tErr = upsertRes.error;
+    // Fallback: coluna priority pode não existir se migration não foi rodada.
+    // Retry sem priority (default 0) — evita targets fantasma (total_targets=18, 0 reais).
+    if (tErr && tErr.code === "PGRST204") {
+      const fallbackRows = targetsRows.map(({ priority, ...rest }) => rest);
+      upsertRes = await supabase.from("campaign_targets").upsert(fallbackRows, { onConflict: "campaign_id,remote_jid", ignoreDuplicates: true });
+      tErr = upsertRes.error;
+      if (tErr && tErr.code === "PGRST204") {
+        console.warn("[prospeccao-sites] migration prospeccao_sites.sql NÃO rodada. Rode no SQL Editor do Supabase.");
+      }
+    }
+    if (tErr) {
+      // Insert de targets falhou de verdade — rollback da campanha vazia.
+      await supabase.from("campaigns").delete().eq("id", camp.id);
+      const msg = tErr.code === "PGRST204"
+        ? "Colunas faltando em campaign_targets. Rode migrations/prospeccao_sites.sql no Supabase."
+        : `Erro ao inserir targets: ${tErr.message}`;
+      return NextResponse.json({ success: false, error: msg }, { status: 500 });
+    }
 
-    return NextResponse.json({ success: true, campaign: { ...camp, total_targets: targetsRows.length } });
+    // Conta targets REAIS no banco (não o length do array JS).
+    const { count: realCount } = await supabase
+      .from("campaign_targets")
+      .select("id", { count: "exact", head: true })
+      .eq("campaign_id", camp.id);
+    const actualTargets = realCount || 0;
+    await supabase.from("campaigns").update({ total_targets: actualTargets }).eq("id", camp.id);
+
+    return NextResponse.json({ success: true, campaign: { ...camp, total_targets: actualTargets } });
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });
   }
