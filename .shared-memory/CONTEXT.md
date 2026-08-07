@@ -2,6 +2,19 @@
 
 Este projeto (`painel-sdr`) é um Painel de SDR construído com Next.js (versão 16.2.3), conectado ao Supabase e Evolution API (WhatsApp), com uso de Redis para filas e inteligência artificial (Google Gemini).
 
+## [2026-08-07] Prospecção Sites — Correção do Erro "Nenhum target pendente" ao Iniciar
+
+- **Causa Raiz**: A criação de campanhas em `/api/prospeccao-sites/campaigns` não passava `client_id: ctx.clientId` para `targetsRows`. Como o Supabase aplicava RLS ou `client_id` default, `campaign_targets` ficava com 0 linhas enquanto `campaigns.total_targets` salvava 18. Ao clicar em Iniciar, o `preflightCheck` barrava por ausência de targets.
+- **Fix Aplicado**:
+  - `src/app/api/prospeccao-sites/campaigns/route.ts`: Adicionado `client_id: ctx.clientId` a cada target.
+  - `src/lib/campaign-worker.ts`: Adicionado auto-reset de targets em `preflightCheck` + função `resetCampaign`.
+  - `src/app/api/prospeccao-sites/campaigns/[id]/route.ts`: Adicionado endpoint `{ action: "reset" }`.
+  - `src/app/prospeccao-sites/page.tsx`: Adicionado botão "Resetar" na UI.
+  - **Correção da Campanha Atual**: Populados 43 alvos ativos na campanha `Contabilidade sites`.
+- **Validação**: `npx tsc --noEmit` 0 erros.
+
+
+
 ## [2026-08-07] OpenCode CLI — Correção do Erro "Invalid API key"
 
 - **Causa Raiz**: Divergência na chave de API entre `opencode.json` (`sk_9router` com sublinhado) e `sk-9router` (com hífen), além da falta do registro da credencial do 9Router no arquivo `auth.json` do OpenCode.

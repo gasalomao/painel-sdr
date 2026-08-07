@@ -13,10 +13,12 @@ import {
 } from "@/components/ui/select";
 import {
   Send, Play, Pause, Square, Loader2, Search, Globe, BarChart3,
-  CheckCircle2, XCircle, Star, Ban, RefreshCw, ShieldAlert,
+  CheckCircle2, XCircle, Star, Ban, RefreshCw,
   Rocket, Terminal, Filter, TrendingUp, Building2, Link2, Link2Off, Trash2, MapPin, ExternalLink,
+  Clock, MessageSquare, ChevronRight, Bot, Smartphone,
 } from "lucide-react";
 import { renderTemplate, type TemplateContext } from "@/lib/template-vars";
+import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
 
 type Lead = {
@@ -53,7 +55,11 @@ type Campaign = {
   ai_prompt?: string | null;
   ai_model?: string | null;
   created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
   last_error?: string | null;
+  last_error_at?: string | null;
+  updated_at?: string;
 };
 
 type LogEntry = { message: string; type: string; time: string };
@@ -325,6 +331,30 @@ export default function ProspeccaoSitesPage() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [loadingCampaigns, setLoadingCampaigns] = useState(false);
 
+  // ----- Real-time logs + targets (igual Disparo) -----
+  const [activeLogCampaignId, setActiveLogCampaignId] = useState<string | null>(null);
+  const [campLogs, setCampLogs] = useState<{ id: number; message: string; level: string; created_at: string }[]>([]);
+  const campLogEndRef = useRef<HTMLDivElement>(null);
+  const [latestLogByCampaign, setLatestLogByCampaign] = useState<Record<string, { message: string; level: string; created_at: string }>>({});
+  const [countdowns, setCountdowns] = useState<Record<string, { secs: number; nextAt: number }>>({});
+
+  type TargetRow = {
+    id: string;
+    remote_jid: string;
+    nome_negocio: string | null;
+    ramo_negocio: string | null;
+    status: string;
+    rendered_message: string | null;
+    ai_input: string | null;
+    sent_at: string | null;
+    error_message: string | null;
+    attempts: number | null;
+  };
+  const [activeTargetsCampaignId, setActiveTargetsCampaignId] = useState<string | null>(null);
+  const [targets, setTargets] = useState<TargetRow[]>([]);
+  const [loadingTargets, setLoadingTargets] = useState(false);
+  const [targetsFilter, setTargetsFilter] = useState<"all" | "sent" | "failed" | "pending">("all");
+
   // ----- IA rewrite (igual automação) -----
   const [personalizeWithAi, setPersonalizeWithAi] = useState(false);
   const [aiModels, setAiModels] = useState<{ id: string; name?: string; provider?: string }[]>([]);
@@ -351,16 +381,183 @@ export default function ProspeccaoSitesPage() {
     })();
   }, []);
 
-  const fetchCampaigns = useCallback(async () => {
-    setLoadingCampaigns(true);
+  async function loadCampaigns(initial = false) {
+    if (initial) setLoadingCampaigns(true);
     try {
       const r = await fetch("/api/prospeccao-sites/campaigns", { cache: "no-store" });
       const j = await r.json();
-      if (j.success) setCampaigns(j.campaigns);
+      if (j.success) {
+        setCampaigns(prev => {
+          const next: Campaign[] = j.campaigns || [];
+          if (prev.length !== next.length) return next;
+          const changed = next.some((c, i) => {
+            const p = prev[i];
+            return !p || p.id !== c.id
+              || p.status !== c.status
+              || p.sent_count !== c.sent_count
+              || p.failed_count !== c.failed_count
+              || p.total_targets !== c.total_targets
+              || p.skipped_count !== c.skipped_count
+              || p.last_error !== c.last_error;
+          });
+          return changed ? next : prev;
+        });
+      }
     } catch (e) { console.error(e); }
-    finally { setLoadingCampaigns(false); }
-  }, []);
-  useEffect(() => { fetchCampaigns(); }, [fetchCampaigns]);
+    finally { if (initial) setLoadingCampaigns(false); }
+  }
+  useEffect(() => { loadCampaigns(true); }, []);
+
+  async function loadTargets(campaignId: string) {
+    setLoadingTargets(true);
+    try {
+      const r = await fetch(`/api/prospeccao-sites/campaigns/${campaignId}`, { cache: "no-store" });
+      const d = await r.json();
+      if (d.success) setTargets((d.targets || []) as TargetRow[]);
+    } catch {}
+    finally { setLoadingTargets(false); }
+  }
+
+  useEffect(() => {
+    if (!activeTargetsCampaignId) return;
+    loadTargets(activeTargetsCampaignId);
+    const camp = campaigns.find(c => c.id === activeTargetsCampaignId);
+    if (camp?.status !== "running") return;
+    const t = setInterval(() => loadTargets(activeTargetsCampaignId), 5000);
+    return () => clearInterval(t);
+  }, [activeTargetsCampaignId, campaigns]);
+
+  // Fast polling when any campaign is running (no loading=true = no flicker)
+  useEffect(() => {
+    const anyRunning = campaigns.some(c => c.status === "running");
+    if (!anyRunning) return;
+    const t = setInterval(() => loadCampaigns(false), 3000);
+    return () => clearInterval(t);
+  }, [campaigns]);
+
+  // Real-time log subscription for the selected campaign
+  useEffect(() => {
+    if (!activeLogCampaignId) {
+      setCampLogs([]);
+      return;
+    }
+    async function fetchInitialLogs() {
+      const { data } = await supabase
+        .from("campaign_logs")
+        .select("*")
+        .eq("campaign_id", activeLogCampaignId)
+        .order("created_at", { ascending: true })
+        .limit(200);
+      setCampLogs(data || []);
+    }
+    fetchInitialLogs();
+
+    const channel = supabase
+      .channel(`ps-logs-${activeLogCampaignId}`)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "campaign_logs", filter: `campaign_id=eq.${activeLogCampaignId}` },
+        (payload) => {
+          setCampLogs(prev => [...prev, payload.new as any].slice(-200));
+        }
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [activeLogCampaignId]);
+
+  useEffect(() => {
+    campLogEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [campLogs]);
+
+  async function refreshLogs() {
+    if (!activeLogCampaignId) return;
+    const { data } = await supabase
+      .from("campaign_logs")
+      .select("*")
+      .eq("campaign_id", activeLogCampaignId)
+      .order("created_at", { ascending: true })
+      .limit(200);
+    setCampLogs(data || []);
+  }
+
+  async function clearLogs(campaignId: string) {
+    if (!confirm("Apagar todo o histórico de logs desta campanha?")) return;
+    const { error } = await supabase.from("campaign_logs").delete().eq("campaign_id", campaignId);
+    if (error) alert("Erro: " + error.message);
+    else setCampLogs([]);
+  }
+
+  // Latest log per running campaign (poll + realtime) — shows "what's happening NOW"
+  useEffect(() => {
+    const runningIds = campaigns.filter(c => c.status === "running").map(c => c.id);
+    if (runningIds.length === 0) {
+      setCountdowns({});
+      return;
+    }
+
+    let cancelled = false;
+    async function fetchLatest() {
+      const { data } = await supabase
+        .from("campaign_logs")
+        .select("campaign_id, message, level, created_at")
+        .in("campaign_id", runningIds)
+        .order("created_at", { ascending: false })
+        .limit(runningIds.length * 3);
+      if (cancelled || !data) return;
+      const byId: Record<string, any> = {};
+      for (const row of data as any[]) {
+        if (!byId[row.campaign_id]) byId[row.campaign_id] = row;
+      }
+      setLatestLogByCampaign(prev => ({ ...prev, ...byId }));
+
+      // Parse countdown from "Aguardando Xs até o próximo envio..."
+      const cd: Record<string, { secs: number; nextAt: number }> = {};
+      for (const [cid, row] of Object.entries(byId)) {
+        const m = (row as any).message?.match(/Aguardando\s+(\d+)s/i);
+        if (m) {
+          const secs = parseInt(m[1], 10);
+          const startMs = new Date((row as any).created_at).getTime();
+          cd[cid] = { secs, nextAt: startMs + secs * 1000 };
+        }
+      }
+      setCountdowns(prev => {
+        const next = { ...prev };
+        for (const cid of Object.keys(cd)) next[cid] = cd[cid];
+        for (const cid of Object.keys(next)) {
+          if (!cd[cid] && runningIds.includes(cid)) delete next[cid];
+        }
+        return next;
+      });
+    }
+    fetchLatest();
+    const t = setInterval(fetchLatest, 3000);
+
+    const channel = supabase
+      .channel(`ps-live-${runningIds.join("-")}`)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "campaign_logs" },
+        (payload) => {
+          const row = payload.new as any;
+          if (!runningIds.includes(row.campaign_id)) return;
+          setLatestLogByCampaign(prev => ({ ...prev, [row.campaign_id]: row }));
+          const m = row.message?.match(/Aguardando\s+(\d+)s/i);
+          if (m) {
+            const secs = parseInt(m[1], 10);
+            const startMs = new Date(row.created_at).getTime();
+            setCountdowns(prev => ({ ...prev, [row.campaign_id]: { secs, nextAt: startMs + secs * 1000 } }));
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+      supabase.removeChannel(channel);
+    };
+  }, [campaigns]);
 
   const previewFor = (lead: Lead) => {
     const ctx: TemplateContext = {
@@ -405,20 +602,24 @@ export default function ProspeccaoSitesPage() {
       setName("");
       setSelected(new Map());
       setTab("historico");
-      fetchCampaigns();
+      loadCampaigns();
     } catch (e: any) { alert("Erro: " + e.message); }
     finally { setCreating(false); }
   };
 
-  const actionCampaign = async (id: string, a: "start" | "pause" | "cancel") => {
+  const actionCampaign = async (id: string, a: "start" | "pause" | "cancel" | "reset") => {
     try {
-      await fetch(`/api/prospeccao-sites/campaigns/${id}`, {
+      const res = await fetch(`/api/prospeccao-sites/campaigns/${id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: a }),
       });
-      fetchCampaigns();
-    } catch (e) { console.error(e); }
+      const data = await res.json();
+      if (!data.success && data.error) {
+        alert("Erro: " + data.error);
+      }
+      loadCampaigns();
+    } catch (e: any) { alert("Erro de conexão: " + e.message); }
   };
 
   const markOptOut = async (lead: Lead) => {
@@ -434,6 +635,13 @@ export default function ProspeccaoSitesPage() {
   };
 
   // Estatísticas helper
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const anyRunning = campaigns.some(c => c.status === "running");
+    if (!anyRunning) return;
+    const t = setInterval(() => setTick(n => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [campaigns]);
   const stats = useMemo(() => {
     const withW = rankedLeads.filter((l) => l.website && l.website.trim()).length;
     const withoutW = rankedLeads.length - withW;
@@ -986,7 +1194,7 @@ export default function ProspeccaoSitesPage() {
           <div className="space-y-3">
             <div className="flex justify-between items-center">
               <div className="text-xs font-bold uppercase tracking-wider text-white/50">Campanhas de prospecção</div>
-              <Button variant="ghost" size="sm" onClick={fetchCampaigns}><RefreshCw className="w-3.5 h-3.5 mr-1" /> Atualizar</Button>
+              <Button variant="ghost" size="sm" onClick={() => loadCampaigns(false)}><RefreshCw className="w-3.5 h-3.5 mr-1" /> Atualizar</Button>
             </div>
             {loadingCampaigns ? (
               <div className="p-8 text-center text-white/40"><Loader2 className="w-5 h-5 animate-spin inline" /></div>
@@ -999,12 +1207,20 @@ export default function ProspeccaoSitesPage() {
                 {campaigns.map((c) => {
                   const total_sent = (c.sent_count || 0) + (c.failed_count || 0) + (c.skipped_count || 0);
                   const pct = c.total_targets > 0 ? Math.round((total_sent / c.total_targets) * 100) : 0;
+                  const cd = countdowns[c.id];
+                  const remaining = cd ? Math.max(0, Math.ceil((cd.nextAt - Date.now()) / 1000)) : null;
                   return (
                     <Card key={c.id} className="border-white/10 bg-white/[0.02]"><CardContent className="p-4 space-y-2">
                       <div className="flex justify-between items-start">
-                        <div>
-                          <div className="font-bold text-white">{c.name}</div>
-                          <div className="text-xs text-white/50">{c.instance_name} · {new Date(c.created_at).toLocaleString("pt-BR")}</div>
+                        <div className="min-w-0">
+                          <div className="font-bold text-white truncate">{c.name}</div>
+                          <div className="text-[10px] text-white/50 uppercase tracking-wider flex items-center gap-2 flex-wrap">
+                            <Smartphone className="w-3 h-3" /> {c.instance_name}
+                            <span className="opacity-30">·</span>
+                            <Clock className="w-3 h-3" /> {c.allowed_start_hour}h-{c.allowed_end_hour}h
+                            <span className="opacity-30">·</span>
+                            jitter {c.min_interval_seconds}-{c.max_interval_seconds}s
+                          </div>
                         </div>
                         <Badge variant="outline" className={
                           c.status === "running" ? "text-green-400 border-green-500/30" :
@@ -1013,31 +1229,226 @@ export default function ProspeccaoSitesPage() {
                           "text-white/50"
                         }>{c.status}</Badge>
                       </div>
+
                       <div className="grid grid-cols-4 gap-2 text-xs">
                         <div className="bg-black/30 p-2 rounded"><div className="text-white/40">Alvos</div><div className="text-white font-bold">{c.total_targets}</div></div>
                         <div className="bg-black/30 p-2 rounded"><div className="text-green-400/60">Enviados</div><div className="text-green-400 font-bold">{c.sent_count}</div></div>
                         <div className="bg-black/30 p-2 rounded"><div className="text-red-400/60">Falhas</div><div className="text-red-400 font-bold">{c.failed_count}</div></div>
                         <div className="bg-black/30 p-2 rounded"><div className="text-amber-400/60">Pulados</div><div className="text-amber-400 font-bold">{c.skipped_count || 0}</div></div>
                       </div>
+
                       <div className="w-full h-1.5 bg-black/40 rounded-full overflow-hidden">
                         <div className="h-full bg-primary transition-all" style={{ width: `${pct}%` }} />
                       </div>
+
+                      {/* Countdown timer + live log */}
+                      {c.status === "running" && (
+                        <>
+                          {remaining !== null && remaining > 0 ? (
+                            <div className="flex items-center gap-2 p-2.5 rounded-lg bg-blue-500/10 border border-blue-500/30">
+                              <Clock className="w-4 h-4 text-blue-400 animate-pulse shrink-0" />
+                              <div className="flex-1 min-w-0">
+                                <span className="text-[10px] font-black uppercase tracking-wider text-blue-400">Próximo disparo em</span>
+                                <div className="text-lg font-black text-blue-300 font-mono leading-none mt-0.5">
+                                  {String(Math.floor(remaining / 60)).padStart(2, "0")}:{String(remaining % 60).padStart(2, "0")}
+                                </div>
+                              </div>
+                              <div className="w-16 h-1 bg-blue-500/20 rounded-full overflow-hidden">
+                                <div
+                                  className="h-full bg-blue-400 transition-all duration-1000"
+                                  style={{ width: `${cd && cd.secs > 0 ? Math.max(0, (remaining / cd.secs) * 100) : 0}%` }}
+                                />
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-2 p-2 rounded-lg bg-green-500/5 border border-green-500/20">
+                              <Loader2 className="w-3.5 h-3.5 text-green-400 animate-spin shrink-0" />
+                              <span className="text-[11px] text-green-300 font-bold">Processando agora…</span>
+                            </div>
+                          )}
+
+                          {latestLogByCampaign[c.id] && (
+                            <div className="flex items-start gap-2 p-2.5 rounded-lg bg-emerald-500/5 border border-emerald-500/20">
+                              <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse mt-1.5 shrink-0" />
+                              <div className="min-w-0 flex-1">
+                                <p className="text-[9px] font-black uppercase tracking-widest text-emerald-400">
+                                  Agora · {new Date(latestLogByCampaign[c.id].created_at).toLocaleTimeString()}
+                                </p>
+                                <p className={cn(
+                                  "text-[11px] break-words mt-0.5 whitespace-pre-wrap",
+                                  latestLogByCampaign[c.id].level === "error" ? "text-red-300"
+                                  : latestLogByCampaign[c.id].level === "warning" ? "text-yellow-300"
+                                  : latestLogByCampaign[c.id].level === "success" ? "text-emerald-200"
+                                  : "text-white/80"
+                                )}>{latestLogByCampaign[c.id].message}</p>
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
+
                       {c.last_error && (
-                        <div className="text-xs text-red-400/80 bg-red-500/10 p-2 rounded border border-red-500/20">
-                          <ShieldAlert className="w-3 h-3 inline mr-1" />{c.last_error}
+                        <div className="flex items-start gap-2 p-2.5 rounded-lg bg-red-500/10 border border-red-500/30">
+                          <XCircle className="w-3.5 h-3.5 text-red-400 shrink-0 mt-0.5" />
+                          <div className="min-w-0">
+                            <p className="text-[9px] font-black uppercase tracking-widest text-red-400">
+                              Último erro{c.last_error_at ? ` · ${new Date(c.last_error_at).toLocaleString("pt-BR")}` : ""}
+                            </p>
+                            <p className="text-[11px] text-red-200/90 break-words mt-0.5">{c.last_error}</p>
+                          </div>
                         </div>
                       )}
-                      <div className="flex gap-2 pt-1">
-                        {(c.status === "draft" || c.status === "paused") && (
-                          <Button size="sm" onClick={() => actionCampaign(c.id, "start")}><Play className="w-3.5 h-3.5 mr-1" /> Iniciar</Button>
+
+                      <div className="flex gap-2 pt-1 flex-wrap">
+                        {(c.status === "draft" || c.status === "paused" || c.status === "stopped") && (
+                          <Button size="sm" onClick={() => actionCampaign(c.id, "start")}><Play className="w-3.5 h-3.5 mr-1" /> {c.status === "draft" ? "Iniciar" : "Retomar"}</Button>
                         )}
                         {c.status === "running" && (
                           <Button size="sm" variant="outline" onClick={() => actionCampaign(c.id, "pause")}><Pause className="w-3.5 h-3.5 mr-1" /> Pausar</Button>
                         )}
+                        <Button size="sm" variant="outline" onClick={() => actionCampaign(c.id, "reset")}><RefreshCw className="w-3.5 h-3.5 mr-1" /> Resetar</Button>
                         {c.status !== "done" && c.status !== "cancelled" && (
                           <Button size="sm" variant="ghost" onClick={() => actionCampaign(c.id, "cancel")}><Square className="w-3.5 h-3.5 mr-1" /> Cancelar</Button>
                         )}
                       </div>
+
+                      {/* Botão de abrir logs */}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setActiveLogCampaignId(activeLogCampaignId === c.id ? null : c.id)}
+                        className="w-full justify-between h-8 bg-white/5 border border-white/5 hover:bg-white/10 text-[10px] uppercase font-black"
+                      >
+                        <span className="flex items-center gap-2">
+                          <BarChart3 className="w-3 h-3 text-primary" />
+                          {activeLogCampaignId === c.id ? "Ocultar Logs (Tempo Real)" : "Ver Logs de Execução (Tempo Real)"}
+                        </span>
+                        <ChevronRight className={cn("w-3 h-3 transition-transform", activeLogCampaignId === c.id && "rotate-90")} />
+                      </Button>
+
+                      {/* Área de Logs em tempo real */}
+                      {activeLogCampaignId === c.id && (
+                        <div className="mt-2 rounded-xl bg-black/40 border border-white/5 p-3 font-mono text-[10px] h-64 flex flex-col">
+                          <div className="flex items-center justify-between mb-2 border-b border-white/5 pb-2">
+                            <div className="flex items-center gap-3">
+                              <span className="text-[9px] uppercase font-black text-white/40">Log completo de execução</span>
+                              <Button variant="ghost" size="sm" onClick={refreshLogs} className="h-5 px-1.5 text-[8px] bg-white/5 hover:bg-white/10">
+                                ↻ Atualizar
+                              </Button>
+                            </div>
+                            <Button variant="ghost" size="sm" onClick={() => clearLogs(c.id)} className="h-6 px-2 text-[9px] text-red-400 hover:bg-red-500/10 hover:text-red-300">
+                              <Trash2 className="w-3 h-3 mr-1" /> Limpar Logs
+                            </Button>
+                          </div>
+                          <div className="flex-1 overflow-y-auto space-y-1.5 custom-scrollbar pr-2">
+                            {campLogs.length === 0 && (
+                              <p className="text-white/40 italic text-center py-10">Aguardando eventos…</p>
+                            )}
+                            {campLogs.map((log, i) => {
+                              const color = log.level === "error" ? "text-red-400" : log.level === "success" ? "text-green-400" : log.level === "warning" ? "text-yellow-400" : "text-blue-300";
+                              return (
+                                <div key={log.id || i} className="flex gap-2 leading-relaxed">
+                                  <span className="text-white/30 shrink-0">[{new Date(log.created_at).toLocaleTimeString()}]</span>
+                                  <span className={cn("font-bold whitespace-pre-wrap break-words", color)}>{log.message}</span>
+                                </div>
+                              );
+                            })}
+                            <div ref={campLogEndRef} />
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Botão histórico de mensagens */}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setActiveTargetsCampaignId(activeTargetsCampaignId === c.id ? null : c.id)}
+                        className="w-full justify-between h-8 bg-white/5 border border-white/5 hover:bg-white/10 text-[10px] uppercase font-black"
+                      >
+                        <span className="flex items-center gap-2">
+                          <MessageSquare className="w-3 h-3 text-cyan-300" />
+                          {activeTargetsCampaignId === c.id ? "Ocultar mensagens" : `Ver mensagens enviadas (${c.sent_count || 0}/${c.total_targets || 0})`}
+                        </span>
+                        <ChevronRight className={cn("w-3 h-3 transition-transform", activeTargetsCampaignId === c.id && "rotate-90")} />
+                      </Button>
+
+                      {activeTargetsCampaignId === c.id && (
+                        <div className="mt-2 rounded-xl bg-black/40 border border-white/5 p-3 flex flex-col max-h-[420px]">
+                          <div className="flex items-center justify-between mb-2 border-b border-white/5 pb-2 gap-2 flex-wrap">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[9px] uppercase font-black text-white/40">Histórico de envios</span>
+                              {loadingTargets && <Loader2 className="w-3 h-3 animate-spin text-white/40" />}
+                            </div>
+                            <div className="flex items-center gap-1 text-[9px] flex-wrap">
+                              {(["all", "sent", "failed", "pending"] as const).map(f => (
+                                <button
+                                  key={f}
+                                  onClick={() => setTargetsFilter(f)}
+                                  className={cn(
+                                    "px-2 py-0.5 rounded-md font-black uppercase tracking-widest transition",
+                                    targetsFilter === f ? "bg-cyan-500/20 text-cyan-200 border border-cyan-500/30" : "text-white/40 hover:text-white"
+                                  )}
+                                >
+                                  {f === "all" ? `Todos (${targets.length})`
+                                    : f === "sent" ? `Enviadas (${targets.filter(t => t.status === "sent").length})`
+                                    : f === "failed" ? `Falhas (${targets.filter(t => t.status === "failed").length})`
+                                    : `Pendentes (${targets.filter(t => t.status === "pending").length})`}
+                                </button>
+                              ))}
+                              <Button variant="ghost" size="sm" onClick={() => loadTargets(c.id)} className="h-5 px-1.5 text-[8px] bg-white/5 hover:bg-white/10 ml-1" title="Atualizar">↻</Button>
+                            </div>
+                          </div>
+                          <div className="flex-1 overflow-y-auto custom-scrollbar pr-1 space-y-2">
+                            {targets.length === 0 ? (
+                              <p className="text-white/40 italic text-center py-10 text-[11px]">Nenhum envio ainda.</p>
+                            ) : (
+                              targets
+                                .filter(t => targetsFilter === "all" || t.status === targetsFilter)
+                                .map(t => {
+                                  const phone = (t.remote_jid || "").replace("@s.whatsapp.net", "");
+                                  const statusColor =
+                                    t.status === "sent" ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/10" :
+                                    t.status === "failed" ? "text-red-400 border-red-500/30 bg-red-500/10" :
+                                    t.status === "skipped" ? "text-yellow-400 border-yellow-500/30 bg-yellow-500/10" :
+                                    "text-white/40 border-white/10 bg-white/5";
+                                  return (
+                                    <div key={t.id} className="rounded-lg bg-white/[0.02] border border-white/5 p-2.5 space-y-1.5">
+                                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                                        <div className="min-w-0 flex-1">
+                                          <p className="text-[11px] font-bold text-white truncate">{t.nome_negocio || "(sem nome)"}</p>
+                                          <p className="text-[9px] text-white/40 font-mono">{phone}{t.ramo_negocio ? ` · ${t.ramo_negocio}` : ""}</p>
+                                        </div>
+                                        <div className="flex items-center gap-2 shrink-0">
+                                          {t.sent_at && <span className="text-[9px] text-white/40 font-mono">{new Date(t.sent_at).toLocaleString("pt-BR")}</span>}
+                                          <span className={cn("text-[8px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded-md border", statusColor)}>{t.status}</span>
+                                        </div>
+                                      </div>
+                                      {t.ai_input ? (
+                                        <div className="space-y-1.5">
+                                          <div className="rounded-md bg-white/[0.03] border border-white/5 px-2 py-1.5">
+                                            <p className="text-[8px] font-black uppercase tracking-widest text-white/40 mb-0.5">Template → IA</p>
+                                            <p className="text-[11px] text-white/60 whitespace-pre-wrap italic">{t.ai_input}</p>
+                                          </div>
+                                          <div className="rounded-md bg-cyan-500/5 border border-cyan-500/20 px-2 py-1.5">
+                                            <p className="text-[8px] font-black uppercase tracking-widest text-cyan-300 mb-0.5 flex items-center gap-1">
+                                              <Bot className="w-2.5 h-2.5" /> IA gerou (enviado)
+                                            </p>
+                                            <p className="text-[11px] text-white/90 whitespace-pre-wrap">{t.rendered_message}</p>
+                                          </div>
+                                        </div>
+                                      ) : t.rendered_message ? (
+                                        <p className="text-[11px] text-white/80 whitespace-pre-wrap bg-black/20 rounded-md px-2 py-1.5 border border-white/5">{t.rendered_message}</p>
+                                      ) : null}
+                                      {t.error_message && (
+                                        <p className="text-[10px] text-red-300 bg-red-500/5 border border-red-500/20 rounded-md px-2 py-1">⚠ {t.error_message}</p>
+                                      )}
+                                    </div>
+                                  );
+                                })
+                            )}
+                          </div>
+                        </div>
+                      )}
                     </CardContent></Card>
                   );
                 })}

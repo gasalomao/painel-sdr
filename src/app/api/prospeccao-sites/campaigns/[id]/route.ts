@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
-import { startCampaign, pauseCampaign, cancelCampaign, isCampaignActive } from "@/lib/campaign-worker";
+import { startCampaign, pauseCampaign, cancelCampaign, resetCampaign, isCampaignActive } from "@/lib/campaign-worker";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 
 export const dynamic = "force-dynamic";
@@ -36,7 +36,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   return NextResponse.json({ success: true, campaign, targets, logs, active_in_memory: isCampaignActive(id) });
 }
 
-/** POST /api/prospeccao-sites/campaigns/:id — start | pause | cancel */
+/** POST /api/prospeccao-sites/campaigns/:id — start | pause | cancel | reset */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const own = await ownsProspeccaoCampaign(req, id);
@@ -49,6 +49,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   }
   if (action === "pause")  { await pauseCampaign(id);  return NextResponse.json({ success: true, status: "paused" }); }
   if (action === "cancel") { await cancelCampaign(id); return NextResponse.json({ success: true, status: "cancelled" }); }
+  if (action === "reset")  {
+    const r = await resetCampaign(id);
+    if (!r.ok) return NextResponse.json({ success: false, error: r.error }, { status: 400 });
+    return NextResponse.json({ success: true, status: "draft" });
+  }
   return NextResponse.json({ success: false, error: "Ação inválida" }, { status: 400 });
 }
 

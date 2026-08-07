@@ -112,13 +112,33 @@ async function preflightCheck(campaignId: string): Promise<{ ok: boolean; error?
   }
 
   // Checa se tem targets pending
-  const { count: pendingCount } = await supabase
+  let { count: pendingCount } = await supabase
     .from("campaign_targets")
     .select("id", { count: "exact", head: true })
     .eq("campaign_id", campaignId)
     .eq("status", "pending");
+
   if (!pendingCount || pendingCount === 0) {
-    return { ok: false, error: "Nenhum target pendente. Cria leads ou reseta a campanha." };
+    const { count: totalCount } = await supabase
+      .from("campaign_targets")
+      .select("id", { count: "exact", head: true })
+      .eq("campaign_id", campaignId);
+
+    if (totalCount && totalCount > 0) {
+      await supabase
+        .from("campaign_targets")
+        .update({ status: "pending", attempts: 0, error_message: null, sent_at: null })
+        .eq("campaign_id", campaignId);
+      
+      await supabase
+        .from("campaigns")
+        .update({ status: "draft", sent_count: 0, failed_count: 0, skipped_count: 0, last_error: null })
+        .eq("id", campaignId);
+
+      pendingCount = totalCount;
+    } else {
+      return { ok: false, error: "Nenhum target pendente nesta campanha. Selecione leads e crie uma nova campanha." };
+    }
   }
 
   // Checa se a instância existe e está conectada (apenas pra Evolution; Cloud é sempre "open" se token válido)
@@ -1169,4 +1189,33 @@ const results = await webSearch(q, 8);
   });
 
   return finalText;
+}
+
+export async function resetCampaign(campaignId: string): Promise<{ ok: boolean; error?: string }> {
+  const { error: tErr } = await supabase
+    .from("campaign_targets")
+    .update({ status: "pending", attempts: 0, error_message: null, sent_at: null })
+    .eq("campaign_id", campaignId);
+
+  if (tErr) return { ok: false, error: tErr.message };
+
+  const { count: pendingCount } = await supabase
+    .from("campaign_targets")
+    .select("id", { count: "exact", head: true })
+    .eq("campaign_id", campaignId)
+    .eq("status", "pending");
+
+  await supabase
+    .from("campaigns")
+    .update({
+      status: "draft",
+      sent_count: 0,
+      failed_count: 0,
+      skipped_count: 0,
+      last_error: null,
+      total_targets: pendingCount || 0,
+    })
+    .eq("id", campaignId);
+
+  return { ok: true };
 }
