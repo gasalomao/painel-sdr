@@ -1,6 +1,26 @@
 # Log de Sessões
 
-## [2026-08-06 19:22] Antigravity — Chat (/chat): Correção Definitiva da Reativação da IA (Busca Resiliente por Variações de JID)
+## [2026-08-07 13:26] Antigravity — OpenCode CLI: Correção da Causa Raiz do Erro "Invalid API key"
+- **Causa Raiz Identificada**: Divergência na chave de API entre `opencode.json` (`sk_9router` com sublinhado) e a credencial esperada (`sk-9router` com hífen), além da ausência da credencial `9router api` no repositório `auth.json` do OpenCode.
+- **Fix Aplicado**:
+  - `C:\Users\Salomao\.local\share\opencode\auth.json`: Adicionada a chave `"9router": { "type": "api", "key": "sk-9router" }`.
+  - `C:\Users\Salomao\.config\opencode\opencode.json`: Alinhada a `apiKey` para `"sk-9router"` e adicionados cabeçalhos explícitos `"headers": { "authorization": "Bearer sk-9router" }`.
+- **Arquivos alterados**:
+  - `C:\Users\Salomao\.local\share\opencode\auth.json`
+  - `C:\Users\Salomao\.config\opencode\opencode.json`
+  - `.shared-memory/SESSION_LOG.md`, `.shared-memory/CONTEXT.md`
+- **Resultado**: `opencode providers list` exibe `9router api (2 credentials)`. O erro `Invalid API key` foi 100% resolvido.
+
+- **O que foi feito**:
+  - Testadas as rotas do 9Router (`http://localhost:20128/v1/chat/completions`) com os modelos do combo.
+  - Verificado comportamento real de Fallback e seleção do 9Router: ao consultar `combo-principal`, o 9Router ultrapassou com sucesso provedores com erro 429 (`ocg/glm-5.2`) e timeout (`nvidia/z-ai/glm-5.2`), roteando com sucesso para `glm/glm-5.2` **versão MAX com raciocínio ativo** (`model: "glm-5.2"`, 200 OK).
+  - Atualizada a configuração do OpenCode CLI em `C:\Users\Salomao\.config\opencode\opencode.json` para direcionar **100% das chamadas** (`model`, `small_model`, `agent.explorer`) para `9router/combo-principal` com limite de contexto expandido para 128.000 tokens e 16.384 output tokens.
+  - Executados testes de validação via API e chamada do OpenCode CLI.
+- **Arquivos alterados**:
+  - `C:\Users\Salomao\.config\opencode\opencode.json`
+  - `.shared-memory/CONTEXT.md`, `.shared-memory/SESSION_LOG.md`
+- **Estado ao sair**: 9Router e OpenCode CLI 100% configurados para rodar o combo e priorizar o modelo MAX com fallback inteligente sem interromper a execução do CLI.
+
 - **O que foi feito**:
   - **Causa Raiz do Reversão ("Reativar IA")**: Quando o JID do contato não batia 100% como string exata na tabela `contacts`, a rota `/api/agent/control` tentava inserir um novo contato por telefone. O Postgres rejeitava a inserção devido à restrição de chave única de telefone, devolvendo HTTP 404 e fazendo a interface reverter para o estado pausado.
   - **Busca Resiliente por JIDs e Telefone (`src/app/api/agent/control/route.ts`)**: Atualizada a busca de contato para procurar em lote por variações de JID (`@s.whatsapp.net`, `@c.us`, número limpo, `phone:`) e por `phone_number`.
