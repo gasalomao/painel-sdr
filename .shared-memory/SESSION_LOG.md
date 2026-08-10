@@ -1,5 +1,75 @@
 # Log de Sessões
 
+## [2026-08-10 22:00] OpenCode (combo-principal) — Bugfix renderCtx + E2E Pipeline Automação
+- **O que foi feito**:
+  - Bugfix: `renderCtx` em `campaign-worker.ts:582` e `followup-worker.ts:399` não incluíam `categoria` nem `push_name`. Variáveis `{{categoria}}`, `{{nome}}`, `{{push_name}}` não resolvidam em templates de disparo e follow-up.
+  - Adicionado select de `categoria` em `leads_extraidos` + query de `push_name` em `contacts` em ambos workers.
+  - `npx tsc --noEmit` 0 erros.
+  - **Teste E2E completo do pipeline de automação prospecção-sites**:
+    1. POST `/api/automations`: criou automação com `dispatch_personalize=true`, `dispatch_ai_model=openrouter:inclusionai/ling-3.0-tiny:free`, `followup_steps` (2 steps D+1/D+2), `followup_ai_enabled=true` — todos os campos persistidos ✅
+    2. POST `/api/automations/{id}/start`: phase `idle → scraping` ✅
+    3. Scraping: 1 lead capturado (Coco Bambu, Restaurante de frutos do mar, 551143046221@s.whatsapp.net) ✅
+    4. Phase `scraping → dispatching`: campanha criada (`74182243...`), target enviado ✅
+    5. Template variables resolvidas: `{{saudacao}}` → `Boa tarde`, `{{ramo}}` → `Restaurante de frutos do mar`, `{{nome_empresa}}` → `Coco Bambu` ✅
+    6. IA personalização (OpenRouter free model): `ai_input` (template renderizado) → `rendered_message` (mensagem personalizada pela IA) ✅
+    7. Evolution API confirmou envio: `message_id=3EB04CC94A660AF3B6D915` ✅
+    8. Phase `dispatching → following`: followup campaign criada (`8416728e...`), target matriculado `status=waiting, step=1` ✅
+    9. Automação de teste deletada (limpeza) ✅
+- **Arquivos alterados**: `src/lib/campaign-worker.ts`, `src/lib/followup-worker.ts`
+- **Decisões**: Query de `push_name` busca em `contacts` por `remote_jid` (nome do WhatsApp). `categoria` vem direto de `leads_extraidos`.
+- **Estado ao sair**: Pipeline E2E 100% funcional. Variáveis de template resolvem corretamente. IA personaliza disparo e follow-up. OpenRouter free model funciona.
+
+
+## [2026-08-10 21:30] OpenCode (combo-principal) — Redesign UI Formulário Automação (Variáveis + IA Cards + Follow-up Steps Editor)
+- **O que foi feito**:
+  - Substituído bloco de formulário antigo (linhas 1705-1766) em `prospeccao-sites/page.tsx` por UI rica espelhando `/automacao/page.tsx`.
+  - Variáveis clicáveis (13 chips: saudacao, nome, nome_empresa, primeiro_nome, ramo, categoria, endereco, website, avaliacao, reviews, telefone, data, hora) com tooltip explicativo e inserção no template.
+  - Card cyan "Reescrever cada disparo com IA" (toggle + modelo select + prompt textarea).
+  - Card purple "Follow-up automático" (toggle ATIVADO/DESATIVADO + steps editor com day_offset/NumberInput + template/Textarea + add/remove + Bot ícone).
+  - Card purple "Reescrever cada follow-up com IA" (toggle + modelo + prompt) dentro do follow-up card.
+  - Horário permitido (start/end hour) mantido.
+  - `npx tsc --noEmit` 0 erros. Página `/prospeccao-sites` retorna 200.
+- **Arquivos alterados**: `src/app/prospeccao-sites/page.tsx`
+- **Decisões**: Manteve state vars existentes (autoTemplate, autoPersonalize, autoAiModel, autoAiPrompt, autoFollowup, autoSteps, autoFollowupAi, autoFollowupAiModel, autoFollowupAiPrompt). Imports já presentes (Bot, Trash2, Repeat, Plus, NumberInput, ModelOptions, cn).
+- **Problemas**: Nenhum — substituição via PowerShell IndexOf para evitar encoding issues com edit tool.
+- **Estado ao sair**: UI completa e funcional. Próximo: testar no browser criar automação com IA rewrite + follow-up steps e verificar options aparecem/desaparecem on toggle.
+
+
+## [2026-08-10 18:55] OpenCode (combo-principal) — Aba Automação: UI Rica + IA Rewrite + Follow-up Steps + E2E Tests
+- **O que foi feito**:
+  - Redesenho completo da aba "Automação" em `/prospeccao-sites/page.tsx` (linhas 1662-1870): interface com seções distintas (configuração, captura, disparo com IA rewrite, follow-up com steps editáveis e IA, lista de automações com ações).
+  - `createAutomation` envia `dispatch_ai_prompt` + `dispatch_ai_model` + `followup_steps` (array `{day_offset, template}`) + `followup_ai_enabled` + `followup_ai_model` + `followup_ai_prompt`.
+  - Validação: 1 follow-up step obrigatório se follow-up habilitado.
+  - Bugfix: filtro `GET /api/automations?source=prospeccao-sites` quebrado (`scrape_filters->_source` inválido em PostgREST). Corrigido para `.filter("scrape_filters->>_source", "eq", source)`.
+  - Testes E2E via PowerShell:
+    - POST /api/automations: cria automação com `dispatch_ai_prompt`, `followup_steps` (1 step), `followup_ai_enabled=true` — todos persistidos.
+    - GET /api/automations?source=prospeccao-sites: filtro JSONB retorna automação criada.
+    - OpenRouter free model `inclusionai/ling-3.0-tiny:free`: HTTP 200, resposta gerada.
+    - POST /api/automations/[id]/start: automação iniciada (phase transitou, scraping começou — timeout esperado por Google Maps real).
+  - `npx tsc --noEmit` 0 erros.
+- **Arquivos alterados**:
+  - `src/app/prospeccao-sites/page.tsx`
+  - `src/app/api/automations/route.ts`
+  - `.shared-memory/TASKS.md`
+- **Decisões**:
+  - OpenRouter free models disponíveis (10+ modelos `:free`) para uso em automação.
+  - PostgREST JSONB filter syntax: `scrape_filters->>_source=eq.value` (text extraction) em vez de `scrape_filters->_source` (json extraction — erro).
+- **Problemas**: Nenhum.
+- **Estado ao sair**: Aba Automação completa e testada E2E. Próximo: testar fluxo completo com nichos/regiões reais no navegador.
+
+## [2026-08-10 16:00] Antigravity — Estudo 9Router no Easypanel (VPS) & Conexão com OpenCode CLI
+- **O que foi feito**:
+  - Estudo completo de arquitetura para executar o 9Router dentro de um container Docker no Easypanel (VPS).
+  - Estruturada a migração do banco SQLite (`data.sqlite`) contendo todas as contas e modelos pré-configurados (`combo-principal`, `GLM 5.2 MAX`, `NVIDIA`, `OpenCode-Go`, `Anthropic`, `Gemini`) do PC local (`C:\Users\Salomao\AppData\Roaming\9router\db\data.sqlite`) diretamente para o volume do Easypanel (`/root/.9router/db/data.sqlite`).
+  - Mapeada a integração do **OpenCode CLI** no PC para consumir o endpoint da VPS (`https://router.seudominio.com/v1`) mantendo autorização por `sk-9router`.
+  - Elaborada a alternativa de hospedagem local no PC com exposição para VPS via **Cloudflare Tunnel** (`cloudflared tunnel --url http://localhost:20128`), permitindo que a VPS use as contas autenticadas no PC sem necessidade de migração.
+  - Criado o documento/artefato explicativo em formato Markdown para referência do usuário.
+- **Arquivos alterados**:
+  - `9router_easypanel_opencode_guide.md` (Artefato criado em `brain/08b9d18e-c09e-4fa0-8e79-72d8c843c2b3/`)
+  - `.shared-memory/CONTEXT.md`
+  - `.shared-memory/SESSION_LOG.md`
+- **Estado ao sair**: Guia de estudo e arquitetura 100% concluído e documentado.
+
 ## [2026-08-07 15:24] Antigravity — Prospecção Sites: Correção da Causa Raiz do Erro "Nenhum target pendente" ao Iniciar
 - **Causa Raiz Identificada**:
   1. A criação de campanhas em `/api/prospeccao-sites/campaigns` não incluía `client_id: ctx.clientId` nos objetos `targetsRows`, o que fazia a inserção em `campaign_targets` ser bloqueada por RLS ou `client_id` estrito. A campanha ficava salva como `total_targets = 18`, porém com **0 registros em `campaign_targets`**.

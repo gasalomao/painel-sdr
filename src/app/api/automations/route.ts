@@ -14,8 +14,10 @@ export async function GET(req: NextRequest) {
     const ctx = await requireClientId(req);
     if (!ctx.ok) return ctx.response;
 
+    const source = req.nextUrl.searchParams.get("source");
     let q = supabase.from("automations").select("*").order("created_at", { ascending: false });
     if (!ctx.isAdmin) q = q.eq("client_id", ctx.clientId);
+    if (source) q = q.filter("scrape_filters->>_source", "eq", source);
     const { data, error } = await q;
     if (error) throw error;
     return NextResponse.json({ success: true, automations: data || [] });

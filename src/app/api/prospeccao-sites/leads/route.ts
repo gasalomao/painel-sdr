@@ -43,7 +43,20 @@ export async function GET(req: NextRequest) {
     sort === "reviews" ? "reviews" :
     "created_at";
 
-  const baseSelect = "id, remoteJid, nome_negocio, telefone, ramo_negocio, endereco, avaliacao, reviews, website, maps_url, place_id, created_at, opt_out";
+  const baseSelect = "id, remoteJid, nome_negocio, telefone, ramo_negocio, endereco, avaliacao, reviews, website, maps_url, place_id, created_at, opt_out, primeiro_contato_source, primeiro_contato_at";
+
+  // Disparo status: return set of remote_jids that received a sent disparo
+  if (url.searchParams.get("disparo_status")) {
+    const { data: sentTargets } = await supabaseAdmin
+      .from("campaign_targets")
+      .select("remote_jid")
+      .eq("status", "sent")
+      .eq("client_id", ctx.clientId);
+    return NextResponse.json({
+      ok: true,
+      disparoJids: (sentTargets || []).map((t: any) => t.remote_jid),
+    });
+  }
 
   const buildQuery = (select: string) => {
     let qq = supabaseAdmin
@@ -63,7 +76,7 @@ export async function GET(req: NextRequest) {
   let { data, error, count } = await buildQuery(baseSelect);
   // ponytail: se coluna maps_url/place_id não existe no DB, retry sem elas
   if (error && /maps_url|place_id/.test(error.message)) {
-    const fallbackSelect = "id, remoteJid, nome_negocio, telefone, ramo_negocio, endereco, avaliacao, reviews, website, created_at, opt_out";
+    const fallbackSelect = "id, remoteJid, nome_negocio, telefone, ramo_negocio, endereco, avaliacao, reviews, website, created_at, opt_out, primeiro_contato_source, primeiro_contato_at";
     const r2 = await buildQuery(fallbackSelect);
     data = r2.data; error = r2.error; count = r2.count;
   }
@@ -73,6 +86,8 @@ export async function GET(req: NextRequest) {
   const leads = (data || []).map((l: any) => ({
     ...l,
     rating: l.avaliacao != null ? String(l.avaliacao) : null,
+    primeiro_contato_source: l.primeiro_contato_source ?? null,
+    primeiro_contato_at: l.primeiro_contato_at ?? null,
   }));
 
   return NextResponse.json({

@@ -44,6 +44,8 @@ interface Lead {
   resumo_ia: string | null;
   ia_last_analyzed_at: string | null;
   created_at: string;
+  primeiro_contato_source: string | null;
+  primeiro_contato_at: string | null;
 }
 
 function mapsUrlFor(lead: Pick<Lead, "maps_url" | "nome_negocio" | "endereco">): string {

@@ -926,3 +926,12 @@ Este projeto (`painel-sdr`) é um Painel de SDR construído com Next.js (versão
 - Achado crítico de Evolution: `test_agent_process.test.ts` é uma integração externa que chama IA, Supabase e Evolution reais, mas só valida HTTP 200/success. Na execução, Evolution V2 retornou instância inexistente e o fallback Evolution GO retornou `not authorized`; o teste ainda passou. Logo, entrega real de WhatsApp não está comprovada.
 - `npm run lint` falha com 1.223 erros (1.480 problemas total), principalmente `no-explicit-any`, e também analisa o backup `temp_wacrm/` e scripts raiz. Build emite 27 avisos de rastreamento Turbopack por `next.config.ts` importado pelo scraper.
 - Endpoint local `/api/test-evo` não pôde ser chamado pois não havia servidor em `127.0.0.1:3000` durante a auditoria. Nenhuma mensagem externa foi enviada intencionalmente.
+
+## [2026-08-10] Estudo 9Router na VPS (Easypanel) & Integração com OpenCode CLI
+- **Solicitação**: Estudar como rodar 9Router no Easypanel (VPS), migrar a base de dados com contas pré-configuradas do PC para a VPS e conectar o OpenCode CLI local via API.
+- **Arquitetura Desenvolvida**:
+  - **Docker no Easypanel**: Sucesso no deploy do container `9router` com `node:20`. Aplicação ativa e rodando no IP `REDACTED`.
+  - **Migração do Banco de Dados**: Gerado o link de download direto bruto da base `data.sqlite` (3.5MB) e executado o comando de importação no container do Easypanel em `/root/.9router/db/data.sqlite`.
+  - **Integração OpenCode CLI & Hermes Agent**: Mapeada a URL pública da VPS `https://sistema-9router.REDACTED.easypanel.host/v1` com a chave `sk-36b9790c1ec0e83a-522w00-34d63001`, permitindo que qualquer ferramenta de IA CLI no PC ou servidor consuma o 9Router VPS via padrão OpenAI.
+  - **Alternativa PC + Tunnel**: Documentado uso do Cloudflare Tunnel (`cloudflared tunnel --url http://localhost:20128`) para expor o 9Router local sem precisar migrar tokens OAuth que exigem navegação de browser no PC.
+- **Artefato Criado**: `9router_easypanel_opencode_guide.md` atualizado.

@@ -18,7 +18,7 @@ import {
     Search, Download, ChevronLeft, ChevronRight, Phone, Building2,
     Calendar, ExternalLink, Globe, Star, MessageSquare, LayoutGrid, List,
     Clock, Trash2, Filter, Bot, X, CheckSquare, Loader2, UserPlus,
-    MapPin,
+    MapPin, Send, CheckCircle2,
 } from "lucide-react";
 import { AddLeadDialog } from "@/components/add-lead-dialog";
 import { supabase } from "@/lib/supabase";
@@ -69,6 +69,8 @@ interface Lead {
   resumo_ia: string | null;
   ia_last_analyzed_at: string | null;
   created_at: string;
+  primeiro_contato_source: string | null;
+  primeiro_contato_at: string | null;
 }
 
 // helper: constroi URL Maps canônica — usa maps_url salvo (place_id embutido);
@@ -104,6 +106,8 @@ export default function LeadsPage() {
   const [addLeadOpen, setAddLeadOpen] = useState(false);
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
   const [viewMode, setViewMode] = useState<"list" | "kanban">("list");
+  const [disparoFilter, setDisparoFilter] = useState<"all" | "pending" | "sent">("all");
+  const [disparoJids, setDisparoJids] = useState<Set<string>>(new Set());
 
   // Colunas do Kanban — fonte única é a tabela kanban_columns (editável no
   // Organizador). Começa com o fallback hardcoded e troca pelo que vier da API
@@ -181,7 +185,7 @@ export default function LeadsPage() {
   useEffect(() => {
     setSelectedIds(new Set());
     setSelectAllAcrossPages(false);
-  }, [page, search, categoryFilter, clientId, viewMode]);
+  }, [page, search, categoryFilter, clientId, viewMode, disparoFilter]);
 
 
 
@@ -189,6 +193,16 @@ export default function LeadsPage() {
     if (!clientId) return;
     setLoading(true);
     try {
+      // Fetch sent disparo JIDs for badge accuracy (once per fetch cycle)
+      const { data: sentTargets } = await supabase
+        .from("campaign_targets")
+        .select("remote_jid")
+        .eq("status", "sent")
+        .eq("client_id", clientId);
+      if (sentTargets) {
+        setDisparoJids(new Set(sentTargets.map((t: any) => t.remote_jid)));
+      }
+
       let query = supabase
         .from("leads_extraidos")
         .select("*", { count: "exact" })
@@ -205,6 +219,14 @@ export default function LeadsPage() {
       
       if (categoryFilter !== "all") {
         query = query.eq("ramo_negocio", categoryFilter);
+      }
+
+      // Disparo filter: sent = source='disparo' OR in campaign_targets;
+      // pending = everything else
+      if (disparoFilter === "sent") {
+        query = query.eq("primeiro_contato_source", "disparo");
+      } else if (disparoFilter === "pending") {
+        query = query.or("primeiro_contato_source.is.null,primeiro_contato_source.neq.disparo");
       }
 
       // Aplica paginação apenas na lista. No kanban traz mais (ex 500)
@@ -228,7 +250,7 @@ export default function LeadsPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, search, viewMode, categoryFilter, clientId]);
+  }, [page, search, viewMode, categoryFilter, clientId, disparoFilter]);
 
   useEffect(() => {
     fetchLeads();
@@ -396,6 +418,36 @@ export default function LeadsPage() {
                 </Button>
             </div>
             
+            {/* Disparo Status Segmented Control */}
+            {viewMode === "list" && (
+            <div className="flex bg-white/5 p-1 rounded-xl border border-white/10 mr-2">
+                <Button 
+                    variant="ghost" 
+                    size="sm" 
+                    className={cn("h-8 px-3 gap-1.5 text-xs rounded-lg transition-all", disparoFilter === "all" && "bg-white/15 text-white shadow-md")}
+                    onClick={() => { setDisparoFilter("all"); setPage(0); }}
+                >
+                    Todos
+                </Button>
+                <Button 
+                    variant="ghost" 
+                    size="sm" 
+                    className={cn("h-8 px-3 gap-1.5 text-xs rounded-lg transition-all", disparoFilter === "pending" && "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shadow-md")}
+                    onClick={() => { setDisparoFilter("pending"); setPage(0); }}
+                >
+                    <Send className="w-3 h-3" /> Pendentes
+                </Button>
+                <Button 
+                    variant="ghost" 
+                    size="sm" 
+                    className={cn("h-8 px-3 gap-1.5 text-xs rounded-lg transition-all", disparoFilter === "sent" && "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 shadow-md")}
+                    onClick={() => { setDisparoFilter("sent"); setPage(0); }}
+                >
+                    <CheckCircle2 className="w-3 h-3" /> Disparados
+                </Button>
+            </div>
+            )}
+            
             <Badge variant="secondary" className="px-3 py-1 bg-white/5 border-white/10 font-mono">
                 {total.toLocaleString("pt-BR")} Leads
             </Badge>
@@ -538,7 +590,14 @@ export default function LeadsPage() {
                               />
                           </TableCell>
                           <TableCell className="py-4">
-                              <div className="font-bold text-white/90 max-w-[250px] truncate">{lead.nome_negocio || "—"}</div>
+                              <div className="font-bold text-white/90 max-w-[250px] truncate flex items-center gap-2">
+                                {lead.nome_negocio || "—"}
+                                {(lead.primeiro_contato_source === "disparo" || disparoJids.has(lead.remoteJid)) && (
+                                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-cyan-500/15 text-cyan-300 text-[9px] font-bold border border-cyan-500/25 whitespace-nowrap" title={lead.primeiro_contato_at ? `Disparado em ${new Date(lead.primeiro_contato_at).toLocaleDateString("pt-BR")}` : "Lead já recebeu disparo"}>
+                                    <Send className="w-2.5 h-2.5" /> Disparado
+                                  </span>
+                                )}
+                              </div>
                               <div className="text-[10px] text-muted-foreground mt-0.5 uppercase tracking-wider">{lead.status || "NOVO"}</div>
                           </TableCell>
                           <TableCell className="py-4">
@@ -609,7 +668,12 @@ export default function LeadsPage() {
                         {(lead.nome_negocio || "?")[0].toUpperCase()}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <p className="font-bold text-sm truncate">{lead.nome_negocio || "—"}</p>
+                        <div className="flex items-center gap-1.5">
+                          <p className="font-bold text-sm truncate">{lead.nome_negocio || "—"}</p>
+                          {(lead.primeiro_contato_source === "disparo" || disparoJids.has(lead.remoteJid)) && (
+                            <Send className="w-3 h-3 text-cyan-400 shrink-0" />
+                          )}
+                        </div>
                         <div className="flex items-center gap-2 mt-0.5">
                           <span className="text-[10px] text-muted-foreground">{lead.ramo_negocio || "Geral"}</span>
                           {lead.rating && (
@@ -760,6 +824,35 @@ export default function LeadsPage() {
                     </div>
                 </div>
             </div>
+
+            {/* Disparo Status Badge */}
+            {selectedLead && (selectedLead.primeiro_contato_source === "disparo" || disparoJids.has(selectedLead.remoteJid)) ? (
+              <div className="p-3 rounded-2xl bg-cyan-500/10 border border-cyan-500/20 flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-cyan-500/20 flex items-center justify-center shrink-0">
+                  <CheckCircle2 className="w-5 h-5 text-cyan-300" />
+                </div>
+                <div>
+                  <p className="text-xs font-black text-cyan-200">Disparo já enviado</p>
+                  <p className="text-[10px] text-cyan-300/70">
+                    {selectedLead.primeiro_contato_at
+                      ? `Enviado em ${new Date(selectedLead.primeiro_contato_at).toLocaleString("pt-BR")}`
+                      : "Este lead já recebeu uma mensagem de disparo."}
+                  </p>
+                </div>
+              </div>
+            ) : (
+              selectedLead && (
+              <div className="p-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-emerald-500/20 flex items-center justify-center shrink-0">
+                  <Send className="w-5 h-5 text-emerald-300" />
+                </div>
+                <div>
+                  <p className="text-xs font-black text-emerald-200">Pronto para disparo</p>
+                  <p className="text-[10px] text-emerald-300/70">Este lead ainda não recebeu nenhuma mensagem de disparo.</p>
+                </div>
+              </div>
+              )
+            )}
 
             <div className="space-y-4">
                 <div className="p-4 rounded-2xl bg-primary/10 border border-primary/20 relative overflow-hidden group">

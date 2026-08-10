@@ -573,9 +573,21 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
   // ({{endereco}}, {{website}}, {{avaliacao}}, {{ramo}}, etc) — não só o nome.
   const { data: leadFull } = await supabase
     .from("leads_extraidos")
-    .select("nome_negocio, ramo_negocio, telefone, endereco, website, instagram, facebook, avaliacao, reviews, status")
+    .select("nome_negocio, ramo_negocio, telefone, endereco, website, instagram, facebook, avaliacao, reviews, status, categoria")
     .eq("remoteJid", target.remote_jid)
     .maybeSingle();
+
+  // push_name do contato — vem da tabela contacts (nome do WhatsApp).
+  let pushName: string | null = null;
+  if (sendJid) {
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("push_name")
+      .eq("client_id", c.client_id)
+      .eq("remote_jid", sendJid)
+      .maybeSingle();
+    pushName = (contact as any)?.push_name || null;
+  }
 
   // Contexto de render — usado no template AGORA e DE NOVO depois da IA
   // (rede de segurança: nenhuma {{variavel}} pode chegar ao cliente).
@@ -583,6 +595,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     remoteJid:    sendJid,
     nome_negocio: leadFull?.nome_negocio || target.nome_negocio,
     ramo_negocio: leadFull?.ramo_negocio || target.ramo_negocio,
+    push_name:    pushName,
     telefone:     leadFull?.telefone || null,
     endereco:     leadFull?.endereco || null,
     website:      leadFull?.website || null,
@@ -591,6 +604,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     avaliacao:    leadFull?.avaliacao ?? null,
     reviews:      leadFull?.reviews ?? null,
     status:       leadFull?.status || null,
+    categoria:    (leadFull as any)?.categoria || null,
   };
 
   // Renderiza msg base substituindo variáveis ({{saudacao}}, {{nome_empresa}}, etc)

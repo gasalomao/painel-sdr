@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { Header } from "@/components/layout/header";
@@ -11,11 +11,13 @@ import { Switch } from "@/components/ui/switch";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import { NumberInput } from "@/components/ui/number-input";
+import { ModelOptions } from "@/components/ai-module-shared";
 import {
   Send, Play, Pause, Square, Loader2, Search, Globe, BarChart3,
   CheckCircle2, XCircle, Star, Ban, RefreshCw,
   Rocket, Terminal, Filter, TrendingUp, Building2, Link2, Link2Off, Trash2, MapPin, ExternalLink,
-  Clock, MessageSquare, ChevronRight, Bot, Smartphone,
+  Clock, MessageSquare, ChevronRight, Bot, Smartphone, Zap, Repeat, Plus,
 } from "lucide-react";
 import { renderTemplate, type TemplateContext } from "@/lib/template-vars";
 import { supabase } from "@/lib/supabase";
@@ -35,6 +37,8 @@ type Lead = {
   place_id: string | null;
   created_at: string;
   opt_out: boolean;
+  primeiro_contato_source: string | null;
+  primeiro_contato_at: string | null;
 };
 
 type Campaign = {
@@ -66,11 +70,12 @@ type Campaign = {
 type LogEntry = { message: string; type: string; time: string };
 
 const TABS = [
-  { key: "captura",  label: "Captura",   icon: Rocket },
-  { key: "leads",    label: "Leads",     icon: Search },
-  { key: "revisao",  label: "Revisão",   icon: CheckCircle2 },
-  { key: "disparo",  label: "Disparo",   icon: Send },
-  { key: "historico",label: "Histórico", icon: BarChart3 },
+  { key: "captura",   label: "Captura",   icon: Rocket },
+  { key: "leads",     label: "Leads",     icon: Search },
+  { key: "revisao",   label: "Revisão",   icon: CheckCircle2 },
+  { key: "disparo",   label: "Disparo",   icon: Send },
+  { key: "historico", label: "Histórico", icon: BarChart3 },
+  { key: "automacao", label: "Automação", icon: Zap },
 ] as const;
 type TabKey = typeof TABS[number]["key"];
 
@@ -220,6 +225,8 @@ export default function ProspeccaoSitesPage() {
   const [reviewsMin, setReviewsMin] = useState("");
   const [hasWebsite, setHasWebsite] = useState<"only_empty" | "all" | "only_with">("only_empty");
   const [showOptOut, setShowOptOut] = useState(false);
+  const [disparoFilter, setDisparoFilter] = useState<"all" | "pending" | "sent">("all");
+  const [disparoJids, setDisparoJids] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Map<number, Lead>>(new Map());
 
   const fetchLeads = useCallback(async () => {
@@ -240,6 +247,13 @@ export default function ProspeccaoSitesPage() {
       const r = await fetch(`/api/prospeccao-sites/leads?${params}`, { cache: "no-store" });
       const j = await r.json();
       if (j.ok) { setLeads(j.leads); setTotal(j.total); }
+
+      // Fetch sent disparo JIDs for badge/filter accuracy
+      try {
+        const dr = await fetch("/api/prospeccao-sites/leads?disparo_status=1", { cache: "no-store" });
+        const dj = await dr.json();
+        if (dj.ok && dj.disparoJids) { setDisparoJids(new Set(dj.disparoJids)); }
+      } catch { /* fallback to primeiro_contato_source */ }
     } catch (e) { console.error("fetchLeads", e); }
     finally { setLoadingLeads(false); }
   }, [page, limit, sort, order, ramoFilter, regionFilter, showOptOut, hasWebsite, ratingMin, reviewsMin]);
@@ -257,6 +271,9 @@ export default function ProspeccaoSitesPage() {
   // Filtros client-side p/ hasWebsite + ratingMin + reviewsMin (API não suporta ainda)
   const filteredLeads = useMemo(() => {
     return leads.filter((l) => {
+      const isDisparado = l.primeiro_contato_source === "disparo" || disparoJids.has(l.remoteJid);
+      if (disparoFilter === "pending" && isDisparado) return false;
+      if (disparoFilter === "sent" && !isDisparado) return false;
       const hasW = !!(l.website && l.website.trim());
       if (hasWebsite === "only_empty" && hasW) return false;
       if (hasWebsite === "only_with" && !hasW) return false;
@@ -270,7 +287,7 @@ export default function ProspeccaoSitesPage() {
       }
       return true;
     });
-  }, [leads, hasWebsite, ratingMin, reviewsMin]);
+  }, [leads, hasWebsite, ratingMin, reviewsMin, disparoFilter, disparoJids]);
 
   // Ranking: reviews desc default. Score = reviews * rating (proxy importância)
   const rankedLeads = useMemo(() => {
@@ -364,6 +381,64 @@ export default function ProspeccaoSitesPage() {
   const [aiPrompt, setAiPrompt] = useState("");
   const [loadingAiModels, setLoadingAiModels] = useState(false);
 
+  // ----- Automação (full pipeline) -----
+  type AutomationRow = {
+    id: string;
+    name: string;
+    status: string;
+    phase: string;
+    instance_name: string;
+    niches: string[];
+    regions: string[];
+    scrape_filters: Record<string, any>;
+    scrape_max_leads: number;
+    dispatch_template: string;
+    dispatch_min_interval: number;
+    dispatch_max_interval: number;
+    dispatch_personalize: boolean;
+    dispatch_ai_model: string | null;
+    dispatch_ai_prompt: string | null;
+    followup_enabled: boolean;
+    followup_steps: any[];
+    followup_min_interval: number;
+    followup_max_interval: number;
+    allowed_start_hour: number;
+    allowed_end_hour: number;
+    scraped_count: number;
+    campaign_id: string | null;
+    followup_campaign_id: string | null;
+    last_error: string | null;
+    created_at: string;
+    updated_at: string;
+  };
+  type AutoLog = { id: number; kind: string; level: string; message: string; created_at: string };
+  const [automations, setAutomations] = useState<AutomationRow[]>([]);
+  const [autoLogs, setAutoLogs] = useState<Record<string, AutoLog[]>>({});
+  const [expandedAuto, setExpandedAuto] = useState<string | null>(null);
+  const [autoName, setAutoName] = useState("");
+  const [autoNiches, setAutoNiches] = useState("");
+  const [autoRegions, setAutoRegions] = useState("");
+  const [autoMaxLeads, setAutoMaxLeads] = useState(200);
+  const [autoTemplate, setAutoTemplate] = useState(DEFAULT_TEMPLATE);
+  const [autoMinSec, setAutoMinSec] = useState(60);
+  const [autoMaxSec, setAutoMaxSec] = useState(180);
+  const [autoStartHour, setAutoStartHour] = useState(9);
+  const [autoEndHour, setAutoEndHour] = useState(20);
+  const [autoFollowup, setAutoFollowup] = useState(true);
+  const [autoFuMinSec, setAutoFuMinSec] = useState(60);
+  const [autoFuMaxSec, setAutoFuMaxSec] = useState(240);
+  const [autoPersonalize, setAutoPersonalize] = useState(false);
+  const [autoAiModel, setAutoAiModel] = useState("");
+  const [autoAiPrompt, setAutoAiPrompt] = useState("");
+  const [autoFollowupAi, setAutoFollowupAi] = useState(false);
+  const [autoFollowupAiModel, setAutoFollowupAiModel] = useState("");
+  const [autoFollowupAiPrompt, setAutoFollowupAiPrompt] = useState("");
+  const [autoSteps, setAutoSteps] = useState<{ day_offset: number; template: string }[]>([
+    { day_offset: 2, template: "Olá {{nome_empresa}}, tudo bem? Ainda tem interesse em ter um site profissional para sua empresa {{ramo}}?" },
+  ]);
+  const [autoInstance, setAutoInstance] = useState("");
+  const [creatingAuto, setCreatingAuto] = useState(false);
+
   useEffect(() => {
     (async () => {
       try {
@@ -409,6 +484,94 @@ export default function ProspeccaoSitesPage() {
     finally { if (initial) setLoadingCampaigns(false); }
   }
   useEffect(() => { loadCampaigns(true); }, []);
+
+  // ----- Automação fetch + actions -----
+  const loadAutomations = useCallback(async () => {
+    try {
+      const r = await fetch("/api/automations?source=prospeccao-sites", { cache: "no-store" });
+      const j = await r.json();
+      if (j.success) setAutomations(j.automations || []);
+    } catch (e) { console.error("loadAutomations", e); }
+  }, []);
+
+  useEffect(() => { loadAutomations(); }, [loadAutomations]);
+
+  const loadAutoLogs = useCallback(async (id: string) => {
+    try {
+      const { data } = await supabase
+        .from("automation_logs")
+        .select("id, kind, level, message, created_at")
+        .eq("automation_id", id)
+        .order("created_at", { ascending: false })
+        .limit(100);
+      setAutoLogs(prev => ({ ...prev, [id]: (data as AutoLog[]) || [] }));
+    } catch { /* noop */ }
+  }, []);
+
+  const createAutomation = async () => {
+    const nichesArr = autoNiches.split("\n").map(s => s.trim()).filter(Boolean);
+    const regionsArr = autoRegions.split("\n").map(s => s.trim()).filter(Boolean);
+    if (!autoName.trim() || !autoInstance || !autoTemplate.trim() || nichesArr.length === 0 || regionsArr.length === 0) {
+      alert("Preencha nome, instância, template, nichos e regiões.");
+      return;
+    }
+    if (autoFollowup && autoSteps.length === 0) {
+      alert("Adicione ao menos 1 passo de follow-up ou desative o follow-up.");
+      return;
+    }
+    setCreatingAuto(true);
+    try {
+      const r = await fetch("/api/automations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: autoName,
+          instance_name: autoInstance,
+          niches: nichesArr,
+          regions: regionsArr,
+          scrape_filters: {
+            _source: "prospeccao-sites",
+            filterEmpty: true,
+            filterDuplicates: true,
+            filterLandlines: false,
+          },
+          scrape_max_leads: autoMaxLeads,
+          dispatch_template: autoTemplate,
+          dispatch_min_interval: autoMinSec,
+          dispatch_max_interval: autoMaxSec,
+          dispatch_personalize: autoPersonalize,
+          dispatch_ai_model: autoPersonalize ? (autoAiModel || null) : null,
+          dispatch_ai_prompt: autoPersonalize ? (autoAiPrompt || null) : null,
+          followup_enabled: autoFollowup,
+          followup_steps: autoFollowup ? autoSteps.map(s => ({ day_offset: Math.max(1, Number(s.day_offset) || 1), template: s.template })) : [],
+          followup_min_interval: autoFuMinSec,
+          followup_max_interval: autoFuMaxSec,
+          followup_ai_enabled: autoFollowup && autoFollowupAi,
+          followup_ai_model: (autoFollowup && autoFollowupAi) ? (autoFollowupAiModel || null) : null,
+          followup_ai_prompt: (autoFollowup && autoFollowupAi) ? (autoFollowupAiPrompt || null) : null,
+          allowed_start_hour: autoStartHour,
+          allowed_end_hour: autoEndHour,
+        }),
+      });
+      const j = await r.json();
+      if (!j.success) throw new Error(j.error || "create fail");
+      setAutoName("");
+      loadAutomations();
+    } catch (e: any) { alert("Erro: " + e.message); }
+    finally { setCreatingAuto(false); }
+  };
+
+  const autoAction = async (id: string, action: "start" | "pause" | "delete") => {
+    try {
+      if (action === "delete") {
+        if (!confirm("Deletar esta automação?")) return;
+        await fetch(`/api/automations/${id}`, { method: "DELETE" });
+      } else {
+        await fetch(`/api/automations/${id}/${action}`, { method: "POST" });
+      }
+      loadAutomations();
+    } catch (e: any) { alert("Erro: " + e.message); }
+  };
 
   async function loadTargets(campaignId: string) {
     setLoadingTargets(true);
@@ -868,6 +1031,22 @@ export default function ProspeccaoSitesPage() {
                     {rankedLeads.length} / {total}
                   </div>
                 </div>
+
+                {/* Disparo Status Segmented Control */}
+                <div className="flex items-center gap-2 pt-1">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-white/40">Disparo:</span>
+                  <div className="flex bg-white/5 p-0.5 rounded-lg border border-white/10">
+                    <Button variant="ghost" size="sm" className={cn("h-7 px-3 text-xs rounded-md transition-all", disparoFilter === "all" ? "bg-white/15 text-white" : "text-white/50 hover:text-white/80")}>
+                      <span onClick={() => setDisparoFilter("all")}>Todos</span>
+                    </Button>
+                    <Button variant="ghost" size="sm" className={cn("h-7 px-3 text-xs rounded-md transition-all gap-1", disparoFilter === "pending" ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" : "text-white/50 hover:text-white/80 border border-transparent")}>
+                      <span className="flex items-center gap-1" onClick={() => setDisparoFilter("pending")}><Send className="w-3 h-3" /> Pendentes</span>
+                    </Button>
+                    <Button variant="ghost" size="sm" className={cn("h-7 px-3 text-xs rounded-md transition-all gap-1", disparoFilter === "sent" ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30" : "text-white/50 hover:text-white/80 border border-transparent")}>
+                      <span className="flex items-center gap-1" onClick={() => setDisparoFilter("sent")}><CheckCircle2 className="w-3 h-3" /> Disparados</span>
+                    </Button>
+                  </div>
+                </div>
               </CardContent>
             </Card>
 
@@ -907,6 +1086,7 @@ export default function ProspeccaoSitesPage() {
                         <th className="p-2 text-left">Nota</th>
                         <th className="p-2 text-left">Avaliações</th>
                         <th className="p-2 text-left">Site</th>
+                        <th className="p-2 text-left">Disparo</th>
                         <th className="p-2 text-left">Maps</th>
                         <th className="p-2 text-left">Descadastro</th>
                         <th className="p-2"></th>
@@ -957,6 +1137,17 @@ export default function ProspeccaoSitesPage() {
                               ) : (
                                 <Badge variant="outline" className="text-red-400 border-red-500/30">
                                   <Link2Off className="w-3 h-3 mr-1" />sem
+                                </Badge>
+                              )}
+                            </td>
+                            <td className="p-2">
+                              {(l.primeiro_contato_source === "disparo" || disparoJids.has(l.remoteJid)) ? (
+                                <Badge variant="outline" className="text-cyan-400 border-cyan-500/30 bg-cyan-500/5" title={l.primeiro_contato_at ? `Disparado em ${new Date(l.primeiro_contato_at).toLocaleDateString("pt-BR")}` : "Já recebeu disparo"}>
+                                  <Send className="w-3 h-3 mr-1" />Enviado
+                                </Badge>
+                              ) : (
+                                <Badge variant="outline" className="text-emerald-400/60 border-emerald-500/20">
+                                  <Clock className="w-3 h-3 mr-1" />Pendente
                                 </Badge>
                               )}
                             </td>
@@ -1469,6 +1660,372 @@ export default function ProspeccaoSitesPage() {
             )}
           </div>
         )}
+
+        {/* TAB AUTOMAÇÃO */}
+        {tab === "automacao" && (
+          <div className="space-y-3 max-w-4xl">
+            <Card className="border-white/10 bg-white/[0.02]">
+              <CardContent className="p-4 space-y-3">
+                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-white/70">
+                  <Zap className="w-4 h-4" /> Automação completa (captura → disparo → follow-up)
+                </div>
+                <p className="text-xs text-white/50">
+                  Cria uma automação que capta leads do Google Maps, dispara o template via WhatsApp e faz follow-up automático. Tudo orquestrado em segundo plano.
+                </p>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-white/60">Nome da automação</label>
+                    <Input value={autoName} onChange={(e) => setAutoName(e.target.value)} placeholder="Ex: Pizzarias SP - Outubro" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-white/60">Instância WhatsApp</label>
+                    <Select value={autoInstance} onValueChange={(v) => setAutoInstance(v || "")}>
+                      <SelectTrigger><SelectValue placeholder="Selecionar…" /></SelectTrigger>
+                      <SelectContent>
+                        {instances.map((inst) => (
+                          <SelectItem key={inst.instance_name} value={inst.instance_name}>
+                            {inst.instance_name}{inst.status ? ` (${inst.status})` : ""}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs text-white/60">Nichos (1 por linha)</label>
+                  <Textarea value={autoNiches} onChange={(e) => setAutoNiches(e.target.value)} rows={2} placeholder={"pizzaria\ndentista"} />
+                </div>
+                <div>
+                  <label className="text-xs text-white/60">Regiões (1 por linha)</label>
+                  <Textarea value={autoRegions} onChange={(e) => setAutoRegions(e.target.value)} rows={2} placeholder={"São Paulo SP\nCentro, Belo Horizonte MG"} />
+                </div>
+
+                {/* Template de disparo + variáveis */}
+                <div className="space-y-1.5">
+                  <p className="text-[9px] uppercase font-bold text-white/40">Variáveis disponíveis (clica pra inserir):</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {[
+                      { key: "saudacao",      label: "Saudação",     hint: "Bom dia / Boa tarde / Boa noite" },
+                      { key: "nome",          label: "Nome",         hint: "Push name do WhatsApp (fallback empresa)" },
+                      { key: "nome_empresa",  label: "Empresa",      hint: "leads_extraidos.nome_negocio" },
+                      { key: "primeiro_nome", label: "1ª palavra",   hint: "Primeira palavra do nome empresa" },
+                      { key: "ramo",          label: "Ramo",         hint: "leads_extraidos.ramo_negocio" },
+                      { key: "categoria",     label: "Categoria",    hint: "Categoria Google Maps" },
+                      { key: "endereco",      label: "Endereço",     hint: "Endereço completo" },
+                      { key: "website",       label: "Website",      hint: "Site do lead" },
+                      { key: "avaliacao",     label: "Avaliação",    hint: "Nota Google (1-5)" },
+                      { key: "reviews",       label: "Reviews",      hint: "Qtd. de reviews" },
+                      { key: "telefone",      label: "Telefone",     hint: "Número limpo" },
+                      { key: "data",          label: "Data",         hint: "DD/MM/AAAA" },
+                      { key: "hora",          label: "Hora",         hint: "HH:MM" },
+                    ].map(v => (
+                      <button
+                        key={v.key} type="button" title={v.hint}
+                        onClick={() => setAutoTemplate((autoTemplate || "") + `{{${v.key}}}`)}
+                        className="px-2 py-1 rounded-md bg-cyan-500/10 border border-cyan-500/30 hover:bg-cyan-500/20 text-[10px] cursor-pointer flex items-center gap-1"
+                      >
+                        <span className="font-bold text-cyan-100">{v.label}</span>
+                        <code className="text-[9px] font-mono text-cyan-300/70">{`{{${v.key}}}`}</code>
+                      </button>
+                    ))}
+                  </div>
+                  <label className="text-xs text-white/60">Mensagem-base (template de disparo)</label>
+                  <Textarea value={autoTemplate} onChange={(e) => setAutoTemplate(e.target.value)} rows={3}
+                    placeholder="Ex: {{saudacao}} {{nome_empresa}}! Vi vocês no Maps…"
+                    className="bg-black/40 border-white/10 font-mono text-xs" />
+                </div>
+
+                {/* Intervalos de disparo */}
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <label className="text-xs text-white/60">Máx. leads a captar</label>
+                    <Input type="number" value={autoMaxLeads} onChange={(e) => setAutoMaxLeads(Number(e.target.value))} min={1} />
+                  </div>
+                  <div>
+                    <label className="text-xs text-white/60">Intervalo mín. entre disparos (s)</label>
+                    <Input type="number" value={autoMinSec} onChange={(e) => setAutoMinSec(Number(e.target.value))} min={5} />
+                  </div>
+                  <div>
+                    <label className="text-xs text-white/60">Intervalo máx. entre disparos (s)</label>
+                    <Input type="number" value={autoMaxSec} onChange={(e) => setAutoMaxSec(Number(e.target.value))} min={autoMinSec} />
+                  </div>
+                </div>
+
+                {/* IA personaliza disparo */}
+                <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-3 space-y-2">
+                  <label className="flex items-center gap-2 text-xs cursor-pointer">
+                    <Switch checked={autoPersonalize} onCheckedChange={setAutoPersonalize} />
+                    <Bot className="w-3.5 h-3.5 text-cyan-300" />
+                    <span className="font-bold text-cyan-200">Reescrever cada disparo com IA</span>
+                  </label>
+                  <p className="text-[10px] text-white/40 leading-relaxed">
+                    Cada lead recebe um <strong>texto único</strong> gerado pela IA a partir do template + dados do lead. Reduz risco de banimento por padrão repetitivo no WhatsApp.
+                  </p>
+                  {autoPersonalize && (
+                    <div className="space-y-2 pl-3 border-l-2 border-cyan-500/30">
+                      <div>
+                        <label className="text-[10px] uppercase font-bold text-white/40">Modelo de IA</label>
+                        <select
+                          value={autoAiModel || ""}
+                          onChange={(e) => setAutoAiModel(e.target.value)}
+                          className="w-full mt-0.5 bg-black/40 border border-white/10 rounded-md px-2 h-8 text-xs"
+                        >
+                          {aiModels.length === 0 ? (
+                            <option value="">{loadingAiModels ? "carregando…" : "(sem modelos — configure API key em Configurações)"}</option>
+                          ) : (
+                            <ModelOptions models={aiModels as any} />
+                          )}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-[10px] uppercase font-bold text-white/40">Prompt para a IA (como reescrever)</label>
+                        <Textarea rows={3}
+                          value={autoAiPrompt}
+                          onChange={(e) => setAutoAiPrompt(e.target.value)}
+                          placeholder="Ex: Reescreva a mensagem-base de forma natural e única para cada cliente, mantendo o tom amigável e profissional. Não use emojis exagerados. Adapte ao ramo do negócio se for relevante. Mensagem deve ter no máximo 3 frases."
+                          className="bg-black/40 border-white/10 font-mono text-xs" />
+                        <p className="text-[9px] text-white/30 mt-1">
+                          A IA recebe: prompt + mensagem-base + dados do lead (nome, ramo). Devolve a mensagem final que será enviada.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Follow-up automático */}
+                <div className={cn(
+                  "rounded-xl border p-4 space-y-3 transition-colors",
+                  autoFollowup
+                    ? "border-purple-500/20 bg-purple-500/5"
+                    : "border-zinc-500/20 bg-zinc-500/5 opacity-60"
+                )}>
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                    <p className="text-xs font-bold uppercase tracking-wider text-purple-300 flex items-center gap-2">
+                      <Repeat className="w-3.5 h-3.5" /> Follow-up automático
+                    </p>
+                    <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
+                      <span className={cn("font-bold", autoFollowup ? "text-purple-200" : "text-white/40")}>
+                        {autoFollowup ? "ATIVADO" : "DESATIVADO"}
+                      </span>
+                      <Switch checked={autoFollowup} onCheckedChange={setAutoFollowup} />
+                    </label>
+                  </div>
+                  {!autoFollowup && (
+                    <p className="text-[10px] text-white/40 italic">
+                      Automação vai terminar logo após o disparo inicial. Leads nesta lista não receberão follow-up.
+                    </p>
+                  )}
+                  {autoFollowup && (
+                    <>
+                      <div className="space-y-2">
+                        {autoSteps.map((step, idx) => (
+                          <div key={idx} className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-start p-2 rounded-xl bg-black/20 border border-white/5 sm:border-none sm:bg-transparent sm:p-0">
+                            <div className="flex flex-col gap-1 shrink-0 w-full sm:w-24">
+                              <span className="text-[9px] uppercase font-bold text-white/40">Após (dias)</span>
+                              <NumberInput min={1} fallback={1} value={step.day_offset}
+                                onChange={n => {
+                                  const next = [...autoSteps];
+                                  next[idx] = { ...next[idx], day_offset: n };
+                                  setAutoSteps(next);
+                                }}
+                                className="bg-black/40 border-white/10 h-8 text-xs" />
+                            </div>
+                            <div className="flex-1">
+                              <span className="text-[9px] uppercase font-bold text-white/40">Mensagem (use variáveis como {`{{nome_empresa}}`}, {`{{ramo}}`})</span>
+                              <Textarea rows={2} value={step.template}
+                                onChange={e => {
+                                  const next = [...autoSteps];
+                                  next[idx] = { ...next[idx], template: e.target.value };
+                                  setAutoSteps(next);
+                                }}
+                                className="bg-black/40 border-white/10 font-mono text-xs" />
+                            </div>
+                            <Button onClick={() => setAutoSteps(autoSteps.filter((_, i) => i !== idx))}
+                              variant="ghost" size="icon" className="h-8 w-8 text-red-400 self-end sm:mt-4">
+                              <Trash2 className="w-3 h-3" />
+                            </Button>
+                          </div>
+                        ))}
+                        <Button onClick={() => setAutoSteps([...autoSteps, { day_offset: 3, template: "" }])}
+                          variant="outline" className="text-[10px] uppercase font-bold gap-2 h-8">
+                          <Plus className="w-3 h-3" /> Adicionar step
+                        </Button>
+                      </div>
+
+                      {/* Intervalos follow-up */}
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="text-xs text-white/60">Intervalo mín. entre follow-ups (s)</label>
+                          <Input type="number" value={autoFuMinSec} onChange={(e) => setAutoFuMinSec(Number(e.target.value))} min={5} />
+                        </div>
+                        <div>
+                          <label className="text-xs text-white/60">Intervalo máx. entre follow-ups (s)</label>
+                          <Input type="number" value={autoFuMaxSec} onChange={(e) => setAutoFuMaxSec(Number(e.target.value))} min={autoFuMinSec} />
+                        </div>
+                      </div>
+
+                      {/* IA reescrever follow-up */}
+                      <div className="border-t border-white/5 pt-3 space-y-2">
+                        <label className="flex items-center gap-2 text-xs cursor-pointer">
+                          <Switch checked={autoFollowupAi} onCheckedChange={setAutoFollowupAi} />
+                          <Bot className="w-3.5 h-3.5 text-purple-300" />
+                          <span className="font-bold text-purple-200">Reescrever cada follow-up com IA</span>
+                        </label>
+                        <p className="text-[10px] text-white/40 leading-relaxed">
+                          Cada follow-up vira único, considerando o <strong>histórico da conversa</strong> daquele lead. Útil pra puxar gancho do que o cliente já disse e fugir de padrão repetitivo.
+                        </p>
+                        {autoFollowupAi && (
+                          <div className="space-y-2 pl-3 border-l-2 border-purple-500/30">
+                            <div>
+                              <label className="text-[10px] uppercase font-bold text-white/40">Modelo de IA</label>
+                              <select
+                                value={autoFollowupAiModel || ""}
+                                onChange={(e) => setAutoFollowupAiModel(e.target.value)}
+                                className="w-full mt-0.5 bg-black/40 border border-white/10 rounded-md px-2 h-8 text-xs"
+                              >
+                                {aiModels.length === 0 ? (
+                                  <option value="">{loadingAiModels ? "carregando…" : "(sem modelos — configure API key em Configurações)"}</option>
+                                ) : (
+                                  <ModelOptions models={aiModels as any} />
+                                )}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="text-[10px] uppercase font-bold text-white/40">Prompt para a IA</label>
+                              <Textarea rows={3}
+                                value={autoFollowupAiPrompt}
+                                onChange={(e) => setAutoFollowupAiPrompt(e.target.value)}
+                                placeholder="Ex: Você é um SDR cordial fazendo follow-up sem ser insistente. Use o histórico pra puxar gancho do que o cliente já mencionou. Tom natural, máximo 3 frases."
+                                className="bg-black/40 border-white/10 font-mono text-xs" />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {/* Horário permitido */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-white/60">Enviar a partir das (h)</label>
+                    <Input type="number" value={autoStartHour} onChange={(e) => setAutoStartHour(Number(e.target.value))} min={0} max={23} />
+                  </div>
+                  <div>
+                    <label className="text-xs text-white/60">Enviar até as (h)</label>
+                    <Input type="number" value={autoEndHour} onChange={(e) => setAutoEndHour(Number(e.target.value))} min={1} max={24} />
+                  </div>
+                </div>
+
+                <Button onClick={createAutomation} disabled={creatingAuto} className="w-full">
+                  {creatingAuto ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Zap className="w-4 h-4 mr-1" />}
+                  Criar automação
+                </Button>
+              </CardContent>
+            </Card>
+
+            {/* Lista de automações */}
+            <div className="flex justify-between items-center">
+              <div className="text-xs font-bold uppercase tracking-wider text-white/50">Automações ativas</div>
+              <Button variant="ghost" size="sm" onClick={loadAutomations}><RefreshCw className="w-3.5 h-3.5 mr-1" /> Atualizar</Button>
+            </div>
+
+            {automations.length === 0 ? (
+              <Card className="border-white/10 bg-white/[0.02]"><CardContent className="p-8 text-center text-white/40 text-sm">
+                Nenhuma automação criada ainda.
+              </CardContent></Card>
+            ) : (
+              <div className="space-y-2">
+                {automations.map((a) => {
+                  const phaseLabels: Record<string, string> = {
+                    idle: "Aguardando", scraping: "Captando", dispatching: "Disparando",
+                    following: "Follow-up", done: "Concluída", error: "Erro",
+                  };
+                  const statusColor =
+                    a.status === "running" ? "text-green-400 bg-green-500/10 border-green-500/30" :
+                    a.status === "paused" ? "text-yellow-400 bg-yellow-500/10 border-yellow-500/30" :
+                    a.status === "error" ? "text-red-400 bg-red-500/10 border-red-500/30" :
+                    a.status === "done" ? "text-blue-400 bg-blue-500/10 border-blue-500/30" :
+                    "text-white/50 bg-white/5 border-white/10";
+                  return (
+                    <Card key={a.id} className="border-white/10 bg-white/[0.02]">
+                      <CardContent className="p-3 space-y-2">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm font-bold text-white truncate">{a.name}</p>
+                            <p className="text-[10px] text-white/40">
+                              {(a.niches || []).join(", ") || "—"} · {(a.regions || []).join(", ") || "—"} · {a.instance_name}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className={cn("text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-md border", statusColor)}>
+                              {a.status} · {phaseLabels[a.phase] || a.phase}
+                            </span>
+                            {a.scraped_count > 0 && (
+                              <Badge className="bg-white/10 text-white/60">{a.scraped_count} leads</Badge>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {(a.status === "draft" || a.status === "paused" || a.status === "error" || a.status === "done") && (
+                            <Button size="sm" onClick={() => autoAction(a.id, "start")} className="h-7 text-[10px]">
+                              <Play className="w-3 h-3 mr-1" /> {a.status === "paused" ? "Retomar" : "Iniciar"}
+                            </Button>
+                          )}
+                          {a.status === "running" && (
+                            <Button size="sm" variant="outline" onClick={() => autoAction(a.id, "pause")} className="h-7 text-[10px]">
+                              <Pause className="w-3 h-3 mr-1" /> Pausar
+                            </Button>
+                          )}
+                          <Button
+                            size="sm" variant="ghost"
+                            onClick={() => {
+                              if (expandedAuto === a.id) { setExpandedAuto(null); }
+                              else { setExpandedAuto(a.id); loadAutoLogs(a.id); }
+                            }}
+                            className="h-7 text-[10px] bg-white/5 hover:bg-white/10"
+                          >
+                            <Terminal className="w-3 h-3 mr-1" />
+                            {expandedAuto === a.id ? "Ocultar logs" : "Ver logs"}
+                          </Button>
+                          <Button size="sm" variant="ghost" onClick={() => autoAction(a.id, "delete")} className="h-7 text-[10px] text-red-400 hover:bg-red-500/10">
+                            <Trash2 className="w-3 h-3" />
+                          </Button>
+                        </div>
+
+                        {a.last_error && (
+                          <p className="text-[10px] text-red-300 bg-red-500/5 border border-red-500/20 rounded-md px-2 py-1">⚠ {a.last_error}</p>
+                        )}
+
+                        {expandedAuto === a.id && (
+                          <div className="rounded-lg bg-black/40 border border-white/5 p-2 max-h-64 overflow-y-auto custom-scrollbar space-y-0.5">
+                            {(autoLogs[a.id] || []).length === 0 ? (
+                              <p className="text-white/40 italic text-center py-6 text-[11px]">Nenhum log ainda.</p>
+                            ) : (
+                              (autoLogs[a.id] || []).map((log, i) => {
+                                const color = log.level === "error" ? "text-red-400" : log.level === "success" ? "text-green-400" : log.level === "warning" ? "text-yellow-400" : "text-blue-300";
+                                return (
+                                  <div key={log.id || i} className="flex gap-2 leading-relaxed text-[11px]">
+                                    <span className="text-white/30 shrink-0">[{new Date(log.created_at).toLocaleTimeString("pt-BR")}]</span>
+                                    <span className={cn("font-bold whitespace-pre-wrap break-words", color)}>{log.message}</span>
+                                  </div>
+                                );
+                              })
+                            )}
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
         </div>
       </div>
     </div>

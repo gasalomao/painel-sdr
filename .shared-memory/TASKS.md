@@ -1,5 +1,21 @@
 # Tarefas do Projeto
 
+## Prospecção Sites — Aba "Automação" (2026-08-10)
+- [x] Adicionar `Zap` icon + tab "automacao" no array `TABS` em `prospeccao-sites/page.tsx` <!-- id: 520 -->
+- [x] Adicionar estado + funções (loadAutomations, createAutomation, autoAction, loadAutoLogs) <!-- id: 521 -->
+- [x] Criar formulário de automação (nome, instância, nichos, regiões, template, intervalos, horários, follow-up, IA) <!-- id: 522 -->
+- [x] Criar lista de automações com status/phase/progresso + botões iniciar/pausar/deletar/ver logs <!-- id: 523 -->
+- [x] Integrar com API existente `/api/automations` (GET com `?source=prospeccao-sites`, POST, start, pause, delete) <!-- id: 524 -->
+- [x] `npx tsc --noEmit` 0 erros em prospeccao-sites (erro pré-existente em leads/page.tsx) <!-- id: 525 -->
+- [x] **TESTADO E2E**: POST /api/automations cria automação — `scrape_filters._source=prospeccao-sites` + `dispatch_ai_prompt` + `followup_steps` + `followup_ai_*` persistidos corretamente <!-- id: 526 -->
+- [x] **TESTADO E2E**: GET /api/automations?source=prospeccao-sites — filtro JSONB `scrape_filters->>_source` retorna automações corretas <!-- id: 526b -->
+- [x] **TESTADO IA**: OpenRouter free model (`inclusionai/ling-3.0-tiny:free`) responde 200 OK — API key configurada no Supabase <!-- id: 526c -->
+- [x] **TESTADO E2E**: POST /api/automations/[id]/start — iniciou scraping (phase transitou, não crashou) <!-- id: 527 -->
+- [ ] **TESTAR**: fluxo completo com nichos/regiões reais → scraping → dispatching → follow-up IA <!-- id: 527b -->
+- [ ] **TESTAR**: pausar/deletar automação <!-- id: 528 -->
+- [x] **BUGFIX**: filtro GET `?source=` quebrado (`scrape_filters->_source` → `scrape_filters->>_source` via `.filter()`) <!-- id: 528b -->
+- [x] **REDESIGN UI**: bloco de formulário de automação reescrito (linhas 1705-1766) com variáveis clicáveis, IA rewrite disparo (card cyan), follow-up card purple com steps editor + add/remove, IA rewrite follow-up, horário, validação `npx tsc --noEmit` 0 erros <!-- id: 529 -->
+
 ## Chat (/chat) — Correção da Causa Raiz do Reaparecimento de Contatos sem Mensagens (2026-08-06)
 - [x] Corrigir erro de sintaxe UUID do Postgres no `DELETE /api/chat/messages` validando se o `conversationId` é um UUID antes de buscar `id.eq` no PostgREST <!-- id: 500 -->
 - [x] Deletar todas as sessões por `remote_jid`, `contact_id` e `id` no Supabase para impedir que contatos continuem exibindo "Nenhuma mensagem..." <!-- id: 501 -->

@@ -390,9 +390,21 @@ async function processTarget(
   // ({{endereco}}, {{website}}, {{avaliacao}}, {{ramo}}, etc) — não só o nome.
   const { data: leadFull } = await supabase
     .from("leads_extraidos")
-    .select("nome_negocio, ramo_negocio, telefone, endereco, website, instagram, facebook, avaliacao, reviews, status")
+    .select("nome_negocio, ramo_negocio, telefone, endereco, website, instagram, facebook, avaliacao, reviews, status, categoria")
     .eq("remoteJid", target.remote_jid)
     .maybeSingle();
+
+  // push_name do contato — vem da tabela contacts (nome do WhatsApp). Necessário
+  // pra resolver {{nome}} e {{push_name}} corretamente no follow-up.
+  let pushName: string | null = null;
+  if (target.remote_jid) {
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("push_name")
+      .eq("remote_jid", target.remote_jid)
+      .maybeSingle();
+    pushName = (contact as any)?.push_name || null;
+  }
 
   // Contexto de render — usado no template AGORA e DE NOVO depois da IA
   // (rede de segurança: nenhuma {{variavel}} ou {variavel} pode chegar ao cliente).
@@ -400,6 +412,7 @@ async function processTarget(
     remoteJid:    target.remote_jid,
     nome_negocio: leadFull?.nome_negocio || target.nome_negocio,
     ramo_negocio: leadFull?.ramo_negocio || target.ramo_negocio,
+    push_name:    pushName,
     telefone:     leadFull?.telefone || null,
     endereco:     leadFull?.endereco || null,
     website:      leadFull?.website || null,
@@ -408,6 +421,7 @@ async function processTarget(
     avaliacao:    leadFull?.avaliacao ?? null,
     reviews:      leadFull?.reviews ?? null,
     status:       leadFull?.status || null,
+    categoria:    (leadFull as any)?.categoria || null,
   };
 
   // 3. Renderiza template
