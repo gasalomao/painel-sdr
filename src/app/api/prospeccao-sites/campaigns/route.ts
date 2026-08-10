@@ -43,6 +43,7 @@ export async function POST(req: NextRequest) {
       personalize_with_ai = false,
       ai_model = null,
       ai_prompt = null,
+      humanize_messages = false,
       order_by = "reviews",
       order_dir = "desc",
       min_reviews = 0,
@@ -77,6 +78,7 @@ export async function POST(req: NextRequest) {
       allowed_start_hour,
       allowed_end_hour,
       personalize_with_ai,
+      humanize_messages: !!humanize_messages,
       ai_prompt: ai_prompt || null,
       campaign_type: "prospeccao_sites",
       status: "draft",
@@ -84,8 +86,11 @@ export async function POST(req: NextRequest) {
     if (ai_model) insertPayload.ai_model = ai_model;
 
     let { data: camp, error: cErr } = await supabase.from("campaigns").insert(insertPayload).select().single();
-    if (cErr && (cErr as any).code === "PGRST204" && "ai_model" in insertPayload) {
-      delete insertPayload.ai_model;
+    // Fallback: se coluna nova (ai_model/humanize_messages) não existir ainda,
+    // remove e tenta de novo. Mesmo padrão que já tínhamos para ai_model.
+    if (cErr && (cErr as any).code === "PGRST204") {
+      if ("ai_model" in insertPayload) delete insertPayload.ai_model;
+      if ("humanize_messages" in insertPayload) delete insertPayload.humanize_messages;
       const retry = await supabase.from("campaigns").insert(insertPayload).select().single();
       camp = retry.data as any;
       cErr = retry.error as any;

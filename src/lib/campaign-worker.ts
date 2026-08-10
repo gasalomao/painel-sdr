@@ -21,6 +21,7 @@ import { webSearch, formatResultsForAI } from "@/lib/web-search";
 import { logTokenUsage } from "@/lib/token-usage";
 import { DEFAULT_CLIENT_ID, clientIdFromInstance } from "@/lib/tenant";
 import { registerAiSend, registerPendingAutomatedSend } from "@/lib/manual-send-registry";
+import { splitMessage } from "@/lib/agent-format";
 
 type CampaignRow = {
   id: string;
@@ -37,6 +38,7 @@ type CampaignRow = {
   use_web_search?: boolean;
   ai_model?: string | null;
   ai_prompt?: string | null;
+  humanize_messages?: boolean;
 };
 
 // Estado in-memory: campanhas em execução com timer ativo
@@ -643,37 +645,71 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
   }
 
   try {
-    // Registra o envio pendente antes de disparar o sendMessage para evitar race conditions com o webhook echo
-    registerPendingAutomatedSend(c.instance_name, sendJid, text);
+    // Picota a mensagem em chunks se humanize_messages estiver ativo
+    // (mesma lógica do agente de IA — splitMessage + delay de digitação).
+    // Em modo OFF, segue como mensagem única.
+    const chunks = c.humanize_messages ? splitMessage(text) : [text];
 
-    // Envia (sendMessage já faz "composing" presence antes)
-    const result = await channel.sendMessage(sendJid, text, c.instance_name);
-    // Sufixo aleatório no fallback evita colisão quando vários disparos saem
-    // no mesmo ms (Date.now era duplicável → unique violation no insert).
-    const msgId = (result as any)?.messageId || (result as any)?.key?.id || (result as any)?.data?.key?.id || `bulk-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    // Em modo humanize com splitMessage retornando [] (texto vazio),
+    // preserva o texto original pra nunca cair num "nada a enviar".
+    if (chunks.length === 0) chunks.push(text);
 
-    // Persiste no chat (sessions/messages/chats_dashboard) pra IA ter contexto.
-    // Esse passo é "best-effort" — se falhar, não queremos marcar o envio como erro,
-    // porque a mensagem já saiu no WhatsApp. Apenas logamos.
+    // Texto completo efetivamente entregue ao lead (usado em
+    // log/preview/rendered_message). Em modo humanize, é a junção dos
+    // chunks com linha em branco — reflete o que o contato recebeu.
+    const finalText = chunks.length > 1 ? chunks.join("\n\n") : chunks[0];
+    let lastMsgId: string | null = null;
+
+    // Sessão do contato é criada uma vez e reusada em todos os chunks
+    // (evita N round-trips pra mesma session).
+    let sess: { sessionId: string | null } | null = null;
     try {
-      const sess = await findOrCreateContactSession(sendJid, c.instance_name, renderCtx.nome_negocio, c.agent_id);
-      await persistOutgoingMessage({
-        sessionId: sess?.sessionId || null,
-        remoteJid: sendJid,
-        instanceName: c.instance_name,
-        msgId,
-        text,
-      });
-    } catch (persistErr: any) {
-      const m = `⚠ Mensagem foi enviada no WhatsApp mas falhou ao salvar no chats_dashboard: ${persistErr?.message || persistErr}. Vai precisar refresh no /chat pra aparecer.`;
-      console.warn(`[CAMPAIGN ${c.name}] ${m}`);
-      await addCampaignLog(campaignId, m, "warning");
+      sess = await findOrCreateContactSession(sendJid, c.instance_name, renderCtx.nome_negocio, c.agent_id);
+    } catch (sessErr: any) {
+      console.warn(`[CAMPAIGN ${c.name}] findOrCreateContactSession falhou (best-effort): ${sessErr?.message || sessErr}`);
     }
+
+    for (let i = 0; i < chunks.length; i++) {
+      const chunkText = chunks[i];
+      if (!chunkText) continue;
+
+      // Delay de digitação entre chunks (2 a 5s) — pula no primeiro.
+      // Mesma fórmula do agente: ~15 chars/seg, clamp [2,5].
+      if (i > 0) {
+        const typingSeconds = Math.min(Math.max(chunkText.length / 15, 2), 5);
+        await new Promise((r) => setTimeout(r, typingSeconds * 1000));
+      }
+
+      // Registra cada chunk anti-echo (webhook pode chegar antes de persistir).
+      registerPendingAutomatedSend(c.instance_name, sendJid, chunkText);
+
+      // Envia (sendMessage já faz "composing" presence antes).
+      const result = await channel.sendMessage(sendJid, chunkText, c.instance_name);
+      const chunkMsgId = (result as any)?.messageId || (result as any)?.key?.id || (result as any)?.data?.key?.id || `bulk-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`;
+      lastMsgId = chunkMsgId;
+
+      // Persiste cada chunk no chat (pra IA ter contexto de todas as partes).
+      try {
+        await persistOutgoingMessage({
+          sessionId: sess?.sessionId || null,
+          remoteJid: sendJid,
+          instanceName: c.instance_name,
+          msgId: chunkMsgId,
+          text: chunkText,
+        });
+      } catch (persistErr: any) {
+        const m = `⚠ Mensagem foi enviada no WhatsApp mas falhou ao salvar no chats_dashboard: ${persistErr?.message || persistErr}. Vai precisar refresh no /chat pra aparecer.`;
+        console.warn(`[CAMPAIGN ${c.name}] ${m}`);
+        await addCampaignLog(campaignId, m, "warning");
+      }
+    }
+
+    const msgId = lastMsgId || `bulk-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     const targetUpdate: Record<string, any> = {
       status: "sent",
       message_id: msgId,
-      rendered_message: text,
+      rendered_message: finalText,
       sent_at: new Date().toISOString(),
       attempts: (target.attempts || 0) + 1,
     };
@@ -771,8 +807,8 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     consecutiveFailures.set(campaignId, 0);
     // Log com a MENSAGEM REAL enviada (truncada pra 240 chars). Operador
     // precisa ver o que foi enviado pra cada lead, não só "OK".
-    const preview = String(text || "").replace(/\s+/g, " ").slice(0, 240);
-    const successMsg = `✓ Enviada → ${target.nome_negocio || target.remote_jid}\n📨 "${preview}${(text || "").length > 240 ? "…" : ""}"`;
+    const preview = String(finalText || "").replace(/\s+/g, " ").slice(0, 240);
+    const successMsg = `✓ Enviada → ${target.nome_negocio || target.remote_jid}${chunks.length > 1 ? ` (${chunks.length} partes)` : ""}\n📨 "${preview}${(finalText || "").length > 240 ? "…" : ""}"`;
     console.log(`[CAMPAIGN ${c.name}] ${successMsg}`);
     await addCampaignLog(campaignId, successMsg, "success");
     return "continue";

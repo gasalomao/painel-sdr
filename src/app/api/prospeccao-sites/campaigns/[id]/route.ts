@@ -70,6 +70,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     "min_interval_seconds", "max_interval_seconds",
     "allowed_start_hour", "allowed_end_hour",
     "personalize_with_ai", "ai_prompt", "ai_model",
+    "humanize_messages",
   ];
   const update: Record<string, any> = { updated_at: new Date().toISOString() };
   for (const k of ALLOWED) if (k in body) update[k] = body[k];

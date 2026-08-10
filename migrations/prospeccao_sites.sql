@@ -35,3 +35,8 @@ ALTER TABLE public.campaign_targets
 
 CREATE INDEX IF NOT EXISTS idx_ct_priority
   ON public.campaign_targets(campaign_id, status, priority DESC, created_at);
+
+-- Humanização: picota mensagens longas em vários blocos e simula digitação
+-- entre eles (igual ao agente de IA). Toggle opcional por campanha.
+ALTER TABLE public.campaigns
+  ADD COLUMN IF NOT EXISTS humanize_messages BOOLEAN NOT NULL DEFAULT false;

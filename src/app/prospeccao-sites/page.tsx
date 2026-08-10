@@ -52,6 +52,7 @@ type Campaign = {
   allowed_start_hour: number;
   allowed_end_hour: number;
   personalize_with_ai?: boolean;
+  humanize_messages?: boolean;
   ai_prompt?: string | null;
   ai_model?: string | null;
   created_at: string;
@@ -357,6 +358,7 @@ export default function ProspeccaoSitesPage() {
 
   // ----- IA rewrite (igual automação) -----
   const [personalizeWithAi, setPersonalizeWithAi] = useState(false);
+  const [humanizeMessages, setHumanizeMessages] = useState(false);
   const [aiModels, setAiModels] = useState<{ id: string; name?: string; provider?: string }[]>([]);
   const [aiModel, setAiModel] = useState("");
   const [aiPrompt, setAiPrompt] = useState("");
@@ -589,6 +591,7 @@ export default function ProspeccaoSitesPage() {
           allowed_start_hour: startHour, allowed_end_hour: endHour,
           lead_ids: Array.from(selected.keys()),
           personalize_with_ai: personalizeWithAi,
+          humanize_messages: humanizeMessages,
           ai_model: personalizeWithAi ? (aiModel || null) : null,
           ai_prompt: personalizeWithAi ? (aiPrompt || null) : null,
           order_by: sort, order_dir: order,
@@ -1173,6 +1176,16 @@ export default function ProspeccaoSitesPage() {
                       </div>
                     </>
                   )}
+                </CardContent></Card>
+
+                <Card className="border-white/10 bg-white/[0.02]"><CardContent className="p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-xs font-bold uppercase tracking-wider text-white/50">Humanizar Mensagens (Picotar)</div>
+                      <div className="text-xs text-white/40">Divide a mensagem em várias partes e simula tempo de digitação entre elas (igual ao Agente de IA).</div>
+                    </div>
+                    <Switch checked={humanizeMessages} onCheckedChange={setHumanizeMessages} />
+                  </div>
                 </CardContent></Card>
                 <div className="text-xs text-white/50">
                   <Globe className="w-3.5 h-3.5 inline mr-1" /> {selected.size} alvos sem site
