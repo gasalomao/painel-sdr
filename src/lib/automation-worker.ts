@@ -553,6 +553,7 @@ async function startDispatchPhase(a: AutomationRow): Promise<void> {
   // essa campanha (ela vive só dentro do card da automação). Se a coluna
   // não existir (DB antigo), tenta sem ela e segue.
   const campInsert: any = {
+    client_id: (a as any).client_id || null,
     name: `[Auto] ${a.name}`,
     instance_name: a.instance_name,
     agent_id: a.agent_id,
@@ -723,6 +724,7 @@ async function startFollowupPhase(a: AutomationRow): Promise<void> {
   const { data: fcamp, error: fcErr } = await supabase
     .from("followup_campaigns")
     .insert({
+      client_id: (a as any).client_id || null,
       name: `[Auto] ${a.name}`,
       instance_name: a.instance_name,
       ai_enabled: !!a.followup_ai_enabled,

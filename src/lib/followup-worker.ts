@@ -532,7 +532,8 @@ async function processTarget(
     }
 
     // ── Mídia anexa (apenas no último step) ──
-    if (camp.media_url && camp.media_type) {
+    const isLastStep = !camp.steps[target.current_step + 1];
+    if (isLastStep && camp.media_url && camp.media_type) {
       try {
         await new Promise((r) => setTimeout(r, 1500));
         const mediaResult = await channel.sendMedia(
@@ -572,7 +573,7 @@ async function processTarget(
     //     (dar ao cliente tempo de responder antes de marcar exhausted)
     const daysToWait = hasMore
       ? Math.max(1, camp.steps[nextStep].day_offset)
-      : Math.max(1, step.day_offset || 3);
+      : Math.max(1, step.day_offset ?? 3);
     const nextSendAt = new Date(Date.now() + daysToWait * 24 * 60 * 60 * 1000).toISOString();
 
     const updatePayload: Record<string, any> = {

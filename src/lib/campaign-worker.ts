@@ -624,7 +624,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     aiInputText = text;
     try {
       await addCampaignLog(campaignId, `Personalizando mensagem com IA para ${target.nome_negocio}...`, "info");
-      text = await personalizeWithAI({
+      const aiText = await personalizeWithAI({
         baseMessage: text,
         model: c.ai_model || "gemini-1.5-flash",
         customPrompt: c.ai_prompt || null,
@@ -636,7 +636,12 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
         remoteJid: target.remote_jid,  // ← injeta briefing cacheado
         instanceName: c.instance_name,  // ← resolve clientId dono do gasto
       });
-      await addCampaignLog(campaignId, `IA gerou: "${text.slice(0, 140)}${text.length > 140 ? "…" : ""}"`, "success");
+      if (aiText && aiText.trim()) {
+        text = aiText.trim();
+        await addCampaignLog(campaignId, `IA gerou: "${text.slice(0, 140)}${text.length > 140 ? "…" : ""}"`, "success");
+      } else {
+        await addCampaignLog(campaignId, `IA retornou resposta vazia — usando template original.`, "warning");
+      }
     } catch (e: any) {
       const errMsg = `Falha ao personalizar com IA, usando template direto: ${e.message}`;
       console.warn(`[CAMPAIGN ${c.name}] ${errMsg}`);
