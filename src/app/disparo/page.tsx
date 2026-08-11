@@ -944,7 +944,7 @@ export default function DisparoPage() {
     <Paperclip className="w-3 h-3" /> Anexar mídia (opcional)
   </p>
   <p className="text-[9px] text-muted-foreground leading-relaxed">
-    Envia logo após o texto. Imagem, vídeo, documento ou áudio. Máx 16 MB.
+    Envia logo após o texto. Imagem, vídeo, documento ou áudio. Documentos até 100 MB, demais tipos limites menores do WhatsApp.
   </p>
   <MediaUploader
     mediaUrl={mediaUrl}

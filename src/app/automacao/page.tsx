@@ -724,7 +724,7 @@ export default function AutomacaoPage() {
                     <Paperclip className="w-3 h-3" /> Anexar mídia (opcional)
                   </p>
                   <p className="text-[10px] text-muted-foreground leading-relaxed">
-                    Envia <strong>logo após</strong> a mensagem de texto. Suporta imagem, vídeo, documento ou áudio. Máx 16&nbsp;MB (Evolution API). Use para cartão de visita, catálogo, áudio de apresentação, etc.
+                    Envia <strong>logo após</strong> a mensagem de texto. Suporta imagem, vídeo, documento ou áudio. Limite por tipo: imagem/áudio 16&nbsp;MB, vídeo 64&nbsp;MB, documento até 100&nbsp;MB. Use para cartão de visita, catálogo, áudio de apresentação, etc.
                   </p>
                   <MediaUploader
                     mediaUrl={formData.dispatch_media_url ?? null}
