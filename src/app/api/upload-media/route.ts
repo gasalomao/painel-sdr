@@ -5,6 +5,7 @@ import { verifySession } from "@/lib/auth";
 export const dynamic = "force-dynamic";
 
 const MEDIA_BUCKET = "chat-media";
+const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB — limite máximo WhatsApp (documentos)
 
 async function ensureBucket() {
   try {
@@ -13,7 +14,7 @@ async function ensureBucket() {
     if (!exists) {
       await supabase.storage.createBucket(MEDIA_BUCKET, {
         public: true,
-        fileSizeLimit: 52428800, // 50MB
+        fileSizeLimit: MAX_FILE_SIZE,
       });
     }
   } catch (err: any) {
@@ -31,7 +32,14 @@ export async function POST(req: NextRequest) {
     const formData = await req.formData();
     const file = formData.get("file") as File;
     if (!file) {
-      return NextResponse.json({ success: false, error: "Nenhum arquivo de imagem enviado" }, { status: 400 });
+      return NextResponse.json({ success: false, error: "Nenhum arquivo enviado" }, { status: 400 });
+    }
+
+    if (file.size > MAX_FILE_SIZE) {
+      return NextResponse.json({
+        success: false,
+        error: `Arquivo de ${(file.size / 1024 / 1024).toFixed(1)}MB excede o limite de 100MB do WhatsApp.`,
+      }, { status: 413 });
     }
 
     await ensureBucket();

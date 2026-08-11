@@ -63,7 +63,7 @@ export function invalidateEvolutionGoCache(): void {
  *
  * As rotas do GO são /send/text, /connect/status etc (mais RESTful).
  */
-async function goFetch(path: string, body?: unknown, instanceToken?: string): Promise<any> {
+async function goFetch(path: string, body?: unknown, instanceToken?: string, timeoutMs: number = 30000): Promise<any> {
   await loadConfig();
   if (!GO_URL) throw new Error("Evolution GO não configurado. Defina EVOLUTION_GO_URL nas configurações.");
   const url = GO_URL.replace(/\/+$/, "") + path;
@@ -78,7 +78,7 @@ async function goFetch(path: string, body?: unknown, instanceToken?: string): Pr
     method: body ? "POST" : "GET",
     headers,
     body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(30000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -173,7 +173,7 @@ export const evolutionGo: WhatsAppProvider = {
         return { ok: false, error: "Mídia sem base64 nem URL — nada pra enviar." };
       }
 
-      const res = await goFetch("/send/media", payload, token);
+      const res = await goFetch("/send/media", payload, token, 120000);
       const msgId = res?.key?.id || res?.messageId || res?.id;
       return { ok: true, messageId: msgId, status: "sent" };
     } catch (e: any) {

@@ -460,7 +460,7 @@ export const evolution = {
         number: targetJid,
         audio: cleanBase64 || mediaData.mediaUrl || mediaData.url || "",
         delay: 2000
-      });
+      }, 120000);
     }
 
     // Para imagem/vídeo/documento: se temos base64, usa SEMPRE ele (mais robusto
@@ -473,7 +473,7 @@ export const evolution = {
       fileName: mediaData.fileName || "midia",
       caption: caption || "",
       delay: 1500
-    });
+    }, 120000);
   },
 
   async sendPresence(number: string, presence: "composing" | "recording" | "paused", instance?: string) {

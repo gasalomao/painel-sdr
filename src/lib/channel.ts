@@ -135,7 +135,7 @@ async function fetchUrlAsBase64(url: string): Promise<{ base64: string; mimetype
 
   try {
     const res = await fetch(url, {
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(60000), // 60s — arquivos até 100MB em conexões lentas
       headers: { "User-Agent": "painel-sdr-media/1.0" },
     });
     if (!res.ok) {
@@ -144,9 +144,10 @@ async function fetchUrlAsBase64(url: string): Promise<{ base64: string; mimetype
     }
     const mimetype = res.headers.get("content-type") || "image/jpeg";
     const buf = Buffer.from(await res.arrayBuffer());
-    // Limite 15MB — Evolution/WhatsApp rejeitam anexos maiores.
-    if (buf.length > 15 * 1024 * 1024) {
-      console.warn(`[channel] Mídia ${url} tem ${buf.length}B (>15MB) — pode ser rejeitada.`);
+    // Limite 100MB — WhatsApp aceita documentos até 100MB; imagens/vídeos/áudio têm limites menores.
+    // Apenas avisa — não rejeita (Evolution/Baileys decide se aceita ou não por tipo).
+    if (buf.length > 100 * 1024 * 1024) {
+      console.warn(`[channel] Mídia ${url} tem ${(buf.length / 1024 / 1024).toFixed(1)}MB (>100MB) — WhatsApp pode rejeitar.`);
     }
     const base64 = buf.toString("base64");
 
