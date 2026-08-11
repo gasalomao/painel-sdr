@@ -53,8 +53,14 @@ export async function POST(req: NextRequest) {
       remote_jids = [],       // ou direto remote_jids
       personalize_with_ai = false,
       use_web_search = false,
+      humanize_messages = false,
       ai_model = null,
       ai_prompt = null,
+      media_url = null,
+      media_type = null,
+      media_caption = null,
+      media_file_name = null,
+      media_mimetype = null,
     } = body;
 
     if (!name || !instance_name || !message_template) {
@@ -72,8 +78,13 @@ export async function POST(req: NextRequest) {
       client_id: session.clientId,
       name, instance_name, message_template, agent_id: agent_id || null,
       min_interval_seconds, max_interval_seconds, allowed_start_hour, allowed_end_hour,
-      personalize_with_ai, use_web_search,
+      personalize_with_ai, use_web_search, humanize_messages,
       ai_prompt: ai_prompt || null,
+      media_url: media_url || null,
+      media_type: media_type || null,
+      media_caption: media_caption || null,
+      media_file_name: media_file_name || null,
+      media_mimetype: media_mimetype || null,
       status: "draft",
     };
     if (ai_model) insertPayload.ai_model = ai_model;

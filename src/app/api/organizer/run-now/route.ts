@@ -21,14 +21,17 @@ export async function POST(req: NextRequest) {
   // Lê a config central pra reaproveitar api_key/model/provider (sem expor pro browser).
   const { data: cfg } = await supabaseAdmin
     .from("ai_organizer_config")
-    .select("enabled, api_key, model, provider")
+    .select("enabled, api_key, openrouter_api_key, model, provider")
     .eq("id", 1)
     .maybeSingle();
   if (!cfg) return NextResponse.json({ ok: false, error: "Organizador não configurado" }, { status: 400 });
   if (!cfg.enabled) {
     return NextResponse.json({ ok: false, error: "Organizador está DESLIGADO globalmente. Avise o admin." }, { status: 400 });
   }
-  if (!cfg.api_key || !cfg.model) {
+  // Aceita OU Gemini api_key OU OpenRouter key — dependendo do modelo ativo.
+  const modelIsOpenRouter = cfg.model?.startsWith("openrouter:");
+  const hasKey = modelIsOpenRouter ? !!cfg.openrouter_api_key : !!cfg.api_key;
+  if (!hasKey || !cfg.model) {
     return NextResponse.json({ ok: false, error: "API key/modelo não configurados. Avise o admin." }, { status: 400 });
   }
 

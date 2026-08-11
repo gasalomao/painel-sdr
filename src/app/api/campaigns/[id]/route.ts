@@ -65,6 +65,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     "min_interval_seconds", "max_interval_seconds",
     "allowed_start_hour", "allowed_end_hour",
     "personalize_with_ai", "use_web_search", "ai_prompt", "ai_model",
+    "media_url", "media_type", "media_caption", "media_file_name", "media_mimetype",
   ];
   const update: Record<string, any> = { updated_at: new Date().toISOString() };
   for (const k of ALLOWED_FIELDS) {

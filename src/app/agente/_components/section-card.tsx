@@ -42,6 +42,8 @@ export interface SectionCardProps {
   accent?: AccentColor;
   /** Slot pra um botão/toggle no canto direito (ex: ativar feature). */
   rightAction?: ReactNode;
+  /** Número do passo no fluxo guiado (1, 2, 3...). Renderiza badge numerado. */
+  step?: number;
   /** Conteúdo da seção. */
   children: ReactNode;
   className?: string;
@@ -54,6 +56,7 @@ export function SectionCard({
   hint,
   accent = "primary",
   rightAction,
+  step,
   children,
   className,
 }: SectionCardProps) {
@@ -67,6 +70,11 @@ export function SectionCard({
       )}
     >
       <header className="flex items-start gap-3">
+        {step !== undefined && (
+          <div className="shrink-0 w-8 h-8 rounded-full bg-primary text-primary-foreground font-bold text-sm flex items-center justify-center ring-2 ring-primary/30">
+            {step}
+          </div>
+        )}
         <div className={cn("shrink-0 p-2.5 rounded-xl ring-1", c.bg, c.ring)}>
           <Icon className={cn("w-5 h-5", c.text)} />
         </div>

@@ -12,9 +12,10 @@ import { cn } from "@/lib/utils";
 import {
   Cpu, Play, Pause, Trash2, Plus, Loader2, ChevronDown, ChevronRight,
   CheckCircle2, XCircle, Bot, MapPin, Zap, Repeat, Clock, Save, AlertTriangle, Pencil,
-  Workflow, Sparkles, Target,
+  Workflow, Sparkles, Target, MessageSquareText, Paperclip,
 } from "lucide-react";
 import { AutomationLogs } from "./AutomationLogs";
+import { MediaUploader } from "@/components/media-uploader";
 import { LeadIntelligenceBatch } from "@/components/lead-intelligence-batch";
 import { ModelOptions } from "@/components/ai-module-shared";
 
@@ -33,8 +34,14 @@ type Automation = {
   dispatch_min_interval: number;
   dispatch_max_interval: number;
   dispatch_personalize: boolean;
+  dispatch_humanize: boolean;
   dispatch_ai_model: string | null;
   dispatch_ai_prompt: string | null;
+  dispatch_media_url: string | null;
+  dispatch_media_type: string | null;
+  dispatch_media_caption: string | null;
+  dispatch_media_file_name: string | null;
+  dispatch_media_mimetype: string | null;
   lead_intelligence_enabled: boolean;
   followup_enabled: boolean;
   followup_steps: FollowupStep[];
@@ -135,6 +142,12 @@ export default function AutomacaoPage() {
       dispatch_min_interval: 60,
       dispatch_max_interval: 180,
       dispatch_personalize: false,
+      dispatch_humanize: false,
+      dispatch_media_url: null,
+      dispatch_media_type: null,
+      dispatch_media_caption: null,
+      dispatch_media_file_name: null,
+      dispatch_media_mimetype: null,
       lead_intelligence_enabled: false,
       followup_enabled: true,
       followup_steps: [
@@ -691,9 +704,53 @@ export default function AutomacaoPage() {
                     </div>
                   )}
                 </div>
+
+                {/* Humanizar — picotar mensagem */}
+                <div className="border-t border-white/5 pt-3 space-y-2">
+                  <label className="flex items-center gap-2 text-[11px] cursor-pointer">
+                    <input type="checkbox" checked={!!formData.dispatch_humanize}
+                      onChange={e => setFormData({ ...formData, dispatch_humanize: e.target.checked })} />
+                    <MessageSquareText className="w-3 h-3 text-emerald-300" />
+                    <span className="font-bold text-emerald-200">Humanizar disparo (picotar mensagens)</span>
+                  </label>
+                  <p className="text-[10px] text-muted-foreground leading-relaxed">
+                    Quebra cada mensagem em <strong>várias partes menores</strong> e simula tempo de digitação entre elas (2–5s) — igual ao agente de IA. Funciona com mensagens reescritas por IA também. Reduz padrão robótico no WhatsApp.
+                  </p>
+                </div>
+
+                {/* Mídia anexa — imagem/vídeo/documento enviado após o texto */}
+                <div className="border-t border-white/5 pt-3 space-y-2">
+                  <p className="text-[11px] font-bold text-cyan-200 flex items-center gap-1.5">
+                    <Paperclip className="w-3 h-3" /> Anexar mídia (opcional)
+                  </p>
+                  <p className="text-[10px] text-muted-foreground leading-relaxed">
+                    Envia <strong>logo após</strong> a mensagem de texto. Suporta imagem, vídeo, documento ou áudio. Máx 16&nbsp;MB (Evolution API). Use para cartão de visita, catálogo, áudio de apresentação, etc.
+                  </p>
+                  <MediaUploader
+                    mediaUrl={formData.dispatch_media_url ?? null}
+                    mediaType={formData.dispatch_media_type ?? null}
+                    mediaFileName={formData.dispatch_media_file_name ?? null}
+                    mediaMimetype={formData.dispatch_media_mimetype ?? null}
+                    onChange={(f) => setFormData({
+                      ...formData,
+                      dispatch_media_url: f.mediaUrl,
+                      dispatch_media_type: f.mediaType,
+                      dispatch_media_file_name: f.mediaFileName,
+                      dispatch_media_mimetype: f.mediaMimetype,
+                    })}
+                  />
+                  {(!!formData.dispatch_media_url) && (
+                    <input
+                      type="text"
+                      placeholder="Legenda da mídia (opcional)"
+                      value={formData.dispatch_media_caption ?? ""}
+                      onChange={e => setFormData({ ...formData, dispatch_media_caption: e.target.value })}
+                      className="w-full text-[11px] bg-zinc-900/70 border border-white/10 rounded px-2 py-1"
+                    />
+                  )}
+                </div>
               </div>
 
-              {/* Follow-up */}
               <div className={cn(
                 "rounded-xl border p-4 space-y-3 transition-colors",
                 formData.followup_enabled !== false

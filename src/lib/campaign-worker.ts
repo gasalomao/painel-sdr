@@ -39,6 +39,11 @@ type CampaignRow = {
   ai_model?: string | null;
   ai_prompt?: string | null;
   humanize_messages?: boolean;
+  media_url?: string | null;
+  media_type?: string | null;
+  media_caption?: string | null;
+  media_file_name?: string | null;
+  media_mimetype?: string | null;
 };
 
 // Estado in-memory: campanhas em execução com timer ativo
@@ -715,6 +720,38 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
         const m = `⚠ Mensagem foi enviada no WhatsApp mas falhou ao salvar no chats_dashboard: ${persistErr?.message || persistErr}. Vai precisar refresh no /chat pra aparecer.`;
         console.warn(`[CAMPAIGN ${c.name}] ${m}`);
         await addCampaignLog(campaignId, m, "warning");
+      }
+    }
+
+    // ── Mídia anexa: envia logo após o texto ──
+    if (c.media_url && c.media_type) {
+      try {
+        await new Promise((r) => setTimeout(r, 1500)); // gap natural entre texto e mídia
+        const mediaResult = await channel.sendMedia(
+          sendJid,
+          c.media_caption || "",
+          {
+            type: c.media_type as "image" | "video" | "audio" | "document",
+            mediaUrl: c.media_url,
+            fileName: c.media_file_name || undefined,
+            mimetype: c.media_mimetype || undefined,
+          },
+          c.instance_name,
+        );
+        const mediaMsgId = (mediaResult as any)?.messageId || (mediaResult as any)?.key?.id || `media-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        await addCampaignLog(campaignId, `📎 Mídia enviada → ${target.nome_negocio || target.remote_jid}`, "info");
+        try {
+          await persistOutgoingMessage({
+            sessionId: sess?.sessionId || null,
+            remoteJid: sendJid,
+            instanceName: c.instance_name,
+            msgId: mediaMsgId,
+            text: c.media_caption || "",
+          });
+        } catch { /* best-effort */ }
+      } catch (mediaErr: any) {
+        console.warn(`[CAMPAIGN ${c.name}] Mídia falhou: ${mediaErr?.message}`);
+        await addCampaignLog(campaignId, `⚠ Mídia falhou: ${mediaErr?.message}`, "warning");
       }
     }
 

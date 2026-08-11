@@ -15,9 +15,10 @@ import {
 import {
   Send, Play, Pause, Square, Trash2, Loader2, Plus, Search, Users,
   Clock, ShieldAlert, Smartphone, CheckCircle2, XCircle, ChevronRight, Zap, Globe, BarChart3,
-  Pencil, Bot, Sparkles, MessageSquare, Save
+  Pencil, Bot, Sparkles, MessageSquare, Save, Paperclip
 } from "lucide-react";
 import { TEMPLATE_VARIABLES, renderTemplate, greetingFor } from "@/lib/template-vars";
+import { MediaUploader } from "@/components/media-uploader";
 import { cn } from "@/lib/utils";
 import { useClientSession } from "@/lib/use-session";
 import { LeadIntelligenceBatch } from "@/components/lead-intelligence-batch";
@@ -52,9 +53,15 @@ type Campaign = {
   last_error_at?: string | null;
   agent_id?: number | null;
   personalize_with_ai?: boolean;
+  humanize_messages?: boolean;
   use_web_search?: boolean;
   ai_prompt?: string | null;
   ai_model?: string | null;
+  media_url?: string | null;
+  media_type?: string | null;
+  media_caption?: string | null;
+  media_file_name?: string | null;
+  media_mimetype?: string | null;
 };
 
 const DEFAULT_AI_PROMPT = `Você é um SDR experiente fazendo uma primeira abordagem PROFISSIONAL via WhatsApp.
@@ -86,7 +93,13 @@ export default function DisparoPage() {
   const [startHour, setStartHour] = useState(9);
   const [endHour, setEndHour] = useState(20);
   const [personalizeWithAI, setPersonalizeWithAI] = useState(false);
+  const [humanizeMessages, setHumanizeMessages] = useState(false);
   const [useWebSearch, setUseWebSearch] = useState(false);
+  const [mediaUrl, setMediaUrl] = useState<string | null>(null);
+  const [mediaType, setMediaType] = useState<string | null>(null);
+  const [mediaFileName, setMediaFileName] = useState<string | null>(null);
+  const [mediaMimetype, setMediaMimetype] = useState<string | null>(null);
+  const [mediaCaption, setMediaCaption] = useState<string>("");
   const [creating, setCreating] = useState(false);
   const templateRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -436,7 +449,9 @@ export default function DisparoPage() {
     setMinSec(30); setMaxSec(60);
     setStartHour(9); setEndHour(20);
     setPersonalizeWithAI(false);
+    setHumanizeMessages(false);
     setUseWebSearch(false);
+    setMediaUrl(null); setMediaType(null); setMediaFileName(null); setMediaMimetype(null); setMediaCaption("");
     // NÃO limpa aiModel — mantém o último escolhido pra próxima campanha
     // (o usuário pediu pra ele ficar salvo até mudar de novo).
     setAiPrompt("");
@@ -453,9 +468,15 @@ export default function DisparoPage() {
     setStartHour(c.allowed_start_hour);
     setEndHour(c.allowed_end_hour);
     setPersonalizeWithAI(!!c.personalize_with_ai);
+    setHumanizeMessages(!!c.humanize_messages);
     setUseWebSearch(!!c.use_web_search);
     setAiModel(c.ai_model || "");
     setAiPrompt(c.ai_prompt || "");
+    setMediaUrl(c.media_url ?? null);
+    setMediaType(c.media_type ?? null);
+    setMediaFileName(c.media_file_name ?? null);
+    setMediaMimetype(c.media_mimetype ?? null);
+    setMediaCaption(c.media_caption ?? "");
     setSelectedLeadIds(new Set()); // edit não mexe em targets
     if (c.personalize_with_ai && aiModels.length === 0) loadAiModels();
     setTab("create");
@@ -487,8 +508,14 @@ export default function DisparoPage() {
         allowed_start_hour: startHour, allowed_end_hour: endHour,
         personalize_with_ai: personalizeWithAI,
         use_web_search: useWebSearch,
+        humanize_messages: humanizeMessages,
         ai_model: personalizeWithAI ? aiModel : null,
         ai_prompt: personalizeWithAI ? (aiPrompt.trim() || null) : null,
+        media_url: mediaUrl,
+        media_type: mediaType,
+        media_caption: mediaCaption.trim() || null,
+        media_file_name: mediaFileName,
+        media_mimetype: mediaMimetype,
       };
 
       if (editingCampaignId) {
@@ -891,8 +918,52 @@ export default function DisparoPage() {
                                         <p className="text-[10px] text-red-300 bg-red-500/5 border border-red-500/20 rounded-md px-2 py-1">
                                           ⚠ {t.error_message}
                                         </p>
-                                      )}
-                                    </div>
+                    )}
+
+                    <label
+                      onClick={() => setHumanizeMessages(!humanizeMessages)}
+                      className={cn(
+                        "flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-all",
+                        humanizeMessages ? "bg-emerald-500/10 border-emerald-500/30" : "bg-black/30 border-white/5 hover:border-white/20"
+                      )}
+                    >
+                      <div className={cn("w-4 h-4 rounded border-2 flex items-center justify-center shrink-0 mt-0.5", humanizeMessages ? "bg-emerald-500 border-emerald-500" : "border-white/30")}>
+                        {humanizeMessages && <CheckCircle2 className="w-3 h-3 text-white" />}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-[11px] font-bold text-emerald-200">Humanizar disparo (picotar mensagens)</p>
+                        <p className="text-[9px] text-muted-foreground leading-relaxed">
+                          Quebra cada mensagem em várias partes menores e simula digitação entre elas (2–5s). Funciona com IA também.
+                        </p>
+                      </div>
+</label>
+
+{/* Mídia anexa */}
+<div className="p-3 rounded-xl border border-white/5 bg-black/30 space-y-2">
+  <p className="text-[11px] font-bold text-cyan-200 flex items-center gap-1.5">
+    <Paperclip className="w-3 h-3" /> Anexar mídia (opcional)
+  </p>
+  <p className="text-[9px] text-muted-foreground leading-relaxed">
+    Envia logo após o texto. Imagem, vídeo, documento ou áudio. Máx 16 MB.
+  </p>
+  <MediaUploader
+    mediaUrl={mediaUrl}
+    mediaType={mediaType}
+    mediaFileName={mediaFileName}
+    mediaMimetype={mediaMimetype}
+    onChange={(f) => { setMediaUrl(f.mediaUrl); setMediaType(f.mediaType); setMediaFileName(f.mediaFileName); setMediaMimetype(f.mediaMimetype); }}
+  />
+  {mediaUrl && (
+    <input
+      type="text"
+      placeholder="Legenda da mídia (opcional)"
+      value={mediaCaption}
+      onChange={e => setMediaCaption(e.target.value)}
+      className="w-full text-[11px] bg-zinc-900/70 border border-white/10 rounded px-2 py-1"
+    />
+  )}
+</div>
+</div>
                                   );
                                 })
                             )}

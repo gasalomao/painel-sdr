@@ -8,6 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { Book, Check, Info, Pencil, Plus, Save, Settings, Trash2, Wrench, X, Image as ImageIcon, Upload, Loader2, Sparkles, Bot, MessageSquare, SlidersHorizontal, CalendarDays, FileText } from "lucide-react";
 import { SaveButton } from "../_components/save-button";
+import { SectionCard } from "../_components/section-card";
 import { EmptyState } from "../_components/empty-state";
 import { CopyButton } from "../_components/copy-button";
 import { PromptPreview } from "../_components/prompt-preview";
@@ -399,16 +400,24 @@ function SectionHeader({ icon: Icon, title, helper }: { icon: any; title: string
 
 export function InfoTab(p: InfoTabProps) {
   const [uploadingImg, setUploadingImg] = useState(false);
+
+  const saveAll = async () => {
+    p.saveIdentity();
+    p.saveCalendarConfig();
+    p.savePrompt();
+  };
+
   return (
     <div className="space-y-6">
-      {/* ========= SEÇÃO: IDENTIDADE DO AGENTE ========= */}
-      <section className="border border-white/[0.08] bg-card/80 rounded-xl shadow-none p-4 sm:p-6 space-y-6">
-        <div className="flex items-center justify-between gap-4 border-b border-white/10 pb-4">
-          <SectionHeader
-            icon={Bot}
-            title="Identidade do Agente"
-            helper="Defina o nome, a função e a personalidade do seu atendente de WhatsApp."
-          />
+      {/* ========= PASSO 1: QUEM É SUA IA ========= */}
+      <SectionCard
+        step={1}
+        icon={Bot}
+        title="Quem é sua IA?"
+        description="Dê um nome e defina a personalidade do seu atendente virtual."
+        hint="Comece aqui! Escolha um nome amigável — é assim que a IA vai se apresentar aos seus clientes no WhatsApp."
+        accent="primary"
+        rightAction={
           <div className="flex items-center gap-2 shrink-0">
             <span className={cn("text-[10px] font-semibold", p.isActiveAgente ? "text-green-400" : "text-red-400")}>
               {p.isActiveAgente ? "ATIVO" : "DESLIGADO"}
@@ -421,7 +430,8 @@ export function InfoTab(p: InfoTabProps) {
               aria-label="Ativar agente"
             />
           </div>
-        </div>
+        }
+      >
 
         <div className="space-y-3">
           <Field label="Nome do Agente" copy={p.nomeAgente}>
@@ -476,17 +486,17 @@ export function InfoTab(p: InfoTabProps) {
             </Field>
           </div>
         </div>
-      </section>
+      </SectionCard>
 
-      {/* ========= SEÇÃO: CONEXÃO COM WHATSAPP ========= */}
-      <section className="border border-white/[0.08] bg-card/80 rounded-xl shadow-none p-4 sm:p-6 space-y-6">
-        <div className="border-b border-white/10 pb-4">
-          <SectionHeader
-            icon={MessageSquare}
-            title="Conexão com WhatsApp"
-            helper="Vincule o agente a uma instância do WhatsApp e configure o endereço de integração."
-          />
-        </div>
+      {/* ========= PASSO 2: CONECTAR NO WHATSAPP ========= */}
+      <SectionCard
+        step={2}
+        icon={MessageSquare}
+        title="Conectar no WhatsApp"
+        description="Vincule sua IA a um número de WhatsApp para começar a atender."
+        hint="Selecione a instância do WhatsApp que você criou na aba WhatsApp. A IA só funciona depois de conectada aqui."
+        accent="blue"
+      >
 
         <div className="space-y-3">
           <Field label="Endereço do App (App URL)" copy={p.appUrl} copyLabel="URL">
@@ -560,17 +570,16 @@ export function InfoTab(p: InfoTabProps) {
 
           <WebhookGuide webhookUrl={p.webhookUrl} />
         </div>
-      </section>
+      </SectionCard>
 
-      {/* ========= SEÇÃO: COMPORTAMENTO DA IA ========= */}
-      <section className="border border-white/[0.08] bg-card/80 rounded-xl shadow-none p-4 sm:p-6 space-y-6">
-        <div className="border-b border-white/10 pb-4">
-          <SectionHeader
-            icon={SlidersHorizontal}
-            title="Comportamento da IA"
-            helper="Ajuste como a IA responde, pesquisa e pensa durante as conversas com seus clientes."
-          />
-        </div>
+      {/* ========= PASSO 3: COMO A IA CONVERSA ========= */}
+      <SectionCard
+        step={3}
+        icon={SlidersHorizontal}
+        title="Como a IA conversa"
+        description="Controle o estilo e o ritmo das respostas da sua IA."
+        accent="cyan"
+      >
 
         <div className="space-y-3">
           {/* Buffer de mensagens */}
@@ -641,23 +650,17 @@ export function InfoTab(p: InfoTabProps) {
             hint={<>Antes de cada interação, a IA gera um <strong>briefing do cliente</strong> (dores, abordagem, decisor, alertas) e usa no contexto. Custa tokens extra — ative só nos agentes que precisam de análise profunda.</>}
           />
         </div>
+      </SectionCard>
 
-        <SaveButton
-          label="Salvar Identidade e Configurações"
-          onSave={p.saveIdentity}
-          disabled={p.savingConfig}
-        />
-      </section>
-
-      {/* ========= SEÇÃO: GOOGLE CALENDAR E AGENDAMENTO ========= */}
-      <section className="border border-white/[0.08] bg-card/80 rounded-xl shadow-none p-4 sm:p-6 space-y-6">
-        <div className="border-b border-white/10 pb-4">
-          <SectionHeader
-            icon={CalendarDays}
-            title="Google Calendar e Agendamento"
-            helper="Permite que a IA agende atendimentos direto no seu Google Calendar e envie lembretes automáticos."
-          />
-        </div>
+      {/* ========= PASSO 4: AGENDA E REUNIÕES ========= */}
+      <SectionCard
+        step={4}
+        icon={CalendarDays}
+        title="Agenda e Reuniões"
+        description="Permita que a IA marque atendimentos direto na sua agenda."
+        hint="Ative o Google Calendar para a IA poder marcar horários com seus clientes automaticamente."
+        accent="blue"
+      >
 
         <div className="flex justify-between items-center bg-black/20 p-4 border border-white/5 rounded-xl">
           <div className="flex items-center gap-3">
@@ -1123,31 +1126,28 @@ export function InfoTab(p: InfoTabProps) {
                         )}
                       </div>
                     )}
-                  </div>
-                </div>
-              )}
-            </div>
+        </div>
+      </div>
+      )}
+      </div>
+      </div>
+      )}
+      </SectionCard>
 
-            <SaveButton
-              label="Salvar Configurações de Agenda"
-              onSave={p.saveCalendarConfig}
-            />
-          </div>
-        )}
-      </section>
-
-      {/* ========= SEÇÃO: BASE DE CONHECIMENTO ========= */}
-      <section className="space-y-6">
-        <div className="flex items-center justify-between">
-          <SectionHeader
-            icon={Book}
-            title="Base de Conhecimento"
-            helper="Documentos que a IA consulta quando o cliente pergunta sobre um assunto específico, sem sobrecarregar o prompt."
-          />
+      {/* ========= PASSO 5: BASE DE CONHECIMENTO ========= */}
+      <SectionCard
+        step={5}
+        icon={Book}
+        title="Base de Conhecimento"
+        description="Produtos, preços e informações que a IA usa para responder perguntas."
+        hint="Adicione aqui catálogos, tabelas de preços ou documentos. A IA só lê quando o cliente pergunta — não inventa resposta."
+        accent="purple"
+        rightAction={
           <Button onClick={() => p.setShowNovoK(!p.showNovoK)} variant="outline" className="h-11 bg-primary/10 border-primary/20 text-primary hover:bg-primary/20 rounded-xl px-6 font-semibold text-xs uppercase tracking-wider">
             <Plus className="w-4 h-4 mr-2" /> Nova Base
           </Button>
-        </div>
+        }
+      >
 
         {p.knowledge.length > 0 && (
           <div className="space-y-3">
@@ -1335,31 +1335,25 @@ export function InfoTab(p: InfoTabProps) {
             </div>
           ))}
         </div>
-      </section>
+      </SectionCard>
 
-      {/* ========= SEÇÃO: PROMPT DE INSTRUÇÃO ========= */}
-      <section className="border border-white/[0.08] bg-card/80 rounded-xl shadow-none p-4 md:p-6 space-y-5">
-        <div className="flex items-center justify-between gap-3 flex-wrap border-b border-white/10 pb-4">
-          <SectionHeader
-            icon={FileText}
-            title="Prompt de Instrução"
-            helper="Instruções principais que definem como o agente conversa com seus clientes."
-          />
+      {/* ========= PASSO 6: INSTRUÇÕES DA IA ========= */}
+      <SectionCard
+        step={6}
+        icon={FileText}
+        title="Instruções da IA"
+        description="Escreva as regras que a IA deve seguir em cada conversa."
+        hint="O prompt é o 'manual' da sua IA. Quanto mais claro, melhores as respostas. Use as variáveis abaixo para personalizar."
+        accent="primary"
+        rightAction={
           <div className="flex items-center gap-2">
             <span className="text-[10px] font-mono text-muted-foreground bg-white/5 border border-white/10 rounded-md px-2 py-0.5">
-              {p.prompt.length.toLocaleString("pt-BR")} chars · {p.prompt.split(/\s+/).filter(Boolean).length} palavras
+              {p.prompt.length.toLocaleString("pt-BR")} chars
             </span>
             <CopyButton text={p.prompt} label="Copiar" />
-            <SaveButton
-              label="Salvar Prompt"
-              onSave={p.savePrompt}
-              disabled={p.savingConfig}
-              variant="subtle"
-              size="sm"
-              width="auto"
-            />
           </div>
-        </div>
+        }
+      >
 
         <p className="text-[11px] text-muted-foreground -mt-2">
           Clique ou arraste qualquer chip para dentro do editor. As variáveis são substituídas automaticamente na conversa.
@@ -1460,7 +1454,13 @@ export function InfoTab(p: InfoTabProps) {
           leadQuery={p.previewLeadQuery}
           setLeadQuery={p.setPreviewLeadQuery}
         />
-      </section>
+
+      </SectionCard>
+
+      {/* ===== STICKY SAVE BAR ===== */}
+      <div className="sticky bottom-0 z-20 bg-card/80 backdrop-blur-md border border-white/10 rounded-2xl p-4 shadow-lg">
+        <SaveButton label="Salvar Tudo" onSave={saveAll} />
+      </div>
     </div>
   );
 }

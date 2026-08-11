@@ -2,6 +2,38 @@
 
 Este projeto (`painel-sdr`) é um Painel de SDR construído com Next.js (versão 16.2.3), conectado ao Supabase e Evolution API (WhatsApp), com uso de Redis para filas e inteligência artificial (Google Gemini).
 
+## [2026-08-11] Mídia Anexa no Disparo + Humanização (picotar mensagens)
+
+- **Solicitação**: Adicionar anexo de mídia (imagem/vídeo/documento/áudio) no fluxo de disparo (automação + manual) + humanização de mensagens (picotar em partes menores).
+- **Humanização (concluído)**:
+  - `dispatch_humanize` column em `automations`, `humanize_messages` em `campaigns` + `followup_campaigns`.
+  - `splitMessage()` em `src/lib/agent-format.ts` (linha 92) divide parágrafos/sentenças, max 400 chars/chunk.
+  - campaign-worker, followup-worker, automation-worker propagam toggle.
+  - UI toggles em `automacao/page.tsx` (PASSO 3) + `disparo/page.tsx`.
+  - Migration: `migrations/add_humanize_messages.sql`.
+- **Mídia Anexa (concluído)**:
+  - Schema: `media_url`, `media_type`, `media_caption`, `media_file_name`, `media_mimetype` em `campaigns` + `followup_campaigns`; `dispatch_media_*` em `automations` (`setup-sql.ts` + `migrations/add_humanize_messages.sql`).
+  - `CampaignRow` (campaign-worker), `FollowupCampaign` (followup-worker), `Automation` (automacao/page.tsx), `Campaign` (disparo/page.tsx) tipos atualizados.
+  - campaign-worker: envia mídia via `channel.sendMedia()` após loop de chunks de texto (linha ~726). 1.5s gap natural entre texto e mídia.
+  - followup-worker: envia mídia após loop de texto (linha ~542). Apenas no último step.
+  - automation-worker: propaga `dispatch_media_*` → `campaigns.media_*` + `followup_campaigns.media_*` no insert.
+  - API: POST `/api/campaigns` aceita media fields; PATCH `/api/campaigns/[id]` whitelist media fields.
+  - `MediaUploader` component (`src/components/media-uploader.tsx`): file picker → upload `/api/upload-media` (Supabase Storage bucket `chat-media`) → preview/remove. Tipo inferido do mimetype.
+  - UI: seção mídia abaixo do toggle humanize em `automacao/page.tsx` (PASSO 3) + `disparo/page.tsx`. Caption input aparece quando mídia anexada. Edit/hydrate/reset funcionando.
+- **Validação**: `npx tsc --noEmit` 0 erros novos (2 pré-existentes em `organizer-integration.test.ts`). `npx vitest run` 443/452 pass (9 skipped — mesmos números de antes, sem regressões).
+- **Arquivos alterados**:
+  - `src/lib/setup-sql.ts` (schema: media columns em campaigns + followup_campaigns + ai_model/ai_prompt restaurado)
+  - `migrations/add_humanize_messages.sql` (ALTER TABLE para humanize + media nas 3 tabelas)
+  - `src/lib/campaign-worker.ts` (CampaignRow type + sendMedia após chunks)
+  - `src/lib/followup-worker.ts` (FollowupCampaign type + sendMedia após texto)
+  - `src/lib/automation-worker.ts` (propaga media fields campaigns + followup_campaigns)
+  - `src/app/automacao/page.tsx` (Automation type + blankAutomation + UI MediaUploader)
+  - `src/app/disparo/page.tsx` (Campaign type + state + openEdit + resetForm + handleCreate + UI MediaUploader)
+  - `src/components/media-uploader.tsx` (NOVO — componente de upload)
+  - `src/app/api/campaigns/route.ts` (POST media fields)
+  - `src/app/api/campaigns/[id]/route.ts` (PATCH whitelist media fields)
+- **Estado ao sair**: Feature completa. Próximo: rodar migration SQL `migrations/add_humanize_messages.sql` no Supabase Studio. Testar upload + disparo real com mídia.
+
 ## [2026-08-07] Prospecção Sites — Correção do Erro "Nenhum target pendente" ao Iniciar
 
 - **Causa Raiz**: A criação de campanhas em `/api/prospeccao-sites/campaigns` não passava `client_id: ctx.clientId` para `targetsRows`. Como o Supabase aplicava RLS ou `client_id` default, `campaign_targets` ficava com 0 linhas enquanto `campaigns.total_targets` salvava 18. Ao clicar em Iniciar, o `preflightCheck` barrava por ausência de targets.

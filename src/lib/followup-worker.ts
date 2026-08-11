@@ -16,6 +16,7 @@
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import * as channel from "@/lib/channel";
 import { renderTemplate } from "@/lib/template-vars";
+import { splitMessage } from "@/lib/agent-format";
 import {
   findOrCreateContactSession,
   persistOutgoingMessage,
@@ -44,6 +45,12 @@ type FollowupCampaign = {
   allowed_start_hour: number;
   allowed_end_hour: number;
   auto_execute: boolean;
+  humanize_messages?: boolean;
+  media_url?: string | null;
+  media_type?: string | null;
+  media_caption?: string | null;
+  media_file_name?: string | null;
+  media_mimetype?: string | null;
   status: string;
 };
 
@@ -480,33 +487,80 @@ async function processTarget(
 
   // 5. Envia via Evolution
   try {
-    // Registra o envio pendente antes de disparar o sendMessage para evitar race conditions com o webhook echo
-    registerPendingAutomatedSend(camp.instance_name, target.remote_jid, text);
+    // Picota a mensagem em chunks se humanize_messages estiver ativo
+    // (mesma lógica do campaign-worker e agente de IA).
+    const chunks = camp.humanize_messages ? splitMessage(text) : [text];
+    if (chunks.length === 0) chunks.push(text);
+    let msgId: string = `followup-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-    const result = await channel.sendMessage(target.remote_jid, text, camp.instance_name);
-    // Sufixo aleatório evita colisão quando vários follow-ups saem no mesmo ms.
-    const msgId = (result as any)?.messageId || (result as any)?.key?.id || (result as any)?.data?.key?.id || `followup-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-    // Persiste no chat pra IA ver contexto depois
+    // Sessão criada uma vez e reusada em todos os chunks.
     const sess = await findOrCreateContactSession(
       target.remote_jid,
       camp.instance_name,
       target.nome_negocio
     );
-    // Persist no histórico — não derruba o envio se falhar (mensagem JÁ foi
-    // enviada). Loga em followup_logs pro operador ver no painel.
-    try {
-      await persistOutgoingMessage({
-        sessionId: sess?.sessionId || null,
-        remoteJid: target.remote_jid,
-        instanceName: camp.instance_name,
-        msgId,
-        text,
-      });
-    } catch (persistErr: any) {
-      const m = `⚠ Follow-up enviado no WhatsApp mas falhou ao salvar no chats_dashboard: ${persistErr?.message}.`;
-      console.warn(`[FOLLOWUP ${camp.name}] ${m}`);
-      await addFollowupLog(camp.id, m, "warning");
+
+    for (let i = 0; i < chunks.length; i++) {
+      const chunkText = chunks[i];
+      if (!chunkText) continue;
+
+      // Delay de digitação entre chunks (2 a 5s) — pula no primeiro.
+      if (i > 0) {
+        const typingSeconds = Math.min(Math.max(chunkText.length / 15, 2), 5);
+        await new Promise((r) => setTimeout(r, typingSeconds * 1000));
+      }
+
+      registerPendingAutomatedSend(camp.instance_name, target.remote_jid, chunkText);
+      const result = await channel.sendMessage(target.remote_jid, chunkText, camp.instance_name);
+
+      // Persiste cada chunk no chat (pra IA ter contexto de todas as partes).
+      const chunkMsgId = (result as any)?.messageId || (result as any)?.key?.id || (result as any)?.data?.key?.id || `followup-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`;
+      msgId = chunkMsgId;
+      try {
+        await persistOutgoingMessage({
+          sessionId: sess?.sessionId || null,
+          remoteJid: target.remote_jid,
+          instanceName: camp.instance_name,
+          msgId: chunkMsgId,
+          text: chunkText,
+        });
+      } catch (persistErr: any) {
+        const m = `⚠ Follow-up enviado no WhatsApp mas falhou ao salvar no chats_dashboard: ${persistErr?.message}.`;
+        console.warn(`[FOLLOWUP ${camp.name}] ${m}`);
+        await addFollowupLog(camp.id, m, "warning");
+      }
+    }
+
+    // ── Mídia anexa (apenas no último step) ──
+    if (camp.media_url && camp.media_type) {
+      try {
+        await new Promise((r) => setTimeout(r, 1500));
+        const mediaResult = await channel.sendMedia(
+          target.remote_jid,
+          camp.media_caption || "",
+          {
+            type: camp.media_type as "image" | "video" | "audio" | "document",
+            mediaUrl: camp.media_url,
+            fileName: camp.media_file_name || undefined,
+            mimetype: camp.media_mimetype || undefined,
+          },
+          camp.instance_name,
+        );
+        const mediaMsgId = (mediaResult as any)?.messageId || (mediaResult as any)?.key?.id || `media-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        await addFollowupLog(camp.id, `📎 Mídia enviada → ${target.nome_negocio || target.remote_jid}`, "info");
+        try {
+          await persistOutgoingMessage({
+            sessionId: sess?.sessionId || null,
+            remoteJid: target.remote_jid,
+            instanceName: camp.instance_name,
+            msgId: mediaMsgId,
+            text: camp.media_caption || "",
+          });
+        } catch { /* best-effort */ }
+      } catch (mediaErr: any) {
+        console.warn(`[FOLLOWUP ${camp.name}] Mídia falhou: ${mediaErr?.message}`);
+        await addFollowupLog(camp.id, `⚠ Mídia falhou: ${mediaErr?.message}`, "warning");
+      }
     }
 
     const nextStep = target.current_step + 1;

@@ -737,7 +737,7 @@ export async function POST(req: NextRequest) {
        // Validação dinâmica: aceita SÓ status_keys do kanban do cliente (não
        // força "sem_interesse"/"descartado" se não existirem no kanban custom).
        // Antes sempre adicionava esses dois — quebrava kanbans com nomes diferentes.
-       const HARDCODED_VALID = new Set(["novo", "primeiro_contato", "interessado", "follow-up", "agendado", "fechado", "sem_interesse", "descartado"]);
+        const HARDCODED_VALID = new Set(["novo", "primeiro_contato", "interessado", "follow_up", "follow-up", "agendado", "fechado", "sem_interesse", "descartado", "perdido"]);
        const validStatuses = kanbanCols.length > 0
          ? new Set<string>(dynamicStatusKeys) // SÓ as colunas reais do kanban do cliente
          : HARDCODED_VALID;
@@ -747,14 +747,18 @@ export async function POST(req: NextRequest) {
        const isLeadNovo = !statusAtualMap[jid];
 
        // Hierarquia: kanban dinâmico tem prioridade. Fallback pro B2B hardcoded.
-       const HARDCODED_HIERARQUIA: Record<string, number> = { "novo": 0, "primeiro_contato": 1, "interessado": 2, "follow-up": 3, "agendado": 4, "fechado": 5 };
+        const HARDCODED_HIERARQUIA: Record<string, number> = { "novo": 0, "primeiro_contato": 1, "interessado": 2, "follow_up": 3, "follow-up": 3, "agendado": 4, "fechado": 5 };
        const hierarquia = kanbanCols.length > 0 ? dynamicHierarquia : HARDCODED_HIERARQUIA;
        const isTerminal = terminalSet.has(novoStatus) || ["sem_interesse", "descartado"].includes(novoStatus);
        const isDowngrade = !isTerminal && !isLeadNovo && (hierarquia[novoStatus] ?? 0) < (hierarquia[statusAntigo] ?? 0);
 
-       // Cliente recorrente/ativo: NUNCA permite rebaixar/mover, mesmo se IA pediu.
-       // Defesa em profundidade contra a IA ignorar R11.
-       const isClienteAtivo = leadType === "cliente_ativo" || leadType === "recorrente";
+        // Cliente recorrente/ativo: NUNCA permite rebaixar/mover, mesmo se IA pediu.
+        // Defesa em profundidade contra a IA ignorar R11.
+        // Usa TANTO o lead_type que a IA retornou AGORA quanto o que já estava
+        // armazenado no banco (assim funciona mesmo se a IA omite lead_type).
+        const storedLeadType = leadMetaMap[jid]?.leadType || null;
+        const effectiveLeadType = leadType || storedLeadType;
+        const isClienteAtivo = effectiveLeadType === "cliente_ativo" || effectiveLeadType === "recorrente";
        const blockMoveByRecurringClient = isClienteAtivo && novoStatus !== statusAntigo && !isTerminal;
 
        // R15/R16 hard-guard: lead em estágio AVANÇADO nunca volta pra estágios
