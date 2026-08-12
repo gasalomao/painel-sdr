@@ -57,11 +57,6 @@ export function chunkText(text: string): string[] {
   if (!text || !text.trim()) return [];
   const cleanText = text.trim();
 
-  // Caso simples: doc inteiro cabe em 1 chunk
-  if (cleanText.length <= CHUNK_TARGET_CHARS) {
-    return [cleanText];
-  }
-
   // Detecta catálogo de produtos (formato do ProductCatalogBuilder da UI):
   //   ### PRODUTO: iPhone 15
   //   - **Preço**: R$ 5000
@@ -73,8 +68,15 @@ export function chunkText(text: string): string[] {
   // Cada produto vira seu próprio chunk (ou agrupados se muito curtos) — nunca
   // corta UM produto no meio (perderia a foto ou o preço). Isso garante que a
   // busca vetorial sempre retorne o produto COMPLETO.
-  if (/\n#{2,3}\s+PRODUTO:|^-{3,}$/m.test(cleanText)) {
+  // DEVE vir antes do check de tamanho — catálogo pequeno ainda precisa respeitar
+  // o limite de 4 produtos/chunk.
+  if (/(?:^|\n)#{2,3}\s+PRODUTO:|^-{3,}$/m.test(cleanText)) {
     return chunkProductCatalog(cleanText);
+  }
+
+  // Caso simples: doc inteiro cabe em 1 chunk
+  if (cleanText.length <= CHUNK_TARGET_CHARS) {
+    return [cleanText];
   }
 
   const chunks: string[] = [];
@@ -195,7 +197,8 @@ function hardSplitByChars(text: string): string[] {
   while (start < text.length) {
     const end = Math.min(start + CHUNK_TARGET_CHARS, text.length);
     chunks.push(text.slice(start, end));
-    start = end - CHUNK_OVERLAP_CHARS; // overlap dentro do mesmo split
+    if (end >= text.length) break;
+    start = end - CHUNK_OVERLAP_CHARS;
     if (start <= 0) start = end;
   }
   return chunks;
@@ -352,7 +355,11 @@ export async function embedQuery(text: string, apiKey?: string | null): Promise<
     taskType: "RETRIEVAL_QUERY" as any,
     outputDimensionality: EMBEDDING_DIMS,
   } as any);
-  return res.embedding.values;
+  const vec = res.embedding.values;
+  if (!vec || vec.length !== EMBEDDING_DIMS) {
+    throw new Error(`embedQuery: dimensão ${vec?.length} ≠ ${EMBEDDING_DIMS} (modelo "${model}"). Reindexe a base ou troque o modelo.`);
+  }
+  return vec;
 }
 
 // ============================================================================

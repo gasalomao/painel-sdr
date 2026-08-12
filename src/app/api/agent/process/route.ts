@@ -924,7 +924,7 @@ ${capturedVariablesPrompt}
 
     // Inicializa o roteamento de provedor (Gemini ou OpenRouter) pelo modelo.
     const { resolveModel } = await import("@/lib/ai-default-model");
-    const { startAiChat, providerOf } = await import("@/lib/ai-provider");
+    const { startAiChat, providerOf, providerDisplayName } = await import("@/lib/ai-provider");
     // target_model do agente é setado pelo admin em /agente (info-tab admin-only).
     // resolveModel ignora optsModel se clientId non-admin — burlaria controle custo.
     // Mas agente é recurso do tenant: target_model amarrado ao agente é decisão
@@ -1092,7 +1092,7 @@ ${capturedVariablesPrompt}
           // RAG real: vector search (top-5 chunks por similaridade semântica).
           // Fallback ILIKE só se vetor não achar NADA — cobre docs ainda não
           // indexados (recém-criados antes do indexer rodar).
-          const raw = String(callArgs.query || "").trim().slice(0, 500);
+          const raw = (typeof callArgs.query === "string" ? callArgs.query : (callArgs.query?.text || JSON.stringify(callArgs.query || ""))).trim().slice(0, 500);
           let matches: any[] = [];
           let searchMethod = "none";
           let dbgError: string | null = null;
@@ -1253,7 +1253,7 @@ ${capturedVariablesPrompt}
              callLogs.push({ role: "system", content: `[Estoque Erro] Item "${rawProd}" não encontrado` });
           }
 } else if (call.name === "web_search") {
-           const q = String(callArgs.query || "").trim();
+           const q = (typeof callArgs.query === "string" ? callArgs.query : (callArgs.query?.text || "")).trim();
            try {
               const { webSearch, formatResultsForAI } = await import("@/lib/web-search");
               const results = await webSearch(q, 8);
@@ -1830,14 +1830,19 @@ ${capturedVariablesPrompt}
       // não enxerga o consumo e admin vê os dados misturados.
       clientId,
       model: effectiveModelId,
-      provider: agentProvider === "openrouter" ? "OpenRouter" : "Gemini",
+      provider: providerDisplayName(agentProvider),
       promptTokens: totalPrompt,
       completionTokens: totalCompletion,
       totalTokens: totalAll,
       metadata: { remoteJid, instanceName, isTestMode, estimated: usageEstimated || undefined },
     });
 
-    finalAnswer = finalAnswer.replace(/^```\w*\n?/g, "").replace(/\n?```$/g, "");
+    finalAnswer = finalAnswer.replace(/^```\w*\n?/g, "").replace(/\n?```$/g, "").trim();
+
+    if (!finalAnswer) {
+      finalAnswer = "Desculpe, pode repetir? Não entendi direito.";
+      console.warn(`[AGENT] IA retornou resposta vazia para ${remoteJid} — usando fallback.`);
+    }
 
     // Normaliza qualquer imagem em markdown (![alt](url)) ou URL solta de imagem para o formato [IMAGEM: url]
     finalAnswer = finalAnswer.replace(/!\[[^\]]*\]\((https?:\/\/[^\s\)]+)\)/gi, "[IMAGEM: $1]");
@@ -1897,8 +1902,8 @@ ${capturedVariablesPrompt}
         let q = supabase.from("messages")
           .select("media_url, content, created_at")
           .eq("sender", "ai")
+          .eq("remote_jid", remoteJid)
           .gte("created_at", sinceIso);
-        if (sessionId) q = q.eq("session_id", sessionId);
         const { data: pastMsgs } = await q;
 
         for (const pm of pastMsgs || []) {

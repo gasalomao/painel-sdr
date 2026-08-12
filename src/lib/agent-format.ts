@@ -80,7 +80,7 @@ export function checkSchedulesSync(schedulesJSON: any, now: Date = new Date()): 
     Thu: "Quinta-feira", Fri: "Sexta-feira", Sat: "Sábado",
   };
   const currentDay = dayMap[get("weekday")] || "";
-  const hh = get("hour") === "24" ? "00" : get("hour");
+  const hh = String(Number(get("hour"))).padStart(2, "0");
   const currentTime = `${hh}:${get("minute")}`;
 
   const sched = schedulesJSON.find((s: any) => s.day === currentDay);

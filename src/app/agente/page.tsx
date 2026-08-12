@@ -296,7 +296,7 @@ export default function AgentePage() {
         setHumanizeMessages(opts.humanize_messages ?? false);
         setWebSearchEnabled(opts.web_search_enabled ?? false);
         // Modo de raciocínio: prefere reasoning_mode (novo); retrocompat thinking_budget.
-        if (opts.reasoning_mode === 0 || opts.reasoning_mode === 1 || opts.reasoning_mode === 2) {
+        if (opts.reasoning_mode === 0 || opts.reasoning_mode === 1 || opts.reasoning_mode === 2 || opts.reasoning_mode === 3) {
           setReasoningMode(opts.reasoning_mode);
         } else if (opts.thinking_budget !== undefined && opts.thinking_budget !== null && opts.thinking_budget !== "") {
           setReasoningMode(Number(opts.thinking_budget) < 0 ? 2 : Number(opts.thinking_budget) > 0 ? 1 : 0);

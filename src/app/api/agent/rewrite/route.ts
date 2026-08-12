@@ -69,20 +69,21 @@ export async function POST(req: NextRequest) {
     let tp = turn.usage.promptTokens, tc = turn.usage.completionTokens, tt = turn.usage.totalTokens;
     let finalText = turn.text.replace(/^["']|["']$/g, "");
 
-    // 4. Lidar com Web Search Tool Call
-    const call = turn.toolCalls[0];
-    if (call && useWebSearch && call.name === "web_search") {
-      const q = String((call.args as any)?.query || "");
-      try {
-        const results = await webSearch(q, 8);
-        const summary = results.length > 0
-          ? formatResultsForAI(results)
-          : "Nenhum resultado.";
-        turn = await session.sendToolResults([{ name: "web_search", id: call.id, response: { results: summary } }]);
-        tp += turn.usage.promptTokens; tc += turn.usage.completionTokens; tt += turn.usage.totalTokens;
-        finalText = turn.text.replace(/^["']|["']$/g, "");
-      } catch {
-        // Mantém finalText anterior
+    // 4. Lidar com Web Search Tool Call (pode haver múltiplas chamadas)
+    for (const call of turn.toolCalls || []) {
+      if (useWebSearch && call.name === "web_search") {
+        const q = String((call.args as any)?.query || "");
+        try {
+          const results = await webSearch(q, 8);
+          const summary = results.length > 0
+            ? formatResultsForAI(results)
+            : "Nenhum resultado.";
+          turn = await session.sendToolResults([{ name: "web_search", id: call.id, response: { results: summary } }]);
+          tp += turn.usage.promptTokens; tc += turn.usage.completionTokens; tt += turn.usage.totalTokens;
+          finalText = turn.text.replace(/^["']|["']$/g, "");
+        } catch {
+          // Mantém finalText anterior
+        }
       }
     }
 
