@@ -145,14 +145,14 @@ export default function FollowUpPage() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewData, setPreviewData] = useState<any>(null);
 
-  const loadCampaigns = useCallback(async () => {
-    setLoading(true);
+  const loadCampaigns = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const r = await fetch("/api/followup", { cache: "no-store" });
       const d = await r.json();
       if (d.success) setCampaigns(d.campaigns || []);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
@@ -242,7 +242,7 @@ export default function FollowUpPage() {
     loadInstances();
     loadModels();
     loadAvailableLeads();
-    const t = setInterval(() => loadCampaigns(), 8000);
+    const t = setInterval(() => loadCampaigns(true), 8000);
     return () => clearInterval(t);
   }, [loadCampaigns, loadInstances, loadModels, loadAvailableLeads]);
 
