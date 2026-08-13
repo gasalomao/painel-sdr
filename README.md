@@ -122,7 +122,7 @@ Para deploy completo no Easypanel, consulte [docs/PASSO_A_PASSO_DEPLOY.md](docs/
 ```
 src/
 ├── app/                    # Next.js App Router (páginas + API routes)
-│   ├── api/                # 30+ endpoints REST
+│   ├── api/                # 98 endpoints REST em 32 grupos
 │   ├── agente/             # Interface do agente de IA
 │   ├── automacao/          # Gestão de automações
 │   ├── chat/               # Inbox de mensagens
@@ -178,6 +178,21 @@ public/                     # Assets estáticos
 Veja [`.env.example`](.env.example) para o template completo.
 
 ## Documentação
+
+Documentação técnica completa em [`docs/`](docs/):
+
+| Documento | Descrição |
+|-----------|-----------|
+| [Arquitetura](docs/ARCHITECTURE.md) | Visão geral, componentes, fluxo de dados |
+| [Referência da API](docs/API_REFERENCE.md) | 98+ endpoints REST documentados |
+| [Banco de Dados](docs/DATABASE.md) | 40 tabelas, relacionamentos, índices |
+| [Pipeline de IA](docs/AI_PIPELINE.md) | Provedores, RAG, failover, custos |
+| [Canais WhatsApp](docs/CHANNELS.md) | Evolution V2/GO, Cloud API, roteamento |
+| [Workers](docs/WORKERS.md) | 6 schedulers: organizer, automação, campanhas |
+| [Segurança](docs/SECURITY.md) | Auth, multi-tenancy, feature gating |
+| [Frontend](docs/FRONTEND.md) | 17 páginas, componentes, hooks |
+
+Guias operacionais:
 
 - [Passo a Passo Deploy](docs/PASSO_A_PASSO_DEPLOY.md)
 - [Deploy Easypanel](docs/DEPLOY_EASYPANEL.md)
