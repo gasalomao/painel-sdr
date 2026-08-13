@@ -959,6 +959,19 @@ export default function AgentePage() {
         return;
       }
 
+      if (data.status && data.status !== "agent_active" && !data.text && !data.chunks) {
+        const statusMessages: Record<string, string> = {
+          agent_inactive: "⚠️ Agente inativo. Ative-o na aba Informações.",
+          ai_paused: `⏸️ IA pausada: ${data.reason || "motivo desconhecido"}.`,
+          out_of_office: "🕐 Fora do horário de atendimento configurado.",
+          batching_active: "⏳ Agurdando buffer de mensagens (não aplicável em teste).",
+          ignored: "ℹ️ Mensagem ignorada (status update).",
+        };
+        const msg = statusMessages[data.status] || `⚠️ Status inesperado: ${data.status}`;
+        setTestMessages((prev) => [...prev, { role: "agent", isError: true, content: msg }]);
+        return;
+      }
+
       const toolLogs: any[] = Array.isArray(data.logs) ? data.logs : [];
 
       if (data.testStateUpdate) {

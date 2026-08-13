@@ -145,7 +145,7 @@ export async function POST(req: NextRequest) {
     const historico = histRes.data || [];
     const knowledgeTopics: { id: string; title: string }[] = (kbRes.data || []).filter((k: any) => k.title);
 
-    if (!agentConfig || !agentConfig.is_active) {
+     if (!agentConfig || (!agentConfig.is_active && !isTestMode)) {
        console.log(`[AGENT] Agent ID ${agentId} is INACTIVE or not found.`);
        // Antes só logava no console e respondia 200 silencioso — usuário não
        // tinha como descobrir por que IA não respondeu. Agora persiste em
@@ -156,8 +156,14 @@ export async function POST(req: NextRequest) {
           payload: { agent_id: agentId, exists: !!agentConfig, is_active: agentConfig?.is_active ?? false, remote_jid: maskJid(remoteJid) },
           created_at: new Date().toISOString(),
        }).then(() => {}, () => {});
+       if (isTestMode) {
+         return NextResponse.json({ success: false, error: `Agente "${agentConfig?.name || agentId}" está INATIVO. Ative-o na aba Informações para usar em produção. (Modo teste permite simular mesmo inativo, mas o agente não foi encontrado.)` });
+       }
        return NextResponse.json({ success: true, status: "agent_inactive" });
-    }
+     }
+     if (isTestMode && agentConfig && !agentConfig.is_active) {
+       console.log(`[AGENT] Agent ID ${agentId} is INACTIVE but running in TEST MODE — bypassing gate.`);
+     }
 
     console.log(`[AGENT] Processing for Agent: ${agentConfig.name} (ID: ${agentId})`);
     
