@@ -55,7 +55,7 @@ Fase 6 (desativação)   [ ] PENDENTE
   GLOBAL_API_KEY=<chave-segura>
   POSTGRES_AUTH_DB=postgresql://user:pass@host:5432/evogo_auth?sslmode=disable
   POSTGRES_USERS_DB=postgresql://user:pass@host:5432/evogo_users?sslmode=disable
-  WEBHOOK_URL=https://sistema-sdr.REDACTED.easypanel.host/api/webhooks/evolution-go
+  WEBHOOK_URL=https://seu-app.easypanel.host/api/webhooks/evolution-go
   CONNECT_ON_STARTUP=true
   ```
 - Ativar licença (registro por email)

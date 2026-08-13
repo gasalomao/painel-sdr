@@ -1,8 +1,8 @@
-# 🚀 PASSO A PASSO — Deploy no Easypanel (Hostinger)
+# PASSO A PASSO — Deploy no Easypanel
 
 ## Pré-requisitos
 - Conta no GitHub (gratuita)
-- VPS Hostinger com Easypanel rodando
+- VPS com Easypanel rodando
 - n8n e Evolution API já funcionando no Easypanel
 
 ---
@@ -17,7 +17,6 @@
 6. No seu computador, abra o terminal na pasta do projeto e rode:
 
 ```bash
-cd "C:\Users\Salomao\Desktop\meu sistema\painel-sdr"
 git add .
 git commit -m "primeiro deploy"
 git branch -M main
@@ -50,19 +49,23 @@ git push -u origin main
 
 ## PASSO 4: Configurar Variáveis de Ambiente
 
-No Easypanel, vá em **"Environment"** do seu app e adicione:
+No Easypanel, vá em **"Environment"** do seu app e adicione (substitua pelos seus valores reais):
 
 | Variável | Valor |
 |----------|-------|
-| `NEXT_PUBLIC_SUPABASE_URL` | `https://REDACTED.supabase.co` |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | `REDACTED.REDACTED` |
-| `REDIS_URL` | `redis://default:REDACTED@REDACTED:6379` |
-| `EVOLUTION_API_URL` | `https://n8n-evolution-api.REDACTED.easypanel.host` |
-| `EVOLUTION_API_KEY` | `REDACTED` |
+| `NEXT_PUBLIC_SUPABASE_URL` | `https://seu-supabase.easypanel.host` |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | `sua-anon-key` |
+| `SUPABASE_SERVICE_ROLE_KEY` | `sua-service-role-key` |
+| `EVOLUTION_API_URL` | `https://seu-evolution-api.easypanel.host` |
+| `EVOLUTION_API_KEY` | `sua-evolution-api-key` |
 | `EVOLUTION_INSTANCE` | `sdr` |
-| `N8N_WEBHOOK_LEAD` | `https://n8n-n8n.REDACTED.easypanel.host/webhook/LEAD` |
-| `ADMIN_PASSWORD` | `REDACTED` |
-
+| `EVOLUTION_GO_URL` | `https://seu-evolution-go.easypanel.host` |
+| `EVOLUTION_GO_KEY` | `sua-evolution-go-key` |
+| `REDIS_HOST` | `sistema_redis` |
+| `REDIS_PORT` | `6379` |
+| `REDIS_PASSWORD` | `sua-senha-redis` |
+| `ADMIN_PASSWORD` | `sua-senha-admin` |
+| `NEXT_PUBLIC_APP_URL` | `https://seu-app.easypanel.host` |
 
 ---
 
@@ -83,32 +86,27 @@ No Easypanel, vá em **"Environment"** do seu app e adicione:
 
 ## PASSO 7: Configurar Realtime no Supabase
 
-Para o chat em tempo real funcionar, você precisa habilitar o Realtime na tabela `n8n_chat_histories`:
+Para o chat em tempo real funcionar, você precisa habilitar o Realtime nas tabelas:
 
 1. Acesse o Supabase Dashboard
-2. Vá em **Database > Tables**
-3. Clique na tabela `n8n_chat_histories`
-4. Aba **"Realtime"**
-5. Ative o toggle para habilitar Realtime nesta tabela
+2. Vá em **Database > Replication**
+3. Verifique se a publicação `supabase_realtime` lista as tabelas `chats_dashboard`, `messages`, `sessions`
 
 ---
 
 ## Onde encontrar as chaves
 
 ### Supabase URL e Anon Key:
-1. Acesse https://supabase.com
-2. Clique no seu projeto
-3. Menu lateral: **Settings** (engrenagem)
-4. Clique em **API**
-5. Copie `Project URL` e `anon public` key
+1. Acesse seu Supabase Studio
+2. Vá em **Settings → API**
+3. Copie `Project URL` e `anon public` key
 
-### Redis URL:
+### Redis:
 - Se o Redis está rodando como container no Easypanel, veja o hostname interno do container
 - Geralmente é algo como `redis://nome-do-servico:6379`
-- Veja no Easypanel o nome do serviço Redis
 
 ### Evolution API Key:
-- Você já tem: é a `apikey` usada nos seus webhooks do n8n
+- É a `apikey` usada nos seus webhooks
 - Está no payload do webhook como campo `apikey`
 
 ---
@@ -119,6 +117,6 @@ Para o chat em tempo real funcionar, você precisa habilitar o Realtime na tabel
 |----------|---------|
 | Build falhou | Verifique os logs no Easypanel. Geralmente é variável de ambiente faltando |
 | Dados não carregam | Verifique se `NEXT_PUBLIC_SUPABASE_URL` e `ANON_KEY` estão corretos |
-| Chat não atualiza em tempo real | Habilite Realtime na tabela `n8n_chat_histories` no Supabase |
+| Chat não atualiza em tempo real | Habilite Realtime nas tabelas no Supabase |
 | Mensagens não enviam | Verifique `EVOLUTION_API_URL` e `EVOLUTION_API_KEY` |
 | Redis não conecta | Verifique o hostname interno do container Redis no Easypanel |

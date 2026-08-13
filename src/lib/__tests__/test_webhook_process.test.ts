@@ -2,7 +2,7 @@ import './setupEnv';
 import { test, expect } from 'vitest';
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://sistema-supabase.REDACTED.easypanel.host';
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'http://localhost:54321';
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const supabase = createClient(supabaseUrl, supabaseServiceKey!);
 
@@ -32,7 +32,7 @@ test("simulate webhook for Marcio Medeiros Advocacia", async () => {
       "messageTimestamp": 1779478456
     },
     "event": "messages.upsert",
-    "apikey": "REDACTED",
+    "apikey": "test-api-key",
     "sender": "5511961607625@s.whatsapp.net",
     "instance": "00000_sao_paulo"
   };

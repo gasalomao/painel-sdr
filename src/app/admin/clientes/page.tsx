@@ -335,7 +335,7 @@ function CredentialsModal({ client, onClose }: { client: Client; onClose: () => 
   const [copied, setCopied] = useState(false);
 
   // URL do painel — usa o domínio que o admin está acessando agora.
-  // Em prod fica https://sistema-sdr.REDACTED.easypanel.host, em dev localhost:3000.
+  // Em prod fica no domínio configurado no Easypanel, em dev localhost:3000.
   const panelUrl = typeof window !== "undefined" ? window.location.origin : "";
 
   // Gera uma senha forte aleatória pra agilizar (admin pode trocar).

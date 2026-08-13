@@ -21,8 +21,8 @@
 
 ## Provedor WhatsApp Atual
 
-- **Evolution API** (Node.js/Baileys) hospedada em `https://sistema-evolution-api.REDACTED.easypanel.host`
-- API Key: `REDACTED`
+- **Evolution API** (Node.js/Baileys) hospedada no Easypanel
+- API Key: *(ver `EVOLUTION_API_KEY` no Environment)*
 - Instância padrão: `sdr`
 - Webhook: recebe em `/api/webhooks/whatsapp`
 

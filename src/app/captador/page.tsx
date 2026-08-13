@@ -88,7 +88,7 @@ interface LogEntry {
 export default function CaptadorPage() {
   const [niches, setNiches] = useState("");
   const [regions, setRegions] = useState("");
-  const [webhookUrl, setWebhookUrl] = useState(process.env.NEXT_PUBLIC_N8N_WEBHOOK_LEAD || "https://n8n-n8n.REDACTED.easypanel.host/webhook/LEAD");
+  const [webhookUrl, setWebhookUrl] = useState(process.env.NEXT_PUBLIC_N8N_WEBHOOK_LEAD || "");
   const [webhookEnabled, setWebhookEnabled] = useState(false);
   const [sendMode, setSendMode] = useState<"realtime" | "batch">("realtime");
   const [isRunning, setIsRunning] = useState(false);

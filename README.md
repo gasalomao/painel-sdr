@@ -166,9 +166,11 @@ public/                     # Assets estáticos
 | `NEXT_PUBLIC_SUPABASE_URL` | URL do projeto Supabase | Sim |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Chave anônima do Supabase | Sim |
 | `SUPABASE_SERVICE_ROLE_KEY` | Service role key (server-side only) | Sim |
-| `EVOLUTION_API_URL` | URL da instância Evolution API | Sim |
-| `EVOLUTION_API_KEY` | API key da Evolution | Sim |
+| `EVOLUTION_API_URL` | URL da instância Evolution API (V2) | Sim |
+| `EVOLUTION_API_KEY` | API key da Evolution V2 | Sim |
 | `EVOLUTION_INSTANCE` | Nome da instância | Sim |
+| `EVOLUTION_GO_URL` | URL do Evolution GO (Go/whatsmeow) | Não |
+| `EVOLUTION_GO_KEY` | API key do Evolution GO | Não |
 | `REDIS_HOST` | Host Redis | Não |
 | `REDIS_PORT` | Porta Redis | Não |
 | `REDIS_PASSWORD` | Senha Redis | Não |

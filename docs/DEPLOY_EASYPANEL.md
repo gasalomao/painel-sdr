@@ -1,4 +1,4 @@
-# Deploy no Easypanel — Guia completo (2026)
+# Deploy no Easypanel — Guia completo
 
 Guia prático pra subir o **Painel SDR** numa VPS com Easypanel, puxando direto do
 GitHub. Nenhuma funcionalidade fica de fora: chat, IA, disparo, follow-up,
@@ -11,11 +11,11 @@ scraper Google Maps (Puppeteer + Chromium), Evolution API, organizador IA, etc.
 
 ## 0. Pré-requisitos
 
-- VPS com Easypanel rodando (IP: `REDACTED`).
+- VPS com Easypanel rodando.
 - Repositório no GitHub com o projeto: `https://github.com/gasalomao/painel-sdr`.
 - Supabase self-hosted no Easypanel (URL + anon key + **service_role key**).
-- Evolution API V2 acessível no Easypanel (`https://sistema-evolution-api.REDACTED.easypanel.host`).
-- Redis acessível no Easypanel (`sistema_redis:6379`).
+- Evolution API V2 acessível no Easypanel.
+- Redis acessível no Easypanel.
 - API Key do Gemini (`https://aistudio.google.com/apikey`).
 
 ---
@@ -62,24 +62,28 @@ em MAIÚSCULO** pelos seus reais.
 
 ```env
 # ============= SUPABASE (self-hosted) =============
-NEXT_PUBLIC_SUPABASE_URL=https://sistema-supabase.REDACTED.easypanel.host
-NEXT_PUBLIC_SUPABASE_ANON_KEY=REDACTED.REDACTED
-SUPABASE_SERVICE_ROLE_KEY=REDACTED.REDACTED
+NEXT_PUBLIC_SUPABASE_URL=https://seu-supabase.easypanel.host
+NEXT_PUBLIC_SUPABASE_ANON_KEY=sua-anon-key
+SUPABASE_SERVICE_ROLE_KEY=sua-service-role-key
 
-# ============= EVOLUTION (WhatsApp) =============
-EVOLUTION_API_URL=https://sistema-evolution-api.REDACTED.easypanel.host
-EVOLUTION_API_KEY=REDACTED
+# ============= EVOLUTION API (WhatsApp) =============
+EVOLUTION_API_URL=https://seu-evolution-api.easypanel.host
+EVOLUTION_API_KEY=sua-evolution-api-key
 EVOLUTION_INSTANCE=sdr
+
+# ============= EVOLUTION GO (WhatsApp — Go/whatsmeow) =============
+EVOLUTION_GO_URL=https://seu-evolution-go.easypanel.host
+EVOLUTION_GO_KEY=sua-evolution-go-key
 
 # ============= REDIS =============
 REDIS_HOST=sistema_redis
 REDIS_PORT=6379
-REDIS_PASSWORD=REDACTED
+REDIS_PASSWORD=sua-senha-redis
 REDIS_USERNAME=default
 
 # ============= APP =============
-ADMIN_PASSWORD=REDACTED
-NEXT_PUBLIC_APP_URL=https://sistema-sdr.REDACTED.easypanel.host
+ADMIN_PASSWORD=sua-senha-admin
+NEXT_PUBLIC_APP_URL=https://seu-app.easypanel.host
 INTERNAL_APP_URL=http://localhost:3000
 PORT=3000
 HOSTNAME=0.0.0.0
@@ -99,10 +103,10 @@ Em **Build → Build Args**, cole as variáveis `NEXT_PUBLIC_*` e
 `SUPABASE_SERVICE_ROLE_KEY`:
 
 ```
-NEXT_PUBLIC_SUPABASE_URL=https://sistema-supabase.REDACTED.easypanel.host
-NEXT_PUBLIC_SUPABASE_ANON_KEY=REDACTED.REDACTED
-NEXT_PUBLIC_APP_URL=https://sistema-sdr.REDACTED.easypanel.host
-SUPABASE_SERVICE_ROLE_KEY=REDACTED.REDACTED
+NEXT_PUBLIC_SUPABASE_URL=https://seu-supabase.easypanel.host
+NEXT_PUBLIC_SUPABASE_ANON_KEY=sua-anon-key
+NEXT_PUBLIC_APP_URL=https://seu-app.easypanel.host
+SUPABASE_SERVICE_ROLE_KEY=sua-service-role-key
 ```
 
 ---
@@ -110,7 +114,7 @@ SUPABASE_SERVICE_ROLE_KEY=REDACTED.REDACTED
 ## 5. Domínio + SSL
 
 Em **Domains** do serviço:
-- Adicione o domínio: `https://sistema-sdr.REDACTED.easypanel.host`
+- Adicione o domínio: `https://seu-app.easypanel.host`
 - Marque **Force SSL** (HTTPS obrigatório).
 
 ---
@@ -144,16 +148,16 @@ Sucesso quando aparece nos logs:
 
 ## 8. Primeiro acesso (configuração inicial pela UI)
 
-Abra `https://sistema-sdr.REDACTED.easypanel.host`.
+Abra `https://seu-app.easypanel.host`.
 
-1. **Login**: senha = `REDACTED`.
+1. **Login**: usa a senha definida em `ADMIN_PASSWORD`.
 2. **Configurações → Google Gemini API Key**: cola sua chave do AI Studio.
    Salva. Aparece "Configurada" verde.
 3. **Configurações → Evolution API**: confirma se a URL/apikey/instância
    estão certas. Clica em **Testar conexão** — deve aparecer verde.
 4. **Configurações → Setup do Banco → Verificar agora** — confirma "Banco pronto".
 5. **Agente IA → Sincronizar Webhook**: o painel configura o webhook apontando pra
-   `https://sistema-sdr.REDACTED.easypanel.host/api/webhooks/evolution`.
+   `https://seu-app.easypanel.host/api/webhooks/evolution`.
 6. Manda uma mensagem de teste no WhatsApp e confere se chega no **Chat**.
 
 ---

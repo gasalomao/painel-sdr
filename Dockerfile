@@ -25,10 +25,10 @@ COPY . .
 
 # ----- Build args (variáveis NEXT_PUBLIC_* viram código no JS do cliente) -----
 # Easypanel injeta estes valores via "Build Args" se você setar lá.
-# Se NÃO setar, caem nos defaults abaixo (que apontam pra produção).
-ARG NEXT_PUBLIC_SUPABASE_URL=https://sistema-supabase.REDACTED.easypanel.host
-ARG NEXT_PUBLIC_SUPABASE_ANON_KEY=REDACTED.REDACTED
-ARG NEXT_PUBLIC_APP_URL=https://sistema-sdr.REDACTED.easypanel.host
+# Defaults vazios — Easypanel preenche via Build Args.
+ARG NEXT_PUBLIC_SUPABASE_URL=
+ARG NEXT_PUBLIC_SUPABASE_ANON_KEY=
+ARG NEXT_PUBLIC_APP_URL=
 ARG SUPABASE_SERVICE_ROLE_KEY=
 
 ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL \
