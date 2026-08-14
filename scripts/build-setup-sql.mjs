@@ -1,11 +1,16 @@
 // Gera src/lib/setup-sql.ts a partir de SETUP_COMPLETO.sql.
 // Rode: node scripts/build-setup-sql.mjs
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 const root = process.cwd();
 const sqlPath = join(root, "SETUP_COMPLETO.sql");
 const outPath = join(root, "src", "lib", "setup-sql.ts");
+
+if (!existsSync(sqlPath)) {
+  console.log("[build-setup-sql] SETUP_COMPLETO.sql não encontrado — pulando regeração (usando setup-sql.ts existente).");
+  process.exit(0);
+}
 
 const sql = readFileSync(sqlPath, "utf8");
 
