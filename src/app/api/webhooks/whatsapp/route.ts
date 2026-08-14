@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { evolution, getEvolutionConfig } from "@/lib/evolution";
 import { getEffectiveStatus } from "@/lib/bot-status";
@@ -1024,33 +1024,34 @@ export async function POST(req: NextRequest) {
         mediaMsg?.base64 || null;
 
       if (hasMedia) {
-        // Pipeline em background (Evolution tem timeout curto no webhook):
+        // Pipeline de mídia roda APÓS a resposta — after() garante execução
+        // mesmo em serverless. Em Docker/Easypanel o Node continua vivo.
         //   1. Resolve base64 (inline ou via getBase64FromMedia)
         //   2. Upload pro Storage → media_url
-        //   3. Se audio → transcreve com Gemini
+        //   3. Se audio → transcreve (whisper/gemini conforme agente)
         //      Se image → descreve com Gemini
         //   4. Update chats_dashboard.content com transcrição/descrição
         //   5. Se for customer + bot ativo → dispara o agente com o texto enriquecido
-        // Pipeline async em background. Em Next 16 com output:standalone, IIFE
-        // continua executando DB ops após response (Node event loop ainda vivo).
-        // Apenas fetch() de saída pode ser abortado — por isso o dispatch interno
-        // do agente em mensagens texto vai pelo caminho síncrono acima.
-        (async () => {
+        after(async () => {
           try {
             // 1) Resolve base64
             if (!base64Media && finalId) {
               console.log("[Media] Sem base64 inline — buscando via getBase64FromMedia...");
               try {
-                const got = await evolution.getBase64FromMedia(finalId, instanceName);
+                const got = await evolution.getBase64FromMedia(finalId, instanceName, remoteJid, fromMe);
                 base64Media = got?.base64 || got?.data?.base64 || got?.message?.base64 || null;
+                if (!base64Media && typeof got === "object") {
+                  console.log("[Media] getBase64FromMedia resposta keys:", Object.keys(got));
+                }
               } catch (fetchErr: any) {
                 console.warn("[Media] getBase64FromMedia falhou:", fetchErr?.message);
               }
             }
             if (!base64Media) {
-              console.warn("[Media] Nenhum base64 disponível pra msg", finalId, "— content fica como placeholder.");
+              console.warn("[Media] Nenhum base64 disponível pra msg", finalId, "— content fica como placeholder. Ative webhookBase64 na instância Evolution.");
               return;
             }
+            console.log("[Media] base64 resolvido, length:", base64Media.length);
 
             const effMimetype = mimetype || mediaMsg?.mimetype || (msgType === "audio" ? "audio/ogg" : msgType === "image" ? "image/jpeg" : "application/octet-stream");
 
@@ -1184,7 +1185,7 @@ export async function POST(req: NextRequest) {
           } catch (err: any) {
             console.error("[Media] Pipeline falhou:", err?.message);
           }
-        })();
+        });
       }
 
       // === 1. SALVA PRIMEIRO NO chats_dashboard (fonte que a UI /chat lê) ===

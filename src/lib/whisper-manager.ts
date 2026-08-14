@@ -207,7 +207,7 @@ export async function getWhisperStatus(): Promise<WhisperStatus> {
 export async function transcribeAudioWithWhisper(
   base64: string,
   mimetype: string,
-  timeoutMs = 60000,
+  timeoutMs = 120000,
 ): Promise<string | null> {
   if (WHISPER_DISABLED) return null;
   if (!isWhisperInstalled()) {

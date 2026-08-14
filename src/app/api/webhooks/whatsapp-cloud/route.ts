@@ -12,7 +12,7 @@
  * `/api/agent/process` com o sessionId — exatamente igual ao fluxo Evolution.
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { whatsappCloud } from "@/lib/whatsapp-cloud";
 import { resolveChannel, resolveInstanceFromPhoneNumberId } from "@/lib/channel";
@@ -321,7 +321,7 @@ export async function POST(req: NextRequest) {
 
       // Pipeline de mídia em background (download Cloud + upload Storage + transcrição/descrição + retrigger agente)
       if (enrichedLater && m.mediaId) {
-        (async () => {
+        after(async () => {
           try {
             const ch = await resolveChannel(instanceName);
             if (!ch.cloud) return;
@@ -385,7 +385,7 @@ export async function POST(req: NextRequest) {
           } catch (mErr: any) {
             console.warn("[Cloud Media] pipeline falhou:", mErr?.message);
           }
-        })();
+        });
       }
 
       // Dispara agente com texto direto (igual webhook Evolution)

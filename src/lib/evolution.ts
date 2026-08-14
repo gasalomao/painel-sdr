@@ -581,10 +581,13 @@ export const evolution = {
    * Útil como fallback quando o webhook não traz o base64 inline.
    * Requer que a Evolution API tenha store habilitado.
    */
-  async getBase64FromMedia(messageId: string, instance?: string) {
+  async getBase64FromMedia(messageId: string, instance?: string, remoteJid?: string, fromMe?: boolean) {
     instance = await resolveInstance(instance);
+    const key: Record<string, unknown> = { id: messageId };
+    if (remoteJid) key.remoteJid = remoteJid;
+    if (fromMe !== undefined) key.fromMe = fromMe;
     return evoFetch(`/chat/getBase64FromMediaMessage/${instance}`, "POST", {
-      message: { key: { id: messageId } },
+      message: { key },
       convertToMp4: false
     });
   },

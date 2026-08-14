@@ -19,7 +19,7 @@
  * Público (não exige auth) — coberto pelo prefixo /api/webhooks/ no proxy.ts.
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import {
   unwrapMessage, extractText, extractMessageType, extractMimetype,
@@ -236,8 +236,7 @@ export async function POST(req: NextRequest) {
     const base64Media = extractBase64Media(unwrapped);
 
     if (!fromMe && base64Media) {
-      // Roda em background (fire-and-forget) — o cliente não espera.
-      (async () => {
+      after(async () => {
         try {
           let enrichedContent: string | null = null;
           let mediaUrl: string | null = null;
@@ -267,7 +266,7 @@ export async function POST(req: NextRequest) {
         } catch (e: any) {
           console.warn("[evo-go-webhook] processamento de mídia falhou:", e?.message);
         }
-      })();
+      });
     }
 
     // ===== Disparar agente IA (mensagens do cliente com texto/mídia) =====
