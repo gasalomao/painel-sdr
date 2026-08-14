@@ -1009,9 +1009,7 @@ export async function POST(req: NextRequest) {
       // Fallback: se NÃO veio inline, a Evolution tem endpoint pra buscar depois pelo id:
       //   POST /chat/getBase64FromMediaMessage/{instance}
       // O uploadMediaBase64 faz upload pro Storage "whatsapp_media" e devolve a URL pública.
-      const mediaUrl: string | null = null;
       // Usa a mensagem desempacotada — ephemeral/viewOnce escondiam a mídia
-      // dentro de message.{ephemeralMessage|viewOnceMessage}.message.{tipo}Message.
       const unwrapped = unwrapMessage(message);
       const mediaMsg =
         unwrapped.imageMessage || unwrapped.audioMessage || unwrapped.pttMessage ||
@@ -1023,187 +1021,112 @@ export async function POST(req: NextRequest) {
         data.base64 || message.base64 || unwrapped.base64 ||
         mediaMsg?.base64 || null;
 
-      if (hasMedia) {
-        // Pipeline de mídia roda APÓS a resposta — after() garante execução
-        // mesmo em serverless. Em Docker/Easypanel o Node continua vivo.
-        //   1. Resolve base64 (inline ou via getBase64FromMedia)
-        //   2. Upload pro Storage → media_url
-        //   3. Se audio → transcreve (whisper/gemini conforme agente)
-        //      Se image → descreve com Gemini
-        //   4. Update chats_dashboard.content com transcrição/descrição
-        //   5. Se for customer + bot ativo → dispara o agente com o texto enriquecido
+      const effMimetype = mimetype || mediaMsg?.mimetype || (msgType === "audio" ? "audio/ogg" : msgType === "image" ? "image/jpeg" : "application/octet-stream");
+
+      // === TRANSCRIÇÃO INLINE (antes do insert) ===
+      // after() é no-op em standalone (confirmado no código linha ~1378).
+      // IIFE fire-and-forget morre quando o handler retorna.
+      // Única forma garantida: rodar a transcrição ANTES de salvar a mensagem.
+      // Evolution aceita até 30s — whisper small leva ~15s.
+      let enrichedContent: string | null = null;
+
+      if (hasMedia && msgType === "audio" && !fromMe && !groupDisabled && transcriptionMethod !== "disabled") {
+        // Resolve base64 (inline ou via Evolution API)
+        if (!base64Media && finalId) {
+          console.log("[Media] Sem base64 inline — buscando via getBase64FromMedia...");
+          try {
+            const got = await evolution.getBase64FromMedia(finalId, instanceName, remoteJid, fromMe);
+            base64Media = got?.base64 || got?.data?.base64 || got?.message?.base64 || null;
+            if (!base64Media && typeof got === "object") {
+              console.log("[Media] getBase64FromMedia resposta keys:", Object.keys(got));
+            }
+          } catch (fetchErr: any) {
+            console.warn("[Media] getBase64FromMedia falhou:", fetchErr?.message);
+          }
+        }
+
+        if (base64Media) {
+          console.log("[Media] base64 OK, length:", base64Media.length);
+          let transcript: string | null = null;
+          let transcribeProvider = "none";
+
+          // Whisper (grátis, local CPU)
+          if (transcriptionMethod === "auto" || transcriptionMethod === "whisper") {
+            try {
+              const { transcribeAudioWithWhisper } = await import("@/lib/whisper-manager");
+              console.log("[Media] Transcrevendo com whisper.cpp...");
+              transcript = await transcribeAudioWithWhisper(base64Media, effMimetype);
+              if (transcript) transcribeProvider = "whisper";
+            } catch (wErr: any) {
+              console.warn("[Media] whisper.cpp indisponível:", wErr?.message);
+            }
+          }
+
+          // Gemini fallback
+          if (!transcript && (transcriptionMethod === "auto" || transcriptionMethod === "gemini")) {
+            console.log("[Media] Transcrevendo com Gemini...");
+            transcript = await transcribeAudioWithGemini(base64Media, effMimetype, finalId, clientId);
+            if (transcript) transcribeProvider = "gemini";
+          }
+
+          if (transcript) {
+            enrichedContent = `🎤 ${transcript}`;
+            console.log(`[Media] Transcrição (${transcribeProvider}):`, transcript.slice(0, 80));
+          } else {
+            enrichedContent = "[🎤 O cliente enviou um áudio que não consegui transcrever]";
+            console.warn("[Media] Transcrição falhou.");
+          }
+        } else {
+          console.warn("[Media] Nenhum base64 — ative webhookBase64 na instância Evolution.");
+          enrichedContent = "[🎤 Áudio recebido — base64 indisponível]";
+        }
+      }
+
+      // === UPLOAD + DESCRICAO DE IMAGEM/DOCUMENTO (background, não bloqueia) ===
+      if (hasMedia && base64Media && (msgType === "image" || msgType === "document") && !fromMe) {
         after(async () => {
           try {
-            // 1) Resolve base64
-            if (!base64Media && finalId) {
-              console.log("[Media] Sem base64 inline — buscando via getBase64FromMedia...");
-              try {
-                const got = await evolution.getBase64FromMedia(finalId, instanceName, remoteJid, fromMe);
-                base64Media = got?.base64 || got?.data?.base64 || got?.message?.base64 || null;
-                if (!base64Media && typeof got === "object") {
-                  console.log("[Media] getBase64FromMedia resposta keys:", Object.keys(got));
-                }
-              } catch (fetchErr: any) {
-                console.warn("[Media] getBase64FromMedia falhou:", fetchErr?.message);
-              }
-            }
-            if (!base64Media) {
-              console.warn("[Media] Nenhum base64 disponível pra msg", finalId, "— content fica como placeholder. Ative webhookBase64 na instância Evolution.");
-              return;
-            }
-            console.log("[Media] base64 resolvido, length:", base64Media.length);
-
-            const effMimetype = mimetype || mediaMsg?.mimetype || (msgType === "audio" ? "audio/ogg" : msgType === "image" ? "image/jpeg" : "application/octet-stream");
-
-            // 2) Upload
             const url = await uploadMediaBase64(base64Media, remoteJid, effMimetype);
-            if (url) {
-              console.log("[Media] Uploaded:", url);
-            } else {
-              console.warn("[Media] Upload falhou — segue pra transcrição mesmo assim.");
-            }
+            if (url) console.log("[Media] Uploaded:", url);
 
-            // 3) ÁUDIO: método definido pelo agente (auto/whisper/gemini/disabled).
-            let enrichedContent: string | null = null;
-            if (msgType === "audio" && !groupDisabled && transcriptionMethod !== "disabled") {
-              let transcript: string | null = null;
-              let transcribeProvider = "none";
-
-              // Whisper (grátis, local CPU).
-              if (transcriptionMethod === "auto" || transcriptionMethod === "whisper") {
-                try {
-                  const { transcribeAudioWithWhisper } = await import("@/lib/whisper-manager");
-                  console.log("[Media] Transcrevendo áudio com whisper.cpp (grátis)...");
-                  transcript = await transcribeAudioWithWhisper(base64Media, effMimetype);
-                  if (transcript) transcribeProvider = "whisper";
-                } catch (wErr: any) {
-                  console.warn("[Media] whisper.cpp indisponível:", wErr?.message);
-                }
-              }
-
-              // Gemini (cloud, fallback em auto; único em gemini).
-              if (!transcript && (transcriptionMethod === "auto" || transcriptionMethod === "gemini")) {
-                console.log("[Media] Transcrevendo áudio com Gemini...");
-                transcript = await transcribeAudioWithGemini(base64Media, effMimetype, finalId, clientId);
-                if (transcript) transcribeProvider = "gemini";
-              }
-              if (transcript) {
-                enrichedContent = `🎤 ${transcript}`;
-                console.log(`[Media] Transcrição (${transcribeProvider}):`, transcript.slice(0, 80));
-              } else {
-                // Sem transcrição — mas ainda manda o áudio pra IA com uma nota
-                // pra ela poder responder algo ("peça pra cliente repetir por texto")
-                enrichedContent = "[🎤 O cliente enviou um áudio que não consegui transcrever]";
-                console.warn("[Media] Transcrição falhou — veja webhook_logs.event=TRANSCRIPTION_FAIL pro motivo exato.");
-              }
-            } else if (msgType === "image") {
-              console.log("[Media] Descrevendo imagem com Gemini...");
+            if (msgType === "image") {
               const desc = await describeImageWithGemini(base64Media, effMimetype, clientId);
               if (desc) {
                 enrichedContent = `📷 ${desc}`;
-                console.log("[Media] Descrição:", desc.slice(0, 80));
+                const upd: Record<string, any> = { content: enrichedContent };
+                if (url) upd.media_url = url;
+                await supabase.from("chats_dashboard").update(upd).eq("message_id", finalId).then(() => {}, () => {});
               }
-              // Imagem sem descrição fica com placeholder "[📷 Imagem]" que já foi inserido
             } else if (msgType === "document") {
-              console.log("[Media] Extraindo conteúdo de documento com Gemini...");
               const fileName = extractFileName(message);
               const desc = await describeDocumentWithGemini(base64Media, effMimetype, fileName, clientId);
               if (desc) {
                 enrichedContent = `📄 ${fileName ? `[${fileName}] ` : ""}${desc}`;
-                console.log("[Media] Documento:", desc.slice(0, 80));
-              } else {
-                // Sem extração mas IA ainda recebe contexto de que cliente mandou arquivo
-                enrichedContent = `[📄 O cliente enviou ${fileName ? `o documento "${fileName}"` : "um documento"}${effMimetype ? ` (${effMimetype})` : ""} mas não consegui extrair o conteúdo automaticamente]`;
+                const upd: Record<string, any> = { content: enrichedContent };
+                if (url) upd.media_url = url;
+                await supabase.from("chats_dashboard").update(upd).eq("message_id", finalId).then(() => {}, () => {});
               }
             }
-
-            // 4) Update das tabelas — sempre atualiza media_url/mimetype,
-            //    e content se tiver enrichment
-            const mediaCategory = ['image', 'audio', 'video', 'document', 'sticker'].includes(msgType) ? msgType : null;
-
-            // messages (V2)
-            const v2Update: Record<string, any> = {};
-            if (url) v2Update.media_url = url;
-            if (effMimetype) v2Update.mimetype = effMimetype;
-            if (enrichedContent) v2Update.content = enrichedContent;
-            if (Object.keys(v2Update).length > 0) {
-              await supabase.from("messages").update(v2Update).eq("message_id", finalId).then(({ error }) => error && console.warn("[Media] update messages:", error.message));
-            }
-
-            // chats_dashboard — update completo, com fallback se coluna não existe
-            const fullUpdate: Record<string, any> = {};
-            if (url) fullUpdate.media_url = url;
-            if (mediaCategory) fullUpdate.media_type = mediaCategory;
-            if (effMimetype) fullUpdate.mimetype = effMimetype;
-            if (enrichedContent) fullUpdate.content = enrichedContent;
-
-            if (Object.keys(fullUpdate).length > 0) {
-              const { error: dashUpdErr } = await supabase.from("chats_dashboard").update(fullUpdate).eq("message_id", finalId);
-
-              if (dashUpdErr?.code === "PGRST204") {
-                // Alguma coluna extra falta — tenta só content + media_url (essencial)
-                const minimal: Record<string, any> = {};
-                if (url) minimal.media_url = url;
-                if (enrichedContent) minimal.content = enrichedContent;
-                const retry = await supabase.from("chats_dashboard").update(minimal).eq("message_id", finalId);
-                if (retry.error?.code === "PGRST204") {
-                  // Nem media_url existe — atualiza só content
-                  if (enrichedContent) {
-                    await supabase.from("chats_dashboard").update({ content: enrichedContent }).eq("message_id", finalId);
-                  }
-                  console.warn("[Media] chats_dashboard sem coluna media_url. Rode criar_chats_dashboard_extras.sql pra mostrar mídia.");
-                } else if (retry.error) {
-                  console.warn("[Media] update chats_dashboard (minimal):", retry.error.message);
-                }
-              } else if (dashUpdErr) {
-                console.warn("[Media] update chats_dashboard:", dashUpdErr.message);
-              }
-            }
-
-            // 5) Dispara agente com texto enriquecido (só se msg do cliente + bot ativo +
-            //    transcrição disponível + mensagem original NÃO tinha caption — senão
-            //    o fluxo síncrono já disparou e a gente evita double-fire).
-            if (!fromMe && !text && enrichedContent && session?.id && !groupDisabled) {
-              const effectiveActive = (session as any)._effective_active ?? (session.bot_status === 'bot_active');
-              if (effectiveActive) {
-                console.log("🤖 [Media] Disparando agente com conteúdo transcrito/descrito:", enrichedContent.slice(0, 60));
-                try {
-                  await fetch(`${INTERNAL_BASE}/api/agent/process`, {
-                    method: "POST",
-                    headers: {
-                      "Content-Type": "application/json",
-                      [INTERNAL_SECRET_HEADER]: getInternalSecret(),
-                      ...(overrideAgentId ? { "x-test-agent-id": overrideAgentId } : {})
-                    },
-                    body: JSON.stringify({ instanceName, remoteJid, text: enrichedContent, sessionId: session.id })
-                  });
-                } catch (e: any) {
-                  console.error("[Media] Falha ao disparar agente:", e?.message);
-                }
-              }
-            }
-          } catch (err: any) {
-            console.error("[Media] Pipeline falhou:", err?.message);
+          } catch (e: any) {
+            console.error("[Media] Pipeline imagem/doc falhou:", e?.message);
           }
         });
       }
 
-      // === 1. SALVA PRIMEIRO NO chats_dashboard (fonte que a UI /chat lê) ===
-      // Payload MINIMAL: só colunas que a gente tem certeza que existem.
-      // Colunas extras (message_type, media_*, quoted_*, mimetype) são opcionais
-      // e serão incluídas via "enrichment" depois, se a tabela tiver espaço.
-      //
-      // Pra mídias sem caption (foto/áudio sozinhos), sem placeholder a UI mostra
-      // "[Sem conteúdo]". Com placeholder, mostra "[🎤 Áudio — transcrevendo...]"
-      // e depois o enrichment troca pela transcrição real.
-      // Fallback em camadas: texto > placeholder por tipo > genérico [Mídia].
-      // Garante que NUNCA caímos em null/"" pra mensagens novas — se um tipo
-      // novo aparecer (ex: novo wrapper da Evolution), mostra ao menos "[Mídia]"
-      // em vez de "[Sem conteúdo]" no chat.
+      // === 1. SALVA PRIMEIRO NO chats_dashboard ===
+      // Se áudio foi transcrito, o conteúdo JÁ vem com a transcrição.
       const initialContent =
+        enrichedContent ||
         text ||
         (hasMedia ? mediaPlaceholder(msgType) : null) ||
         (msgType && msgType !== "text" ? mediaPlaceholder(msgType) : null);
+
+      let mediaUrl: string | null = null;
+      if (hasMedia && base64Media && msgType === "audio") {
+        try {
+          mediaUrl = await uploadMediaBase64(base64Media, remoteJid, effMimetype);
+        } catch {}
+      }
 
       const basePayload: Record<string, any> = {
         client_id: clientId,
@@ -1281,7 +1204,7 @@ export async function POST(req: NextRequest) {
           session_id: session.id,
           message_id: finalId,
           sender,
-          content: text || null,
+          content: enrichedContent || text || null,
           media_category: msgType as any,
           media_url: mediaUrl,
           mimetype,
@@ -1359,8 +1282,9 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // === Disparar IA (apenas se mensagem do cliente E IA efetivamente ativa) ===
-      if (!fromMe && text && session?.id && !groupDisabled) {
+      // === Disparar IA (texto OU áudio transcrito) ===
+      const agentText = text || enrichedContent;
+      if (!fromMe && agentText && session?.id && !groupDisabled) {
         const effectiveActive = (session as any)._effective_active ?? (session.bot_status === 'bot_active');
         if (effectiveActive) {
           console.log("🤖 DISPARANDO AGENTE DE IA PARA:", maskJid(remoteJid));
@@ -1396,7 +1320,7 @@ export async function POST(req: NextRequest) {
                 [INTERNAL_SECRET_HEADER]: internalSecretValue,
                 ...(overrideAgentId ? { "x-test-agent-id": overrideAgentId } : {}),
               },
-              body: JSON.stringify({ instanceName, remoteJid, text, sessionId: session.id }),
+              body: JSON.stringify({ instanceName, remoteJid, text: agentText, sessionId: session.id }),
             });
             // Next 13+ Route Handler aceita Request; o cast pra NextRequest é seguro
             // porque agent/process não usa nada exclusivo do NextRequest extras.
