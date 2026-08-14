@@ -128,6 +128,15 @@ export function MessageThread({
     onMessagesLoadedRef.current = onMessagesLoaded;
   });
 
+  // Espelho ref do histórico atual — o polling de 2.5s usa isto em vez do
+  // `messages` do closure (que congela na criação do effect e re-adiciona
+  // mensagens que já chegaram via realtime, trocando identidades → re-render
+  // e salto de scroll = "pisca").
+  const messagesRef = useRef<Message[]>(messages);
+  useEffect(() => {
+    messagesRef.current = messages;
+  });
+
   const conversationId = conversation?.id; // remoteJid
   const hasUnread = (conversation?.unread_count ?? 0) > 0;
 
@@ -193,14 +202,17 @@ export function MessageThread({
       if (!data || data.length === 0) return;
 
       const norm = (data || []).reverse().map(normalizeDbMessage);
-      const existingIds = new Set((messages || []).map((m: Message) => m.id));
+      const current = messagesRef.current;
+      const existingIds = new Set(current.map((m: Message) => m.id));
       const newMsgs = norm.filter((m: Message) => !existingIds.has(m.id));
       if (newMsgs.length === 0) return;
 
-      const merged = [...(messages || []), ...newMsgs];
+      const merged = [...current, ...newMsgs];
       const uniqueMap = new Map<string, Message>();
+      // Mantém a PRIMEIRA ocorrência (objeto já renderizado) — preserva a
+      // identidade das mensagens existentes e evita re-render dos bubbles.
       for (const m of merged) {
-        uniqueMap.set(m.id, m);
+        if (!uniqueMap.has(m.id)) uniqueMap.set(m.id, m);
       }
       const sorted = Array.from(uniqueMap.values()).sort(
         (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
@@ -620,7 +632,7 @@ export function MessageThread({
       {/* Área de Histórico das Mensagens */}
       <div className="flex-1 overflow-hidden relative bg-muted/20">
         <ScrollArea ref={scrollAreaRef} className="h-full p-4">
-          {loading ? (
+          {loading && messages.length === 0 ? (
             <div className="flex items-center justify-center py-12">
               <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
             </div>

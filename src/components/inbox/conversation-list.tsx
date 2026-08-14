@@ -252,6 +252,14 @@ export function ConversationList({
   useEffect(() => {
     if (!clientId) return;
 
+    // Assinatura do último ciclo — se nada mudou, NÃO dispara setState
+    // (evita re-render da lista inteira a cada 5s = "pisca").
+    let lastSig: string | null = null;
+    const sigOf = (list: any[]) =>
+      list
+        .map((c) => `${c.id}|${c.last_message_at}|${c.last_message_text}|${c.unread_count}|${c.status}|${c.bot_status}|${c.contact?.avatar_url || ""}`)
+        .join(";");
+
     const interval = setInterval(async () => {
       if (document.hidden) return;
 
@@ -297,6 +305,10 @@ export function ConversationList({
           last_message_at: lastMsgObj?.created_at || c.last_message_at,
         };
       });
+
+      const sig = sigOf(normalized);
+      if (sig === lastSig) return;
+      lastSig = sig;
 
       onConversationsLoadedRef.current(normalized);
     }, 5000);

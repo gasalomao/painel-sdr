@@ -62,6 +62,39 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, skipped: true, reason: `event ${eventType}` });
     }
 
+    // ===== VALIDAÇÃO DE ORIGEM (mesma política do webhook whatsapp/route.ts) =====
+    // Secret per-instância em channel_connections.provider_config.webhook_secret.
+    // Padrão não-bloqueante (só registra mismatch em webhook_logs); setar
+    // webhook_strict=true pra rejeitar com 401 — bloqueia payloads forjados.
+    const secretInstance = String(body.instance || body.instanceName || "");
+    if (secretInstance) {
+      try {
+        const { data: conn } = await supabase
+          .from("channel_connections")
+          .select("provider_config")
+          .eq("instance_name", secretInstance)
+          .maybeSingle();
+        const cfg = (conn?.provider_config || {}) as any;
+        const expected = cfg.webhook_secret as string | undefined;
+        if (expected) {
+          const got = req.headers.get("x-webhook-secret") || req.headers.get("x-internal-secret");
+          if (got !== expected) {
+            const reason = got ? "header_mismatch" : "header_absent";
+            console.warn(`>>> evo-go webhook secret mismatch em ${secretInstance}: ${reason} (strict=${!!cfg.webhook_strict})`);
+            await supabase.from("webhook_logs").insert({
+              instance_name: secretInstance,
+              event: cfg.webhook_strict ? "WEBHOOK_SECRET_REJECTED" : "WEBHOOK_SECRET_MISMATCH",
+              payload: { reason, strict: !!cfg.webhook_strict },
+              created_at: new Date().toISOString(),
+            }).then(() => {}, () => {});
+            if (cfg.webhook_strict) {
+              return NextResponse.json({ ok: false, error: "Não autorizado" }, { status: 401 });
+            }
+          }
+        }
+      } catch { /* lookup falho não bloqueia — backwards compat */ }
+    }
+
     // ===== Extrair dados (formato whatsmeow) =====
     const key = raw.key || {};
     const message = raw.message || body.message || {};

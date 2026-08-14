@@ -400,11 +400,13 @@ export default function WhatsAppPage() {
     if (!clientId) return;
     try {
       setLoading(true);
+      // SECURITY: nunca select("*" — provider_config carrega webhook_secret e
+      // possíveis API keys que não podem ir pro browser.
       const { data: conns } = await supabase
-        .from("channel_connections")
-        .select("*")
-        .eq("client_id", clientId)
-        .order("created_at");
+          .from("channel_connections")
+          .select("id, instance_name, client_id, agent_id, status, phone_number, owner_phone, created_at, updated_at")
+          .eq("client_id", clientId)
+          .order("created_at");
 
       if (conns) {
         setConnections(conns);

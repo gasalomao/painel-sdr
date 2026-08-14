@@ -1012,6 +1012,24 @@ DO $$ BEGIN
 END $$;
 
 -- =====================================================================
+-- SECURITY HARDENING — revoga acesso anônimo a tabelas sensíveis
+-- =====================================================================
+-- O painel usa auth PRÓPRIA (cookie JWT) — a anon key do Supabase só é
+-- usada pelo browser para as tabelas operacionais (chats, contacts,
+-- sessions, etc). As tabelas abaixo NUNCA são acessadas pelo browser:
+-- qualquer leitura/escrita nelas via anon key é ataque.
+-- service_role (usado pelo servidor) NÃO é afetado pelos REVOKEs.
+-- Rodar de novo é idempotente.
+
+REVOKE ALL ON TABLE public.clients FROM anon, authenticated;
+REVOKE ALL ON TABLE public.auth_sessions FROM anon, authenticated;
+REVOKE ALL ON TABLE public.app_settings FROM anon, authenticated;
+REVOKE ALL ON TABLE public.messages FROM anon, authenticated;
+REVOKE ALL ON TABLE public.ai_token_usage FROM anon, authenticated;
+REVOKE ALL ON TABLE public.ai_pricing_cache FROM anon, authenticated;
+REVOKE ALL ON TABLE public.agent_knowledge_chunks FROM anon, authenticated;
+
+-- =====================================================================
 -- FIM
 -- =====================================================================
 `;

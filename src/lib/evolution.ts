@@ -176,10 +176,13 @@ async function evoFetch(path: string, method: string = "GET", body?: unknown, ti
     // Se o host respondeu com HTML (ex: página de erro do Easypanel, Cloudflare, Nginx),
     // o backend da Evolution está offline ou em crash. Joga um erro curto e acionável.
     const raw = typeof res.data === "string" ? res.data : JSON.stringify(res.data);
+    // axios 1.19: headers podem ser AxiosHeaders (usa .get) ou plain object.
+    const h = res.headers as any;
+    const contentType: string = h?.get?.("content-type") ?? h?.["content-type"] ?? "";
     const looksLikeHtml =
       (typeof raw === "string" && raw.trim().toLowerCase().startsWith("<!doctype")) ||
       (typeof raw === "string" && raw.trim().toLowerCase().startsWith("<html")) ||
-      /content-type:\s*text\/html/i.test(res.headers?.["content-type"] || "");
+      /content-type:\s*text\/html/i.test(String(contentType));
     if (looksLikeHtml) {
       throw new Error("Evolution API offline: o host respondeu com uma página de erro (provavelmente o container parou no Easypanel). Reinicia o serviço.");
     }

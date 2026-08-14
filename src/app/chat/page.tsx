@@ -331,7 +331,26 @@ function ChatPageContent() {
   }, [router]);
 
   const handleMessagesLoaded = useCallback((loaded: Message[]) => {
-    setMessages(loaded);
+    setMessages((prev) => {
+      if (prev.length === 0) return loaded;
+      // Preserva a identidade dos objetos que não mudaram — evita re-render
+      // (e "pisca") de todos os bubbles quando um resync/poll recarrega o
+      // histórico com dados idênticos.
+      const prevById = new Map(prev.map((m) => [m.id, m]));
+      return loaded.map((m) => {
+        const old = prevById.get(m.id);
+        if (
+          old &&
+          old.content_text === m.content_text &&
+          old.status === m.status &&
+          old.media_url === m.media_url &&
+          old.content_type === m.content_type
+        ) {
+          return old;
+        }
+        return m;
+      });
+    });
   }, []);
 
   const handleNewMessage = useCallback((msg: Message) => {

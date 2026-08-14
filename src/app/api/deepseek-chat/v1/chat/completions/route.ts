@@ -14,11 +14,32 @@
 import { NextRequest, NextResponse } from "next/server";
 import { pickToken, getFullToken } from "@/lib/deepseek-chat-manager";
 import { chatComplete, DsUpstreamError, messagesToPrompt, DEEPSEEK_CHAT_MODELS } from "@/lib/deepseek-chat-client";
+import { verifySession, SESSION_COOKIE } from "@/lib/auth-edge";
+import { hasInternalSecret } from "@/lib/internal-auth";
 
 // Streaming pode demorar — afrouxa o timeout.
 export const maxDuration = 120;
 
+/**
+ * Auth: aceita sessão válida (browser do painel — fetch same-origin manda o
+ * cookie) OU X-Internal-Secret (chamadas server-to-server). Bloqueia
+ * consumidores externos anônimos — antes era público e qualquer um na
+ * internet gastava as contas DeepSeek logadas do painel.
+ */
+async function authorized(req: NextRequest): Promise<boolean> {
+  if (hasInternalSecret(req)) return true;
+  const token = req.cookies.get(SESSION_COOKIE)?.value;
+  if (token && (await verifySession(token))) return true;
+  // Bearer com o AUTH_SECRET — permite ferramentas externas apontarem aqui
+  const bearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+  const secret = process.env.AUTH_SECRET || "";
+  return !!(bearer && secret && bearer === secret);
+}
+
 export async function POST(req: NextRequest) {
+  if (!(await authorized(req))) {
+    return NextResponse.json({ error: { message: "Não autorizado." } }, { status: 401 });
+  }
   let body: any;
   try { body = await req.json(); } catch {
     return NextResponse.json({ error: { message: "Body JSON inválido." } }, { status: 400 });

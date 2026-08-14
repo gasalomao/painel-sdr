@@ -11,6 +11,7 @@
  */
 
 import type { NextRequest } from "next/server";
+import { timingSafeEqual } from "crypto";
 
 export const INTERNAL_SECRET_HEADER = "x-internal-secret";
 
@@ -23,5 +24,9 @@ export function hasInternalSecret(req: NextRequest): boolean {
   const secret = getInternalSecret();
   if (!secret) return false;
   const header = req.headers.get(INTERNAL_SECRET_HEADER);
-  return !!header && header === secret;
+  if (!header) return false;
+  // timing-safe — compara comprimento antes (timingSafeEqual exige mesmo len)
+  const a = Buffer.from(header);
+  const b = Buffer.from(secret);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
