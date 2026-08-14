@@ -49,6 +49,22 @@ RUN npm run build
 # next.config.ts marca como serverExternalPackages.
 RUN npm prune --omit=dev
 
+# ===== STAGE 2.5: Whisper builder (compila from source pra Alpine musl) ===
+# O release oficial whisper-bin-ubuntu-x64 é linkado contra glibc e NÃO roda
+# em Alpine (musl libc), mesmo com libc6-compat. Compilando do source no próprio
+# Alpine garantimos um binário musl-native que executa sem erros.
+FROM node:20-alpine AS whisper-builder
+RUN apk add --no-cache build-base cmake git
+RUN git clone --depth 1 --branch v1.8.7 https://github.com/ggml-org/whisper.cpp.git /whisper && \
+    cd /whisper && \
+    cmake -B build \
+      -DWHISPER_BUILD_TESTS=OFF \
+      -DWHISPER_BUILD_EXAMPLES=ON \
+      -DWHISPER_BUILD_SERVER=OFF \
+      -DBUILD_SHARED_LIBS=OFF && \
+    cmake --build build -j$(nproc) -t whisper-cli && \
+    cp build/bin/whisper-cli /whisper-cli
+
 # ===== STAGE 3: Runner ===================================================
 FROM node:20-alpine AS runner
 WORKDIR /app
@@ -62,7 +78,6 @@ ARG WHISPER_MODEL=ggml-small.bin
 # tar + libc6-compat: o conector embutido (1 clique) extrai e roda o binário do
 # CLIProxyAPI — tar garante a extração do .tar.gz e libc6-compat a execução.
 # ffmpeg: conversão ogg→wav16k exigida pelo whisper.cpp (transcrição grátis).
-# libc6-compat também roda o binário whisper-bin-ubuntu-x64 no Alpine.
 # curl: usado pra pré-baixar o modelo whisper durante o build.
 RUN apk add --no-cache chromium nss freetype harfbuzz ca-certificates ttf-freefont font-noto-emoji tar libc6-compat ffmpeg curl
 RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
@@ -96,21 +111,13 @@ RUN mkdir -p /app/.gateway-proxy && chown -R nextjs:nodejs /app/.gateway-proxy
 RUN mkdir -p /app/.deepseek-chat && chown -R nextjs:nodejs /app/.deepseek-chat
 
 # Whisper.cpp (transcrição de áudio GRATUITA, sem API):
-# 1) Baixa o binário whisper-cli (Linux x64, ~poucos MB) do release oficial v1.8.7
+# 1) Copia o binário whisper-cli compilado from source no Stage 2.5 (musl-native)
 # 2) Baixa o modelo definido em WHISPER_MODEL (default ggml-small.bin, 465MB)
 # Tudo durante o BUILD — o container sobe pronto, sem download em runtime.
-# Se trocar WHISPER_MODEL, rebuild a imagem pra baixar o modelo novo.
-# Modelo tamanho varia: base 148MB, small 465MB, medium 1.46GB.
-# Monte um VOLUME opcional em /app/.whisper se quiser persistir entre deploys
-# (mas se já vem na imagem, só precisa de volume se planeja trocar modelo sem rebuild).
 RUN mkdir -p /app/.whisper/bin && \
-    cd /app/.whisper && \
-    curl -fsSL -o whisper-bin.tar.gz \
-      "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.7/whisper-bin-ubuntu-x64.tar.gz" && \
-    tar -xzf whisper-bin.tar.gz -C /app/.whisper/bin && \
-    rm whisper-bin.tar.gz && \
-    BIN=$(find /app/.whisper/bin -name "whisper-cli" -type f | head -1) && \
-    if [ -n "$BIN" ]; then chmod 755 "$BIN"; echo "$BIN" > /app/.whisper/bin-path.txt; fi && \
+    cp /whisper-cli /app/.whisper/bin/whisper-cli && \
+    chmod 755 /app/.whisper/bin/whisper-cli && \
+    echo "/app/.whisper/bin/whisper-cli" > /app/.whisper/bin-path.txt && \
     curl -fsSL -o "/app/.whisper/${WHISPER_MODEL}" \
       "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${WHISPER_MODEL}" && \
     chown -R nextjs:nodejs /app/.whisper
