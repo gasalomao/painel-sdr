@@ -17,7 +17,7 @@ import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { whatsappCloud } from "@/lib/whatsapp-cloud";
 import { resolveChannel, resolveInstanceFromPhoneNumberId } from "@/lib/channel";
 import { getEffectiveStatus } from "@/lib/bot-status";
-import { shouldSkipGroupActions } from "@/lib/bot-status";
+import { shouldSkipGroupActions, getTranscriptionMethod } from "@/lib/bot-status";
 import { isManualSend } from "@/lib/manual-send-registry";
 import { createHmac, timingSafeEqual } from "node:crypto";
 
@@ -257,6 +257,10 @@ export async function POST(req: NextRequest) {
         ? await shouldSkipGroupActions(m.remoteJid, sessionRow.agent_id)
         : false;
 
+      const transcriptionMethod = sessionRow?.agent_id
+        ? await getTranscriptionMethod(sessionRow.agent_id)
+        : "auto";
+
       // Sender (Cloud webhook não dispara fromMe automaticamente — apenas mensagens recebidas)
       // Se for echo de envio nosso (alguns Apps mandam), tratamos via isManualSend.
       const fromMe = false; // Cloud só entrega messages do usuário; status de envio vai no campo statuses
@@ -340,10 +344,10 @@ export async function POST(req: NextRequest) {
             // Enriquecer texto se for áudio/imagem
             let enriched: string | null = null;
             let transcribeProvider: string | null = null;
-            if (m.type === "audio" && !groupDisabled) {
+            if (m.type === "audio" && !groupDisabled && transcriptionMethod !== "disabled") {
               try {
                 const { transcribeAudio } = await import("@/app/api/webhooks/shared-helpers");
-                const t = await transcribeAudio(base64, mimetype || "audio/ogg", m.messageId);
+                const t = await transcribeAudio(base64, mimetype || "audio/ogg", m.messageId, transcriptionMethod);
                 if (t) { enriched = `🎤 ${t}`; transcribeProvider = "whisper-or-gemini"; }
               } catch { /* ignore */ }
               if (!enriched) enriched = "[🎤 O cliente enviou um áudio que não consegui transcrever]";

@@ -185,18 +185,27 @@ export async function uploadMediaBase64(base64: string, remoteJid: string, mimet
 // IA: TRANSCRIÇÃO + DESCRIÇÃO (lazy import pra não carregar se não precisar)
 // ============================================================================
 
-export async function transcribeAudio(base64: string, mimetype: string, debugMessageId?: string): Promise<string | null> {
-  // Tenta whisper.cpp (grátis) primeiro, fallback Gemini.
+export async function transcribeAudio(
+  base64: string,
+  mimetype: string,
+  debugMessageId?: string,
+  method: "auto" | "whisper" | "gemini" | "disabled" = "auto",
+): Promise<string | null> {
+  if (method === "disabled") return null;
+
+  // Whisper (grátis, local CPU).
+  if (method === "auto" || method === "whisper") {
+    try {
+      const { transcribeAudioWithWhisper } = await import("@/lib/whisper-manager");
+      const t = await transcribeAudioWithWhisper(base64, mimetype);
+      if (t) return t;
+    } catch {}
+  }
+
+  // Gemini fallback (apenas em modo auto ou gemini).
+  if (method === "whisper") return null;
+
   try {
-    const { transcribeAudioWithWhisper } = await import("@/lib/whisper-manager");
-    const t = await transcribeAudioWithWhisper(base64, mimetype);
-    if (t) return t;
-  } catch {}
-  // Fallback: Gemini multimodal.
-  try {
-    const mod = await import("@/app/api/webhooks/whatsapp/route");
-    // A função não é exportada — usamos a versão inline do módulo.
-    // Pra evitar duplicação, fazemos uma chamada direta ao Gemini aqui.
     const { GoogleGenerativeAI } = await import("@google/generative-ai");
     const cfg = await getOrganizerConfig();
     const apiKey = cfg?.api_key;

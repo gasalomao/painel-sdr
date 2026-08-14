@@ -32,7 +32,7 @@ import {
 import { clientIdFromInstance, DEFAULT_CLIENT_ID } from "@/lib/tenant";
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
 import { isAiSend, isManualSend, isPendingAutomatedSend } from "@/lib/manual-send-registry";
-import { shouldSkipGroupActions } from "@/lib/bot-status";
+import { shouldSkipGroupActions, getTranscriptionMethod } from "@/lib/bot-status";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -121,6 +121,10 @@ export async function POST(req: NextRequest) {
     const groupDisabled = session?.agent_id
       ? await shouldSkipGroupActions(remoteJid, session.agent_id)
       : false;
+
+    const transcriptionMethod = session?.agent_id
+      ? await getTranscriptionMethod(session.agent_id)
+      : "auto";
 
     // ===== Buscar foto de perfil (fire-and-forget) =====
     // Não bloqueia o processamento da mensagem. Só busca se o contato
@@ -242,8 +246,8 @@ export async function POST(req: NextRequest) {
           mediaUrl = await uploadMediaBase64(base64Media, remoteJid, sanitizeMimetype(mimetype || "", "application/octet-stream"));
 
           // Transcrição/descrição baseada no tipo.
-          if (msgType === "audio" && !groupDisabled) {
-            const transcript = await transcribeAudio(base64Media, sanitizeMimetype(mimetype || "", "audio/ogg"), messageId);
+          if (msgType === "audio" && !groupDisabled && transcriptionMethod !== "disabled") {
+            const transcript = await transcribeAudio(base64Media, sanitizeMimetype(mimetype || "", "audio/ogg"), messageId, transcriptionMethod);
             enrichedContent = transcript ? `🎤 ${transcript}` : "[🎤 O cliente enviou um áudio que não consegui transcrever]";
           } else if (msgType === "image") {
             const desc = await describeImage(base64Media, sanitizeMimetype(mimetype || "", "image/jpeg"));

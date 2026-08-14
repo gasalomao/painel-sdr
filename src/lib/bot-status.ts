@@ -86,6 +86,24 @@ export async function shouldSkipGroupActions(
   return isGroupDisabled(agentId);
 }
 
+export type TranscriptionMethod = "auto" | "whisper" | "gemini" | "disabled";
+
+export async function getTranscriptionMethod(agentId: number | string | null | undefined): Promise<TranscriptionMethod> {
+  if (!agentId) return "auto";
+  try {
+    const { data } = await supabaseAdmin
+      .from("agent_settings")
+      .select("transcription_method")
+      .eq("id", agentId)
+      .maybeSingle();
+    const m = data?.transcription_method;
+    if (m === "whisper" || m === "gemini" || m === "disabled") return m;
+    return "auto";
+  } catch {
+    return "auto";
+  }
+}
+
 /* ============================================================
    PAUSA "GLOBAL" — agora POR INSTÂNCIA
    ============================================================ */

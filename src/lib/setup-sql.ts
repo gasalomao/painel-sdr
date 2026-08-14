@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS public.agent_settings (
   client_id                  uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid,
   lead_intelligence_enabled  boolean DEFAULT false,
   disable_groups             boolean DEFAULT false,
+  transcription_method       text DEFAULT 'auto',
   is_scheduler               boolean NOT NULL DEFAULT false,
   scheduler_config           jsonb DEFAULT '{"reminders": [{"message": "Oi {nome}! Lembrete: amanhã às {hora_agendamento} temos seu agendamento de {servico}. Confirma a presença?", "offset_minutes": 1440}, {"message": "Oi {nome}! Em 1h é o seu agendamento ({servico}). Te esperamos!", "offset_minutes": 60}], "calendar_id": "primary", "owner_phone": null, "notify_owner": false, "business_hours": {"tz": "America/Sao_Paulo", "end": "18:00", "days": [1, 2, 3, 4, 5, 6], "start": "09:00"}, "cancel_window_minutes": 120, "default_duration_minutes": 60, "auto_promote_kanban_after_minutes": 30}'::jsonb
 );

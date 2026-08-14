@@ -169,6 +169,7 @@ export default function AgentePage() {
   const [is24h, setIs24h] = useState(false);
   const [awayMessage, setAwayMessage] = useState("");
   const [disableGroups, setDisableGroups] = useState(false);
+  const [transcriptionMethod, setTranscriptionMethod] = useState<"auto" | "whisper" | "gemini" | "disabled">("auto");
 
   // ============= ETAPAS DO FUNIL =============
   const [stages, setStages] = useState<any[]>([]);
@@ -262,6 +263,7 @@ export default function AgentePage() {
         setIs24h(data.is_24h ?? false);
         setAwayMessage(data.away_message || "");
         setDisableGroups(data.disable_groups ?? false);
+        setTranscriptionMethod(data.transcription_method || "auto");
 
         const opts = data.options || {};
         setAppUrl(opts.app_url || "");
@@ -549,7 +551,7 @@ export default function AgentePage() {
   const saveSchedules = async () => {
     if (!activeAgentId) return;
     setSavingConfig(true);
-    const { error } = await supabase.from("agent_settings").update({ schedules, is_24h: is24h, away_message: awayMessage, disable_groups: disableGroups }).eq("id", activeAgentId).eq("client_id", clientId);
+    const { error } = await supabase.from("agent_settings").update({ schedules, is_24h: is24h, away_message: awayMessage, disable_groups: disableGroups, transcription_method: transcriptionMethod }).eq("id", activeAgentId).eq("client_id", clientId);
     setSavingConfig(false);
     if (!error) alert("Horários salvos!"); else alert("Erro: " + error.message);
   };
@@ -1158,6 +1160,7 @@ export default function AgentePage() {
                 schedules={schedules} setSchedules={setSchedules}
                 awayMessage={awayMessage} setAwayMessage={setAwayMessage}
                 disableGroups={disableGroups} setDisableGroups={setDisableGroups}
+                transcriptionMethod={transcriptionMethod} setTranscriptionMethod={setTranscriptionMethod}
                 onSave={saveSchedules}
                 saving={savingConfig}
               />

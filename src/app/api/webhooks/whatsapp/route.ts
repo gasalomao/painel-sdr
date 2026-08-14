@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { evolution, getEvolutionConfig } from "@/lib/evolution";
 import { getEffectiveStatus } from "@/lib/bot-status";
-import { shouldSkipGroupActions } from "@/lib/bot-status";
+import { shouldSkipGroupActions, getTranscriptionMethod } from "@/lib/bot-status";
 import { isManualSend, isAiSend, isPendingAutomatedSend } from "@/lib/manual-send-registry";
 import { clientIdFromInstance, DEFAULT_CLIENT_ID } from "@/lib/tenant";
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
@@ -969,6 +969,10 @@ export async function POST(req: NextRequest) {
         ? await shouldSkipGroupActions(remoteJid, session.agent_id)
         : false;
 
+      const transcriptionMethod = session?.agent_id
+        ? await getTranscriptionMethod(session.agent_id)
+        : "auto";
+
       // Determinar sender. Pra mensagens fromMe (saíram do nosso número):
       let sender: 'customer' | 'ai' | 'human' | 'system' = 'customer';
       if (fromMe) {
@@ -1058,25 +1062,27 @@ export async function POST(req: NextRequest) {
               console.warn("[Media] Upload falhou — segue pra transcrição mesmo assim.");
             }
 
-            // 3) ÁUDIO: whisper.cpp PRIMEIRO (grátis, local) → Gemini fallback.
-            // Nunca perde um áudio: se o whisper falhar/indisponível, cai pro
-            // Gemini (multimodal, gasta token mas garante resposta ao cliente).
+            // 3) ÁUDIO: método definido pelo agente (auto/whisper/gemini/disabled).
             let enrichedContent: string | null = null;
-            if (msgType === "audio" && !groupDisabled) {
+            if (msgType === "audio" && !groupDisabled && transcriptionMethod !== "disabled") {
               let transcript: string | null = null;
               let transcribeProvider = "none";
-              // Tenta whisper.cpp (grátis) primeiro — baixa na 1ª vez, cacheia.
-              try {
-                const { transcribeAudioWithWhisper } = await import("@/lib/whisper-manager");
-                console.log("[Media] Transcrevendo áudio com whisper.cpp (grátis)...");
-                transcript = await transcribeAudioWithWhisper(base64Media, effMimetype);
-                if (transcript) transcribeProvider = "whisper";
-              } catch (wErr: any) {
-                console.warn("[Media] whisper.cpp indisponível:", wErr?.message, "→ cai pro Gemini.");
+
+              // Whisper (grátis, local CPU).
+              if (transcriptionMethod === "auto" || transcriptionMethod === "whisper") {
+                try {
+                  const { transcribeAudioWithWhisper } = await import("@/lib/whisper-manager");
+                  console.log("[Media] Transcrevendo áudio com whisper.cpp (grátis)...");
+                  transcript = await transcribeAudioWithWhisper(base64Media, effMimetype);
+                  if (transcript) transcribeProvider = "whisper";
+                } catch (wErr: any) {
+                  console.warn("[Media] whisper.cpp indisponível:", wErr?.message);
+                }
               }
-              // Fallback: Gemini multimodal (gasta token, mas nunca falha).
-              if (!transcript) {
-                console.log("[Media] Transcrevendo áudio com Gemini (fallback)...");
+
+              // Gemini (cloud, fallback em auto; único em gemini).
+              if (!transcript && (transcriptionMethod === "auto" || transcriptionMethod === "gemini")) {
+                console.log("[Media] Transcrevendo áudio com Gemini...");
                 transcript = await transcribeAudioWithGemini(base64Media, effMimetype, finalId, clientId);
                 if (transcript) transcribeProvider = "gemini";
               }

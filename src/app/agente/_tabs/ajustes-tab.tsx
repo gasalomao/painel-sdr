@@ -3,11 +3,19 @@
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { Clock, Users } from "lucide-react";
+import { Clock, Users, Mic } from "lucide-react";
 import { Toggle } from "../_components/toggle";
 import { SaveButton } from "../_components/save-button";
 
 export type ScheduleRow = { day: string; active: boolean; start: string; end: string };
+export type TranscriptionMethod = "auto" | "whisper" | "gemini" | "disabled";
+
+const TRANSCRIPTION_OPTIONS: { value: TranscriptionMethod; label: string; desc: string }[] = [
+  { value: "auto", label: "Automático", desc: "Whisper primeiro (grátis), Gemini se falhar" },
+  { value: "whisper", label: "Whisper (VPS)", desc: "Local e grátis — não gasta tokens" },
+  { value: "gemini", label: "Gemini (Cloud)", desc: "Melhor qualidade — gasta tokens da API" },
+  { value: "disabled", label: "Desativado", desc: "Não transcreve áudios" },
+];
 
 export function AjustesTab({
   is24h,
@@ -18,6 +26,8 @@ export function AjustesTab({
   setAwayMessage,
   disableGroups,
   setDisableGroups,
+  transcriptionMethod,
+  setTranscriptionMethod,
   onSave,
   saving,
 }: {
@@ -29,6 +39,8 @@ export function AjustesTab({
   setAwayMessage: (v: string) => void;
   disableGroups: boolean;
   setDisableGroups: (v: boolean) => void;
+  transcriptionMethod: TranscriptionMethod;
+  setTranscriptionMethod: (v: TranscriptionMethod) => void;
   onSave: () => void;
   saving: boolean;
 }) {
@@ -173,6 +185,45 @@ export function AjustesTab({
             size="md"
             aria-label="Atender grupos"
           />
+        </div>
+      </div>
+
+      {/* ===== Transcrição de Áudio ===== */}
+      <div className="border-t border-white/[0.06] pt-6 space-y-4">
+        <header className="flex items-center gap-3">
+          <div className="p-2.5 rounded-xl bg-primary/15 text-primary shrink-0">
+            <Mic className="w-5 h-5" />
+          </div>
+          <div>
+            <h3 className="text-base font-semibold text-foreground">Transcrição de áudio</h3>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Escolha como os áudios recebidos são transcritos.
+            </p>
+          </div>
+        </header>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {TRANSCRIPTION_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => setTranscriptionMethod(opt.value)}
+              className={cn(
+                "text-left rounded-xl border p-4 transition-colors",
+                transcriptionMethod === opt.value
+                  ? "border-primary/50 bg-primary/10"
+                  : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]",
+              )}
+            >
+              <p className={cn(
+                "text-sm font-medium",
+                transcriptionMethod === opt.value ? "text-primary" : "text-foreground",
+              )}>
+                {opt.label}
+              </p>
+              <p className="text-xs text-muted-foreground mt-1 leading-relaxed">{opt.desc}</p>
+            </button>
+          ))}
         </div>
       </div>
 
