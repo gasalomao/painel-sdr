@@ -127,8 +127,19 @@ export async function ensureWhisper(): Promise<{ binPath: string; modelPath: str
   }
 
   // 2) Modelo — baixa do HuggingFace. Cacheado.
+  // GUARD: se o modelo configurado não existe mas JÁ existe outro ggml-*.bin
+  // em disco (Docker baixa 1 no build), usa o existente em vez de baixar
+  // gigabytes em runtime na VPS (medium = 1.46GB + 3GB RAM — mata VPS humilde).
   const _modelPath = getModelPath();
   if (!fs.existsSync(_modelPath)) {
+    try {
+      const local = fs.readdirSync(DIR).filter(f => /^ggml-.*\.bin$/i.test(f));
+      if (local.length > 0) {
+        console.warn(`[whisper] modelo ${getModelName()} ausente — usando ${local[0]} já presente (sem download).`);
+        process.env.WHISPER_MODEL = local[0];
+        return { binPath, modelPath: path.join(DIR, local[0]) };
+      }
+    } catch { /* cai no download abaixo */ }
     const res = await fetch(getModelUrl(), {
       headers: { "User-Agent": "painel-sdr" },
       signal: AbortSignal.timeout(600000),
