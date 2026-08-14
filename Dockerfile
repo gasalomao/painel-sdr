@@ -1,31 +1,21 @@
 # syntax=docker/dockerfile:1.6
 # =============================================================================
-#  Painel SDR — Dockerfile multi-stage otimizado para Easypanel
-#  - Stage 1 (deps):    instala TODAS as deps (incluindo dev) p/ build
-#  - Stage 2 (builder): roda `next build` em modo standalone
-#  - Stage 3 (runner):  imagem final mínima com Chromium + standalone server.js
+#  Painel SDR — Dockerfile multi-stage otimizado para Debian Bookworm
 # =============================================================================
 
 # ===== STAGE 1: Dependencies =============================================
-FROM node:20-alpine AS deps
+FROM node:20-bookworm-slim AS deps
 WORKDIR /app
-# libc6-compat ajuda algumas libs nativas (sharp etc.) a rodarem no alpine.
-RUN apk add --no-cache libc6-compat
 COPY package.json package-lock.json ./
-# `npm ci` é determinístico (usa o lockfile).
-# BuildKit cache acelera rebuilds quando não mexeu nos deps.
 RUN --mount=type=cache,target=/root/.npm \
     npm ci --no-audit --no-fund
 
 # ===== STAGE 2: Builder ==================================================
-FROM node:20-alpine AS builder
+FROM node:20-bookworm-slim AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# ----- Build args (variáveis NEXT_PUBLIC_* viram código no JS do cliente) -----
-# Easypanel injeta estes valores via "Build Args" se você setar lá.
-# Defaults vazios — Easypanel preenche via Build Args.
 ARG NEXT_PUBLIC_SUPABASE_URL=
 ARG NEXT_PUBLIC_SUPABASE_ANON_KEY=
 ARG NEXT_PUBLIC_APP_URL=
@@ -39,85 +29,56 @@ ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL \
     NODE_ENV=production \
     NODE_OPTIONS=--max-old-space-size=4096
 
-# scripts/build-setup-sql.mjs roda dentro do `npm run build` e gera o setup-sql.ts.
-# 4 GB de heap pro Node — o type-checker do Next 16 (Turbopack) consome ~2 GB
-# por worker e o default de 1.4 GB derruba o build com OOM.
 RUN npm run build
-
-# Remove devDependencies do node_modules pra deixar a imagem final mais magra.
-# Mantém produção + os pacotes externos (puppeteer-core etc.) que o
-# next.config.ts marca como serverExternalPackages.
 RUN npm prune --omit=dev
 
-# ===== STAGE 2.5: Whisper builder (compila from source pra Alpine musl) ===
-# O release oficial whisper-bin-ubuntu-x64 é linkado contra glibc e NÃO roda
-# em Alpine (musl libc), mesmo com libc6-compat. Compilando do source no próprio
-# Alpine garantimos um binário musl-native que executa sem erros.
-FROM node:20-alpine AS whisper-builder
-RUN apk add --no-cache build-base cmake git
-RUN git clone --depth 1 --branch v1.8.7 https://github.com/ggml-org/whisper.cpp.git /whisper && \
-    cd /whisper && \
-    cmake -B build \
-      -DWHISPER_BUILD_TESTS=OFF \
-      -DWHISPER_BUILD_EXAMPLES=ON \
-      -DWHISPER_BUILD_SERVER=OFF \
-      -DBUILD_SHARED_LIBS=OFF && \
-    cmake --build build -j$(nproc) -t whisper-cli && \
-    cp build/bin/whisper-cli /whisper-cli
-
 # ===== STAGE 3: Runner ===================================================
-FROM node:20-alpine AS runner
+FROM node:20-bookworm-slim AS runner
 WORKDIR /app
 
-# Build arg: qual modelo whisper pré-baixar no container.
-# Default: ggml-small.bin (465MB, bom PT). Para melhor qualidade: ggml-medium.bin (1.46GB).
-# No Easypanel: setar como Build Arg E Environment Variable com o mesmo valor.
 ARG WHISPER_MODEL=ggml-small.bin
 
-# Chromium + libs de fonte/encoding pra Puppeteer (scraper Google Maps).
-# tar + libc6-compat: o conector embutido (1 clique) extrai e roda o binário do
-# CLIProxyAPI — tar garante a extração do .tar.gz e libc6-compat a execução.
-# ffmpeg: conversão ogg→wav16k exigida pelo whisper.cpp (transcrição grátis).
-# curl: usado pra pré-baixar o modelo whisper durante o build.
-RUN apk add --no-cache chromium nss freetype harfbuzz ca-certificates ttf-freefont font-noto-emoji tar libc6-compat ffmpeg curl
-RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
+# Instala Chromium + dependências de fonte/render + ffmpeg + curl + tar no Debian
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium \
+    ffmpeg \
+    curl \
+    tar \
+    ca-certificates \
+    fonts-freefont-otf \
+    fonts-noto-color-emoji \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --system --gid 1001 nodejs && useradd --system --uid 1001 -g nodejs nextjs
 
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=3000 \
     HOSTNAME=0.0.0.0 \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
     PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
     WHISPER_MODEL=${WHISPER_MODEL}
 
-# Copia apenas o que o standalone precisa pra rodar.
 COPY --from=builder --chown=nextjs:nodejs /app/public           ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static     ./.next/static
-# node_modules de produção (inclui pacotes externos não-bundleados pelo Next).
 COPY --from=builder --chown=nextjs:nodejs /app/node_modules     ./node_modules
 
-# Conector embutido (1 clique) grava aqui: binário do CLIProxyAPI, config,
-# management.key e logins (auths/). Como o app roda como `nextjs` (não-root) e
-# /app pertence ao root, sem este chown o mkdir falha com EACCES.
-# Monte um VOLUME nesta pasta no Easypanel pra os logins sobreviverem a deploys.
 RUN mkdir -p /app/.gateway-proxy && chown -R nextjs:nodejs /app/.gateway-proxy
-
-# DeepSeek "modo conta" grava aqui: tokens (userToken capturado) + subscriptions
-# (userscript Tampermonkey). Mesma razão do .gateway-proxy acima: sem permissão,
-# o save falha com EACCES em runtime (app roda como nextjs, /app é do root).
-# Foi o mesmo bug corrigido em 6433bb5 pro conector — agora aplicado pro DeepSeek.
-# Monte um VOLUME aqui no Easypanel pra os tokens sobreviverem a deploys.
 RUN mkdir -p /app/.deepseek-chat && chown -R nextjs:nodejs /app/.deepseek-chat
 
 # Whisper.cpp (transcrição de áudio GRATUITA, sem API):
-# 1) Copia o binário whisper-cli compilado from source no Stage 2.5 (musl-native)
-# 2) Baixa o modelo definido em WHISPER_MODEL (default ggml-small.bin, 465MB)
-# Tudo durante o BUILD — o container sobe pronto, sem download em runtime.
+# Baixa o binário oficial do Ubuntu/Debian (glibc nativo, roda direto no Debian slim)
+# Baixa o modelo direto do HuggingFace durante o build.
 RUN mkdir -p /app/.whisper/bin && \
-    cp /whisper-cli /app/.whisper/bin/whisper-cli && \
-    chmod 755 /app/.whisper/bin/whisper-cli && \
-    echo "/app/.whisper/bin/whisper-cli" > /app/.whisper/bin-path.txt && \
+    cd /app/.whisper && \
+    curl -fsSL -o whisper-bin.tar.gz \
+      "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.7/whisper-bin-ubuntu-x64.tar.gz" && \
+    tar -xzf whisper-bin.tar.gz -C /app/.whisper/bin && \
+    rm whisper-bin.tar.gz && \
+    BIN=$(find /app/.whisper/bin -name "whisper-cli" -type f | head -1) && \
+    if [ -n "$BIN" ]; then chmod 755 "$BIN"; echo "$BIN" > /app/.whisper/bin-path.txt; fi && \
     curl -fsSL -o "/app/.whisper/${WHISPER_MODEL}" \
       "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${WHISPER_MODEL}" && \
     chown -R nextjs:nodejs /app/.whisper

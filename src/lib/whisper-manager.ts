@@ -282,15 +282,26 @@ export async function transcribeAudioWithWhisper(
       return null;
     }
 
+    // Timeout dinâmico: whisper em CPU roda ~5-10x o tempo do áudio (medium).
+    // Timeout fixo de 120s matava áudios >20s → null → placeholder silencioso.
+    // Duração do WAV 16kHz mono 16-bit = 32000 bytes/s.
+    const wavBytes = fs.statSync(wavPath).size;
+    const durationSec = Math.max(1, (wavBytes - 44) / 32000);
+    const effectiveTimeout = Math.max(timeoutMs, Math.round(60000 + durationSec * 20000));
+
+    // Threads: -t 2 hard-coded subutiliza CPU moderna. Usa os núcleos
+    // disponíveis (cap 8 — retornos diminuem além disso).
+    const threads = Math.max(2, Math.min(os.cpus()?.length || 2, 8));
+
     // Roda o whisper-cli. Flags:
-    //   -m modelo  -f arquivo  -l pt (português)  -t 2 (threads)
+    //   -m modelo  -f arquivo  -l pt (português)  -t threads
     //   -otxt (saída .txt)  -np (sem progress bar colorida)  -nt (sem timestamps)
     const result = await new Promise<string | null>((resolve) => {
       const child = spawn(binPath, [
         "-m", modelPath,
         "-f", wavPath,
         "-l", "pt",
-        "-t", "2",
+        "-t", String(threads),
         "-otxt",
         "-np",
         "-nt",
@@ -300,9 +311,10 @@ export async function transcribeAudioWithWhisper(
       child.stderr.on("data", (d) => { stderr += d.toString(); });
       child.stdout.on("data", (d) => { stdout += d.toString(); });
       const timer = setTimeout(() => {
+        console.warn(`[whisper] TIMEOUT ${effectiveTimeout}ms (áudio ~${durationSec.toFixed(0)}s) — processo morto`);
         try { child.kill("SIGKILL"); } catch { /* já morto */ }
         resolve(null);
-      }, timeoutMs);
+      }, effectiveTimeout);
       child.on("close", (code) => {
         clearTimeout(timer);
         if (code !== 0) {
