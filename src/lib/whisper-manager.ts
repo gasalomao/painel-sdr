@@ -209,12 +209,46 @@ export async function transcribeAudioWithWhisper(
   mimetype: string,
   timeoutMs = 120000,
 ): Promise<string | null> {
-  if (WHISPER_DISABLED) return null;
-  if (!isWhisperInstalled()) {
-    try { await ensureWhisper(); } catch { return null; }
+  if (WHISPER_DISABLED) {
+    console.warn("[whisper] desligado via WHISPER_DISABLED");
+    return null;
   }
-  const binPath = readText(BINPATH_PATH);
-  if (!binPath || !fs.existsSync(binPath) || !fs.existsSync(getModelPath())) return null;
+
+  if (!isWhisperInstalled()) {
+    console.log("[whisper] não instalado — tentando ensureWhisper()...");
+    try {
+      await ensureWhisper();
+    } catch (e: any) {
+      console.error("[whisper] ensureWhisper falhou:", e?.message?.slice(0, 200));
+      return null;
+    }
+  }
+
+  let binPath = readText(BINPATH_PATH);
+  let modelPath = getModelPath();
+
+  // Safety: se o modelo configurado não existe, procura qualquer ggml-*.bin
+  if (!fs.existsSync(modelPath)) {
+    console.warn(`[whisper] modelo ${getModelName()} não encontrado em ${modelPath}`);
+    try {
+      const files = fs.readdirSync(DIR).filter(f => /^ggml-.*\.bin$/i.test(f));
+      if (files.length > 0) {
+        modelPath = path.join(DIR, files[0]);
+        console.warn(`[whisper] usando modelo alternativo: ${files[0]}`);
+      } else {
+        console.error(`[whisper] NENHUM modelo encontrado em ${DIR}`);
+        return null;
+      }
+    } catch {
+      console.error(`[whisper] erro procurando modelos em ${DIR}`);
+      return null;
+    }
+  }
+
+  if (!binPath || !fs.existsSync(binPath)) {
+    console.error(`[whisper] binário não encontrado (bin-path.txt=${binPath || "vazio"})`);
+    return null;
+  }
 
   // Decodifica base64 → arquivo temporário com extensão certa.
   const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");
@@ -240,22 +274,20 @@ export async function transcribeAudioWithWhisper(
         wavPath,
       ], { timeout: 20000 });
     } catch (ffmpegErr: any) {
-      // ffmpeg ausente (comum em Windows sem instalar) ou áudio inválido.
-      // Retorna null pra chamar fallback Gemini (multimodal) — nunca perde áudio.
-      console.warn(
-        "[whisper] ffmpeg falhou (instale ffmpeg ou use WHISPER_DISABLED=1 pra pular direto pro Gemini):",
-        ffmpegErr?.message?.slice(0, 120)
-      );
+      console.warn("[whisper] ffmpeg falhou:", ffmpegErr?.message?.slice(0, 200));
       return null;
     }
-    if (!fs.existsSync(wavPath)) return null;
+    if (!fs.existsSync(wavPath)) {
+      console.warn("[whisper] ffmpeg não gerou output.wav");
+      return null;
+    }
 
     // Roda o whisper-cli. Flags:
     //   -m modelo  -f arquivo  -l pt (português)  -t 2 (threads)
     //   -otxt (saída .txt)  -np (sem progress bar colorida)  -nt (sem timestamps)
     const result = await new Promise<string | null>((resolve) => {
       const child = spawn(binPath, [
-        "-m", getModelPath(),
+        "-m", modelPath,
         "-f", wavPath,
         "-l", "pt",
         "-t", "2",
@@ -291,7 +323,7 @@ export async function transcribeAudioWithWhisper(
         const cleaned = stdout.replace(/^whisper\.cpp.*$/gm, "").replace(/^read_audio_data.*$/gm, "").trim();
         resolve(cleaned || null);
       });
-      child.on("error", () => { clearTimeout(timer); resolve(null); });
+      child.on("error", (err) => { clearTimeout(timer); console.error("[whisper] spawn falhou:", err?.message); resolve(null); });
     });
 
     return result;

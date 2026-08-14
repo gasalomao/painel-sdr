@@ -1074,7 +1074,41 @@ export async function POST(req: NextRequest) {
             console.log(`[Media] Transcrição (${transcribeProvider}):`, transcript.slice(0, 80));
           } else {
             enrichedContent = "[🎤 O cliente enviou um áudio que não consegui transcrever]";
-            console.warn("[Media] Transcrição falhou.");
+            console.warn("[Media] Transcrição falhou — whisper + gemini ambos retornaram null.");
+            // Log detalhado pra diagnóstico no banco
+            try {
+              let whisperDiag: any = "n/a";
+              try {
+                const { isWhisperInstalled, getWhisperStatus } = await import("@/lib/whisper-manager");
+                const fs = await import("fs");
+                const path = await import("path");
+                const dir = process.env.WHISPER_DIR || path.join(process.cwd(), ".whisper");
+                const binPathFile = path.join(dir, "bin-path.txt");
+                const binPath = fs.existsSync(binPathFile) ? fs.readFileSync(binPathFile, "utf8").trim() : "(missing)";
+                const modelFile = path.join(dir, process.env.WHISPER_MODEL || "ggml-base.bin");
+                whisperDiag = {
+                  installed: isWhisperInstalled(),
+                  status: await getWhisperStatus(),
+                  binPath,
+                  binExists: fs.existsSync(binPath),
+                  modelExpected: modelFile,
+                  modelExists: fs.existsSync(modelFile),
+                  whisperDirExists: fs.existsSync(dir),
+                  cwd: process.cwd(),
+                };
+              } catch (de: any) { whisperDiag = "diag-error: " + de?.message; }
+
+              await supabase.from("webhook_logs").insert({
+                event: "TRANSCRIPTION_FAIL",
+                payload: {
+                  message_id: finalId,
+                  transcription_method: transcriptionMethod,
+                  base64_length: base64Media?.length || 0,
+                  mimetype: effMimetype,
+                  whisper_diag: whisperDiag,
+                },
+              });
+            } catch {}
           }
         } else {
           console.warn("[Media] Nenhum base64 — ative webhookBase64 na instância Evolution.");
