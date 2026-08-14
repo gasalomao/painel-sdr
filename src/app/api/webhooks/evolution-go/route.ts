@@ -19,7 +19,7 @@
  * Público (não exige auth) — coberto pelo prefixo /api/webhooks/ no proxy.ts.
  */
 
-import { NextRequest, NextResponse, after } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import {
   unwrapMessage, extractText, extractMessageType, extractMimetype,
@@ -145,8 +145,36 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ===== Salvar mensagem básica PRIMEIRO (não bloqueia com processamento de mídia) =====
-    const placeholderContent = text || mediaPlaceholder(msgType);
+    // ===== MÍDIA: transcrever/descrever ANTES de salvar (o chat só mostra
+    // o áudio já transcrito; placeholder apenas se transcrição falhou) =====
+    const base64Media = extractBase64Media(unwrapped);
+    let enrichedContent: string | null = null;
+    let mediaUrl: string | null = null;
+
+    if (!fromMe && base64Media) {
+      try {
+        // Upload da mídia.
+        mediaUrl = await uploadMediaBase64(base64Media, remoteJid, sanitizeMimetype(mimetype || "", "application/octet-stream"));
+
+        // Transcrição/descrição baseada no tipo.
+        if (msgType === "audio" && !groupDisabled && transcriptionMethod !== "disabled") {
+          const transcript = await transcribeAudio(base64Media, sanitizeMimetype(mimetype || "", "audio/ogg"), messageId, transcriptionMethod);
+          enrichedContent = transcript ? `🎤 ${transcript}` : "[🎤 O cliente enviou um áudio que não consegui transcrever]";
+        } else if (msgType === "image") {
+          const desc = await describeImage(base64Media, sanitizeMimetype(mimetype || "", "image/jpeg"));
+          enrichedContent = desc ? `📷 ${desc}` : null;
+        } else if (msgType === "document") {
+          const desc = await describeDocument(base64Media, sanitizeMimetype(mimetype || "", "application/pdf"), fileName);
+          enrichedContent = desc ? `📄 ${fileName ? `[${fileName}] ` : ""}${desc}` : null;
+        }
+      } catch (e: any) {
+        console.warn("[evo-go-webhook] processamento de mídia falhou:", e?.message);
+        if (msgType === "audio") enrichedContent = "[🎤 O cliente enviou um áudio que não consegui transcrever]";
+      }
+    }
+
+    // ===== Salvar mensagem (áudio já transcrito acima) =====
+    const placeholderContent = enrichedContent || text || mediaPlaceholder(msgType);
     const insertData: Record<string, any> = {
       remote_jid: remoteJid,
       instance_name: instanceName,
@@ -157,6 +185,7 @@ export async function POST(req: NextRequest) {
       contact_name: pushName || null,
       client_id: clientId,
     };
+    if (mediaUrl) insertData.media_url = mediaUrl;
     if (mimetype) insertData.mimetype = sanitizeMimetype(mimetype, "application/octet-stream");
     if (msgType !== "text" && msgType !== "unknown" && msgType !== "buttons" && msgType !== "reaction") {
       insertData.media_type = msgType;
@@ -231,43 +260,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ===== Processamento de MÍDIA (em background — não bloqueia o HTTP 200) =====
-    const msgId = inserted?.id;
-    const base64Media = extractBase64Media(unwrapped);
-
-    if (!fromMe && base64Media) {
-      after(async () => {
-        try {
-          let enrichedContent: string | null = null;
-          let mediaUrl: string | null = null;
-
-          // Upload da mídia.
-          mediaUrl = await uploadMediaBase64(base64Media, remoteJid, sanitizeMimetype(mimetype || "", "application/octet-stream"));
-
-          // Transcrição/descrição baseada no tipo.
-          if (msgType === "audio" && !groupDisabled && transcriptionMethod !== "disabled") {
-            const transcript = await transcribeAudio(base64Media, sanitizeMimetype(mimetype || "", "audio/ogg"), messageId, transcriptionMethod);
-            enrichedContent = transcript ? `🎤 ${transcript}` : "[🎤 O cliente enviou um áudio que não consegui transcrever]";
-          } else if (msgType === "image") {
-            const desc = await describeImage(base64Media, sanitizeMimetype(mimetype || "", "image/jpeg"));
-            enrichedContent = desc ? `📷 ${desc}` : null;
-          } else if (msgType === "document") {
-            const desc = await describeDocument(base64Media, sanitizeMimetype(mimetype || "", "application/pdf"), fileName);
-            enrichedContent = desc ? `📄 ${fileName ? `[${fileName}] ` : ""}${desc}` : null;
-          }
-
-          // Atualiza a mensagem com o conteúdo enriquecido + URL da mídia.
-          const update: Record<string, any> = {};
-          if (enrichedContent) update.content = enrichedContent;
-          if (mediaUrl) update.media_url = mediaUrl;
-          if (Object.keys(update).length > 0) {
-            await supabase.from("chats_dashboard").update(update).eq("id", msgId);
-          }
-        } catch (e: any) {
-          console.warn("[evo-go-webhook] processamento de mídia falhou:", e?.message);
-        }
-      });
-    }
+    // (mídia já processada inline acima, antes do insert)
 
     // ===== Disparar agente IA (mensagens do cliente com texto/mídia) =====
     if (!fromMe && (text || msgType === "audio" || msgType === "image") && session?.id && !groupDisabled) {
@@ -296,7 +289,9 @@ export async function POST(req: NextRequest) {
               body: JSON.stringify({
                 instanceName,
                 remoteJid,
-                text: text || (msgType === "audio" ? "[🎤 Áudio — transcrevendo...]" : mediaPlaceholder(msgType)),
+                // Áudio: manda a TRANSCRIÇÃO (contexto real p/ IA). Placeholder
+                // só quando a transcrição falhou de verdade.
+                text: text || enrichedContent || mediaPlaceholder(msgType),
                 sessionId: session.id,
               }),
             });
@@ -329,7 +324,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    return NextResponse.json({ ok: true, saved: true, msgId });
+    return NextResponse.json({ ok: true, saved: true, msgId: messageId });
   } catch (err: any) {
     console.error("[evo-go-webhook] erro:", err?.message);
     return NextResponse.json({ ok: false, error: err?.message }, { status: 500 });

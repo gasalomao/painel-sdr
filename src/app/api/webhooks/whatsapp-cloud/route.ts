@@ -12,7 +12,7 @@
  * `/api/agent/process` com o sessionId — exatamente igual ao fluxo Evolution.
  */
 
-import { NextRequest, NextResponse, after } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { whatsappCloud } from "@/lib/whatsapp-cloud";
 import { resolveChannel, resolveInstanceFromPhoneNumberId } from "@/lib/channel";
@@ -270,18 +270,47 @@ export async function POST(req: NextRequest) {
 
       // Conteúdo: text direto, ou caption, ou placeholder de mídia
       let content: string = m.text || m.caption || "";
-      let enrichedLater = false;
+      let mediaUrl: string | null = null;
 
+      // ===== Mídia: baixar + transcrever ANTES de salvar (o chat só mostra
+      // o áudio já transcrito; placeholder apenas se transcrição falhou) =====
       if (!content && m.mediaId) {
-        const placeholders: Record<string, string> = {
-          image: "[📷 Imagem]",
-          audio: "[🎤 Áudio — transcrevendo...]",
-          video: "[🎥 Vídeo]",
-          document: m.fileName ? `[📄 ${m.fileName}]` : "[📄 Documento]",
-          sticker: "[Sticker]",
-        };
-        content = placeholders[m.type] || "[Mídia]";
-        enrichedLater = true;
+        if (m.type === "audio" && !groupDisabled && transcriptionMethod !== "disabled") {
+          try {
+            const ch = await resolveChannel(instanceName);
+            if (ch.cloud) {
+              const { base64, mimetype: fMime } = await whatsappCloud.fetchMedia(ch.cloud, m.mediaId!);
+              // Upload pro Storage (mesmo bucket do Evolution)
+              try {
+                const buffer = Buffer.from(base64, "base64");
+                const ext = (fMime.split("/")[1] || "bin").split(";")[0];
+                const path = `${m.remoteJid}/${Date.now()}.${ext}`;
+                const { error: upErr } = await supabase.storage
+                  .from("whatsapp_media").upload(path, buffer, { contentType: fMime, upsert: true });
+                if (!upErr) mediaUrl = supabase.storage.from("whatsapp_media").getPublicUrl(path).data.publicUrl;
+              } catch (upErr: any) {
+                console.warn("[Cloud Media] upload falhou:", upErr?.message);
+              }
+              const { transcribeAudio } = await import("@/app/api/webhooks/shared-helpers");
+              const t = await transcribeAudio(base64, fMime || "audio/ogg", m.messageId, transcriptionMethod);
+              content = t ? `🎤 ${t}` : "[🎤 O cliente enviou um áudio que não consegui transcrever]";
+            } else {
+              content = "[🎤 O cliente enviou um áudio que não consegui transcrever]";
+            }
+          } catch (mErr: any) {
+            console.warn("[Cloud Media] transcrição falhou:", mErr?.message);
+            content = "[🎤 O cliente enviou um áudio que não consegui transcrever]";
+          }
+        } else {
+          const placeholders: Record<string, string> = {
+            image: "[📷 Imagem]",
+            audio: "[🎤 Áudio]",
+            video: "[🎥 Vídeo]",
+            document: m.fileName ? `[📄 ${m.fileName}]` : "[📄 Documento]",
+            sticker: "[Sticker]",
+          };
+          content = placeholders[m.type] || "[Mídia]";
+        }
       }
 
       // Insert chats_dashboard (UI lê isso)
@@ -292,6 +321,8 @@ export async function POST(req: NextRequest) {
         sender_type: sender,
         content,
         status_envio: "received",
+        ...(mediaUrl ? { media_url: mediaUrl } : {}),
+        ...(m.type !== "text" ? { media_type: m.type } : {}),
         created_at: new Date(m.timestamp * 1000).toISOString(),
       }).then(({ error }) => {
         if (error && error.code !== "23505") console.warn("[Cloud Webhook] dash insert:", error.message);
@@ -319,83 +350,17 @@ export async function POST(req: NextRequest) {
         supabase.from("sessions").update(updPayload).eq("id", sessionRow.id).then(() => {}, () => {});
       }
 
-      // Pipeline de mídia em background (download Cloud + upload Storage + transcrição/descrição + retrigger agente)
-      if (enrichedLater && m.mediaId) {
-        after(async () => {
-          try {
-            const ch = await resolveChannel(instanceName);
-            if (!ch.cloud) return;
-            const { base64, mimetype } = await whatsappCloud.fetchMedia(ch.cloud, m.mediaId!);
+      // (mídia já processada inline acima, antes do insert)
 
-            // Upload pro Storage (mesmo bucket do Evolution)
-            let mediaUrl: string | null = null;
-            try {
-              const bucketName = "whatsapp_media";
-              const buffer = Buffer.from(base64, "base64");
-              const ext = (mimetype.split("/")[1] || "bin").split(";")[0];
-              const path = `${m.remoteJid}/${Date.now()}.${ext}`;
-              const { error: upErr } = await supabase.storage
-                .from(bucketName).upload(path, buffer, { contentType: mimetype, upsert: true });
-              if (!upErr) mediaUrl = supabase.storage.from(bucketName).getPublicUrl(path).data.publicUrl;
-            } catch (upErr: any) {
-              console.warn("[Cloud Media] upload falhou:", upErr?.message);
-            }
-
-            // Enriquecer texto se for áudio/imagem
-            let enriched: string | null = null;
-            let transcribeProvider: string | null = null;
-            if (m.type === "audio" && !groupDisabled && transcriptionMethod !== "disabled") {
-              try {
-                const { transcribeAudio } = await import("@/app/api/webhooks/shared-helpers");
-                const t = await transcribeAudio(base64, mimetype || "audio/ogg", m.messageId, transcriptionMethod);
-                if (t) { enriched = `🎤 ${t}`; transcribeProvider = "whisper-or-gemini"; }
-              } catch { /* ignore */ }
-              if (!enriched) enriched = "[🎤 O cliente enviou um áudio que não consegui transcrever]";
-            }
-
-            // Atualiza linhas
-            const upd: Record<string, any> = {};
-            if (mediaUrl) upd.media_url = mediaUrl;
-            if (mimetype) upd.mimetype = mimetype;
-            if (enriched) upd.content = enriched;
-            const updDash: Record<string, any> = { ...upd };
-            if (m.type !== "text") updDash.media_type = m.type;
-
-            if (Object.keys(updDash).length > 0) {
-              const { error } = await supabase.from("chats_dashboard").update(updDash).eq("message_id", m.messageId);
-              if (error?.code === "PGRST204" && enriched) {
-                await supabase.from("chats_dashboard").update({ content: enriched }).eq("message_id", m.messageId);
-              }
-            }
-            if (Object.keys(upd).length > 0) {
-              await supabase.from("messages").update(upd).eq("message_id", m.messageId);
-            }
-
-            // Re-dispara agente com texto enriquecido (mesma lógica do Evolution)
-            if (enriched && sessionRow?.id && !groupDisabled) {
-              const eff = await getEffectiveStatus(sessionRow as any);
-              if (eff.isActive) {
-                fetch(`${INTERNAL_BASE}/api/agent/process`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ instanceName, remoteJid: m.remoteJid, text: enriched, sessionId: sessionRow.id }),
-                }).catch(() => {});
-              }
-            }
-          } catch (mErr: any) {
-            console.warn("[Cloud Media] pipeline falhou:", mErr?.message);
-          }
-        });
-      }
-
-      // Dispara agente com texto direto (igual webhook Evolution)
-      if (content && (m.text || m.caption) && sessionRow?.id && !groupDisabled) {
+      // Dispara agente com texto direto (igual webhook Evolution).
+      // Áudio: `content` já contém a transcrição (ou placeholder de falha).
+      if (content && (m.text || m.caption || m.type === "audio") && sessionRow?.id && !groupDisabled) {
         const eff = await getEffectiveStatus(sessionRow as any);
         if (eff.isActive) {
           fetch(`${INTERNAL_BASE}/api/agent/process`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ instanceName, remoteJid: m.remoteJid, text: m.text || m.caption || "", sessionId: sessionRow.id }),
+            body: JSON.stringify({ instanceName, remoteJid: m.remoteJid, text: m.text || m.caption || content, sessionId: sessionRow.id }),
           }).catch(() => {});
         } else {
           await supabase.from("webhook_logs").insert({
