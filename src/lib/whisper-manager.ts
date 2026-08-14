@@ -1,4 +1,4 @@
-﻿﻿﻿/**
+﻿/**
  * Whisper.cpp — transcrição de áudio GRATUITA e LOCAL (sem API, sem token).
  *
  * POR QUE EXISTE: o painel transcrevia áudios só com o Gemini (multimodal),
@@ -225,8 +225,8 @@ export async function transcribeAudioWithWhisper(
   const tmpDir = path.join(os.tmpdir(), `painel-whisper-${Date.now()}`);
   fs.mkdirSync(tmpDir, { recursive: true });
   const inputPath = path.join(tmpDir, `input${ext}`);
-  const wavPath = path.join(tmpDir, "input.wav");
-  const txtPath = path.join(tmpDir, "input.wav.txt");
+  const wavPath = path.join(tmpDir, "converted.wav");
+  const txtPath = path.join(tmpDir, "converted.wav.txt");
 
   try {
     fs.writeFileSync(inputPath, Buffer.from(cleanBase64, "base64"));
