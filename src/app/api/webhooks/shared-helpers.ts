@@ -325,7 +325,7 @@ export async function findOrCreateSession(contactId: string, instanceName: strin
   try {
     const { data: existing } = await supabase
       .from("sessions")
-      .select("id, bot_status")
+      .select("id, bot_status, agent_id")
       .eq("contact_id", contactId)
       .eq("instance_name", instanceName)
       .eq("client_id", clientId)
@@ -342,7 +342,7 @@ export async function findOrCreateSession(contactId: string, instanceName: strin
         bot_status: "bot_active",
         remote_jid: remoteJid,
       })
-      .select("id, bot_status")
+      .select("id, bot_status, agent_id")
       .single();
 
     if (error) throw error;

@@ -76,6 +76,18 @@ export function normalizeConversation(raw: any): Conversation {
 }
 
 /**
+ * Ordena conversas pela data da última mensagem (DESC), igual ao WhatsApp.
+ * Fallback: updated_at → created_at → 0.
+ */
+export function sortConversationsByLastMessage(conversations: Conversation[]): Conversation[] {
+  return [...conversations].sort((a, b) => {
+    const timeA = new Date(a.last_message_at || a.updated_at || a.created_at || 0).getTime();
+    const timeB = new Date(b.last_message_at || b.updated_at || b.created_at || 0).getTime();
+    return timeB - timeA;
+  });
+}
+
+/**
  * Normaliza e DEDUPLICA as sessões por remoteJid (id do contato).
  * Se o mesmo contato possuir múltiplas sessões (ex: de instâncias antigas),
  * combina-as em uma única conversa no Inbox, mantendo o histórico mais recente
@@ -108,11 +120,7 @@ export function normalizeConversations(rows: any[]): Conversation[] {
     }
   }
 
-  return Array.from(map.values()).sort((a, b) => {
-    const timeA = new Date(a.last_message_at || a.updated_at || a.created_at || 0).getTime();
-    const timeB = new Date(b.last_message_at || b.updated_at || b.created_at || 0).getTime();
-    return timeB - timeA;
-  });
+  return sortConversationsByLastMessage(Array.from(map.values()));
 }
 
 export interface ContactFilters {

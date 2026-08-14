@@ -5,7 +5,7 @@ import { Header } from "@/components/layout/header";
 import { supabase } from "@/lib/supabase";
 import { useClientSession } from "@/lib/use-session";
 import { useRealtime } from "@/hooks/use-realtime";
-import { normalizeConversation, isSameJid, formatLastMessagePreview } from "@/lib/inbox/conversations";
+import { normalizeConversation, sortConversationsByLastMessage, isSameJid, formatLastMessagePreview } from "@/lib/inbox/conversations";
 import { ConversationList } from "@/components/inbox/conversation-list";
 import { MessageThread } from "@/components/inbox/message-thread";
 import { ContactSidebar } from "@/components/inbox/contact-sidebar";
@@ -146,22 +146,25 @@ function ChatPageContent() {
           });
         }
 
-        // Atualiza a última mensagem da conversa no card lateral.
+        // Atualiza a última mensagem da conversa no card lateral E reordena
+        // a lista (igual WhatsApp: conversa com nova mensagem sobe pro topo).
         setConversations((prev) =>
-          prev.map((c) => {
-            if (!isSameJid(c.id, msg.remote_jid)) return c;
-            const isCurrent = currentActive && isSameJid(currentActive.id, msg.remote_jid);
-            const preview = formatLastMessagePreview(
-              msg.content || msg.content_text,
-              msg.media_type || msg.message_type || (msg.media_url ? "image" : undefined)
-            ) || c.last_message_text;
-            return {
-              ...c,
-              last_message_text: preview,
-              last_message_at: msg.created_at || c.last_message_at,
-              unread_count: isCurrent ? 0 : c.unread_count + (senderType === "customer" ? 1 : 0),
-            };
-          })
+          sortConversationsByLastMessage(
+            prev.map((c) => {
+              if (!isSameJid(c.id, msg.remote_jid)) return c;
+              const isCurrent = currentActive && isSameJid(currentActive.id, msg.remote_jid);
+              const preview = formatLastMessagePreview(
+                msg.content || msg.content_text,
+                msg.media_type || msg.message_type || (msg.media_url ? "image" : undefined)
+              ) || c.last_message_text;
+              return {
+                ...c,
+                last_message_text: preview,
+                last_message_at: msg.created_at || c.last_message_at,
+                unread_count: isCurrent ? 0 : c.unread_count + (senderType === "customer" ? 1 : 0),
+              };
+            })
+          )
         );
       } else if (event.eventType === "UPDATE") {
         // Update de status (sent → delivered → read) ou enriquecimento de mídia.
@@ -195,19 +198,21 @@ function ChatPageContent() {
       setConversations((prev: Conversation[]) => {
         const exists = prev.some((c) => isSameJid(c.id, updated.id));
         if (exists) {
-          return prev.map((c) =>
-            isSameJid(c.id, updated.id)
-              ? {
-                  ...c,
-                  ...updated,
-                  last_message_text: updated.last_message_text || c.last_message_text,
-                  unread_count: currentActive && isSameJid(currentActive.id, updated.id) ? 0 : updated.unread_count,
-                }
-              : c
+          return sortConversationsByLastMessage(
+            prev.map((c) =>
+              isSameJid(c.id, updated.id)
+                ? {
+                    ...c,
+                    ...updated,
+                    last_message_text: updated.last_message_text || c.last_message_text,
+                    unread_count: currentActive && isSameJid(currentActive.id, updated.id) ? 0 : updated.unread_count,
+                  }
+                : c
+            )
           );
         } else {
           if (rawSession.client_id === clientId) {
-            return [updated, ...prev];
+            return sortConversationsByLastMessage([updated, ...prev]);
           }
           return prev;
         }
@@ -261,7 +266,29 @@ function ChatPageContent() {
 
   const handleConversationsLoaded = useCallback(
     (loaded: Conversation[]) => {
-      setConversations(loaded);
+      setConversations((prev) => {
+        if (prev.length === 0) return loaded;
+
+        const prevByDigits = new Map<string, Conversation>();
+        for (const c of prev) prevByDigits.set(c.id.replace(/\D/g, "") || c.id, c);
+
+        const merged = loaded.map((c) => {
+          const existing = prevByDigits.get(c.id.replace(/\D/g, "") || c.id);
+          if (!existing) return c;
+          const existingTime = new Date(existing.last_message_at || existing.updated_at || existing.created_at || 0).getTime();
+          const loadedTime = new Date(c.last_message_at || c.updated_at || c.created_at || 0).getTime();
+          if (existingTime > loadedTime) {
+            return {
+              ...c,
+              last_message_at: existing.last_message_at,
+              last_message_text: existing.last_message_text || c.last_message_text,
+            };
+          }
+          return c;
+        });
+
+        return sortConversationsByLastMessage(merged);
+      });
       
       if (deepLinkConvId && autoSelectedForDeepLinkRef.current !== deepLinkConvId && loaded.length > 0) {
         autoSelectedForDeepLinkRef.current = deepLinkConvId;
@@ -313,16 +340,19 @@ function ChatPageContent() {
       return [...prev, msg];
     });
 
-    // Atualiza o texto da última mensagem no card do contato
+    // Atualiza o texto da última mensagem no card do contato E reordena
+    // a lista (conversa que recebeu mensagem do agente sobe pro topo).
     setConversations((prev) =>
-      prev.map((c) =>
-        c.id === msg.conversation_id
-          ? {
-              ...c,
-              last_message_text: msg.content_text || c.last_message_text,
-              last_message_at: msg.created_at,
-            }
-          : c
+      sortConversationsByLastMessage(
+        prev.map((c) =>
+          c.id === msg.conversation_id
+            ? {
+                ...c,
+                last_message_text: msg.content_text || c.last_message_text,
+                last_message_at: msg.created_at,
+              }
+            : c
+        )
       )
     );
   }, []);

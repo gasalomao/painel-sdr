@@ -168,6 +168,7 @@ export default function AgentePage() {
   );
   const [is24h, setIs24h] = useState(false);
   const [awayMessage, setAwayMessage] = useState("");
+  const [disableGroups, setDisableGroups] = useState(false);
 
   // ============= ETAPAS DO FUNIL =============
   const [stages, setStages] = useState<any[]>([]);
@@ -260,6 +261,7 @@ export default function AgentePage() {
         setIsActiveAgente(data.is_active ?? true);
         setIs24h(data.is_24h ?? false);
         setAwayMessage(data.away_message || "");
+        setDisableGroups(data.disable_groups ?? false);
 
         const opts = data.options || {};
         setAppUrl(opts.app_url || "");
@@ -513,7 +515,7 @@ export default function AgentePage() {
   /* ====================================================================
      SAVE handlers — todos chamam supabase.update com o subset relevante.
   ==================================================================== */
-  const saveIdentity = async () => {
+  const saveIdentity = async (silent = false) => {
     if (!activeAgentId) return;
     setSavingConfig(true);
     const { data: current } = await supabase.from("agent_settings").select("options").eq("id", activeAgentId).single();
@@ -526,32 +528,33 @@ export default function AgentePage() {
         humanize_messages: humanizeMessages,
         web_search_enabled: webSearchEnabled,
         reasoning_mode: reasoningMode,
-        thinking_budget: reasoningMode, // retrocompat: grava o mesmo valor no campo legado
+        thinking_budget: reasoningMode,
       },
-      // Coluna dedicada (não JSONB) — workers/backend filtram via WHERE
       lead_intelligence_enabled: leadIntelligenceEnabled,
     }).eq("id", activeAgentId).eq("client_id", clientId);
     setSavingConfig(false);
-    if (!error) alert("Identidade salva!"); else alert("Erro: " + error.message);
+    if (!silent) { if (!error) alert("Identidade salva!"); else alert("Erro: " + error.message); }
+    return !error;
   };
 
-  const savePrompt = async () => {
+  const savePrompt = async (silent = false) => {
     if (!activeAgentId) return;
     setSavingConfig(true);
     const { error } = await supabase.from("agent_settings").update({ main_prompt: prompt }).eq("id", activeAgentId).eq("client_id", clientId);
     setSavingConfig(false);
-    if (!error) alert("Prompt salvo!"); else alert("Erro: " + error.message);
+    if (!silent) { if (!error) alert("Prompt salvo!"); else alert("Erro: " + error.message); }
+    return !error;
   };
 
   const saveSchedules = async () => {
     if (!activeAgentId) return;
     setSavingConfig(true);
-    const { error } = await supabase.from("agent_settings").update({ schedules, is_24h: is24h, away_message: awayMessage }).eq("id", activeAgentId).eq("client_id", clientId);
+    const { error } = await supabase.from("agent_settings").update({ schedules, is_24h: is24h, away_message: awayMessage, disable_groups: disableGroups }).eq("id", activeAgentId).eq("client_id", clientId);
     setSavingConfig(false);
     if (!error) alert("Horários salvos!"); else alert("Erro: " + error.message);
   };
 
-  const saveCalendarConfig = async () => {
+  const saveCalendarConfig = async (silent = false) => {
     if (!activeAgentId) return;
     setSavingConfig(true);
     const { data: current } = await supabase.from("agent_settings").select("options, scheduler_config").eq("id", activeAgentId).single();
@@ -595,7 +598,8 @@ export default function AgentePage() {
       },
     }).eq("id", activeAgentId).eq("client_id", clientId);
     setSavingConfig(false);
-    if (!error) alert("Agenda salva!"); else alert("Erro: " + error.message);
+    if (!silent) { if (!error) alert("Agenda salva!"); else alert("Erro: " + error.message); }
+    return !error;
   };
 
   // Testa + salva a credencial OAuth e abre o fluxo de autorização do Google.
@@ -1153,6 +1157,7 @@ export default function AgentePage() {
                 is24h={is24h} setIs24h={setIs24h}
                 schedules={schedules} setSchedules={setSchedules}
                 awayMessage={awayMessage} setAwayMessage={setAwayMessage}
+                disableGroups={disableGroups} setDisableGroups={setDisableGroups}
                 onSave={saveSchedules}
                 saving={savingConfig}
               />

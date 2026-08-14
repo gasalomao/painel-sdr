@@ -3,7 +3,7 @@
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { Clock } from "lucide-react";
+import { Clock, Users } from "lucide-react";
 import { Toggle } from "../_components/toggle";
 import { SaveButton } from "../_components/save-button";
 
@@ -16,6 +16,8 @@ export function AjustesTab({
   setSchedules,
   awayMessage,
   setAwayMessage,
+  disableGroups,
+  setDisableGroups,
   onSave,
   saving,
 }: {
@@ -25,6 +27,8 @@ export function AjustesTab({
   setSchedules: (v: ScheduleRow[]) => void;
   awayMessage: string;
   setAwayMessage: (v: string) => void;
+  disableGroups: boolean;
+  setDisableGroups: (v: boolean) => void;
   onSave: () => void;
   saving: boolean;
 }) {
@@ -137,6 +141,39 @@ export function AjustesTab({
           placeholder="Ex: Olá! No momento estamos fora do horário de atendimento. Retornamos amanhã às 08:00."
           className="bg-white/[0.02] border-white/[0.08] rounded-lg h-24 text-sm"
         />
+      </div>
+
+      {/* ===== Grupos do WhatsApp ===== */}
+      <div className="border-t border-white/[0.06] pt-6 space-y-4">
+        <header className="flex items-center gap-3">
+          <div className="p-2.5 rounded-xl bg-primary/15 text-primary shrink-0">
+            <Users className="w-5 h-5" />
+          </div>
+          <div>
+            <h3 className="text-base font-semibold text-foreground">Grupos do WhatsApp</h3>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Controle se a IA atende grupos conectados a este número.
+            </p>
+          </div>
+        </header>
+
+        <div className="flex items-center justify-between gap-4 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-foreground">Atender grupos</p>
+            <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+              {!disableGroups
+                ? "A IA responde mensagens e transcreve áudios recebidos em grupos."
+                : "A IA ignora grupos: não responde nem transcreve áudios — economiza tokens. As mensagens continuam salvas no painel."}
+            </p>
+          </div>
+          <Toggle
+            checked={!disableGroups}
+            onCheckedChange={(v) => setDisableGroups(!v)}
+            color="green"
+            size="md"
+            aria-label="Atender grupos"
+          />
+        </div>
       </div>
 
       <SaveButton label="Salvar Configurações" onSave={onSave} disabled={saving} />

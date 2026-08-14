@@ -3,6 +3,7 @@ import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { SchemaType } from "@google/generative-ai";
 import { google } from "googleapis";
 import { getEffectiveStatus } from "@/lib/bot-status";
+import { isGroupJid } from "@/lib/bot-status";
 import { renderTemplate } from "@/lib/template-vars";
 import { logTokenUsage } from "@/lib/token-usage";
 import { getEvolutionConfig } from "@/lib/evolution";
@@ -160,6 +161,20 @@ export async function POST(req: NextRequest) {
          return NextResponse.json({ success: false, error: `Agente "${agentConfig?.name || agentId}" está INATIVO. Ative-o na aba Informações para usar em produção. (Modo teste permite simular mesmo inativo, mas o agente não foi encontrado.)` });
        }
        return NextResponse.json({ success: true, status: "agent_inactive" });
+     }
+
+     // GATE de grupos: se o agente tem disable_groups e a mensagem vem de
+     // um grupo (@g.us), a IA não responde. A mensagem já foi salva pelo
+     // webhook — o usuário vê no painel, mas a IA fica em silêncio.
+     if (agentConfig.disable_groups && isGroupJid(remoteJid)) {
+       console.log(`[AGENT] Grupos desativados para este agente — pulando IA para ${maskJid(remoteJid)}`);
+       await supabase.from("webhook_logs").insert({
+          instance_name: instanceName,
+          event: "AGENT_SKIP_GROUP_DISABLED",
+          payload: { remote_jid: maskJid(remoteJid), agent_id: agentId },
+          created_at: new Date().toISOString(),
+       }).then(() => {}, () => {});
+       return NextResponse.json({ success: true, status: "group_disabled" });
      }
      if (isTestMode && agentConfig && !agentConfig.is_active) {
        console.log(`[AGENT] Agent ID ${agentId} is INACTIVE but running in TEST MODE — bypassing gate.`);

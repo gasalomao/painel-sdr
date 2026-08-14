@@ -32,6 +32,7 @@ import {
 import { clientIdFromInstance, DEFAULT_CLIENT_ID } from "@/lib/tenant";
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
 import { isAiSend, isManualSend, isPendingAutomatedSend } from "@/lib/manual-send-registry";
+import { shouldSkipGroupActions } from "@/lib/bot-status";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -115,6 +116,11 @@ export async function POST(req: NextRequest) {
     const session = contact
       ? await findOrCreateSession(contact.id, instanceName, remoteJid, clientId)
       : null;
+
+    // Verifica se grupos estão desativados para este agente.
+    const groupDisabled = session?.agent_id
+      ? await shouldSkipGroupActions(remoteJid, session.agent_id)
+      : false;
 
     // ===== Buscar foto de perfil (fire-and-forget) =====
     // Não bloqueia o processamento da mensagem. Só busca se o contato
@@ -236,7 +242,7 @@ export async function POST(req: NextRequest) {
           mediaUrl = await uploadMediaBase64(base64Media, remoteJid, sanitizeMimetype(mimetype || "", "application/octet-stream"));
 
           // Transcrição/descrição baseada no tipo.
-          if (msgType === "audio") {
+          if (msgType === "audio" && !groupDisabled) {
             const transcript = await transcribeAudio(base64Media, sanitizeMimetype(mimetype || "", "audio/ogg"), messageId);
             enrichedContent = transcript ? `🎤 ${transcript}` : "[🎤 O cliente enviou um áudio que não consegui transcrever]";
           } else if (msgType === "image") {
@@ -261,7 +267,7 @@ export async function POST(req: NextRequest) {
     }
 
     // ===== Disparar agente IA (mensagens do cliente com texto/mídia) =====
-    if (!fromMe && (text || msgType === "audio" || msgType === "image") && session?.id) {
+    if (!fromMe && (text || msgType === "audio" || msgType === "image") && session?.id && !groupDisabled) {
       const effectiveActive = (session as any)._effective_active ?? (session.bot_status === "bot_active");
       if (effectiveActive) {
         const internalSecret = getInternalSecret();

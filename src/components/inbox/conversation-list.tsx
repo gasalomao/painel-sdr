@@ -202,12 +202,12 @@ export function ConversationList({
       const latestMap = new Map<string, { content: string; created_at: string }>();
       if (msgsRes.data) {
         for (const msg of msgsRes.data) {
-          if (msg.remote_jid && !latestMap.has(msg.remote_jid)) {
+          if (msg.remote_jid && !latestMap.has(msg.remote_jid.replace(/\D/g, "") || msg.remote_jid)) {
             const previewText = formatLastMessagePreview(
               msg.content,
               msg.media_type || (msg.media_url ? "image" : undefined)
             );
-            latestMap.set(msg.remote_jid, {
+            latestMap.set(msg.remote_jid.replace(/\D/g, "") || msg.remote_jid, {
               content: previewText,
               created_at: msg.created_at
             });
@@ -216,7 +216,7 @@ export function ConversationList({
       }
 
       const normalized = normalizeConversations(sessionsRes.data ?? []).map((c) => {
-        const lastMsgObj = latestMap.get(c.id);
+        const lastMsgObj = latestMap.get(c.id.replace(/\D/g, "") || c.id);
         const text = lastMsgObj?.content || formatLastMessagePreview(c.last_message_text) || "";
         return {
           ...c,
@@ -275,12 +275,12 @@ export function ConversationList({
       const latestMap = new Map<string, { content: string; created_at: string }>();
       if (msgsRes.data) {
         for (const msg of msgsRes.data) {
-          if (msg.remote_jid && !latestMap.has(msg.remote_jid)) {
+          if (msg.remote_jid && !latestMap.has(msg.remote_jid.replace(/\D/g, "") || msg.remote_jid)) {
             const previewText = formatLastMessagePreview(
               msg.content,
               msg.media_type || (msg.media_url ? "image" : undefined)
             );
-            latestMap.set(msg.remote_jid, {
+            latestMap.set(msg.remote_jid.replace(/\D/g, "") || msg.remote_jid, {
               content: previewText,
               created_at: msg.created_at,
             });
@@ -289,7 +289,7 @@ export function ConversationList({
       }
 
       const normalized = normalizeConversations(sessionsRes.data).map((c) => {
-        const lastMsgObj = latestMap.get(c.id);
+        const lastMsgObj = latestMap.get(c.id.replace(/\D/g, "") || c.id);
         const text = lastMsgObj?.content || formatLastMessagePreview(c.last_message_text) || "";
         return {
           ...c,

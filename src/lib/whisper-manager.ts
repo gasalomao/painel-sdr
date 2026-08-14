@@ -1,4 +1,4 @@
-/**
+﻿﻿﻿/**
  * Whisper.cpp — transcrição de áudio GRATUITA e LOCAL (sem API, sem token).
  *
  * POR QUE EXISTE: o painel transcrevia áudios só com o Gemini (multimodal),
@@ -8,9 +8,9 @@
  * PRIMEIRO; se falhar, cai pro Gemini (fallback) — nunca perde um áudio.
  *
  * COMO FUNCIONA:
- *   1. ensureWhisper(): baixa o binário (whisper-bin-ubuntu-x64) + modelo
- *      (ggml-base.bin, 74MB) em runtime pro disco (.whisper/). Idempotente —
- *      só baixa 1x, cacheia. Mesmo padrão do conector embutido (CLIProxyAPI).
+ *   1. ensureWhisper(): baixa o binário (whisper-cli) + modelo
+ *      (tamanho varia por modelo: base 148MB, small 465MB, medium 1.46GB;
+ *      pro disco (.whisper/). Idempotente — só baixa 1x, cacheia.
  *   2. transcribeAudioWithWhisper(base64, mime): decodifica o áudio, converte
  *      pra WAV 16kHz (whisper.cpp exige) com ffmpeg, roda whisper-cli em CPU
  *      e devolve o texto. Retorna null em falha (caller cai no fallback).
@@ -19,7 +19,7 @@
  * via libc6-compat). Veja Dockerfile.
  *
  * Server-only (fs/child_process). Env WHISPER_DISABLED=1 desliga (cai direto
- * no Gemini). Env WHISPER_MODEL troca o modelo (default ggml-base.bin).
+ * no Gemini). Env WHISPER_MODEL seleciona o modelo (ver Dockerfile).
  */
 
 import fs from "fs";
@@ -58,13 +58,21 @@ function resolveBaseDir(): string {
 
 const DIR = resolveBaseDir();
 const BIN_DIR = path.join(DIR, "bin");
-const MODEL_NAME = process.env.WHISPER_MODEL || "ggml-base.bin";
-const MODEL_PATH = path.join(DIR, MODEL_NAME);
 const BIN_PATH = path.join(BIN_DIR, "whisper-cli");
 const BINPATH_PATH = path.join(DIR, "bin-path.txt");
 
+function getModelName(): string {
+  return process.env.WHISPER_MODEL || "ggml-base.bin";
+}
+function getModelPath(): string {
+  return path.join(DIR, getModelName());
+}
+function getModelUrl(): string {
+  return `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${getModelName()}`;
+}
+
 // Releases oficiais: github.com/ggml-org/whisper.cpp/releases
-const WHISPER_VERSION = "v1.7.5"; // pinado pra estabilidade; bump manual
+const WHISPER_VERSION = "v1.8.7"; // pinado pra estabilidade; bump manual
 // Binário certo por plataforma — antes baixava só o binário Linux e QUEBRAVA
 // no Windows do usuário (wine não existe). Agora win32 baixa .zip com .exe.
 const IS_WINDOWS = process.platform === "win32";
@@ -72,7 +80,6 @@ const BIN_ASSET = IS_WINDOWS
   ? "whisper-bin-x64.zip"
   : "whisper-bin-ubuntu-x64.tar.gz";
 const BIN_URL = `https://github.com/ggml-org/whisper.cpp/releases/download/${WHISPER_VERSION}/${BIN_ASSET}`;
-const MODEL_URL = `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${MODEL_NAME}`;
 
 function readText(p: string): string | null {
   try { return fs.readFileSync(p, "utf8").trim() || null; } catch { return null; }
@@ -84,13 +91,13 @@ function readText(p: string): string | null {
  */
 export function isWhisperInstalled(): boolean {
   const p = readText(BINPATH_PATH);
-  return !!(p && fs.existsSync(p) && fs.existsSync(MODEL_PATH));
+  return !!(p && fs.existsSync(p) && fs.existsSync(getModelPath()));
 }
 
 /**
  * Baixa e instala o whisper (binário + modelo) em runtime. Idempotente — só
  * baixa o que falta. Mesmo padrão do installProxy() do gateway-proxy-manager.
- * Pode demorar na 1ª vez (~74MB modelo + ~9MB binário); depois é instantâneo.
+ * Pode demorar na 1ª vez (modelo + binário); depois é instantâneo.
  */
 export async function ensureWhisper(): Promise<{ binPath: string; modelPath: string }> {
   if (WHISPER_DISABLED) throw new Error("Whisper desligado via WHISPER_DISABLED.");
@@ -119,18 +126,19 @@ export async function ensureWhisper(): Promise<{ binPath: string; modelPath: str
     fs.writeFileSync(BINPATH_PATH, binPath, "utf8");
   }
 
-  // 2) Modelo — baixa do HuggingFace (74MB pra ggml-base.bin). Cacheado.
-  if (!fs.existsSync(MODEL_PATH)) {
-    const res = await fetch(MODEL_URL, {
+  // 2) Modelo — baixa do HuggingFace. Cacheado.
+  const _modelPath = getModelPath();
+  if (!fs.existsSync(_modelPath)) {
+    const res = await fetch(getModelUrl(), {
       headers: { "User-Agent": "painel-sdr" },
-      signal: AbortSignal.timeout(300000),
+      signal: AbortSignal.timeout(600000),
     });
     if (!res.ok) throw new Error(`Download do modelo whisper falhou (HTTP ${res.status}).`);
     const buf = Buffer.from(await res.arrayBuffer());
-    fs.writeFileSync(MODEL_PATH, buf);
+    fs.writeFileSync(_modelPath, buf);
   }
 
-  return { binPath, modelPath: MODEL_PATH };
+  return { binPath, modelPath: _modelPath };
 }
 
 /** Extrai tar.gz (Linux/Mac) ou zip (Windows). */
@@ -182,7 +190,7 @@ export async function getWhisperStatus(): Promise<WhisperStatus> {
   return {
     installed: isWhisperInstalled(),
     disabled: WHISPER_DISABLED,
-    model: MODEL_NAME,
+    model: getModelName(),
   };
 }
 
@@ -206,7 +214,7 @@ export async function transcribeAudioWithWhisper(
     try { await ensureWhisper(); } catch { return null; }
   }
   const binPath = readText(BINPATH_PATH);
-  if (!binPath || !fs.existsSync(binPath) || !fs.existsSync(MODEL_PATH)) return null;
+  if (!binPath || !fs.existsSync(binPath) || !fs.existsSync(getModelPath())) return null;
 
   // Decodifica base64 → arquivo temporário com extensão certa.
   const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");
@@ -218,7 +226,7 @@ export async function transcribeAudioWithWhisper(
   fs.mkdirSync(tmpDir, { recursive: true });
   const inputPath = path.join(tmpDir, `input${ext}`);
   const wavPath = path.join(tmpDir, "input.wav");
-  const txtPath = path.join(tmpDir, "input.txt");
+  const txtPath = path.join(tmpDir, "input.wav.txt");
 
   try {
     fs.writeFileSync(inputPath, Buffer.from(cleanBase64, "base64"));
@@ -247,7 +255,7 @@ export async function transcribeAudioWithWhisper(
     //   -otxt (saída .txt)  -np (sem progress bar colorida)  -nt (sem timestamps)
     const result = await new Promise<string | null>((resolve) => {
       const child = spawn(binPath, [
-        "-m", MODEL_PATH,
+        "-m", getModelPath(),
         "-f", wavPath,
         "-l", "pt",
         "-t", "2",
@@ -256,7 +264,9 @@ export async function transcribeAudioWithWhisper(
         "-nt",
       ], { windowsHide: true });
       let stderr = "";
+      let stdout = "";
       child.stderr.on("data", (d) => { stderr += d.toString(); });
+      child.stdout.on("data", (d) => { stdout += d.toString(); });
       const timer = setTimeout(() => {
         try { child.kill("SIGKILL"); } catch { /* já morto */ }
         resolve(null);
@@ -268,17 +278,18 @@ export async function transcribeAudioWithWhisper(
           resolve(null);
           return;
         }
-        // O whisper escreve o resultado em input.txt (ao lado do wav).
+        // whisper-cli com -otxt escreve em {input.wav}.txt
         try {
           if (fs.existsSync(txtPath)) {
             const text = fs.readFileSync(txtPath, "utf8").trim();
             resolve(text || null);
-          } else {
-            resolve(null);
+            return;
           }
-        } catch {
-          resolve(null);
-        }
+        } catch { /* fallback stdout abaixo */ }
+        // Fallback: se não achou o .txt, pega o texto do stdout
+        // (whisper-cli também imprime a transcrição no terminal)
+        const cleaned = stdout.replace(/^whisper\.cpp.*$/gm, "").replace(/^read_audio_data.*$/gm, "").trim();
+        resolve(cleaned || null);
       });
       child.on("error", () => { clearTimeout(timer); resolve(null); });
     });

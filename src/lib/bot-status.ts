@@ -44,6 +44,49 @@ const LEGACY_GLOBAL_KEY = "global_ai_paused_until";
 const keyFor = (instance: string) => `global_ai_paused_until:${instance}`;
 
 /* ============================================================
+   GRUPOS — helper para identificar e filtrar
+   ============================================================ */
+
+/**
+ * Identifica se um JID pertence a um grupo do WhatsApp.
+ * Grupos usam o sufixo @g.us (Evolution API / Baileys / whatsmeow).
+ */
+export function isGroupJid(remoteJid: string | null | undefined): boolean {
+  return !!remoteJid && remoteJid.endsWith("@g.us");
+}
+
+/**
+ * Verifica se o agente tem "disable_groups" ativado.
+ * Consulta agent_settings.disable_groups (boolean, default false).
+ */
+export async function isGroupDisabled(agentId: number | string): Promise<boolean> {
+  try {
+    const { data } = await supabaseAdmin
+      .from("agent_settings")
+      .select("disable_groups")
+      .eq("id", agentId)
+      .maybeSingle();
+    return data?.disable_groups === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Combina as duas checagens: só retorna true se for grupo E o agente
+ * tiver disable_groups ativado. Uso típico nos webhooks antes de
+ * transcrever áudio ou disparar a IA.
+ */
+export async function shouldSkipGroupActions(
+  remoteJid: string | null | undefined,
+  agentId: number | string | null | undefined,
+): Promise<boolean> {
+  if (!isGroupJid(remoteJid)) return false;
+  if (!agentId) return false;
+  return isGroupDisabled(agentId);
+}
+
+/* ============================================================
    PAUSA "GLOBAL" — agora POR INSTÂNCIA
    ============================================================ */
 

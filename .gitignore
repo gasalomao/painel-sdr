@@ -60,6 +60,7 @@ AGENTS.md
 
 # ==================== Runtime State (local only) ====================
 .gateway-proxy/
+.whisper/
 ruvector.db
 qr-sdr.png
 scratch/

@@ -82,7 +82,7 @@ export type InfoTabProps = {
   webSearchEnabled: boolean; setWebSearchEnabled: (v: boolean) => void;
   reasoningMode: 0 | 1 | 2 | 3; setReasoningMode: (n: 0 | 1 | 2 | 3) => void;
   leadIntelligenceEnabled: boolean; setLeadIntelligenceEnabled: (v: boolean) => void;
-  saveIdentity: () => void;
+  saveIdentity: (silent?: boolean) => Promise<boolean | void>;
   savingConfig: boolean;
   toggleAgentActive: () => void;
 
@@ -103,7 +103,7 @@ export type InfoTabProps = {
     necessidade_label?: string;
   };
   setCalendarAutoCapture: (fn: (prev: any) => any) => void;
-  saveCalendarConfig: () => void;
+  saveCalendarConfig: (silent?: boolean) => Promise<boolean | void>;
 
   // Scheduler (lembretes automáticos + auto-promote kanban)
   isScheduler: boolean; setIsScheduler: (v: boolean) => void;
@@ -133,7 +133,7 @@ export type InfoTabProps = {
   promptRef: React.RefObject<HTMLTextAreaElement | null>;
   insertVariable: (key: string) => void;
   insertKbVariable: (title: string) => void;
-  savePrompt: () => void;
+  savePrompt: (silent?: boolean) => Promise<boolean | void>;
   knowledge: any[];
 
   // Prompt preview
@@ -402,9 +402,11 @@ export function InfoTab(p: InfoTabProps) {
   const [uploadingImg, setUploadingImg] = useState(false);
 
   const saveAll = async () => {
-    p.saveIdentity();
-    p.saveCalendarConfig();
-    p.savePrompt();
+    const ok1 = await p.saveIdentity(true);
+    const ok2 = await p.saveCalendarConfig(true);
+    const ok3 = await p.savePrompt(true);
+    if (ok1 && ok2 && ok3) alert("Tudo salvo com sucesso!");
+    else alert("Erro ao salvar — verifique os campos e tente novamente.");
   };
 
   return (

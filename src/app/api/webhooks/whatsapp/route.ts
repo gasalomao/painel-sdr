@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { evolution, getEvolutionConfig } from "@/lib/evolution";
 import { getEffectiveStatus } from "@/lib/bot-status";
+import { shouldSkipGroupActions } from "@/lib/bot-status";
 import { isManualSend, isAiSend, isPendingAutomatedSend } from "@/lib/manual-send-registry";
 import { clientIdFromInstance, DEFAULT_CLIENT_ID } from "@/lib/tenant";
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
@@ -962,13 +963,13 @@ export async function POST(req: NextRequest) {
         }).then(() => {}, () => {});
       }
 
+      // Verifica se grupos estão desativados para este agente — se sim,
+      // skipa transcrição de áudio e disparo da IA (mensagem ainda é salva).
+      const groupDisabled = session?.agent_id
+        ? await shouldSkipGroupActions(remoteJid, session.agent_id)
+        : false;
+
       // Determinar sender. Pra mensagens fromMe (saíram do nosso número):
-      //   - isAiSend     → foi a PRÓPRIA IA (registro em memória) → 'ai'
-      //   - isManualSend → envio pelo painel → 'human'
-      //   - nenhum dos 2 → humano digitou no CELULAR (número conectado) → 'human'
-      // Antes usava-se `bot_active ? 'ai' : 'human'`, que rotulava errado um
-      // envio do celular como 'ai' quando o bot estava ativo — e, com isso, a
-      // IA nunca pausava ao você responder pelo telefone.
       let sender: 'customer' | 'ai' | 'human' | 'system' = 'customer';
       if (fromMe) {
         if (isAiSend(finalId) || isPendingAutomatedSend(instanceName, remoteJid, text)) {
@@ -1061,7 +1062,7 @@ export async function POST(req: NextRequest) {
             // Nunca perde um áudio: se o whisper falhar/indisponível, cai pro
             // Gemini (multimodal, gasta token mas garante resposta ao cliente).
             let enrichedContent: string | null = null;
-            if (msgType === "audio") {
+            if (msgType === "audio" && !groupDisabled) {
               let transcript: string | null = null;
               let transcribeProvider = "none";
               // Tenta whisper.cpp (grátis) primeiro — baixa na 1ª vez, cacheia.
@@ -1155,7 +1156,7 @@ export async function POST(req: NextRequest) {
             // 5) Dispara agente com texto enriquecido (só se msg do cliente + bot ativo +
             //    transcrição disponível + mensagem original NÃO tinha caption — senão
             //    o fluxo síncrono já disparou e a gente evita double-fire).
-            if (!fromMe && !text && enrichedContent && session?.id) {
+            if (!fromMe && !text && enrichedContent && session?.id && !groupDisabled) {
               const effectiveActive = (session as any)._effective_active ?? (session.bot_status === 'bot_active');
               if (effectiveActive) {
                 console.log("🤖 [Media] Disparando agente com conteúdo transcrito/descrito:", enrichedContent.slice(0, 60));
@@ -1352,7 +1353,7 @@ export async function POST(req: NextRequest) {
       }
 
       // === Disparar IA (apenas se mensagem do cliente E IA efetivamente ativa) ===
-      if (!fromMe && text && session?.id) {
+      if (!fromMe && text && session?.id && !groupDisabled) {
         const effectiveActive = (session as any)._effective_active ?? (session.bot_status === 'bot_active');
         if (effectiveActive) {
           console.log("🤖 DISPARANDO AGENTE DE IA PARA:", maskJid(remoteJid));

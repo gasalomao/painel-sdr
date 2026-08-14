@@ -17,6 +17,7 @@ import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { whatsappCloud } from "@/lib/whatsapp-cloud";
 import { resolveChannel, resolveInstanceFromPhoneNumberId } from "@/lib/channel";
 import { getEffectiveStatus } from "@/lib/bot-status";
+import { shouldSkipGroupActions } from "@/lib/bot-status";
 import { isManualSend } from "@/lib/manual-send-registry";
 import { createHmac, timingSafeEqual } from "node:crypto";
 
@@ -251,6 +252,11 @@ export async function POST(req: NextRequest) {
         console.warn("[Cloud Webhook] contact/session falhou (não-fatal):", sErr?.message);
       }
 
+      // Verifica se grupos estão desativados para este agente.
+      const groupDisabled = sessionRow?.agent_id
+        ? await shouldSkipGroupActions(m.remoteJid, sessionRow.agent_id)
+        : false;
+
       // Sender (Cloud webhook não dispara fromMe automaticamente — apenas mensagens recebidas)
       // Se for echo de envio nosso (alguns Apps mandam), tratamos via isManualSend.
       const fromMe = false; // Cloud só entrega messages do usuário; status de envio vai no campo statuses
@@ -331,63 +337,14 @@ export async function POST(req: NextRequest) {
               console.warn("[Cloud Media] upload falhou:", upErr?.message);
             }
 
-            // Enriquecer texto se for áudio/imagem (reaproveita Gemini do webhook Evolution)
+            // Enriquecer texto se for áudio/imagem
             let enriched: string | null = null;
-            if (m.type === "audio") {
+            let transcribeProvider: string | null = null;
+            if (m.type === "audio" && !groupDisabled) {
               try {
-                const { GoogleGenerativeAI } = await import("@google/generative-ai");
-                const { data: cfg } = await supabase.from("ai_organizer_config").select("api_key").eq("id", 1).maybeSingle();
-                if (cfg?.api_key) {
-                  const genAI = new GoogleGenerativeAI(cfg.api_key);
-                  // Tenta primeiro o modelo escolhido pelo admin, depois fallbacks históricos
-                  // (lista local — última camada se a config global vier vazia).
-                  const { getDefaultModel } = await import("@/lib/ai-default-model");
-                  const adminModel = await getDefaultModel();
-                  const candidates = Array.from(new Set([
-                    adminModel,
-                    "gemini-2.5-flash",
-                    "gemini-2.0-flash",
-                    "gemini-1.5-flash",
-                  ].filter(Boolean) as string[]));
-                  for (const model of candidates) {
-                    try {
-                      const mdl = genAI.getGenerativeModel({ model });
-                      const res = await mdl.generateContent([
-                        { inlineData: { data: base64, mimeType: (mimetype || "audio/ogg").split(";")[0] } },
-                        { text: "Transcreva esse áudio em PT-BR. Devolva APENAS o texto transcrito." },
-                      ]);
-                      const t = res.response.text().trim();
-                      // Token tracking — antes esse bloco do canal Cloud era o
-                      // "primo pobre" do whatsapp/route.ts e NÃO logava nada,
-                      // deixando o gasto de transcrição invisível pro tenant.
-                      try {
-                        const { extractGeminiUsage, logTokenUsage } = await import("@/lib/token-usage");
-                        const usage = extractGeminiUsage(res);
-                        const clientId = await (async () => {
-                          const { data } = await supabase
-                            .from("channel_connections")
-                            .select("client_id")
-                            .eq("instance_name", instanceName)
-                            .maybeSingle();
-                          return data?.client_id || null;
-                        })();
-                        await logTokenUsage({
-                          source: "other",
-                          sourceLabel: "Transcrição áudio (Cloud)",
-                          model,
-                          promptTokens: usage.promptTokens,
-                          completionTokens: usage.completionTokens,
-                          totalTokens: usage.totalTokens,
-                          clientId,
-                          metadata: { kind: "audio_transcription_cloud", mimetype, instanceName, remoteJid: m.remoteJid },
-                        });
-                      } catch (logErr) {
-                        console.warn("[Cloud Media] token log falhou:", (logErr as Error).message);
-                      }
-                      if (t) { enriched = `🎤 ${t}`; break; }
-                    } catch { /* tenta próximo modelo */ }
-                  }
-                }
+                const { transcribeAudio } = await import("@/app/api/webhooks/shared-helpers");
+                const t = await transcribeAudio(base64, mimetype || "audio/ogg", m.messageId);
+                if (t) { enriched = `🎤 ${t}`; transcribeProvider = "whisper-or-gemini"; }
               } catch { /* ignore */ }
               if (!enriched) enriched = "[🎤 O cliente enviou um áudio que não consegui transcrever]";
             }
@@ -411,7 +368,7 @@ export async function POST(req: NextRequest) {
             }
 
             // Re-dispara agente com texto enriquecido (mesma lógica do Evolution)
-            if (enriched && sessionRow?.id) {
+            if (enriched && sessionRow?.id && !groupDisabled) {
               const eff = await getEffectiveStatus(sessionRow as any);
               if (eff.isActive) {
                 fetch(`${INTERNAL_BASE}/api/agent/process`, {
@@ -428,7 +385,7 @@ export async function POST(req: NextRequest) {
       }
 
       // Dispara agente com texto direto (igual webhook Evolution)
-      if (content && (m.text || m.caption) && sessionRow?.id) {
+      if (content && (m.text || m.caption) && sessionRow?.id && !groupDisabled) {
         const eff = await getEffectiveStatus(sessionRow as any);
         if (eff.isActive) {
           fetch(`${INTERNAL_BASE}/api/agent/process`, {
