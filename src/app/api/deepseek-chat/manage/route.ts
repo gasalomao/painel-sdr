@@ -17,6 +17,7 @@ import {
   getFullToken,
 } from "@/lib/deepseek-chat-manager";
 import { probeToken } from "@/lib/deepseek-chat-client";
+import { invalidateGatewayModelsCache } from "@/lib/gateway-model-discovery";
 
 export async function POST(req: NextRequest) {
   try {
@@ -37,6 +38,7 @@ export async function POST(req: NextRequest) {
       const token = String(body.token || "");
       const label = String(body.label || "");
       const t = addToken({ token, label });
+      invalidateGatewayModelsCache();
       return NextResponse.json({ success: true, token: t, tokens: listTokens() });
     }
 
@@ -47,6 +49,7 @@ export async function POST(req: NextRequest) {
       if (typeof body.label === "string") patch.label = body.label;
       if (typeof body.paused === "boolean") patch.paused = body.paused;
       const t = updateToken(id, patch);
+      invalidateGatewayModelsCache();
       return NextResponse.json({ success: true, token: t, tokens: listTokens() });
     }
 
@@ -54,6 +57,7 @@ export async function POST(req: NextRequest) {
       const id = String(body.id || "");
       if (!id) return NextResponse.json({ success: false, error: "id obrigatório." }, { status: 400 });
       deleteToken(id);
+      invalidateGatewayModelsCache();
       return NextResponse.json({ success: true, tokens: listTokens() });
     }
 

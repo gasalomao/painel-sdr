@@ -102,11 +102,13 @@ export async function GET(req: NextRequest) {
       ? String(cfg.openrouter_api_key).trim() : null;
     // "Configurado" = existe ao menos UMA conexão (lista nova OU legado single).
     const { parseGatewayEndpoints } = await import("@/lib/ai-keys");
+    const { countActiveTokens } = await import("@/lib/deepseek-chat-manager");
+    const hasDeepSeekTokens = countActiveTokens() > 0;
     const gatewayConfigured = parseGatewayEndpoints(
       cfg?.gateway_endpoints,
       cfg?.gateway_base_url || null,
       cfg?.gateway_api_key || null,
-    ).length > 0;
+    ).length > 0 || hasDeepSeekTokens;
 
     if (!geminiKey && !openrouterKey && !gatewayConfigured) {
       return NextResponse.json({

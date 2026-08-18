@@ -58,9 +58,31 @@ const MODEL_ENDPOINTS = new Map<string, GatewayEndpoint[]>();
 export async function getEndpoints(): Promise<GatewayEndpoint[]> {
   try {
     const keys = await getAiKeys();
-    return (keys.gatewayEndpoints || [])
+    const list = (keys.gatewayEndpoints || [])
       .map((e) => ({ ...e, baseUrl: normalizeGatewayBaseUrl(e.baseUrl) || "" }))
       .filter((e) => e.baseUrl.length > 0);
+
+    // Se temos contas DeepSeek ativas registradas no módulo deepseek-chat,
+    // injetamos automaticamente o endpoint interno se ele ainda não estiver na lista.
+    try {
+      const { countActiveTokens } = await import("@/lib/deepseek-chat-manager");
+      if (countActiveTokens() > 0) {
+        const internalDsUrl = "/api/deepseek-chat/v1";
+        const hasDs = list.some((e) => e.baseUrl.includes("deepseek-chat"));
+        if (!hasDs) {
+          const port = process.env.PORT || "3000";
+          const base = process.env.NEXT_PUBLIC_APP_URL || `http://localhost:${port}`;
+          list.push({
+            id: "ds_internal",
+            label: "DeepSeek (Conta Web)",
+            baseUrl: `${base.replace(/\/+$/, "")}${internalDsUrl}`,
+            apiKey: null,
+          });
+        }
+      }
+    } catch {}
+
+    return list;
   } catch {
     return [];
   }
@@ -68,6 +90,27 @@ export async function getEndpoints(): Promise<GatewayEndpoint[]> {
 
 /** Consulta /models de UMA conexão. Nunca lança — devolve [] se o proxy falhar. */
 async function fetchEndpointModels(ep: GatewayEndpoint): Promise<GatewayModel[]> {
+  // Se for o endpoint interno do DeepSeek, resolvemos diretamente sem HTTP loopback
+  if (ep.id === "ds_internal" || ep.baseUrl.includes("deepseek-chat")) {
+    try {
+      const { DEEPSEEK_CHAT_MODELS } = await import("@/lib/deepseek-chat-client");
+      const { countActiveTokens, listTokens } = await import("@/lib/deepseek-chat-manager");
+      if (countActiveTokens() === 0) return [];
+      const tokens = listTokens().filter((t) => !t.paused);
+      const labels = tokens.map((t) => t.label).join(", ");
+      return DEEPSEEK_CHAT_MODELS.map((m): GatewayModel => ({
+        id: m.id,
+        name: `${m.id === "deepseek-chat" ? "DeepSeek V3" : "DeepSeek R1"} (${ep.label})`,
+        ownedBy: "deepseek",
+        supportsTools: true,
+        endpointId: ep.id,
+        endpointLabel: labels ? `${ep.label} [${labels}]` : ep.label,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
   try {
     const headers: Record<string, string> = {};
     if (ep.apiKey) headers.Authorization = `Bearer ${ep.apiKey}`;

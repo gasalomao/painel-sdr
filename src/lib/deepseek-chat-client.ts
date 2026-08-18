@@ -102,13 +102,20 @@ async function getDispatcher(): Promise<any | null> {
 
 async function ds(method: string, path: string, token: string, fp: DsFingerprint, body?: unknown): Promise<Response> {
   const dispatcher = await getDispatcher();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
   const init: any = {
     method,
     headers: browserHeaders(fp, token),
     body: body ? JSON.stringify(body) : undefined,
+    signal: controller.signal,
   };
   if (dispatcher) init.dispatcher = dispatcher;
-  return fetch(`${UPSTREAM}${path}`, init);
+  try {
+    return await fetch(`${UPSTREAM}${path}`, init);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Erro tipado com flag de "token morto" pra o caller auto-pausar. */
@@ -136,8 +143,11 @@ async function createSession(token: string, fp: DsFingerprint): Promise<string> 
     throw new DsUpstreamError(res.status, `Falha ao criar sessão DeepSeek (HTTP ${res.status}): ${txt}`);
   }
   const j: any = await res.json().catch(() => null);
-  const id = j?.data?.biz_data?.id || j?.data?.id || j?.id;
-  if (!id) throw new DsUpstreamError(500, "DeepSeek não devolveu chat_session_id.");
+  const id = j?.data?.biz_data?.id || j?.data?.id || j?.id || j?.data?.session_id || j?.session_id;
+  if (!id) {
+    const raw = typeof j === "object" ? JSON.stringify(j).slice(0, 200) : "null";
+    throw new DsUpstreamError(500, `DeepSeek não devolveu chat_session_id (resposta: ${raw})`);
+  }
   return String(id);
 }
 

@@ -139,7 +139,8 @@ async function startScrapingPhase(a: AutomationRow): Promise<void> {
       mode: "batch",
       filterEmpty: filters.filterEmpty !== false,
       filterDuplicates: filters.filterDuplicates !== false,
-      filterLandlines: filters.filterLandlines !== false,
+      filterLandlines: filters.filterLandlines === true,
+      filterWithWebsite: filters.filterWithWebsite === true,
       captureAllReviews: filters.captureAllReviews === true,
       webhookEnabled: false,
       maxLeads: Number(a.scrape_max_leads) || 200,  // ← respeita o limite configurado

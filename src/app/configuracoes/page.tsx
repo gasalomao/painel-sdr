@@ -5,7 +5,7 @@ import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Settings2, Key, Save, CheckCircle2, XCircle, Loader2, Info, Database, Copy, ExternalLink, Check, Server, Plug, RefreshCw, Bot, Trash2, Plus, ChevronDown, ChevronRight, Zap, MoveUp, MoveDown } from "lucide-react";
+import { Settings2, Key, Save, CheckCircle2, XCircle, Loader2, Info, Database, Copy, ExternalLink, Check, Server, Plug, RefreshCw, Bot, Trash2, Plus, ChevronDown, ChevronRight, Zap, MoveUp, MoveDown, Play } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ModelOptions } from "@/components/ai-module-shared";
 import { AiCombosManager } from "@/components/ai-combos-manager";
@@ -1136,6 +1136,21 @@ export default function ConfiguracoesPage() {
     finally { setDsBusy(null); }
   }
 
+  async function handleDsTestToken(t: DsTok) {
+    setDsBusy(t.id);
+    setDsError(null);
+    setDsTestResult({ ok: false, detail: `Testando conta "${t.label}"…` });
+    try {
+      const res = await dsCall({ action: "test", id: t.id });
+      setDsTestResult({ ok: !!res.ok, detail: res.detail || (res.ok ? "OK" : "Falhou") });
+      await refreshDsTokens();
+    } catch (e: any) {
+      setDsTestResult({ ok: false, detail: e.message || "Erro ao testar conta." });
+    } finally {
+      setDsBusy(null);
+    }
+  }
+
   async function handleDsDelete(t: DsTok) {
     if (!confirm(`Remover a conta DeepSeek "${t.label}"?\n\nVocê precisará capturar o userToken de novo se quiser reconectar.`)) return;
     setDsBusy(t.id);
@@ -1158,9 +1173,8 @@ export default function ConfiguracoesPage() {
   function buildBookmarkletHref(painelUrl: string, code: string): string {
     const safeP = JSON.stringify(painelUrl);
     const safeC = JSON.stringify(code);
-    // Tudo em 1 linha — javascript: URLs não comem newlines bem em alguns
-    // browsers. Tentamos várias keys conhecidas + scan de JSON wrappers.
-    const body = `(function(){try{var P=${safeP};var C=${safeC};function clean(t){if(!t||typeof t!=='string')return null;var c=t.trim().replace(/^"|"$/g,'');if(c.length>20)return c;return null;}var keys=['userToken','user_token','__token__','deepseek_token','accessToken'];var t=null;for(var i=0;i<keys.length;i++){var raw=localStorage.getItem(keys[i]);if(!raw)continue;if(raw.indexOf('{')===0){try{var j=JSON.parse(raw);var c=j.userToken||j.token||j.access_token||j.accessToken||j.value||j.user_token;t=clean(c);if(t)break;}catch(_){}}t=clean(raw);if(t)break;}if(!t){for(var k in localStorage){try{var raw=localStorage.getItem(k);if(!raw)continue;if(raw.indexOf('{')===0){var j=JSON.parse(raw);var c=j.userToken||j.token||j.access_token||j.accessToken||j.value||j.user_token;t=clean(c);if(t)break;}t=clean(raw);if(t)break;}catch(_){}}}if(!t){alert('Nao achei o token de login. Voce esta logado em chat.deepseek.com?');return;}fetch(P+'/api/deepseek-chat/import-bookmarklet',{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({code:C,token:t})}).then(function(r){return r.json();}).then(function(d){if(d.success){alert('Token enviado pro painel! Pode voltar la.');}else{alert('Erro: '+(d.error||'falhou'));}}).catch(function(e){alert('Erro de rede: '+e.message);});}catch(e){alert('Erro: '+e.message);}})();`;
+    // Tudo em 1 linha — javascript: URLs não comem newlines bem em alguns browsers.
+    const body = `(function(){try{var P=${safeP};var C=${safeC};function clean(t){if(!t||typeof t!=='string')return null;var c=t.trim().replace(/^"|"$/g,'');if(c.length>20)return c;return null;}var keys=['userToken','user_token','__token__','deepseek_token','accessToken','token','auth_token','sessionToken'];var t=null;for(var i=0;i<keys.length;i++){var raw=localStorage.getItem(keys[i])||sessionStorage.getItem(keys[i]);if(!raw)continue;if(raw.indexOf('{')===0){try{var j=JSON.parse(raw);var c=j.userToken||j.token||j.access_token||j.accessToken||j.value||j.user_token;t=clean(c);if(t)break;}catch(_){}}t=clean(raw);if(t)break;}if(!t){for(var k in localStorage){try{var raw=localStorage.getItem(k);if(!raw)continue;if(raw.indexOf('{')===0){var j=JSON.parse(raw);var c=j.userToken||j.token||j.access_token||j.accessToken||j.value||j.user_token;t=clean(c);if(t)break;}t=clean(raw);if(t)break;}catch(_){}}}if(!t&&typeof document!=='undefined'&&document.cookie){var cp=document.cookie.split(';');for(var x=0;x<cp.length;x++){var p=cp[x].trim().split('=');var n=p[0]?p[0].trim():'';var v=p[1]?decodeURIComponent(p[1].trim()):'';if(['userToken','user_token','token','auth_token','accessToken'].indexOf(n)!==-1||n.indexOf('token')!==-1){t=clean(v);if(t)break;}}}if(!t){alert('Nao achei o token de login. Voce esta logado em chat.deepseek.com?');return;}fetch(P+'/api/deepseek-chat/import-bookmarklet',{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({code:C,token:t})}).then(function(r){return r.json();}).then(function(d){if(d.success){alert('Conta conectada com sucesso no painel!');}else{alert('Erro: '+(d.error||'falhou'));}}).catch(function(e){alert('Erro de rede: '+e.message);});}catch(e){alert('Erro: '+e.message);}})();`;
     return `javascript:${encodeURI(body)}`;
   }
 
@@ -3323,6 +3337,15 @@ export default function ConfiguracoesPage() {
                                 {editing && (
                                   <Button onClick={() => handleDsRename(t)} disabled={busy} className="h-7 bg-emerald-500/20 hover:bg-emerald-500/30 text-[10px]">Salvar</Button>
                                 )}
+                                <Button
+                                  onClick={() => handleDsTestToken(t)}
+                                  disabled={busy || t.paused}
+                                  variant="outline"
+                                  className="h-7 text-[10px] bg-blue-500/10 hover:bg-blue-500/20 border-blue-500/30 text-blue-200 gap-1"
+                                >
+                                  {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+                                  Testar
+                                </Button>
                                 <Button onClick={() => handleDsTogglePause(t)} variant="outline" className="h-7 text-[10px]">{t.paused ? "Retomar" : "Pausar"}</Button>
                                 <Button onClick={() => handleDsDelete(t)} variant="outline" className="h-7 text-[10px] bg-red-500/10 hover:bg-red-500/20 border-red-500/30 text-red-200">Excluir</Button>
                               </div>

@@ -451,6 +451,44 @@ async function openRouterChatWithFailover(
 }
 
 async function gatewayChat(baseUrl: string, apiKey: string | null, body: Record<string, any>, endpointId?: string): Promise<any> {
+  // Se for a rota interna do DeepSeek Web, chama o client diretamente em memória sem HTTP loopback
+  if (endpointId === "ds_internal" || baseUrl.includes("deepseek-chat")) {
+    const { chatComplete, messagesToPrompt } = await import("@/lib/deepseek-chat-client");
+    const { pickToken } = await import("@/lib/deepseek-chat-manager");
+    const active = pickToken();
+    if (!active) {
+      throw new ProviderHttpError(503, "Nenhuma conta DeepSeek conectada ou ativa no momento.");
+    }
+    const messages = Array.isArray(body?.messages) ? body.messages : [];
+    const prompt = messagesToPrompt(messages);
+    const model = String(body?.model || "deepseek-chat");
+    const res = await chatComplete({
+      tokenId: active.id,
+      token: active.token,
+      fingerprint: active.fingerprint,
+      model,
+      prompt,
+    });
+    return {
+      id: `ds_${Date.now()}`,
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: res.content },
+          finish_reason: "stop",
+        },
+      ],
+      usage: {
+        prompt_tokens: res.usage.promptTokens,
+        completion_tokens: res.usage.completionTokens,
+        total_tokens: res.usage.promptTokens + res.usage.completionTokens,
+      },
+    };
+  }
+
   return openAICompatibleChat(baseUrl, body, gatewayHeaders(apiKey), "Gateway de assinatura", endpointId);
 }
 

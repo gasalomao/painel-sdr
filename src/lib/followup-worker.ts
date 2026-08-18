@@ -456,7 +456,7 @@ async function processTarget(
       const history = await getConversationHistory(target.remote_jid, 20);
       const ai = await personalizeFollowupWithAI({
         baseMessage: text,
-        customPrompt: camp.ai_prompt || "",
+        customPrompt: camp.ai_prompt ? renderTemplate(camp.ai_prompt, renderCtx) : "",
         model: camp.ai_model,
         nome_empresa: target.nome_negocio || "",
         ramo: target.ramo_negocio || "",

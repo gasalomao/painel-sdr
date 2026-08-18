@@ -436,17 +436,22 @@ export default function ProspeccaoSitesPage() {
   const [autoStartHour, setAutoStartHour] = useState(9);
   const [autoEndHour, setAutoEndHour] = useState(20);
   const [autoFollowup, setAutoFollowup] = useState(true);
+  const [autoFollowupAi, setAutoFollowupAi] = useState(false);
+  const [autoFollowupAiModel, setAutoFollowupAiModel] = useState("");
+  const [autoFollowupAiPrompt, setAutoFollowupAiPrompt] = useState("");
   const [autoFuMinSec, setAutoFuMinSec] = useState(60);
   const [autoFuMaxSec, setAutoFuMaxSec] = useState(240);
   const [autoPersonalize, setAutoPersonalize] = useState(false);
   const [autoAiModel, setAutoAiModel] = useState("");
   const [autoAiPrompt, setAutoAiPrompt] = useState("");
+  const [autoCaptureAllReviews, setAutoCaptureAllReviews] = useState(false);
   const [autoReviewsAi, setAutoReviewsAi] = useState(false);
   const [autoReviewsAiModel, setAutoReviewsAiModel] = useState("");
   const [autoReviewsAiPrompt, setAutoReviewsAiPrompt] = useState("");
-  const [autoFollowupAi, setAutoFollowupAi] = useState(false);
-  const [autoFollowupAiModel, setAutoFollowupAiModel] = useState("");
-  const [autoFollowupAiPrompt, setAutoFollowupAiPrompt] = useState("");
+  const [autoFilterEmpty, setAutoFilterEmpty] = useState(true);
+  const [autoFilterDuplicates, setAutoFilterDuplicates] = useState(true);
+  const [autoFilterLandlines, setAutoFilterLandlines] = useState(false);
+  const [autoFilterWithWebsite, setAutoFilterWithWebsite] = useState(true);
   const [autoSteps, setAutoSteps] = useState<{ day_offset: number; template: string }[]>([
     { day_offset: 2, template: "Olá {{nome_empresa}}, tudo bem? Ainda tem interesse em ter um site profissional para sua empresa {{ramo}}?" },
   ]);
@@ -547,10 +552,11 @@ export default function ProspeccaoSitesPage() {
           regions: regionsArr,
           scrape_filters: {
             _source: "prospeccao-sites",
-            filterEmpty: true,
-            filterDuplicates: true,
-            filterLandlines: false,
-            captureAllReviews: autoReviewsAi,
+            filterEmpty: autoFilterEmpty,
+            filterDuplicates: autoFilterDuplicates,
+            filterLandlines: autoFilterLandlines,
+            filterWithWebsite: autoFilterWithWebsite,
+            captureAllReviews: autoCaptureAllReviews || autoReviewsAi,
             reviews_ai: autoReviewsAi
               ? { enabled: true, model: autoReviewsAiModel || null, prompt: autoReviewsAiPrompt || null }
               : { enabled: false },
@@ -1317,12 +1323,36 @@ export default function ProspeccaoSitesPage() {
               <>
                 <Card className="border-white/10 bg-white/[0.02]"><CardContent className="p-3 space-y-2">
                   <div className="text-xs font-bold uppercase tracking-wider text-white/50">Template</div>
-                  <Textarea value={template} onChange={(e) => setTemplate(e.target.value)} rows={5} className="text-sm" />
-                  <div className="flex flex-wrap gap-2 text-xs text-white/40">
-                    <span>Variáveis:</span>
-                    <code>{"{{saudacao}}"}</code><code>{"{{nome_empresa}}"}</code><code>{"{{ramo}}"}</code>
-                    <code>{"{{telefone}}"}</code><code>{"{{endereco}}"}</code><code>{"{{vendedor}}"}</code>
+                  <div className="space-y-1.5">
+                    <p className="text-[9px] uppercase font-bold text-white/40">Variáveis disponíveis (clica pra inserir):</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {[
+                        { key: "saudacao",          label: "Saudação",      hint: "Bom dia / Boa tarde / Boa noite" },
+                        { key: "nome",              label: "Nome",          hint: "Push name do WhatsApp (fallback empresa)" },
+                        { key: "nome_empresa",      label: "Empresa",       hint: "leads_extraidos.nome_negocio" },
+                        { key: "primeiro_nome",     label: "1ª palavra",    hint: "Primeira palavra do nome empresa" },
+                        { key: "ramo",              label: "Ramo",          hint: "leads_extraidos.ramo_negocio" },
+                        { key: "categoria",         label: "Categoria",     hint: "Categoria Google Maps" },
+                        { key: "endereco",          label: "Endereço",      hint: "Endereço completo" },
+                        { key: "website",           label: "Website",       hint: "Site do lead" },
+                        { key: "avaliacao",         label: "Avaliação",     hint: "Nota Google (1-5)" },
+                        { key: "reviews",           label: "Reviews",       hint: "Qtd. de reviews" },
+                        { key: "resumo_avaliacoes", label: "Resumo aval.",  hint: "Resumo IA das avaliações do Google (reviews-ai)" },
+                        { key: "telefone",          label: "Telefone",      hint: "Número limpo" },
+                        { key: "vendedor",          label: "Vendedor",      hint: "Nome do vendedor preenchido abaixo" },
+                      ].map(v => (
+                        <button
+                          key={v.key} type="button" title={v.hint}
+                          onClick={() => setTemplate((template || "") + `{{${v.key}}}`)}
+                          className="px-2 py-1 rounded-md bg-cyan-500/10 border border-cyan-500/30 hover:bg-cyan-500/20 text-[10px] cursor-pointer flex items-center gap-1"
+                        >
+                          <span className="font-bold text-cyan-100">{v.label}</span>
+                          <code className="text-[9px] font-mono text-cyan-300/70">{`{{${v.key}}}`}</code>
+                        </button>
+                      ))}
+                    </div>
                   </div>
+                  <Textarea value={template} onChange={(e) => setTemplate(e.target.value)} rows={5} className="text-sm font-mono bg-black/40 border-white/10" />
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-white/50">Vendedor:</span>
                     <Input value={vendedor} onChange={(e) => setVendedor(e.target.value)} className="w-48" />
@@ -1799,6 +1829,43 @@ export default function ProspeccaoSitesPage() {
                   <Textarea value={autoRegions} onChange={(e) => setAutoRegions(e.target.value)} rows={2} placeholder={"São Paulo SP\nCentro, Belo Horizonte MG"} />
                 </div>
 
+                {/* Filtros Automáticos da Automação */}
+                <div className="space-y-3 rounded-lg border border-white/10 p-3 bg-white/[0.02]">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-1.5">
+                      <Filter className="w-3 h-3 text-white/60" />
+                      <label className="text-xs font-semibold text-white/60 uppercase tracking-wider">Filtros Automáticos da Captura</label>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <label htmlFor="auto-capture-all-reviews" className="text-xs text-white/60 cursor-pointer">Capturar todas as avaliações</label>
+                      <Switch id="auto-capture-all-reviews" checked={autoCaptureAllReviews || autoReviewsAi} onCheckedChange={setAutoCaptureAllReviews} />
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-white/50">Configurações de filtragem que serão aplicadas durante a fase de captação de leads desta automação.</p>
+
+                  {[
+                    { label: "Remover leads sem telefone", value: autoFilterEmpty, set: setAutoFilterEmpty },
+                    { label: "Remover telefones duplicados", value: autoFilterDuplicates, set: setAutoFilterDuplicates },
+                    { label: "Remover telefones fixos", value: autoFilterLandlines, set: setAutoFilterLandlines },
+                    { label: "Capturar somente leads sem site", value: autoFilterWithWebsite, set: setAutoFilterWithWebsite },
+                  ].map((f) => (
+                    <div
+                      key={f.label}
+                      className="flex items-center justify-between p-2 rounded-lg hover:bg-white/5 cursor-pointer"
+                      onClick={() => f.set(!f.value)}
+                    >
+                      <span className="text-sm text-white/90 select-none flex-1">{f.label}</span>
+                      <input
+                        type="checkbox"
+                        checked={f.value}
+                        onChange={(e) => f.set(e.target.checked)}
+                        onClick={(e) => e.stopPropagation()}
+                        className="w-4 h-4 accent-primary cursor-pointer"
+                      />
+                    </div>
+                  ))}
+                </div>
+
                 {/* Template de disparo + variáveis */}
                 <div className="space-y-1.5">
                   <p className="text-[9px] uppercase font-bold text-white/40">Variáveis disponíveis (clica pra inserir):</p>
@@ -1971,14 +2038,37 @@ export default function ProspeccaoSitesPage() {
                                 }}
                                 className="bg-black/40 border-white/10 h-8 text-xs" />
                             </div>
-                            <div className="flex-1">
-                              <span className="text-[9px] uppercase font-bold text-white/40">Mensagem (use variáveis como {`{{nome_empresa}}`}, {`{{ramo}}`})</span>
+                            <div className="flex-1 space-y-1">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[9px] uppercase font-bold text-white/40">Mensagem do follow-up</span>
+                                <div className="flex flex-wrap gap-1">
+                                  {[
+                                    { key: "saudacao", label: "Saudação" },
+                                    { key: "nome_empresa", label: "Empresa" },
+                                    { key: "ramo", label: "Ramo" },
+                                    { key: "resumo_avaliacoes", label: "Resumo aval." },
+                                  ].map(v => (
+                                    <button
+                                      key={v.key} type="button"
+                                      onClick={() => {
+                                        const next = [...autoSteps];
+                                        next[idx] = { ...next[idx], template: (next[idx].template || "") + `{{${v.key}}}` };
+                                        setAutoSteps(next);
+                                      }}
+                                      className="px-1.5 py-0.5 rounded bg-purple-500/10 border border-purple-500/30 hover:bg-purple-500/20 text-[9px] text-purple-200 cursor-pointer"
+                                    >
+                                      +{v.label}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
                               <Textarea rows={2} value={step.template}
                                 onChange={e => {
                                   const next = [...autoSteps];
                                   next[idx] = { ...next[idx], template: e.target.value };
                                   setAutoSteps(next);
                                 }}
+                                placeholder="Ex: Olá {{nome_empresa}}! Vi os elogios em {{resumo_avaliacoes}} e..."
                                 className="bg-black/40 border-white/10 font-mono text-xs" />
                             </div>
                             <Button onClick={() => setAutoSteps(autoSteps.filter((_, i) => i !== idx))}

@@ -149,14 +149,23 @@ ${connectLines}
   function clean(t) {
     if (!t || typeof t !== 'string') return null;
     var c = t.trim().replace(/^"|"$/g, '');
+    // Se for um JSON stringificado que sobrou, extrai o valor interno
+    if (c.startsWith('{') && c.endsWith('}')) {
+      try {
+        var p = JSON.parse(c);
+        var inner = p.value || p.userToken || p.token || p.access_token || p.accessToken;
+        if (inner && typeof inner === 'string') c = inner.trim().replace(/^"|"$/g, '');
+      } catch(_) {}
+    }
     if (c.length > 20) return c;
     return null;
   }
 
   function findToken() {
-    var keys = ['userToken','user_token','__token__','deepseek_token','accessToken'];
+    // 1. Procura nas chaves comuns
+    var keys = ['userToken','user_token','__token__','deepseek_token','accessToken','token','auth_token','sessionToken'];
     for (var i = 0; i < keys.length; i++) {
-      var raw = localStorage.getItem(keys[i]);
+      var raw = localStorage.getItem(keys[i]) || sessionStorage.getItem(keys[i]);
       if (!raw) continue;
       if (raw.trim().startsWith('{')) {
         try {
@@ -169,7 +178,7 @@ ${connectLines}
       var t = clean(raw);
       if (t) return t;
     }
-    // Fallback: scaneia todos os keys
+    // 2. Fallback: scaneia todo localStorage
     for (var k in localStorage) {
       try {
         var raw = localStorage.getItem(k);
@@ -183,6 +192,19 @@ ${connectLines}
         var t = clean(raw);
         if (t) return t;
       } catch (_) {}
+    }
+    // 3. Fallback: scaneia cookies
+    if (typeof document !== 'undefined' && document.cookie) {
+      var cookieParts = document.cookie.split(';');
+      for (var cIdx = 0; cIdx < cookieParts.length; cIdx++) {
+        var pair = cookieParts[cIdx].trim().split('=');
+        var name = pair[0] ? pair[0].trim() : '';
+        var val = pair[1] ? decodeURIComponent(pair[1].trim()) : '';
+        if (['userToken','user_token','token','auth_token','accessToken'].indexOf(name) !== -1 || name.indexOf('token') !== -1) {
+          var cleaned = clean(val);
+          if (cleaned) return cleaned;
+        }
+      }
     }
     return null;
   }

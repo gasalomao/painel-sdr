@@ -639,7 +639,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
       const aiText = await personalizeWithAI({
         baseMessage: text,
         model: c.ai_model || "gemini-1.5-flash",
-        customPrompt: c.ai_prompt || null,
+        customPrompt: c.ai_prompt ? renderTemplate(c.ai_prompt, renderCtx) : null,
         nomeEmpresa: target.nome_negocio || "",
         ramo: target.ramo_negocio || "",
         useWebSearch: !!c.use_web_search,
