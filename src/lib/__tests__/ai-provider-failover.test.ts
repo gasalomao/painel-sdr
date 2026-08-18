@@ -11,14 +11,27 @@
  *  - HTTP 400 bad request puro → NÃO (outra conta dá o mesmo erro)
  *  - HTTP 404 → NÃO (modelo/rota inexistente — não é falha de conta)
  *  - ProviderHttpError preserva status + endpointId
+ *
+ * INTEGRAÇÃO (sem rede real — fetch/ai-keys/proxy-manager/SDK Gemini mockados):
+ *  - 429 na conta 1 → cooldown + resposta pela conta 2 (MESMO modelo)
+ *  - 401 na conta 1 → marcada MORTA e pulada nas chamadas seguintes
+ *  - 400 bad request puro → relança (não troca conta, não marca cooldown)
+ *  - Combo: contas do modelo 1 esgotam → avança pro modelo 2 (NÃO pro fallback
+ *    global — o refill do banco não pode "resolver" o passo sozinho)
+ *  - Combo inteiro falha → fallback global (API key) UMA vez, no fim
+ *  - startAiChat combo: falha no 1º turno → cascata pro próximo modelo
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   ProviderHttpError,
   isFailoverableStatus,
   resolveReasoningMode,
   applyReasoning,
+  generateText,
+  startAiChat,
 } from "../ai-provider";
+import { resetGatewayCooldown, isEndpointUnavailable, isEndpointDead } from "../gateway-cooldown";
+import { invalidateGatewayModelsCache } from "../gateway-model-discovery";
 
 describe("isFailoverableStatus — quando trocar de conta?", () => {
   it("429 (rate limit) → troca", () => {
@@ -153,5 +166,188 @@ describe("applyReasoning — mapa por provedor", () => {
     applyReasoning(body, 2, "openrouter", "deepseek-chat");
     expect(body.reasoning).toBeUndefined();
     expect(body.thinking).toBeUndefined();
+  });
+});
+
+// =====================================================================
+// Integração: failover de CONTAS × cascata de COMBOS (estilo 9Router).
+// =====================================================================
+
+const EP1 = "http://gw1.test/v1";
+const EP2 = "http://gw2.test/v1";
+
+const st = vi.hoisted(() => ({
+  keys: null as any,
+  endpoints: [] as Array<{ id: string; label: string; baseUrl: string; apiKey: string | null }>,
+  /** endpointId → modelIds (resposta do GET /models de cada conta). */
+  modelsByEp: {} as Record<string, string[]>,
+  /** Roteador de chat: (baseUrl, model) => { status: 200, content } | { status, msg }. */
+  chat: (..._a: any[]) => ({}) as any,
+  /** Chamadas POST /chat/completions efetivamente feitas. */
+  calls: [] as Array<{ base: string; model: string }>,
+  geminiCalls: 0,
+}));
+
+vi.mock("@/lib/ai-keys", () => ({
+  getAiKeys: async () => st.keys,
+  invalidateAiKeysCache: () => {},
+}));
+
+vi.mock("@/lib/gateway-proxy-manager", () => ({
+  ensureProxyRunning: async () => ({ running: true, installed: true }),
+}));
+
+vi.mock("@google/generative-ai", () => ({
+  SchemaType: { OBJECT: "object", STRING: "string", NUMBER: "number", ARRAY: "array", BOOLEAN: "boolean", INTEGER: "integer" },
+  GoogleGenerativeAI: class {
+    constructor(_key: string) {}
+    getGenerativeModel(_cfg: any) {
+      return {
+        startChat: () => ({
+          sendMessage: async () => ({ response: { text: () => "GEMINI-FALLBACK-TEXT", functionCalls: () => [], usageMetadata: {} } }),
+        }),
+        generateContent: async () => {
+          st.geminiCalls++;
+          return { response: { text: () => "GEMINI-FALLBACK-TEXT", usageMetadata: {} } };
+        },
+      };
+    }
+  },
+}));
+
+function jsonRes(status: number, body: any) {
+  return { ok: status >= 200 && status < 300, status, json: async () => body, text: async () => JSON.stringify(body) };
+}
+const ok = (content: string) => ({ status: 200, content });
+const fail = (status: number, msg: string) => ({ status, msg });
+
+const realFetch = global.fetch;
+
+beforeEach(() => {
+  resetGatewayCooldown();
+  invalidateGatewayModelsCache();
+  st.endpoints = [
+    { id: "ep1", label: "Conta 1", baseUrl: EP1, apiKey: null },
+    { id: "ep2", label: "Conta 2", baseUrl: EP2, apiKey: null },
+  ];
+  st.modelsByEp = {};
+  st.chat = () => ok("OK");
+  st.calls = [];
+  st.geminiCalls = 0;
+  st.keys = {
+    gemini: "fake-gemini-key",
+    openrouter: "fake-or-key",
+    gatewayBaseUrl: null,
+    gatewayApiKey: null,
+    gatewayFallbackModel: "gemini-2.5-flash",
+    gatewayEndpoints: st.endpoints,
+    aiCombos: [] as any[],
+  };
+  global.fetch = (async (url: any, init: any) => {
+    const u = String(url);
+    const ep = st.endpoints.find((e) => u.startsWith(e.baseUrl));
+    if (u.endsWith("/models")) {
+      return jsonRes(200, { object: "list", data: (st.modelsByEp[ep?.id || ""] || []).map((id) => ({ id })) });
+    }
+    if (u.endsWith("/chat/completions")) {
+      const body = JSON.parse(init?.body || "{}");
+      st.calls.push({ base: ep?.baseUrl || u, model: body.model });
+      const r = st.chat(ep?.baseUrl || u, body.model);
+      if (r.status === 200) {
+        return jsonRes(200, {
+          choices: [{ message: { content: r.content } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        });
+      }
+      return jsonRes(r.status, { error: { message: r.msg || `HTTP ${r.status}` } });
+    }
+    return jsonRes(404, {});
+  }) as any;
+});
+
+afterEach(() => {
+  global.fetch = realFetch;
+});
+
+describe("integração: failover de CONTAS (mesmo modelo)", () => {
+  it("429 na conta 1 → cooldown + resposta pela conta 2", async () => {
+    st.modelsByEp = { ep1: ["claude-3-7-sonnet"], ep2: ["claude-3-7-sonnet"] };
+    st.chat = (base) => (base === EP1 ? fail(429, "Quota exceeded") : ok("EP2-OK"));
+    const res = await generateText({ modelRef: "gateway:claude-3-7-sonnet", prompt: "oi" });
+    expect(res.text).toBe("EP2-OK");
+    expect(res.modelUsed).toBe("claude-3-7-sonnet");
+    expect(st.calls).toHaveLength(2); // tentou as duas contas
+    expect(isEndpointUnavailable("ep1")).toBe(true);
+    expect(isEndpointUnavailable("ep2")).toBe(false);
+  });
+
+  it("401 na conta 1 → marcada MORTA e pulada nas chamadas seguintes", async () => {
+    st.modelsByEp = { ep1: ["gpt-4o"], ep2: ["gpt-4o"] };
+    st.chat = (base) => (base === EP1 ? fail(401, "Unauthorized") : ok("EP2-OK"));
+    const r1 = await generateText({ modelRef: "gateway:gpt-4o", prompt: "oi" });
+    const r2 = await generateText({ modelRef: "gateway:gpt-4o", prompt: "oi" });
+    expect(r1.text).toBe("EP2-OK");
+    expect(r2.text).toBe("EP2-OK");
+    expect(st.calls.filter((c) => c.base === EP1)).toHaveLength(1); // 2ª chamada pulou a morta
+    expect(isEndpointDead("ep1")).toBe(true);
+  });
+
+  it("400 bad request puro → relança sem trocar de conta e sem cooldown", async () => {
+    st.endpoints = [st.endpoints[0]]; // só ep1
+    st.keys.gatewayEndpoints = st.endpoints;
+    st.modelsByEp = { ep1: ["m-x"] };
+    st.keys.gatewayFallbackModel = null;
+    st.chat = () => fail(400, "invalid model");
+    await expect(generateText({ modelRef: "gateway:m-x", prompt: "oi" })).rejects.toThrow(/invalid model/);
+    expect(st.calls).toHaveLength(1); // não tentou outra conta
+    expect(isEndpointUnavailable("ep1")).toBe(false); // não marcou cooldown
+  });
+});
+
+describe("integração: cascata de COMBOS (contas primeiro, modelo depois)", () => {
+  const COMBO = {
+    id: "c",
+    name: "Combo Teste",
+    models: [
+      { modelRef: "gateway:claude-3-7-sonnet", enabled: true },
+      { modelRef: "gateway:gpt-4o", enabled: true },
+    ],
+  };
+
+  it("todas as contas do modelo 1 esgotam → avança pro modelo 2 (fallback global NÃO mascara a cascata)", async () => {
+    st.modelsByEp = { ep1: ["claude-3-7-sonnet"], ep2: ["gpt-4o"] };
+    st.chat = (_base, model) => (model === "claude-3-7-sonnet" ? fail(429, "Quota exceeded") : ok("GPT4O-OK"));
+    st.keys.aiCombos = [COMBO];
+    const res = await generateText({ modelRef: "combo:c", prompt: "oi", geminiApiKey: "AIza-test" });
+    expect(res.text).toBe("GPT4O-OK");
+    expect(res.didFallback).toBe(true); // cascata = passo 2
+    expect(st.geminiCalls).toBe(0); // o fallback global NÃO pode rodar dentro do passo
+  });
+
+  it("combo INTEIRO falha → fallback global (API key) uma única vez, no fim", async () => {
+    st.modelsByEp = { ep1: ["claude-3-7-sonnet", "gpt-4o"] };
+    st.chat = () => fail(429, "Quota exceeded");
+    st.keys.aiCombos = [COMBO];
+    const res = await generateText({ modelRef: "combo:c", prompt: "oi", geminiApiKey: "AIza-test" });
+    expect(res.text).toBe("GEMINI-FALLBACK-TEXT");
+    expect(res.didFallback).toBe(true);
+    expect(st.geminiCalls).toBe(1); // uma vez só, depois de esgotar todos os passos
+  });
+
+  it("startAiChat: 1º turno falha no modelo 1 → cascata pro modelo 2 na sessão", async () => {
+    st.modelsByEp = { ep1: ["claude-3-7-sonnet"], ep2: ["gpt-4o"] };
+    st.chat = (_base, model) => (model === "claude-3-7-sonnet" ? fail(429, "Quota exceeded") : ok("GPT4O-OK"));
+    st.keys.aiCombos = [COMBO];
+    const session = await startAiChat({
+      modelRef: "combo:c",
+      systemInstruction: "sys",
+      history: [],
+      tools: [],
+      geminiApiKey: "AIza-test",
+    });
+    const res = await session.sendUser("oi");
+    expect(res.text).toBe("GPT4O-OK");
+    expect(session.modelUsed()).toBe("gpt-4o");
+    expect(st.geminiCalls).toBe(0);
   });
 });

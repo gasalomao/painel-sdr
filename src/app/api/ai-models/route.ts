@@ -14,11 +14,11 @@ const adminClient = supabaseAdmin || supabase;
  * `rawId` é o id puro do provedor (pra exibição). `provider` permite agrupar.
  */
 export type UnifiedModel = {
-  id: string;          // valor salvo no banco (ex: "gemini-2.5-flash", "openrouter:...", "gateway:gpt-5")
-  rawId: string;       // id puro do provedor (ex: "anthropic/claude-3.5-sonnet", "gpt-5")
+  id: string;          // valor salvo no banco (ex: "gemini-2.5-flash", "openrouter:...", "gateway:gpt-5", "combo:principal")
+  rawId: string;       // id puro do provedor (ex: "anthropic/claude-3.5-sonnet", "gpt-5", "principal")
   name: string;
   description?: string;
-  provider: "gemini" | "openrouter" | "gateway";
+  provider: "gemini" | "openrouter" | "gateway" | "combo";
   supportsTools: boolean;
 };
 
@@ -61,29 +61,41 @@ export async function GET(req: NextRequest) {
     let cfg: Record<string, any> | null = null;
     const full = await adminClient
       .from("ai_organizer_config")
-      .select("api_key, openrouter_api_key, gateway_base_url, gateway_api_key, gateway_endpoints")
+      .select("api_key, openrouter_api_key, gateway_base_url, gateway_api_key, gateway_endpoints, ai_combos")
       .eq("id", 1)
       .maybeSingle();
     if (full.error) {
-      const mid = await adminClient
+      const mid2 = await adminClient
         .from("ai_organizer_config")
-        .select("api_key, openrouter_api_key, gateway_base_url")
+        .select("api_key, openrouter_api_key, gateway_base_url, gateway_api_key, gateway_endpoints")
         .eq("id", 1)
         .maybeSingle();
-      if (mid.error) {
-        const base = await adminClient
+      if (mid2.error) {
+        const mid = await adminClient
           .from("ai_organizer_config")
-          .select("api_key, openrouter_api_key")
+          .select("api_key, openrouter_api_key, gateway_base_url")
           .eq("id", 1)
           .maybeSingle();
-        if (base.error) console.warn("[AI-MODELS] Falha ao ler config:", base.error.message);
-        cfg = (base.data as any) || null;
+        if (mid.error) {
+          const base = await adminClient
+            .from("ai_organizer_config")
+            .select("api_key, openrouter_api_key")
+            .eq("id", 1)
+            .maybeSingle();
+          if (base.error) console.warn("[AI-MODELS] Falha ao ler config:", base.error.message);
+          cfg = (base.data as any) || null;
+        } else {
+          cfg = (mid.data as any) || null;
+        }
       } else {
-        cfg = (mid.data as any) || null;
+        cfg = (mid2.data as any) || null;
       }
     } else {
-      cfg = (full.data as any) || null;
+      d: cfg = (full.data as any) || null;
     }
+
+    const { sanitizeCombos } = await import("@/lib/ai-combos");
+    const configuredCombos = sanitizeCombos(cfg?.ai_combos);
 
     const geminiKey = cfg?.api_key && String(cfg.api_key).trim() ? String(cfg.api_key).trim() : null;
     const openrouterKey = cfg?.openrouter_api_key && String(cfg.openrouter_api_key).trim()
@@ -138,11 +150,21 @@ export async function GET(req: NextRequest) {
         : Promise.resolve([] as UnifiedModel[]),
     ]);
 
-    const models = [...gemini, ...openrouter, ...gateway];
+    const comboModels: UnifiedModel[] = configuredCombos.map((c) => ({
+      id: formatModelRef("combo", c.id),
+      rawId: c.id,
+      name: c.name,
+      description: c.description || `${c.models.length} modelos em cascata resiliente`,
+      provider: "combo",
+      supportsTools: true,
+    }));
+
+    const models = [...comboModels, ...gemini, ...openrouter, ...gateway];
     return NextResponse.json({
       success: true,
       models,
       providers: {
+        combo: { configured: comboModels.length > 0, count: comboModels.length },
         gemini: { configured: !!geminiKey, count: gemini.length },
         openrouter: { configured: !!openrouterKey, count: openrouter.length },
         gateway: { configured: gatewayConfigured, count: gateway.length },

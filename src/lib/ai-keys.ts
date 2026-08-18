@@ -7,6 +7,7 @@
 
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { supabase } from "@/lib/supabase";
+import { sanitizeCombos, type AiCombo } from "@/lib/ai-combos";
 
 const adminClient = supabaseAdmin || supabase;
 
@@ -26,8 +27,14 @@ export interface GatewayEndpoint {
 export interface AiKeys {
   /** Chave Google Gemini (ai_organizer_config.api_key). */
   gemini: string | null;
-  /** Chave OpenRouter (ai_organizer_config.openrouter_api_key). */
+  /** Chave OpenRouter principal/legada (ai_organizer_config.openrouter_api_key). Sempre = openrouterKeys[0]. */
   openrouter: string | null;
+  /**
+   * TODAS as chaves OpenRouter (multi-conta, rotação 9Router-style quando uma
+   * bate 429/quota). Cola: ai_organizer_config.openrouter_keys (JSON array).
+   * A chave legada (openrouter_api_key) é sempre a primeira da lista.
+   */
+  openrouterKeys: string[];
   /**
    * Gateway de ASSINATURA (LEGADO/1ª conexão) — baseURL do proxy local
    * OpenAI-compatible. Mantido por retrocompat; a fonte canônica agora é
@@ -47,15 +54,19 @@ export interface AiKeys {
    * (ai_organizer_config.gateway_endpoints)
    */
   gatewayEndpoints: GatewayEndpoint[];
+  /** Combos/Filas de IA salvas em ai_organizer_config.ai_combos */
+  aiCombos: AiCombo[];
 }
 
 const EMPTY_KEYS: AiKeys = {
   gemini: null,
   openrouter: null,
+  openrouterKeys: [],
   gatewayBaseUrl: null,
   gatewayApiKey: null,
   gatewayFallbackModel: null,
   gatewayEndpoints: [],
+  aiCombos: [],
 };
 
 /** Normaliza um valor de coluna texto pra string-ou-null (trim, vazio→null). */
@@ -100,6 +111,31 @@ export function parseGatewayEndpoints(
 let CACHE: { keys: AiKeys; at: number } | null = null;
 const TTL_MS = 30 * 1000;
 
+/**
+ * Lê a lista de chaves OpenRouter (multi-conta) do JSON `openrouter_keys`.
+ * Aceita array de strings ou de objetos `{ key }`, parseado ou em string JSON.
+ * A chave LEGADA (openrouter_api_key) entra sempre como primeira (dedup).
+ */
+export function parseOpenRouterKeys(raw: unknown, legacyKey: string | null): string[] {
+  let arr: any[] = [];
+  if (Array.isArray(raw)) arr = raw;
+  else if (typeof raw === "string" && raw.trim()) {
+    try { const p = JSON.parse(raw); if (Array.isArray(p)) arr = p; } catch { /* ignora */ }
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (v: unknown) => {
+    const k = (v == null ? "" : String(v)).trim();
+    if (k && !seen.has(k)) { seen.add(k); out.push(k); }
+  };
+  push(legacyKey);
+  for (const e of arr) {
+    const k = typeof e === "string" ? e : e?.key ?? e?.api_key;
+    push(k);
+  }
+  return out;
+}
+
 export async function getAiKeys(force = false): Promise<AiKeys> {
   if (!force && CACHE && Date.now() - CACHE.at < TTL_MS) return CACHE.keys;
   try {
@@ -109,38 +145,50 @@ export async function getAiKeys(force = false): Promise<AiKeys> {
     let d: Record<string, unknown>;
     const full = await adminClient
       .from("ai_organizer_config")
-      .select("api_key, openrouter_api_key, gateway_base_url, gateway_api_key, gateway_fallback_model, gateway_endpoints")
+      .select("api_key, openrouter_api_key, openrouter_keys, gateway_base_url, gateway_api_key, gateway_fallback_model, gateway_endpoints, ai_combos")
       .eq("id", 1)
       .maybeSingle();
     if (full.error) {
-      // Pode faltar SÓ a coluna gateway_endpoints (migração parcial): tenta sem ela.
-      const mid = await adminClient
+      // Pode faltar ai_combos ou gateway_endpoints: tenta sem ai_combos
+      const mid2 = await adminClient
         .from("ai_organizer_config")
-        .select("api_key, openrouter_api_key, gateway_base_url, gateway_api_key, gateway_fallback_model")
+        .select("api_key, openrouter_api_key, openrouter_keys, gateway_base_url, gateway_api_key, gateway_fallback_model, gateway_endpoints")
         .eq("id", 1)
         .maybeSingle();
-      if (mid.error) {
-        const base = await adminClient
+      if (mid2.error) {
+        const mid = await adminClient
           .from("ai_organizer_config")
-          .select("api_key, openrouter_api_key")
+          .select("api_key, openrouter_api_key, gateway_base_url, gateway_api_key, gateway_fallback_model")
           .eq("id", 1)
           .maybeSingle();
-        d = (base.data || {}) as Record<string, unknown>;
+        if (mid.error) {
+          const base = await adminClient
+            .from("ai_organizer_config")
+            .select("api_key, openrouter_api_key")
+            .eq("id", 1)
+            .maybeSingle();
+          d = (base.data || {}) as Record<string, unknown>;
+        } else {
+          d = (mid.data || {}) as Record<string, unknown>;
+        }
       } else {
-        d = (mid.data || {}) as Record<string, unknown>;
+        d = (mid2.data || {}) as Record<string, unknown>;
       }
     } else {
       d = (full.data || {}) as Record<string, unknown>;
     }
     const gatewayBaseUrl = txt(d.gateway_base_url);
     const gatewayApiKey = txt(d.gateway_api_key);
+    const openrouter = txt(d.openrouter_api_key);
     const keys: AiKeys = {
       gemini: txt(d.api_key),
-      openrouter: txt(d.openrouter_api_key),
+      openrouter,
+      openrouterKeys: parseOpenRouterKeys(d.openrouter_keys, openrouter),
       gatewayBaseUrl,
       gatewayApiKey,
       gatewayFallbackModel: txt(d.gateway_fallback_model),
       gatewayEndpoints: parseGatewayEndpoints(d.gateway_endpoints, gatewayBaseUrl, gatewayApiKey),
+      aiCombos: sanitizeCombos(d.ai_combos),
     };
     CACHE = { keys, at: Date.now() };
     return keys;

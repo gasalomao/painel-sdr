@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS public.ai_organizer_config (
   enabled                 boolean DEFAULT false,
   api_key                 text,
   openrouter_api_key      text,
+  openrouter_keys         jsonb DEFAULT '[]'::jsonb,
   gateway_base_url        text,
   gateway_api_key         text,
   gateway_fallback_model  text,
@@ -124,6 +125,8 @@ CREATE TABLE IF NOT EXISTS public.ai_organizer_config (
 );
 -- Idempotente: bancos antigos ganham as colunas novas sem recriar a tabela.
 ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS openrouter_api_key text;
+-- openrouter_keys = lista JSON de API Keys (multi-conta OpenRouter para rotação 9Router-style em 429/quota):
+ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS openrouter_keys jsonb DEFAULT '[]'::jsonb;
 -- Gateway de Assinatura (proxy OpenAI-compatible da sua conta — ex: CLIProxyAPI):
 --   gateway_base_url       = URL do proxy local (ex: http://127.0.0.1:8317/v1)
 --   gateway_api_key        = management key opcional do proxy
@@ -135,6 +138,8 @@ ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS gateway_fallback
 -- ChatGPT). Cada item: {id, label, base_url, api_key}. Os campos single acima
 -- viram a 1ª conexão (retrocompat). gateway_fallback_model continua global.
 ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS gateway_endpoints jsonb DEFAULT '[]'::jsonb;
+-- Combos de IA (Filas de Modelos Virtuais com fallback ordenado e rotação de contas):
+ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS ai_combos jsonb DEFAULT '[]'::jsonb;
 
 CREATE TABLE IF NOT EXISTS public.ai_organizer_runs (
   id              BIGSERIAL PRIMARY KEY,

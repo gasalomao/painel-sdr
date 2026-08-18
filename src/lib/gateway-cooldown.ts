@@ -16,11 +16,13 @@
  * é suficiente; multi-instância poderia divergir, mas o custo de divergir é só
  * "tentar uma conta que talvez ainda esteja em cooldown" — não-fatal.
  *
- * Semântica (igual ao DeepSeek):
- *   - 429 / quota  → cooldown TEMPORÁRIO (volta sozinho depois do prazo).
+ * Semântica (igual ao DeepSeek / spec 9Router):
+ *   - 429 / quota  → cooldown TEMPORÁRIO (volta sozinha depois do prazo).
  *   - 401 / 403    → marcado MORTO (pula sempre até restart — credencial inválida).
- *   - 5xx / rede   → NÃO marca aqui (transitório; o failover tenta outra conta
- *                    sem penalizar esta permanentemente — a próxima msg retenta).
+ *   - 5xx (HTTP)   → cooldown temporário (evita martelar a conta em queda;
+ *                    o roteador marca e segue pra próxima conta).
+ *   - Rede/timeout puro (sem status HTTP) → NÃO marca aqui — só failover
+ *     imediato pra outra conta; a próxima msg retenta esta.
  */
 
 /** Cooldown temporário: endpointId → timestamp (ms) até quando pular. */

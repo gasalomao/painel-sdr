@@ -5,9 +5,10 @@ import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Settings2, Key, Save, CheckCircle2, XCircle, Loader2, Info, Database, Copy, ExternalLink, Check, Server, Plug, RefreshCw, Bot, Trash2, Plus, ChevronDown, ChevronRight } from "lucide-react";
+import { Settings2, Key, Save, CheckCircle2, XCircle, Loader2, Info, Database, Copy, ExternalLink, Check, Server, Plug, RefreshCw, Bot, Trash2, Plus, ChevronDown, ChevronRight, Zap, MoveUp, MoveDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ModelOptions } from "@/components/ai-module-shared";
+import { AiCombosManager } from "@/components/ai-combos-manager";
 
 export default function ConfiguracoesPage() {
   const [apiKey, setApiKey] = useState("");
@@ -19,10 +20,10 @@ export default function ConfiguracoesPage() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [sessionLoaded, setSessionLoaded] = useState(false);
 
-  // OpenRouter API Key (provedor alternativo ao Gemini — mesmo modelo de uso:
-  // chave compartilhada por todo o sistema, salva em ai_organizer_config).
+  // OpenRouter API Key (provedor alternativo ao Gemini — com suporte Multi-Key / Rotação 9Router).
   const [orKey, setOrKey] = useState("");
   const [hasOrKey, setHasOrKey] = useState(false);
+  const [orKeysList, setOrKeysList] = useState<Array<{ id: string; masked: string; isPrimary: boolean }>>([]);
   const [orSaving, setOrSaving] = useState(false);
   const [orTesting, setOrTesting] = useState(false);
   const [orTestResult, setOrTestResult] = useState<null | { ok: boolean; message: string; count?: number }>(null);
@@ -416,6 +417,9 @@ export default function ConfiguracoesPage() {
         if (d.success && d.config) {
           setHasKey(!!d.config.has_api_key);
           setHasOrKey(!!d.config.has_openrouter_key);
+          if (Array.isArray(d.config.openrouter_keys)) {
+            setOrKeysList(d.config.openrouter_keys);
+          }
           // Conexões do gateway (várias contas). As chaves vêm mascaradas
           // (has_api_key) — o campo de chave fica vazio = "manter a salva".
           const eps = Array.isArray(d.config.gateway_endpoints) ? d.config.gateway_endpoints : [];
@@ -444,13 +448,67 @@ export default function ConfiguracoesPage() {
       const r = await fetch("/api/ai-organize/config", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ openrouter_api_key: orKey.trim() }),
+        body: JSON.stringify({ add_openrouter_key: orKey.trim() }),
       });
       const d = await r.json();
       if (!d.success) throw new Error(d.error || "Falha ao salvar");
       setHasOrKey(true);
       setOrKey("");
-      alert("API Key do OpenRouter salva! Agora os seletores de modelo mostram também os modelos do OpenRouter (Claude, GPT, Llama, etc.).");
+      // Recarrega lista
+      const cf = await fetch("/api/ai-organize/config", { cache: "no-store" }).then(res => res.json());
+      if (cf?.success && Array.isArray(cf.config?.openrouter_keys)) {
+        setOrKeysList(cf.config.openrouter_keys);
+      }
+      alert("API Key do OpenRouter adicionada com sucesso! O sistema usará rotação automática 9Router-style caso uma chave atinja 429/limite de quota.");
+    } catch (e: any) {
+      alert("Erro: " + e.message);
+    } finally {
+      setOrSaving(false);
+    }
+  }
+
+  async function handleRemoveOpenRouterKey(index: number) {
+    if (!confirm("Tem certeza que deseja remover esta chave do OpenRouter?")) return;
+    setOrSaving(true);
+    try {
+      const r = await fetch("/api/ai-organize/config", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ remove_openrouter_key_index: index }),
+      });
+      const d = await r.json();
+      if (!d.success) throw new Error(d.error || "Falha ao remover");
+      const cf = await fetch("/api/ai-organize/config", { cache: "no-store" }).then(res => res.json());
+      if (cf?.success) {
+        setHasOrKey(!!cf.config?.has_openrouter_key);
+        setOrKeysList(Array.isArray(cf.config?.openrouter_keys) ? cf.config.openrouter_keys : []);
+      }
+    } catch (e: any) {
+      alert("Erro: " + e.message);
+    } finally {
+      setOrSaving(false);
+    }
+  }
+
+  async function handleReorderOpenRouterKey(fromIndex: number, toIndex: number) {
+    if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0 || fromIndex >= orKeysList.length || toIndex >= orKeysList.length) return;
+    setOrSaving(true);
+    try {
+      const r = await fetch("/api/ai-organize/config", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reorder_openrouter_key_index: fromIndex,
+          reorder_openrouter_key_to: toIndex,
+        }),
+      });
+      const d = await r.json();
+      if (!d.success) throw new Error(d.error || "Falha ao alterar prioridade");
+      const cf = await fetch("/api/ai-organize/config", { cache: "no-store" }).then(res => res.json());
+      if (cf?.success) {
+        setHasOrKey(!!cf.config?.has_openrouter_key);
+        setOrKeysList(Array.isArray(cf.config?.openrouter_keys) ? cf.config.openrouter_keys : []);
+      }
     } catch (e: any) {
       alert("Erro: " + e.message);
     } finally {
@@ -1710,22 +1768,78 @@ export default function ConfiguracoesPage() {
                         )}
                       </div>
 
+                      {/* Lista de Chaves Multi-Conta Cadastradas */}
+                      {orKeysList.length > 0 && (
+                        <div className="space-y-2 pt-2 border-t border-white/5">
+                          <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground flex items-center justify-between">
+                            <span>Chaves Ativas para Rotação ({orKeysList.length})</span>
+                            <span className="text-[9px] text-purple-400 font-normal">Rotação automática em 429/Quota</span>
+                          </label>
+                          <div className="space-y-1.5">
+                            {orKeysList.map((k, idx) => (
+                              <div
+                                key={k.id || idx}
+                                className="flex items-center justify-between p-2.5 rounded-lg bg-black/40 border border-white/5 text-xs font-mono"
+                              >
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[9px] bg-purple-500/10 text-purple-400 border border-purple-500/20 px-1.5 py-0.5 rounded font-bold">
+                                    {idx === 0 ? "PRIORITÁRIA" : `CONTA #${idx + 1}`}
+                                  </span>
+                                  <span className="text-zinc-300">{k.masked}</span>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    disabled={idx === 0 || orSaving}
+                                    onClick={() => handleReorderOpenRouterKey(idx, idx - 1)}
+                                    className="h-7 w-7 p-0 text-muted-foreground hover:text-purple-300 hover:bg-purple-500/10"
+                                    title="Aumentar prioridade"
+                                  >
+                                    <MoveUp className="w-3.5 h-3.5" />
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    disabled={idx === orKeysList.length - 1 || orSaving}
+                                    onClick={() => handleReorderOpenRouterKey(idx, idx + 1)}
+                                    className="h-7 w-7 p-0 text-muted-foreground hover:text-purple-300 hover:bg-purple-500/10"
+                                    title="Diminuir prioridade"
+                                  >
+                                    <MoveDown className="w-3.5 h-3.5" />
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => handleRemoveOpenRouterKey(idx)}
+                                    disabled={orSaving}
+                                    className="h-7 px-2 text-red-400 hover:text-red-300 hover:bg-red-500/10 text-[10px]"
+                                  >
+                                    Remover
+                                  </Button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
                       <div className="space-y-2">
                         <label className="text-[10px] font-black uppercase tracking-widest text-purple-400">
-                          {hasOrKey ? "Substituir chave" : "Cole sua API Key do OpenRouter aqui"}
+                          {orKeysList.length > 0 ? "Adicionar API Keys do OpenRouter (Multi-Conta / Lote)" : "Cole sua(s) API Key(s) do OpenRouter"}
                         </label>
-                        <Input
-                          type="password"
+                        <textarea
                           value={orKey}
                           onChange={e => setOrKey(e.target.value)}
-                          placeholder={hasOrKey ? "••••••••••• (cole nova pra substituir)" : "sk-or-v1-..."}
-                          className="bg-black/40 border-white/10 font-mono text-sm h-11"
+                          placeholder={orKeysList.length > 0 ? "sk-or-v1-...\nsk-or-v1-... (pode colar várias chaves de contas diferentes, uma por linha)" : "sk-or-v1-...\n(pode colar 1 ou várias chaves de contas diferentes, uma por linha)"}
+                          rows={2}
+                          className="w-full bg-black/40 border border-white/10 rounded-md p-2.5 font-mono text-xs text-white focus:outline-none focus:ring-1 focus:ring-purple-400 resize-y"
                           autoComplete="off"
                           spellCheck={false}
                         />
                         <p className="text-[9px] text-muted-foreground flex items-start gap-1 leading-relaxed">
                           <Info className="w-3 h-3 shrink-0 mt-0.5" />
-                          Obtenha sua chave em {" "}
+                          Obtenha suas chaves em {" "}
                           <a
                             href="https://openrouter.ai/keys"
                             target="_blank"
@@ -1734,7 +1848,7 @@ export default function ConfiguracoesPage() {
                           >
                             openrouter.ai/keys
                           </a>
-                          . Como o Gemini, essa chave é compartilhada por todos os agentes e serviços.
+                          . Pode colar várias chaves (uma por linha) de contas diferentes. O sistema rotaciona automaticamente (9Router-style) se o limite for excedido.
                         </p>
                       </div>
 
@@ -1745,7 +1859,7 @@ export default function ConfiguracoesPage() {
                           className="bg-purple-500/20 text-purple-100 border border-purple-500/40 hover:bg-purple-500/30 font-bold text-xs uppercase tracking-widest gap-2"
                         >
                           {orSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                          Salvar
+                          {orKeysList.length > 0 ? "Adicionar Chave" : "Salvar"}
                         </Button>
                         <Button
                           onClick={handleTestOpenRouter}
@@ -2880,6 +2994,11 @@ export default function ConfiguracoesPage() {
                         <Button onClick={() => refreshProxyStatus()} disabled={!!pxBusy} variant="outline" size="sm" className="h-7 text-[10px] bg-white/5 border-white/10 text-muted-foreground hover:bg-white/10 font-bold gap-1">
                           <RefreshCw className="w-3 h-3" /> Atualizar status
                         </Button>
+                      </div>
+
+                      {/* ===== COMBOS VIRTUAIS & CASCATA 9ROUTER-STYLE ===== */}
+                      <div className="pt-4 border-t border-emerald-500/20">
+                        <AiCombosManager />
                       </div>
                     </CardContent>
                   )}

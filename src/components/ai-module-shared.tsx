@@ -25,6 +25,7 @@ interface AIModelSelectProps {
 }
 
 const PROVIDER_LABEL: Record<string, string> = {
+  combo: "⚡ Combos Virtuais (Resilientes)",
   gateway: "Gateway (Assinatura)",
   openrouter: "OpenRouter",
   gemini: "Google Gemini",
@@ -32,6 +33,7 @@ const PROVIDER_LABEL: Record<string, string> = {
 
 // Cor do cabeçalho de cada grupo de provedor no dropdown.
 const PROVIDER_COLOR: Record<string, string> = {
+  combo: "text-amber-400 font-bold",
   gateway: "text-emerald-400",
   openrouter: "text-purple-400",
   gemini: "text-blue-400",

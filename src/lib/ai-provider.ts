@@ -33,8 +33,10 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { pickBestFlashModel } from "@/lib/gemini-model-discovery";
 import { isDeadModelError } from "@/lib/gemini-call";
+import { COMBO_PREFIX, resolveComboSteps } from "@/lib/ai-combos";
+import { getAiKeys } from "@/lib/ai-keys";
 
-export type AiProvider = "gemini" | "openrouter" | "gateway";
+export type AiProvider = "gemini" | "openrouter" | "gateway" | "combo";
 
 export interface ModelRef {
   provider: AiProvider;
@@ -226,6 +228,9 @@ export function buildSystemMessage(
 export function parseModelRef(ref: string | null | undefined): ModelRef {
   const s = (ref || "").trim();
   if (!s) return { provider: "gemini", model: "" };
+  if (s.startsWith(COMBO_PREFIX)) {
+    return { provider: "combo", model: s.slice(COMBO_PREFIX.length).trim() };
+  }
   if (s.startsWith(GATEWAY_PREFIX)) {
     return { provider: "gateway", model: s.slice(GATEWAY_PREFIX.length).trim() };
   }
@@ -243,6 +248,7 @@ export function parseModelRef(ref: string | null | undefined): ModelRef {
 /** Monta a string de modelo pra salvar no banco a partir de provider + id cru. */
 export function formatModelRef(provider: AiProvider, model: string): string {
   const m = (model || "").trim();
+  if (provider === "combo") return `${COMBO_PREFIX}${m}`;
   if (provider === "openrouter") return `${OPENROUTER_PREFIX}${m}`;
   if (provider === "gateway") return `${GATEWAY_PREFIX}${m}`;
   return m; // Gemini fica "bare" pra retrocompatibilidade.
@@ -258,6 +264,7 @@ export function providerOf(ref: string | null | undefined): AiProvider {
  * rótulo pra que "gateway" não seja confundido com "Gemini" em lugar nenhum.
  */
 export function providerDisplayName(p: AiProvider): string {
+  if (p === "combo") return "Combo Virtual";
   if (p === "openrouter") return "OpenRouter";
   if (p === "gateway") return "Gateway";
   return "Gemini";
@@ -356,8 +363,91 @@ async function openAICompatibleChat(
   return json;
 }
 
-async function openRouterChat(apiKey: string, body: Record<string, any>): Promise<any> {
-  return openAICompatibleChat(OPENROUTER_BASE, body, openRouterHeaders(apiKey), "OpenRouter");
+async function openRouterChat(apiKey: string, body: Record<string, any>, keyId?: string): Promise<any> {
+  return openAICompatibleChat(OPENROUTER_BASE, body, openRouterHeaders(apiKey), "OpenRouter", keyId);
+}
+
+/**
+ * FAILOVER 9Router-style entre múltiplas API keys do OpenRouter.
+ * Tenta as chaves disponíveis sequencialmente (pulando as em cooldown/mortas).
+ * 429/quota/402 → marca cooldown temporário da chave e tenta a PRÓXIMA chave.
+ * 401/403 → marca chave como MORTA (inválida) e tenta a PRÓXIMA chave.
+ * 400 (Bad Request) → relança (erro de payload/modelo, trocar chave não resolve).
+ */
+async function openRouterChatWithFailover(
+  body: Record<string, any>,
+  opts: { openrouterApiKey?: string | null; openrouterKeys?: string[] | null }
+): Promise<any> {
+  const { markEndpointCooldown, markEndpointDead, isEndpointUnavailable } = await import("@/lib/gateway-cooldown");
+
+  // Coleta lista inicial de chaves fornecidas explicitamente
+  const rawList: string[] = [];
+  if (Array.isArray(opts.openrouterKeys)) {
+    for (const k of opts.openrouterKeys) {
+      const s = (k || "").trim();
+      if (s && !rawList.includes(s)) rawList.push(s);
+    }
+  }
+  if (opts.openrouterApiKey && !rawList.includes(opts.openrouterApiKey.trim())) {
+    rawList.unshift(opts.openrouterApiKey.trim());
+  }
+
+  // Se não veio nenhuma chave nos opts, busca do banco
+  if (!rawList.length) {
+    try {
+      const { getAiKeys } = await import("@/lib/ai-keys");
+      const keys = await getAiKeys();
+      if (keys?.openrouterKeys?.length) {
+        for (const k of keys.openrouterKeys) {
+          const s = (k || "").trim();
+          if (s && !rawList.includes(s)) rawList.push(s);
+        }
+      } else if (keys?.openrouter) {
+        rawList.push(keys.openrouter.trim());
+      }
+    } catch {
+      /* segue com o que tiver */
+    }
+  }
+
+  if (!rawList.length) {
+    throw new Error("OpenRouter API Key não configurada.");
+  }
+
+  const candidates = rawList.map((key) => {
+    // ID determinístico pro cooldown baseado no hash/prefixo da chave (ex: or_sk-or-v1-abc...)
+    const id = `or_${key.slice(0, 16)}`;
+    return { key, id };
+  });
+
+  let lastErr: unknown = null;
+  for (const c of candidates) {
+    if (isEndpointUnavailable(c.id)) continue;
+    try {
+      return await openRouterChat(c.key, body, c.id);
+    } catch (err) {
+      lastErr = err;
+      if (err instanceof ProviderHttpError) {
+        if (err.status === 401 || err.status === 403) {
+          markEndpointDead(c.id);
+          console.warn(`[ai-provider:openrouter] Chave ${c.id} marcada MORTA (HTTP ${err.status}). Rotacionando para próxima chave OpenRouter.`);
+          continue;
+        }
+        if (err.status === 429 || err.status === 402 || isFailoverableStatus(err.status, err.message)) {
+          markEndpointCooldown(c.id);
+          console.warn(`[ai-provider:openrouter] Chave ${c.id} em cooldown (HTTP ${err.status}). Rotacionando para próxima chave OpenRouter.`);
+          continue;
+        }
+        throw err;
+      }
+      console.warn(`[ai-provider:openrouter] Chave ${c.id} falhou (rede/timeout). Rotacionando:`, (err as any)?.message);
+      continue;
+    }
+  }
+
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error("Todas as chaves OpenRouter falharam ou estão em cooldown. Tente novamente mais tarde.");
 }
 
 async function gatewayChat(baseUrl: string, apiKey: string | null, body: Record<string, any>, endpointId?: string): Promise<any> {
@@ -387,11 +477,15 @@ async function resolveGatewayCreds(opts: {
   gatewayBaseUrl?: string | null;
   gatewayApiKey?: string | null;
   fallbackModelRef?: string | null;
+  noGatewayFallback?: boolean;
 }, model?: string): Promise<GatewayCreds> {
   let baseUrl = normalizeGatewayBaseUrl(opts.gatewayBaseUrl);
   let apiKey = (opts.gatewayApiKey || "").trim() || null;
   let endpointId: string | undefined;
-  let fallbackModelRef = (opts.fallbackModelRef || "").trim() || null;
+  // noGatewayFallback: supressão EXPLÍCITA — sem isso, o refill do banco abaixo
+  // ressuscitaria o fallback global dentro de cada PASSO de um combo, e a
+  // cascata nunca avançaria pro próximo modelo (o passo "resolveria" sozinho).
+  let fallbackModelRef = opts.noGatewayFallback ? null : ((opts.fallbackModelRef || "").trim() || null);
 
   // Auto-start do proxy CLIProxyAPI server-side. O proxy morre a cada reboot
   // /dev-server restart, e sem isso as chamadas de IA via gateway falham
@@ -437,7 +531,7 @@ async function resolveGatewayCreds(opts: {
         baseUrl = normalizeGatewayBaseUrl(keys.gatewayBaseUrl);
         if (!apiKey) apiKey = keys.gatewayApiKey || null;
       }
-      if (!fallbackModelRef) fallbackModelRef = keys.gatewayFallbackModel || null;
+      if (!fallbackModelRef && !opts.noGatewayFallback) fallbackModelRef = keys.gatewayFallbackModel || null;
     } catch {
       /* sem banco acessível — segue só com o que veio em opts */
     }
@@ -542,8 +636,10 @@ export interface GenerateTextOpts {
   maxOutputTokens?: number | null;
   /** Chave Gemini (se não vier, o caller deve garantir uma). */
   geminiApiKey?: string | null;
-  /** Chave OpenRouter. */
+  /** Chave OpenRouter única ou lista/rotação multi-key. */
   openrouterApiKey?: string | null;
+  /** Lista opcional de chaves OpenRouter para rotação multi-conta (9Router-style). */
+  openrouterKeys?: string[] | null;
   /** Gateway de assinatura: baseURL do proxy OpenAI-compatible. Se omitido, lê do banco. */
   gatewayBaseUrl?: string | null;
   /** Gateway de assinatura: chave/management key opcional do proxy. */
@@ -553,6 +649,12 @@ export interface GenerateTextOpts {
    * deslogada, quota). Garante "nunca quebra". Se omitido, lê do banco.
    */
   fallbackModelRef?: string | null;
+  /**
+   * SUPRIME o fallback global do gateway (inclusive o lido do banco). Usado
+   * pelos PASSOS de um combo: cada passo deve PROPAGAR a falha para a cascata
+   * avançar pro próximo modelo — com fallback interno, o combo nunca trocaria.
+   */
+  noGatewayFallback?: boolean;
   /** Força saída em JSON (Gemini: responseMimeType; OpenRouter: response_format). */
   jsonMode?: boolean;
   /** Só Gemini: schema estruturado pra saída JSON garantida (responseSchema). */
@@ -570,8 +672,46 @@ export interface GenerateTextResult {
 export async function generateText(opts: GenerateTextOpts): Promise<GenerateTextResult> {
   const { provider, model } = parseModelRef(opts.modelRef);
 
+  if (provider === "combo") {
+    const { getAiKeys } = await import("@/lib/ai-keys");
+    const keys = await getAiKeys();
+    const steps = resolveComboSteps(model, keys?.aiCombos);
+    if (!steps.length) {
+      throw new Error(`Combo de IA "${model}" não possui modelos ativos configurados.`);
+    }
+
+    let lastErr: unknown = null;
+    for (let i = 0; i < steps.length; i++) {
+      const stepRef = steps[i];
+      try {
+        const result = await generateText({
+          ...opts,
+          modelRef: stepRef,
+          fallbackModelRef: null, // Deixa a cascata ser controlada pelo próprio combo
+          noGatewayFallback: true, // Impede o refill do banco de "resolver" o passo sozinho
+        });
+        return {
+          ...result,
+          didFallback: i > 0,
+        };
+      } catch (err) {
+        lastErr = err;
+        console.warn(`[ai-provider:combo] Passo ${i + 1}/${steps.length} (${stepRef}) falhou (${(err as any)?.message}). Avançando para o próximo modelo do combo.`);
+      }
+    }
+
+    // Se todos os passos do combo falharam, tenta o fallback global (opts ou banco).
+    const comboGlobalFallback = (opts.fallbackModelRef || "").trim() || keys?.gatewayFallbackModel || null;
+    if (comboGlobalFallback && comboGlobalFallback !== opts.modelRef) {
+      console.warn(`[ai-provider:combo] Todos os modelos do combo "${model}" falharam. Acionando fallback global: "${comboGlobalFallback}".`);
+      const res = await generateText({ ...opts, modelRef: comboGlobalFallback, fallbackModelRef: null });
+      return { ...res, didFallback: true };
+    }
+
+    throw lastErr instanceof Error ? lastErr : new Error(`Todos os ${steps.length} modelos do combo "${model}" falharam.`);
+  }
+
   if (provider === "openrouter") {
-    if (!opts.openrouterApiKey) throw new Error("OpenRouter API Key não configurada.");
     const messages: any[] = [];
     if (opts.system) messages.push(buildSystemMessage(opts.system, provider, model));
     messages.push({ role: "user", content: opts.prompt });
@@ -580,7 +720,10 @@ export async function generateText(opts: GenerateTextOpts): Promise<GenerateText
     body.max_tokens = opts.maxOutputTokens != null ? opts.maxOutputTokens : 4096;
     if (opts.jsonMode) body.response_format = { type: "json_object" };
     applyReasoning(body, resolveReasoningMode(opts.reasoningMode, opts.thinkingBudget), provider, model);
-    const json = await openRouterChat(opts.openrouterApiKey, body);
+    const json = await openRouterChatWithFailover(body, {
+      openrouterApiKey: opts.openrouterApiKey,
+      openrouterKeys: opts.openrouterKeys,
+    });
     const text = String(json?.choices?.[0]?.message?.content || "").trim();
     return { text, usage: openRouterUsage(json), provider, modelUsed: model, didFallback: false };
   }
@@ -731,26 +874,102 @@ export interface StartAiChatOpts {
   thinkingBudget?: number | null;
   geminiApiKey?: string | null;
   openrouterApiKey?: string | null;
+  /** Lista opcional de chaves OpenRouter para rotação multi-conta (9Router-style). */
+  openrouterKeys?: string[] | null;
   /** Gateway de assinatura: baseURL do proxy OpenAI-compatible. Se omitido, lê do banco. */
   gatewayBaseUrl?: string | null;
   /** Gateway de assinatura: chave/management key opcional do proxy. */
   gatewayApiKey?: string | null;
   /** modelRef de RESERVA (API key) se o gateway falhar na 1ª mensagem. Se omitido, lê do banco. */
   fallbackModelRef?: string | null;
+  /** Igual ao generateText: suprime o fallback global (usado pelos passos de combo). */
+  noGatewayFallback?: boolean;
 }
 
 export async function startAiChat(opts: StartAiChatOpts): Promise<AiChatSession> {
   const { provider, model } = parseModelRef(opts.modelRef);
 
+  if (provider === "combo") {
+    const { getAiKeys } = await import("@/lib/ai-keys");
+    const keys = await getAiKeys();
+    const steps = resolveComboSteps(model, keys?.aiCombos);
+    if (!steps.length) {
+      throw new Error(`Combo de IA "${model}" não possui modelos ativos configurados.`);
+    }
+
+    let currentIndex = 0;
+    let activeSession: AiChatSession | null = null;
+    let turnsCount = 0;
+
+    async function initSessionAtIndex(index: number): Promise<AiChatSession> {
+      if (index >= steps.length) {
+        const comboGlobalFallback = (opts.fallbackModelRef || "").trim() || keys?.gatewayFallbackModel || null;
+        if (comboGlobalFallback && comboGlobalFallback !== opts.modelRef) {
+          console.warn(`[ai-provider:combo] Todos os modelos do combo "${model}" falharam na inicialização. Acionando fallback global: "${comboGlobalFallback}".`);
+          return startAiChat({ ...opts, modelRef: comboGlobalFallback, fallbackModelRef: null });
+        }
+        throw new Error(`Todos os ${steps.length} modelos do combo "${model}" falharam.`);
+      }
+
+      const targetRef = steps[index];
+      try {
+        const session = await startAiChat({
+          ...opts,
+          modelRef: targetRef,
+          fallbackModelRef: null,
+          noGatewayFallback: true, // Sem makeFallback global: falha propaga p/ cascata
+        });
+        return session;
+      } catch (err) {
+        console.warn(`[ai-provider:combo] Falha ao iniciar modelo ${index + 1}/${steps.length} (${targetRef}): ${(err as any)?.message}. Tentando próximo modelo do combo.`);
+        return initSessionAtIndex(index + 1);
+      }
+    }
+
+    activeSession = await initSessionAtIndex(0);
+
+    return {
+      provider: "combo",
+      modelUsed: () => activeSession ? activeSession.modelUsed() : steps[currentIndex] || model,
+      async sendUser(text: string) {
+        if (!activeSession) {
+          activeSession = await initSessionAtIndex(currentIndex);
+        }
+        try {
+          const res = await activeSession.sendUser(text);
+          turnsCount++;
+          return res;
+        } catch (err) {
+          // Se falhou no primeiro turno, tenta o próximo modelo do combo
+          if (turnsCount === 0 && currentIndex + 1 < steps.length) {
+            currentIndex++;
+            console.warn(`[ai-provider:combo] Turno inicial falhou no modelo ${steps[currentIndex - 1]} (${(err as any)?.message}). Cascata para ${steps[currentIndex]}.`);
+            activeSession = await initSessionAtIndex(currentIndex);
+            return activeSession.sendUser(text);
+          }
+          throw err;
+        }
+      },
+      async sendToolResults(results: AiToolResult[]) {
+        if (!activeSession) {
+          throw new Error("Sessão do combo não inicializada.");
+        }
+        return activeSession.sendToolResults(results);
+      },
+    };
+  }
+
   if (provider === "openrouter") {
-    if (!opts.openrouterApiKey) throw new Error("OpenRouter API Key não configurada.");
-    const apiKey = opts.openrouterApiKey;
     return startOpenAICompatibleChat(opts, model, {
       provider: "openrouter",
-      post: (body) => openRouterChat(apiKey, body),
+      post: (body) =>
+        openRouterChatWithFailover(body, {
+          openrouterApiKey: opts.openrouterApiKey,
+          openrouterKeys: opts.openrouterKeys,
+        }),
       makeFallback: opts.geminiApiKey ? async () => {
         const gemModel = "gemini-2.5-flash"; // Modelo padrão resiliente e barato
-        console.warn(`[ai-provider] OpenRouter falhou. Fazendo fallback de último caso para Gemini (${gemModel}).`);
+        console.warn(`[ai-provider] OpenRouter falhou em todas as chaves. Fazendo fallback de último caso para Gemini (${gemModel}).`);
         return startAiChat({ ...opts, modelRef: gemModel });
       } : undefined
     });

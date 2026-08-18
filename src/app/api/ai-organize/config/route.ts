@@ -44,13 +44,13 @@ export async function GET() {
     let data: Record<string, any> | null = null;
     const full = await supabase
       .from("ai_organizer_config")
-      .select("enabled, model, provider, execution_hour, last_run, api_key, openrouter_api_key, gateway_base_url, gateway_api_key, gateway_fallback_model, gateway_endpoints")
+      .select("enabled, model, provider, execution_hour, last_run, api_key, openrouter_api_key, openrouter_keys, gateway_base_url, gateway_api_key, gateway_fallback_model, gateway_endpoints")
       .eq("id", 1)
       .maybeSingle();
     if (full.error) {
       const mid = await supabase
         .from("ai_organizer_config")
-        .select("enabled, model, provider, execution_hour, last_run, api_key, openrouter_api_key, gateway_base_url, gateway_api_key, gateway_fallback_model")
+        .select("enabled, model, provider, execution_hour, last_run, api_key, openrouter_api_key, openrouter_keys, gateway_base_url, gateway_api_key, gateway_fallback_model")
         .eq("id", 1)
         .maybeSingle();
       if (mid.error) {
@@ -70,12 +70,20 @@ export async function GET() {
     // Lista UNIFICADA de conexões (várias contas). Inclui o legado sintetizado
     // quando a lista está vazia. As chaves são secretas → mascara, expondo só
     // `has_api_key` por conexão (a UI mostra •••• e não reenvia a chave).
-    const { parseGatewayEndpoints } = await import("@/lib/ai-keys");
+    const { parseGatewayEndpoints, parseOpenRouterKeys } = await import("@/lib/ai-keys");
     const endpoints = parseGatewayEndpoints(
       data?.gateway_endpoints,
       data?.gateway_base_url || null,
       data?.gateway_api_key || null,
     ).map((e) => ({ id: e.id, label: e.label, base_url: e.baseUrl, has_api_key: !!e.apiKey }));
+
+    const openrouterKeysList = parseOpenRouterKeys(data?.openrouter_keys, data?.openrouter_api_key || null);
+    // Mascara chaves para exibição segura na UI (ex: sk-or-...3a4b)
+    const maskedOpenrouterKeys = openrouterKeysList.map((k, idx) => ({
+      id: `or_${idx}`,
+      masked: k.length > 10 ? `${k.slice(0, 7)}••••${k.slice(-4)}` : "••••••••",
+      isPrimary: idx === 0,
+    }));
 
     return NextResponse.json({
       success: true,
@@ -86,7 +94,9 @@ export async function GET() {
         execution_hour: typeof data?.execution_hour === "number" ? data.execution_hour : 20,
         last_run: data?.last_run || null,
         has_api_key: !!(data?.api_key && String(data.api_key).trim().length > 0),
-        has_openrouter_key: !!(data?.openrouter_api_key && String(data.openrouter_api_key).trim().length > 0),
+        has_openrouter_key: !!(data?.openrouter_api_key && String(data.openrouter_api_key).trim().length > 0) || openrouterKeysList.length > 0,
+        openrouter_keys_count: openrouterKeysList.length,
+        openrouter_keys: maskedOpenrouterKeys,
         // Gateway de Assinatura. base_url e fallback NÃO são segredo (URL local +
         // nome de modelo) → devolve o valor pra UI popular o form. A chave do
         // gateway é secreta → só devolve um booleano.
@@ -120,6 +130,10 @@ export async function PATCH(req: NextRequest) {
       || (typeof body.provider === "string" && body.provider.trim())
       || (typeof body.api_key === "string" && body.api_key.trim())
       || (typeof body.openrouter_api_key === "string" && body.openrouter_api_key.trim())
+      || Array.isArray(body.openrouter_keys)
+      || (typeof body.add_openrouter_key === "string" && body.add_openrouter_key.trim())
+      || (typeof body.remove_openrouter_key_index === "number")
+      || (typeof body.reorder_openrouter_key_index === "number" && typeof body.reorder_openrouter_key_to === "number")
       || (typeof body.gateway_base_url === "string")
       || (typeof body.gateway_api_key === "string")
       || (typeof body.gateway_fallback_model === "string")
@@ -137,6 +151,66 @@ export async function PATCH(req: NextRequest) {
     if (typeof body.provider === "string" && body.provider.trim()) update.provider = body.provider.trim();
     if (typeof body.api_key === "string" && body.api_key.trim()) update.api_key = body.api_key.trim();
     if (typeof body.openrouter_api_key === "string" && body.openrouter_api_key.trim()) update.openrouter_api_key = body.openrouter_api_key.trim();
+
+    // Suporte multi-key OpenRouter: adicionar uma nova chave, remover por índice, reordenar prioridade ou enviar lista
+    let openrouterChanged = typeof body.openrouter_api_key === "string" && body.openrouter_api_key.trim().length > 0;
+    if (
+      Array.isArray(body.openrouter_keys) ||
+      (typeof body.add_openrouter_key === "string" && body.add_openrouter_key.trim()) ||
+      typeof body.remove_openrouter_key_index === "number" ||
+      (typeof body.reorder_openrouter_key_index === "number" && typeof body.reorder_openrouter_key_to === "number")
+    ) {
+      openrouterChanged = true;
+      try {
+        const cur = await supabase
+          .from("ai_organizer_config")
+          .select("openrouter_keys, openrouter_api_key")
+          .eq("id", 1)
+          .maybeSingle();
+        const { parseOpenRouterKeys } = await import("@/lib/ai-keys");
+        let list = parseOpenRouterKeys((cur.data as any)?.openrouter_keys, (cur.data as any)?.openrouter_api_key || null);
+
+        if (Array.isArray(body.openrouter_keys)) {
+          list = body.openrouter_keys.map((s: any) => String(s || "").trim()).filter(Boolean);
+        }
+
+        if (typeof body.add_openrouter_key === "string" && body.add_openrouter_key.trim()) {
+          // Permite adicionar múltiplas chaves separadas por quebra de linha, vírgula ou espaço
+          const rawEntries = body.add_openrouter_key
+            .split(/[\r\n,;\s]+/)
+            .map((s: string) => s.trim())
+            .filter(Boolean);
+          for (const k of rawEntries) {
+            if (!list.includes(k)) list.push(k);
+          }
+        }
+
+        if (typeof body.remove_openrouter_key_index === "number") {
+          const idx = body.remove_openrouter_key_index;
+          if (idx >= 0 && idx < list.length) {
+            list.splice(idx, 1);
+          }
+        }
+
+        if (
+          typeof body.reorder_openrouter_key_index === "number" &&
+          typeof body.reorder_openrouter_key_to === "number"
+        ) {
+          const from = body.reorder_openrouter_key_index;
+          const to = body.reorder_openrouter_key_to;
+          if (from >= 0 && from < list.length && to >= 0 && to < list.length && from !== to) {
+            const [moved] = list.splice(from, 1);
+            list.splice(to, 0, moved);
+          }
+        }
+
+        update.openrouter_keys = list;
+        // Mantém a chave principal legada em sincronia com a primeira chave da lista
+        update.openrouter_api_key = list[0] || null;
+      } catch {
+        /* fallback silencioso */
+      }
+    }
     // Gateway de Assinatura — diferente das chaves acima, aceita string vazia
     // pra LIMPAR (desconectar). Vazio → null no banco.
     let gatewayChanged = false;
@@ -217,7 +291,7 @@ export async function PATCH(req: NextRequest) {
     invalidateOrganizerConfigCache();
     // Se a chave OpenRouter mudou, invalida o cache de chaves e o de modelos
     // pra a lista do seletor recarregar com a nova chave imediatamente.
-    if (typeof body.openrouter_api_key === "string" && body.openrouter_api_key.trim()) {
+    if (openrouterChanged) {
       try {
         const { invalidateAiKeysCache } = await import("@/lib/ai-keys");
         invalidateAiKeysCache();

@@ -20,7 +20,7 @@ export type GroupableModel = {
   rawId?: string;
   name?: string;
   description?: string;
-  provider?: string; // "gemini" | "openrouter" | "gateway"
+  provider?: string; // "combo" | "gemini" | "openrouter" | "gateway"
   supportsTools?: boolean;
 };
 
@@ -88,6 +88,9 @@ export function isFreeModel(m: GroupableModel): boolean {
 /** Rótulo do subgrupo dentro de um provedor (string vazia = sem subgrupo). */
 export function subGroupLabel(m: GroupableModel): string {
   const provider = m.provider || "gemini";
+  if (provider === "combo") {
+    return "Combos Virtuais";
+  }
   if (provider === "openrouter") {
     if (isFreeModel(m)) return "Grátis";
     return modelFamily(m.rawId || m.id);
@@ -101,10 +104,10 @@ export function subGroupLabel(m: GroupableModel): string {
 export type SubGroup<T extends GroupableModel = GroupableModel> = { label: string; items: T[] };
 export type ProviderGroup<T extends GroupableModel = GroupableModel> = { provider: string; subgroups: SubGroup<T>[] };
 
-const PROVIDER_ORDER = ["gateway", "openrouter", "gemini"];
+const PROVIDER_ORDER = ["combo", "gateway", "openrouter", "gemini"];
 
 /**
- * Agrupa por provedor (na ordem gateway → openrouter → gemini) e, dentro de cada
+ * Agrupa por provedor (na ordem combo → gateway → openrouter → gemini) e, dentro de cada
  * um, por subgrupo. "Grátis" vem primeiro; subgrupos sem rótulo, por último.
  */
 export function groupModels<T extends GroupableModel>(models: T[]): ProviderGroup<T>[] {
@@ -121,6 +124,8 @@ export function groupModels<T extends GroupableModel>(models: T[]): ProviderGrou
     }
     const subgroups = Object.keys(bySub)
       .sort((a, b) => {
+        if (a === "Combos Virtuais") return -1;
+        if (b === "Combos Virtuais") return 1;
         if (a === "Grátis") return -1;
         if (b === "Grátis") return 1;
         if (a === "") return 1;
@@ -134,6 +139,7 @@ export function groupModels<T extends GroupableModel>(models: T[]): ProviderGrou
 
 /** Rótulo amigável de cada provedor (compartilhado entre os seletores). */
 export const PROVIDER_LABEL: Record<string, string> = {
+  combo: "⚡ Combos Virtuais (Resilientes)",
   gateway: "Gateway (Assinatura)",
   openrouter: "OpenRouter",
   gemini: "Google Gemini",
