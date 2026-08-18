@@ -39,6 +39,7 @@ type Lead = {
   opt_out: boolean;
   primeiro_contato_source: string | null;
   primeiro_contato_at: string | null;
+  resumo_avaliacoes?: string | null;
 };
 
 type Campaign = {
@@ -185,6 +186,9 @@ export default function ProspeccaoSitesPage() {
           filterLandlines,
           filterWithWebsite,
           captureAllReviews,
+          reviews_ai: reviewsAiEnabled
+            ? { enabled: true, model: reviewsAiModel || null, prompt: reviewsAiPrompt || null }
+            : undefined,
           maxLeads,
         }),
       });
@@ -381,6 +385,13 @@ export default function ProspeccaoSitesPage() {
   const [aiPrompt, setAiPrompt] = useState("");
   const [loadingAiModels, setLoadingAiModels] = useState(false);
 
+  // ----- Reviews AI (resumo de avaliações com IA) -----
+  const [reviewsAiEnabled, setReviewsAiEnabled] = useState(false);
+  const [reviewsAiModel, setReviewsAiModel] = useState("");
+  const [reviewsAiPrompt, setReviewsAiPrompt] = useState("");
+  const [reviewsAiRunning, setReviewsAiRunning] = useState(false);
+  const [reviewsAiResults, setReviewsAiResults] = useState<{ lead_id: number; ok: boolean; nome_negocio?: string | null; resumo?: string; cached?: boolean; error?: string }[] | null>(null);
+
   // ----- Automação (full pipeline) -----
   type AutomationRow = {
     id: string;
@@ -430,6 +441,9 @@ export default function ProspeccaoSitesPage() {
   const [autoPersonalize, setAutoPersonalize] = useState(false);
   const [autoAiModel, setAutoAiModel] = useState("");
   const [autoAiPrompt, setAutoAiPrompt] = useState("");
+  const [autoReviewsAi, setAutoReviewsAi] = useState(false);
+  const [autoReviewsAiModel, setAutoReviewsAiModel] = useState("");
+  const [autoReviewsAiPrompt, setAutoReviewsAiPrompt] = useState("");
   const [autoFollowupAi, setAutoFollowupAi] = useState(false);
   const [autoFollowupAiModel, setAutoFollowupAiModel] = useState("");
   const [autoFollowupAiPrompt, setAutoFollowupAiPrompt] = useState("");
@@ -453,6 +467,8 @@ export default function ProspeccaoSitesPage() {
         const list = Array.isArray(j2.models) ? j2.models : [];
         setAiModels(list);
         if (list.length && !aiModel) setAiModel(list[0].id);
+        if (list.length && !reviewsAiModel) setReviewsAiModel(list[0].id);
+        if (list.length && !autoReviewsAiModel) setAutoReviewsAiModel(list[0].id);
       } catch (e) { console.warn("ai-models", e); }
       finally { setLoadingAiModels(false); }
     })();
@@ -534,6 +550,10 @@ export default function ProspeccaoSitesPage() {
             filterEmpty: true,
             filterDuplicates: true,
             filterLandlines: false,
+            captureAllReviews: autoReviewsAi,
+            reviews_ai: autoReviewsAi
+              ? { enabled: true, model: autoReviewsAiModel || null, prompt: autoReviewsAiPrompt || null }
+              : { enabled: false },
           },
           scrape_max_leads: autoMaxLeads,
           dispatch_template: autoTemplate,
@@ -788,6 +808,27 @@ export default function ProspeccaoSitesPage() {
     } catch (e: any) { alert("Erro de conexão: " + e.message); }
   };
 
+  const runReviewsAi = async () => {
+    const ids = selected.size > 0 ? Array.from(selected.keys()) : leads.map((l) => l.id);
+    if (ids.length === 0) { alert("Selecione leads na aba Leads (ou capture leads primeiro)."); return; }
+    if (!reviewsAiModel) { alert("Nenhum modelo de IA disponível (admin precisa configurar API key)."); return; }
+    if (!confirm(`Analisar avaliações de ${Math.min(ids.length, 50)} lead(s) com IA? (cache de 7 dias por lead)`)) return;
+    setReviewsAiRunning(true);
+    setReviewsAiResults(null);
+    try {
+      const r = await fetch("/api/prospeccao-sites/reviews-ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lead_ids: ids.slice(0, 50), model: reviewsAiModel, prompt: reviewsAiPrompt || undefined }),
+      });
+      const j = await r.json();
+      if (!j.success) throw new Error(j.error || "POST fail");
+      setReviewsAiResults(j.results || []);
+      fetchLeads();
+    } catch (e: any) { alert("Erro: " + e.message); }
+    finally { setReviewsAiRunning(false); }
+  };
+
   const markOptOut = async (lead: Lead) => {
     if (!confirm(`Marcar ${lead.nome_negocio || lead.remoteJid} como opt-out?`)) return;
     try {
@@ -883,6 +924,39 @@ export default function ProspeccaoSitesPage() {
                     </div>
                   </div>
                   <p className="text-[11px] text-white/50">Quando ativado, carrega e salva todos os comentários e avaliações disponíveis no Google Maps. A captação pode levar mais tempo.</p>
+
+                  {/* Resumo de avaliações com IA (reviews-ai) */}
+                  <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-3 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <label htmlFor="ps-reviews-ai" className="text-xs font-semibold text-white/70 cursor-pointer">Resumir avaliações com IA</label>
+                      <Switch id="ps-reviews-ai" checked={reviewsAiEnabled} onCheckedChange={(v) => { setReviewsAiEnabled(v); if (v) setCaptureAllReviews(true); }} />
+                    </div>
+                    <p className="text-[11px] text-white/50">
+                      Liga "Capturar todas as avaliações" automaticamente. Cada lead capturado é resumido NA HORA pela IA com o prompt abaixo (todos os comentários vão junto). O resumo fica em <code className="bg-black/40 px-1 rounded">{"{{resumo_avaliacoes}}"}</code> nos disparos.
+                    </p>
+                    {reviewsAiEnabled && (
+                      <>
+                        <div>
+                          <label className="text-xs text-white/60">Modelo de IA</label>
+                          <select value={reviewsAiModel} onChange={(e) => setReviewsAiModel(e.target.value)} className="w-full mt-1 px-3 py-2 rounded-lg bg-black/40 border border-white/10 text-sm">
+                            {loadingAiModels && <option value="">Carregando…</option>}
+                            {!loadingAiModels && aiModels.length === 0 && <option value="">(sem modelos — admin precisa configurar API key)</option>}
+                            <ModelOptions models={aiModels as any} />
+                          </select>
+                        </div>
+                        <div>
+                          <label className="text-xs text-white/60">Prompt (vazio = padrão: ELOGIOS / RECLAMAÇÕES / GANCHO / NOTA GERAL)</label>
+                          <Textarea value={reviewsAiPrompt} onChange={(e) => setReviewsAiPrompt(e.target.value)} rows={3}
+                            placeholder="Ex: Resuma em tom de vendas, focando dores que um site profissional resolveria…"
+                            className="bg-black/40 border-white/10 font-mono text-xs" />
+                        </div>
+                        <Button onClick={runReviewsAi} disabled={reviewsAiRunning} size="sm" className="w-full">
+                          {reviewsAiRunning ? "Analisando…" : `Analisar avaliações (${selected.size > 0 ? selected.size : leads.length} lead${selected.size > 0 ? " selecionado" : ""})`}
+                        </Button>
+                      </>
+                    )}
+                  </div>
+
                   {[
                     { label: "Remover leads sem telefone", value: filterEmpty, set: setFilterEmpty },
                     { label: "Remover telefones duplicados", value: filterDuplicates, set: setFilterDuplicates },
@@ -934,6 +1008,31 @@ export default function ProspeccaoSitesPage() {
                 </div>
               </CardContent>
             </Card>
+
+            {/* Resultado do resumo de avaliações com IA */}
+            {reviewsAiResults && (
+              <Card className="border-cyan-500/20 bg-white/[0.02]">
+                <CardContent className="p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="text-xs font-bold uppercase tracking-wider text-cyan-300/80">
+                      Resumo de avaliações (IA) · {reviewsAiResults.filter((r) => r.ok).length}/{reviewsAiResults.length} ok
+                    </div>
+                    <button type="button" onClick={() => setReviewsAiResults(null)} className="text-white/40 hover:text-white text-xs">fechar ✕</button>
+                  </div>
+                  {reviewsAiResults.map((r) => (
+                    <div key={r.lead_id} className={`rounded-lg border p-2 text-xs ${r.ok ? "border-white/10 bg-black/30" : "border-red-500/30 bg-red-500/5"}`}>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="font-bold text-white/80">{r.nome_negocio || `Lead #${r.lead_id}`}</span>
+                        {r.cached && <span className="px-1.5 py-0.5 rounded bg-white/10 text-white/50 text-[9px]">CACHE</span>}
+                      </div>
+                      {r.ok
+                        ? <pre className="whitespace-pre-wrap font-sans text-white/70 leading-relaxed">{r.resumo}</pre>
+                        : <span className="text-red-300/80">Erro: {r.error}</span>}
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+            )}
 
             {/* Log panel */}
             {logs.length > 0 && (
@@ -1354,11 +1453,9 @@ export default function ProspeccaoSitesPage() {
                       <div>
                         <label className="text-xs text-white/60">Modelo de IA</label>
                         <select value={aiModel} onChange={(e) => setAiModel(e.target.value)} className="w-full mt-1 px-3 py-2 rounded-lg bg-black/40 border border-white/10 text-sm">
-                          {loadingAiModels && <option value="">carregando…</option>}
+                          {loadingAiModels && <option value="">Carregando…</option>}
                           {!loadingAiModels && aiModels.length === 0 && <option value="">(sem modelos — admin precisa configurar API key)</option>}
-                          {aiModels.map((m) => (
-                            <option key={m.id} value={m.id}>{m.name || m.id}{m.provider ? ` (${m.provider})` : ""}</option>
-                          ))}
+                          <ModelOptions models={aiModels as any} />
                         </select>
                       </div>
                       <div>
@@ -1717,6 +1814,7 @@ export default function ProspeccaoSitesPage() {
                       { key: "website",       label: "Website",      hint: "Site do lead" },
                       { key: "avaliacao",     label: "Avaliação",    hint: "Nota Google (1-5)" },
                       { key: "reviews",       label: "Reviews",      hint: "Qtd. de reviews" },
+                      { key: "resumo_avaliacoes", label: "Resumo aval.", hint: "Resumo IA das avaliações do Google (reviews-ai)" },
                       { key: "telefone",      label: "Telefone",     hint: "Número limpo" },
                       { key: "data",          label: "Data",         hint: "DD/MM/AAAA" },
                       { key: "hora",          label: "Hora",         hint: "HH:MM" },
@@ -1789,6 +1887,47 @@ export default function ProspeccaoSitesPage() {
                         <p className="text-[9px] text-white/30 mt-1">
                           A IA recebe: prompt + mensagem-base + dados do lead (nome, ramo). Devolve a mensagem final que será enviada.
                         </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Resumo de avaliações com IA (antes do disparo) — reviews-ai */}
+                <div className={cn(
+                  "rounded-lg border p-3 space-y-2 transition-colors",
+                  autoReviewsAi ? "border-cyan-400/40 bg-cyan-500/5" : "border-white/10 bg-white/[0.02]"
+                )}>
+                  <label className="flex items-center gap-2 text-xs cursor-pointer">
+                    <Switch checked={autoReviewsAi} onCheckedChange={setAutoReviewsAi} />
+                    <Bot className="w-3.5 h-3.5 text-cyan-300" />
+                    <span className="font-bold text-cyan-200">Resumir avaliações do Google com IA</span>
+                  </label>
+                  <p className="text-[10px] text-white/40 leading-relaxed">
+                    Antes do disparo, roda a IA em todas as avaliações capturadas de cada lead e gera um resumo (elogios, reclamações e gancho). Disponível como <code className="bg-black/40 px-1 rounded">{"{{resumo_avaliacoes}}"}</code> no template. Ativa "Capturar todas as avaliações" automaticamente.
+                  </p>
+                  {autoReviewsAi && (
+                    <div className="space-y-2 pl-3 border-l-2 border-cyan-500/30">
+                      <div>
+                        <label className="text-[10px] uppercase font-bold text-white/40">Modelo de IA</label>
+                        <select
+                          value={autoReviewsAiModel || ""}
+                          onChange={(e) => setAutoReviewsAiModel(e.target.value)}
+                          className="w-full mt-0.5 bg-black/40 border border-white/10 rounded-md px-2 h-8 text-xs"
+                        >
+                          {aiModels.length === 0 ? (
+                            <option value="">{loadingAiModels ? "carregando…" : "(sem modelos — configure API key)"}</option>
+                          ) : (
+                            <ModelOptions models={aiModels as any} />
+                          )}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-[10px] uppercase font-bold text-white/40">Prompt (vazio = padrão)</label>
+                        <Textarea rows={2}
+                          value={autoReviewsAiPrompt}
+                          onChange={(e) => setAutoReviewsAiPrompt(e.target.value)}
+                          placeholder="Ex: Resuma as avaliações focando em dores que um site profissional resolveria…"
+                          className="bg-black/40 border-white/10 font-mono text-xs" />
                       </div>
                     </div>
                   )}

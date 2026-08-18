@@ -135,7 +135,7 @@ export default function AutomacaoPage() {
       agent_id: null,
       niches: [],
       regions: [],
-      scrape_filters: { filterEmpty: true, filterDuplicates: true, filterLandlines: true },
+      scrape_filters: { filterEmpty: true, filterDuplicates: true, filterLandlines: true, captureAllReviews: false, reviews_ai: { enabled: false, model: null, prompt: null } },
       scrape_max_leads: 100,
       dispatch_template: "{{saudacao}} {{nome_empresa}}! Sou da Sarah Tech, vi sua empresa no Maps e queria saber se faz sentido conversarmos sobre [oferta]. Pode ser?",
       // Defaults SEGUROS WhatsApp: 60-180s aleatório (média ~2 min, ~30 envios/h)
@@ -231,6 +231,14 @@ export default function AutomacaoPage() {
           }
         }
         setAiModels(merged);
+        // pré-seleciona modelo de reviews-ai se vier vazio do formulário
+        setFormData(prev => {
+          const cur = prev.scrape_filters?.reviews_ai as any;
+          if (cur && !cur.model && merged.length) {
+            return { ...prev, scrape_filters: { ...prev.scrape_filters, reviews_ai: { ...cur, model: merged[0].id } } };
+          }
+          return prev;
+        });
       } else {
         setAiModelsError(d.error || "Sem modelos retornados — usando lista padrão");
         setAiModels(FALLBACK_MODELS);
@@ -274,8 +282,13 @@ export default function AutomacaoPage() {
     setEditingId(a.id);
     setFormData({
       ...a,
-      // garante objetos editáveis
-      scrape_filters: a.scrape_filters || { filterEmpty: true, filterDuplicates: true, filterLandlines: true },
+      // garante objetos editáveis e chaves novas (reviews-ai) presentes
+      scrape_filters: {
+        filterEmpty: true, filterDuplicates: true, filterLandlines: true,
+        ...(a.scrape_filters || {}),
+        captureAllReviews: a.scrape_filters?.captureAllReviews ?? false,
+        reviews_ai: { enabled: false, model: null, prompt: null, ...(a.scrape_filters?.reviews_ai || {}) },
+      },
       followup_steps: Array.isArray(a.followup_steps) ? a.followup_steps : [],
     });
     setNichesText((a.niches || []).join("\n"));
@@ -523,6 +536,65 @@ export default function AutomacaoPage() {
                       className="bg-black/40 border-white/10 h-8 w-20 text-xs" />
                   </div>
                 </div>
+
+                {/* Resumo de avaliações com IA (reviews-ai) */}
+                <div className={cn(
+                  "rounded-lg border p-3 space-y-2 transition-colors",
+                  formData.scrape_filters?.reviews_ai?.enabled
+                    ? "border-cyan-400/40 bg-cyan-500/5"
+                    : "border-white/10 bg-white/[0.02]"
+                )}>
+                  <label className="flex items-center gap-2 text-xs cursor-pointer">
+                    <input type="checkbox"
+                      checked={!!formData.scrape_filters?.reviews_ai?.enabled}
+                      onChange={e => setFormData({
+                        ...formData,
+                        scrape_filters: {
+                          ...formData.scrape_filters,
+                          captureAllReviews: e.target.checked || !!formData.scrape_filters?.captureAllReviews,
+                          reviews_ai: {
+                            enabled: e.target.checked,
+                            model: aiModels.length ? (formData.scrape_filters?.reviews_ai?.model || aiModels[0].id) : null,
+                            prompt: formData.scrape_filters?.reviews_ai?.prompt ?? null,
+                          },
+                        },
+                      })} />
+                    <Bot className="w-3.5 h-3.5 text-cyan-300" />
+                    <span className="font-bold text-cyan-200 text-xs">Resumir avaliações do Google com IA (antes do disparo)</span>
+                  </label>
+                  <p className="text-[10px] text-white/40 leading-relaxed">
+                    Reúne TODAS as avaliações capturadas de cada lead e a IA resume elogios, reclamações e um gancho. Disponível como <code className="bg-black/40 px-1 rounded">{"{{resumo_avaliacoes}}"}</code> no template de disparo e follow-up. Ativa "Capturar todas as avaliações".
+                  </p>
+                  {formData.scrape_filters?.reviews_ai?.enabled && (
+                    <div className="space-y-2 pl-3 border-l-2 border-cyan-500/30">
+                      <div>
+                        <label className="text-[10px] uppercase font-bold text-white/40">Modelo de IA</label>
+                        <select
+                          value={formData.scrape_filters?.reviews_ai?.model || ""}
+                          onChange={e => setFormData({
+                            ...formData,
+                            scrape_filters: { ...formData.scrape_filters, reviews_ai: { ...formData.scrape_filters!.reviews_ai!, model: e.target.value } },
+                          })}
+                          className="w-full mt-0.5 bg-black/40 border border-white/10 rounded-md px-2 h-8 text-xs"
+                        >
+                          {aiModels.length === 0 && <option value="">{loadingAiModels ? "carregando…" : "(sem modelos — configure API key)"}</option>}
+                          {aiModels.map((m: any) => <option key={m.id} value={m.id}>{m.name || m.id}{m.provider ? ` (${m.provider})` : ""}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-[10px] uppercase font-bold text-white/40">Prompt (vazio = padrão: ELOGIOS / RECLAMAÇÕES / GANCHO / NOTA GERAL)</label>
+                        <Textarea rows={2}
+                          value={formData.scrape_filters?.reviews_ai?.prompt || ""}
+                          onChange={e => setFormData({
+                            ...formData,
+                            scrape_filters: { ...formData.scrape_filters, reviews_ai: { ...formData.scrape_filters!.reviews_ai!, prompt: e.target.value || null } },
+                          })}
+                          placeholder="Ex: Resuma em tom comercial, focando dores que um site profissional resolveria…"
+                          className="bg-black/40 border-white/10 font-mono text-xs" />
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* Lead Intelligence — entre captação e disparo. Análise IA de
@@ -598,7 +670,8 @@ export default function AutomacaoPage() {
                       { key: "endereco",      label: "Endereço",     hint: "Endereço completo" },
                       { key: "website",       label: "Website",      hint: "Site do lead" },
                       { key: "avaliacao",     label: "Avaliação",    hint: "Nota Google (1-5)" },
-                      { key: "reviews",       label: "Reviews",      hint: "Qtd. de reviews" },
+                      { key: "reviews", label: "Reviews", hint: "Qtd. de reviews" },
+                      { key: "resumo_avaliacoes", label: "Resumo aval.", hint: "Resumo IA das avaliações (reviews-ai)" },
                       { key: "telefone",      label: "Telefone",     hint: "Número limpo" },
                       { key: "data",          label: "Data",         hint: "DD/MM/AAAA" },
                       { key: "hora",          label: "Hora",         hint: "HH:MM" },

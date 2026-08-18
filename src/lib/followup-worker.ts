@@ -395,11 +395,21 @@ async function processTarget(
 
   // Busca o lead completo no CRM pra abastecer TODAS as variáveis do template
   // ({{endereco}}, {{website}}, {{avaliacao}}, {{ramo}}, etc) — não só o nome.
-  const { data: leadFull } = await supabase
-    .from("leads_extraidos")
-    .select("nome_negocio, ramo_negocio, telefone, endereco, website, instagram, facebook, avaliacao, reviews, status, categoria")
-    .eq("remoteJid", target.remote_jid)
-    .maybeSingle();
+  // resumo_avaliacoes é coluna da migração reviews_ai.sql — PGRST204 cai no
+  // retry sem ela (variável fica vazia, resto intacto).
+  let leadFull: any = null;
+  {
+    const cols = "nome_negocio, ramo_negocio, telefone, endereco, website, instagram, facebook, avaliacao, reviews, status, categoria, resumo_avaliacoes";
+    let res = await supabase.from("leads_extraidos").select(cols).eq("remoteJid", target.remote_jid).maybeSingle();
+    if (res.error && res.error.code === "PGRST204") {
+      res = await supabase
+        .from("leads_extraidos")
+        .select(cols.replace(", resumo_avaliacoes", ""))
+        .eq("remoteJid", target.remote_jid)
+        .maybeSingle();
+    }
+    leadFull = res.data || null;
+  }
 
   // push_name do contato — vem da tabela contacts (nome do WhatsApp). Necessário
   // pra resolver {{nome}} e {{push_name}} corretamente no follow-up.
@@ -429,6 +439,7 @@ async function processTarget(
     reviews:      leadFull?.reviews ?? null,
     status:       leadFull?.status || null,
     categoria:    (leadFull as any)?.categoria || null,
+    resumo_avaliacoes: (leadFull as any)?.resumo_avaliacoes || null,
   };
 
   // 3. Renderiza template

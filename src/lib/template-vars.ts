@@ -14,6 +14,7 @@
  *   {{website}}       → website do lead
  *   {{avaliacao}}     → avaliação (Google) do lead
  *   {{reviews}}       → quantidade de reviews do lead
+ *   {{resumo_avaliacoes}} → resumo IA das avaliações do Google (reviews-ai)
  *   {{status}}        → status do lead no CRM
  *   {{data}}          → "23/04/2026"
  *   {{hora}}          → "14:30"
@@ -34,6 +35,8 @@ export type TemplateContext = {
   website?: string | null;
   avaliacao?: number | string | null;
   reviews?: number | string | null;
+  /** Resumo IA das avaliações do Google (leads_extraidos.resumo_avaliacoes). */
+  resumo_avaliacoes?: string | null;
   status?: string | null;
   observacoes?: string | null;
   instagram?: string | null;
@@ -92,6 +95,9 @@ export function renderTemplate(template: string, ctx: TemplateContext = {}): str
   const baseMap: Record<string, string> = {
     saudacao:      greetingFor(now),
     nome_empresa:  ctx.nome_negocio || "",
+    // Alias natural: usuário escreve {{nome_negocio}} (nome da coluna do CRM)
+    // mesmo o token oficial sendo {{nome_empresa}}.
+    nome_negocio:  ctx.nome_negocio || "",
     primeiro_nome: empresaFirst,
     nome:          nomeFinal,
     push_name:     ctx.push_name || "",
@@ -103,6 +109,7 @@ export function renderTemplate(template: string, ctx: TemplateContext = {}): str
     website:       ctx.website || "",
     avaliacao:     ctx.avaliacao != null ? String(ctx.avaliacao) : "",
     reviews:       ctx.reviews   != null ? String(ctx.reviews)   : "",
+    resumo_avaliacoes: ctx.resumo_avaliacoes || "",
     status:        ctx.status || "",
     observacoes:   ctx.observacoes || "",
     instagram:     ctx.instagram || "",
@@ -148,7 +155,8 @@ export const TEMPLATE_VARIABLES = [
   { key: "endereco",      label: "Endereço",     hint: "Endereço do lead" },
   { key: "website",       label: "Website",      hint: "Site do lead" },
   { key: "avaliacao",     label: "Avaliação",    hint: "Nota do Google (1-5)" },
-  { key: "reviews",       label: "Reviews",      hint: "Qtd. de avaliações" },
+  { key: "reviews",         label: "Reviews",      hint: "Qtd. de avaliações" },
+  { key: "resumo_avaliacoes", label: "Resumo avaliações", hint: "Resumo IA das avaliações do Google (elogios/reclamações/gancho)" },
   { key: "telefone",      label: "Telefone",     hint: "Número do WhatsApp" },
   { key: "email",         label: "Email",        hint: "Email do lead (se cadastrado)" },
   { key: "observacoes",   label: "Observações",  hint: "Notas livres do CRM" },

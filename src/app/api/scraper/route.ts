@@ -74,6 +74,7 @@ export async function POST(req: NextRequest) {
         maxLeads: body.maxLeads,            // /captador também pode passar limite
         automation_id: body.automation_id,
         client_id: session.clientId,
+        reviews_ai: body.reviews_ai,        // resumo automático pós-save (Busca)
       });
       if (!r.ok) return NextResponse.json({ error: r.error }, { status: 400 });
       if (r.alreadyRunning) {

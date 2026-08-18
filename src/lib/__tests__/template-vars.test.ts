@@ -48,6 +48,11 @@ describe("renderTemplate — variáveis do disparo", () => {
     expect(out).toBe("Vi que a ABC atua em Advocacia — site abc.com.br.");
   });
 
+  it("alias {{nome_negocio}} resolve igual a {{nome_empresa}} (coluna do CRM)", () => {
+    const out = renderTemplate("Olá {{nome_negocio}}!", { nome_negocio: "Padaria Pão Quente", now: tarde });
+    expect(out).toBe("Olá Padaria Pão Quente!");
+  });
+
   it("variável desconhecida fica intacta (não quebra, mas é detectável)", () => {
     const out = renderTemplate("Oi {{variavel_inexistente}}", { now: tarde });
     expect(out).toBe("Oi {{variavel_inexistente}}");

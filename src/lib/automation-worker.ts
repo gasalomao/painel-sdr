@@ -21,6 +21,7 @@ import { startCampaign, pauseCampaign } from "@/lib/campaign-worker";
 import { enrollLeads } from "@/lib/followup-worker";
 import { startScraperRun, stopScraper, getStatus as getScraperStatus } from "@/lib/scraper-engine";
 import { resolveCapturedLeadScope } from "@/lib/automation-lead-scope";
+import { summarizeReviewsForLead } from "@/lib/reviews-ai";
 import { evolution } from "@/lib/evolution";
 import * as channel from "@/lib/channel";
 
@@ -139,6 +140,7 @@ async function startScrapingPhase(a: AutomationRow): Promise<void> {
       filterEmpty: filters.filterEmpty !== false,
       filterDuplicates: filters.filterDuplicates !== false,
       filterLandlines: filters.filterLandlines !== false,
+      captureAllReviews: filters.captureAllReviews === true,
       webhookEnabled: false,
       maxLeads: Number(a.scrape_max_leads) || 200,  // ← respeita o limite configurado
       automation_id: a.id,
@@ -326,6 +328,42 @@ async function startDispatchPhase(a: AutomationRow): Promise<void> {
     `✅ Captação concluída · ${leads.length} lead(s) novo(s)`,
     { metadata: { count: leads.length } }
   );
+
+  // ───────── RESUMO DE AVALIAÇÕES COM IA (reviews-ai) ─────────
+  // Opcional via scrape_filters.reviews_ai {enabled, model, prompt}.
+  // Roda ANTES do disparo pra {{resumo_avaliacoes}} resolver no template.
+  // Best-effort: falha individual não bloqueia o disparo (fica só no log).
+  const filters = a.scrape_filters || {};
+  const reviewsAiCfg = filters.reviews_ai as { enabled?: boolean; model?: string; prompt?: string } | undefined;
+  if (reviewsAiCfg?.enabled && reviewsAiCfg.model) {
+    await log(a.id, "scrape", "info",
+      `🧠 Resumindo avaliações do Google com IA (${reviewsAiCfg.model}) pra ${leads.length} lead(s)...`
+    );
+    let ok = 0, cached = 0, semReviews = 0, falhas = 0;
+    for (const l of leads) {
+      try {
+        const r = await summarizeReviewsForLead({
+          leadId: l.id,
+          model: reviewsAiCfg.model,
+          customPrompt: reviewsAiCfg.prompt || null,
+          clientId: (a as any).client_id || null,
+          source: "automation",
+          automationId: a.id,
+        });
+        if ("error" in r) {
+          if (/sem avaliações/i.test(r.error)) semReviews++;
+          else { falhas++; console.warn(`[AUTOMATION ${a.id}] reviews-ai lead ${l.id}: ${r.error}`); }
+        } else if (r.cached) cached++;
+        else ok++;
+      } catch (e: any) {
+        falhas++;
+        console.warn(`[AUTOMATION ${a.id}] reviews-ai lead ${l.id} falhou: ${e?.message || e}`);
+      }
+    }
+    await log(a.id, "scrape", falhas ? "warning" : "success",
+      `🧠 Resumo de avaliações: ${ok} gerado(s) · ${cached} em cache · ${semReviews} sem reviews · ${falhas} falha(s).`
+    );
+  }
 
   // ───────── UNIFICAÇÃO PRECOCE DE JID CANÔNICO (WhatsApp) ─────────
   // Scraper extrai telefones e gera JIDs brutos (que no Brasil podem vir com

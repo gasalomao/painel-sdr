@@ -43,7 +43,7 @@ export async function GET(req: NextRequest) {
     sort === "reviews" ? "reviews" :
     "created_at";
 
-  const baseSelect = "id, remoteJid, nome_negocio, telefone, ramo_negocio, endereco, avaliacao, reviews, website, maps_url, place_id, created_at, opt_out, primeiro_contato_source, primeiro_contato_at";
+  const baseSelect = "id, remoteJid, nome_negocio, telefone, ramo_negocio, endereco, avaliacao, reviews, website, maps_url, place_id, created_at, opt_out, primeiro_contato_source, primeiro_contato_at, resumo_avaliacoes";
 
   // Disparo status: return set of remote_jids that received a sent disparo
   if (url.searchParams.get("disparo_status")) {
@@ -74,6 +74,11 @@ export async function GET(req: NextRequest) {
   };
 
   let { data, error, count } = await buildQuery(baseSelect);
+  // resumo_avaliacoes é da migração reviews_ai.sql — retry sem ela se ausente
+  if (error && /resumo_avaliacoes/.test(error.message)) {
+    const rr = await buildQuery(baseSelect.replace(", resumo_avaliacoes", ""));
+    data = rr.data; error = rr.error; count = rr.count;
+  }
   // ponytail: se coluna maps_url/place_id não existe no DB, retry sem elas
   if (error && /maps_url|place_id/.test(error.message)) {
     const fallbackSelect = "id, remoteJid, nome_negocio, telefone, ramo_negocio, endereco, avaliacao, reviews, website, created_at, opt_out, primeiro_contato_source, primeiro_contato_at";

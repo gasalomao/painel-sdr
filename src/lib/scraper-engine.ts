@@ -13,6 +13,7 @@
 
 import { supabase, supabaseAdmin } from "@/lib/supabase";
 import { getEvolutionConfig } from "@/lib/evolution";
+import { summarizeReviewsForLead } from "@/lib/reviews-ai";
 import os from "os";
 import fs from "fs";
 import path from "path";
@@ -122,6 +123,10 @@ export interface ScraperSettings {
    *  tick e avança pra fase de disparo. Sem limite = sem parada por contagem. */
   maxLeads?: number;
   client_id?: string | null;
+  /** Resumo automático de avaliações com IA logo após salvar cada lead
+   *  (fluxo Busca do /prospeccao-sites). Automação NÃO passa isto — ela roda
+   *  o resumo em batch na fase de dispatch (automation-worker). */
+  reviews_ai?: { enabled?: boolean; model?: string; prompt?: string | null };
 }
 
 // ---- Estado in-memory (singleton no processo Node) ----
@@ -321,7 +326,7 @@ export async function checkCrmDuplicate(remoteJid: string, clientId?: string | n
   }
 }
 
-async function saveLeadAndSync(lead: Lead, settings: ScraperSettings) {
+async function saveLeadAndSync(lead: Lead, settings: ScraperSettings): Promise<number | null> {
   const hasWhatsApp = !!lead.remoteJid;
 
   try {
@@ -333,7 +338,7 @@ async function saveLeadAndSync(lead: Lead, settings: ScraperSettings) {
       const dupSource = await checkCrmDuplicate(lead.remoteJid, currentClientId);
       if (dupSource) {
         sendLog(`⏭️ "${lead.name}" já estava no CRM (${dupSource}) — pulando`, "info");
-        return;
+        return null;
       }
     }
 
@@ -387,11 +392,15 @@ async function saveLeadAndSync(lead: Lead, settings: ScraperSettings) {
       updated_at: new Date().toISOString(),
     };
 
-    let { error: insError } = await client.from("leads_extraidos").insert(fullPayload);
+    let savedId: number | null = null;
+
+    let insertResult = await client.from("leads_extraidos").insert(fullPayload).select("id").single();
+    let insError = insertResult.error as any;
+    if (!insError) savedId = insertResult.data?.id ?? null;
 
     // PGRST204 = coluna inexistente. Banco antigo sem instagram/facebook/ou
     // sem as colunas JSONB da Migration 009/011/012 — tenta só com colunas garantidas.
-    if (insError && (insError as any).code === "PGRST204") {
+    if (insError && insError.code === "PGRST204") {
       const minimal: any = { ...fullPayload };
       const maybeMissing = [
         "instagram", "facebook",
@@ -404,8 +413,9 @@ async function saveLeadAndSync(lead: Lead, settings: ScraperSettings) {
         "additional_categories", "address_components",
       ];
       for (const k of maybeMissing) delete minimal[k];
-      const retry = await client.from("leads_extraidos").insert(minimal);
+      const retry = await client.from("leads_extraidos").insert(minimal).select("id").single();
       insError = retry.error as any;
+      if (!insError) savedId = retry.data?.id ?? null;
       if (!insError) {
         sendLog(`(banco antigo — lead salvo sem colunas extras do Maps/reviews)`, "warning");
       }
@@ -418,25 +428,29 @@ async function saveLeadAndSync(lead: Lead, settings: ScraperSettings) {
     } else {
       sendLog(`✅ Salvo: ${lead.name} (sem WhatsApp — status: sem_contato)`, "success");
     }
+
+    // Webhook realtime (best-effort): falha aqui não derruba o save.
+    if (settings.webhookEnabled && settings.mode === "realtime" && settings.webhookUrl) {
+      try {
+        const payload = formatLeadForN8n(lead);
+        await fetch(settings.webhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        sendLog(`[Webhook] Lead enviado: ${lead.name}`, "success");
+      } catch (err) {
+        sendLog(`[Webhook] Falha ao enviar para n8n: ${(err as Error).message}`, "error");
+      }
+    }
+
+    return savedId;
   } catch (err: any) {
     const msg = err?.message || String(err);
     const detail = err?.details || err?.hint || "";
     console.error("Erro ao salvar no Supabase (CRM):", msg, detail);
     sendLog(`❌ Falha ao salvar "${lead.name}": ${msg}${detail ? ` (${detail})` : ""}`, "error");
-  }
-
-  if (!settings.webhookEnabled || !settings.webhookUrl) return;
-  if (settings.mode !== "realtime") return;
-  try {
-    const payload = formatLeadForN8n(lead);
-    await fetch(settings.webhookUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    sendLog(`[Webhook] Lead enviado: ${lead.name}`, "success");
-  } catch (err) {
-    sendLog(`[Webhook] Falha ao enviar para n8n: ${(err as Error).message}`, "error");
+    return null;
   }
 }
 
@@ -1530,7 +1544,31 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
               };
               leadsStore.push(finalLead);
               broadcast({ event: "new_lead", lead: finalLead, count: leadsStore.length });
-              await saveLeadAndSync(finalLead, settings);
+              const savedLeadId = await saveLeadAndSync(finalLead, settings);
+
+              // Resumo automático de avaliações com IA — roda NA HORA em cada
+              // lead salvo (fluxo Busca com "Resumir avaliações com IA" ligado).
+              // Best-effort: falha não interrompe a captura.
+              if (savedLeadId && settings.reviews_ai?.enabled && settings.reviews_ai.model) {
+                sendLog(`🧠 Resumindo avaliações de "${finalLead.name}" com IA (${settings.reviews_ai.model})...`, "info");
+                try {
+                  const r = await summarizeReviewsForLead({
+                    leadId: savedLeadId,
+                    model: settings.reviews_ai.model,
+                    customPrompt: settings.reviews_ai.prompt || null,
+                    clientId: currentClientId,
+                    source: "capture",
+                  });
+                  if ("error" in r) {
+                    sendLog(`⚠️ Reviews-IA "${finalLead.name}": ${r.error}`, "warning");
+                  } else {
+                    sendLog(`🧠 Resumo de avaliações ${r.cached ? "(cache) " : ""}salvo: ${finalLead.name}`, "success");
+                  }
+                } catch (e: any) {
+                  sendLog(`⚠️ Reviews-IA falhou (${finalLead.name}): ${e?.message || e}`, "warning");
+                }
+              }
+
               // Bateu o limite? Para tudo agora — sai do scroll, sai da fila.
               if (maxLeads > 0 && leadsStore.length >= maxLeads) {
                 sendLog(`🎯 Limite de ${maxLeads} leads atingido. Encerrando.`, "success");
@@ -1666,6 +1704,7 @@ export interface StartOpts {
   maxLeads?: number;
   automation_id?: string | null;
   client_id?: string | null;
+  reviews_ai?: { enabled?: boolean; model?: string; prompt?: string | null };
 }
 
 /**
@@ -1696,6 +1735,7 @@ export function startScraperRun(opts: StartOpts): { ok: boolean; error?: string;
     filterWithWebsite: opts.filterWithWebsite,
     captureAllReviews: opts.captureAllReviews,
     maxLeads: opts.maxLeads,
+    reviews_ai: opts.reviews_ai,
   });
   return { ok: true };
 }
