@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { Header } from "@/components/layout/header";
@@ -22,6 +22,7 @@ import {
 import { renderTemplate, type TemplateContext } from "@/lib/template-vars";
 import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
+import { AutomationLogs } from "../automacao/AutomationLogs";
 
 type Lead = {
   id: number;
@@ -2230,20 +2231,14 @@ export default function ProspeccaoSitesPage() {
                         )}
 
                         {expandedAuto === a.id && (
-                          <div className="rounded-lg bg-black/40 border border-white/5 p-2 max-h-64 overflow-y-auto custom-scrollbar space-y-0.5">
-                            {(autoLogs[a.id] || []).length === 0 ? (
-                              <p className="text-white/40 italic text-center py-6 text-[11px]">Nenhum log ainda.</p>
-                            ) : (
-                              (autoLogs[a.id] || []).map((log, i) => {
-                                const color = log.level === "error" ? "text-red-400" : log.level === "success" ? "text-green-400" : log.level === "warning" ? "text-yellow-400" : "text-blue-300";
-                                return (
-                                  <div key={log.id || i} className="flex gap-2 leading-relaxed text-[11px]">
-                                    <span className="text-white/30 shrink-0">[{new Date(log.created_at).toLocaleTimeString("pt-BR")}]</span>
-                                    <span className={cn("font-bold whitespace-pre-wrap break-words", color)}>{log.message}</span>
-                                  </div>
-                                );
-                              })
-                            )}
+                          <div className="mt-2">
+                            <AutomationLogs
+                              automationId={a.id}
+                              campaignId={a.campaign_id}
+                              followupCampaignId={a.followup_campaign_id}
+                              startedAt={(a as any).started_at || null}
+                              scraping={a.phase === "scraping"}
+                            />
                           </div>
                         )}
                       </CardContent>

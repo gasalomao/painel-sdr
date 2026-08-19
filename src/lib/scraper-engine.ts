@@ -482,8 +482,18 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
         if (executablePath) sendLog(`Ambiente Windows detectado. Usando: ${executablePath}`, "info");
         else sendLog("Aviso: Navegador não encontrado no Windows. Tente instalar o Chrome.", "warning");
       } else {
-        const alpinePath = "/usr/bin/chromium-browser";
-        if (fs.existsSync(alpinePath)) executablePath = alpinePath;
+        const linuxPaths = [
+          "/usr/bin/chromium-browser",
+          "/usr/bin/chromium",
+          "/usr/bin/google-chrome-stable",
+          "/usr/bin/google-chrome",
+        ];
+        for (const p of linuxPaths) {
+          if (fs.existsSync(p)) {
+            executablePath = p;
+            break;
+          }
+        }
       }
     }
 
@@ -494,6 +504,12 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
+        "--disable-breakpad",
+        "--disable-crash-reporter",
+        "--disable-gpu",
+        "--disable-software-rasterizer",
+        "--no-first-run",
+        "--no-zygote",
         "--disable-web-security",
         "--disable-features=IsolateOrigins,site-per-process",
         "--window-size=1280,800",
@@ -1705,6 +1721,8 @@ export interface StartOpts {
   automation_id?: string | null;
   client_id?: string | null;
   reviews_ai?: { enabled?: boolean; model?: string; prompt?: string | null };
+  /** Se true, reseta qualquer captura travada anterior e força o início limpo. */
+  forceRestart?: boolean;
 }
 
 /**
@@ -1716,10 +1734,13 @@ export function startScraperRun(opts: StartOpts): { ok: boolean; error?: string;
   if (!opts.niches?.length || !opts.regions?.length) {
     return { ok: false, error: "Forneça pelo menos 1 nicho e 1 região." };
   }
-  if (isScraping) {
+  if (isScraping && opts.forceRestart) {
+    stopScraper();
+  } else if (isScraping) {
     if (opts.automation_id) currentAutomationId = opts.automation_id;
     return { ok: true, alreadyRunning: true };
   }
+  isScraping = false;
   lastSearchNiche = opts.niches[0];
   lastSearchRegion = opts.regions[0];
   currentAutomationId = opts.automation_id || null;

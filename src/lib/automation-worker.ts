@@ -146,6 +146,7 @@ async function startScrapingPhase(a: AutomationRow): Promise<void> {
       maxLeads: Number(a.scrape_max_leads) || 200,  // ← respeita o limite configurado
       automation_id: a.id,
       client_id: (a as any).client_id || null, // tagging multi-tenant
+      forceRestart: true,
     });
     if (!r.ok) {
       return markError(a.id, `Scraper rejeitou: ${r.error}`);
@@ -995,6 +996,11 @@ export async function startAutomation(id: string): Promise<{ ok: boolean; error?
         .eq("id", a.followup_campaign_id);
     } catch {}
   }
+
+  // Reseta qualquer scraper in-memory antigo pra garantir arranque limpo do robô
+  try {
+    stopScraper();
+  } catch {}
 
   // Reset COMPLETO em todos os casos. Sem early-return: clicar Iniciar = recomeçar.
   // Limpa também os _baselineCount/_scrapeStartedAt/_lastProgressAt antigos pra
