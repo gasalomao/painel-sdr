@@ -503,6 +503,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
       ignoreDefaultArgs: ["--enable-automation"],
       env: {
         ...process.env,
+        HOME: process.env.HOME && fs.existsSync(process.env.HOME) ? process.env.HOME : "/tmp",
         CHROME_CRASHPAD_PIPE_NAME: "",
       },
       args: [

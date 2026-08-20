@@ -63,7 +63,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     && rm -rf /var/lib/apt/lists/*
 
-RUN groupadd --system --gid 1001 nodejs && useradd --system --uid 1001 -g nodejs nextjs
+RUN groupadd --system --gid 1001 nodejs && useradd --system --uid 1001 -g nodejs --create-home nextjs \
+    && mkdir -p /home/nextjs/.config/chromium && chown -R nextjs:nodejs /home/nextjs
 
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
