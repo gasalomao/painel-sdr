@@ -27,6 +27,18 @@ import * as channel from "@/lib/channel";
 
 type AutomationRow = any;
 
+/** Debounce anti-clique-múltiplo no botão Iniciar: id → último start (ms).
+ *  Log real (EasyPanel) mostrou 3 clicks em <2s → 3 startAutomation
+ *  concorrentes → 3 scrapers intercalados no mesmo Maps (logs duplicados,
+ *  "Parando robô..." de forceRestart matando a sessão anterior). */
+const lastStartAt = new Map<string, number>();
+/** Start de fase de scrape em andamento: evita 2 ticks concorrentes
+ *  (tick imediato do Iniciar + tick de 60s do instrumentation) lerem
+ *  phase=idle ao mesmo tempo e dispararem 2× startScrapingPhase. */
+const scrapeStartInFlight = new Set<string>();
+/** Lock anti-reentrada do tick global. */
+let ticking = false;
+
 /**
  * Memória de progresso por automação (vive no processo Node). Serve pra os
  * heartbeats de disparo/follow-up só gravarem log QUANDO o número muda —
@@ -865,7 +877,17 @@ async function tickOne(a: AutomationRow) {
 
   try {
     if (a.phase === "idle") {
-      await startScrapingPhase(a);
+      // GUARDA: 2 ticks concorrentes (imediato + 60s) podem ler phase=idle
+      // juntos e disparar o scraper 2×. O Set segura o segundo até o
+      // primeiro concluir (aí a phase já virou "scraping" no banco).
+      if (!scrapeStartInFlight.has(a.id)) {
+        scrapeStartInFlight.add(a.id);
+        try {
+          await startScrapingPhase(a);
+        } finally {
+          scrapeStartInFlight.delete(a.id);
+        }
+      }
       return;
     }
 
@@ -968,22 +990,40 @@ async function tickOne(a: AutomationRow) {
  * Tick global. Chamado pelo instrumentation a cada 60s.
  */
 export async function tickAllAutomations(): Promise<number> {
-  const { data } = await supabase
-    .from("automations")
-    .select("*")
-    .eq("status", "running")
-    .neq("phase", "done");
-  if (!data || data.length === 0) return 0;
-  for (const a of data) {
-    await tickOne(a);
+  // Lock anti-reentrada: tick imediato do Iniciar + tick do timer de 60s
+  // não podem rodar sobrepostos — davam 2× startScrapingPhase/heartbeat.
+  if (ticking) return 0;
+  ticking = true;
+  try {
+    const { data } = await supabase
+      .from("automations")
+      .select("*")
+      .eq("status", "running")
+      .neq("phase", "done");
+    if (!data || data.length === 0) return 0;
+    for (const a of data) {
+      await tickOne(a);
+    }
+    return data.length;
+  } finally {
+    ticking = false;
   }
-  return data.length;
 }
 
 /** Liga uma automação. SEMPRE reseta pra idle e re-tick — clicar Iniciar
  *  significa "rode agora", mesmo se o status já estava como running de uma
  *  tentativa anterior travada (que era o motivo de "nada acontecer"). */
 export async function startAutomation(id: string): Promise<{ ok: boolean; error?: string; phase?: string }> {
+  // GUARDA anti-duplo-clique: se um Iniciar desta automação aconteceu há
+  // menos de 8s, ignora. O primeiro click já está processando (reset +
+  // tick + scraper); um segundo click nesse intervalo só criaria corrida
+  // e scraper duplicado. Restart deliberado continua funcionando (>8s).
+  const last = lastStartAt.get(id) || 0;
+  if (Date.now() - last < 8000) {
+    return { ok: false, error: "Automação já foi iniciada há poucos segundos — aguarde ela arrancar antes de clicar de novo." };
+  }
+  lastStartAt.set(id, Date.now());
+
   const { data: a } = await supabase.from("automations").select("*").eq("id", id).maybeSingle();
   if (!a) return { ok: false, error: "Automação não encontrada." };
 
