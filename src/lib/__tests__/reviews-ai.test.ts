@@ -3,14 +3,21 @@ import { formatReviewLine, buildReviewsInput, DEFAULT_REVIEWS_PROMPT } from "@/l
 import { renderTemplate } from "@/lib/template-vars";
 
 describe("reviews-ai", () => {
-  it("formatReviewLine formata com autor, nota, data e texto limpo", () => {
+  it("formatReviewLine formata com nota, data e texto limpo (sem autor — ruído)", () => {
     const line = formatReviewLine({
       autor: "João Silva",
       nota: "5",
       data: "há 2 semanas",
       texto: "Atendimento excelente!\nSuper recomendo.",
     });
-    expect(line).toBe('- (5★ · há 2 semanas) João Silva: "Atendimento excelente! Super recomendo."');
+    expect(line).toBe('- (5★ · há 2 semanas) "Atendimento excelente! Super recomendo."');
+  });
+
+  it("formatReviewLine corta review gigante em ~450 chars sem quebrar palavra", () => {
+    const longo = "Frase inicial completa. ".repeat(100) + "final";
+    const line = formatReviewLine({ nota: "4", texto: longo });
+    expect(line.length).toBeLessThan(520);
+    expect(line.endsWith('…"')).toBe(true);
   });
 
   it("formatReviewLine ignora review sem texto", () => {
@@ -46,6 +53,38 @@ describe("reviews-ai", () => {
     expect(input).toContain("Melhor pizza");
     expect(input).toContain("Demorou 1 hora");
     expect(input).toContain("Ambiente agradável");
+  });
+
+  it("buildReviewsInput com volume grande: 1★ entra mesmo com 300 reviews 5★ na frente", () => {
+    const reviews: any[] = [];
+    for (let i = 0; i < 300; i++) reviews.push({ autor: `A${i}`, nota: "5", data: `há ${i} dias`, texto: `Atendimento maravilhoso número ${i}, recomendo demais, voltarei com certeza.` });
+    for (let i = 0; i < 30; i++) reviews.push({ autor: `R${i}`, nota: "1", data: `há ${i} dias`, texto: `Péssimo atendimento, demorou 2 horas e ninguém respondeu no WhatsApp.` });
+    const input = buildReviewsInput({ nome_negocio: "Grande", reviews_detalhes: reviews });
+    // orçamento respeitado
+    expect(input.length).toBeLessThanOrEqual(16000);
+    // segmento de queixa PRESENTE (antes era cortado pela cauda)
+    expect(input).toContain("Péssimo atendimento");
+    // rodízio: as primeiras linhas já misturam 1★ e 5★
+    const first10 = input.split("\n").filter((l) => l.startsWith("- (")).slice(0, 10);
+    expect(first10.some((l) => l.includes("1★"))).toBe(true);
+    expect(first10.some((l) => l.includes("5★"))).toBe(true);
+    // rodapé de transparência mostra o que não entrou (todas as 1★ couberam; sobrou só cauda 5★)
+    expect(input).toMatch(/não incluídas por limite de tamanho: 5★: \d+/);
+    expect(input).not.toMatch(/1★: \d+ —/);
+  });
+
+  it("buildReviewsInput entra TUDO quando cabe no orçamento (sem perda)", () => {
+    const reviews = [
+      { autor: "A", nota: "5", texto: "bom" },
+      { autor: "B", nota: "4", texto: "ok" },
+      { autor: "C", nota: "2", texto: "ruim" },
+    ];
+    const input = buildReviewsInput({ nome_negocio: "Peq", reviews_detalhes: reviews });
+    expect(input).toContain("(3 capturadas):");
+    expect(input).toContain("bom");
+    expect(input).toContain("ok");
+    expect(input).toContain("ruim");
+    expect(input).not.toContain("não incluídas");
   });
 
   it("DEFAULT_REVIEWS_PROMPT pede elogios, reclamações e gancho", () => {

@@ -18,10 +18,29 @@ import { supabaseAdmin } from "@/lib/supabase_admin";
 
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 dias
 
-/** Limite duro do texto de reviews enviado pra IA (~18k chars). */
-const MAX_REVIEWS_CHARS = 18000;
+/** Limite duro do texto de reviews enviado pra IA (~15k chars ≈ 4-5k tokens). */
+const MAX_REVIEWS_CHARS = 15000;
+/** Cap por avaliação individual — cauda longa de 1 review raramente agrega
+ *  sinal novo e estoura o budget em reviews de 3000+ chars. */
+const PER_REVIEW_CHAR_CAP = 450;
 
-export const DEFAULT_REVIEWS_PROMPT = `Você é um analista de reputação. Vai receber TODAS as avaliações públicas do Google de um negócio.
+/** Comprime o texto de 1 review: normaliza espaços e corta em ~450 chars
+ *  na última frase completa (nunca no meio da palavra). */
+export function compressReviewText(raw: string, cap = PER_REVIEW_CHAR_CAP): string {
+  const t = String(raw || "").replace(/\s+/g, " ").trim();
+  if (t.length <= cap) return t;
+  const cut = t.slice(0, cap);
+  const lastStop = Math.max(cut.lastIndexOf("."), cut.lastIndexOf("!"), cut.lastIndexOf("?"));
+  return (lastStop > cap * 0.6 ? cut.slice(0, lastStop + 1) : cut.trimEnd()) + "…";
+}
+
+/** Faixa de estrelas da review (1-5); 0 = sem nota parseável. */
+function starBucket(r: any): number {
+  const n = parseFloat(String(r?.nota ?? r?.rating ?? "").replace(",", "."));
+  return Number.isFinite(n) && n >= 1 && n <= 5 ? Math.round(n) : 0;
+}
+
+export const DEFAULT_REVIEWS_PROMPT = `Você é um analista de reputação. Vai receber as avaliações públicas do Google de um negócio — quando há muitas, vem uma amostra estratificada por nota (1-3★ priorizadas) MAIS a distribuição completa de todas no cabeçalho; use as duas.
 Produza um resumo objetivo em PT-BR com esta estrutura exata:
 
 ELOGIOS: o que os clientes mais elogiam (2-4 bullets, com os termos reais usados).
@@ -38,15 +57,16 @@ function isMissingTable(err: any): boolean {
   return err?.code === "42P01" || /relation .* does not exist/i.test(err?.message || "") || /schema cache .* table/i.test(err?.message || "");
 }
 
-/** Linha de review — shape gravado pelo scraper-engine ({autor,nota,data,texto,...}). */
+/** Linha de review — shape gravado pelo scraper-engine ({autor,nota,data,texto,...}).
+ *  AUTOR omitido deliberadamente: é ruído p/ análise de reputação (~20% dos
+ *  chars) — o sinal está na nota + data + texto. */
 export function formatReviewLine(r: any): string {
   if (!r || typeof r !== "object") return "";
   const nota = r.nota != null && String(r.nota).trim() ? `${String(r.nota).replace(",", ".")}★` : "";
-  const autor = r.autor || r.author || "anônimo";
   const data = r.data || r.relative_time || "";
-  const texto = String(r.texto || r.text || r.comment || "").replace(/\s+/g, " ").trim();
+  const texto = compressReviewText(r.texto || r.text || r.comment || "");
   if (!texto) return "";
-  return `- (${nota}${data ? ` · ${data}` : ""}) ${autor}: "${texto}"`;
+  return `- (${nota}${data ? ` · ${data}` : ""}) "${texto}"`;
 }
 
 /**
@@ -102,19 +122,53 @@ export function buildReviewsInput(lead: {
     lines.push(`DISTRIBUIÇÃO: ${dist}`);
   }
 
+  // ─── Estratificação por faixa de estrelas ───
+  // Problema antigo: incluía as reviews em ordem de chegada até estourar o
+  // budget → com 200+ reviews, cortava a cauda INTEIRA (e as 1-2★, mais
+  // recentes, sumiam junto). Solução: rodízio entre faixas priorizando
+  // as queixas (1-3★ = dor real = gancho de venda), depois 5★/4★, e a
+  // distribuição completa de TODAS fica no cabeçalho. Nenhum segmento
+  // fica sem representação, e se tudo couber no budget entra tudo.
+  const byBucket = new Map<number, any[]>();
+  for (const r of all) {
+    const b = starBucket(r);
+    const arr = byBucket.get(b);
+    if (arr) arr.push(r);
+    else byBucket.set(b, [r]);
+  }
+  const bucketOrder = [1, 2, 3, 5, 4, 0];
+  const ordered: any[] = [];
+  for (let progress = true; progress; ) {
+    progress = false;
+    for (const b of bucketOrder) {
+      const arr = byBucket.get(b);
+      if (arr && arr.length) { ordered.push(arr.shift()!); progress = true; }
+    }
+  }
+
   lines.push(`AVALIAÇÕES (${all.length} capturadas):`);
+  const totalsByBucket = new Map<number, number>();
+  for (const r of all) totalsByBucket.set(starBucket(r), (totalsByBucket.get(starBucket(r)) || 0) + 1);
+  const printedByBucket = new Map<number, number>();
   let used = 0;
   let printed = 0;
-  for (const r of all) {
+  for (const r of ordered) {
     const line = formatReviewLine(r);
     if (!line) continue;
-    if (used + line.length > MAX_REVIEWS_CHARS) {
-      lines.push(`(… mais ${all.length - printed} avaliações cortadas por limite de tamanho …)`);
-      break;
-    }
+    if (used + line.length > MAX_REVIEWS_CHARS) break;
     lines.push(line);
     used += line.length;
     printed++;
+    const b = starBucket(r);
+    printedByBucket.set(b, (printedByBucket.get(b) || 0) + 1);
+  }
+  if (printed < all.length) {
+    const left = bucketOrder
+      .map((b) => [b, (totalsByBucket.get(b) || 0) - (printedByBucket.get(b) || 0)] as [number, number])
+      .filter(([, c]) => c > 0)
+      .map(([b, c]) => `${b ? `${b}★` : "s/ nota"}: ${c}`)
+      .join(" · ");
+    lines.push(`(— a distribuição completa de TODAS as ${all.length} avaliações está na linha DISTRIBUIÇÃO acima; não incluídas por limite de tamanho: ${left} —)`);
   }
   return lines.join("\n");
 }

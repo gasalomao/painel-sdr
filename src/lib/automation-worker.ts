@@ -236,10 +236,13 @@ async function checkScrapingDone(a: AutomationRow): Promise<ScrapeCheck> {
     return { ...base, done: true, doneReason: "timeout de 15min sem captar nenhum lead" };
   }
 
-  // 120s sem progresso = scraper terminou (ou travou). Note: usamos
+  // X sem progresso = scraper terminou (ou travou). Note: usamos
   // _lastProgressAt salvo separado de updated_at, porque updated_at é bumpado
-  // a cada tick e mascarava esse timer.
-  if (!progressed && Date.now() - lastProgressAtMs > 120_000 && scrapedNow > 0) {
+  // a cada tick e mascarava esse timer. Com captureAllReviews, carregar TODAS
+  // as reviews de 1 negócio leva minutos sem salvar lead novo — o timer de
+  // 120s cortava a captação no meio (leads perdidos). Sobe pra 6min.
+  const idleLimitMs = a.scrape_filters?.captureAllReviews ? 360_000 : 120_000;
+  if (!progressed && Date.now() - lastProgressAtMs > idleLimitMs && scrapedNow > 0) {
     return { ...base, done: true, doneReason: `${idleSeconds}s sem leads novos — scraper concluído` };
   }
   // Se ainda nem captou 1 lead após 5min, também encerra (scraper provavelmente
@@ -342,7 +345,12 @@ async function startDispatchPhase(a: AutomationRow): Promise<void> {
       `🧠 Resumindo avaliações do Google com IA (${reviewsAiCfg.model}) pra ${leads.length} lead(s)...`
     );
     let ok = 0, cached = 0, semReviews = 0, falhas = 0;
-    for (const l of leads) {
+    const motivos = new Map<string, number>();
+    for (let i = 0; i < leads.length; i++) {
+      const l = leads[i];
+      const name = (l.nome_negocio || `lead ${l.id}`).slice(0, 40);
+      const idx = `[${i + 1}/${leads.length}]`;
+      const bump = (msg: string) => motivos.set(msg, (motivos.get(msg) || 0) + 1);
       try {
         const r = await summarizeReviewsForLead({
           leadId: l.id,
@@ -353,17 +361,38 @@ async function startDispatchPhase(a: AutomationRow): Promise<void> {
           automationId: a.id,
         });
         if ("error" in r) {
-          if (/sem avaliações/i.test(r.error)) semReviews++;
-          else { falhas++; console.warn(`[AUTOMATION ${a.id}] reviews-ai lead ${l.id}: ${r.error}`); }
-        } else if (r.cached) cached++;
-        else ok++;
+          if (/sem avalia/i.test(r.error)) {
+            semReviews++;
+            await log(a.id, "scrape", "info", `   ${idx} ⏭️ ${name} — ${r.error}`);
+          } else {
+            falhas++;
+            bump(r.error);
+            await log(a.id, "scrape", "warning", `   ${idx} ❌ ${name} — ${r.error}`);
+          }
+        } else if (r.cached) {
+          cached++;
+          await log(a.id, "scrape", "info", `   ${idx} 💾 ${name} — resumo em cache`);
+        } else {
+          ok++;
+          await log(a.id, "scrape", "success", `   ${idx} ✅ ${name} — resumo gerado`);
+        }
       } catch (e: any) {
         falhas++;
-        console.warn(`[AUTOMATION ${a.id}] reviews-ai lead ${l.id} falhou: ${e?.message || e}`);
+        const msg = String(e?.message || e).slice(0, 160);
+        bump(msg);
+        await log(a.id, "scrape", "warning", `   ${idx} ❌ ${name} — ${msg}`);
       }
     }
+    // Breakdown por motivo — sem isso, "N falha(s)" era mudo e ninguém sabia
+    // POR QUE a IA não gerava (rate limit? chave morta? resposta vazia?).
+    const motivoStr = Array.from(motivos.entries())
+      .sort((x, y) => y[1] - x[1])
+      .slice(0, 5)
+      .map(([m, c]) => `${m} ×${c}`)
+      .join(" | ");
     await log(a.id, "scrape", falhas ? "warning" : "success",
-      `🧠 Resumo de avaliações: ${ok} gerado(s) · ${cached} em cache · ${semReviews} sem reviews · ${falhas} falha(s).`
+      `🧠 Resumo de avaliações: ${ok} gerado(s) · ${cached} em cache · ${semReviews} sem reviews · ${falhas} falha(s).` +
+      (motivoStr ? ` Motivos: ${motivoStr}` : "")
     );
   }
 

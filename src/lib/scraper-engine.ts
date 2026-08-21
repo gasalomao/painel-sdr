@@ -237,6 +237,33 @@ function formatJid(phone: string): string {
   return `${clean}@s.whatsapp.net`;
 }
 
+/**
+ * Filtros de lead (sem telefone / duplicado / fixo / com site) num ponto
+ * único. Chamado ANTES da captura profunda de reviews (economiza o scroll
+ * caro em leads que vão ser descartados) e de novo no fim (defesa).
+ */
+export function evaluateLeadFilters(
+  cleanPhone: string,
+  websiteStr: string,
+  settings: ScraperSettings,
+  existingLeads: Lead[],
+): { pass: boolean; reason: string } {
+  if (settings.filterEmpty && cleanPhone === "") return { pass: false, reason: "Sem telefone" };
+  if (settings.filterDuplicates && cleanPhone !== "" && existingLeads.find((l) => l.phones.replace(/\D/g, "") === cleanPhone)) {
+    return { pass: false, reason: "Telefone duplicado" };
+  }
+  if (settings.filterLandlines && cleanPhone !== "" && isLandline(cleanPhone)) return { pass: false, reason: "Telefone fixo" };
+  if (settings.filterWithWebsite && websiteStr) return { pass: false, reason: "Com site" };
+  return { pass: true, reason: "" };
+}
+
+/** Chave estável de URL de place do Maps (sem o segmento de viewport /@lat,lng
+ *  que varia entre buscas) — usada pra não reprocessar o mesmo negócio que
+ *  aparece em duas buscas da mesma automação. */
+export function placeUrlKey(url: string): string {
+  return url.replace(/\/@[^/]+/, "").replace(/[?&]hl=[^&]*/g, "").replace(/\/+$/, "");
+}
+
 export function formatLeadForN8n(lead: Lead) {
   // Caminho CHAVE-VALOR p/ integrações n8n/Zapier/Make (chaves snake_case,
   // fácil de mapear). Inclui TODOS os campos capturados do Maps — não perde
@@ -551,6 +578,9 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
         queue.push(`${niche.trim()} ${region.trim()}`);
       }
     }
+    // Negócio já processado em OUTRA busca da mesma execução (mesmo place,
+    // URL normalizada sem viewport) → não abre detalhe nem reviews de novo.
+    const processedPlaceKeys = new Set<string>();
     sendLog(`📋 Fila: ${queue.length} buscas${settings.maxLeads ? ` · limite ${settings.maxLeads} leads` : ""}`, "info");
 
     const maxLeads = Number(settings.maxLeads) || 0; // 0 = sem limite
@@ -659,6 +689,10 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
           if (extractedPlaces.has(lead.name)) continue;
           extractedPlaces.add(lead.name);
 
+          const placeKey = placeUrlKey(lead.url);
+          if (placeKey && processedPlaceKeys.has(placeKey)) continue;
+          if (placeKey) processedPlaceKeys.add(placeKey);
+
           const cardData = await page.evaluate((leadName: string) => {
             const items = Array.from(document.querySelectorAll(".Nv2PK"));
             const item = items.find((el) => el.querySelector(".qBF1Pd")?.textContent?.trim() === leadName);
@@ -717,19 +751,35 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
               if (rcMatch) reviews = rcMatch[1];
             }
 
+            // Site do card (botão "Site" do resultado) — permite descartar
+            // "Com site" SEM abrir o painel de detalhes (economia grande).
+            const websiteEl = item.querySelector('a[data-value="Website"], a[data-item-id="authority"]') as HTMLAnchorElement | null;
+
             return {
               name: leadName,
               fullAddress: address,
               categories: category || "Comércio",
               averageRating: rating,
               reviewCount: reviews,
+              website: websiteEl?.href || "",
             };
           }, lead.name);
 
           if (!cardData) continue;
 
+          // Descarte ULTRAPRECOCE: site já visível no card → nem abre o
+          // painel de detalhes (pula navegação + reviews + filtros).
+          if (settings.filterWithWebsite && cardData.website) {
+            sendLog(`🚫 Descartado (Com site): ${lead.name}`, "warning");
+            continue;
+          }
+
           let phoneStr = "";
           let websiteStr = "";
+          // Motivo do descarte antecipado (pós-FASE 1): quando setado, pula a
+          // FASE 2 (reviews profundas) — o scroll caro não roda pra lead que
+          // vai ser descartado. Vazio = passou nos filtros.
+          let discardedByFilters = "";
           let instagramStr = "";
           let facebookStr = "";
           let reviewsDetalhes: any[] = [];
@@ -1323,27 +1373,61 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
               }
 
               // ============================================================
+              // FILTROS ANTECIPADOS — logo após a FASE 1 (telefone + site já
+              // conhecidos). Descarta ANTES da captura profunda de reviews:
+              // não gastamos 10-30s de scroll em lead que será descartado.
+              // ============================================================
+              const earlyCheck = evaluateLeadFilters(phoneStr.replace(/\D/g, ""), websiteStr, settings, leadsStore);
+              if (!earlyCheck.pass) {
+                discardedByFilters = earlyCheck.reason;
+                sendLog(`🚫 Descartado (${earlyCheck.reason}): ${lead.name}`, "warning");
+              }
+
+              // ============================================================
               // FASE 2 — Capturar reviews profundas.
               // ============================================================
               const reviewLimit = settings.captureAllReviews ? Number.MAX_SAFE_INTEGER : 50;
-              if (settings.captureAllReviews || reviewsDetalhes.length < reviewLimit) {
+              if (!discardedByFilters && (settings.captureAllReviews || reviewsDetalhes.length < reviewLimit)) {
                 try {
-                  if (settings.captureAllReviews) sendLog(`📝 Carregando todas as avaliações disponíveis: ${cardData.name}`, "info");
-                  const reviewsOpened = await detailsPage.evaluate(() => {
-                    const candidates = Array.from(document.querySelectorAll('button, [role="button"], a')) as HTMLElement[];
-                    const trigger = candidates.find((element) => {
-                      const text = `${element.getAttribute("aria-label") || ""} ${element.innerText || ""}`;
-                      return /(?:avaliações|avaliacoes|reviews?)/i.test(text);
-                    });
-                    if (!trigger) return false;
-                    trigger.click();
-                    return true;
-                  });
-                  if (!reviewsOpened) {
-                    const reviewsUrl = lead.url.endsWith("/reviews") ? lead.url : lead.url.replace(/\/?$/, "/reviews");
-                    await detailsPage.goto(reviewsUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+                  // ---- Abrir a lista de reviews (UI nova 2025+ do Maps) ----
+                  // A UI nova NÃO tem [role="feed"] na aba Avaliações: as
+                  // reviews ficam num div.m6QErb rolável. Além disso, lead.url
+                  // (URL de card, com /data=!...) + "/reviews" gera URL
+                  // inválida → Google cai no Overview sem reviews → captura
+                  // congela nas 2-3 de preview (bug "3 de ~492").
+                  // Clicar a ABA primeiro SEMPRE: o wait inicial resolvia no
+                  // preview do Overview (2-3 .jftiEf soltos) e o loop nunca
+                  // via a lista completa. Clique em aba já ativa é no-op.
+                  if (settings.captureAllReviews) {
+                    sendLog(`📝 Carregando todas as avaliações disponíveis: ${cardData.name}`, "info");
                   }
-                  await detailsPage.waitForSelector('.jftiEf, div[data-review-id], div[role="article"]', { timeout: 8000 }).catch(() => {});
+                  const reviewWaitSel = '.jftiEf, div[data-review-id], div[role="feed"]';
+                  await detailsPage.evaluate(() => {
+                    const tab = Array.from(document.querySelectorAll('[role="tab"], button[aria-label*="valia" i]'))
+                      .find((el) => /avalia/i.test(`${(el as HTMLElement).innerText || ""} ${(el as HTMLElement).getAttribute("aria-label") || ""}`));
+                    (tab as HTMLElement | undefined)?.click();
+                  });
+                  let reviewsVisible = await detailsPage.waitForSelector(reviewWaitSel, { timeout: 6000 }).catch(() => null);
+                  if (!reviewsVisible) {
+                    await detailsPage.evaluate(() => {
+                      const cands = Array.from(document.querySelectorAll('button, [role="button"], a')) as HTMLElement[];
+                      const trigger = cands.find((e) => /^[\d.,]+[kK]?\s*(?:avalia|review)/i.test((e.innerText || "").trim()) || /(?:avaliações|avaliacoes|reviews?)\s*$/i.test((e.getAttribute("aria-label") || "").trim()));
+                      trigger?.click();
+                    });
+                    reviewsVisible = await detailsPage.waitForSelector(reviewWaitSel, { timeout: 5000 }).catch(() => null);
+                  }
+                  if (!reviewsVisible) {
+                    // Último recurso: URL /reviews — precisa de URL limpa
+                    // (sem /@lat,lng nem /data=!..., que o Google ignora).
+                    const base = lead.url.split("?")[0].replace(/\/$/, "");
+                    const cutIdx = [base.indexOf("/@"), base.indexOf("/data=")].filter((i) => i > 0).sort((a, b) => a - b)[0];
+                    const cleanBase = cutIdx ? base.slice(0, cutIdx) : base;
+                    const reviewsUrl = cleanBase.endsWith("/reviews") ? cleanBase : `${cleanBase}/reviews`;
+                    if (reviewsUrl !== base || !cutIdx) {
+                      await detailsPage.goto(reviewsUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+                      await detailsPage.waitForSelector(reviewWaitSel, { timeout: 8000 }).catch(() => {});
+                    }
+                  }
                   await sleep(1200);
                   await detailsPage.evaluate(() => { delete (window as any).__painelSdrReviews; });
 
@@ -1366,6 +1450,10 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                   let semNovidade = 0;
                   let cachedCountAnterior = 0;
                   const MAX_ROLAGENS = settings.captureAllReviews ? 1000 : 25;
+                  // "Capturar todas" = paciência maior: o Maps carrega reviews
+                  // em lazy chunks; 3 rodadas sem novidade (~3,5s) cortava
+                  // listas longas no meio. 6 rodadas (~7s) cobre chunks lentos.
+                  const PACIENCIA = settings.captureAllReviews ? 6 : 3;
                   for (let i = 0; i < MAX_ROLAGENS; i++) {
                     await detailsPage.evaluate(() => {
                       const reviewSelector = '.jftiEf, div[role="article"][aria-label], div[data-review-id], div[jslog*="review"]';
@@ -1411,7 +1499,18 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                         };
                       }
                       const firstReview = document.querySelector(reviewSelector) as HTMLElement | null;
-                      const scroller = firstReview?.closest('[role="feed"], .m6QErb, [role="main"]') as HTMLElement | null;
+                      // Encontra o ancestral QUE ROLA DE VERDADE — confiar em
+                      // seletor fixo ([role="feed"]/.m6QErb) falha quando o
+                      // overflow está num pai: scrollBy não move nada, o feed
+                      // não lazy-loada e a captura congela nas iniciais.
+                      const scroller = (() => {
+                        let el: HTMLElement | null = firstReview?.closest('[role="feed"]') || firstReview;
+                        while (el && el !== document.body) {
+                          if (el.scrollHeight > el.clientHeight + 50) return el;
+                          el = el.parentElement;
+                        }
+                        return (document.scrollingElement as HTMLElement) || document.body;
+                      })();
                       const before = scroller?.scrollTop || 0;
                       if (scroller) scroller.scrollBy(0, Math.max(1200, scroller.clientHeight * 0.85));
                       return { before, cachedCount: Object.keys(cached).length };
@@ -1419,12 +1518,19 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                     await sleep(900);
                     const progresso = await detailsPage.evaluate((before: number) => {
                       const firstReview = document.querySelector('.jftiEf, div[role="article"][aria-label], div[data-review-id], div[jslog*="review"]') as HTMLElement | null;
-                      const scroller = firstReview?.closest('[role="feed"], .m6QErb, [role="main"]') as HTMLElement | null;
+                      const scroller = (() => {
+                        let el: HTMLElement | null = firstReview?.closest('[role="feed"]') || firstReview;
+                        while (el && el !== document.body) {
+                          if (el.scrollHeight > el.clientHeight + 50) return el;
+                          el = el.parentElement;
+                        }
+                        return (document.scrollingElement as HTMLElement) || document.body;
+                      })();
                       return { moved: !!scroller && scroller.scrollTop > before, cachedCount: Object.keys((window as any).__painelSdrReviews || {}).length };
                     }, novos.before);
                     if (progresso.cachedCount === cachedCountAnterior) {
                       semNovidade++;
-                      if (semNovidade >= 3) break;
+                      if (semNovidade >= PACIENCIA) break;
                     } else {
                       semNovidade = 0;
                     }
@@ -1487,7 +1593,20 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                       merged.set(sig, rv);
                     }
                     reviewsDetalhes = Array.from(merged.values()).slice(0, reviewLimit);
-                    if (settings.captureAllReviews) sendLog(`📝 ${reviewsDetalhes.length} avaliações capturadas: ${cardData.name}`, "success");
+                    if (settings.captureAllReviews) {
+                      // Cobertura: parseia o total declarado pelo Google
+                      // ("1.234", "2,5k") e mostra capturadas vs esperadas —
+                      // se ficar muito abaixo, dá pra ver NO LOG que a
+                      // rolagem parou cedo.
+                      const rawCount = String(cardData.reviewCount || "");
+                      let expected = parseInt(rawCount.replace(/\D/g, ""), 10) || 0;
+                      const kMatch = rawCount.match(/([\d.,]+)\s*[kK]/);
+                      if (!expected && kMatch) expected = Math.round(parseFloat(kMatch[1].replace(",", ".")) * 1000);
+                      sendLog(
+                        `📝 ${reviewsDetalhes.length} avaliações capturadas${expected > 0 ? ` (de ~${expected} no Google)` : ""}: ${cardData.name}`,
+                        "success",
+                      );
+                    }
                   }
                 } catch {
                   // se falhar navegação pra /reviews, mantém as reviews já
@@ -1502,16 +1621,14 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
           }
 
           const cleanPhone = phoneStr.replace(/\D/g, "");
-          let pass = true;
-          let reason = "";
-          if (settings.filterEmpty && cleanPhone === "") { pass = false; reason = "Sem telefone"; }
-          if (pass && settings.filterDuplicates && cleanPhone !== "") {
-            if (leadsStore.find((l) => l.phones.replace(/\D/g, "") === cleanPhone)) { pass = false; reason = "Telefone duplicado"; }
-          }
-          if (pass && settings.filterLandlines && cleanPhone !== "" && isLandline(cleanPhone)) { pass = false; reason = "Telefone fixo"; }
-          if (pass && settings.filterWithWebsite && websiteStr) { pass = false; reason = "Com site"; }
+          // Mesma avaliação do ponto antecipado (defesa: cobre o caso em que
+          // a página de detalhe nem abriu). Se já foi descartado antes, o log
+          // já saiu — não repete.
+          const finalCheck = discardedByFilters
+            ? { pass: false, reason: discardedByFilters }
+            : evaluateLeadFilters(cleanPhone, websiteStr, settings, leadsStore);
 
-          if (pass) {
+          if (finalCheck.pass) {
             const jid = formatJid(phoneStr);
             // Filtro CRM: se o JID já está no leads_extraidos OU contacts, pula
             // SEM contar pro maxLeads, sem broadcast, sem salvar duplicata.
@@ -1549,7 +1666,9 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 name: cardData.name,
                 fullAddress: cardData.fullAddress,
                 categories: cardData.categories,
-                phones: phoneStr,
+                // tira rótulo "Telefone:"/"Phone:" que o aria-label carrega —
+                // coluna telefone salva só o número pro CRM
+                phones: phoneStr.replace(/^\s*(?:Telefone|Phone|Tel\.?)\s*:?\s*/i, ""),
                 averageRating: cardData.averageRating,
                 reviewCount: cardData.reviewCount,
                 website: websiteStr,
@@ -1616,8 +1735,8 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 break outer;
               }
             }
-          } else {
-            sendLog(`🚫 Descartado (${reason}): ${lead.name}`, "warning");
+          } else if (!discardedByFilters) {
+            sendLog(`🚫 Descartado (${finalCheck.reason}): ${lead.name}`, "warning");
           }
         }
 
