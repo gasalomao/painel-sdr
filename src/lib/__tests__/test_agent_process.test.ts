@@ -14,7 +14,10 @@ const supabase = createClient(supabaseUrl, supabaseServiceKey!);
 import { POST } from '../../app/api/agent/process/route';
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from '../internal-auth';
 
-test("simulate agent processing", async () => {
+// ponytail: teste de INTEGRAÇÃO AO VIVO (Supabase prod + IA + envio real de
+// WhatsApp). Roda só com RUN_LIVE_TESTS=1 — padrão do repo pra testes reais.
+const isLive = process.env.RUN_LIVE_TESTS === "1";
+(isLive ? test : test.skip)("simulate agent processing", async () => {
   const instanceName = '00000_sao_paulo';
   const remoteJid = '5511997765220@s.whatsapp.net';
   const text = 'Boa tarde, tudo bem?';

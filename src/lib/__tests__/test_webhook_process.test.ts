@@ -10,7 +10,10 @@ import { getEffectiveStatus } from '../bot-status';
 import { extractText, extractMessageType, extractMimetype, extractFileName, extractFileSize, extractQuoted } from '../../app/api/webhooks/whatsapp/route';
 
 // We import the parts and run the exact webhook logic to see where it failed.
-test("simulate webhook for Marcio Medeiros Advocacia", async () => {
+// ponytail: teste de INTEGRAÇÃO AO VIVO — ESCREVE no Supabase prod (inserts +
+// delete). Roda só com RUN_LIVE_TESTS=1 — padrão do repo pra testes reais.
+const isLive = process.env.RUN_LIVE_TESTS === "1";
+(isLive ? test : test.skip)("simulate webhook for Marcio Medeiros Advocacia", async () => {
   const body = {
     "data": {
       "key": {

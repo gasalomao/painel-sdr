@@ -48,8 +48,10 @@ async function findOrCreateSession(contactId: string, instanceName: string, remo
   return newSession;
 }
 
-// ponytail: 30s timeout — 3 chamadas Supabase remotas em série excedem 5s default.
-test("findOrCreateSession test", async () => {
+// ponytail: teste de INTEGRAÇÃO AO VIVO (Supabase prod). Roda só com
+// RUN_LIVE_TESTS=1 — padrão do repo pra testes reais.
+const isLive = process.env.RUN_LIVE_TESTS === "1";
+(isLive ? test : test.skip)("findOrCreateSession test", async () => {
   const contactId = '91e8565d-479d-4fbb-acac-ae6817f252c2';
   const instanceName = '00000_sao_paulo';
   const remoteJid = '5511997765220@s.whatsapp.net';

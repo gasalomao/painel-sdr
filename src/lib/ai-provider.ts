@@ -415,27 +415,34 @@ async function openRouterChatWithFailover(
   }
 
   const candidates = rawList.map((key) => {
-    // ID determinístico pro cooldown baseado no hash/prefixo da chave (ex: or_sk-or-v1-abc...)
-    const id = `or_${key.slice(0, 16)}`;
+    // ID determinístico pro cooldown. NÃO usa prefixo da chave (vazaria
+    // material da key nos logs) — só chars fixos + sufixo curto p/ leitura.
+    const id = `or_sk-or-v1…${key.slice(-4)}`;
     return { key, id };
   });
 
   let lastErr: unknown = null;
+  // Cooldown com escopo CHAVE+MODELO: limites free/429 da OpenRouter são
+  // POR MODELO. Sem o modelo no ID, um único :free estourado colocava a
+  // chave inteira em cooldown e derrubava TODOS os outros modelos.
+  const model = String(body?.model || "");
   for (const c of candidates) {
-    if (isEndpointUnavailable(c.id)) continue;
+    const coolId = model ? `${c.id}::${model}` : c.id;
+    if (isEndpointUnavailable(coolId)) continue;
     try {
-      return await openRouterChat(c.key, body, c.id);
+      return await openRouterChat(c.key, body, coolId);
     } catch (err) {
       lastErr = err;
       if (err instanceof ProviderHttpError) {
         if (err.status === 401 || err.status === 403) {
+          // Credencial inválida vale pro modelo TODOS — marca a chave crua.
           markEndpointDead(c.id);
           console.warn(`[ai-provider:openrouter] Chave ${c.id} marcada MORTA (HTTP ${err.status}). Rotacionando para próxima chave OpenRouter.`);
           continue;
         }
         if (err.status === 429 || err.status === 402 || isFailoverableStatus(err.status, err.message)) {
-          markEndpointCooldown(c.id);
-          console.warn(`[ai-provider:openrouter] Chave ${c.id} em cooldown (HTTP ${err.status}). Rotacionando para próxima chave OpenRouter.`);
+          markEndpointCooldown(coolId);
+          console.warn(`[ai-provider:openrouter] ${coolId} em cooldown (HTTP ${err.status}). Rotacionando para próxima chave/modelo.`);
           continue;
         }
         throw err;

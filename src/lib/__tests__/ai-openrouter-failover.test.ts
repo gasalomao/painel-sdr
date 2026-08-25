@@ -85,7 +85,8 @@ describe("OpenRouter Multi-Key Failover (9Router-style)", () => {
     expect(st.openrouterCalls).toHaveLength(2);
     expect(st.openrouterCalls[0].key).toBe("sk-or-v1-key1");
     expect(st.openrouterCalls[1].key).toBe("sk-or-v1-key2");
-    expect(isEndpointCooling("or_sk-or-v1-key1")).toBe(true);
+    // Cooldown tem escopo CHAVE+MODELO — quota 429 da OpenRouter é por modelo.
+    expect(isEndpointCooling("or_sk-or-v1…key1::anthropic/claude-3.5-haiku")).toBe(true);
   });
 
   it("marca chave como DEAD em 401/403 e avança para a próxima", async () => {
@@ -103,7 +104,34 @@ describe("OpenRouter Multi-Key Failover (9Router-style)", () => {
     });
 
     expect(res.text).toBe("KEY2_AFTER_401");
-    expect(isEndpointDead("or_sk-or-v1-key1")).toBe(true);
+    // 401/403 é problema de CREDENCIAL — vale pro modelo todos, marca a chave.
+    expect(isEndpointDead("or_sk-or-v1…key1")).toBe(true);
+  });
+
+  it("429 num modelo free NÃO derruba os outros modelos da mesma chave", async () => {
+    st.openrouterHandler = (_key, model) =>
+      model.includes("gemma")
+        ? { status: 429, content: "", msg: "Rate limit exceeded" }
+        : { status: 200, content: "OTHER_MODEL_OK", msg: "" };
+
+    // Modelo A estoura quota nas duas chaves...
+    await generateText({
+      modelRef: "openrouter:google/gemma-x:free",
+      prompt: "Tenta gemma",
+      openrouterKeys: ["sk-or-v1-key1", "sk-or-v1-key2"],
+    }).catch(() => {});
+    expect(st.openrouterCalls).toHaveLength(2);
+
+    st.openrouterCalls = [];
+    // ...mas modelo B na MESMA chave responde na hora (sem cooldown cruzado).
+    const res = await generateText({
+      modelRef: "openrouter:nvidia/nemotron:free",
+      prompt: "Outro modelo",
+      openrouterKeys: ["sk-or-v1-key1", "sk-or-v1-key2"],
+    });
+    expect(res.text).toBe("OTHER_MODEL_OK");
+    expect(st.openrouterCalls).toHaveLength(1);
+    expect(st.openrouterCalls[0].key).toBe("sk-or-v1-key1");
   });
 
   it("não rotaciona em erro 400 (Bad Request - prompt inválido)", async () => {

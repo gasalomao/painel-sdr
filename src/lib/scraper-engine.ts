@@ -1384,6 +1384,21 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
               }
 
               // ============================================================
+              // DUPLICATA DE CRM ANTECIPADA — logo após a FASE 1 (telefone
+              // já conhecido). Se o JID já está no CRM, descarta NA HORA e
+              // pula a FASE 2 (reviews profundas = 10-30s de scroll caro).
+              // ============================================================
+              if (!discardedByFilters) {
+                const earlyJid = formatJid(phoneStr);
+                const earlyDup = earlyJid ? await checkCrmDuplicate(earlyJid, currentClientId) : null;
+                if (earlyDup) {
+                  crmSkipped++;
+                  sendLog(`⏭️ Já no CRM (${earlyDup}): ${lead.name}`, "info");
+                  discardedByFilters = `Já no CRM (${earlyDup})`;
+                }
+              }
+
+              // ============================================================
               // FASE 2 — Capturar reviews profundas.
               // ============================================================
               const reviewLimit = settings.captureAllReviews ? Number.MAX_SAFE_INTEGER : 50;
@@ -1454,6 +1469,11 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                   // em lazy chunks; 3 rodadas sem novidade (~3,5s) cortava
                   // listas longas no meio. 6 rodadas (~7s) cobre chunks lentos.
                   const PACIENCIA = settings.captureAllReviews ? 6 : 3;
+                  // Container travado: se scrollTop não move por 2 rodadas,
+                  // ativa rolagens alternativas (janela + wheel no feed) —
+                  // sem isso, negócios grandes paravam nas ~5 iniciais.
+                  let semMovimento = 0;
+                  let scrollAggressivo = false;
                   for (let i = 0; i < MAX_ROLAGENS; i++) {
                     await detailsPage.evaluate(() => {
                       const reviewSelector = '.jftiEf, div[role="article"][aria-label], div[data-review-id], div[jslog*="review"]';
@@ -1463,7 +1483,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                       }
                     });
                     await sleep(250);
-                    const novos = await detailsPage.evaluate(() => {
+                    const novos = await detailsPage.evaluate((aggressive: boolean) => {
                       const reviewSelector = '.jftiEf, div[role="article"][aria-label], div[data-review-id], div[jslog*="review"]';
                       const cacheKey = "__painelSdrReviews";
                       const cached = ((window as any)[cacheKey] ||= {}) as Record<string, any>;
@@ -1513,8 +1533,16 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                       })();
                       const before = scroller?.scrollTop || 0;
                       if (scroller) scroller.scrollBy(0, Math.max(1200, scroller.clientHeight * 0.85));
+                      if (aggressive) {
+                        // Fallbacks: ancestral com overflow não encontrado ou
+                        // trocado pelo Google → rola a janela e simula wheel
+                        // no feed (dispara o lazy-load por outros caminhos).
+                        window.scrollBy(0, 800);
+                        const feedEl = document.querySelector('[role="feed"], div.m6QErb') as HTMLElement | null;
+                        feedEl?.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: 1500 }));
+                      }
                       return { before, cachedCount: Object.keys(cached).length };
-                    });
+                    }, scrollAggressivo);
                     await sleep(900);
                     const progresso = await detailsPage.evaluate((before: number) => {
                       const firstReview = document.querySelector('.jftiEf, div[role="article"][aria-label], div[data-review-id], div[jslog*="review"]') as HTMLElement | null;
@@ -1534,6 +1562,9 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                     } else {
                       semNovidade = 0;
                     }
+                    // Escala a rolagem quando o container está travado.
+                    semMovimento = progresso.moved ? 0 : semMovimento + 1;
+                    scrollAggressivo = semMovimento >= 2;
                     cachedCountAnterior = progresso.cachedCount;
                   }
                   const reviewExtracted = await detailsPage.evaluate((limit: number) => {

@@ -194,8 +194,10 @@ function isWithinAllowedHour(c: CampaignRow): boolean {
 
 export function isWithinHourWindow(startHour: number, endHour: number): boolean {
   const h = nowHourBRT();
-  if (startHour <= endHour) return h >= startHour && h < endHour;
-  return h >= startHour || h < endHour;
+  // Janela INCLUSIVA nas duas pontas: config "8h às 23h" tem que enviar até
+  // 23:59 — antes, h < endHour bloqueava a hora final inteira (23:00-23:59).
+  if (startHour <= endHour) return h >= startHour && h <= endHour;
+  return h >= startHour || h <= endHour;
 }
 
 export function jitterMs(min: number, max: number): number {

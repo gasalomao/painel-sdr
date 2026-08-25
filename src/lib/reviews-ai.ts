@@ -329,14 +329,22 @@ async function processLead(
 
   const system = (opts.customPrompt && opts.customPrompt.trim()) || DEFAULT_REVIEWS_PROMPT;
 
-  const gen = await generateText({
-    modelRef,
-    system,
-    prompt: reviewsInput,
-    maxOutputTokens: 2048,
-    geminiApiKey: keys.gemini,
-    openrouterApiKey: keys.openrouter,
-  });
+  // generateText lança em falha de provider (429/quota/rede). O contrato da
+  // função é devolver { error } — sem este catch a exceção estourava cru no
+  // chamador e derrubava fluxos inteiros (scraper, rotas) por 1 lead falho.
+  let gen;
+  try {
+    gen = await generateText({
+      modelRef,
+      system,
+      prompt: reviewsInput,
+      maxOutputTokens: 2048,
+      geminiApiKey: keys.gemini,
+      openrouterApiKey: keys.openrouter,
+    });
+  } catch (e: any) {
+    return { error: `IA falhou (${modelRef}): ${e?.message || e}` };
+  }
 
   const resumo = (gen.text || "").trim();
   if (!resumo) return { error: "IA retornou resposta vazia" };
