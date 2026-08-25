@@ -109,6 +109,27 @@ export async function POST(req: NextRequest) {
 
     console.log(`[SEND-MESSAGE] Enviando para ${cleanJid} (original: ${remoteJid}) via ${instanceName}`);
 
+    // === IDEMPOTÊNCIA ANTI-DUPLO-ENVIO ===
+    // Duplo Enter/clique (ou reenvio porque a UI demorou) fazia o MESMO
+    // texto sair 2× pro cliente — Evolution confirmava 2 send.message.
+    // Texto idêntico p/ o mesmo JID nos últimos 6s → não reenvia.
+    const trimmedText = String(text || "").trim();
+    if (trimmedText && !media) {
+      const sinceDedup = new Date(Date.now() - 6000).toISOString();
+      const { data: recentDup } = await supabase
+        .from("chats_dashboard")
+        .select("id, message_id")
+        .eq("remote_jid", remoteJid)
+        .eq("sender_type", "human")
+        .eq("content", trimmedText)
+        .gte("created_at", sinceDedup)
+        .limit(1);
+      if (recentDup?.length) {
+        console.log(`[SEND-MESSAGE] Suprimido (texto idêntico há <6s p/ ${cleanJid})`);
+        return NextResponse.json({ success: true, deduped: true, msgId: recentDup[0].message_id, sent: false });
+      }
+    }
+
     // === 1. Enviar via Evolution API DIRETO ===
     // Se falhar, NÃO aborta — salva a mensagem com status 'error' pra não sumir da UI.
     let evoData: any = null;
