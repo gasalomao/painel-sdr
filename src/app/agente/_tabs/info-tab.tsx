@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { Book, Check, Info, Pencil, Plus, Save, Settings, Trash2, Wrench, X, Image as ImageIcon, Upload, Loader2, Sparkles, Bot, MessageSquare, SlidersHorizontal, CalendarDays, FileText } from "lucide-react";
+import { Book, Check, Info, Pencil, Plus, Settings, Trash2, Wrench, X, Image as ImageIcon, Upload, Loader2, Sparkles, Bot, MessageSquare, SlidersHorizontal, CalendarDays, FileText } from "lucide-react";
 import { SaveButton } from "../_components/save-button";
 import { SectionCard } from "../_components/section-card";
 import { EmptyState } from "../_components/empty-state";
@@ -16,7 +16,7 @@ import { Toggle, type ToggleColor } from "../_components/toggle";
 import { WebhookGuide } from "../_components/webhook-guide";
 import type { PreviewLead, PreviewSample } from "../_components/lead-selector";
 import { ModelOptions } from "@/components/ai-module-shared";
-import { supabase } from "@/lib/supabase";
+import type { GroupableModel } from "@/lib/model-grouping";
 import { toast } from "sonner";
 
 // Variáveis que aparecem como chips clicáveis no editor de prompt.
@@ -61,6 +61,54 @@ const NICHE_PRESETS = [
   { id: "educ",      label: "Educação / Curso",  nec_label: "Curso de interesse", hint: "Curso ou área que o cliente quer" },
 ];
 
+// Presets de identidade: um clique preenche Função + Personalidade + Tom.
+// Os campos continuam editáveis — o preset é só ponto de partida.
+const IDENTITY_PRESETS = [
+  {
+    id: "sdr",
+    label: "SDR de Vendas",
+    hint: "Prospecção e agendamento de reuniões",
+    funcao: "Você é um pré-vendedor (SDR) que atende clientes no WhatsApp. Seu objetivo é entender a necessidade do cliente, apresentar a solução da empresa e agendar uma reunião ou uma visita.",
+    personalidade: "Proativo e simpático. Faz perguntas para entender o cliente antes de oferecer.",
+    tom: "Amigável e profissional — informal, mas respeitoso.",
+  },
+  {
+    id: "suporte",
+    label: "Atendimento / Suporte",
+    hint: "Tira dúvidas sobre produtos e serviços",
+    funcao: "Você é um atendente de suporte no WhatsApp. Responde dúvidas sobre produtos, serviços, prazos e políticas da empresa usando a base de conhecimento. Se não souber, coleta as informações e diz que o time vai retornar.",
+    personalidade: "Paciente e claro. Explica sem jargão e confirma se a dúvida foi resolvida.",
+    tom: "Cordial e objetivo.",
+  },
+  {
+    id: "consultivo",
+    label: "Consultivo Especialista",
+    hint: "Aconselha como especialista do nicho",
+    funcao: "Você é um consultor especialista da área. Faz um diagnóstico da situação do cliente com perguntas inteligentes, recomenda a melhor solução e conduz para o agendamento ou orçamento.",
+    personalidade: "Confiante e analítico. Demonstra domínio do assunto sem arrogância.",
+    tom: "Profissional e consultivo.",
+  },
+  {
+    id: "formal",
+    label: "Formal / Empresarial",
+    hint: "Tom sóbrio para marcas sérias",
+    funcao: "Você é o assistente de atendimento da empresa no WhatsApp. Presta informações com precisão, registra pedidos e encaminha ao responsável quando necessário.",
+    personalidade: "Discreta e eficiente. Sem exageros ou emojis.",
+    tom: "Formal e cortês.",
+  },
+];
+
+type CalendarAutoCaptureCfg = {
+  telefone: boolean;
+  empresa: boolean;
+  necessidade: boolean;
+  /** Label customizado pro "necessidade" — adapta o agente ao nicho.
+      Ex: "Serviço desejado" pra salão, "Especialidade" pra médico. */
+  necessidade_label?: string;
+};
+type ReminderItem = { offset_minutes: number; message: string };
+type KnowledgeDoc = { id: string; title: string; content?: string };
+
 export type InfoTabProps = {
   // Identidade
   nomeAgente: string; setNomeAgente: (v: string) => void;
@@ -69,7 +117,7 @@ export type InfoTabProps = {
   tomAgente: string; setTomAgente: (v: string) => void;
   isActiveAgente: boolean; setIsActiveAgente: (v: boolean) => void;
   targetModel: string; setTargetModel: (v: string) => void;
-  modelOptions: any[];
+  modelOptions: GroupableModel[];
   isAdmin?: boolean;  // só admin vê/altera modelo de IA (controle de custo)
   defaultAiModel?: string | null;  // modelo padrão da conta definido pelo admin
   appUrl: string; setAppUrl: (v: string) => void;
@@ -94,21 +142,14 @@ export type InfoTabProps = {
   calendarGenerateMeet: boolean; setCalendarGenerateMeet: (v: boolean) => void;
   calendarSendMeetLink: boolean; setCalendarSendMeetLink: (v: boolean) => void;
   calendarOptionalFields: Record<string, boolean>; setCalendarOptionalFields: (fn: (prev: Record<string, boolean>) => Record<string, boolean>) => void;
-  calendarAutoCapture: {
-    telefone: boolean;
-    empresa: boolean;
-    necessidade: boolean;
-    /** Label customizado pro "necessidade" — adapta o agente ao nicho.
-        Ex: "Serviço desejado" pra salão, "Especialidade" pra médico. */
-    necessidade_label?: string;
-  };
-  setCalendarAutoCapture: (fn: (prev: any) => any) => void;
+  calendarAutoCapture: CalendarAutoCaptureCfg;
+  setCalendarAutoCapture: (fn: (prev: CalendarAutoCaptureCfg) => CalendarAutoCaptureCfg) => void;
   saveCalendarConfig: (silent?: boolean) => Promise<boolean | void>;
 
   // Scheduler (lembretes automáticos + auto-promote kanban)
   isScheduler: boolean; setIsScheduler: (v: boolean) => void;
-  reminders: { offset_minutes: number; message: string }[];
-  setReminders: (fn: any) => void;
+  reminders: ReminderItem[];
+  setReminders: (fn: (prev: ReminderItem[]) => ReminderItem[]) => void;
   autoPromoteAfter: number; setAutoPromoteAfter: (n: number) => void;
   notifyOwner: boolean; setNotifyOwner: (v: boolean) => void;
   ownerPhone: string; setOwnerPhone: (v: string) => void;
@@ -134,7 +175,7 @@ export type InfoTabProps = {
   insertVariable: (key: string) => void;
   insertKbVariable: (title: string) => void;
   savePrompt: (silent?: boolean) => Promise<boolean | void>;
-  knowledge: any[];
+  knowledge: KnowledgeDoc[];
 
   // Prompt preview
   previewSample: PreviewSample; setPreviewSample: (s: PreviewSample) => void;
@@ -153,7 +194,7 @@ export type InfoTabProps = {
   editKId: string | null;
   editKTitle: string; setEditKTitle: (v: string) => void;
   editKContent: string; setEditKContent: (v: string) => void;
-  iniciarEdicaoKnowledge: (k: any) => void;
+  iniciarEdicaoKnowledge: (k: KnowledgeDoc) => void;
   cancelarEdicaoKnowledge: () => void;
   salvarEdicaoKnowledge: () => void;
   deletarKnowledge: (id: string) => void;
@@ -173,8 +214,8 @@ async function uploadImageToStorage(file: File): Promise<string | null> {
       return null;
     }
     return data.url;
-  } catch (err: any) {
-    toast.error("Erro ao fazer upload da foto: " + err.message);
+  } catch (err) {
+    toast.error("Erro ao fazer upload da foto: " + (err as Error).message);
     return null;
   }
 }
@@ -386,20 +427,41 @@ function ProductCatalogBuilder({
   );
 }
 
-function SectionHeader({ icon: Icon, title, helper }: { icon: any; title: string; helper: string }) {
+/**
+ * Bloco "Opções avançadas" — recolhido por padrão. Esconde configurações
+ * técnicas/finas do usuário novo sem removê-las (o estado continua sendo
+ * salvo normalmente pelo "Salvar Tudo").
+ */
+function AdvancedSection({ children, label = "Opções avançadas" }: { children: React.ReactNode; label?: string }) {
+  const [open, setOpen] = useState(false);
   return (
-    <div className="space-y-1">
-      <div className="flex items-center gap-2">
-        <div className="p-2 rounded-lg bg-primary/10 text-primary"><Icon className="w-4 h-4" /></div>
-        <h3 className="text-base font-semibold tracking-tight text-foreground">{title}</h3>
-      </div>
-      <p className="text-xs text-muted-foreground leading-relaxed pl-9">{helper}</p>
+    <div className="rounded-xl border border-white/10 bg-white/[0.02] overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between px-4 py-3 hover:bg-white/[0.03] transition cursor-pointer"
+      >
+        <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground flex items-center gap-2">
+          <Settings className="w-3.5 h-3.5" /> {label}
+        </span>
+        <span className={cn("text-[10px] text-muted-foreground transition-transform inline-block", open && "rotate-90")}>▶</span>
+      </button>
+      {open && <div className="px-4 pb-4 pt-1 space-y-4 border-t border-white/5">{children}</div>}
     </div>
   );
 }
 
 export function InfoTab(p: InfoTabProps) {
   const [uploadingImg, setUploadingImg] = useState(false);
+  // Preset de identidade aplicado por último (só pra destaque visual dos cards)
+  const [activePreset, setActivePreset] = useState<string | null>(null);
+
+  const applyIdentityPreset = (preset: (typeof IDENTITY_PRESETS)[number]) => {
+    p.setFuncaoAgente(preset.funcao);
+    p.setPersonalidadeAgente(preset.personalidade);
+    p.setTomAgente(preset.tom);
+    setActivePreset(preset.id);
+  };
 
   const saveAll = async () => {
     const ok1 = await p.saveIdentity(true);
@@ -440,40 +502,61 @@ export function InfoTab(p: InfoTabProps) {
             <Input value={p.nomeAgente} onChange={(e) => p.setNomeAgente(e.target.value)} className="bg-white/5 border-white/10 h-12 rounded-xl text-sm" />
           </Field>
 
+          {/* Presets de identidade — 1 clique preenche Função/Personalidade/Tom */}
           <div className="space-y-2">
-            <label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Modelo de IA (Gemini ou OpenRouter)</label>
-            {p.isAdmin ? (
-              <>
-                <select
-                  value={p.targetModel}
-                  onChange={(e) => p.setTargetModel(e.target.value)}
-                  className="w-full bg-white/5 border-white/10 text-white h-12 rounded-xl text-sm px-3 focus:outline-none"
+            <label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Comece com um perfil pronto</label>
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+              {IDENTITY_PRESETS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => applyIdentityPreset(preset)}
+                  title={preset.hint}
+                  className={cn(
+                    "text-left rounded-xl border p-3 transition-all cursor-pointer",
+                    activePreset === preset.id
+                      ? "border-primary/50 bg-primary/10"
+                      : "border-white/10 bg-white/[0.02] hover:border-white/25 hover:bg-white/[0.05]"
+                  )}
                 >
-                  {p.targetModel && !p.modelOptions.some((m) => m.id === p.targetModel) && (
-                    <option key={p.targetModel} value={p.targetModel} className="bg-neutral-900">
-                      {p.targetModel} (salvo)
-                    </option>
-                  )}
-                  {p.modelOptions.length === 0 && !p.targetModel && (
-                    <option value="" className="bg-neutral-900 text-muted-foreground">
-                      Configure a API Key em Configurações primeiro…
-                    </option>
-                  )}
-                  <ModelOptions models={p.modelOptions as any} markNoTools />
-                </select>
-                <p className="text-[10px] text-muted-foreground mt-1 px-1">
-                  {p.modelOptions.length > 0
-                    ? <>{p.modelOptions.length} modelos disponíveis · só o admin altera. O agente usa ferramentas (agenda, base de conhecimento) — prefira modelos sem o aviso "sem ferramentas".</>
-                    : <>Lista de modelos vazia. Configure a chave do Gemini ou OpenRouter em <a href="/configuracoes" className="text-primary underline decoration-dotted">Configurações</a>.</>}
-                </p>
-              </>
-            ) : (
-              <div className="w-full bg-white/5 border border-white/10 h-12 rounded-xl text-sm px-3 flex items-center text-muted-foreground">
-                <span className="font-mono text-white/80">{p.targetModel || p.defaultAiModel || "—"}</span>
-                <span className="ml-auto text-[9px] uppercase tracking-widest text-purple-300/70">definido pelo admin</span>
-              </div>
-            )}
+                  <p className={cn("text-xs font-bold", activePreset === preset.id ? "text-primary" : "text-foreground")}>{preset.label}</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5 leading-snug">{preset.hint}</p>
+                </button>
+              ))}
+            </div>
           </div>
+
+          {p.isAdmin ? (
+            <div className="space-y-2">
+              <label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Modelo de IA (Gemini ou OpenRouter)</label>
+              <select
+                value={p.targetModel}
+                onChange={(e) => p.setTargetModel(e.target.value)}
+                className="w-full bg-white/5 border-white/10 text-white h-12 rounded-xl text-sm px-3 focus:outline-none"
+              >
+                {p.targetModel && !p.modelOptions.some((m) => m.id === p.targetModel) && (
+                  <option key={p.targetModel} value={p.targetModel} className="bg-neutral-900">
+                    {p.targetModel} (salvo)
+                  </option>
+                )}
+                {p.modelOptions.length === 0 && !p.targetModel && (
+                  <option value="" className="bg-neutral-900 text-muted-foreground">
+                    Configure a API Key em Configurações primeiro…
+                  </option>
+                )}
+                <ModelOptions models={p.modelOptions} markNoTools />
+              </select>
+              <p className="text-[10px] text-muted-foreground mt-1 px-1">
+                {p.modelOptions.length > 0
+                  ? <>{p.modelOptions.length} modelos disponíveis · só o admin altera. O agente usa ferramentas (agenda, base de conhecimento) — prefira modelos sem o aviso &quot;sem ferramentas&quot;.</>
+                  : <>Lista de modelos vazia. Configure a chave do Gemini ou OpenRouter em <a href="/configuracoes" className="text-primary underline decoration-dotted">Configurações</a>.</>}
+              </p>
+            </div>
+          ) : (
+            <p className="text-[10px] text-muted-foreground px-1">
+              Modelo de IA: <span className="font-mono text-foreground/70">{p.targetModel || p.defaultAiModel || "padrão"}</span> · definido pelo admin
+            </p>
+          )}
 
           <Field label="Função Principal" copy={p.funcaoAgente}>
             <Textarea value={p.funcaoAgente} onChange={(e) => p.setFuncaoAgente(e.target.value)} className="bg-white/5 border-white/10 h-[100px] resize-none rounded-xl text-sm" />
@@ -501,18 +584,6 @@ export function InfoTab(p: InfoTabProps) {
       >
 
         <div className="space-y-3">
-          <Field label="Endereço do App (App URL)" copy={p.appUrl} copyLabel="URL">
-            <Input value={p.appUrl} onChange={(e) => p.setAppUrl(e.target.value)} placeholder="https://..." className="bg-white/5 border-white/10 h-10 rounded-xl text-xs" />
-          </Field>
-
-          <div className="flex items-start gap-2 p-2.5 rounded-lg bg-primary/5 border border-primary/20">
-            <Info className="w-3.5 h-3.5 text-primary shrink-0 mt-0.5" />
-            <p className="text-[10px] text-primary/90 leading-relaxed">
-              A <strong>API Key do Gemini</strong> agora é única para todo o sistema. Configure em{" "}
-              <a href="/configuracoes" className="underline decoration-dotted font-semibold hover:text-primary">Configurações</a>.
-            </p>
-          </div>
-
           <div className="space-y-2">
             <div className="flex items-center justify-between gap-2">
               <label className="text-[11px] font-semibold uppercase tracking-wider text-primary">Instância WhatsApp Vinculada</label>
@@ -551,30 +622,44 @@ export function InfoTab(p: InfoTabProps) {
               Cada agente usa <strong>uma</strong> instância. Trocar aqui transfere o vínculo.
             </p>
           </div>
-        </div>
 
-        {/* Webhook */}
-        <div className="border-t border-white/10 pt-6 space-y-3">
-          <div className="space-y-1">
-            <label className="text-[11px] font-semibold uppercase tracking-wider text-[#00ffcc]">Webhook do Agente (cole na Evolution API v2)</label>
-            <p className="text-[11px] text-muted-foreground">Endereço que a Evolution API chama para enviar e receber mensagens deste agente.</p>
-          </div>
-          <div className="flex gap-2">
-            <Button
-              onClick={p.onSyncWebhook}
-              className="h-9 px-3 bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 text-[10px] font-semibold uppercase tracking-wider"
-            >
-              Sincronizar Agora
-            </Button>
-            <CopyButton text={p.webhookUrl} label="Copiar" />
-          </div>
-          <Input readOnly value={p.webhookUrl} className="bg-black/40 border-white/10 text-xs font-mono h-12 pr-12 w-full" />
+          <AdvancedSection label="Avançado · URL do app, webhook e Evolution API">
+            <Field label="Endereço do App (App URL)" copy={p.appUrl} copyLabel="URL">
+              <Input value={p.appUrl} onChange={(e) => p.setAppUrl(e.target.value)} placeholder="https://..." className="bg-white/5 border-white/10 h-10 rounded-xl text-xs" />
+            </Field>
 
-          <WebhookGuide webhookUrl={p.webhookUrl} />
+            <div className="flex items-start gap-2 p-2.5 rounded-lg bg-primary/5 border border-primary/20">
+              <Info className="w-3.5 h-3.5 text-primary shrink-0 mt-0.5" />
+              <p className="text-[10px] text-primary/90 leading-relaxed">
+                A <strong>API Key do Gemini</strong> agora é única para todo o sistema. Configure em{" "}
+                <a href="/configuracoes" className="underline decoration-dotted font-semibold hover:text-primary">Configurações</a>.
+              </p>
+            </div>
+
+          {/* Webhook */}
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <label className="text-[11px] font-semibold uppercase tracking-wider text-[#00ffcc]">Webhook do Agente (cole na Evolution API v2)</label>
+              <p className="text-[11px] text-muted-foreground">Endereço que a Evolution API chama para enviar e receber mensagens deste agente.</p>
+            </div>
+            <div className="flex gap-2">
+              <Button
+                onClick={p.onSyncWebhook}
+                className="h-9 px-3 bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 text-[10px] font-semibold uppercase tracking-wider"
+              >
+                Sincronizar Agora
+              </Button>
+              <CopyButton text={p.webhookUrl} label="Copiar" />
+            </div>
+            <Input readOnly value={p.webhookUrl} className="bg-black/40 border-white/10 text-xs font-mono h-12 pr-12 w-full" />
+
+            <WebhookGuide webhookUrl={p.webhookUrl} />
+          </div>
+          </AdvancedSection>
         </div>
       </SectionCard>
 
-      {/* ========= PASSO 3: COMO A IA CONVERSA ========= */}
+      {/* ========= PASSO 3: COMO A IA CONVERSA (avançado) ========= */}
       <SectionCard
         step={3}
         icon={SlidersHorizontal}
@@ -582,7 +667,7 @@ export function InfoTab(p: InfoTabProps) {
         description="Controle o estilo e o ritmo das respostas da sua IA."
         accent="cyan"
       >
-
+        <AdvancedSection label="Abrir ajustes de conversa (buffer, humanizar, raciocínio…)">
         <div className="space-y-3">
           {/* Buffer de mensagens */}
           <div className="space-y-2">
@@ -652,6 +737,7 @@ export function InfoTab(p: InfoTabProps) {
             hint={<>Antes de cada interação, a IA gera um <strong>briefing do cliente</strong> (dores, abordagem, decisor, alertas) e usa no contexto. Custa tokens extra — ative só nos agentes que precisam de análise profunda.</>}
           />
         </div>
+        </AdvancedSection>
       </SectionCard>
 
       {/* ========= PASSO 4: AGENDA E REUNIÕES ========= */}
@@ -725,6 +811,7 @@ export function InfoTab(p: InfoTabProps) {
               <p className="text-[10px] text-muted-foreground">A IA usa esse valor por padrão. O cliente pode pedir outra duração na conversa.</p>
             </div>
 
+            <AdvancedSection label="Avançado · Google Meet, perguntas e captura automática">
             {/* Gerar Meet */}
             <div className="flex items-center justify-between gap-3 p-2 bg-black/30 rounded-lg border border-white/5">
               <div>
@@ -802,7 +889,7 @@ export function InfoTab(p: InfoTabProps) {
                       </div>
                       <Toggle
                         checked={on}
-                        onCheckedChange={(next) => p.setCalendarAutoCapture((prev: any) => ({ ...prev, [item.key]: next }))}
+                        onCheckedChange={(next) => p.setCalendarAutoCapture((prev) => ({ ...prev, [item.key]: next }))}
                         color="emerald"
                         size="md"
                         aria-label={`Captura automática: ${displayLabel}`}
@@ -830,7 +917,7 @@ export function InfoTab(p: InfoTabProps) {
                           <button
                             key={preset.id}
                             type="button"
-                            onClick={() => p.setCalendarAutoCapture((prev: any) => ({
+                            onClick={() => p.setCalendarAutoCapture((prev) => ({
                               ...prev,
                               necessidade_label: preset.nec_label,
                             }))}
@@ -852,7 +939,7 @@ export function InfoTab(p: InfoTabProps) {
                     <input
                       type="text"
                       value={p.calendarAutoCapture.necessidade_label || ""}
-                      onChange={(e) => p.setCalendarAutoCapture((prev: any) => ({
+                      onChange={(e) => p.setCalendarAutoCapture((prev) => ({
                         ...prev,
                         necessidade_label: e.target.value,
                       }))}
@@ -881,6 +968,7 @@ export function InfoTab(p: InfoTabProps) {
               </div>
               <p className="text-[10px] text-muted-foreground italic">Você não precisa escrever isso no prompt — o sistema injeta automaticamente.</p>
             </div>
+            </AdvancedSection>
 
             {/* ========= SCHEDULER: lembretes automáticos + auto-promote kanban ========= */}
             <div className="pt-4 border-t border-white/5 space-y-4">
@@ -916,7 +1004,7 @@ export function InfoTab(p: InfoTabProps) {
                               max={43200}
                               fallback={60}
                               value={r.offset_minutes}
-                              onChange={(n) => p.setReminders((prev: any[]) => prev.map((x, i) => i === idx ? { ...x, offset_minutes: n } : x))}
+                              onChange={(n) => p.setReminders((prev) => prev.map((x, i) => i === idx ? { ...x, offset_minutes: n } : x))}
                               className="bg-black/60 border-white/10 text-xs h-8 w-24 font-mono"
                             />
                             <span className="text-[10px] text-muted-foreground uppercase font-semibold">min antes</span>
@@ -925,21 +1013,21 @@ export function InfoTab(p: InfoTabProps) {
                                 r.offset_minutes >= 60 ? `${Math.round(r.offset_minutes / 60)}h` : `${r.offset_minutes}min`})
                             </span>
                             <button
-                              onClick={() => p.setReminders((prev: any[]) => prev.filter((_, i) => i !== idx))}
+                              onClick={() => p.setReminders((prev) => prev.filter((_, i) => i !== idx))}
                               className="text-red-400/70 hover:text-red-400 text-[10px] font-semibold uppercase"
                               title="Remover este lembrete"
                             >Remover</button>
                           </div>
                           <Textarea
                             value={r.message}
-                            onChange={(e) => p.setReminders((prev: any[]) => prev.map((x, i) => i === idx ? { ...x, message: e.target.value } : x))}
+                            onChange={(e) => p.setReminders((prev) => prev.map((x, i) => i === idx ? { ...x, message: e.target.value } : x))}
                             className="text-xs bg-black/60 border-white/5 min-h-[60px] resize-none"
                             placeholder="Oi {nome}! Lembrete: amanhã às {hora_agendamento} ..."
                           />
                         </div>
                       ))}
                       <button
-                        onClick={() => p.setReminders((prev: any[]) => [...prev, { offset_minutes: 30, message: "Oi {nome}! Lembrete do seu agendamento às {hora_agendamento}." }])}
+                          onClick={() => p.setReminders((prev) => [...prev, { offset_minutes: 30, message: "Oi {nome}! Lembrete do seu agendamento às {hora_agendamento}." }])}
                         className="w-full py-2 rounded-lg border border-dashed border-emerald-500/30 text-[10px] uppercase font-semibold text-emerald-400 hover:bg-emerald-500/5"
                       >
                         + Adicionar lembrete
@@ -962,6 +1050,7 @@ export function InfoTab(p: InfoTabProps) {
                     </div>
                   </div>
 
+                  <AdvancedSection label="Avançado · Kanban, avisos e resumo pro dono">
                   {/* Auto-promote kanban — De [coluna] → Para [coluna] */}
                   <div className="pt-3 border-t border-white/5">
                     <div className="flex items-center justify-between gap-2">
@@ -1119,7 +1208,7 @@ export function InfoTab(p: InfoTabProps) {
                               {p.ownerSummaryModel && !p.modelOptions.some((m) => m.id === p.ownerSummaryModel) && (
                                 <option value={p.ownerSummaryModel} className="bg-neutral-900">{p.ownerSummaryModel} (salvo)</option>
                               )}
-                              <ModelOptions models={p.modelOptions as any} />
+                              <ModelOptions models={p.modelOptions} />
                             </select>
                             <p className="text-[10px] text-muted-foreground mt-1">Só o admin escolhe o modelo. Cliente comum usa o padrão da conta.</p>
                           </div>
@@ -1128,8 +1217,10 @@ export function InfoTab(p: InfoTabProps) {
                         )}
                       </div>
                     )}
+                  </div>
+
+                  </AdvancedSection>
         </div>
-      </div>
       )}
       </div>
       </div>
@@ -1357,6 +1448,7 @@ export function InfoTab(p: InfoTabProps) {
         }
       >
 
+        <AdvancedSection label="Abrir editor de instruções e prompt">
         <p className="text-[11px] text-muted-foreground -mt-2">
           Clique ou arraste qualquer chip para dentro do editor. As variáveis são substituídas automaticamente na conversa.
         </p>
@@ -1427,6 +1519,7 @@ export function InfoTab(p: InfoTabProps) {
         )}
 
         {/* Editor */}
+        {/* eslint-disable react-hooks/refs -- falso positivo: a regra envenena todo acesso `p.*` após ler p.promptRef; passar um RefObject pro atributo `ref` é uso legítimo */}
         <div className="rounded-xl bg-[#0a0a0a] border border-white/10 overflow-hidden">
           <div className="flex items-center justify-between gap-2 px-4 py-2 border-b border-white/5 bg-white/[0.02]">
             <p className="text-[10px] font-semibold uppercase tracking-wider text-white/60">Editor — prompt cru</p>
@@ -1456,6 +1549,8 @@ export function InfoTab(p: InfoTabProps) {
           leadQuery={p.previewLeadQuery}
           setLeadQuery={p.setPreviewLeadQuery}
         />
+        {/* eslint-enable react-hooks/refs */}
+        </AdvancedSection>
 
       </SectionCard>
 

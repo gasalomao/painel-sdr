@@ -319,7 +319,7 @@ export default function HistoricoIAPage() {
                 )}
                 {!schedulerCfg.enabled && (
                   <p className="text-[11px] text-zinc-400">
-                    Pra ligar: vá em <strong>Chat → Organizar IA</strong> ou <strong>Configurações</strong> e marque "Habilitar execução automática".
+                    Pra ligar: vá em <strong>Chat → Organizar IA</strong> ou <strong>Configurações</strong> e marque &quot;Habilitar execução automática&quot;.
                   </p>
                 )}
               </div>

@@ -981,9 +981,9 @@ export default function WhatsAppPage() {
             <div className="flex-1 min-w-0">
               <p className="text-xs font-bold text-white">Webhook sincroniza sozinho ao escanear o QR ✨</p>
               <p className="text-[11px] text-muted-foreground mt-1 leading-relaxed">
-                Assim que a instância ficar <span className="text-emerald-300 font-bold">"open"</span> (depois do QR), o sistema configura o webhook automaticamente
+                Assim que a instância ficar <span className="text-emerald-300 font-bold">&quot;open&quot;</span> (depois do QR), o sistema configura o webhook automaticamente
                 — URL pública + os 5 eventos certos + Base64 ON. Você não precisa entrar no painel da Evolution.
-                O botão <strong className="text-purple-300">"Sincronizar webhook"</strong> em cada card é só pra <em>forçar</em> uma re-sincronização manual.
+                O botão <strong className="text-purple-300">&quot;Sincronizar webhook&quot;</strong> em cada card é só pra <em>forçar</em> uma re-sincronização manual.
               </p>
             </div>
           </div>

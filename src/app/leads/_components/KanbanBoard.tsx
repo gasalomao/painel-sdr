@@ -238,10 +238,15 @@ function KanbanColumn({ column, leads, onLeadClick, formatPhone, onRename, onDel
   const [draft, setDraft] = useState(column.label);
   const [menuOpen, setMenuOpen] = useState(false);
   const [colorOpen, setColorOpen] = useState(false);
+  // Sincroniza o draft quando o label muda por fora — padrão "adjust during render"
+  // (React docs) em vez de useEffect.
+  const [prevLabel, setPrevLabel] = useState(column.label);
+  if (prevLabel !== column.label) {
+    setPrevLabel(column.label);
+    setDraft(column.label);
+  }
   const inputRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => { setDraft(column.label); }, [column.label]);
 
   useEffect(() => {
     if (editing) inputRef.current?.focus(), inputRef.current?.select();

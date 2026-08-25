@@ -764,7 +764,7 @@ export default function LeadsPage() {
                   </div>
                   <DialogTitle className="text-xl font-black text-white">Purgar Lead Definitivamente?</DialogTitle>
                   <p className="text-sm text-neutral-300">
-                      Você está prestes a excluir <strong className="text-white">"{leadToDelete?.nome_negocio || "este lead"}"</strong>.
+                      Você está prestes a excluir <strong className="text-white">&quot;{leadToDelete?.nome_negocio || "este lead"}&quot;</strong>.
                       <br/>Escolha abaixo o quão profunda será esta exclusão.
                   </p>
                   
@@ -878,7 +878,7 @@ export default function LeadsPage() {
                                   <Bot className="w-3.5 h-3.5" /> Motivo IA
                               </p>
                               <p className="text-xs text-purple-200/90 italic leading-relaxed">
-                                  "{selectedLead.justificativa_ia}"
+                                  &quot;{selectedLead.justificativa_ia}&quot;
                               </p>
                           </div>
                       )}
@@ -924,10 +924,11 @@ export default function LeadsPage() {
                         onClick={() => {
                             if (selectedLead) {
                                 const params = new URLSearchParams({
-                                  session: selectedLead.remoteJid,
+                                  c: selectedLead.remoteJid,
+                                  n: selectedLead.nome_negocio || "",
                                 });
                                 if ((selectedLead as any).instance_name) {
-                                  params.set("instance", (selectedLead as any).instance_name);
+                                  params.set("i", (selectedLead as any).instance_name);
                                 }
                                 window.location.href = `/chat?${params.toString()}`;
                             }
@@ -1089,7 +1090,7 @@ function LeadIntelligenceSection({ lead, onUpdated }: { lead: any; onUpdated: (u
                 {intel.sources.site_url && (
                   <a href={intel.sources.site_url} target="_blank" rel="noreferrer" className="text-[9px] text-emerald-400 underline break-all">{intel.sources.site_url}</a>
                 )}
-                <p className="text-[10px] text-white/70 mt-1 italic line-clamp-6">"{intel.sources.site_excerpt}"</p>
+                <p className="text-[10px] text-white/70 mt-1 italic line-clamp-6">&quot;{intel.sources.site_excerpt}&quot;</p>
               </div>
             )}
             {Array.isArray(intel.sources.search_lead) && intel.sources.search_lead.length > 0 && (

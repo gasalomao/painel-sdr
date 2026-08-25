@@ -53,6 +53,8 @@ function BlockedFeatureBanner() {
   const [blocked, setBlocked] = useState<string | null>(null);
 
   useEffect(() => {
+    // window.location.search só existe pós-mount (SSR-safe) — não dá pra derivar em render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setBlocked(new URLSearchParams(window.location.search).get("blocked"));
   }, []);
 

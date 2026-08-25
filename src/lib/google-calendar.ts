@@ -295,37 +295,6 @@ export async function cancelCalendarEvent(agentId: number, eventId: string, cale
 }
 
 /**
- * Verifica disponibilidade num intervalo. Retorna true se NÃO há conflitos
- * no Google Calendar do agente.
- *
- * Importante: NÃO consulta o banco local. O caller deve fazer 2 checks:
- *   1. anti-double-booking local (constraint do banco em appointments)
- *   2. essa função (eventos manuais que o dono criou direto no Google)
- */
-export async function isAvailable(
-  agentId: number,
-  startAt: Date | string,
-  endAt: Date | string,
-  calendarId = "primary"
-): Promise<boolean> {
-  const oauth2 = await getOAuthClient(agentId);
-  const cal = calendarClient(oauth2);
-  try {
-    const res = await cal.freebusy.query({
-      requestBody: {
-        timeMin: new Date(startAt).toISOString(),
-        timeMax: new Date(endAt).toISOString(),
-        items: [{ id: calendarId }],
-      },
-    });
-    const busy = res.data.calendars?.[calendarId]?.busy || [];
-    return busy.length === 0;
-  } catch (e: any) {
-    throw new GoogleCalendarError(`Falha ao verificar disponibilidade: ${e?.message || e}`, "api_error", e?.errors);
-  }
-}
-
-/**
  * Checa se o agente tem OAuth Google configurado (sem fazer chamada de rede).
  * Útil pra UI mostrar "Conectado / Não conectado" e pro worker decidir
  * se deve tentar sincronizar.

@@ -63,8 +63,3 @@ export function useAiModels() {
 
   return { models, loading, error };
 }
-
-/** Reset do cache — usar após admin trocar API key e querer recarregar. */
-export function invalidateAiModelsCache() {
-  CACHE = null;
-}

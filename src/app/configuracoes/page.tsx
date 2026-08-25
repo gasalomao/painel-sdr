@@ -862,7 +862,7 @@ export default function ConfiguracoesPage() {
    * novo de forma tolerante) ou `null` se não parecer um token.
    */
   function looksLikeDeepSeekToken(raw: string): string | null {
-    let t = (raw || "").trim();
+    const t = (raw || "").trim();
     if (!t) return null;
     // Limpa aspas/backticks que o console às vezes cola em volta.
     const outer = t.replace(/^["'`]+|["'`]+$/g, "").trim();
@@ -2018,7 +2018,7 @@ export default function ConfiguracoesPage() {
                           <div className="flex-1">
                             <p className="text-[12px] font-bold text-white">Copie o SQL abaixo e cole no editor</p>
                             <p className="text-[10px] text-muted-foreground mt-0.5">
-                              Depois é só clicar <strong>Run</strong> no Supabase. Aparece "Success. No rows returned." quando terminar.
+                              Depois é só clicar <strong>Run</strong> no Supabase. Aparece &quot;Success. No rows returned.&quot; quando terminar.
                             </p>
                             <Button
                               onClick={copySql}
@@ -2518,7 +2518,7 @@ export default function ConfiguracoesPage() {
                         <div className="flex flex-col items-center gap-2">
                           <img src={goQrCode} alt="QR Code WhatsApp" className="w-56 h-56 rounded-lg bg-white p-2" />
                           <p className="text-[10px] text-muted-foreground">
-                            WhatsApp → Configurações → Aparelhos conectados → Conectar aparelho. O QR expira em ~60s — clique "Conectar e gerar QR" de novo se precisar.
+                            WhatsApp → Configurações → Aparelhos conectados → Conectar aparelho. O QR expira em ~60s — clique &quot;Conectar e gerar QR&quot; de novo se precisar.
                           </p>
                         </div>
                       </div>
@@ -3101,7 +3101,7 @@ export default function ConfiguracoesPage() {
                                 <strong>2.</strong> Aperte <kbd className="px-1.5 py-0.5 rounded bg-black/40 border border-emerald-500/30 text-emerald-100 font-mono text-[10px]">F12</kbd>
                                 {" "}→ aba <strong>Console</strong> → cole isto e dê Enter:
                                 <code className="block mt-1 px-2 py-1.5 rounded bg-black/50 border border-emerald-500/20 text-emerald-200 font-mono text-[10px] break-all select-all">
-                                  localStorage.getItem('userToken')
+                                  {`localStorage.getItem('userToken')`}
                                 </code>
                               </li>
                               <li><strong>3.</strong> Clique em cima do resultado, selecione tudo e <strong>copie</strong> (Ctrl+C).</li>
@@ -3467,7 +3467,7 @@ function LeadIntelligenceSettings() {
             </p>
           ) : models.length === 0 ? (
             <p className="text-[11px] text-amber-300">
-              ⚠ Nenhum modelo retornado. Salve sua API Key Gemini no card "Organizador IA" acima primeiro.
+              ⚠ Nenhum modelo retornado. Salve sua API Key Gemini no card &quot;Organizador IA&quot; acima primeiro.
             </p>
           ) : (
             <>

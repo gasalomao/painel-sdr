@@ -226,12 +226,6 @@ export function lookupPriceSync(model: string): ModelPrice | null {
   return findPriceFor(FALLBACK_PRICES, model);
 }
 
-/** Async — garante cache antes de buscar. */
-export async function lookupPrice(model: string): Promise<ModelPrice | null> {
-  await ensurePricing();
-  return lookupPriceSync(model);
-}
-
 /** Calcula custo USD pra uma chamada. */
 export function computeCost(price: ModelPrice | null, promptTokens: number, completionTokens: number): number {
   if (!price) return 0;
@@ -340,11 +334,6 @@ export function getFxRateSync(): number {
 }
 
 /** Converte custo USD pra BRL usando cotação atual. */
-export async function usdToBrl(usd: number): Promise<{ brl: number; rate: number; source: string }> {
-  const fx = await ensureFxRate();
-  return { brl: usd * fx.rate, rate: fx.rate, source: fx.source };
-}
-
 /** Estado do câmbio pra UI mostrar (origem, idade, cotação). */
 export async function getFxState(): Promise<{ rate: number; fetchedAt: number; source: string; ageMinutes: number }> {
   const s = await ensureFxRate();

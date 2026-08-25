@@ -145,7 +145,7 @@ Reescreva a mensagem para focar nos pontos fortes citados.`;
 
   describe("3. Blindagem de variáveis e proteção contra chaves residuais", () => {
     it("remove variáveis residuais inventadas ou não resolvidas", () => {
-      let textoComVariavelInventada = "Olá, vi que sua empresa {{empresa_inexistente}} tem potencial em {cidade_nao_mapeada}.";
+      const textoComVariavelInventada = "Olá, vi que sua empresa {{empresa_inexistente}} tem potencial em {cidade_nao_mapeada}.";
       
       // Simula a etapa de blindagem final do campaign-worker / followup-worker
       const textoBlindado = textoComVariavelInventada

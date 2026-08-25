@@ -76,7 +76,7 @@ export function WebhookGuide({ webhookUrl }: { webhookUrl: string }) {
               Abra sua instância no painel da Evolution e vá em <span className="text-[#00ffcc]">Webhook</span>
             </p>
             <p className="text-[10px] text-muted-foreground">
-              Dentro de cada instância existe uma aba "Webhook". É lá que a gente cola a URL do painel.
+              Dentro de cada instância existe uma aba &quot;Webhook&quot;. É lá que a gente cola a URL do painel.
             </p>
           </div>
         </div>

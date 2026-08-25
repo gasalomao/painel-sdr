@@ -382,7 +382,7 @@ export async function POST(req: NextRequest) {
         });
     } else if (historico.length > 0) {
         // Ordem cronológica (mais antiga primeiro)
-        let chrono = [...historico].reverse().filter((m: any) => {
+        const chrono = [...historico].reverse().filter((m: any) => {
             const sk = m.sender || m.sender_type;
             return sk !== "system"; // Foca em tudo exceto mensagens internas de sistema (inclui IA, Campanhas/Disparos e Atendente Humano)
         });
@@ -1920,7 +1920,7 @@ ${capturedVariablesPrompt}
     if (dedupProductMedia && (sessionId || remoteJid)) {
       try {
         const sinceIso = new Date(Date.now() - dedupWindowMs).toISOString();
-        let q = supabase.from("messages")
+        const q = supabase.from("messages")
           .select("media_url, content, created_at")
           .eq("sender", "ai")
           .eq("remote_jid", remoteJid)

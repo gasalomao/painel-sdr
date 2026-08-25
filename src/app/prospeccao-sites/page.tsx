@@ -815,6 +815,19 @@ export default function ProspeccaoSitesPage() {
     } catch (e: any) { alert("Erro de conexão: " + e.message); }
   };
 
+  const deleteCampaign = async (c: { id: string; name: string }) => {
+    if (!confirm(`Excluir a campanha "${c.name}"? Alvos, logs e histórico de envios serão removidos.`)) return;
+    try {
+      const res = await fetch(`/api/prospeccao-sites/campaigns/${c.id}`, { method: "DELETE" });
+      const data = await res.json();
+      if (!data.success && data.error) {
+        alert("Erro: " + data.error);
+        return;
+      }
+      loadCampaigns();
+    } catch (e: any) { alert("Erro de conexão: " + e.message); }
+  };
+
   const runReviewsAi = async () => {
     const ids = selected.size > 0 ? Array.from(selected.keys()) : leads.map((l) => l.id);
     if (ids.length === 0) { alert("Selecione leads na aba Leads (ou capture leads primeiro)."); return; }
@@ -907,7 +920,7 @@ export default function ProspeccaoSitesPage() {
                 </div>
                 <div className="text-xs text-white/50">
                   A captura roda o mesmo engine do Captador Maps e popula a coluna <code className="bg-black/40 px-1 rounded">website</code> em leads.
-                  Depois de pronta, vá pra aba Leads — o filtro "sem site" já vem ativo.
+                  Depois de pronta, vá pra aba Leads — o filtro &quot;sem site&quot; já vem ativo.
                 </div>
 
                 <div>
@@ -939,7 +952,7 @@ export default function ProspeccaoSitesPage() {
                       <Switch id="ps-reviews-ai" checked={reviewsAiEnabled} onCheckedChange={(v) => { setReviewsAiEnabled(v); if (v) setCaptureAllReviews(true); }} />
                     </div>
                     <p className="text-[11px] text-white/50">
-                      Liga "Capturar todas as avaliações" automaticamente. Cada lead capturado é resumido NA HORA pela IA com o prompt abaixo (todos os comentários vão junto). O resumo fica em <code className="bg-black/40 px-1 rounded">{"{{resumo_avaliacoes}}"}</code> nos disparos.
+                      Liga &quot;Capturar todas as avaliações&quot; automaticamente. Cada lead capturado é resumido NA HORA pela IA com o prompt abaixo (todos os comentários vão junto). O resumo fica em <code className="bg-black/40 px-1 rounded">{"{{resumo_avaliacoes}}"}</code> nos disparos.
                     </p>
                     {reviewsAiEnabled && (
                       <>
@@ -1642,6 +1655,7 @@ export default function ProspeccaoSitesPage() {
                         {c.status !== "done" && c.status !== "cancelled" && (
                           <Button size="sm" variant="ghost" onClick={() => actionCampaign(c.id, "cancel")}><Square className="w-3.5 h-3.5 mr-1" /> Cancelar</Button>
                         )}
+                        <Button size="sm" variant="ghost" onClick={() => deleteCampaign(c)} className="text-red-400 hover:bg-red-500/10 hover:text-red-300"><Trash2 className="w-3.5 h-3.5 mr-1" /> Excluir</Button>
                       </div>
 
                       {/* Botão de abrir logs */}
@@ -1971,7 +1985,7 @@ export default function ProspeccaoSitesPage() {
                     <span className="font-bold text-cyan-200">Resumir avaliações do Google com IA</span>
                   </label>
                   <p className="text-[10px] text-white/40 leading-relaxed">
-                    Antes do disparo, roda a IA em todas as avaliações capturadas de cada lead e gera um resumo (elogios, reclamações e gancho). Disponível como <code className="bg-black/40 px-1 rounded">{"{{resumo_avaliacoes}}"}</code> no template. Ativa "Capturar todas as avaliações" automaticamente.
+                    Antes do disparo, roda a IA em todas as avaliações capturadas de cada lead e gera um resumo (elogios, reclamações e gancho). Disponível como <code className="bg-black/40 px-1 rounded">{"{{resumo_avaliacoes}}"}</code> no template. Ativa &quot;Capturar todas as avaliações&quot; automaticamente.
                   </p>
                   {autoReviewsAi && (
                     <div className="space-y-2 pl-3 border-l-2 border-cyan-500/30">

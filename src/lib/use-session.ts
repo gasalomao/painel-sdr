@@ -43,17 +43,3 @@ export function useClientSession() {
 
   return { session, loading, clientId: session?.clientId || null };
 }
-
-/**
- * Função standalone para pegar o clientId da sessão atual.
- * Útil em callbacks e event handlers onde hooks não podem ser usados.
- */
-export async function getClientId(): Promise<string | null> {
-  try {
-    const r = await fetch("/api/auth/session", { cache: "no-store" });
-    const d = await r.json();
-    return d?.clientId || null;
-  } catch {
-    return null;
-  }
-}

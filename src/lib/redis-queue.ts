@@ -60,25 +60,6 @@ export function getRedisConnection() {
   return globalForRedis.redisInstance;
 }
 
-// Fila de Mensagens (Opcional, o chat agora usa envio direto)
-export const MESSAGE_QUEUE_NAME = 'whatsapp_messages';
-let messageQueue: Queue | null = null;
-
-export function getMessageQueue() {
-  if (!messageQueue) {
-    messageQueue = new Queue(MESSAGE_QUEUE_NAME, {
-      connection: getRedisConnection(),
-      defaultJobOptions: { attempts: 1, removeOnComplete: true },
-    });
-
-    // BULLMQ também emite erros que precisam ser capturados!
-    messageQueue.on('error', (err) => {
-      console.warn('[BullMQ] Erro na Fila (silenciado):', err.message);
-    });
-  }
-  return messageQueue;
-}
-
 // ÚLTIMO RECURSO: Captura global de eventos não tratados do ioredis no processo Node
 if (typeof process !== 'undefined') {
   process.on('unhandledRejection', (reason: any) => {

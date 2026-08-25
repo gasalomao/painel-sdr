@@ -675,7 +675,7 @@ export default function OrganizadorPage() {
                         <strong>O que é o prompt?</strong> É o manual que você dá pra IA. Igual a treinar um funcionário novo: você explica o seu negócio, quais critérios usar pra mover um cliente de uma coluna pra outra, e o que NÃO fazer.
                       </p>
                       <p className="text-[10px] text-cyan-200/80 leading-relaxed">
-                        <strong>Você não precisa escrever nada</strong> — se deixar vazio, a IA usa o manual padrão (já bom pra qualquer nicho). Mas se quiser personalizar pro SEU negócio (ex.: "se cliente disser que está grávida, não sugerir esmalte tóxico"), escreva aqui.
+                        <strong>Você não precisa escrever nada</strong> — se deixar vazio, a IA usa o manual padrão (já bom pra qualquer nicho). Mas se quiser personalizar pro SEU negócio (ex.: &quot;se cliente disser que está grávida, não sugerir esmalte tóxico&quot;), escreva aqui.
                       </p>
                     </div>
 
@@ -734,7 +734,7 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                       className="bg-black/40 border-white/10 min-h-[180px] text-xs leading-relaxed"
                     />
                     <p className="text-[10px] text-muted-foreground">
-                      💡 <strong>Dica:</strong> escreva em português normal, como se estivesse explicando pra uma pessoa. A IA entende. Pra ver o texto FINAL completo (seu prompt + regras técnicas + seu kanban), abra o card amarelo "Prompt completo que está rodando" mais abaixo.
+                      💡 <strong>Dica:</strong> escreva em português normal, como se estivesse explicando pra uma pessoa. A IA entende. Pra ver o texto FINAL completo (seu prompt + regras técnicas + seu kanban), abra o card amarelo &quot;Prompt completo que está rodando&quot; mais abaixo.
                     </p>
                   </div>
                 </div>
@@ -761,7 +761,7 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                 <div>
                   <h2 className="text-sm font-bold">Colunas do Kanban</h2>
                   <p className="text-[10px] text-muted-foreground mt-0.5">
-                    Edite nomes, cores e ordem. Coluna "sistema" não pode ser apagada.
+                    Edite nomes, cores e ordem. Coluna &quot;sistema&quot; não pode ser apagada.
                   </p>
                 </div>
 

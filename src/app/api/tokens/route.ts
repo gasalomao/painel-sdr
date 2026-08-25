@@ -152,7 +152,7 @@ export async function GET(req: NextRequest) {
         map[k].completion += Number(r.completion_tokens || 0);
       }
       const clientIds = Object.keys(map).filter(id => id !== "(sem cliente)");
-      let nameMap: Record<string, string> = {};
+      const nameMap: Record<string, string> = {};
       if (clientIds.length > 0 && supabaseAdmin) {
         const { data: clients } = await supabaseAdmin
           .from("clients")

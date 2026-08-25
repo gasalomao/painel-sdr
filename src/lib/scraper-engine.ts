@@ -421,7 +421,7 @@ async function saveLeadAndSync(lead: Lead, settings: ScraperSettings): Promise<n
 
     let savedId: number | null = null;
 
-    let insertResult = await client.from("leads_extraidos").insert(fullPayload).select("id").single();
+    const insertResult = await client.from("leads_extraidos").insert(fullPayload).select("id").single();
     let insError = insertResult.error as any;
     if (!insError) savedId = insertResult.data?.id ?? null;
 

@@ -130,7 +130,7 @@ export async function POST(req: NextRequest) {
       const res = await fetch(`${url}/instance/status`, { headers, method: "GET", signal: AbortSignal.timeout(10000) });
       const json = await res.json().catch(() => ({}));
       const data = json?.data || {};
-      let state = String(data.Connected ? "open" : data.LoggedIn ? "open" : "close").toLowerCase();
+      const state = String(data.Connected ? "open" : data.LoggedIn ? "open" : "close").toLowerCase();
       return NextResponse.json({ success: true, state, data: json });
     }
 
@@ -163,7 +163,7 @@ export async function POST(req: NextRequest) {
 
       // 3. Aguarda QR code (pode demorar 1-2s pra gerar).
       let qrCode: string | null = null;
-      let pairingCode: string | null = null;
+      const pairingCode: string | null = null;
       for (let i = 0; i < 5; i++) {
         await new Promise((r) => setTimeout(r, 2000));
         const qrRes = await fetch(`${url}/instance/qr`, { headers, signal: AbortSignal.timeout(10000) });

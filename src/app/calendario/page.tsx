@@ -758,7 +758,7 @@ function AppointmentDialog({
       setCustomReminders([]);
     }
     setAttendeeInput("");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [editing, agents, open, initialStart]);
 
   function addAttendee() {

@@ -583,7 +583,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
   let leadFull: any = null;
   {
     const cols = "nome_negocio, ramo_negocio, telefone, endereco, website, instagram, facebook, avaliacao, reviews, status, categoria, resumo_avaliacoes";
-    let q = supabase.from("leads_extraidos").select(cols).eq("remoteJid", target.remote_jid);
+    const q = supabase.from("leads_extraidos").select(cols).eq("remoteJid", target.remote_jid);
     let res = await q.maybeSingle();
     if (res.error && res.error.code === "PGRST204") {
       res = await supabase

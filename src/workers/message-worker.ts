@@ -12,8 +12,12 @@ dotenv.config({ path: path.resolve(process.cwd(), '.env.local') });
 
 // 2. IMPORTS DINÂMICOS OU DEPOIS DO DOTENV
 // Usamos require para garantir a ordem de carregamento das variáveis de ambiente
+// (import estático seria içado pra cima do dotenv.config e as libs leriam .env vazio)
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const { getRedisConnection, MESSAGE_QUEUE_NAME } = require('../lib/redis-queue');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const channel = require('../lib/channel');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const { supabaseAdmin: supabase } = require('../lib/supabase_admin');
 
 console.log(`[Worker] Inicializando engine...`);

@@ -70,7 +70,8 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json().catch(() => ({}));
-    let { apiKey, model, provider, triggered_by, clientId } = body || {};
+    let { apiKey, model, provider } = body || {};
+    const { triggered_by, clientId } = body || {};
     triggerLabel = triggered_by === "auto" || triggered_by === "schedule_catchup" ? triggered_by : "manual";
     if (typeof clientId === "string" && clientId.trim()) clientIdScope = clientId.trim();
 

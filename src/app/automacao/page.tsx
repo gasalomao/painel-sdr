@@ -563,7 +563,7 @@ export default function AutomacaoPage() {
                     <span className="font-bold text-cyan-200 text-xs">Resumir avaliações do Google com IA (antes do disparo)</span>
                   </label>
                   <p className="text-[10px] text-white/40 leading-relaxed">
-                    Reúne TODAS as avaliações capturadas de cada lead e a IA resume elogios, reclamações e um gancho. Disponível como <code className="bg-black/40 px-1 rounded">{"{{resumo_avaliacoes}}"}</code> no template de disparo e follow-up. Ativa "Capturar todas as avaliações".
+                    Reúne TODAS as avaliações capturadas de cada lead e a IA resume elogios, reclamações e um gancho. Disponível como <code className="bg-black/40 px-1 rounded">{"{{resumo_avaliacoes}}"}</code> no template de disparo e follow-up. Ativa &quot;Capturar todas as avaliações&quot;.
                   </p>
                   {formData.scrape_filters?.reviews_ai?.enabled && (
                     <div className="space-y-2 pl-3 border-l-2 border-cyan-500/30">
@@ -1149,6 +1149,8 @@ export default function AutomacaoPage() {
 function AutomationLeadIntelBatch({ automationId, startedAt, scrapedCount }: { automationId: string; startedAt: string | null; scrapedCount: number }) {
   const [leadIds, setLeadIds] = useState<number[]>([]);
   useEffect(() => {
+    // Reset síncrono ao trocar de automação + fetch assinado logo abaixo (padrão data-fetch).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!startedAt) { setLeadIds([]); return; }
     let alive = true;
     supabase

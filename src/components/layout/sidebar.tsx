@@ -324,8 +324,9 @@ function MobileBottomNav() {
   // No "Mais" do mobile, admin items vêm no topo seguidos da nav normal.
   const allMobileItems = [...visibleAdmin, ...visibleNav];
 
-  // Close "more" sheet when navigating
+  // Close "more" sheet when navigating (a mudança vem de fora — rota nova)
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMoreOpen(false);
   }, [pathname]);
 

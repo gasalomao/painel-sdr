@@ -168,6 +168,8 @@ export function AutomationLogs({
     setLoading(false);
   }, [automationId, campaignId, followupCampaignId, startedAt]);
 
+  // Fetch-on-mount: setLoading(true) síncrono antes do await é intencional (spinner imediato).
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
   // Auto-scroll inteligente (padrão chat/terminal):
@@ -189,14 +191,19 @@ export function AutomationLogs({
     setShowJumpToBottom(dist > 80);
   }, []);
 
+  // Stick-scroll pós-paint: alinhar scrollTop e estado do botão no MESMO frame
+  // que o log novo entra (padrão terminal — ver comentário acima).
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useLayoutEffect(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
     if (wasAtBottomRef.current) {
       el.scrollTop = el.scrollHeight;
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- stick-scroll: botão some no mesmo frame do log novo
       setShowJumpToBottom(false);
     } else {
       // Usuário leu histórico — só mostra o botão pra ele voltar quando quiser.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setShowJumpToBottom(true);
     }
   }, [entries.length]);

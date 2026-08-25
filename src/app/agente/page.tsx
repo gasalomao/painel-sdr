@@ -17,7 +17,10 @@ import { supabase } from "@/lib/supabase";
 import { renderTemplate } from "@/lib/template-vars";
 import { cn } from "@/lib/utils";
 import { useClientSession } from "@/lib/use-session";
-import { Activity, FlaskConical, Info, ListTree, Settings } from "lucide-react";
+import { Activity, FlaskConical, Info, ListTree, Settings, type LucideIcon } from "lucide-react";
+import type { GroupableModel } from "@/lib/model-grouping";
+import type { Stage } from "./_components/sortable-stage";
+import type { TemplateContext } from "@/lib/template-vars";
 import { toast } from "sonner";
 
 import { AgentSwitcher } from "./_components/agent-switcher";
@@ -49,9 +52,24 @@ export default function AgentePage() {
   // ============= TAB ATIVA =============
   const [activeTab, setActiveTab] = useState<Tab>("info");
 
+  // Modo avançado: revela as abas Etapas e Logs (power-user). Persistido por cliente.
+  const [advancedMode, setAdvancedMode] = useState(false);
+  useEffect(() => {
+    if (!clientId) return;
+    try { setAdvancedMode(localStorage.getItem(`sdr_agent_advanced_${clientId}`) === "1"); } catch {}
+  }, [clientId]);
+  const toggleAdvancedMode = useCallback(() => {
+    setAdvancedMode((prev) => {
+      const next = !prev;
+      if (!next && (activeTab === "etapas" || activeTab === "logs")) setActiveTab("info");
+      try { if (clientId) localStorage.setItem(`sdr_agent_advanced_${clientId}`, next ? "1" : "0"); } catch {}
+      return next;
+    });
+  }, [activeTab, clientId]);
+
   // ============= AGENTES (lista + atual) =============
   const [activeAgentId, setActiveAgentId] = useState<number>(1);
-  const [agentsList, setAgentsList] = useState<any[]>([]);
+  const [agentsList, setAgentsList] = useState<{ id: number; name: string }[]>([]);
 
   // ============= IDENTIDADE DO AGENTE =============
   const [isActiveAgente, setIsActiveAgente] = useState(true);
@@ -60,12 +78,12 @@ export default function AgentePage() {
   const [personalidadeAgente, setPersonalidadeAgente] = useState("");
   const [tomAgente, setTomAgente] = useState("");
   const [targetModel, setTargetModel] = useState("");  // carregado do DB / hook em runtime
-  const [modelOptions, setModelOptions] = useState<any[]>([]);
+  const [modelOptions, setModelOptions] = useState<GroupableModel[]>([]);
   const [isAdmin, setIsAdmin] = useState(false);  // só admin altera modelo de IA
   const [defaultAiModel, setDefaultAiModel] = useState<string | null>(null);
   const [appUrl, setAppUrl] = useState("");
   const [savingConfig, setSavingConfig] = useState(false);
-  const [loadingConfig, setLoadingConfig] = useState(true);
+  const [, setLoadingConfig] = useState(true);
 
   // ============= INSTÂNCIA VINCULADA =============
   const [vinculoInstance, setVinculoInstance] = useState("");
@@ -86,7 +104,7 @@ export default function AgentePage() {
   // ============= GOOGLE CALENDAR =============
   const [calendarEnabled, setCalendarEnabled] = useState(false);
   const [googleJson, setGoogleJson] = useState("");
-  const [googleTokens, setGoogleTokens] = useState<any>(null);
+  const [, setGoogleTokens] = useState<object | null>(null);
   const [calendarGenerateMeet, setCalendarGenerateMeet] = useState(false);
   const [calendarSendMeetLink, setCalendarSendMeetLink] = useState(false);
   const [calendarDefaultDuration, setCalendarDefaultDuration] = useState<number>(30);
@@ -127,7 +145,7 @@ export default function AgentePage() {
       .then((r) => r.json())
       .then((j) => {
         if (j?.ok && Array.isArray(j.columns)) {
-          setKanbanColumns(j.columns.map((c: any) => ({ status_key: c.status_key, label: c.label })));
+          setKanbanColumns(j.columns.map((c: { status_key: string; label: string }) => ({ status_key: c.status_key, label: c.label })));
         }
       })
       .catch(() => {});
@@ -154,7 +172,7 @@ export default function AgentePage() {
   const [previewLeadQuery, setPreviewLeadQuery] = useState("");
 
   // ============= BASE DE CONHECIMENTO =============
-  const [knowledge, setKnowledge] = useState<any[]>([]);
+  const [knowledge, setKnowledge] = useState<{ id: string; title: string; content?: string }[]>([]);
   const [showNovoK, setShowNovoK] = useState(false);
   const [novoKTitle, setNovoKTitle] = useState("");
   const [novoKContent, setNovoKContent] = useState("");
@@ -172,16 +190,17 @@ export default function AgentePage() {
   const [transcriptionMethod, setTranscriptionMethod] = useState<"auto" | "whisper" | "gemini" | "disabled">("auto");
 
   // ============= ETAPAS DO FUNIL =============
-  const [stages, setStages] = useState<any[]>([]);
+  const [stages, setStages] = useState<Stage[]>([]);
   const [novoStageTitle, setNovoStageTitle] = useState("");
   const [novoStagePrompt, setNovoStagePrompt] = useState("");
   const [showNovoStage, setShowNovoStage] = useState(false);
 
   // ============= CUSTOM TOOLS (loaded; UI ainda não exposta nessa refatoração) =============
-  const [customTools, setCustomTools] = useState<any[]>([]);
+  const [, setCustomTools] = useState<unknown[]>([]);
 
   // ============= TESTES (SANDBOX) =============
-  const [testMessages, setTestMessages] = useState<any[]>([]);
+  type SandboxMsg = { role: "user" | "agent" | "tool"; content: string; isError?: boolean };
+  const [testMessages, setTestMessages] = useState<SandboxMsg[]>([]);
   const [testInput, setTestInput] = useState("");
   const [testLoading, setTestLoading] = useState(false);
   const [testVariables, setTestVariables] = useState<Record<string, string>>({});
@@ -189,7 +208,7 @@ export default function AgentePage() {
   const [testSkippedStages, setTestSkippedStages] = useState<number[]>([]);
   const testBufferTimerRef = useRef<NodeJS.Timeout | null>(null);
   const testMessageBufferRef = useRef<string[]>([]);
-  const testMessagesStateRef = useRef<any[]>([]);
+  const testMessagesStateRef = useRef<SandboxMsg[]>([]);
 
   // ============= TESTES (DISPARO INICIAL) =============
   const [sandboxTemplate, setSandboxTemplate] = useState("Olá {{nome_negocio}}, vi que vocês são do ramo de {{ramo_negocio}}...");
@@ -200,7 +219,8 @@ export default function AgentePage() {
   const [sandboxSimulationEnabled, setSandboxSimulationEnabled] = useState(true);
 
   // ============= LOGS =============
-  const [webhookLogs, setWebhookLogs] = useState<any[]>([]);
+  type WebhookLogRow = { created_at: string; event: string; instance_name: string; payload: unknown; id?: string | number };
+  const [webhookLogs, setWebhookLogs] = useState<WebhookLogRow[]>([]);
   const [expandedLogs, setExpandedLogs] = useState<number[]>([]);
 
   // ============= APP URL DETECTADO NO BROWSER =============
@@ -275,8 +295,8 @@ export default function AgentePage() {
         setCalendarDefaultDuration(Number(opts.calendar_default_duration) || 30);
         setCalendarOptionalFields(opts.calendar_optional_fields || {});
         // Scheduler (lembretes + auto-promote) — vem das colunas novas da migration 006
-        const isSched = !!(data as any).is_scheduler;
-        const schedCfg = ((data as any).scheduler_config || {}) as any;
+        const isSched = !!data.is_scheduler;
+        const schedCfg = data.scheduler_config || {};
         setIsScheduler(isSched);
         if (Array.isArray(schedCfg.reminders)) setReminders(schedCfg.reminders);
         if (typeof schedCfg.auto_promote_kanban_after_minutes === "number") setAutoPromoteAfter(schedCfg.auto_promote_kanban_after_minutes);
@@ -309,7 +329,7 @@ export default function AgentePage() {
         }
         // Lead Intelligence vem da coluna dedicada na tabela (não do JSONB options),
         // pra worker/automation conseguirem ler com SELECT simples.
-        setLeadIntelligenceEnabled((data as any).lead_intelligence_enabled ?? false);
+        setLeadIntelligenceEnabled(data.lead_intelligence_enabled ?? false);
       }
       if (kb.data) setKnowledge(kb.data);
       setVinculoInstance(conn.data?.[0]?.instance_name || "");
@@ -380,8 +400,8 @@ export default function AgentePage() {
       if (clientId) delQ = delQ.eq("client_id", clientId);
       const { error: e2 } = await delQ;
       if (e2) console.warn("[VINCULO] Erro ao limpar instâncias antigas:", e2.message);
-    } catch (err: any) {
-      alert("Erro ao vincular instância: " + err.message);
+    } catch (err) {
+      alert("Erro ao vincular instância: " + (err as Error).message);
     } finally {
       setSavingVinculo(false);
     }
@@ -426,7 +446,7 @@ export default function AgentePage() {
         .then((data) => {
           if (!data.instances) return;
           const evoNames = data.instances
-            .map((i: any) => i.instanceName || i.instance_name)
+            .map((i: { instanceName?: string; instance_name?: string }) => i.instanceName || i.instance_name)
             .filter(Boolean) as string[];
 
           setAllInstances((prev) => {
@@ -455,7 +475,7 @@ export default function AgentePage() {
         setWebhookLogs((prev) => {
           // Dedup por id — evita o caso onde o INSERT echo do realtime chega depois
           // do load inicial e duplica o log na UI.
-          const incoming = payload.new as any;
+          const incoming = payload.new as WebhookLogRow;
           if (incoming?.id && prev.some((l) => l.id === incoming.id)) return prev;
           return [incoming, ...prev].slice(0, 20);
         });
@@ -560,7 +580,7 @@ export default function AgentePage() {
     if (!activeAgentId) return;
     setSavingConfig(true);
     const { data: current } = await supabase.from("agent_settings").select("options, scheduler_config").eq("id", activeAgentId).single();
-    const prevSched = (current?.scheduler_config || {}) as any;
+    const prevSched = current?.scheduler_config || {};
     const { error } = await supabase.from("agent_settings").update({
       options: {
         ...current?.options,
@@ -630,9 +650,9 @@ export default function AgentePage() {
       if (!u?.url) { popup?.close(); alert("Falha ao gerar a URL do Google: " + (u?.error || "desconhecido")); return; }
       if (popup) popup.location.href = u.url;
       else window.open(u.url, "_blank"); // fallback se o popup foi bloqueado
-    } catch (e: any) {
+    } catch (e) {
       popup?.close();
-      alert("Erro de rede: " + (e?.message || e));
+      alert("Erro de rede: " + ((e as Error)?.message || e));
     } finally { setTestingGoogle(false); }
   };
 
@@ -696,8 +716,8 @@ export default function AgentePage() {
       } else {
         alert("Erro ao salvar base de conhecimento: " + (data.error || "Falha na requisição"));
       }
-    } catch (err: any) {
-      alert("Erro de conexão ao salvar: " + err.message);
+    } catch (err) {
+      alert("Erro de conexão ao salvar: " + (err as Error).message);
     }
   };
 
@@ -719,12 +739,12 @@ export default function AgentePage() {
       } else {
         alert("Erro ao excluir: " + (data.error || "Falha"));
       }
-    } catch (err: any) {
-      alert("Erro ao excluir: " + err.message);
+    } catch (err) {
+      alert("Erro ao excluir: " + (err as Error).message);
     }
   };
 
-  const iniciarEdicaoKnowledge = (k: any) => {
+  const iniciarEdicaoKnowledge = (k: { id: string; title: string; content?: string }) => {
     setEditKId(k.id);
     setEditKTitle(k.title || "");
     setEditKContent(k.content || "");
@@ -760,8 +780,8 @@ export default function AgentePage() {
       } else {
         alert("Erro ao atualizar: " + (data.error || "Falha"));
       }
-    } catch (err: any) {
-      alert("Erro ao atualizar: " + err.message);
+    } catch (err) {
+      alert("Erro ao atualizar: " + (err as Error).message);
     }
   };
 
@@ -785,7 +805,7 @@ export default function AgentePage() {
     if (!error) loadAgent(activeAgentId);
   };
 
-  const reorderStages = async (newStages: any[]) => {
+  const reorderStages = async (newStages: Stage[]) => {
     const updates = newStages.map((s, i) => ({ ...s, order_index: i }));
     await Promise.all(
       updates.map((st) =>
@@ -794,7 +814,7 @@ export default function AgentePage() {
     );
   };
 
-  const saveStage = async (stage: any) => {
+  const saveStage = async (stage: Stage) => {
     const { error } = await supabase.from("agent_stages").update({
       goal_prompt: stage.goal_prompt,
       condition_variable: stage.condition_variable,
@@ -847,7 +867,7 @@ export default function AgentePage() {
         query = query.eq("client_id", session.clientId);
       }
       const { data } = await query;
-      setPreviewLeads((data || []) as any);
+      setPreviewLeads((data || []) as PreviewLead[]);
     } finally {
       setPreviewLeadsLoading(false);
     }
@@ -890,8 +910,8 @@ export default function AgentePage() {
       } else {
         alert("Erro: " + data.error);
       }
-    } catch (e: any) {
-      alert("Erro ao sincronizar: " + e.message);
+    } catch (e) {
+      alert("Erro ao sincronizar: " + (e as Error).message);
     }
   };
 
@@ -903,7 +923,7 @@ export default function AgentePage() {
     if (!sandboxSimulationEnabled) return;
     setSandboxSimulating(true);
     try {
-      const baseMessage = renderTemplate(sandboxTemplate, previewSample as any);
+      const baseMessage = renderTemplate(sandboxTemplate, previewSample as unknown as TemplateContext);
       let finalMessage = baseMessage;
 
       if (sandboxPersonalizeAI) {
@@ -921,14 +941,14 @@ export default function AgentePage() {
         else { alert("Erro na IA: " + data.error); return; }
       }
 
-      const agentMessage = { role: "agent", content: finalMessage };
+      const agentMessage: SandboxMsg = { role: "agent", content: finalMessage };
       setTestMessages([agentMessage]);
       setTestVariables({});
       setTestStageIndex(0);
       setTestSkippedStages([]);
       try { localStorage.setItem(`sdr_test_messages_${activeAgentId}`, JSON.stringify([agentMessage])); } catch {}
-    } catch (e: any) {
-      alert("Erro ao simular: " + e.message);
+    } catch (e) {
+      alert("Erro ao simular: " + (e as Error).message);
     } finally {
       setSandboxSimulating(false);
     }
@@ -978,7 +998,7 @@ export default function AgentePage() {
         return;
       }
 
-      const toolLogs: any[] = Array.isArray(data.logs) ? data.logs : [];
+      const toolLogs = Array.isArray(data.logs) ? data.logs : [];
 
       if (data.testStateUpdate) {
         if (data.testStateUpdate.variables) setTestVariables(data.testStateUpdate.variables);
@@ -992,7 +1012,7 @@ export default function AgentePage() {
 
       setTestMessages((prev) => [
         ...prev,
-        ...toolLogs.map((l: any) => ({ role: "tool", content: l.content || JSON.stringify(l) })),
+        ...toolLogs.map((l: { content?: string }) => ({ role: "tool" as const, content: String(l.content ?? JSON.stringify(l)) })),
       ]);
 
       for (let i = 0; i < chunks.length; i++) {
@@ -1002,8 +1022,8 @@ export default function AgentePage() {
         }
         setTestMessages((prev) => [...prev, { role: "agent", content: chunks[i] }]);
       }
-    } catch (e: any) {
-      setTestMessages((prev) => [...prev, { role: "agent", isError: true, content: `❌ Falha ao contatar servidor: ${e.message}` }]);
+    } catch (e) {
+      setTestMessages((prev) => [...prev, { role: "agent", isError: true, content: `❌ Falha ao contatar servidor: ${(e as Error).message}` }]);
     } finally {
       setTestLoading(false);
     }
@@ -1071,7 +1091,7 @@ export default function AgentePage() {
 
         <div className="max-w-6xl mx-auto p-3 sm:p-8 space-y-6 sm:space-y-8 mobile-safe-bottom">
           {/* Tabs nav */}
-          <TabsNav active={activeTab} onChange={setActiveTab} />
+          <TabsNav active={activeTab} onChange={setActiveTab} showAdvanced={advancedMode} onToggleAdvanced={toggleAdvancedMode} />
 
           <div className="space-y-12 pb-8 mobile-safe-bottom">
             {activeTab === "info" && (
@@ -1232,43 +1252,63 @@ export default function AgentePage() {
    TabsNav — barra de tabs no topo da área de conteúdo. Pequeno o
    suficiente pra ficar inline, grande o suficiente pra merecer um nome.
 ==================================================================== */
-function TabsNav({ active, onChange }: { active: Tab; onChange: (t: Tab) => void }) {
-  const tabs: Array<{ id: Tab; icon: any; label: string; shortLabel?: string }> = [
+function TabsNav({ active, onChange, showAdvanced, onToggleAdvanced }: {
+  active: Tab;
+  onChange: (t: Tab) => void;
+  showAdvanced: boolean;
+  onToggleAdvanced: () => void;
+}) {
+  const tabs: Array<{ id: Tab; icon: LucideIcon; label: string; shortLabel?: string; advancedOnly?: boolean }> = [
     { id: "info",    icon: Info,         label: "Informações", shortLabel: "Info" },
     { id: "ajustes", icon: Settings,     label: "Ajustes" },
-    { id: "etapas",  icon: ListTree,     label: "Etapas" },
+    { id: "etapas",  icon: ListTree,     label: "Etapas", advancedOnly: true },
     { id: "testes",  icon: FlaskConical, label: "Testes" },
-    { id: "logs",    icon: Activity,     label: "Logs" },
+    { id: "logs",    icon: Activity,     label: "Logs", advancedOnly: true },
   ];
+  const visible = tabs.filter((t) => !t.advancedOnly || showAdvanced);
 
   return (
-    <div className="flex gap-1 overflow-x-auto border-b border-white/[0.06] mobile-tabs-scroll pb-px">
-      {tabs.map((t) => {
-        const Icon = t.icon;
-        const isActive = active === t.id;
-        return (
-          <button
-            key={t.id}
-            onClick={() => onChange(t.id)}
-            className={cn(
-              "flex items-center gap-2 px-4 py-2.5 text-sm font-medium rounded-t-lg whitespace-nowrap transition-colors border-b-2 -mb-px",
-              isActive
-                ? "border-primary text-foreground"
-                : "border-transparent text-muted-foreground hover:text-foreground hover:bg-white/[0.03]"
-            )}
-          >
-            <Icon className="w-4 h-4" />
-            {t.shortLabel ? (
-              <>
-                <span className="hidden sm:inline">{t.label}</span>
-                <span className="sm:hidden">{t.shortLabel}</span>
-              </>
-            ) : (
-              <span>{t.label}</span>
-            )}
-          </button>
-        );
-      })}
+    <div className="flex items-stretch border-b border-white/[0.06] mobile-tabs-scroll pb-px">
+      <div className="flex gap-1 overflow-x-auto flex-1 min-w-0">
+        {visible.map((t) => {
+          const Icon = t.icon;
+          const isActive = active === t.id;
+          return (
+            <button
+              key={t.id}
+              onClick={() => onChange(t.id)}
+              className={cn(
+                "flex items-center gap-2 px-4 py-2.5 text-sm font-medium rounded-t-lg whitespace-nowrap transition-colors border-b-2 -mb-px",
+                isActive
+                  ? "border-primary text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground hover:bg-white/[0.03]"
+              )}
+            >
+              <Icon className="w-4 h-4" />
+              {t.shortLabel ? (
+                <>
+                  <span className="hidden sm:inline">{t.label}</span>
+                  <span className="sm:hidden">{t.shortLabel}</span>
+                </>
+              ) : (
+                <span>{t.label}</span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+      <button
+        onClick={onToggleAdvanced}
+        title={showAdvanced ? "Ocultar abas avançadas (Etapas e Logs)" : "Mostrar abas avançadas (Etapas e Logs)"}
+        className={cn(
+          "shrink-0 self-center ml-2 px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-widest border transition-colors cursor-pointer",
+          showAdvanced
+            ? "bg-primary/15 border-primary/40 text-primary"
+            : "bg-white/[0.03] border-white/10 text-muted-foreground hover:text-foreground hover:bg-white/[0.06]"
+        )}
+      >
+        {showAdvanced ? "− Avançado" : "Avançado"}
+      </button>
     </div>
   );
 }

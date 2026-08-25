@@ -235,7 +235,7 @@ export async function transcribeAudioWithWhisper(
     }
   }
 
-  let binPath = readText(BINPATH_PATH);
+  const binPath = readText(BINPATH_PATH);
   let modelPath = getModelPath();
 
   // Safety: se o modelo configurado não existe, procura qualquer ggml-*.bin

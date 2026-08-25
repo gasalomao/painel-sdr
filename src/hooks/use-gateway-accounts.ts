@@ -53,11 +53,8 @@ export function useGatewayAccounts() {
 
   useEffect(() => {
     let cancelled = false;
-    const fresh = cached && Date.now() - cached.at < TTL_MS;
-    if (fresh) {
-      setAccounts(cached!.accounts);
-      return;
-    }
+    // Cache fresco: o useState inicial já hidratou esses mesmos valores — pula o fetch.
+    if (cached && Date.now() - cached.at < TTL_MS) return;
     fetchAccounts().then((accs) => {
       if (cancelled) return;
       cached = { at: Date.now(), accounts: accs };

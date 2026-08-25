@@ -1225,7 +1225,7 @@ export default function DisparoPage() {
                             className="mt-1 bg-black/40 border-white/10 h-40 font-mono text-[11px]"
                           />
                           <p className="text-[9px] text-muted-foreground mt-1 leading-relaxed">
-                            Esse texto vira o "system prompt" da IA ao reescrever cada mensagem. A MENSAGEM-BASE (template) + DADOS DO LEAD são anexados automaticamente; você só precisa descrever tom e abordagem aqui.
+                            Esse texto vira o &quot;system prompt&quot; da IA ao reescrever cada mensagem. A MENSAGEM-BASE (template) + DADOS DO LEAD são anexados automaticamente; você só precisa descrever tom e abordagem aqui.
                           </p>
                         </div>
                       </div>

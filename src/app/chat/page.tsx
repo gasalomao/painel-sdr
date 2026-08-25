@@ -19,6 +19,8 @@ function ChatPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const deepLinkConvId = searchParams.get("c");
+  const deepLinkName = searchParams.get("n") || "";
+  const deepLinkInstance = searchParams.get("i") || "";
 
   const { clientId, loading: sessionLoading } = useClientSession();
 
@@ -290,19 +292,54 @@ function ChatPageContent() {
         return sortConversationsByLastMessage(merged);
       });
       
-      if (deepLinkConvId && autoSelectedForDeepLinkRef.current !== deepLinkConvId && loaded.length > 0) {
+      if (deepLinkConvId && autoSelectedForDeepLinkRef.current !== deepLinkConvId) {
         autoSelectedForDeepLinkRef.current = deepLinkConvId;
         if (activeConversation?.id === deepLinkConvId) return;
-        
-        const match = loaded.find((c) => c.id === deepLinkConvId);
+
+        const match = loaded.find((c) => c.id === deepLinkConvId || isSameJid(c.id, deepLinkConvId));
         if (match) {
           setActiveConversation(match);
           setActiveContact(match.contact ?? null);
           setMessages([]);
+        } else {
+          // Lead sem conversa prévia: cria uma conversa transitória local.
+          // Mensagens carregam por JID; o primeiro envio via /api/send-message
+          // persiste contato + session no banco (find-or-create).
+          const digits = deepLinkConvId.replace(/\D/g, "");
+          const now = new Date().toISOString();
+          const transient: Conversation = {
+            id: deepLinkConvId,
+            user_id: clientId || "",
+            contact_id: "",
+            status: "open",
+            unread_count: 0,
+            created_at: now,
+            updated_at: now,
+            instance_name: deepLinkInstance || undefined,
+            last_instance: deepLinkInstance || undefined,
+            contact: {
+              id: "",
+              user_id: clientId || "",
+              account_id: clientId || "",
+              phone: digits,
+              name: deepLinkName || digits || "Sem Nome",
+              company: deepLinkName || "",
+              remote_jid: deepLinkConvId,
+              created_at: now,
+              updated_at: now,
+              tags: [],
+            },
+          };
+          setConversations((prev) =>
+            prev.some((c) => isSameJid(c.id, transient.id)) ? prev : sortConversationsByLastMessage([transient, ...prev])
+          );
+          setActiveConversation(transient);
+          setActiveContact(transient.contact ?? null);
+          setMessages([]);
         }
       }
     },
-    [deepLinkConvId, activeConversation?.id]
+    [deepLinkConvId, deepLinkName, deepLinkInstance, activeConversation?.id, clientId]
   );
 
   const handleSelectConversation = useCallback(
