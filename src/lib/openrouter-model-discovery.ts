@@ -17,6 +17,8 @@ export type OpenRouterModel = {
   /** true se o modelo suporta function/tool calling (usado pelo Agente SDR). */
   supportsTools: boolean;
   pricing?: { prompt?: string; completion?: string };
+  /** Modalidades de entrada aceitas (ex: ["text","audio"]) — undefined se a API não informou. */
+  inputModalities?: string[];
 };
 
 type Cache = { models: OpenRouterModel[]; at: number };
@@ -72,6 +74,9 @@ export async function listAvailableOpenRouterModels(force = false): Promise<Open
           contextLength: m.context_length,
           supportsTools: params.includes("tools"),
           pricing: m.pricing ? { prompt: m.pricing.prompt, completion: m.pricing.completion } : undefined,
+          inputModalities: Array.isArray(m?.architecture?.input_modalities)
+            ? m.architecture.input_modalities.map(String)
+            : undefined,
         };
       });
 
@@ -87,6 +92,39 @@ export async function listAvailableOpenRouterModels(force = false): Promise<Open
 export function invalidateOpenRouterModelsCache() {
   CACHE = null;
   EMBED_CACHE = null;
+}
+
+// ============================================================================
+// ÁUDIO — modelos multimodal que aceitam input de áudio (transcrição)
+// ============================================================================
+
+/** true se o preço do prompt é 0 (modelo :free). */
+export function isFreePricing(pricing?: { prompt?: string }): boolean {
+  const n = parseFloat(pricing?.prompt ?? "");
+  return Number.isFinite(n) && n === 0;
+}
+
+/** true se o modelo aceita áudio como entrada (input_modalities contém "audio"). */
+export function isOpenRouterAudioModel(m: OpenRouterModel): boolean {
+  return Array.isArray(m.inputModalities) && m.inputModalities.includes("audio");
+}
+
+/** Ordena grátis primeiro, mantendo a ordem relativa dentro de cada grupo. */
+export function sortAudioModelsFreeFirst(models: OpenRouterModel[]): OpenRouterModel[] {
+  return [...models].sort((a, b) => {
+    const fa = isFreePricing(a.pricing) ? 0 : 1;
+    const fb = isFreePricing(b.pricing) ? 0 : 1;
+    return fa - fb;
+  });
+}
+
+/**
+ * Lista modelos OpenRouter que ACEITAM ÁUDIO, grátis primeiro. Cache herdado
+ * do listAvailableOpenRouterModels (10 min). Retorna [] se sem chave/offline.
+ */
+export async function listOpenRouterAudioModels(force = false): Promise<OpenRouterModel[]> {
+  const all = await listAvailableOpenRouterModels(force);
+  return sortAudioModelsFreeFirst(all.filter(isOpenRouterAudioModel));
 }
 
 // ============================================================================

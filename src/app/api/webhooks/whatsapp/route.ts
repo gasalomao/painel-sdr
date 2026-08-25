@@ -329,11 +329,6 @@ function sanitizeMimetype(mt: string | null | undefined, fallback: string): stri
 }
 
 /**
- * Transcreve áudio usando Gemini (multimodal). API Key central em ai_organizer_config.
- * Suporta ogg/opus (formato padrão de áudio do WhatsApp), mp3, wav, etc.
- * Retorna null em caso de falha — o pipeline continua sem transcrição.
- */
-/**
  * Modelos Gemini tentados em ordem — ordenados por custo-benefício (mais
  * barato primeiro, fallback se a key não tiver acesso). Todos suportam
  * inlineData (áudio/imagem/PDF) nativamente.
@@ -348,107 +343,6 @@ function sanitizeMimetype(mt: string | null | undefined, fallback: string): stri
 async function getGeminiModelChain(): Promise<string[]> {
   const { buildFallbackChain } = await import("@/lib/gemini-model-discovery");
   return buildFallbackChain();
-}
-
-async function transcribeAudioWithGemini(base64: string, mimetype: string, debugMessageId?: string, clientId?: string): Promise<string | null> {
-  const cfg = await getOrganizerConfig();
-  const apiKey = cfg?.api_key;
-
-  const logFail = async (reason: string, extra: any = {}) => {
-    console.error(`[Transcription] ❌ ${reason}`, extra);
-    try {
-      await supabase.from("webhook_logs").insert({
-        instance_name: "transcription",
-        event: "TRANSCRIPTION_FAIL",
-        payload: { reason, message_id: debugMessageId, ...extra },
-        created_at: new Date().toISOString(),
-      });
-    } catch { /* ignore */ }
-  };
-
-  if (!apiKey) {
-    await logFail("Sem API Key do Gemini em /configuracoes (ai_organizer_config.api_key vazio).");
-    return null;
-  }
-
-  const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");
-  const sizeBytes = Math.ceil(cleanBase64.length * 0.75);
-  if (sizeBytes > 20 * 1024 * 1024) {
-    await logFail("Áudio maior que 20 MB — Gemini inline não suporta.", { sizeBytes });
-    return null;
-  }
-
-  // Gemini aceita: audio/wav, mp3, aiff, aac, ogg, flac.
-  // WhatsApp manda "audio/ogg; codecs=opus" — sanitiza pra "audio/ogg" e tem fallback.
-  const tryMimes = Array.from(new Set([
-    sanitizeMimetype(mimetype, "audio/ogg"),
-    "audio/ogg",
-    "audio/mpeg",
-    "audio/wav",
-  ]));
-
-  const { GoogleGenerativeAI } = await import("@google/generative-ai");
-  const genAI = new GoogleGenerativeAI(apiKey);
-
-  // Matriz: modelo × mimetype. Para cada modelo, tenta cada mimetype.
-  let lastErr: any = null;
-  const attempts: any[] = [];
-  const chain = await getGeminiModelChain();
-  if (!chain.length) {
-    await logFail("Não foi possível descobrir modelos Gemini (API key inválida ou Google fora).");
-    return null;
-  }
-  for (const modelName of chain) {
-    const model = genAI.getGenerativeModel({ model: modelName });
-    for (const tryMime of tryMimes) {
-      try {
-        console.log(`[Transcription] model=${modelName} mime=${tryMime} size=${sizeBytes}B msgId=${debugMessageId}`);
-        const result = await model.generateContent([
-          { inlineData: { data: cleanBase64, mimeType: tryMime } },
-          { text: "Transcreva esse áudio em Português (BR). Devolva APENAS o texto transcrito, sem aspas, sem prefixo, sem explicação. Se não entender, devolva '[áudio inaudível]'." },
-        ]);
-        const text = result.response.text().trim().replace(/^["']+|["']+$/g, "");
-        if (text) {
-          console.log(`[Transcription] ✓ OK com ${modelName}/${tryMime}: ${text.slice(0, 80)}`);
-          // Token tracking
-          {
-            const { logTokenUsage, extractGeminiUsage } = await import("@/lib/token-usage");
-            const u = extractGeminiUsage(result);
-            await logTokenUsage({
-              source: "other",
-              sourceLabel: "Transcrição de áudio",
-              model: modelName,
-              promptTokens: u.promptTokens,
-              completionTokens: u.completionTokens,
-              totalTokens: u.totalTokens,
-              clientId: clientId || undefined,
-              metadata: { kind: "audio_transcription", mime: tryMime, msgId: debugMessageId },
-            });
-          }
-          return text;
-        }
-        attempts.push({ model: modelName, mime: tryMime, result: "vazio" });
-      } catch (e: any) {
-        lastErr = e;
-        const msg = String(e?.message || e).slice(0, 400);
-        attempts.push({ model: modelName, mime: tryMime, error: msg });
-        console.warn(`[Transcription] falha ${modelName}/${tryMime}: ${msg}`);
-
-        // API key errada → aborta tudo, não adianta tentar outros modelos
-        if (/API key|invalid.*key|unauthorized|401|403.*api/i.test(msg) && !/model/i.test(msg)) {
-          await logFail(`API Key inválida ou sem permissão: ${msg}`, { attempts });
-          return null;
-        }
-        // Modelo não existe pra essa key → tenta próximo modelo (quebra o loop de mime)
-        if (/not found|404|does not exist|not supported|model/i.test(msg)) {
-          break;
-        }
-      }
-    }
-  }
-
-  await logFail("Nenhuma combinação modelo/mimetype funcionou.", { attempts, lastError: String(lastErr?.message || lastErr || "").slice(0, 400) });
-  return null;
 }
 
 /**
@@ -1050,23 +944,17 @@ export async function POST(req: NextRequest) {
           let transcript: string | null = null;
           let transcribeProvider = "none";
 
-          // Whisper (grátis, local CPU)
-          if (transcriptionMethod === "auto" || transcriptionMethod === "whisper") {
-            try {
-              const { transcribeAudioWithWhisper } = await import("@/lib/whisper-manager");
-              console.log("[Media] Transcrevendo com whisper.cpp...");
-              transcript = await transcribeAudioWithWhisper(base64Media, effMimetype);
-              if (transcript) transcribeProvider = "whisper";
-            } catch (wErr: any) {
-              console.warn("[Media] whisper.cpp indisponível:", wErr?.message);
+          // Cadeia única: whisper → openrouter (grátis primeiro) → gemini
+          // (ordem definida em shared-helpers.transcribeAudioDetailed).
+          try {
+            const { transcribeAudioDetailed } = await import("@/app/api/webhooks/shared-helpers");
+            const det = await transcribeAudioDetailed(base64Media, effMimetype, finalId, transcriptionMethod);
+            if (det) {
+              transcript = det.text;
+              transcribeProvider = det.provider;
             }
-          }
-
-          // Gemini fallback
-          if (!transcript && (transcriptionMethod === "auto" || transcriptionMethod === "gemini")) {
-            console.log("[Media] Transcrevendo com Gemini...");
-            transcript = await transcribeAudioWithGemini(base64Media, effMimetype, finalId, clientId);
-            if (transcript) transcribeProvider = "gemini";
+          } catch (tErr: any) {
+            console.warn("[Media] Pipeline de transcrição falhou:", tErr?.message);
           }
 
           if (transcript) {
@@ -1074,7 +962,7 @@ export async function POST(req: NextRequest) {
             console.log(`[Media] Transcrição (${transcribeProvider}):`, transcript.slice(0, 80));
           } else {
             enrichedContent = "[🎤 O cliente enviou um áudio que não consegui transcrever]";
-            console.warn("[Media] Transcrição falhou — whisper + gemini ambos retornaram null.");
+            console.warn("[Media] Transcrição falhou — nenhum provedor (whisper/openrouter/gemini) funcionou.");
             // Log detalhado pra diagnóstico no banco
             try {
               let whisperDiag: any = "n/a";

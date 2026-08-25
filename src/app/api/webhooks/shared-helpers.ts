@@ -185,54 +185,105 @@ export async function uploadMediaBase64(base64: string, remoteJid: string, mimet
 // IA: TRANSCRIÇÃO + DESCRIÇÃO (lazy import pra não carregar se não precisar)
 // ============================================================================
 
+export type TranscriptionMethodValue = "auto" | "whisper" | "gemini" | "openrouter" | "disabled";
+
+/** Ordem de tentativas por método — espelho do "falhou Gemini → Whisper". */
+const TRANSCRIPTION_STEPS: Record<TranscriptionMethodValue, string[]> = {
+  auto: ["whisper", "openrouter", "gemini"],
+  openrouter: ["openrouter", "whisper", "gemini"],
+  whisper: ["whisper"],
+  gemini: ["gemini"],
+  disabled: [],
+};
+
+/**
+ * Transcreve com fallback completo e informa o provedor que funcionou
+ * ("whisper" | "openrouter:<model>" | "gemini"). Null se tudo falhar.
+ */
+export async function transcribeAudioDetailed(
+  base64: string,
+  mimetype: string,
+  debugMessageId?: string,
+  method: TranscriptionMethodValue = "auto",
+): Promise<{ text: string; provider: string } | null> {
+  if (method === "disabled") return null;
+  void debugMessageId;
+
+  const runWhisper = async (): Promise<string | null> => {
+    try {
+      const { transcribeAudioWithWhisper } = await import("@/lib/whisper-manager");
+      return await transcribeAudioWithWhisper(base64, mimetype);
+    } catch {
+      return null;
+    }
+  };
+
+  const runOpenRouter = async (): Promise<{ text: string; model: string } | null> => {
+    try {
+      const { transcribeAudioWithOpenRouter } = await import("@/lib/openrouter-transcription");
+      return await transcribeAudioWithOpenRouter(
+        base64.replace(/^data:.*?;base64,/, ""),
+        mimetype,
+      );
+    } catch {
+      return null;
+    }
+  };
+
+  const runGemini = async (): Promise<string | null> => {
+    try {
+      const { GoogleGenerativeAI } = await import("@google/generative-ai");
+      const cfg = await getOrganizerConfig();
+      const apiKey = cfg?.api_key;
+      if (!apiKey) return null;
+      const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");
+      const tryMimes = Array.from(new Set([sanitizeMimetype(mimetype, "audio/ogg"), "audio/ogg", "audio/mpeg", "audio/wav"]));
+      const { buildFallbackChain } = await import("@/lib/gemini-model-discovery");
+      const chain = await buildFallbackChain();
+      if (!chain.length) return null;
+      const genAI = new GoogleGenerativeAI(apiKey);
+      for (const modelName of chain) {
+        const model = genAI.getGenerativeModel({ model: modelName });
+        for (const tryMime of tryMimes) {
+          try {
+            const result = await model.generateContent([
+              { inlineData: { data: cleanBase64, mimeType: tryMime } },
+              { text: "Transcreva esse áudio em Português (BR). Devolva APENAS o texto transcrito." },
+            ]);
+            const text = result.response.text().trim();
+            if (text) return text;
+          } catch {}
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
+  for (const step of TRANSCRIPTION_STEPS[method] || TRANSCRIPTION_STEPS.auto) {
+    if (step === "whisper") {
+      const t = await runWhisper();
+      if (t) return { text: t, provider: "whisper" };
+    } else if (step === "openrouter") {
+      const r = await runOpenRouter();
+      if (r) return { text: r.text, provider: `openrouter:${r.model}` };
+    } else {
+      const t = await runGemini();
+      if (t) return { text: t, provider: "gemini" };
+    }
+  }
+  return null;
+}
+
 export async function transcribeAudio(
   base64: string,
   mimetype: string,
   debugMessageId?: string,
-  method: "auto" | "whisper" | "gemini" | "disabled" = "auto",
+  method: TranscriptionMethodValue = "auto",
 ): Promise<string | null> {
-  if (method === "disabled") return null;
-
-  // Whisper (grátis, local CPU).
-  if (method === "auto" || method === "whisper") {
-    try {
-      const { transcribeAudioWithWhisper } = await import("@/lib/whisper-manager");
-      const t = await transcribeAudioWithWhisper(base64, mimetype);
-      if (t) return t;
-    } catch {}
-  }
-
-  // Gemini fallback (apenas em modo auto ou gemini).
-  if (method === "whisper") return null;
-
-  try {
-    const { GoogleGenerativeAI } = await import("@google/generative-ai");
-    const cfg = await getOrganizerConfig();
-    const apiKey = cfg?.api_key;
-    if (!apiKey) return null;
-    const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");
-    const tryMimes = Array.from(new Set([sanitizeMimetype(mimetype, "audio/ogg"), "audio/ogg", "audio/mpeg", "audio/wav"]));
-    const { buildFallbackChain } = await import("@/lib/gemini-model-discovery");
-    const chain = await buildFallbackChain();
-    if (!chain.length) return null;
-    const genAI = new GoogleGenerativeAI(apiKey);
-    for (const modelName of chain) {
-      const model = genAI.getGenerativeModel({ model: modelName });
-      for (const tryMime of tryMimes) {
-        try {
-          const result = await model.generateContent([
-            { inlineData: { data: cleanBase64, mimeType: tryMime } },
-            { text: "Transcreva esse áudio em Português (BR). Devolva APENAS o texto transcrito." },
-          ]);
-          const text = result.response.text().trim();
-          if (text) return text;
-        } catch {}
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
+  const r = await transcribeAudioDetailed(base64, mimetype, debugMessageId, method);
+  return r?.text ?? null;
 }
 
 export async function describeImage(base64: string, mimetype: string): Promise<string | null> {

@@ -32,6 +32,25 @@ vi.mock("@/lib/gemini-model-discovery", () => ({
   buildFallbackChain: vi.fn(async () => []),
 }));
 
+// Sem chaves/modelos OpenRouter → etapa OpenRouter do "auto" retorna null
+// na hora, SEM rede (evita chamadas reais ao Supabase/OpenRouter nestes testes).
+vi.mock("@/lib/ai-keys", () => ({
+  getAiKeys: vi.fn(async () => ({
+    gemini: null,
+    openrouter: null,
+    openrouterKeys: [],
+    gatewayBaseUrl: null,
+    gatewayApiKey: null,
+    gatewayFallbackModel: null,
+    gatewayEndpoints: [],
+    aiCombos: [],
+  })),
+}));
+
+vi.mock("@/lib/openrouter-model-discovery", () => ({
+  listOpenRouterAudioModels: vi.fn(async () => []),
+}));
+
 describe("shared-helpers transcribeAudio — whisper primeiro, Gemini fallback", () => {
   beforeEach(() => {
     vi.clearAllMocks();

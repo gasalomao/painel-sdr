@@ -187,7 +187,7 @@ export default function AgentePage() {
   const [is24h, setIs24h] = useState(false);
   const [awayMessage, setAwayMessage] = useState("");
   const [disableGroups, setDisableGroups] = useState(false);
-  const [transcriptionMethod, setTranscriptionMethod] = useState<"auto" | "whisper" | "gemini" | "disabled">("auto");
+  const [transcriptionMethod, setTranscriptionMethod] = useState<"auto" | "whisper" | "gemini" | "openrouter" | "disabled">("auto");
 
   // ============= ETAPAS DO FUNIL =============
   const [stages, setStages] = useState<Stage[]>([]);

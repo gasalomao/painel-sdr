@@ -86,7 +86,7 @@ export async function shouldSkipGroupActions(
   return isGroupDisabled(agentId);
 }
 
-export type TranscriptionMethod = "auto" | "whisper" | "gemini" | "disabled";
+export type TranscriptionMethod = "auto" | "whisper" | "gemini" | "openrouter" | "disabled";
 
 export async function getTranscriptionMethod(agentId: number | string | null | undefined): Promise<TranscriptionMethod> {
   if (!agentId) return "auto";
@@ -97,7 +97,7 @@ export async function getTranscriptionMethod(agentId: number | string | null | u
       .eq("id", agentId)
       .maybeSingle();
     const m = data?.transcription_method;
-    if (m === "whisper" || m === "gemini" || m === "disabled") return m;
+    if (m === "whisper" || m === "gemini" || m === "openrouter" || m === "disabled") return m;
     return "auto";
   } catch {
     return "auto";

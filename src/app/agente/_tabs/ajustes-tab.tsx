@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
@@ -8,14 +9,74 @@ import { Toggle } from "../_components/toggle";
 import { SaveButton } from "../_components/save-button";
 
 export type ScheduleRow = { day: string; active: boolean; start: string; end: string };
-export type TranscriptionMethod = "auto" | "whisper" | "gemini" | "disabled";
+export type TranscriptionMethod = "auto" | "whisper" | "gemini" | "openrouter" | "disabled";
 
 const TRANSCRIPTION_OPTIONS: { value: TranscriptionMethod; label: string; desc: string }[] = [
-  { value: "auto", label: "Automático", desc: "Whisper primeiro (grátis), Gemini se falhar" },
+  { value: "auto", label: "Automático", desc: "Whisper primeiro (grátis), depois OpenRouter free e Gemini se falhar" },
   { value: "whisper", label: "Whisper (VPS)", desc: "Local e grátis — não gasta tokens" },
+  { value: "openrouter", label: "OpenRouter (Cloud)", desc: "Modelos multimodal com áudio — grátis primeiro, fallback automático entre modelos/chaves" },
   { value: "gemini", label: "Gemini (Cloud)", desc: "Melhor qualidade — gasta tokens da API" },
   { value: "disabled", label: "Desativado", desc: "Não transcreve áudios" },
 ];
+
+type AudioModel = { id: string; name: string; free: boolean };
+
+/** Lista ao vivo dos modelos OpenRouter que aceitam áudio (grátis primeiro). */
+function OpenRouterModelList() {
+  const [models, setModels] = useState<AudioModel[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/openrouter-audio-models")
+      .then((r) => r.json())
+      .then((d) => {
+        if (!alive) return;
+        if (d?.success && Array.isArray(d.models)) setModels(d.models);
+        else setError(d?.error || "Falha ao listar modelos.");
+      })
+      .catch(() => alive && setError("Falha ao listar modelos."));
+    return () => { alive = false; };
+  }, []);
+
+  if (error) return <p className="text-xs text-red-400/80">{error}</p>;
+  if (!models) return <p className="text-xs text-muted-foreground">Carregando modelos OpenRouter...</p>;
+  if (!models.length)
+    return (
+      <p className="text-xs text-muted-foreground">
+        Nenhum modelo de áudio retornado. Configure a API Key do OpenRouter em{" "}
+        <a href="/configuracoes" className="text-primary underline decoration-dotted">Configurações</a>.
+      </p>
+    );
+
+  return (
+    <div className="space-y-2">
+      <p className="text-xs text-muted-foreground">
+        {models.length} modelos aceitam áudio ({models.filter((m) => m.free).length} grátis). Ordem de fallback: grátis → pagos.
+      </p>
+      <div className="flex flex-wrap gap-1.5">
+        {models.slice(0, 12).map((m) => (
+          <span
+            key={m.id}
+            title={m.id}
+            className={cn(
+              "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px]",
+              m.free
+                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                : "border-white/[0.08] bg-white/[0.02] text-muted-foreground",
+            )}
+          >
+            {m.free && <span className="font-semibold">GRÁTIS</span>}
+            {m.name}
+          </span>
+        ))}
+        {models.length > 12 && (
+          <span className="text-[11px] text-muted-foreground self-center">+{models.length - 12} outros</span>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export function AjustesTab({
   is24h,
@@ -225,6 +286,12 @@ export function AjustesTab({
             </button>
           ))}
         </div>
+
+        {transcriptionMethod === "openrouter" && (
+          <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+            <OpenRouterModelList />
+          </div>
+        )}
       </div>
 
       <SaveButton label="Salvar Configurações" onSave={onSave} disabled={saving} />
