@@ -206,6 +206,16 @@ export async function getWhisperStatus(): Promise<WhisperStatus> {
 }
 
 /**
+ * Semáforo de concorrência: cada whisper-cli usa até min(cpus,8) threads.
+ * Sem limite, 5 áudios simultâneos starvam o CPU do processo inteiro
+ * (webhook + IA + painel). Cap = ¼ dos núcleos, mínimo 1. Demais chamadas
+ * ficam na fila FIFO esperando a vez.
+ */
+const WHISPER_CONCURRENCY = Math.max(1, Math.floor((os.cpus()?.length || 2) / 4));
+let whisperActive = 0;
+const whisperWaiters: Array<() => void> = [];
+
+/**
  * Transcreve um áudio (base64) usando whisper.cpp local. Devolve o texto ou
  * `null` em falha (caller cai no fallback Gemini). Formata esperado pelo
  * webhook: recebe o base64 do WhatsApp (audio/ogg; codecs=opus), decodifica,
@@ -216,6 +226,28 @@ export async function getWhisperStatus(): Promise<WhisperStatus> {
  * @param timeoutMs   Timeout (default 60s — áudios longos em CPU podem demorar)
  */
 export async function transcribeAudioWithWhisper(
+  base64: string,
+  mimetype: string,
+  timeoutMs = 120000,
+): Promise<string | null> {
+  // Hand-off direto de slot: quem espera recebe o slot DO finalizador
+  // (active não muda). Um simples "decrementa e espera o próximo incrementar"
+  // tinha janela de microtask onde um caller novo entrava e passava do cap.
+  if (whisperActive >= WHISPER_CONCURRENCY) {
+    await new Promise<void>((resolve) => whisperWaiters.push(resolve));
+  } else {
+    whisperActive++;
+  }
+  try {
+    return await transcribeAudioWithWhisperUnqueued(base64, mimetype, timeoutMs);
+  } finally {
+    const next = whisperWaiters.shift();
+    if (next) next();
+    else whisperActive--;
+  }
+}
+
+async function transcribeAudioWithWhisperUnqueued(
   base64: string,
   mimetype: string,
   timeoutMs = 120000,

@@ -13,6 +13,7 @@ import { maskJid } from "@/lib/pii";
 import { resolveFunnelStage, checkSchedulesSync, splitMessage } from "@/lib/agent-format";
 import { parseAgendaDateTime, isDuplicateSlot, hasAgentOverlapConflict } from "@/lib/agenda-logic";
 import { indexKnowledgeDocument } from "@/lib/rag";
+import { getAiKeys } from "@/lib/ai-keys";
 import { formatResultsForAI, needsFreshWebSearch, webSearch } from "@/lib/web-search";
 
 export const dynamic = 'force-dynamic';
@@ -38,13 +39,13 @@ export async function POST(req: NextRequest) {
        return NextResponse.json({ success: false, error: "Missing remoteJid or text" });
     }
 
-    // Log de entrada para depuração no painel
-    await supabase.from("webhook_logs").insert({
+    // Log de entrada — fire-and-forget: nunca atrasa o processamento da mensagem.
+    supabase.from("webhook_logs").insert({
        instance_name: instanceName,
        event: "AGENT_PROCESS_START",
        payload: { remoteJid, text_preview: text.slice(0, 50), isTestMode },
        created_at: new Date().toISOString()
-    });
+    }).then(() => {}, () => {});
     
     if (isStatusUpdate) {
        return NextResponse.json({ success: true, ignored: true });
@@ -77,7 +78,8 @@ export async function POST(req: NextRequest) {
     // dinâmicas que o prompt do agente pode usar ({{nome_empresa}}, {{ramo}}, etc).
     const [channelRes, orgRes, leadRes, contactRes] = await Promise.all([
        supabase.from("channel_connections").select("agent_id, client_id").eq("instance_name", instanceName).maybeSingle(),
-       supabase.from("ai_organizer_config").select("*").eq("id", 1).single(),
+       // Chaves de IA via cache (30s) — era um select(*) a cada mensagem recebida.
+       getAiKeys().catch(() => null),
        !isTestMode ? supabase.from("leads_extraidos")
          .select('"remoteJid", nome_negocio, ramo_negocio, categoria, endereco, website, avaliacao, reviews, telefone, status')
          .eq("remoteJid", remoteJid).maybeSingle() : Promise.resolve({ data: null }),
@@ -85,7 +87,11 @@ export async function POST(req: NextRequest) {
     ]);
 
     const channel = channelRes.data;
-    const orgConfig = orgRes.data;
+    // Shape compatível com a leitura antiga de ai_organizer_config (só estas
+    // 2 chaves são usadas no pipeline).
+    const orgConfig = orgRes
+      ? { api_key: orgRes.gemini, openrouter_api_key: orgRes.openrouter }
+      : null;
     let leadRow = leadRes.data || null;
     let contactRow = contactRes.data || null;
 
@@ -1221,10 +1227,15 @@ ${capturedVariablesPrompt}
           let updatedSuccess = false;
 
           if (rawProd) {
+             // Pré-filtro ILIKE: antes carregava a KB INTEIRA (contents completos)
+             // em memória por tool call. Busca só docs que mencionam o produto.
+             const likeTerm = rawProd.replace(/[%_,()"]/g, " ").trim();
              const { data: docs } = await supabase
                 .from("agent_knowledge")
                 .select("id, title, content, client_id")
-                .eq("agent_id", agentId);
+                .eq("agent_id", agentId)
+                .or(likeTerm ? `title.ilike.%${likeTerm}%,content.ilike.%${likeTerm}%` : "id.neq.null")
+                .limit(20);
 
              for (const d of docs || []) {
                 if (!d.content) continue;
@@ -1821,7 +1832,9 @@ ${capturedVariablesPrompt}
                   const reqWb = await fetch(matchTool.webhook_url, {
                      method: "POST",
                      headers: { "Content-Type": "application/json" },
-                     body: JSON.stringify({ query: callArgs.query, remoteJid, instanceName })
+                     body: JSON.stringify({ query: callArgs.query, remoteJid, instanceName }),
+                     // Sem timeout, n8n/Make pendurado trava o turno do agente inteiro.
+                     signal: AbortSignal.timeout(15_000),
                   });
                   const reqJson = await reqWb.json();
                   functionResultRes = { success: true, api_response: reqJson };
@@ -2243,15 +2256,15 @@ ${capturedVariablesPrompt}
         }
     }
 
-    // Log de resultado (resumo)
-    await supabase.from("webhook_logs").insert({
+    // Log de resultado (resumo) — fire-and-forget: resposta já pode voltar.
+    supabase.from("webhook_logs").insert({
        instance_name: instanceName,
        event: anySendError ? "AGENT_SEND_ERROR" : "AGENT_SEND_SUCCESS",
-       payload: anySendError 
+       payload: anySendError
          ? { remoteJid, error: anySendError }
          : { remoteJid, text_preview: finalAnswer.slice(0, 50), chunks: messageChunks.length },
        created_at: new Date().toISOString()
-    });
+    }).then(() => {}, () => {});
 
     return NextResponse.json({ success: true, ai_responded: true, sendResult: lastSendResult, sendError: anySendError, testStateUpdate });
 

@@ -48,6 +48,9 @@ function LoginForm() {
         return;
       }
       const target = fromPath && fromPath !== "/login" && !fromPath.startsWith("/login") ? fromPath : "/";
+      // Avisa consumidores de sessão cacheada (header/sidebar/páginas) que o
+      // estado mudou — login é SPA, sem reload o cache de módulo ficava velho.
+      window.dispatchEvent(new Event("session-changed"));
       router.push(target);
       router.refresh();
     } catch (err: any) {

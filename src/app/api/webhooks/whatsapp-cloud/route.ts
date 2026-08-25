@@ -19,6 +19,7 @@ import { resolveChannel, resolveInstanceFromPhoneNumberId } from "@/lib/channel"
 import { getEffectiveStatus } from "@/lib/bot-status";
 import { shouldSkipGroupActions, getTranscriptionMethod } from "@/lib/bot-status";
 import { isManualSend } from "@/lib/manual-send-registry";
+import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 export const dynamic = "force-dynamic";
@@ -357,10 +358,27 @@ export async function POST(req: NextRequest) {
       if (content && (m.text || m.caption || m.type === "audio") && sessionRow?.id && !groupDisabled) {
         const eff = await getEffectiveStatus(sessionRow as any);
         if (eff.isActive) {
+          // Precondição: sem secret interno o /api/agent/process responde 401
+          // silencioso — loga o hint pra diagnóstico (paridade com webhook legado).
+          const internalSecretValue = getInternalSecret();
+          if (!internalSecretValue) {
+            supabase.from("webhook_logs").insert({
+              instance_name: instanceName,
+              event: "AGENT_DISPATCH_NO_SECRET",
+              payload: { hint: "AUTH_SECRET ou SUPABASE_SERVICE_ROLE_KEY vazio no env; /api/agent/process vai rejeitar com 401", remote_jid: m.remoteJid },
+              created_at: new Date().toISOString(),
+            }).then(() => {}, () => {});
+          }
           fetch(`${INTERNAL_BASE}/api/agent/process`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            // Header interno obrigatório — sem ele o agent/process rejeita
+            // (cookie não existe em chamada server-to-server → 401 silencioso).
+            headers: {
+              "Content-Type": "application/json",
+              [INTERNAL_SECRET_HEADER]: getInternalSecret(),
+            },
             body: JSON.stringify({ instanceName, remoteJid: m.remoteJid, text: m.text || m.caption || content, sessionId: sessionRow.id }),
+            signal: AbortSignal.timeout(120_000),
           }).catch(() => {});
         } else {
           await supabase.from("webhook_logs").insert({

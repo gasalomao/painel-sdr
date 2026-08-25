@@ -313,9 +313,13 @@ export default function WhatsAppPage() {
 
       const owner = data.data?.instance?.owner || data.data?.owner || null;
       const profileName = data.data?.instance?.profileName || data.data?.profileName || null;
+
+      // Estado igual ao anterior → nem atualiza estado nem bate no banco
+      // (o poll roda a cada 15s por instância; sem isso é 1 UPDATE ocioso por tick).
+      if (statusMap[instanceName]?.state === state) return;
       setStatusMap(prev => ({ ...prev, [instanceName]: { state, owner, profileName } }));
 
-      // Persiste no banco se o estado for válido — escopado por client_id
+      // Persiste no banco se o estado for válido - escopado por client_id
       // pra não atualizar instância de outro tenant caso RLS esteja frouxa.
       if (state === "open" || state === "close") {
         let q = supabase

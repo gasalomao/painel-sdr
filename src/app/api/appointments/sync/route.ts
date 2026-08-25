@@ -76,6 +76,22 @@ export async function GET(req: NextRequest) {
     }
 
     let upserted = 0;
+
+    // UMA query pra buscar todos os eventos já existentes (antes: 1 SELECT por
+    // evento = ~200 round-trips por agente dentro do page-load do calendário).
+    const eventIds = events.map((ev) => ev.id).filter(Boolean);
+    const existingByEventId = new Map<string, { id: string; title: string | null; status: string; start_at: string; end_at: string }>();
+    if (eventIds.length) {
+      const { data: existingRows } = await supabaseAdmin
+        .from("appointments")
+        .select("id, google_event_id, status, title, start_at, end_at")
+        .in("google_event_id", eventIds);
+      for (const row of existingRows || []) {
+        existingByEventId.set(row.google_event_id as string, row as any);
+      }
+    }
+
+    const shadowInserts: any[] = [];
     for (const ev of events) {
       // Eventos sem hora marcada (dia inteiro) só têm `date`, não `dateTime` — ignora.
       const startISO = ev.start?.dateTime;
@@ -83,12 +99,7 @@ export async function GET(req: NextRequest) {
       if (!startISO || !endISO) continue;
       if (!ev.id) continue;
 
-      // Procura row local com esse google_event_id
-      const { data: existing } = await supabaseAdmin
-        .from("appointments")
-        .select("id, status, title, start_at, end_at")
-        .eq("google_event_id", ev.id)
-        .maybeSingle();
+      const existing = existingByEventId.get(ev.id);
 
       const evStatus = ev.status === "cancelled" ? "cancelled" : "confirmed";
       const patch = {
@@ -122,7 +133,7 @@ export async function GET(req: NextRequest) {
         // created_by=google_sync. remote_jid fica vazio (não vem do Google).
         // Em fase 2: tentar parsear "Maria Silva — 5511..." da descrição/title.
         const attendeeEmail = ev.attendees?.[0]?.email || null;
-        await supabaseAdmin.from("appointments").insert({
+        shadowInserts.push({
           client_id: agent.client_id || auth.clientId,
           agent_id: agent.id,
           remote_jid: `google:${ev.id}`, // placeholder — não dispara lembrete WhatsApp
@@ -135,12 +146,27 @@ export async function GET(req: NextRequest) {
           status: patch.status,
           created_by: "google_sync",
           metadata: attendeeEmail ? { attendee_email: attendeeEmail } : {},
-        }).then(({ error }) => {
-          if (error && error.code !== "23505") {
-            console.warn(`[appointments/sync] insert google_sync falhou:`, error.message);
-          }
         });
         upserted++;
+      }
+    }
+
+    // Insert em lote; se bater em unique (sync concorrente), cai pro modo
+    // sequencial tolerante a 23505 — mesmo comportamento de antes.
+    if (shadowInserts.length) {
+      const { error } = await supabaseAdmin.from("appointments").insert(shadowInserts);
+      if (error) {
+        if (error.code === "23505") {
+          for (const row of shadowInserts) {
+            await supabaseAdmin.from("appointments").insert(row).then(({ error: e2 }) => {
+              if (e2 && e2.code !== "23505") {
+                console.warn(`[appointments/sync] insert google_sync falhou:`, e2.message);
+              }
+            });
+          }
+        } else {
+          console.warn(`[appointments/sync] insert lote falhou:`, error.message);
+        }
       }
     }
 

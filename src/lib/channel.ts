@@ -117,12 +117,38 @@ export async function getProvider(instanceName: string): Promise<{ primary: What
  * Solução robusta: baixamos server-side e SEMPRE enviamos base64 pro provider.
  * Nunca mais o cliente recebe link no lugar da imagem.
  *
- * Cache simples em memória (LRU de 50 itens) pra não baixar a mesma foto
- * de produto 100x por dia (produtos do catálogo são re-enviados a cada pergunta).
+ * Cache em memória com ORÇAMENTO EM BYTES (48MB total) pra não baixar a mesma
+ * foto de produto 100x por dia (produtos do catálogo são re-enviados a cada
+ * pergunta). Antes era "LRU de 50 itens" — 50 × base64 grande = OOM.
  */
 const mediaBase64Cache = new Map<string, { base64: string; mimetype: string; ts: number }>();
 const MEDIA_CACHE_TTL_MS = 6 * 3600 * 1000; // 6h — produtos mudam raramente
-const MEDIA_CACHE_MAX = 50;
+/**
+ * Orçamento em BYTES (não em itens): 50 itens × base64 de até 100MB = OOM.
+ * 48MB total cobre dezenas de fotos de produto; mídia >8MB nem entra no cache
+ * (um vídeo só despejaria todo o resto).
+ */
+const MEDIA_CACHE_MAX_BYTES = 48 * 1024 * 1024;
+const MEDIA_CACHE_ITEM_MAX_BYTES = 8 * 1024 * 1024;
+let mediaCacheBytes = 0;
+
+function cachePutBounded(url: string, entry: { base64: string; mimetype: string; ts: number }) {
+  const size = entry.base64.length;
+  if (size > MEDIA_CACHE_ITEM_MAX_BYTES) return;
+  while (mediaCacheBytes + size > MEDIA_CACHE_MAX_BYTES && mediaBase64Cache.size > 0) {
+    // Evicta o mais antigo (FIFO por ts).
+    let oldestUrl: string | null = null;
+    let oldestTs = Infinity;
+    for (const [k, v] of mediaBase64Cache) {
+      if (v.ts < oldestTs) { oldestTs = v.ts; oldestUrl = k; }
+    }
+    if (!oldestUrl) break;
+    mediaCacheBytes -= mediaBase64Cache.get(oldestUrl)!.base64.length;
+    mediaBase64Cache.delete(oldestUrl);
+  }
+  mediaBase64Cache.set(url, entry);
+  mediaCacheBytes += size;
+}
 
 async function fetchUrlAsBase64(url: string): Promise<{ base64: string; mimetype: string } | null> {
   if (!url || !/^https?:\/\//.test(url)) return null;
@@ -151,12 +177,8 @@ async function fetchUrlAsBase64(url: string): Promise<{ base64: string; mimetype
     }
     const base64 = buf.toString("base64");
 
-    // Cache (LRU simples — quando encher, remove o mais antigo).
-    if (mediaBase64Cache.size >= MEDIA_CACHE_MAX) {
-      const oldest = Array.from(mediaBase64Cache.entries()).sort((a, b) => a[1].ts - b[1].ts)[0];
-      if (oldest) mediaBase64Cache.delete(oldest[0]);
-    }
-    mediaBase64Cache.set(url, { base64, mimetype, ts: Date.now() });
+    // Cache com orçamento em bytes (ver MEDIA_CACHE_MAX_BYTES acima).
+    cachePutBounded(url, { base64, mimetype, ts: Date.now() });
 
     return { base64, mimetype };
   } catch (err: any) {

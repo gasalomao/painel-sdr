@@ -134,6 +134,36 @@ export function mediaPlaceholder(msgType: string): string {
 }
 
 // ============================================================================
+// SANITIZAÇÃO DE LOGS — evita gravar MBs de base64 em webhook_logs (jsonb)
+// ============================================================================
+
+const LOG_STR_LIMIT = 2_000;
+
+/**
+ * Cópia sanitizada pra logging: remove chaves com base64, trunca strings
+ * longas, limita arrays e profundidade. Payload bruto do Evolution contém o
+ * mídia inteiro em base64 quando webhookBase64=true — sem isso cada evento de
+ * mídia grava vários MB na tabela e ela cresce sem limite.
+ */
+export function sanitizeLogPayload(value: unknown, depth = 0): unknown {
+  if (value == null) return value;
+  const t = typeof value;
+  if (t === "string") {
+    const s = value as string;
+    return s.length > LOG_STR_LIMIT ? `${s.slice(0, LOG_STR_LIMIT)}…(+${s.length - LOG_STR_LIMIT})` : s;
+  }
+  if (t !== "object") return value;
+  if (depth >= 6) return "[profundidade]";
+  if (Array.isArray(value)) return value.slice(0, 20).map((v) => sanitizeLogPayload(v, depth + 1));
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (/base64/i.test(k)) continue; // campo inteiro fora — é sempre o mídia bruto
+    out[k] = sanitizeLogPayload(v, depth + 1);
+  }
+  return out;
+}
+
+// ============================================================================
 // UPLOAD DE MÍDIA (Supabase Storage)
 // ============================================================================
 

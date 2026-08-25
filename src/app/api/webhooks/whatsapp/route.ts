@@ -7,7 +7,7 @@ import { isManualSend, isAiSend, isPendingAutomatedSend } from "@/lib/manual-sen
 import { clientIdFromInstance, DEFAULT_CLIENT_ID } from "@/lib/tenant";
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
 import { maskJid, truncForLog } from "@/lib/pii";
-import { refreshProfilePicIfStale } from "../shared-helpers";
+import { refreshProfilePicIfStale, sanitizeLogPayload } from "../shared-helpers";
 import { getOrganizerConfig } from "@/lib/organizer-config-cache";
 
 export const dynamic = 'force-dynamic';
@@ -763,12 +763,13 @@ export async function POST(req: NextRequest) {
     // ============================================================
     const clientId = (await clientIdFromInstance(instanceName)) || DEFAULT_CLIENT_ID;
 
-    // Log tudo para debug
-    await supabase.from("webhook_logs").insert({
+    // Log resumido p/ debug — payload bruto contém mídia em base64 (MBs por
+    // evento). Sanitizado + fire-and-forget: nunca bloqueia o webhook.
+    supabase.from("webhook_logs").insert({
       client_id: clientId,
       instance_name: instanceName,
       event: eventName,
-      payload: { level: "raw", event: eventName, instance: instanceName, raw: body },
+      payload: { level: "raw", event: eventName, instance: instanceName, raw: sanitizeLogPayload(body) },
       created_at: new Date().toISOString()
     }).then(({ error }) => error && console.error("❌ Log error:", error.message));
 

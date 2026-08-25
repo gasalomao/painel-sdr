@@ -36,6 +36,27 @@ import { isDeadModelError } from "@/lib/gemini-call";
 import { COMBO_PREFIX, resolveComboSteps } from "@/lib/ai-combos";
 import { getAiKeys } from "@/lib/ai-keys";
 
+/**
+ * Timeout por chamada de IA — sem isso um gateway/proxy pendurado bloqueia a
+ * cadeia inteira (webhook → agent/process → tool loop) indefinidamente.
+ * Configurável via env; 45s cobre modelos lentos com thinking sem travar o
+ * webhook por minutos.
+ */
+export const AI_CALL_TIMEOUT_MS = Number(process.env.AI_CALL_TIMEOUT_MS) || 45_000;
+
+/** Corre com timeout: rejeita se `p` não resolver em AI_CALL_TIMEOUT_MS. */
+export function withAiTimeout<T>(p: Promise<T>, label = "IA"): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label}: timeout após ${AI_CALL_TIMEOUT_MS}ms`)),
+      AI_CALL_TIMEOUT_MS,
+    );
+    timer.unref?.();
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+}
+
 export type AiProvider = "gemini" | "openrouter" | "gateway" | "combo";
 
 export interface ModelRef {
@@ -348,6 +369,7 @@ async function openAICompatibleChat(
     method: "POST",
     headers,
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(AI_CALL_TIMEOUT_MS),
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -831,7 +853,7 @@ export async function generateText(opts: GenerateTextOpts): Promise<GenerateText
 
   const run = async (modelId: string) => {
     const mdl = genAI.getGenerativeModel({ model: modelId, generationConfig });
-    return mdl.generateContent(buildPrompt());
+    return withAiTimeout(mdl.generateContent(buildPrompt()), `Gemini ${modelId}`);
   };
 
   try {
@@ -1086,7 +1108,7 @@ function startGeminiChat(opts: StartAiChatOpts, requestedModel: string): AiChatS
       // 1ª tentativa com fallback automático de modelo morto (404 generateContent).
       try {
         chat = buildChat(usedModel);
-        const r = await chat.sendMessage([{ text }]);
+        const r = await withAiTimeout(chat.sendMessage([{ text }]), `Gemini ${usedModel}`);
         return parse(r);
       } catch (err) {
         if (!isDeadModelError(err)) throw err;
@@ -1095,7 +1117,7 @@ function startGeminiChat(opts: StartAiChatOpts, requestedModel: string): AiChatS
         console.warn(`[ai-provider] Gemini "${usedModel}" morto. Trocando p/ "${fb}".`);
         usedModel = fb;
         chat = buildChat(usedModel);
-        const r = await chat.sendMessage([{ text }]);
+        const r = await withAiTimeout(chat.sendMessage([{ text }]), `Gemini ${fb}`);
         return parse(r);
       }
     },
@@ -1103,7 +1125,7 @@ function startGeminiChat(opts: StartAiChatOpts, requestedModel: string): AiChatS
       const parts = results.map((r) => ({
         functionResponse: { name: r.name, response: r.response },
       }));
-      const r = await chat.sendMessage(parts);
+      const r = await withAiTimeout(chat.sendMessage(parts), `Gemini ${usedModel} tool`);
       return parse(r);
     },
   };

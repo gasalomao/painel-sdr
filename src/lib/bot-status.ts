@@ -44,6 +44,32 @@ const LEGACY_GLOBAL_KEY = "global_ai_paused_until";
 const keyFor = (instance: string) => `global_ai_paused_until:${instance}`;
 
 /* ============================================================
+   CACHE TTL CURTO — settings lidos no hot path do webhook
+   ------------------------------------------------------------
+   Cada mensagem recebida fazia 4+ SELECTs de settings sem cache
+   (getEffectiveStatus×2 chaves + shouldSkipGroupActions +
+   getTranscriptionMethod). TTL 30s corta quase tudo. Escritas
+   LOCAIS invalidam na hora; escritas pelo painel (browser →
+   Supabase direto) ficam stale até 30s — aceitável pra config.
+   ============================================================ */
+const SETTINGS_TTL_MS = 30_000;
+const settingsCache = new Map<string, { v: unknown; at: number }>();
+
+async function cachedSetting<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const hit = settingsCache.get(key);
+  if (hit && Date.now() - hit.at < SETTINGS_TTL_MS) return hit.v as T;
+  const v = await fn();
+  settingsCache.set(key, { v, at: Date.now() });
+  return v;
+}
+
+function bustSettings(prefix: string) {
+  for (const k of [...settingsCache.keys()]) {
+    if (k.startsWith(prefix)) settingsCache.delete(k);
+  }
+}
+
+/* ============================================================
    GRUPOS — helper para identificar e filtrar
    ============================================================ */
 
@@ -60,16 +86,18 @@ export function isGroupJid(remoteJid: string | null | undefined): boolean {
  * Consulta agent_settings.disable_groups (boolean, default false).
  */
 export async function isGroupDisabled(agentId: number | string): Promise<boolean> {
-  try {
-    const { data } = await supabaseAdmin
-      .from("agent_settings")
-      .select("disable_groups")
-      .eq("id", agentId)
-      .maybeSingle();
-    return data?.disable_groups === true;
-  } catch {
-    return false;
-  }
+  return cachedSetting(`gd:${agentId}`, async () => {
+    try {
+      const { data } = await supabaseAdmin
+        .from("agent_settings")
+        .select("disable_groups")
+        .eq("id", agentId)
+        .maybeSingle();
+      return data?.disable_groups === true;
+    } catch {
+      return false;
+    }
+  });
 }
 
 /**
@@ -90,18 +118,20 @@ export type TranscriptionMethod = "auto" | "whisper" | "gemini" | "openrouter" |
 
 export async function getTranscriptionMethod(agentId: number | string | null | undefined): Promise<TranscriptionMethod> {
   if (!agentId) return "auto";
-  try {
-    const { data } = await supabaseAdmin
-      .from("agent_settings")
-      .select("transcription_method")
-      .eq("id", agentId)
-      .maybeSingle();
-    const m = data?.transcription_method;
-    if (m === "whisper" || m === "gemini" || m === "openrouter" || m === "disabled") return m;
-    return "auto";
-  } catch {
-    return "auto";
-  }
+  return cachedSetting(`tm:${agentId}`, async () => {
+    try {
+      const { data } = await supabaseAdmin
+        .from("agent_settings")
+        .select("transcription_method")
+        .eq("id", agentId)
+        .maybeSingle();
+      const m = data?.transcription_method;
+      if (m === "whisper" || m === "gemini" || m === "openrouter" || m === "disabled") return m;
+      return "auto";
+    } catch {
+      return "auto";
+    }
+  }) as Promise<TranscriptionMethod>;
 }
 
 /* ============================================================
@@ -123,31 +153,35 @@ export async function getGlobalPause(instance?: string): Promise<GlobalPauseStat
   if (!instance) {
     // Compat: se NINGUÉM passa instance, ainda lê a chave legada (fallback).
     // Isso só importa pra quem tem um estado antigo persistido.
+    return cachedSetting("gp:legacy", async () => {
+      const { data } = await supabaseAdmin
+        .from("app_settings")
+        .select("value")
+        .eq("key", LEGACY_GLOBAL_KEY)
+        .maybeSingle();
+      const v = data?.value || "";
+      if (!v) return { paused: false, until: null, instance: null };
+      if (v === "forever") return { paused: true, until: null, instance: null };
+      if (new Date(v) > new Date()) return { paused: true, until: v, instance: null };
+      await supabaseAdmin.from("app_settings").upsert({ key: LEGACY_GLOBAL_KEY, value: "", updated_at: new Date().toISOString() }, { onConflict: "key" });
+      return { paused: false, until: null, instance: null };
+    }) as Promise<GlobalPauseState>;
+  }
+
+  return cachedSetting(`gp:${instance}`, async () => {
     const { data } = await supabaseAdmin
       .from("app_settings")
       .select("value")
-      .eq("key", LEGACY_GLOBAL_KEY)
+      .eq("key", keyFor(instance))
       .maybeSingle();
     const v = data?.value || "";
-    if (!v) return { paused: false, until: null, instance: null };
-    if (v === "forever") return { paused: true, until: null, instance: null };
-    if (new Date(v) > new Date()) return { paused: true, until: v, instance: null };
-    await supabaseAdmin.from("app_settings").upsert({ key: LEGACY_GLOBAL_KEY, value: "", updated_at: new Date().toISOString() }, { onConflict: "key" });
-    return { paused: false, until: null, instance: null };
-  }
-
-  const { data } = await supabaseAdmin
-    .from("app_settings")
-    .select("value")
-    .eq("key", keyFor(instance))
-    .maybeSingle();
-  const v = data?.value || "";
-  if (!v) return { paused: false, until: null, instance };
-  if (v === "forever") return { paused: true, until: null, instance };
-  if (new Date(v) > new Date()) return { paused: true, until: v, instance };
-  // expirou — limpa silenciosamente
-  await supabaseAdmin.from("app_settings").upsert({ key: keyFor(instance), value: "", updated_at: new Date().toISOString() }, { onConflict: "key" });
-  return { paused: false, until: null, instance };
+    if (!v) return { paused: false, until: null, instance };
+    if (v === "forever") return { paused: true, until: null, instance };
+    if (new Date(v) > new Date()) return { paused: true, until: v, instance };
+    // expirou — limpa silenciosamente
+    await supabaseAdmin.from("app_settings").upsert({ key: keyFor(instance), value: "", updated_at: new Date().toISOString() }, { onConflict: "key" });
+    return { paused: false, until: null, instance };
+  }) as Promise<GlobalPauseState>;
 }
 
 export async function setGlobalPause(opts: { forever?: boolean; durationMinutes?: number; instance?: string }): Promise<GlobalPauseState> {
@@ -162,6 +196,7 @@ export async function setGlobalPause(opts: { forever?: boolean; durationMinutes?
     value = new Date(Date.now() + opts.durationMinutes * 60 * 1000).toISOString();
   }
   await supabaseAdmin.from("app_settings").upsert({ key: keyFor(opts.instance), value, updated_at: new Date().toISOString() }, { onConflict: "key" });
+  bustSettings("gp:");
   if (!value) return { paused: false, until: null, instance: opts.instance };
   if (value === "forever") return { paused: true, until: null, instance: opts.instance };
   return { paused: true, until: value, instance: opts.instance };
@@ -171,9 +206,11 @@ export async function clearGlobalPause(instance?: string): Promise<GlobalPauseSt
   if (!instance) {
     // Limpa a chave legada (compat).
     await supabaseAdmin.from("app_settings").upsert({ key: LEGACY_GLOBAL_KEY, value: "", updated_at: new Date().toISOString() }, { onConflict: "key" });
+    bustSettings("gp:");
     return { paused: false, until: null, instance: null };
   }
   await supabaseAdmin.from("app_settings").upsert({ key: keyFor(instance), value: "", updated_at: new Date().toISOString() }, { onConflict: "key" });
+  bustSettings(`gp:${instance}`);
   return { paused: false, until: null, instance };
 }
 
@@ -198,23 +235,25 @@ const HP_KEYS = ["human_pause_enabled", "human_pause_minutes", "human_pause_mode
 
 /** Lê a config da pausa automática. Default: ligada, 30min, volta sozinha. */
 export async function getHumanPauseConfig(): Promise<HumanPauseConfig> {
-  try {
-    const { data } = await supabaseAdmin
-      .from("app_settings")
-      .select("key, value")
-      .in("key", HP_KEYS);
-    const map = new Map((data || []).map((r: any) => [r.key, r.value]));
-    const enabledRaw = map.get("human_pause_enabled");
-    return {
-      // Sem valor salvo = ligado (mantém o comportamento histórico de
-      // auto-pausar quando o operador assume a conversa).
-      enabled: enabledRaw == null || enabledRaw === "" ? true : enabledRaw === "true",
-      minutes: Math.max(1, Number(map.get("human_pause_minutes")) || 30),
-      mode: map.get("human_pause_mode") === "manual" ? "manual" : "timed",
-    };
-  } catch {
-    return { enabled: true, minutes: 30, mode: "timed" };
-  }
+  return cachedSetting("hp", async () => {
+    try {
+      const { data } = await supabaseAdmin
+        .from("app_settings")
+        .select("key, value")
+        .in("key", HP_KEYS);
+      const map = new Map((data || []).map((r: any) => [r.key, r.value]));
+      const enabledRaw = map.get("human_pause_enabled");
+      return {
+        // Sem valor salvo = ligado (mantém o comportamento histórico de
+        // auto-pausar quando o operador assume a conversa).
+        enabled: enabledRaw == null || enabledRaw === "" ? true : enabledRaw === "true",
+        minutes: Math.max(1, Number(map.get("human_pause_minutes")) || 30),
+        mode: map.get("human_pause_mode") === "manual" ? "manual" : "timed",
+      };
+    } catch {
+      return { enabled: true, minutes: 30, mode: "timed" };
+    }
+  }) as Promise<HumanPauseConfig>;
 }
 
 /** Grava (parcialmente) a config da pausa automática em app_settings. */
@@ -228,6 +267,7 @@ export async function setHumanPauseConfig(cfg: Partial<HumanPauseConfig>): Promi
       .from("app_settings")
       .upsert({ key: r.key, value: r.value, updated_at: new Date().toISOString() }, { onConflict: "key" });
   }
+  bustSettings("hp");
 }
 
 /* ============================================================

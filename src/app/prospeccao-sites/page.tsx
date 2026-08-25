@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useCallback, useRef } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef, useReducer } from "react";
 import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -103,6 +103,44 @@ const ORDER_LABELS: Record<string, string> = {
   desc: "Maior → menor",
   asc: "Menor → maior",
 };
+
+/**
+ * Countdown auto-contido: tem intervalo próprio de 1s e re-renderiza SÓ ele.
+ * Antes um setTick global re-renderizava a página inteira (2.2k linhas) por segundo.
+ */
+function CountdownCard({ cd }: { cd: { secs: number; nextAt: number } | undefined }) {
+  const [, force] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    const t = setInterval(force, 1000);
+    return () => clearInterval(t);
+  }, [force]);
+  const remaining = cd ? Math.max(0, Math.ceil((cd.nextAt - Date.now()) / 1000)) : null;
+  if (remaining === null || remaining <= 0) {
+    return (
+      <div className="flex items-center gap-2 p-2 rounded-lg bg-green-500/5 border border-green-500/20">
+        <Loader2 className="w-3.5 h-3.5 text-green-400 animate-spin shrink-0" />
+        <span className="text-[11px] text-green-300 font-bold">Processando agora.</span>
+      </div>
+    );
+  }
+  return (
+    <div className="flex items-center gap-2 p-2.5 rounded-lg bg-blue-500/10 border border-blue-500/30">
+      <Clock className="w-4 h-4 text-blue-400 animate-pulse shrink-0" />
+      <div className="flex-1 min-w-0">
+        <span className="text-[10px] font-black uppercase tracking-wider text-blue-400">Próximo disparo em</span>
+        <div className="text-lg font-black text-blue-300 font-mono leading-none mt-0.5">
+          {String(Math.floor(remaining / 60)).padStart(2, "0")}:{String(remaining % 60).padStart(2, "0")}
+        </div>
+      </div>
+      <div className="w-16 h-1 bg-blue-500/20 rounded-full overflow-hidden">
+        <div
+          className="h-full bg-blue-400 transition-all duration-1000"
+          style={{ width: `${cd && cd.secs > 0 ? Math.max(0, (remaining / cd.secs) * 100) : 0}%` }}
+        />
+      </div>
+    </div>
+  );
+}
 
 function mapsUrlFor(lead: { maps_url?: string | null; place_id?: string | null; nome_negocio?: string | null; endereco?: string | null }): string {
   if (lead.maps_url && lead.maps_url.trim()) return lead.maps_url;
@@ -862,13 +900,6 @@ export default function ProspeccaoSitesPage() {
   };
 
   // Estatísticas helper
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    const anyRunning = campaigns.some(c => c.status === "running");
-    if (!anyRunning) return;
-    const t = setInterval(() => setTick(n => n + 1), 1000);
-    return () => clearInterval(t);
-  }, [campaigns]);
   const stats = useMemo(() => {
     const withW = rankedLeads.filter((l) => l.website && l.website.trim()).length;
     const withoutW = rankedLeads.length - withW;
@@ -1552,8 +1583,6 @@ export default function ProspeccaoSitesPage() {
                 {campaigns.map((c) => {
                   const total_sent = (c.sent_count || 0) + (c.failed_count || 0) + (c.skipped_count || 0);
                   const pct = c.total_targets > 0 ? Math.round((total_sent / c.total_targets) * 100) : 0;
-                  const cd = countdowns[c.id];
-                  const remaining = cd ? Math.max(0, Math.ceil((cd.nextAt - Date.now()) / 1000)) : null;
                   return (
                     <Card key={c.id} className="border-white/10 bg-white/[0.02]"><CardContent className="p-4 space-y-2">
                       <div className="flex justify-between items-start">
@@ -1589,28 +1618,7 @@ export default function ProspeccaoSitesPage() {
                       {/* Countdown timer + live log */}
                       {c.status === "running" && (
                         <>
-                          {remaining !== null && remaining > 0 ? (
-                            <div className="flex items-center gap-2 p-2.5 rounded-lg bg-blue-500/10 border border-blue-500/30">
-                              <Clock className="w-4 h-4 text-blue-400 animate-pulse shrink-0" />
-                              <div className="flex-1 min-w-0">
-                                <span className="text-[10px] font-black uppercase tracking-wider text-blue-400">Próximo disparo em</span>
-                                <div className="text-lg font-black text-blue-300 font-mono leading-none mt-0.5">
-                                  {String(Math.floor(remaining / 60)).padStart(2, "0")}:{String(remaining % 60).padStart(2, "0")}
-                                </div>
-                              </div>
-                              <div className="w-16 h-1 bg-blue-500/20 rounded-full overflow-hidden">
-                                <div
-                                  className="h-full bg-blue-400 transition-all duration-1000"
-                                  style={{ width: `${cd && cd.secs > 0 ? Math.max(0, (remaining / cd.secs) * 100) : 0}%` }}
-                                />
-                              </div>
-                            </div>
-                          ) : (
-                            <div className="flex items-center gap-2 p-2 rounded-lg bg-green-500/5 border border-green-500/20">
-                              <Loader2 className="w-3.5 h-3.5 text-green-400 animate-spin shrink-0" />
-                              <span className="text-[11px] text-green-300 font-bold">Processando agora…</span>
-                            </div>
-                          )}
+                          <CountdownCard cd={countdowns[c.id]} />
 
                           {latestLogByCampaign[c.id] && (
                             <div className="flex items-start gap-2 p-2.5 rounded-lg bg-emerald-500/5 border border-emerald-500/20">

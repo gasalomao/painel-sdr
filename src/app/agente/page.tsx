@@ -25,11 +25,14 @@ import { toast } from "sonner";
 
 import { AgentSwitcher } from "./_components/agent-switcher";
 import type { PreviewLead, PreviewSample } from "./_components/lead-selector";
+import dynamic from "next/dynamic";
 import { AjustesTab, type ScheduleRow } from "./_tabs/ajustes-tab";
-import { EtapasTab } from "./_tabs/etapas-tab";
-import { InfoTab } from "./_tabs/info-tab";
-import { LogsTab } from "./_tabs/logs-tab";
-import { TestesTab } from "./_tabs/testes-tab";
+// Tabs pesadas carregam sob demanda — só 1 aba é visível por vez, mas antes
+// TODAS vinham no bundle da rota (info-tab sozinha = ~87KB de fonte).
+const EtapasTab = dynamic(() => import("./_tabs/etapas-tab").then((m) => m.EtapasTab), { ssr: false });
+const InfoTab = dynamic(() => import("./_tabs/info-tab").then((m) => m.InfoTab), { ssr: false });
+const LogsTab = dynamic(() => import("./_tabs/logs-tab").then((m) => m.LogsTab), { ssr: false });
+const TestesTab = dynamic(() => import("./_tabs/testes-tab").then((m) => m.TestesTab), { ssr: false });
 
 type Tab = "info" | "ajustes" | "etapas" | "testes" | "logs";
 
