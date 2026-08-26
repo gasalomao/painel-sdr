@@ -81,9 +81,15 @@ const TABS = [
 ] as const;
 type TabKey = typeof TABS[number]["key"];
 
-const DEFAULT_TEMPLATE = `{{saudacao}} {{nome_empresa}}! Tudo bem?
-Notei que sua empresa {{ramo}} ainda não tem site — isso tá te fazendo perder clientes que pesquisam no Google antes de comprar.
-Queria te mostrar como podemos resolver rápido. Tem 2 min pra um papo? — {{vendedor}}`;
+const DEFAULT_TEMPLATE = `{{saudacao}}! Tudo bem?
+
+Estava dando uma olhada no perfil da {{nome_empresa}} no Google e parabéns pela nota {{avaliacao}} com {{reviews}} avaliações!
+
+Notei que muitos clientes chegam até vocês pelas buscas, mas ainda falta uma página própria no setor de {{ramo}} para converter quem pesquisa online.
+
+Trabalho com desenvolvimento web e montei uma prévia visual completa de um site com as informações públicas do estabelecimento de vocês.
+
+Posso te enviar o PDF da prévia por aqui sem compromisso para você ver como ficou?`;
 
 const VENDEDOR_DEFAULT = "Salomão";
 
