@@ -14,10 +14,12 @@ import {
   CornerDownLeft,
   Sparkles,
   Trash2,
+  AudioLines,
 } from "lucide-react";
 import { format } from "date-fns";
 import { ReplyQuote } from "./reply-quote";
 import { MessageReactions } from "./message-reactions";
+import { transcriptionProviderLabel } from "@/lib/transcription-label";
 
 interface MessageBubbleProps {
   message: Message;
@@ -138,8 +140,10 @@ function MessageContent({ message }: { message: Message }) {
 
     case "audio":
       // Mostra o player do áudio E a transcrição (quando disponível no content_text).
-      // A transcrição vem do whisper.cpp (local, grátis) ou Gemini (fallback).
-      // Sem isso, o usuário não vê o que o cliente falou no áudio.
+      // A transcrição vem do whisper.cpp (local, grátis), OpenRouter ou Gemini (fallback).
+      // Badge discreto abaixo indica QUAL modelo transcreveu — só visual,
+      // essa info nunca entra no contexto do agente de IA.
+      const transcribedWith = transcriptionProviderLabel((message as any).transcription_provider);
       return (
         <div className="py-1 space-y-1">
           {mediaSrc ? (
@@ -151,6 +155,15 @@ function MessageContent({ message }: { message: Message }) {
             <div className="text-[11px] italic opacity-80 border-l-2 border-current/30 pl-2 whitespace-pre-wrap break-words">
               {message.content_text}
             </div>
+          )}
+          {transcribedWith && (
+            <span
+              className="inline-flex items-center gap-1 text-[9px] font-medium tracking-wide text-muted-foreground/70 select-none"
+              title={`Áudio transcrito com ${transcribedWith}`}
+            >
+              <AudioLines className="h-2.5 w-2.5" aria-hidden />
+              {transcribedWith}
+            </span>
           )}
         </div>
       );

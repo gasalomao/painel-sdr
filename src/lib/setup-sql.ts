@@ -399,8 +399,14 @@ CREATE TABLE IF NOT EXISTS public.chats_dashboard (
   agent_id           integer,
   updated_at         timestamp with time zone DEFAULT now(),
   file_name          text,
+  transcription_provider text,
   client_id          uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
 );
+
+-- Transcrição de áudio: qual modelo transcreveu (whisper | openrouter:<model> | gemini).
+-- EXCLUSIVO pra badge na UI do chat — NUNCA entra no contexto do agente de IA.
+-- Idempotente: Bancos existentes ganham a coluna sem quebrar nada.
+ALTER TABLE public.chats_dashboard ADD COLUMN IF NOT EXISTS transcription_provider text;
 
 CREATE TABLE IF NOT EXISTS public.clients (
   id                        uuid PRIMARY KEY DEFAULT gen_random_uuid(),

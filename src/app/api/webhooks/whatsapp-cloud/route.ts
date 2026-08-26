@@ -272,6 +272,8 @@ export async function POST(req: NextRequest) {
       // Conteúdo: text direto, ou caption, ou placeholder de mídia
       let content: string = m.text || m.caption || "";
       let mediaUrl: string | null = null;
+      // Provider da transcrição (UI only — badge no chat; nunca vai pro agente).
+      let transcribeProvider: string | null = null;
 
       // ===== Mídia: baixar + transcrever ANTES de salvar (o chat só mostra
       // o áudio já transcrito; placeholder apenas se transcrição falhou) =====
@@ -292,10 +294,11 @@ export async function POST(req: NextRequest) {
               } catch (upErr: any) {
                 console.warn("[Cloud Media] upload falhou:", upErr?.message);
               }
-              const { transcribeAudio } = await import("@/app/api/webhooks/shared-helpers");
+              const { transcribeAudioDetailed } = await import("@/app/api/webhooks/shared-helpers");
               const orModels = sessionRow?.agent_id ? await getTranscriptionModels(sessionRow.agent_id) : [];
-              const t = await transcribeAudio(base64, fMime || "audio/ogg", m.messageId, transcriptionMethod, { models: orModels });
-              content = t ? `🎤 ${t}` : "[🎤 O cliente enviou um áudio que não consegui transcrever]";
+              const det = await transcribeAudioDetailed(base64, fMime || "audio/ogg", m.messageId, transcriptionMethod, { models: orModels });
+              content = det ? `🎤 ${det.text}` : "[🎤 O cliente enviou um áudio que não consegui transcrever]";
+              if (det) transcribeProvider = det.provider;
             } else {
               content = "[🎤 O cliente enviou um áudio que não consegui transcrever]";
             }
@@ -327,6 +330,7 @@ export async function POST(req: NextRequest) {
         status_envio: "received",
         ...(mediaUrl ? { media_url: mediaUrl } : {}),
         ...(m.type !== "text" ? { media_type: m.type } : {}),
+        ...(transcribeProvider ? { transcription_provider: transcribeProvider } : {}),
         created_at: new Date(m.timestamp * 1000).toISOString(),
       });
       if (dashErr) {

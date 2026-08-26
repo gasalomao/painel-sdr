@@ -936,6 +936,8 @@ export async function POST(req: NextRequest) {
       // Única forma garantida: rodar a transcrição ANTES de salvar a mensagem.
       // Evolution aceita até 30s — whisper small leva ~15s.
       let enrichedContent: string | null = null;
+      // Provider da transcrição (UI only — badge no chat; nunca vai pro agente).
+      let transcribeProvider = "none";
 
       if (hasMedia && msgType === "audio" && !fromMe && !groupDisabled && transcriptionMethod !== "disabled") {
         // Resolve base64 (inline ou via Evolution API)
@@ -955,7 +957,6 @@ export async function POST(req: NextRequest) {
         if (base64Media) {
           console.log("[Media] base64 OK, length:", base64Media.length);
           let transcript: string | null = null;
-          let transcribeProvider = "none";
 
           // Cadeia única: whisper → openrouter (grátis primeiro) → gemini
           // (ordem definida em shared-helpers.transcribeAudioDetailed).
@@ -1068,6 +1069,13 @@ export async function POST(req: NextRequest) {
         status_envio: fromMe ? "sent" : "received",
         created_at: new Date().toISOString(),
       };
+
+      // Badge de transcrição (UI only): qual modelo transcreveu o áudio.
+      // Se a coluna não existir no banco, o retry PGRST204 abaixo (payload
+      // mínimo) já cobre — sem quebrar o fluxo.
+      if (transcribeProvider !== "none") {
+        basePayload.transcription_provider = transcribeProvider;
+      }
 
       let { error: dashErr } = await supabase.from("chats_dashboard").insert(basePayload);
 

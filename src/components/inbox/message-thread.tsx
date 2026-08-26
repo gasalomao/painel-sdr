@@ -98,6 +98,7 @@ function normalizeDbMessage(raw: any): Message {
     created_at: raw.created_at,
     base64_content: raw.base64_content,
     media_type: raw.media_type,
+    transcription_provider: raw.transcription_provider,
     is_ai: isAi,
   } as any;
 }

@@ -25,7 +25,7 @@ import {
   unwrapMessage, extractText, extractMessageType, extractMimetype,
   extractFileName, extractQuoted, extractBase64Media, sanitizeMimetype,
   mediaPlaceholder, uploadMediaBase64,
-  transcribeAudio, describeImage, describeDocument,
+  transcribeAudio, transcribeAudioDetailed, describeImage, describeDocument,
   findOrCreateContact, findOrCreateSession, healLeadNameFromPushName,
   refreshProfilePicIfStale,
 } from "../shared-helpers";
@@ -188,6 +188,8 @@ export async function POST(req: NextRequest) {
     const base64Media = extractBase64Media(unwrapped);
     let enrichedContent: string | null = null;
     let mediaUrl: string | null = null;
+    // Provider da transcrição (UI only — badge no chat; nunca vai pro agente).
+    let transcribeProvider: string | null = null;
 
     if (!fromMe && base64Media) {
       try {
@@ -196,8 +198,9 @@ export async function POST(req: NextRequest) {
 
         // Transcrição/descrição baseada no tipo.
         if (msgType === "audio" && !groupDisabled && transcriptionMethod !== "disabled") {
-          const transcript = await transcribeAudio(base64Media, sanitizeMimetype(mimetype || "", "audio/ogg"), messageId, transcriptionMethod);
-          enrichedContent = transcript ? `🎤 ${transcript}` : "[🎤 O cliente enviou um áudio que não consegui transcrever]";
+          const det = await transcribeAudioDetailed(base64Media, sanitizeMimetype(mimetype || "", "audio/ogg"), messageId, transcriptionMethod);
+          enrichedContent = det ? `🎤 ${det.text}` : "[🎤 O cliente enviou um áudio que não consegui transcrever]";
+          if (det) transcribeProvider = det.provider;
         } else if (msgType === "image") {
           const desc = await describeImage(base64Media, sanitizeMimetype(mimetype || "", "image/jpeg"));
           enrichedContent = desc ? `📷 ${desc}` : null;
@@ -227,6 +230,7 @@ export async function POST(req: NextRequest) {
       client_id: clientId,
     };
     if (mediaUrl) insertData.media_url = mediaUrl;
+    if (transcribeProvider) insertData.transcription_provider = transcribeProvider;
     if (mimetype) insertData.mimetype = sanitizeMimetype(mimetype, "application/octet-stream");
     if (msgType !== "text" && msgType !== "unknown" && msgType !== "buttons" && msgType !== "reaction") {
       insertData.media_type = msgType;
