@@ -19,7 +19,7 @@ import {
 import { format } from "date-fns";
 import { ReplyQuote } from "./reply-quote";
 import { MessageReactions } from "./message-reactions";
-import { transcriptionProviderLabel } from "@/lib/transcription-label";
+import { transcriptionProviderLabel, extractProviderFromMime } from "@/lib/transcription-label";
 
 interface MessageBubbleProps {
   message: Message;
@@ -143,27 +143,32 @@ function MessageContent({ message }: { message: Message }) {
       // A transcrição vem do whisper.cpp (local, grátis), OpenRouter ou Gemini (fallback).
       // Badge discreto abaixo indica QUAL modelo transcreveu — só visual,
       // essa info nunca entra no contexto do agente de IA.
-      const transcribedWith = transcriptionProviderLabel((message as any).transcription_provider);
+      const rawProvider = (message as any).transcription_provider || extractProviderFromMime((message as any).mimetype);
+      const isTranscribed = message.content_text && message.content_text.startsWith("🎤");
+      const transcribedWith = transcriptionProviderLabel(rawProvider) || (isTranscribed ? "Áudio transcrito" : null);
+
       return (
-        <div className="py-1 space-y-1">
+        <div className="py-1 space-y-1.5">
           {mediaSrc ? (
             <audio src={mediaSrc} controls className="max-w-full outline-none" />
           ) : (
             <MediaUnavailable label="Áudio" />
           )}
           {message.content_text && (
-            <div className="text-[11px] italic opacity-80 border-l-2 border-current/30 pl-2 whitespace-pre-wrap break-words">
+            <div className="text-[11px] italic opacity-85 border-l-2 border-primary/40 pl-2.5 py-0.5 whitespace-pre-wrap break-words bg-black/10 rounded-r-md">
               {message.content_text}
             </div>
           )}
           {transcribedWith && (
-            <span
-              className="inline-flex items-center gap-1 text-[9px] font-medium tracking-wide text-muted-foreground/70 select-none"
-              title={`Áudio transcrito com ${transcribedWith}`}
-            >
-              <AudioLines className="h-2.5 w-2.5" aria-hidden />
-              {transcribedWith}
-            </span>
+            <div className="pt-0.5">
+              <span
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono tracking-tight text-muted-foreground/80 bg-white/5 border border-white/5 select-none"
+                title={`Áudio transcrito com: ${transcribedWith}`}
+              >
+                <AudioLines className="h-2.5 w-2.5 text-primary/70" aria-hidden />
+                {transcribedWith}
+              </span>
+            </div>
           )}
         </div>
       );

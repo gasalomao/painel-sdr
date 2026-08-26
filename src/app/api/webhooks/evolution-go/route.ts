@@ -229,9 +229,13 @@ export async function POST(req: NextRequest) {
       contact_name: pushName || null,
       client_id: clientId,
     };
+    const { encodeTranscriptionMime } = await import("@/lib/transcription-label");
+    const goMime = msgType === "audio" && transcribeProvider
+      ? encodeTranscriptionMime(mimetype || "audio/ogg", transcribeProvider)
+      : mimetype;
+
     if (mediaUrl) insertData.media_url = mediaUrl;
-    if (transcribeProvider) insertData.transcription_provider = transcribeProvider;
-    if (mimetype) insertData.mimetype = sanitizeMimetype(mimetype, "application/octet-stream");
+    if (goMime) insertData.mimetype = sanitizeMimetype(goMime, "application/octet-stream");
     if (msgType !== "text" && msgType !== "unknown" && msgType !== "buttons" && msgType !== "reaction") {
       insertData.media_type = msgType;
     }

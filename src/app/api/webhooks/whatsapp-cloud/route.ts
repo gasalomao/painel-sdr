@@ -321,6 +321,11 @@ export async function POST(req: NextRequest) {
       // Insert chats_dashboard (UI lê isso). Duplicata (23505) = Meta reentregou
       // → NÃO dispara o agente de novo (antes virava resposta DUPLA).
       let msgDup = false;
+      const { encodeTranscriptionMime } = await import("@/lib/transcription-label");
+      const cloudMime = m.type === "audio" && transcribeProvider
+        ? encodeTranscriptionMime(fMime || "audio/ogg", transcribeProvider)
+        : fMime;
+
       const { error: dashErr } = await supabase.from("chats_dashboard").insert({
         instance_name: instanceName,
         message_id: m.messageId,
@@ -330,7 +335,7 @@ export async function POST(req: NextRequest) {
         status_envio: "received",
         ...(mediaUrl ? { media_url: mediaUrl } : {}),
         ...(m.type !== "text" ? { media_type: m.type } : {}),
-        ...(transcribeProvider ? { transcription_provider: transcribeProvider } : {}),
+        ...(cloudMime ? { mimetype: cloudMime } : {}),
         created_at: new Date(m.timestamp * 1000).toISOString(),
       });
       if (dashErr) {

@@ -1059,6 +1059,11 @@ export async function POST(req: NextRequest) {
         } catch {}
       }
 
+      const { encodeTranscriptionMime } = await import("@/lib/transcription-label");
+      const finalMime = msgType === "audio" && transcribeProvider !== "none"
+        ? encodeTranscriptionMime(effMimetype, transcribeProvider)
+        : effMimetype;
+
       const basePayload: Record<string, any> = {
         client_id: clientId,
         instance_name: instanceName,
@@ -1067,15 +1072,10 @@ export async function POST(req: NextRequest) {
         sender_type: sender === 'ai' ? 'ai' : sender,
         content: initialContent,
         status_envio: fromMe ? "sent" : "received",
+        ...(finalMime ? { mimetype: finalMime } : {}),
+        ...(msgType && msgType !== "text" ? { media_type: msgType } : {}),
         created_at: new Date().toISOString(),
       };
-
-      // Badge de transcrição (UI only): qual modelo transcreveu o áudio.
-      // Se a coluna não existir no banco, o retry PGRST204 abaixo (payload
-      // mínimo) já cobre — sem quebrar o fluxo.
-      if (transcribeProvider !== "none") {
-        basePayload.transcription_provider = transcribeProvider;
-      }
 
       let { error: dashErr } = await supabase.from("chats_dashboard").insert(basePayload);
 

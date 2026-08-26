@@ -31,6 +31,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { extractProviderFromMime } from "@/lib/transcription-label";
 
 interface MessageThreadProps {
   conversation: Conversation | null;
@@ -98,7 +99,7 @@ function normalizeDbMessage(raw: any): Message {
     created_at: raw.created_at,
     base64_content: raw.base64_content,
     media_type: raw.media_type,
-    transcription_provider: raw.transcription_provider,
+    transcription_provider: raw.transcription_provider || extractProviderFromMime(raw.mimetype),
     is_ai: isAi,
   } as any;
 }
