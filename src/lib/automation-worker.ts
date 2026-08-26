@@ -270,7 +270,10 @@ async function checkScrapingDone(a: AutomationRow): Promise<ScrapeCheck> {
  * FASE 2 — Cria a campanha de disparo a partir dos leads novos colhidos
  * desde que a automação começou e dispara via campaign-worker.
  */
-async function startDispatchPhase(a: AutomationRow): Promise<void> {
+async function startDispatchPhase(
+  a: AutomationRow,
+  doneInfo?: { reason: string | null; scrapedNow: number }
+): Promise<void> {
   // GUARDA DE IDEMPOTÊNCIA: se já existe campanha pra esta automação,
   // NÃO cria outra. Antes, race condition entre 2 ticks ou re-clicks fazia
   // 2 campanhas pros mesmos leads → mesmo número recebia 2x → ban no zap.
@@ -294,6 +297,12 @@ async function startDispatchPhase(a: AutomationRow): Promise<void> {
     console.log(`[AUTOMATION ${a.id}] outro tick já avançou pra dispatching — pulando.`);
     return;
   }
+  // Log de transição SÓ DEPOIS de ganhar a trava — antes ficava no tick, e 2
+  // ticks concorrentes logavam "Fase de captação encerrada" 2× (mesmo que só
+  // um executasse de verdade).
+  await log(a.id, "state", "info",
+    `✅ Fase de captação encerrada${doneInfo?.reason ? ` (${doneInfo.reason})` : ""}. Avançando para o disparo…`,
+    { metadata: { scrapedNow: doneInfo?.scrapedNow ?? null, reason: doneInfo?.reason ?? null } });
 
   if (!a.dispatch_template?.trim()) return markError(a.id, "Template de disparo vazio.");
 
@@ -353,16 +362,35 @@ async function startDispatchPhase(a: AutomationRow): Promise<void> {
   const filters = a.scrape_filters || {};
   const reviewsAiCfg = filters.reviews_ai as { enabled?: boolean; model?: string; prompt?: string } | undefined;
   if (reviewsAiCfg?.enabled && reviewsAiCfg.model) {
+    // SKIP 1: se NENHUM texto consumidor menciona {{resumo_avaliacoes}}, o
+    // resumo é peso morto — gastar IA aqui é dinheiro jogado fora (o scraper
+    // ainda gastou ~10s/lead abrindo TODAS as avaliações pra alimentar isso).
+    const consumidorResumo = [
+      a.dispatch_template,
+      a.dispatch_ai_prompt,
+      a.followup_ai_prompt,
+      ...(Array.isArray(a.followup_steps) ? a.followup_steps.map((s: any) => s?.template || "") : []),
+    ].filter(Boolean).join("\n");
+    if (!/resumo_avaliacoes/.test(consumidorResumo)) {
+      await log(a.id, "scrape", "info",
+        `⏭️ Resumo de avaliações pulado — nenhum template/prompt usa {{resumo_avaliacoes}}.`);
+    } else {
     await log(a.id, "scrape", "info",
       `🧠 Resumindo avaliações do Google com IA (${reviewsAiCfg.model}) pra ${leads.length} lead(s)...`
     );
     let ok = 0, cached = 0, semReviews = 0, falhas = 0;
     const motivos = new Map<string, number>();
+    // CIRCUITO ABERTO: erro de chave/cooldown/quota NÃO é por-lead — é do
+    // provider inteiro. Depois de 2 falhas consecutivas desse tipo, o resto
+    // do loop é previsivelmente fadado; aborta e loga uma vez em vez de N.
+    let breakerAbertos = 0;
+    let consecutivosFatais = 0;
     for (let i = 0; i < leads.length; i++) {
       const l = leads[i];
       const name = (l.nome_negocio || `lead ${l.id}`).slice(0, 40);
       const idx = `[${i + 1}/${leads.length}]`;
       const bump = (msg: string) => motivos.set(msg, (motivos.get(msg) || 0) + 1);
+      const fatal = (msg: string) => /cooldown|falharam|429|rate.?limit|quota|402|sem cr[eé]dito/i.test(msg);
       try {
         const r = await summarizeReviewsForLead({
           leadId: l.id,
@@ -375,25 +403,43 @@ async function startDispatchPhase(a: AutomationRow): Promise<void> {
         if ("error" in r) {
           if (/sem avalia/i.test(r.error)) {
             semReviews++;
+            consecutivosFatais = 0;
             await log(a.id, "scrape", "info", `   ${idx} ⏭️ ${name} — ${r.error}`);
           } else {
             falhas++;
             bump(r.error);
+            if (!fatal(r.error)) consecutivosFatais = 0;
             await log(a.id, "scrape", "warning", `   ${idx} ❌ ${name} — ${r.error}`);
+            // Provider morto (cooldown/chaves) volta como r.error, não throw.
+            if (fatal(r.error) && ++consecutivosFatais >= 2) {
+              breakerAbertos = leads.length - (i + 1);
+              break;
+            }
           }
         } else if (r.cached) {
           cached++;
+          consecutivosFatais = 0;
           await log(a.id, "scrape", "info", `   ${idx} 💾 ${name} — resumo em cache`);
         } else {
           ok++;
+          consecutivosFatais = 0;
           await log(a.id, "scrape", "success", `   ${idx} ✅ ${name} — resumo gerado`);
         }
       } catch (e: any) {
         falhas++;
         const msg = String(e?.message || e).slice(0, 160);
         bump(msg);
+        if (!fatal(msg)) consecutivosFatais = 0;
         await log(a.id, "scrape", "warning", `   ${idx} ❌ ${name} — ${msg}`);
+        if (fatal(msg) && ++consecutivosFatais >= 2) {
+          breakerAbertos = leads.length - (i + 1);
+          break;
+        }
       }
+    }
+    if (breakerAbertos > 0) {
+      await log(a.id, "scrape", "warning",
+        `🔴 Circuito aberto — provider de IA indisponível (${reviewsAiCfg.model}). ${breakerAbertos} lead(s) restante(s) pulado(s); resumos podem ser gerados depois via aba Leads.`);
     }
     // Breakdown por motivo — sem isso, "N falha(s)" era mudo e ninguém sabia
     // POR QUE a IA não gerava (rate limit? chave morta? resposta vazia?).
@@ -406,6 +452,7 @@ async function startDispatchPhase(a: AutomationRow): Promise<void> {
       `🧠 Resumo de avaliações: ${ok} gerado(s) · ${cached} em cache · ${semReviews} sem reviews · ${falhas} falha(s).` +
       (motivoStr ? ` Motivos: ${motivoStr}` : "")
     );
+    }
   }
 
   // ───────── UNIFICAÇÃO PRECOCE DE JID CANÔNICO (WhatsApp) ─────────
@@ -915,10 +962,12 @@ async function tickOne(a: AutomationRow) {
         updated_at: new Date().toISOString(),
       }).eq("id", a.id);
       if (r.done) {
-        await log(a.id, "state", "info",
-          `✅ Fase de captação encerrada (${r.doneReason}). Avançando para o disparo…`,
-          { metadata: { scrapedNow: r.scrapedNow, reason: r.doneReason } });
-        await startDispatchPhase({ ...a, scraped_count: r.scrapedNow, scrape_filters: nextFilters });
+        // O log de transição vive DENTRO do startDispatchPhase, só pra quem
+        // ganha a trava atômica — senão 2 ticks concorrentes duplicam a linha.
+        await startDispatchPhase(
+          { ...a, scraped_count: r.scrapedNow, scrape_filters: nextFilters },
+          { reason: r.doneReason, scrapedNow: r.scrapedNow },
+        );
       }
       return;
     }
@@ -1084,6 +1133,7 @@ export async function startAutomation(id: string): Promise<{ ok: boolean; error?
   const { error: updErr } = await supabase.from("automations").update({
     status: "running",
     phase: "idle",
+    started_at: new Date().toISOString(),
     last_error: null,
     last_error_at: null,
     campaign_id: null,
