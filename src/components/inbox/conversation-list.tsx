@@ -151,23 +151,38 @@ export function ConversationList({
       const data = await res.json();
       if (!data?.avatars) return;
       const avatars: Record<string, string> = data.avatars;
-      // Atualiza só os contatos que receberam URL válida.
       const updates = Object.entries(avatars).filter(([, url]) => !!url);
       if (updates.length === 0) return;
-      const avatarMap = new Map(updates);
+      
+      const avatarMap = new Map<string, string>();
+      for (const [key, url] of updates) {
+        avatarMap.set(key, url);
+        const digits = key.replace(/\D/g, "");
+        if (digits) avatarMap.set(digits, url);
+      }
+
       onConversationsLoadedRef.current(
         conversations.map((c) => {
-          if (!c.contact) return c;
-          const url = avatarMap.get(c.id);
+          const url = avatarMap.get(c.id) || avatarMap.get(c.id.replace(/\D/g, "")) || (c.contact?.remote_jid ? avatarMap.get(c.contact.remote_jid) : null);
           if (!url) return c;
           return {
             ...c,
-            contact: { ...c.contact, avatar_url: url },
+            contact: c.contact
+              ? { ...c.contact, avatar_url: url }
+              : ({
+                  id: c.id,
+                  remote_jid: c.id,
+                  phone: c.id.replace(/@.*$/, "").replace(/\D/g, ""),
+                  avatar_url: url,
+                  user_id: clientId || "",
+                  created_at: new Date().toISOString(),
+                  updated_at: new Date().toISOString(),
+                } as any),
           };
         })
       );
     } catch {}
-  }, [conversations]);
+  }, [conversations, clientId]);
 
   useEffect(() => {
     if (!clientId) return;
@@ -458,20 +473,26 @@ export function ConversationList({
         if (resAvatars.ok) {
           const dataAvatars = await resAvatars.json();
           if (dataAvatars?.avatars) {
-            const avatarMap = new Map(Object.entries(dataAvatars.avatars).filter(([, url]) => !!url));
+            const updates = Object.entries(dataAvatars.avatars).filter(([, url]) => !!url);
+            const avatarMap = new Map<string, string>();
+            for (const [key, url] of updates) {
+              avatarMap.set(key, url as string);
+              const digits = key.replace(/\D/g, "");
+              if (digits) avatarMap.set(digits, url as string);
+            }
             onConversationsLoadedRef.current(
               conversations.map((c) => {
-                const url = avatarMap.get(c.id);
+                const url = avatarMap.get(c.id) || avatarMap.get(c.id.replace(/\D/g, "")) || (c.contact?.remote_jid ? avatarMap.get(c.contact.remote_jid) : null);
                 if (!url) return c;
                 return {
                   ...c,
                   contact: c.contact
-                    ? { ...c.contact, avatar_url: url as string }
+                    ? { ...c.contact, avatar_url: url }
                     : ({
                         id: c.id,
                         remote_jid: c.id,
                         phone: c.id.replace(/@.*$/, "").replace(/\D/g, ""),
-                        avatar_url: url as string,
+                        avatar_url: url,
                         user_id: clientId || "",
                         created_at: new Date().toISOString(),
                         updated_at: new Date().toISOString(),
@@ -770,11 +791,17 @@ function ConversationItem({
   onDeleteRequest,
 }: ConversationItemProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [imgError, setImgError] = useState(false);
 
   const contact = conversation.contact;
   const displayName = contact?.name || contact?.phone || "Desconhecido";
   const initials = displayName.charAt(0).toUpperCase();
   const isHumanTakeover = conversation.status === "open"; // bot_paused
+
+  // Reset imgError if avatar_url changes
+  useEffect(() => {
+    setImgError(false);
+  }, [contact?.avatar_url]);
 
   const handleClick = useCallback(() => {
     onSelect(conversation);
@@ -809,15 +836,16 @@ function ConversationItem({
       )}
     >
       {/* Avatar */}
-      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-muted text-sm font-medium text-foreground relative">
-        {contact?.avatar_url ? (
+      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-muted text-sm font-medium text-foreground relative overflow-hidden">
+        {contact?.avatar_url && !imgError ? (
           <img
             src={contact.avatar_url}
             alt={displayName}
+            onError={() => setImgError(true)}
             className="h-10 w-10 rounded-full object-cover"
           />
         ) : (
-          initials
+          <span>{initials}</span>
         )}
         {/* Indicador de status IA vs Humano no avatar */}
         <span

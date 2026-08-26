@@ -287,14 +287,25 @@ function ChatPageContent() {
           if (!existing) return c;
           const existingTime = new Date(existing.last_message_at || existing.updated_at || existing.created_at || 0).getTime();
           const loadedTime = new Date(c.last_message_at || c.updated_at || c.created_at || 0).getTime();
+          
+          // Preserva o avatar mais recente entre loaded e existing
+          const avatarUrl = c.contact?.avatar_url || existing.contact?.avatar_url;
+          const contact = (c.contact || existing.contact)
+            ? { ...(c.contact || existing.contact), avatar_url: avatarUrl } as any
+            : undefined;
+
           if (existingTime > loadedTime) {
             return {
               ...c,
+              contact,
               last_message_at: existing.last_message_at,
               last_message_text: existing.last_message_text || c.last_message_text,
             };
           }
-          return c;
+          return {
+            ...c,
+            contact,
+          };
         });
 
         return sortConversationsByLastMessage(merged);

@@ -25,7 +25,7 @@ export function normalizeConversation(raw: any): Conversation {
         phone: rawContact.phone_number || "",
         name: rawContact.nome_negocio || rawContact.push_name || rawContact.phone_number || "Sem Nome",
         company: rawContact.nome_negocio || "",
-        avatar_url: rawContact.profile_pic_url || undefined,
+        avatar_url: rawContact.profile_pic_url || rawContact.profile_pic || undefined,
         created_at: rawContact.created_at,
         updated_at: rawContact.updated_at || rawContact.created_at,
         remote_jid: remoteJid,
