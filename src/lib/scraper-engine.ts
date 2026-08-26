@@ -14,6 +14,7 @@
 import { supabase, supabaseAdmin } from "@/lib/supabase";
 import { getEvolutionConfig } from "@/lib/evolution";
 import { summarizeReviewsForLead } from "@/lib/reviews-ai";
+import { extractLocation } from "@/lib/lead-intelligence";
 import os from "os";
 import fs from "fs";
 import path from "path";
@@ -585,6 +586,20 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
 
     const maxLeads = Number(settings.maxLeads) || 0; // 0 = sem limite
 
+    // ─── EXPANSÃO AUTOMÁTICA PRA CIDADES VIZINHAS ───
+    // Problema real de log: 1 nicho × 1 região, limite 40, Google esgota os
+    // ~113 resultados da cidade e os filtros (sem site etc.) descartam quase
+    // tudo → run termina com 5/40 sem nunca olhar cidade nenhuma do entorno.
+    // Solução: colher as cidades dos ENDEREÇOS dos próprios resultados
+    // (inclusive dos descartados — o card tem endereço de graça) e, quando a
+    // última busca da fila acaba abaixo do limite, enfileirar o mesmo nicho
+    // nessas cidades. Places repetidos entre buscas já são dedupados por
+    // processedPlaceKeys — expandir nunca gera lead duplicado.
+    const norm = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+    const searchedRegions = new Set<string>(regions.map(r => norm(r)));
+    const cityCounts = new Map<string, number>();
+    let expansionsLeft = 10; // teto de cidades extras — bounding box de custo/tempo
+
     outer: for (let i = 0; i < queue.length; i++) {
       if (!keepRunning) {
         sendLog("Parada recebida. Abortando fila.", "warning");
@@ -766,6 +781,13 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
           }, lead.name);
 
           if (!cardData) continue;
+
+          // Colhe a cidade do endereço ANTES de qualquer descarte — até os
+          // descartados alimentam o mapa de cidades vizinhas pra expansão.
+          const loc = extractLocation(cardData.fullAddress);
+          if (loc.cidade && loc.cidade.length >= 3 && !/\d/.test(loc.cidade)) {
+            cityCounts.set(loc.cidade, (cityCounts.get(loc.cidade) || 0) + 1);
+          }
 
           // Descarte ULTRAPRECOCE: site já visível no card → nem abre o
           // painel de detalhes (pula navegação + reviews + filtros).
@@ -1779,6 +1801,36 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
         if (isEnd) {
           scrolling = false;
           sendLog(`Fim dos resultados para "${searchTerm}". Total: ${extractedPlaces.size}`, "info");
+        }
+      }
+
+      // ─── PONTO DE EXPANSÃO ───
+      // Roda SÓ na última busca da fila: se ainda falta lead pro limite e
+      // sobrou cota de expansão, enfileira o nicho nas cidades vizinhas mais
+      // vistas nos endereços. O for externo re-avalia queue.length a cada
+      // iteração, então o push simplesmente continua o trabalho.
+      if (
+        i === queue.length - 1 &&
+        settings.mode === "batch" &&
+        maxLeads > 0 &&
+        leadsStore.length < maxLeads &&
+        keepRunning &&
+        expansionsLeft > 0
+      ) {
+        const next = Array.from(cityCounts.entries())
+          .filter(([c]) => !searchedRegions.has(norm(c)))
+          .sort((a, b) => b[1] - a[1])   // cidade mais frequente primeiro
+          .slice(0, Math.min(5, expansionsLeft));
+        if (next.length === 0) {
+          sendLog(`🧭 Fila esgotada: ${leadsStore.length}/${maxLeads} leads e nenhuma cidade vizinha nova nos resultados pra expandir. Encerrando.`, "info");
+        } else {
+          for (const [c] of next) searchedRegions.add(norm(c));
+          expansionsLeft -= next.length;
+          queue.push(...next.flatMap(([c]) => niches.map(n => `${n.trim()} ${c}`)));
+          sendLog(
+            `🧭 ${leadsStore.length}/${maxLeads} leads e fila esgotada — expandindo pra cidade(s) vizinha(s): ${next.map(([c]) => c).join(", ")}.`,
+            "info"
+          );
         }
       }
     }
