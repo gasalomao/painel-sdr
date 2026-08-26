@@ -121,6 +121,13 @@ function TranscriptionModelPicker({ agentId }: { agentId: number | null }) {
         passa pro próximo. Válido nos modos <span className="text-primary">Automático</span> e{" "}
         <span className="text-primary">OpenRouter</span>.
       </p>
+      {freeCount > 0 && (
+        <p className="text-[11px] text-amber-300/70 leading-relaxed">
+          ⚠ Regra da OpenRouter: <strong>áudio</strong> nos modelos grátis exige saldo mínimo de US$0,50 na conta
+          (depósito único em openrouter.ai/credits). Sem saldo, os grátis respondem 402 e o sistema cai pro
+          Whisper local / Gemini automaticamente — modelos bloqueados ficam cacheados e param de custar latência.
+        </p>
+      )}
 
       {/* Ordem escolhida */}
       <div className="space-y-1.5">

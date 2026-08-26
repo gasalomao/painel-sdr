@@ -19,6 +19,35 @@ import {
 } from "@/lib/openrouter-model-discovery";
 
 const MAX_MODELS = 8;
+
+// ============================================================================
+// SAÚDE (escalabilidade): não re-tentar o que já sabemos que está quebrado.
+//
+// Visto ao vivo na OpenRouter:
+//   - Modelos :free de áudio exigem saldo ≥ US$0.50 (402 "requires at least
+//     $0.50 in balance for audio") e alguns só liberam pra harnesses
+//     aprovados (403). Sem depósito, TODA tentativa falha — e cada áudio do
+//     WhatsApp pagaria segundos de tentativas fúteis antes do fallback.
+//   - Cache por modelo bloqueado (403/400/404): pula sem rede por 30min.
+//   - Circuit breaker global: se NENHUM modelo respondeu, OpenRouter fica
+//     marcada indisponível por 10min — áudios vão direto whisper→Gemini.
+// ============================================================================
+const BLOCKED_MODEL_TTL_MS = 30 * 60_000;
+const OR_UNAVAILABLE_TTL_MS = 10 * 60_000;
+const blockedModels = new Map<string, number>(); // id → timestamp-limite
+let orUnavailableUntil = 0;
+
+/** Reset do estado de saúde — uso em testes. */
+export function __resetOpenRouterHealthForTests(): void {
+  blockedModels.clear();
+  orUnavailableUntil = 0;
+}
+
+function pruneBlockedModels(now = Date.now()): void {
+  for (const [id, until] of blockedModels) {
+    if (until <= now) blockedModels.delete(id);
+  }
+}
 /**
  * Webhook do WhatsApp tem ~30s de janela (Evolution). Orçamento total da
  * cadeia OpenRouter: 15s hard cap — o timeout por chamada é encurtado pro que
@@ -145,24 +174,31 @@ export async function transcribeAudioWithOpenRouter(
   mimetype: string,
   opts?: { models?: string[] },
 ): Promise<OpenRouterTranscription | null> {
+  // Circuit breaker aberto → nem consulta catálogo; caller cai pro fallback.
+  if (Date.now() < orUnavailableUntil) return null;
+
   try {
     const [keysInfo, audioModels] = await Promise.all([
       getAiKeys(),
       listOpenRouterAudioModels(),
     ]);
     const keys = keysInfo.openrouterKeys.filter(Boolean);
-    const chain = buildAudioAttemptChain(audioModels, MAX_MODELS, opts?.models);
+    pruneBlockedModels();
+    const chain = buildAudioAttemptChain(audioModels, MAX_MODELS, opts?.models)
+      .filter((id) => !blockedModels.has(id));
     if (!keys.length || !chain.length) return null;
 
     const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");
     const format = audioFormatFromMime(mimetype);
     const start = Date.now();
+    let attempted = 0;
 
     for (const modelId of chain) {
       for (const apiKey of keys) {
         // Orçamento global: não começa nova chamada sem tempo restante mínimo.
         const remaining = BUDGET_MS - (Date.now() - start);
         if (remaining < 500) return null;
+        attempted++;
         try {
           const text = await callOnce(modelId, apiKey, cleanBase64, format, Math.min(PER_CALL_MS, remaining));
           if (text) return { text, model: modelId };
@@ -171,11 +207,17 @@ export async function transcribeAudioWithOpenRouter(
             `[openrouter-transcribe] ${modelId} falhou${err?.keyLevel ? " (chave)" : err?.modelLevel ? " (modelo bloqueado)" : ""}:`,
             err?.message?.slice(0, 160),
           );
-          // Erro de modelo → nenhuma chave vai resolver; pula pro próximo modelo.
-          if (err?.modelLevel) break;
+          // Erro de modelo → nenhuma chave vai resolve; pula pro próximo modelo
+          // e memoriza pra não re-tentar nos próximos áudios.
+          if (err?.modelLevel) {
+            blockedModels.set(modelId, Date.now() + BLOCKED_MODEL_TTL_MS);
+            break;
+          }
         }
       }
     }
+    // Tentou e nada respondeu — abre o breaker por um tempo.
+    if (attempted > 0) orUnavailableUntil = Date.now() + OR_UNAVAILABLE_TTL_MS;
     return null;
   } catch (err: any) {
     console.warn("[openrouter-transcribe] Erro geral:", err?.message);

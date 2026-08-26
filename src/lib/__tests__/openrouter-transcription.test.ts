@@ -95,6 +95,12 @@ describe("openrouter-model-discovery — helpers de áudio", () => {
 describe("openrouter-transcription — cadeia e chamadas", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
+  // Estado de saúde (breaker/blocked) vive no módulo — zera entre testes.
+  beforeEach(async () => {
+    const mod = await import("@/lib/openrouter-transcription");
+    mod.__resetOpenRouterHealthForTests();
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -222,6 +228,46 @@ describe("openrouter-transcription — cadeia e chamadas", () => {
     // free/audio-b: UMA tentativa só (403 pula as demais chaves e o modelo)
     const triedModels = fetchMock.mock.calls.map((c: any) => JSON.parse(c[1].body).model);
     expect(triedModels).toEqual(["free/audio-b", "paid/audio-a"]);
+  });
+
+  it("modelo bloqueado fica em cache e é pulado SEM rede na próxima chamada", async () => {
+    const mod = await import("@/lib/openrouter-transcription");
+    mod.__resetOpenRouterHealthForTests();
+
+    // Fase 1: free bloqueia (403), pago responde → marca só o free
+    fetchMock = vi.fn(async (_url: any, init?: any) => {
+      const model = JSON.parse(init.body).model;
+      if (model === "paid/audio-a") return new Response(JSON.stringify({ choices: [{ message: { content: "ok1" } }] }), { status: 200 });
+      return new Response(JSON.stringify({ error: { message: "blocked" } }), { status: 403 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const r1 = await mod.transcribeAudioWithOpenRouter("dGVzdA==", "audio/ogg");
+    expect(r1?.model).toBe("paid/audio-a");
+
+    // Fase 2: novo mock conta chamadas — free NEM PODE ser chamado (cache)
+    fetchMock = vi.fn(async (_url: any, init?: any) =>
+      new Response(JSON.stringify({ choices: [{ message: { content: "ok2" } }] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const r2 = await mod.transcribeAudioWithOpenRouter("dGVzdA==", "audio/ogg");
+
+    expect(r2?.model).toBe("paid/audio-a");
+    const triedModels = fetchMock.mock.calls.map((c: any) => JSON.parse(c[1].body).model);
+    expect(triedModels).toEqual(["paid/audio-a"]); // bloqueado pulado sem rede
+  });
+
+  it("circuit breaker: OpenRouter inteiro fora → próximas chamadas nem batem na rede", async () => {
+    const mod = await import("@/lib/openrouter-transcription");
+    mod.__resetOpenRouterHealthForTests();
+    let calls = 0;
+    fetchMock = vi.fn(async () => { calls++; return new Response("{}", { status: 500 }); });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await mod.transcribeAudioWithOpenRouter("dGVzdA==", "audio/ogg"); // tudo falha → breaker abre
+    const callsAfterFirst = calls;
+
+    const r = await mod.transcribeAudioWithOpenRouter("dGVzdA==", "audio/ogg");
+    expect(r).toBeNull();
+    expect(calls).toBe(callsAfterFirst); // ZERO novas chamadas de rede
   });
 
   it("resposta vazia não é aceita como sucesso", async () => {
