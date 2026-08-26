@@ -462,9 +462,14 @@ async function openRouterChatWithFailover(
           console.warn(`[ai-provider:openrouter] Chave ${c.id} marcada MORTA (HTTP ${err.status}). Rotacionando para próxima chave OpenRouter.`);
           continue;
         }
-        if (err.status === 429 || err.status === 402 || isFailoverableStatus(err.status, err.message)) {
+        if (
+          err.status === 429 ||
+          err.status === 402 ||
+          isFailoverableStatus(err.status, err.message) ||
+          (/unavailable for free|not a valid model id/i.test(err.message) && !/support tool use/i.test(err.message))
+        ) {
           markEndpointCooldown(coolId);
-          console.warn(`[ai-provider:openrouter] ${coolId} em cooldown (HTTP ${err.status}). Rotacionando para próxima chave/modelo.`);
+          console.warn(`[ai-provider:openrouter] ${coolId} falhou (${err.message.slice(0, 80)}). Rotacionando para próxima chave/modelo.`);
           continue;
         }
         throw err;
@@ -476,7 +481,7 @@ async function openRouterChatWithFailover(
 
   throw lastErr instanceof Error
     ? lastErr
-    : new Error("Todas as chaves OpenRouter falharam ou estão em cooldown. Tente novamente mais tarde.");
+    : new ProviderHttpError(429, "Todas as chaves OpenRouter falharam ou estão em cooldown. Tente novamente mais tarde.");
 }
 
 async function gatewayChat(baseUrl: string, apiKey: string | null, body: Record<string, any>, endpointId?: string): Promise<any> {
@@ -752,9 +757,14 @@ export interface GenerateTextResult {
  * morto já tem retry interno próprio).
  */
 function isAccountLevelError(err: unknown): boolean {
-  if (err instanceof ProviderHttpError) return isFailoverableStatus(err.status, err.message);
+  if (err instanceof ProviderHttpError) {
+    if (isFailoverableStatus(err.status, err.message)) return true;
+    const msg = String(err.message || "");
+    if (/unavailable for free|not a valid model id|no endpoints found|cooldown|falharam/i.test(msg)) return true;
+    return false;
+  }
   const msg = String((err as any)?.message || err);
-  return /quota|exhaust|429|rate.?limit|timeout|deadline|network|ENOTFOUND|ECONNRESET|fetch failed|api key|unauthor|forbidden|unavailable|overloaded/i.test(msg);
+  return /quota|exhaust|429|rate.?limit|timeout|deadline|network|ENOTFOUND|ECONNRESET|fetch failed|api key|unauthor|forbidden|unavailable|overloaded|unavailable for free|not a valid model id|no endpoints found|cooldown|falharam/i.test(msg);
 }
 
 /** Chaves mínimas que a escada precisa pra montar os rungs. */
@@ -780,24 +790,34 @@ interface LadderKeys {
  */
 async function buildLadder(requestedRef: string, keys: LadderKeys | null): Promise<string[]> {
   const ladder = [requestedRef];
-  const seen = new Set<string>([providerOf(requestedRef)]);
-  const push = (ref: string | null | undefined) => {
+  const seenModels = new Set<string>([requestedRef]);
+  const seenProviders = new Set<string>([providerOf(requestedRef)]);
+
+  const push = (ref: string | null | undefined, allowSameProvider = false) => {
     const r = (ref || "").trim();
-    if (!r) return;
+    if (!r || seenModels.has(r)) return;
     const p = providerOf(r);
-    if (seen.has(p)) return;
-    seen.add(p);
+    if (!allowSameProvider && seenProviders.has(p)) return;
+    seenModels.add(r);
+    seenProviders.add(p);
     ladder.push(r);
   };
-  push(keys?.gatewayFallbackModel);
+
+  // 1. Reserva do usuário (máxima prioridade)
+  push(keys?.gatewayFallbackModel, true);
+
+  // 2. Provedor Gemini (melhor flash do momento)
   if (keys?.gemini) {
-    // Descoberta dinâmica: o melhor flash DISPONÍVEL AGORA (ex.: gemini-3.x
-    // quando existir) — não um id hardcoded que envelhece.
-    let best = "gemini-2.5-flash"; // piso se a descoberta falhar (modelo velho mas vivo)
-    try { best = (await pickBestFlashModel()) || best; } catch { /* offline: usa o piso */ }
+    let best = "gemini-2.5-flash";
+    try { best = (await pickBestFlashModel()) || best; } catch { /* offline */ }
     push(best);
   }
-  if (keys?.openrouter || (keys?.openrouterKeys?.length || 0) > 0) push("openrouter:openai/gpt-4o-mini");
+
+  // 3. Última rede de segurança: modelo OpenRouter barato e de alta disponibilidade (gpt-4o-mini)
+  if (keys?.openrouter || (keys?.openrouterKeys?.length || 0) > 0) {
+    push("openrouter:openai/gpt-4o-mini", true);
+  }
+
   return ladder;
 }
 
@@ -990,8 +1010,8 @@ export async function generateText(opts: GenerateTextOpts): Promise<GenerateText
         });
         return { ...res, didFallback: true };
       } catch (rungErr) {
-        if (!isAccountLevelError(rungErr)) throw rungErr;
-        // rung morreu com erro de conta também → tenta o próximo
+        console.warn(`[ai-provider] Degrau "${rung}" falhou (${String((rungErr as any)?.message || rungErr).slice(0, 80)}). Tentando próximo da escada.`);
+        // Continua para o próximo degrau
       }
     }
     throw err; // esgotou a escada inteira — aí sim falha de verdade
@@ -1113,7 +1133,8 @@ export async function startAiChat(opts: StartAiChatOpts): Promise<AiChatSession>
             migrated = s;
             successfulTurns++;
             return r;
-          } catch {
+          } catch (rungErr) {
+            console.warn(`[ai-provider] Degrau de sessão "${rung}" falhou (${String((rungErr as any)?.message || rungErr).slice(0, 80)}). Tentando próximo.`);
             // rung morreu também → tenta o próximo da escada
           }
         }

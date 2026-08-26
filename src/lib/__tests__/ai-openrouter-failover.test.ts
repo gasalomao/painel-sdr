@@ -114,11 +114,12 @@ describe("OpenRouter Multi-Key Failover (9Router-style)", () => {
         ? { status: 429, content: "", msg: "Rate limit exceeded" }
         : { status: 200, content: "OTHER_MODEL_OK", msg: "" };
 
-    // Modelo A estoura quota nas duas chaves...
+    // Modelo A estoura quota nas duas chaves (e o degrau gpt-4o-mini da escada é tentado)...
     await generateText({
       modelRef: "openrouter:google/gemma-x:free",
-      prompt: "Tenta gemma",
+      prompt: "oi",
       openrouterKeys: ["sk-or-v1-key1", "sk-or-v1-key2"],
+      noGatewayFallback: true, // Testa estritamente a rotação do modelo A sem subir a escada
     }).catch(() => {});
     expect(st.openrouterCalls).toHaveLength(2);
 
