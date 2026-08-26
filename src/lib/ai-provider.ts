@@ -736,7 +736,79 @@ export interface GenerateTextResult {
   didFallback: boolean;
 }
 
-export async function generateText(opts: GenerateTextOpts): Promise<GenerateTextResult> {
+// ─────────────────────────────────────────────────────────────────────
+// ESCADA DE FALLBACK CROSS-PROVIDER ("nunca quebra")
+// A rotação de CONTAS já existe dentro de cada provider (chaves OpenRouter,
+// contas do gateway, cascata de combos). O que faltava era a travessia:
+// Gemini com quota estourada não caía pra OpenRouter; generateText no
+// OpenRouter não caía pro Gemini. A escada cobre isso num lugar só —
+// generateText e startAiChat ganham de graça.
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Esse erro justifica tentar OUTRO provider? Erros de CONTA (quota/429/auth/
+ * rede) sim — outra conta resolve. Erros de REQUEST (400 bad request puro,
+ * 404 modelo morto) não — qualquer provider daria o mesmo erro (e modelo
+ * morto já tem retry interno próprio).
+ */
+function isAccountLevelError(err: unknown): boolean {
+  if (err instanceof ProviderHttpError) return isFailoverableStatus(err.status, err.message);
+  const msg = String((err as any)?.message || err);
+  return /quota|exhaust|429|rate.?limit|timeout|deadline|network|ENOTFOUND|ECONNRESET|fetch failed|api key|unauthor|forbidden|unavailable|overloaded/i.test(msg);
+}
+
+/** Chaves mínimas que a escada precisa pra montar os rungs. */
+interface LadderKeys {
+  gemini?: string | null;
+  openrouter?: string | null;
+  openrouterKeys?: string[] | null;
+  gatewayFallbackModel?: string | null;
+}
+
+/**
+ * Monta a escada de fallback cross-provider, dedup POR PROVIDER (a rotação
+ * interna já cobre "outra conta do mesmo provider"):
+ *   1. modelRef pedido
+ *   2. gatewayFallbackModel (reserva explícita configurada em Configurações)
+ *   3. gemini-2.5-flash (se houver chave Gemini)
+ *   4. openrouter:openai/gpt-4o-mini (se houver chave OpenRouter — último
+ *      rung, pago porém frações de centavo; só é alcançado quando TUDO
+ *      acima morreu. ponytail: se preferir sem custo, remova este rung.)
+ */
+function buildLadder(requestedRef: string, keys: LadderKeys | null): string[] {
+  const ladder = [requestedRef];
+  const seen = new Set<string>([providerOf(requestedRef)]);
+  const push = (ref: string | null | undefined) => {
+    const r = (ref || "").trim();
+    if (!r) return;
+    const p = providerOf(r);
+    if (seen.has(p)) return;
+    seen.add(p);
+    ladder.push(r);
+  };
+  push(keys?.gatewayFallbackModel);
+  if (keys?.gemini) push("gemini-2.5-flash");
+  if (keys?.openrouter || (keys?.openrouterKeys?.length || 0) > 0) push("openrouter:openai/gpt-4o-mini");
+  return ladder;
+}
+
+/** Lê as chaves pra montar a escada — best-effort (DB fora = escada vazia). */
+async function ladderKeys(opts: { geminiApiKey?: string | null; openrouterApiKey?: string | null; openrouterKeys?: string[] | null }): Promise<LadderKeys | null> {
+  try {
+    const { getAiKeys } = await import("@/lib/ai-keys");
+    const keys = await getAiKeys();
+    return {
+      gemini: opts.geminiApiKey || keys?.gemini || null,
+      openrouter: opts.openrouterApiKey || keys?.openrouter || null,
+      openrouterKeys: opts.openrouterKeys || keys?.openrouterKeys || null,
+      gatewayFallbackModel: keys?.gatewayFallbackModel || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function generateTextSingle(opts: GenerateTextOpts): Promise<GenerateTextResult> {
   const { provider, model } = parseModelRef(opts.modelRef);
 
   if (provider === "combo") {
@@ -881,6 +953,42 @@ export async function generateText(opts: GenerateTextOpts): Promise<GenerateText
   }
 }
 
+/**
+ * generateText PÚBLICO — escada cross-provider em volta do single:
+ * falha de CONTA no provider pedido (quota/429/auth/rede) tenta os rungs
+ * de OUTROS providers configurados. Só lança de verdade quando NENHUMA
+ * conta/provider consegue atender — exatamente o contrato do disparo:
+ * "IA reescrevendo" não pode cair no template cru por 1 chave morta.
+ */
+export async function generateText(opts: GenerateTextOpts): Promise<GenerateTextResult> {
+  if (opts.noGatewayFallback) return generateTextSingle(opts);
+  try {
+    return await generateTextSingle(opts);
+  } catch (err) {
+    if (!isAccountLevelError(err)) throw err;
+    const keys = await ladderKeys(opts);
+    const ladder = buildLadder(opts.modelRef, keys);
+    for (const rung of ladder.slice(1)) {
+      try {
+        console.warn(`[ai-provider] "${opts.modelRef}" falhou (${String((err as any)?.message || err).slice(0, 120)}). Fallback cross-provider → "${rung}".`);
+        const res = await generateTextSingle({
+          ...opts,
+          modelRef: rung,
+          noGatewayFallback: true,
+          geminiApiKey: keys?.gemini || null,
+          openrouterApiKey: keys?.openrouter || null,
+          openrouterKeys: keys?.openrouterKeys || null,
+        });
+        return { ...res, didFallback: true };
+      } catch (rungErr) {
+        if (!isAccountLevelError(rungErr)) throw rungErr;
+        // rung morreu com erro de conta também → tenta o próximo
+      }
+    }
+    throw err; // esgotou a escada inteira — aí sim falha de verdade
+  }
+}
+
 // =====================================================================
 // 2) startAiChat — sessão de chat com FERRAMENTAS (o Agente SDR).
 //
@@ -953,7 +1061,64 @@ export interface StartAiChatOpts {
   noGatewayFallback?: boolean;
 }
 
+/**
+ * startAiChat PÚBLICO — escada cross-provider em volta do single. Sessões
+ * falham no 1º turno (não na criação), então a migração acontece ali:
+ * se o turno inicial morrer com erro de CONTA, monta sessão no próximo
+ * rung de outro provider e refaz o turno. Migra UMA vez — depois do 1º
+ * turno bem-sucedido nunca troca (não perde contexto no meio da conversa).
+ * Só lança quando NENHUMA conta/provider consegue atender.
+ */
 export async function startAiChat(opts: StartAiChatOpts): Promise<AiChatSession> {
+  const inner = await startAiChatSingle(opts);
+  if (opts.noGatewayFallback) return inner;
+
+  let migrated: AiChatSession | null = null;
+  let successfulTurns = 0;
+
+  return {
+    provider: inner.provider,
+    modelUsed: () => (migrated ? migrated.modelUsed() : inner.modelUsed()),
+    async sendUser(text: string) {
+      if (migrated) return migrated.sendUser(text);
+      try {
+        const r = await inner.sendUser(text);
+        successfulTurns++;
+        return r;
+      } catch (err) {
+        if (successfulTurns > 0 || !isAccountLevelError(err)) throw err;
+        const keys = await ladderKeys(opts);
+        const ladder = buildLadder(opts.modelRef, keys);
+        for (const rung of ladder.slice(1)) {
+          try {
+            console.warn(`[ai-provider] Sessão "${opts.modelRef}" falhou no 1º turno (${String((err as any)?.message || err).slice(0, 120)}). Migrando pro fallback cross-provider "${rung}".`);
+            const s = await startAiChatSingle({
+              ...opts,
+              modelRef: rung,
+              noGatewayFallback: true,
+              geminiApiKey: opts.geminiApiKey || keys?.gemini || null,
+              openrouterApiKey: opts.openrouterApiKey || keys?.openrouter || null,
+              openrouterKeys: opts.openrouterKeys || keys?.openrouterKeys || null,
+            });
+            const r = await s.sendUser(text);
+            migrated = s;
+            successfulTurns++;
+            return r;
+          } catch {
+            // rung morreu também → tenta o próximo da escada
+          }
+        }
+        throw err; // esgotou a escada inteira
+      }
+    },
+    async sendToolResults(results: AiToolResult[]) {
+      if (migrated) return migrated.sendToolResults(results);
+      return inner.sendToolResults(results);
+    },
+  };
+}
+
+async function startAiChatSingle(opts: StartAiChatOpts): Promise<AiChatSession> {
   const { provider, model } = parseModelRef(opts.modelRef);
 
   if (provider === "combo") {
