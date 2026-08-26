@@ -205,6 +205,25 @@ describe("openrouter-transcription — cadeia e chamadas", () => {
     expect(JSON.parse(fetchMock.mock.calls[0][1].body).messages[0].content[1].input_audio.format).toBe("mp3");
   });
 
+  it("403/400/404 = erro de MODELO: não queima as outras chaves, pula pro próximo modelo", async () => {
+    // Caso real visto ao vivo: ":free" responde 403 "only available on agentic
+    // harnesses" — trocar chave não resolve nenhum pouco.
+    fetchMock = vi.fn(async (_url: any, init?: any) => {
+      const model = JSON.parse(init.body).model;
+      if (model === "paid/audio-a") return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+      return new Response(JSON.stringify({ error: { message: "only available on agentic harnesses" } }), { status: 403 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { transcribeAudioWithOpenRouter } = await import("@/lib/openrouter-transcription");
+    const r = await transcribeAudioWithOpenRouter("dGVzdA==", "audio/ogg");
+
+    expect(r).toEqual({ text: "ok", model: "paid/audio-a" });
+    // free/audio-b: UMA tentativa só (403 pula as demais chaves e o modelo)
+    const triedModels = fetchMock.mock.calls.map((c: any) => JSON.parse(c[1].body).model);
+    expect(triedModels).toEqual(["free/audio-b", "paid/audio-a"]);
+  });
+
   it("resposta vazia não é aceita como sucesso", async () => {
     fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ choices: [{ message: { content: "" } }] }), { status: 200 }));

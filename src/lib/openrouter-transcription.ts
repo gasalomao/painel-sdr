@@ -117,6 +117,14 @@ async function callOnce(
     err.keyLevel = true;
     throw err;
   }
+  // 400/403/404 = problema de MODELO (bloqueado/não existe/rejeitou o payload)
+  // — trocar chave não resolve nenhum pouco. Visto ao vivo: ":free" responde
+  // 403 "only available on agentic harnesses".
+  if (res.status === 400 || res.status === 403 || res.status === 404) {
+    const err: any = new Error(`openrouter ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    err.modelLevel = true;
+    throw err;
+  }
   if (!res.ok) {
     throw new Error(`openrouter ${res.status}: ${(await res.text()).slice(0, 200)}`);
   }
@@ -160,9 +168,11 @@ export async function transcribeAudioWithOpenRouter(
           if (text) return { text, model: modelId };
         } catch (err: any) {
           console.warn(
-            `[openrouter-transcribe] ${modelId} falhou${err?.keyLevel ? " (chave)" : ""}:`,
+            `[openrouter-transcribe] ${modelId} falhou${err?.keyLevel ? " (chave)" : err?.modelLevel ? " (modelo bloqueado)" : ""}:`,
             err?.message?.slice(0, 160),
           );
+          // Erro de modelo → nenhuma chave vai resolver; pula pro próximo modelo.
+          if (err?.modelLevel) break;
         }
       }
     }
