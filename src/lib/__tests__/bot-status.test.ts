@@ -61,3 +61,102 @@ describe("manual-send-registry — edge cases", () => {
     expect(key).toBe("inst1::whatsapp");
   });
 });
+
+// ============================================================================
+// BOT-STATUS DE VERDADE — sanitização da ordem de modelos + whitelist do
+// método + cache TTL/invalidação. (Antes este arquivo nem importava o módulo.)
+// ============================================================================
+import { describe as d2, it as t2, expect as e2, vi, beforeEach as bfe } from "vitest";
+
+let maybeSingleResult: { data: unknown } = { data: null };
+const maybeSingleSpy = vi.fn(async () => maybeSingleResult);
+
+vi.mock("@/lib/supabase_admin", () => ({
+  supabaseAdmin: {
+    from: vi.fn(() => ({
+      select: vi.fn(() => ({
+        eq: vi.fn(() => ({
+          maybeSingle: maybeSingleSpy,
+          single: vi.fn(async () => ({ data: null })),
+        })),
+      })),
+    })),
+  },
+}));
+
+d2("bot-status — getTranscriptionModels (ordem salva por agente)", () => {
+  bfe(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    maybeSingleResult = { data: null };
+  });
+
+  t2("sem agente → [] sem consultar banco", async () => {
+    const { getTranscriptionModels } = await import("@/lib/bot-status");
+    e2(await getTranscriptionModels(null)).toEqual([]);
+    e2(await getTranscriptionModels(undefined)).toEqual([]);
+    e2(maybeSingleSpy).not.toHaveBeenCalled();
+  });
+
+  t2("options ausente/não-array → []", async () => {
+    maybeSingleResult = { data: { options: { gemini_api_key: "x" } } };
+    const { getTranscriptionModels } = await import("@/lib/bot-status");
+    e2(await getTranscriptionModels(1)).toEqual([]);
+    maybeSingleResult = { data: { options: { transcription_models: "não-sou-array" } } };
+    // outro agentId força nova leitura (cache é por agente)
+    e2(await getTranscriptionModels(2)).toEqual([]);
+  });
+
+  t2("lê array válido, converte pra string, descarta vazios e corta em 10", async () => {
+    maybeSingleResult = {
+      data: {
+        options: {
+          transcription_models: [
+            "modelo/a",
+            42,               // número vira string
+            "",               // vazio fora
+            "   ",            // só espaço fora
+            null,             // null fora
+            ...Array.from({ length: 12 }, (_, i) => `extra/${i}`),
+          ],
+        },
+      },
+    };
+    const { getTranscriptionModels } = await import("@/lib/bot-status");
+    const out = await getTranscriptionModels(3);
+    e2(out[0]).toBe("modelo/a");
+    e2(out[1]).toBe("42");
+    e2(out.length).toBe(10); // cap
+    e2(out.some((s: unknown) => s === "" || s === null)).toBe(false);
+  });
+
+  t2("cache: 2ª chamada no mesmo agente NÃO consulta banco; invalidação volta a consultar", async () => {
+    maybeSingleResult = { data: { options: { transcription_models: ["a/b"] } } };
+    const { getTranscriptionModels, invalidateTranscriptionModelsCache } = await import("@/lib/bot-status");
+    e2(await getTranscriptionModels(7)).toEqual(["a/b"]);
+    const afterCache = maybeSingleSpy.mock.calls.length;
+    e2(await getTranscriptionModels(7)).toEqual(["a/b"]);
+    e2(maybeSingleSpy.mock.calls.length).toBe(afterCache); // cache hit
+
+    invalidateTranscriptionModelsCache(7);
+    e2(await getTranscriptionModels(7)).toEqual(["a/b"]);
+    e2(maybeSingleSpy.mock.calls.length).toBe(afterCache + 1); // reconsultou
+  });
+
+  t2("getTranscriptionMethod: aceita openrouter; valores estranhos caem em auto", async () => {
+    maybeSingleResult = { data: { transcription_method: "openrouter" } };
+    const mod = await import("@/lib/bot-status");
+    e2(await mod.getTranscriptionMethod(11)).toBe("openrouter");
+
+    maybeSingleResult = { data: { transcription_method: "HACK" } };
+    e2(await mod.getTranscriptionMethod(12)).toBe("auto");
+
+    maybeSingleResult = { data: null };
+    e2(await mod.getTranscriptionMethod(13)).toBe("auto");
+
+    e2(await mod.getTranscriptionMethod(null)).toBe("auto");
+    const callsAfterNull = maybeSingleSpy.mock.calls.length;
+    await mod.getTranscriptionMethod(null);
+    e2(maybeSingleSpy.mock.calls.length).toBe(callsAfterNull); // null short-circuit sem banco
+  });
+});

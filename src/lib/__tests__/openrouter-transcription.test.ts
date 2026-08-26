@@ -270,6 +270,103 @@ describe("openrouter-transcription — cadeia e chamadas", () => {
     expect(calls).toBe(callsAfterFirst); // ZERO novas chamadas de rede
   });
 
+  it("breaker EXPIRA após ~10min — rede volta a ser tentada", async () => {
+    vi.useFakeTimers();
+    try {
+      const mod = await import("@/lib/openrouter-transcription");
+      mod.__resetOpenRouterHealthForTests();
+      let calls = 0;
+      fetchMock = vi.fn(async () => { calls++; return new Response("{}", { status: 500 }); });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await mod.transcribeAudioWithOpenRouter("dGVzdA==", "audio/ogg"); // abre breaker
+      await mod.transcribeAudioWithOpenRouter("dGVzdA==", "audio/ogg"); // bloqueada
+      const frozen = calls;
+
+      // +11 min — TTL do breaker é 10min
+      vi.setSystemTime(Date.now() + 11 * 60_000);
+      await mod.transcribeAudioWithOpenRouter("dGVzdA==", "audio/ogg");
+      expect(calls).toBeGreaterThan(frozen); // voltou a tentar
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bloqueio de modelo EXPIRA após ~30min — modelo volta pra cadeia", async () => {
+    vi.useFakeTimers();
+    try {
+      const mod = await import("@/lib/openrouter-transcription");
+      mod.__resetOpenRouterHealthForTests();
+
+      // Fase 1: free 403 (marca bloqueado), pago OK
+      fetchMock = vi.fn(async (_url: any, init?: any) => {
+        const model = JSON.parse(init.body).model;
+        if (model === "paid/audio-a") return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+        return new Response(JSON.stringify({ error: {} }), { status: 403 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      await mod.transcribeAudioWithOpenRouter("dGVzdA==", "audio/ogg");
+
+      // Fase 2: dentro da janela → free pulado
+      let tried: string[] = [];
+      fetchMock = vi.fn(async (_url: any, init?: any) => {
+        tried.push(JSON.parse(init.body).model);
+        return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      await mod.transcribeAudioWithOpenRouter("dGVzdA==", "audio/ogg");
+      expect(tried).toEqual(["paid/audio-a"]);
+
+      // Fase 3: +31 min — bloqueio expira, free volta a ser tentado primeiro
+      tried = [];
+      vi.setSystemTime(Date.now() + 31 * 60_000);
+      await mod.transcribeAudioWithOpenRouter("dGVzdA==", "audio/ogg");
+      expect(tried[0]).toBe("free/audio-b");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("todos os modelos bloqueados → null SEM abrir breaker (não é indisponibilidade)", async () => {
+    vi.useFakeTimers();
+    try {
+      const mod = await import("@/lib/openrouter-transcription");
+      mod.__resetOpenRouterHealthForTests();
+      fetchMock = vi.fn(async () =>
+        new Response(JSON.stringify({ error: {} }), { status: 403 })); // ambos bloqueiam
+      vi.stubGlobal("fetch", fetchMock);
+      await mod.transcribeAudioWithOpenRouter("dGVzdA==", "audio/ogg");
+
+      // Ambos em cache → chain vazia → null imediato, sem marcar indisponível
+      let called = false;
+      fetchMock = vi.fn(async () => { called = true; return new Response("{}", { status: 500 }); });
+      vi.stubGlobal("fetch", fetchMock);
+      const r = await mod.transcribeAudioWithOpenRouter("dGVzdA==", "audio/ogg");
+      expect(r).toBeNull();
+      expect(called).toBe(false);
+
+      // E como NÃO abriu breaker, expirado o cache dos modelos volta a tentar
+      vi.setSystemTime(Date.now() + 31 * 60_000);
+      called = false;
+      await mod.transcribeAudioWithOpenRouter("dGVzdA==", "audio/ogg");
+      expect(called).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("extra.models=[] cai no padrão grátis-primeiro; customOrder respeita cap do max", async () => {
+    const { buildAudioAttemptChain } = await import("@/lib/openrouter-transcription");
+    const models = [
+      { id: "free/a", pricing: { prompt: "0" } },
+      { id: "free/b", pricing: { prompt: "0" } },
+      { id: "paid/c", pricing: { prompt: "0.01" } },
+    ];
+    expect(buildAudioAttemptChain(models, 8, [])).toEqual(["free/a", "free/b", "paid/c"]);
+    // Ordem custom maior que max → corta na ordem escolhida
+    expect(buildAudioAttemptChain(models, 2, ["paid/c", "free/a", "free/b"])).toEqual(["paid/c", "free/a"]);
+  });
+
   it("resposta vazia não é aceita como sucesso", async () => {
     fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ choices: [{ message: { content: "" } }] }), { status: 200 }));
@@ -358,5 +455,36 @@ describe("shared-helpers transcribeAudio — ordem de fallback com OpenRouter", 
     const { transcribeAudioDetailed } = await import("@/app/api/webhooks/shared-helpers");
     expect(await transcribeAudioDetailed("dGVzdA==", "audio/ogg", "m4", "disabled")).toBeNull();
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('método "whisper" puro NÃO tenta OpenRouter nem Gemini', async () => {
+    const fetchSpy = vi.fn(async () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: "x" } }] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const { transcribeAudioWithWhisper } = await import("@/lib/whisper-manager");
+    (transcribeAudioWithWhisper as any).mockResolvedValue("só whisper");
+
+    const { transcribeAudioDetailed } = await import("@/app/api/webhooks/shared-helpers");
+    const r = await transcribeAudioDetailed("dGVzdA==", "audio/ogg", "m6", "whisper");
+
+    expect(r).toEqual({ text: "só whisper", provider: "whisper" });
+    expect(fetchSpy).not.toHaveBeenCalled(); // zero chamadas à OpenRouter
+  });
+
+  it("prefixo data:...;base64, é removido antes de enviar à OpenRouter", async () => {
+    let sentData = "";
+    vi.stubGlobal("fetch", vi.fn(async (_url: any, init?: any) => {
+      sentData = JSON.parse(init.body).messages[0].content[1].input_audio.data;
+      return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+    }));
+    const { transcribeAudioDetailed } = await import("@/app/api/webhooks/shared-helpers");
+    const r = await transcribeAudioDetailed(
+      "data:audio/ogg;codecs=opus;base64,dGVzdA==",
+      "audio/ogg",
+      "m7",
+      "openrouter",
+    );
+    expect(r?.text).toBe("ok");
+    expect(sentData).toBe("dGVzdA=="); // limpo
   });
 });
