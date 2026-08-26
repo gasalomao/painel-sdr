@@ -110,6 +110,16 @@ afterEach(() => {
 });
 
 describe("generateText — escada cross-provider", () => {
+  it("reserva ESCOLHIDA pelo usuário tem prioridade sobre o flash padrão", async () => {
+    st.keys.gemini = "fake-gemini-key";
+    st.keys.gatewayFallbackModel = "openrouter:anthropic/claude-3.5-sonnet";
+    st.geminiFails = true;
+    st.orQueue = [{ status: 200, content: "CLAUDE-OK" }];
+    const res = await generateText({ modelRef: "gemini:gemini-2.5-flash", prompt: "oi", geminiApiKey: st.keys.gemini });
+    expect(res.text).toBe("CLAUDE-OK");
+    expect(res.modelUsed).toBe("anthropic/claude-3.5-sonnet");
+  });
+
   it("Gemini com quota estourada e chave OpenRouter disponível → cai pro OpenRouter", async () => {
     st.keys.gemini = "fake-gemini-key";
     st.geminiFails = true;

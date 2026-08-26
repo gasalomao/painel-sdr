@@ -769,13 +769,16 @@ interface LadderKeys {
  * Monta a escada de fallback cross-provider, dedup POR PROVIDER (a rotação
  * interna já cobre "outra conta do mesmo provider"):
  *   1. modelRef pedido
- *   2. gatewayFallbackModel (reserva explícita configurada em Configurações)
- *   3. gemini-2.5-flash (se houver chave Gemini)
- *   4. openrouter:openai/gpt-4o-mini (se houver chave OpenRouter — último
- *      rung, pago porém frações de centavo; só é alcançado quando TUDO
- *      acima morreu. ponytail: se preferir sem custo, remova este rung.)
+ *   2. gatewayFallbackModel — RESERVA ESCOLHIDA PELO USUÁRIO em
+ *      Configurações ("Modelo de reserva"). É aqui que o usuário decide pra
+ *      onde cair primeiro.
+ *   3. melhor flash ATUAL descoberto na hora (pickBestFlashModel — consulta
+ *      a lista real da Google; nunca fica ultrapassado como um id fixo)
+ *   4. openrouter:openai/gpt-4o-mini (último rung, pago porém frações de
+ *      centavo; só é alcançado quando TUDO acima morreu. ponytail: se
+ *      preferir sem custo, remova este rung.)
  */
-function buildLadder(requestedRef: string, keys: LadderKeys | null): string[] {
+async function buildLadder(requestedRef: string, keys: LadderKeys | null): Promise<string[]> {
   const ladder = [requestedRef];
   const seen = new Set<string>([providerOf(requestedRef)]);
   const push = (ref: string | null | undefined) => {
@@ -787,7 +790,13 @@ function buildLadder(requestedRef: string, keys: LadderKeys | null): string[] {
     ladder.push(r);
   };
   push(keys?.gatewayFallbackModel);
-  if (keys?.gemini) push("gemini-2.5-flash");
+  if (keys?.gemini) {
+    // Descoberta dinâmica: o melhor flash DISPONÍVEL AGORA (ex.: gemini-3.x
+    // quando existir) — não um id hardcoded que envelhece.
+    let best = "gemini-2.5-flash"; // piso se a descoberta falhar (modelo velho mas vivo)
+    try { best = (await pickBestFlashModel()) || best; } catch { /* offline: usa o piso */ }
+    push(best);
+  }
   if (keys?.openrouter || (keys?.openrouterKeys?.length || 0) > 0) push("openrouter:openai/gpt-4o-mini");
   return ladder;
 }
@@ -967,7 +976,7 @@ export async function generateText(opts: GenerateTextOpts): Promise<GenerateText
   } catch (err) {
     if (!isAccountLevelError(err)) throw err;
     const keys = await ladderKeys(opts);
-    const ladder = buildLadder(opts.modelRef, keys);
+    const ladder = await buildLadder(opts.modelRef, keys);
     for (const rung of ladder.slice(1)) {
       try {
         console.warn(`[ai-provider] "${opts.modelRef}" falhou (${String((err as any)?.message || err).slice(0, 120)}). Fallback cross-provider → "${rung}".`);
@@ -1088,7 +1097,7 @@ export async function startAiChat(opts: StartAiChatOpts): Promise<AiChatSession>
       } catch (err) {
         if (successfulTurns > 0 || !isAccountLevelError(err)) throw err;
         const keys = await ladderKeys(opts);
-        const ladder = buildLadder(opts.modelRef, keys);
+        const ladder = await buildLadder(opts.modelRef, keys);
         for (const rung of ladder.slice(1)) {
           try {
             console.warn(`[ai-provider] Sessão "${opts.modelRef}" falhou no 1º turno (${String((err as any)?.message || err).slice(0, 120)}). Migrando pro fallback cross-provider "${rung}".`);
@@ -1200,9 +1209,14 @@ async function startAiChatSingle(opts: StartAiChatOpts): Promise<AiChatSession> 
           openrouterKeys: opts.openrouterKeys,
         }),
       makeFallback: opts.geminiApiKey ? async () => {
-        const gemModel = "gemini-2.5-flash"; // Modelo padrão resiliente e barato
-        console.warn(`[ai-provider] OpenRouter falhou em todas as chaves. Fazendo fallback de último caso para Gemini (${gemModel}).`);
-        return startAiChat({ ...opts, modelRef: gemModel });
+        // Usa a reserva ESCOLHIDA pelo usuário se configurada; senão o melhor flash descoberto
+        let target = opts.fallbackModelRef || (await ladderKeys(opts))?.gatewayFallbackModel || null;
+        if (!target) {
+          try { target = (await pickBestFlashModel()) || "gemini-2.5-flash"; }
+          catch { target = "gemini-2.5-flash"; }
+        }
+        console.warn(`[ai-provider] OpenRouter falhou em todas as chaves. Fazendo fallback de último caso para "${target}".`);
+        return startAiChat({ ...opts, modelRef: target });
       } : undefined
     });
   }
