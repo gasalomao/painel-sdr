@@ -145,7 +145,10 @@ function MessageContent({ message }: { message: Message }) {
       // essa info nunca entra no contexto do agente de IA.
       const rawProvider = (message as any).transcription_provider || extractProviderFromMime((message as any).mimetype);
       const isTranscribed = message.content_text && message.content_text.startsWith("🎤");
-      const transcribedWith = transcriptionProviderLabel(rawProvider) || (isTranscribed ? "Áudio transcrito" : null);
+      const providerName = transcriptionProviderLabel(rawProvider);
+      const transcribedLabel = providerName
+        ? `Transcrito via ${providerName}`
+        : (isTranscribed ? "Transcrito via Whisper (local)" : null);
 
       return (
         <div className="py-1 space-y-1.5">
@@ -155,18 +158,18 @@ function MessageContent({ message }: { message: Message }) {
             <MediaUnavailable label="Áudio" />
           )}
           {message.content_text && (
-            <div className="text-[11px] italic opacity-85 border-l-2 border-primary/40 pl-2.5 py-0.5 whitespace-pre-wrap break-words bg-black/10 rounded-r-md">
+            <div className="text-[11px] italic opacity-85 border-l-2 border-primary/50 pl-2.5 py-0.5 whitespace-pre-wrap break-words bg-black/10 rounded-r-md">
               {message.content_text}
             </div>
           )}
-          {transcribedWith && (
-            <div className="pt-0.5">
+          {transcribedLabel && (
+            <div className="pt-0.5 flex items-center">
               <span
-                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono tracking-tight text-muted-foreground/80 bg-white/5 border border-white/5 select-none"
-                title={`Áudio transcrito com: ${transcribedWith}`}
+                className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[9px] font-medium tracking-tight text-primary/90 bg-primary/10 border border-primary/20 select-none shadow-xs"
+                title={`Motor de transcrição: ${transcribedLabel}`}
               >
-                <AudioLines className="h-2.5 w-2.5 text-primary/70" aria-hidden />
-                {transcribedWith}
+                <AudioLines className="h-2.5 w-2.5 text-primary" aria-hidden />
+                {transcribedLabel}
               </span>
             </div>
           )}

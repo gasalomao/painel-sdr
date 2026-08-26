@@ -9,12 +9,12 @@
 export function transcriptionProviderLabel(provider: string | null | undefined): string | null {
   const p = (provider || "").trim();
   if (!p || p === "none") return null;
-  if (p === "whisper") return "Whisper (local)";
-  if (p === "gemini") return "Gemini";
+  if (p.toLowerCase() === "whisper") return "Whisper (local)";
+  if (p.toLowerCase() === "gemini") return "Gemini";
   if (p.startsWith("openrouter:")) {
     const model = p.slice("openrouter:".length);
     const short = model.includes("/") ? model.split("/").pop()! : model;
-    return `OpenRouter · ${short}`;
+    return `OpenRouter (${short})`;
   }
   return p;
 }

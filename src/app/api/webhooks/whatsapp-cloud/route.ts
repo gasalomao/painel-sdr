@@ -272,6 +272,7 @@ export async function POST(req: NextRequest) {
       // Conteúdo: text direto, ou caption, ou placeholder de mídia
       let content: string = m.text || m.caption || "";
       let mediaUrl: string | null = null;
+      let effectiveMime: string | null = null;
       // Provider da transcrição (UI only — badge no chat; nunca vai pro agente).
       let transcribeProvider: string | null = null;
 
@@ -283,6 +284,7 @@ export async function POST(req: NextRequest) {
             const ch = await resolveChannel(instanceName);
             if (ch.cloud) {
               const { base64, mimetype: fMime } = await whatsappCloud.fetchMedia(ch.cloud, m.mediaId!);
+              effectiveMime = fMime;
               // Upload pro Storage (mesmo bucket do Evolution)
               try {
                 const buffer = Buffer.from(base64, "base64");
@@ -323,8 +325,8 @@ export async function POST(req: NextRequest) {
       let msgDup = false;
       const { encodeTranscriptionMime } = await import("@/lib/transcription-label");
       const cloudMime = m.type === "audio" && transcribeProvider
-        ? encodeTranscriptionMime(fMime || "audio/ogg", transcribeProvider)
-        : fMime;
+        ? encodeTranscriptionMime(effectiveMime || "audio/ogg", transcribeProvider)
+        : effectiveMime;
 
       const { error: dashErr } = await supabase.from("chats_dashboard").insert({
         instance_name: instanceName,

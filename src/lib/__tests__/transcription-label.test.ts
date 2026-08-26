@@ -4,7 +4,7 @@
  *
  * Contrato:
  *  - "whisper" → "Whisper (local)"
- *  - "openrouter:vendor/model" → "OpenRouter · model"
+ *  - "openrouter:vendor/model" → "OpenRouter (model)"
  *  - "gemini" → "Gemini"
  *  - encodeTranscriptionMime + extractProviderFromMime codificam e decodificam de forma transparente
  */
@@ -21,8 +21,9 @@ describe("transcriptionProviderLabel", () => {
   });
 
   it("openrouter com modelo", () => {
-    expect(transcriptionProviderLabel("openrouter:z-ai/glm-5.2")).toBe("OpenRouter · glm-5.2");
-    expect(transcriptionProviderLabel("openrouter:openai/gpt-4o-mini")).toBe("OpenRouter · gpt-4o-mini");
+    expect(transcriptionProviderLabel("openrouter:z-ai/glm-5.2")).toBe("OpenRouter (glm-5.2)");
+    expect(transcriptionProviderLabel("openrouter:openai/gpt-4o-mini")).toBe("OpenRouter (gpt-4o-mini)");
+    expect(transcriptionProviderLabel("openrouter:thinkingmachines/inkling-small:free")).toBe("OpenRouter (inkling-small:free)");
   });
 
   it("gemini", () => {
@@ -53,7 +54,7 @@ describe("encodeTranscriptionMime & extractProviderFromMime", () => {
 
     const extracted = extractProviderFromMime(encoded);
     expect(extracted).toBe("openrouter:meta-llama/llama-3.1-8b-instruct:free");
-    expect(transcriptionProviderLabel(extracted)).toBe("OpenRouter · llama-3.1-8b-instruct:free");
+    expect(transcriptionProviderLabel(extracted)).toBe("OpenRouter (llama-3.1-8b-instruct:free)");
   });
 
   it("mimetype sem provider retorna null", () => {
