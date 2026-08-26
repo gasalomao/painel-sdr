@@ -731,6 +731,30 @@ export default function WhatsAppPage() {
     }
   };
 
+  const handleSyncPhotos = async (instanceName: string) => {
+    setActionLoading(prev => ({ ...prev, [`${instanceName}_sync_photos`]: true }));
+    try {
+      const res = await fetch("/api/contacts/sync-avatars", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instance: instanceName }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setToast({
+          kind: "ok",
+          text: data.updated > 0 ? `✓ ${data.updated} fotos de perfil atualizadas!` : "✓ Fotos sincronizadas com o WhatsApp!",
+        });
+      } else {
+        setToast({ kind: "err", text: `Falha: ${data.error || "Erro ao sincronizar fotos"}` });
+      }
+    } catch (err: any) {
+      setToast({ kind: "err", text: `Erro: ${err?.message || "Falha na rede"}` });
+    } finally {
+      setActionLoading(prev => ({ ...prev, [`${instanceName}_sync_photos`]: false }));
+    }
+  };
+
   return (
     <div className="flex flex-col h-[100dvh] max-h-[100dvh] bg-background selection:bg-primary/30">
       <Header />
@@ -1092,9 +1116,20 @@ export default function WhatsAppPage() {
                           </div>
                         )}
 
-                        <Button onClick={() => checkStatus(conn.instance_name)} variant="ghost" className="w-full h-9 rounded-xl text-xs font-bold text-muted-foreground hover:text-white gap-2">
-                          <RefreshCw className="w-3 h-3" /> Atualizar Status
-                        </Button>
+                        <div className="flex gap-2">
+                          <Button onClick={() => checkStatus(conn.instance_name)} variant="ghost" className="flex-1 h-9 rounded-xl text-xs font-bold text-muted-foreground hover:text-white gap-2">
+                            <RefreshCw className="w-3 h-3" /> Status
+                          </Button>
+                          <Button
+                            onClick={() => handleSyncPhotos(conn.instance_name)}
+                            variant="ghost"
+                            disabled={actionLoading[`${conn.instance_name}_sync_photos`]}
+                            className="flex-1 h-9 rounded-xl text-xs font-bold text-blue-400 hover:text-blue-300 hover:bg-blue-500/10 gap-2"
+                          >
+                            <RefreshCw className={cn("w-3 h-3", actionLoading[`${conn.instance_name}_sync_photos`] && "animate-spin")} />
+                            {actionLoading[`${conn.instance_name}_sync_photos`] ? "Sincronizando..." : "Sincronizar Fotos"}
+                          </Button>
+                        </div>
                      </div>
 
                      {/* QR Code */}

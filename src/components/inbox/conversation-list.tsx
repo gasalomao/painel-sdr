@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
+import { toast } from "sonner";
 import {
   Dialog,
   DialogContent,
@@ -419,34 +420,77 @@ export function ConversationList({
     [onSelect]
   );
 
-  // Sync bulk de fotos de perfil via /api/contacts/sync-avatars.
+  // Sync bulk de fotos de perfil via /api/contacts/sync-avatars e /api/contacts/avatars
   const [syncingAvatars, setSyncingAvatars] = useState(false);
   const handleSyncAvatars = useCallback(async () => {
     if (syncingAvatars) return;
     setSyncingAvatars(true);
+    toast.info("Sincronizando fotos de perfil com o WhatsApp...");
     try {
-      const instanceName = instances[0]?.instance_name;
-      await fetch("/api/contacts/sync-avatars", {
+      // Coleta todas as instâncias disponíveis
+      const instanceNames = Array.from(
+        new Set(
+          conversations
+            .map((c) => c.instance_name)
+            .concat(instances.map((i) => i.instance_name))
+            .filter(Boolean) as string[]
+        )
+      );
+
+      const targetInstance = instanceNames[0] || undefined;
+
+      // 1. Dispara bulk sync do provedor
+      const resBulk = await fetch("/api/contacts/sync-avatars", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ instance: instanceName }),
+        body: JSON.stringify({ instance: targetInstance }),
       });
-      // Após sync, re-hidrata os avatares das conversas atuais.
-      const jidsSemFoto = conversations
-        .filter((c) => !c.contact?.avatar_url)
-        .map((c) => c.id)
-        .filter(Boolean) as string[];
-      if (jidsSemFoto.length > 0) {
-        await hydrateAvatars(jidsSemFoto, instanceName);
+      const dataBulk = await resBulk.json().catch(() => ({}));
+
+      // 2. Força re-hidratação de todas as conversas visíveis (com force: true)
+      const allJids = conversations.map((c) => c.id).filter(Boolean) as string[];
+      if (allJids.length > 0) {
+        const resAvatars = await fetch("/api/contacts/avatars", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jids: allJids.slice(0, 150), instance: targetInstance, force: true }),
+        });
+        if (resAvatars.ok) {
+          const dataAvatars = await resAvatars.json();
+          if (dataAvatars?.avatars) {
+            const avatarMap = new Map(Object.entries(dataAvatars.avatars).filter(([, url]) => !!url));
+            onConversationsLoadedRef.current(
+              conversations.map((c) => {
+                const url = avatarMap.get(c.id);
+                if (!url) return c;
+                return {
+                  ...c,
+                  contact: c.contact
+                    ? { ...c.contact, avatar_url: url as string }
+                    : ({
+                        id: c.id,
+                        remote_jid: c.id,
+                        phone: c.id.replace(/@.*$/, "").replace(/\D/g, ""),
+                        avatar_url: url as string,
+                        user_id: clientId || "",
+                        created_at: new Date().toISOString(),
+                        updated_at: new Date().toISOString(),
+                      } as any),
+                };
+              })
+            );
+          }
+        }
       }
-      // Dispara reload das conversas para pegar as fotos atualizadas do banco.
-      onConversationsLoadedRef.current(conversations.map((c) => ({
-        ...c,
-        contact: c.contact ? { ...c.contact } : c.contact,
-      })));
-    } catch {}
-    setSyncingAvatars(false);
-  }, [syncingAvatars, instances, conversations, hydrateAvatars]);
+
+      const totalUpdated = dataBulk?.updated || 0;
+      toast.success(totalUpdated > 0 ? `Sincronização concluída: ${totalUpdated} fotos atualizadas!` : "Fotos de perfil atualizadas com sucesso!");
+    } catch (err: any) {
+      toast.error(`Falha ao sincronizar fotos: ${err?.message || "Erro de conexão"}`);
+    } finally {
+      setSyncingAvatars(false);
+    }
+  }, [syncingAvatars, instances, conversations, clientId]);
 
   const activeFilter = FILTER_OPTIONS.find((o) => o.value === filter);
 

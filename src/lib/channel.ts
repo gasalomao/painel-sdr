@@ -388,30 +388,39 @@ export async function bulkSyncProfilePics(instanceName: string): Promise<number>
 
   if (!contacts || contacts.length === 0) return 0;
 
-  // Atualiza o banco em batch.
+  // Atualiza o banco em paralelo por chunks de 25 com Promise.all
   let updated = 0;
   const now = new Date().toISOString();
-  const BATCH = 50;
-  for (let i = 0; i < contacts.length; i += BATCH) {
-    const batch = contacts.slice(i, i + BATCH);
-    const updates = batch
-      .filter((c) => c.profilePicUrl && c.profilePicUrl.startsWith("http"))
-      .map((c) => ({
-        remote_jid: c.remoteJid,
-        profile_pic_url: c.profilePicUrl,
-        profile_pic_fetched_at: now,
-      }));
+  const validUpdates = contacts
+    .filter((c) => c.profilePicUrl && c.profilePicUrl.startsWith("http"))
+    .map((c) => ({
+      remote_jid: c.remoteJid,
+      phone_number: c.remoteJid.replace(/@.*$/, "").replace(/\D/g, ""),
+      profile_pic_url: c.profilePicUrl,
+      profile_pic_fetched_at: now,
+    }));
 
-    for (const u of updates) {
-      const { error } = await supabase
-        .from("contacts")
-        .update({
-          profile_pic_url: u.profile_pic_url,
-          profile_pic_fetched_at: now,
-        })
-        .eq("remote_jid", u.remote_jid);
-      if (!error) updated++;
-    }
+  const CHUNK = 25;
+  for (let i = 0; i < validUpdates.length; i += CHUNK) {
+    const batch = validUpdates.slice(i, i + CHUNK);
+    const results = await Promise.allSettled(
+      batch.map((u) =>
+        supabase
+          .from("contacts")
+          .upsert(
+            {
+              remote_jid: u.remote_jid,
+              phone_number: u.phone_number,
+              profile_pic_url: u.profile_pic_url,
+              profile_pic_fetched_at: now,
+            },
+            { onConflict: "remote_jid" }
+          )
+      )
+    );
+    results.forEach((r) => {
+      if (r.status === "fulfilled" && (!r.value || !r.value.error)) updated++;
+    });
   }
 
   return updated;
@@ -425,20 +434,11 @@ async function tryBulkContacts(
   provider: WhatsAppProvider,
   instanceName: string
 ): Promise<Array<{ remoteJid: string; profilePicUrl: string | null }> | null> {
-  // Evolution API v2: POST /chat/findContacts/{instance}
-  if (provider.name === "evolution_v2") {
-    const { evolution } = await import("@/lib/evolution");
-    try {
-      const res = await (evolution as any).evoFetch
-        ? null
-        : null;
-      // Usa evoFetch diretamente via evolution.fetchInstances-like pattern.
-      // Mas findContacts não está exposto no objeto evolution — vamos usar o fetch diretamente.
-    } catch {}
-    // Como findContacts não está exposto no objeto evolution, usamos o endpoint direto.
+  // Evolution API (v2 / Node.js): POST /chat/findContacts/{instance}
+  if (provider.name === "evolution" || provider.name === "evolution_v2") {
     const { getEvolutionConfig } = await import("@/lib/evolution");
-    const cfg = await getEvolutionConfig();
-    if (!cfg.url) return null;
+    const cfg = (await getEvolutionConfig()) || ({} as any);
+    if (!cfg?.url) return null;
 
     const contacts: Array<{ remoteJid: string; profilePicUrl: string | null }> = [];
     try {
