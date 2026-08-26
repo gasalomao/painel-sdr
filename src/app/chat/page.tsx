@@ -127,6 +127,10 @@ function ChatPageContent() {
         : "customer";
 
       if (event.eventType === "INSERT") {
+        // FIX multi-tenant: RLS desligada → realtime entrega INSERTs de TODOS
+        // os clientes. Sem esse guard, mensagem de outro SaaS (mesmo telefone)
+        // aparecia ao vivo dentro da thread deste operador.
+        if ((msg as any).client_id && clientId && (msg as any).client_id !== clientId) return;
         if (currentActive && isSameJid(msg.remote_jid, currentActive.id)) {
           setMessages((prev) => {
             // Deduplicação: otimista + webhook podem chegar na mesma msg.
@@ -196,6 +200,10 @@ function ChatPageContent() {
 
       const updated = normalizeConversation(rawSession);
       const currentActive = activeConvRef.current;
+
+      // FIX multi-tenant: session de OUTRO cliente nunca sobrescreve a lista
+      // (antes o branch "exists" aplicava unread/bot_status alheios).
+      if (rawSession.client_id && clientId && rawSession.client_id !== clientId) return;
 
       setConversations((prev: Conversation[]) => {
         const exists = prev.some((c) => isSameJid(c.id, updated.id));

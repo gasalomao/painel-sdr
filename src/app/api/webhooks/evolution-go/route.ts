@@ -52,14 +52,15 @@ export async function POST(req: NextRequest) {
     const raw = body.data || body;
 
     // Ignora eventos que não são de mensagem (CONNECTION, QRCODE, PRESENCE, etc).
+    // FIX: events de STATUS (messages.update/delete) carregam data.key e antes
+    // vazavam pro caminho de mensagem virando mensagens fantasma "[Mídia]".
+    const isStatusEvent = /MESSAGES?\.(UPDATE|DELETE)|READ|RECEIPT|PRESENCE|STATUS/i.test(eventType);
     if (
-      eventType &&
-      !["MESSAGE", "ALL", "MESSAGES_UPSERT", "MESSAGES_UPSERT"].includes(eventType) &&
-      eventTypeRaw !== "messages.upsert" &&
-      !raw.key &&
-      !raw.message
+      (eventType && !["MESSAGE", "ALL", "MESSAGES_UPSERT"].includes(eventType) &&
+        eventTypeRaw !== "messages.upsert" && (!raw.key || !raw.message)) ||
+      (eventType && isStatusEvent)
     ) {
-      return NextResponse.json({ ok: true, skipped: true, reason: `event ${eventType}` });
+      return NextResponse.json({ ok: true, skipped: true, reason: `event ${eventType || "(sem tipo)"}` });
     }
 
     // ===== VALIDAÇÃO DE ORIGEM (mesma política do webhook whatsapp/route.ts) =====
@@ -102,6 +103,10 @@ export async function POST(req: NextRequest) {
 
     const remoteJid = String(key.remoteJid || raw.remoteJid || raw.from || "");
     if (!remoteJid) return NextResponse.json({ ok: true, skipped: true, reason: "sem remoteJid" });
+    // Status/stories do WhatsApp não são mensagens de atendimento.
+    if (remoteJid === "status@broadcast") {
+      return NextResponse.json({ ok: true, skipped: true, reason: "status@broadcast" });
+    }
 
     const fromMe = key.fromMe ?? raw.fromMe ?? false;
     const messageId = String(key.id || raw.id || raw.messageId || "");
@@ -204,6 +209,9 @@ export async function POST(req: NextRequest) {
         console.warn("[evo-go-webhook] processamento de mídia falhou:", e?.message);
         if (msgType === "audio") enrichedContent = "[🎤 O cliente enviou um áudio que não consegui transcrever]";
       }
+    } else if (!fromMe && msgType === "audio" && !base64Media) {
+      // Sem base64 inline: antes ficava eternamente "[🎤 Áudio — transcrevendo...]".
+      enrichedContent = "[🎤 Áudio recebido — base64 indisponível para transcrição]";
     }
 
     // ===== Salvar mensagem (áudio já transcrito acima) =====
@@ -234,6 +242,12 @@ export async function POST(req: NextRequest) {
       .single();
 
     if (insertErr) {
+      // Corrida de concorrência: outro request salvou a mesma mensagem
+      // primeiro → é duplicata OK, não erro (evita retry infinito do GO).
+      if ((insertErr as any).code === "23505") {
+        seenMessageIds.add(messageId);
+        return NextResponse.json({ ok: true, skipped: true, reason: "db-dup-insert" });
+      }
       console.error("[evo-go-webhook] erro salvando:", insertErr.message);
       return NextResponse.json({ ok: false, error: insertErr.message }, { status: 500 });
     }
@@ -297,8 +311,13 @@ export async function POST(req: NextRequest) {
 
     // ===== Disparar agente IA (mensagens do cliente com texto/mídia) =====
     if (!fromMe && (text || msgType === "audio" || msgType === "image") && session?.id && !groupDisabled) {
-      const effectiveActive = (session as any)._effective_active ?? (session.bot_status === "bot_active");
-      if (effectiveActive) {
+      // FIX crítico: usar getEffectiveStatus de verdade — antes lia
+      // `_effective_active` (nunca setado aqui) e bot_status cru, então o
+      // snooze expirava e a IA ficava MUDA para sempre, e a pausa por
+      // instância era totalmente ignorada neste provedor.
+      const { getEffectiveStatus } = await import("@/lib/bot-status");
+      const eff = await getEffectiveStatus(session as any);
+      if (eff.isActive) {
         const internalSecret = getInternalSecret();
         if (!internalSecret) {
           await supabase
@@ -350,7 +369,7 @@ export async function POST(req: NextRequest) {
           .insert({
             instance_name: instanceName,
             event: "AGENT_SKIP_PAUSED",
-            payload: { remoteJid, bot_status: session.bot_status, message_saved: true },
+            payload: { remoteJid, bot_status: eff.status, reason: eff.reason, message_saved: true },
             created_at: new Date().toISOString(),
           })
           .then(() => {}, () => {});

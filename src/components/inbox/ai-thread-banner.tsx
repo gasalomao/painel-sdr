@@ -52,6 +52,15 @@ export function AiThreadBanner({
         setCountdown(null);
         if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
         onChange?.({ bot_status: "bot_active", resume_at: null });
+        // FIX: antes só virava o banner localmente — no SERVIDOR a sessão
+        // continuava human_takeover e a IA ficava muda. Chama o resume real.
+        if (conversationId) {
+          fetch("/api/agent/control", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "resume", remoteJid: conversationId, instanceName: instanceName || undefined }),
+          }).catch(() => {});
+        }
         return;
       }
 

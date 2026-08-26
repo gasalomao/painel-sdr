@@ -398,20 +398,34 @@ export async function findOrCreateContact(remoteJid: string, pushName: string | 
       return existing;
     }
 
-    const phone = remoteJid.replace(/@.*$/, "");
-    const { data: created, error } = await supabase
-      .from("contacts")
-      .insert({
-        remote_jid: remoteJid,
-        phone_number: phone,
-        push_name: pushName || null,
-        client_id: clientId,
-      })
-      .select("id, push_name, phone_number")
-      .single();
+  const phone = remoteJid.replace(/@.*$/, "");
+  const { data: created, error } = await supabase
+    .from("contacts")
+    .insert({
+      remote_jid: remoteJid,
+      phone_number: phone,
+      push_name: pushName || null,
+      client_id: clientId,
+    })
+    .select("id, push_name, phone_number")
+    .single();
 
-    if (error) throw error;
-    return created;
+  if (error) {
+    // Corrida: outra requisição criou o contato primeiro (23505) → re-busca
+    // em vez de null (null fazia a mensagem perder session e resposta da IA).
+    // FIX multi-tenant: remote_jid é UNIQUE GLOBAL — sem filtro de client_id a
+    // recuperação podia vincular o contato do tenant A à sessão do tenant B.
+    const { data: healed } = await supabase
+      .from("contacts")
+      .select("id, push_name, phone_number")
+      .eq("remote_jid", remoteJid)
+      .eq("client_id", clientId)
+      .maybeSingle();
+    if (healed) return healed;
+    console.error("[contact] findOrCreate (23505, outro tenant):", error.message);
+    return null;
+  }
+  return created;
   } catch (err: any) {
     console.error("[contact] findOrCreate:", err.message);
     return null;
@@ -420,9 +434,11 @@ export async function findOrCreateContact(remoteJid: string, pushName: string | 
 
 export async function findOrCreateSession(contactId: string, instanceName: string, remoteJid: string, clientId: string) {
   try {
+    // unread_count incluído pro bump incremental dos webhooks (antes vinha
+    // sempre undefined → badge nunca passava de 1 no legado/GO).
     const { data: existing } = await supabase
       .from("sessions")
-      .select("id, bot_status, agent_id")
+      .select("id, bot_status, agent_id, unread_count, instance_name, resume_at")
       .eq("contact_id", contactId)
       .eq("instance_name", instanceName)
       .eq("client_id", clientId)
@@ -439,10 +455,22 @@ export async function findOrCreateSession(contactId: string, instanceName: strin
         bot_status: "bot_active",
         remote_jid: remoteJid,
       })
-      .select("id, bot_status, agent_id")
+      .select("id, bot_status, agent_id, unread_count, instance_name, resume_at")
       .single();
 
-    if (error) throw error;
+    if (error) {
+      // Corrida de concorrência (23505): outra request criou primeiro.
+      const { data: healed } = await supabase
+        .from("sessions")
+        .select("id, bot_status, agent_id, unread_count, instance_name, resume_at")
+        .eq("contact_id", contactId)
+        .eq("instance_name", instanceName)
+        .eq("client_id", clientId)
+        .maybeSingle();
+      if (healed) return healed;
+      console.error("[session] findOrCreate:", error.message);
+      return null;
+    }
     return created;
   } catch (err: any) {
     console.error("[session] findOrCreate:", err.message);
@@ -453,10 +481,12 @@ export async function findOrCreateSession(contactId: string, instanceName: strin
 export async function healLeadNameFromPushName(remoteJid: string, pushName: string | undefined, clientId: string) {
   if (!pushName) return;
   try {
+    // Coluna é "remoteJid" (camelCase, criada com aspas) — "remote_jid" não
+    // existe em leads_extraidos e o erro era engolido pelo catch vazio.
     await supabase
       .from("leads_extraidos")
       .update({ nome_negocio: pushName })
-      .eq("remote_jid", remoteJid)
+      .eq("remoteJid", remoteJid)
       .eq("client_id", clientId)
       .is("nome_negocio", null);
   } catch {}

@@ -192,6 +192,7 @@ export async function POST(req: NextRequest) {
     // NOVO: SISTEMA DE AGRUPAMENTO (BUFFER) DE MENSAGENS
     // ============================================================
     const bufferSeconds = agentConfig.options?.message_buffer_seconds || 0;
+    let skipBufferWait = false;
     let finalProcessText = text;
 
     if (!isTestMode && bufferSeconds > 0) {
@@ -205,20 +206,47 @@ export async function POST(req: NextRequest) {
        });
 
        if (lockErr) {
-          // Se for erro de conflito (23505), outro processo já é o líder
+          // Se for erro de conflito (23505), outro processo já é o líder —
+          // MAS se o lock dele EXPIROU (líder morreu no meio do sleep: deploy,
+          // crash, OOM), a conversa ficaria muda pra sempre. Rouba a liderança.
           if (lockErr.code === "23505") {
-             console.log(`[BUFFER] Outro processo já é o líder para ${maskJid(remoteJid)}. Este encerra.`);
-             return NextResponse.json({ success: true, status: "batching_active" });
+             const { data: stale } = await supabase
+                .from("chat_buffers")
+                .select("expires_at")
+                .eq("remote_jid", remoteJid)
+                .eq("instance_name", instanceName)
+                .maybeSingle();
+             const orphan = !!stale?.expires_at && new Date(stale.expires_at as any).getTime() < Date.now();
+             if (!orphan) {
+                console.log(`[BUFFER] Outro processo já é o líder para ${maskJid(remoteJid)}. Este encerra.`);
+                return NextResponse.json({ success: true, status: "batching_active" });
+             }
+             console.warn(`[BUFFER] Lock ÓRFÃO expirado de ${maskJid(remoteJid)} — assumindo liderança.`);
+             await supabase.from("chat_buffers")
+                .delete()
+                .eq("remote_jid", remoteJid)
+                .eq("instance_name", instanceName)
+                .lt("expires_at", new Date().toISOString());
+             const retry = await supabase.from("chat_buffers").insert({
+                remote_jid: remoteJid, instance_name: instanceName, expires_at: expiresAt
+             });
+             if (retry.error) {
+                // Outro request roubou junto — ele venceu.
+                return NextResponse.json({ success: true, status: "batching_active" });
+             }
+             // Venceu o roubo → segue como líder abaixo.
           } else {
              console.error("[BUFFER] Erro inesperado ao criar lock:", lockErr);
-             // Se não for conflito, apenas ignora o buffer e processa agora para não travar
+             // Não-conflito: pula o buffer e processa AGORA (não trava).
+             skipBufferWait = true;
           }
-       } else {
-          // Eu sou o Líder
+       }
+
+       if (!skipBufferWait) {
+       // Eu sou o Líder (insert direto OU roubo de lock órfão)
+       {
           console.log(`[BUFFER] LIDER: Aguardando ${bufferSeconds}s para consolidar mensagens de ${maskJid(remoteJid)}...`);
           await new Promise(resolve => setTimeout(resolve, bufferSeconds * 1000));
-
-          // Buscar lote
           const { data: batchMsgs } = await supabase.from("chats_dashboard")
              .select("content")
              .eq("remote_jid", remoteJid)
@@ -226,17 +254,17 @@ export async function POST(req: NextRequest) {
              .eq("sender_type", "customer")
              .gte("created_at", batchStartTime)
              .order("created_at", { ascending: true });
-
           if (batchMsgs && batchMsgs.length > 0) {
              const contents = Array.from(new Set(batchMsgs.map(m => m.content).filter(Boolean)));
              if (!contents.includes(text)) contents.unshift(text);
              finalProcessText = contents.join("\n");
              console.log(`[BUFFER] Lote de ${batchMsgs.length} mensagens consolidado.`);
           }
-          
+
           await supabase.from("chat_buffers").delete().eq("remote_jid", remoteJid).eq("instance_name", instanceName);
-       }
-    }
+        }
+       } // fim if (!skipBufferWait)
+     } // fim if (bufferSeconds > 0)
 
     // 3. Horário Comercial
     if (!isTestMode && !agentConfig.is_24h) {
@@ -396,10 +424,20 @@ export async function POST(req: NextRequest) {
         // Para evitar duplicar a mensagem atual no histórico enviado ao Gemini (e evitar erros de alternância de turnos no SDK),
         // se a última mensagem do histórico cronológico for a mensagem atual do cliente, nós a removemos do histórico.
         // Ela será enviada unicamente na chamada sendMessage() abaixo.
+        // FIX: só remove se o conteúdo BATER com a mensagem sendo processada.
+        // Antes: com 2 mensagens rápidas, o run da M1 popava M2 (conteúdo
+        // diferente) → M2 saía do contexto e ainda era re-anexada duplicada.
         if (chrono.length > 0) {
-            const lastMsg = chrono[chrono.length - 1];
-            const lastSender = lastMsg.sender_type;
-            if (lastSender === "customer") {
+            const lastMsg: any = chrono[chrono.length - 1];
+            const lastSender = lastMsg.sender_type || lastMsg.sender;
+            const lastContent = String(lastMsg.content || "").trim();
+            const currentText = String(finalProcessText || text || "").trim();
+            if (
+                lastSender === "customer" &&
+                lastContent.length > 0 &&
+                (lastContent === currentText ||
+                 (lastContent.length >= 4 && currentText.includes(lastContent)))
+            ) {
                 chrono.pop();
             }
         }
@@ -1222,6 +1260,12 @@ ${capturedVariablesPrompt}
           }
           callLogs.push({ role: "system", content: `[RAG] "${raw}" | method=${searchMethod} | hits=${matches.length}` });
        } else if (call.name === "update_product_stock") {
+          // Modo teste NÃO muta produção (estoque real era decrementado por
+          // conversa de teste no /agente).
+          if (isTestMode) {
+             functionResultRes = { simulated: true, message: "Modo teste: alteração de estoque suprimida." };
+             callLogs.push({ role: "system", content: `[TESTE] update_product_stock suprimido` });
+          } else {
           const rawProd = String(callArgs.product_name || "").trim();
           const qtySold = Number(callArgs.quantity_sold) || 1;
           let updatedSuccess = false;
@@ -1284,6 +1328,7 @@ ${capturedVariablesPrompt}
              };
              callLogs.push({ role: "system", content: `[Estoque Erro] Item "${rawProd}" não encontrado` });
           }
+          } // fim else !isTestMode
 } else if (call.name === "web_search") {
            const q = (typeof callArgs.query === "string" ? callArgs.query : (callArgs.query?.text || "")).trim();
            try {
@@ -1311,6 +1356,12 @@ ${capturedVariablesPrompt}
               callLogs.push({ role: "system", content: `[Web Fetch] ${u} | FALHA: ${e.message}` });
            }
        } else if (call.name === "schedule_google_calendar") {
+          // Modo teste NÃO cria eventos reais no Google Calendar nem manda
+          // WhatsApp pro dono (acontecia em toda conversa de teste).
+          if (isTestMode) {
+             functionResultRes = { simulated: true, scheduled: false, message: "Modo teste: agendamento real suprimido. Confirme que deseja marcar." };
+             callLogs.push({ role: "system", content: `[TESTE] schedule_google_calendar suprimido` });
+          } else {
           console.log("[MCP] Iniciando Agendamento no Google Calendar ->", callArgs);
           functionResultRes = { scheduled: false, message: "Erro ao agendar no sistema." };
 
@@ -1641,7 +1692,8 @@ ${capturedVariablesPrompt}
              console.error("[MCP Error]:", mcpErr);
              functionResultRes = { scheduled: false, message: `Falha na integração: ${mcpErr.message}. Peça desculpas ao cliente e avise que o sistema está indisponível.` };
           }
-          callLogs.push({ role: "system", content: `[Google Calendar] O Agente tentou agendar: "${callArgs.summary}" | Status: ${functionResultRes.scheduled ? 'Sucesso' : 'Falha'}` });
+           callLogs.push({ role: "system", content: `[Google Calendar] O Agente tentou agendar: "${callArgs.summary}" | Status: ${functionResultRes.scheduled ? 'Sucesso' : 'Falha'}` });
+          } // fim else !isTestMode (schedule_google_calendar)
        } else if (call.name === "check_google_calendar_availability") {
            console.log("[MCP] Checando disponibilidade no Google Calendar ->", callArgs);
            functionResultRes = { available: false, message: "Erro ao consultar agenda." };
@@ -1911,7 +1963,40 @@ ${capturedVariablesPrompt}
 
     let lastSendResult: any = null;
     let anySendError: string | null = null;
-    
+
+    // ============================================================
+        // Safety-net anti-{{var}}: variável não resolvida NUNCA chega ao cliente.
+    finalAnswer = finalAnswer.replace(/\{\{[^}]*\}\}/g, "").replace(/[ \t]{2,}/g, " ").trim();
+
+// GATE FINAL DE PAUSA — entre o início do processamento (buffer de
+    // mensagens, tool loop, Google Calendar, delays de digitação) e o envio
+    // podem se passar dezenas de segundos. Se o operador assumiu a conversa
+    // nesse meio-tempo, a IA NÃO pode responder por cima dele.
+    // ============================================================
+    if (!isTestMode && sessionId) {
+      try {
+        const { data: sessNow } = await supabase
+          .from("sessions")
+          .select("id, bot_status, resume_at, instance_name")
+          .eq("id", sessionId)
+          .maybeSingle();
+        if (sessNow) {
+          const { getEffectiveStatus } = await import("@/lib/bot-status");
+          const effFinal = await getEffectiveStatus(sessNow as any);
+          if (!effFinal.isActive) {
+            console.log(`[AGENT] Gate final: pausa detectada (${effFinal.reason}) — resposta suprimida.`);
+            supabase.from("webhook_logs").insert({
+              instance_name: instanceName,
+              event: "AGENT_SUPPRESSED_PAUSED",
+              payload: { remoteJid, reason: effFinal.reason, preview: finalAnswer.slice(0, 50) },
+              created_at: new Date().toISOString(),
+            }).then(() => {}, () => {});
+            return NextResponse.json({ success: true, suppressed: "paused_before_send", reason: effFinal.reason });
+          }
+        }
+      } catch { /* gate é best-effort — falha não bloqueia o reply */ }
+    }
+
     const messageChunks = humanize ? splitMessage(finalAnswer) : [finalAnswer];
     console.log(`[AGENT] Enviando ${messageChunks.length} chunks para ${maskJid(remoteJid)} (Humanize: ${humanize})`);
 
@@ -2122,6 +2207,12 @@ ${capturedVariablesPrompt}
 
               const sendResult: any = await channelMod.sendMessage(remoteJid, text, instanceName);
               const msgId = sendResult?.key?.id || sendResult?.messageId || `agent-${Date.now()}`;
+              // FIX: resend pós-migração não registrava o msgId como envio da IA
+              // → eco voltava classificado "human" → bot pausado 30min injustamente.
+              try {
+                const { registerAiSend } = await import("@/lib/manual-send-registry");
+                registerAiSend(msgId);
+              } catch { /* ignore */ }
               const nowIso = new Date().toISOString();
               if (sessionId) {
                 await supabase.from("messages").insert({
@@ -2235,14 +2326,14 @@ ${capturedVariablesPrompt}
           } else {
             // Segmento de imagem.
             if (photosSent >= MAX_PHOTOS_PER_TURN) {
-              console.warn(`[AGENT] Limite de ${MAX_PHOTOS_PER_TURN} fotos/turno atingido. Restante suprimido.`);
-              break;
+              console.warn(`[AGENT] Limite de ${MAX_PHOTOS_PER_TURN} fotos/turno atingido — pulando FOTO; textos restantes ainda são enviados.`);
+              continue;
             }
             // Dedup baseado em tempo.
             const lastSentTs = sentMediaRecently.get(s.url);
             const recent = lastSentTs && (Date.now() - lastSentTs < dedupWindowMs);
             if (dedupProductMedia && recent) {
-              console.log(`[AGENT] Mídia ${s.url} enviada há ${Math.round((Date.now() - (lastSentTs || 0)) / 1000)}s — suprimindo duplicação imediata.`);
+              console.log(`[AGENT] Mídia ${s.url} enviada há ${Math.round((Date.now() - (lastSentTs || 0)) / 1000)}s - suprimindo duplicação imediata.`);
               continue;
             }
             // Delay entre fotos: 2s (evita burst que parece spam).
@@ -2251,7 +2342,14 @@ ${capturedVariablesPrompt}
             }
             console.log(`[AGENT] Enviando foto ${photosSent + 1}: ${s.url}${s.caption ? ` (caption: "${s.caption.slice(0, 50)}...")` : ""}`);
             const sentOk = await sendProductPhoto(s.url, s.caption);
-            if (sentOk) photosSent++;
+            if (sentOk) {
+              photosSent++;
+            } else if (s.caption) {
+              // Foto falhou mas a caption era conteúdo real (preço/descrição)
+              // — cai pro texto em vez de perder a informação.
+              console.warn("[AGENT] Foto falhou — enviando caption como texto.");
+              await sendAndPersistText(s.caption);
+            }
           }
         }
     }

@@ -52,6 +52,9 @@ export function useRealtime({
             // Salvamos remote_jid no payload para ajudar o inbox a identificar a conversa do contato
             remote_jid: raw.remote_jid, 
             conversation_id: raw.remote_jid, // Mapeado para remote_jid para unificação de instâncias
+            // FIX multi-tenant: RLS está desligada — sem client_id o inbox de um
+            // cliente recebia mensagens de OUTRO cliente com o mesmo telefone.
+            client_id: raw.client_id,
             sender_type: raw.sender_type === "ai" || raw.sender_type === "bot" ? "bot" : (raw.sender_type === "customer" ? "customer" : "agent"),
             sender_id: raw.agent_id ? String(raw.agent_id) : undefined,
             content_type: raw.media_type || "text",
@@ -60,7 +63,9 @@ export function useRealtime({
             mimetype: raw.mimetype || undefined,
             file_name: raw.file_name || undefined,
             message_id: raw.message_id,
-            status: raw.status_envio === "sent" ? "sent" : (raw.status_envio === "delivered" ? "delivered" : (raw.status_envio === "read" ? "read" : (raw.status_envio === "error" ? "failed" : "sent"))),
+            // Preserva status desconhecido (antes UPDATE de mídia rebaixava
+            // "read" de volta pra "sent" apagando o ✓✓ azul).
+            status: raw.status_envio === "sent" ? "sent" : (raw.status_envio === "delivered" ? "delivered" : (raw.status_envio === "read" ? "read" : (raw.status_envio === "error" ? "failed" : raw.status_envio ? String(raw.status_envio) : undefined))),
             created_at: raw.created_at,
           };
 

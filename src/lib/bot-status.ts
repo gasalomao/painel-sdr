@@ -329,11 +329,13 @@ export async function getEffectiveStatus(session: SessionRow): Promise<Effective
 
   if (status === "human_takeover" && session.resume_at) {
     if (new Date(session.resume_at) <= new Date()) {
-      // Snooze venceu — auto-resume
+      // Snooze venceu — auto-resume. Guarda .eq(human_takeover): se o operador
+      // acabou de clicar Pausar (bot_paused) no mesmo instante, NÃO sobrescreve.
       await supabaseAdmin
         .from("sessions")
         .update({ bot_status: "bot_active", paused_by: null, paused_at: null, resume_at: null })
-        .eq("id", session.id);
+        .eq("id", session.id)
+        .eq("bot_status", "human_takeover");
       return { isActive: true, status: "bot_active", reason: "auto_resumed", resumeAt: null };
     }
     return { isActive: false, status, reason: "snoozed", resumeAt: session.resume_at };

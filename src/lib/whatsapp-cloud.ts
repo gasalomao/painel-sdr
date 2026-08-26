@@ -276,16 +276,24 @@ export const whatsappCloud = {
         }
 
         for (const m of value.messages || []) {
-          const from = String(m.from || "").replace(/\D/g, "");
+          // FIX: grupos chegam com m.from = "<id>@g.us". Antes o .replace(/\D/g,"")
+          // mutilava o JID (virava <dígitos>@s.whatsapp.net) → grupo virava
+          // contato falso 1:1, isGroupJid() nunca batia e disable_groups morria.
+          const rawFrom = String(m.from || "");
+          const from = rawFrom.includes("@") ? rawFrom : rawFrom.replace(/\D/g, "");
+          const remoteJid = from.includes("@")
+            ? from
+            : `${from}@s.whatsapp.net`;
           const base: any = {
             from,
-            remoteJid: `${from}@s.whatsapp.net`,
+            remoteJid,
             messageId: m.id,
             timestamp: Number(m.timestamp) || Date.now() / 1000,
             type: m.type,
             pushName: contactsByWa[m.from] || undefined,
             phoneNumberId,
           };
+          if (m.author) base.author = m.author; // autor real em grupos
           if (m.type === "text") {
             base.text = m.text?.body || "";
           } else if (m.type === "image" || m.type === "video" || m.type === "audio" || m.type === "document" || m.type === "sticker") {

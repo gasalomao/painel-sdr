@@ -136,6 +136,10 @@ export function MessageComposer({
       await onSend(trimmed, replyTo?.id);
       setText("");
       adjustHeight();
+    } catch {
+      // FIX: falha de rede/HTTP NÃO limpa o rascunho — operador podia perder
+      // um pitch longo. O toast de erro já é mostrado pelo handleSend da thread.
+      // Texto preservado pra reenviar/editar.
     } finally {
       setSending(false);
     }

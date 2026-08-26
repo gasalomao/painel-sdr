@@ -138,6 +138,8 @@ export function MessageThread({
   });
 
   const conversationId = conversation?.id; // remoteJid
+  const conversationIdRef = useRef<string | null>(conversationId);
+  useEffect(() => { conversationIdRef.current = conversationId; }, [conversationId]);
   const hasUnread = (conversation?.unread_count ?? 0) > 0;
 
   // Resolve o instanceName de envio da mensagem
@@ -187,10 +189,15 @@ export function MessageThread({
   useEffect(() => {
     if (!conversationId || !clientId) return;
 
+    // Stale-guard: captura a conversa desta rodada do efeito. Um poll já em
+    // voo quando o operador troca de conversa NÃO pode despejar mensagens da
+    // conversa antiga na nova thread.
+    const myConversationId = conversationId;
+
     const interval = setInterval(async () => {
       if (document.hidden) return;
 
-      const posiblesJids = getPossibleJids(conversationId);
+      const posiblesJids = getPossibleJids(myConversationId);
       const { data } = await supabase
         .from("chats_dashboard")
         .select("*")
@@ -200,19 +207,27 @@ export function MessageThread({
         .limit(20);
 
       if (!data || data.length === 0) return;
+      if (myConversationId !== conversationIdRef.current) return; // trocou de conversa no meio
 
       const norm = (data || []).reverse().map(normalizeDbMessage);
       const current = messagesRef.current;
-      const existingIds = new Set(current.map((m: Message) => m.id));
-      const newMsgs = norm.filter((m: Message) => !existingIds.has(m.id));
+      // Dedup por message_id ?? id — o envio manual otimista usa o id do
+      // WhatsApp (message_id) enquanto a cópia do DB tem id próprio; dedup
+      // só por id duplicava a bolha ~2.5s depois de cada envio.
+      const existingKeys = new Set(current.map((m: Message) => m.message_id || m.id));
+      const newMsgs = norm.filter((m: Message) => {
+        const key = (m as any).message_id || m.id;
+        return !existingKeys.has(key);
+      });
       if (newMsgs.length === 0) return;
 
       const merged = [...current, ...newMsgs];
       const uniqueMap = new Map<string, Message>();
-      // Mantém a PRIMEIRA ocorrência (objeto já renderizado) — preserva a
+      // Mantém a PRIMEIRA ocorrência (objeto já renderizado) - preserva a
       // identidade das mensagens existentes e evita re-render dos bubbles.
       for (const m of merged) {
-        if (!uniqueMap.has(m.id)) uniqueMap.set(m.id, m);
+        const key = String((m as any).message_id || m.id);
+        if (!uniqueMap.has(key)) uniqueMap.set(key, m);
       }
       const sorted = Array.from(uniqueMap.values()).sort(
         (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
@@ -339,7 +354,8 @@ export function MessageThread({
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
           toast.error(data.error || "Falha ao enviar mensagem via WhatsApp.");
-          return;
+          // Propaga pro composer: rascunho NÃO é limpo em falha.
+          throw new Error(data.error || "send_failed");
         }
 
         const now = new Date().toISOString();
@@ -372,6 +388,7 @@ export function MessageThread({
         }).catch(() => {});
       } catch (err: any) {
         toast.error("Erro de conexão ao enviar mensagem: " + err.message);
+        throw err; // composer preserva o rascunho
       } finally {
         setSending(false);
       }

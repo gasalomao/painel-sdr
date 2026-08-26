@@ -67,18 +67,19 @@ function inferMimeType(mediaType?: string): string {
 }
 
 // Resolução inteligente da fonte da mídia (URL ou base64) do Painel-SDR
+// FIX: media_url PRIMEIRO — base64 de MBs forçava decode/render pesado a cada
+// render mesmo com URL leve disponível.
 function resolveMediaSrc(msg: any): string | null {
+  const url = msg.media_url || msg.mediaUrl;
+  if (url && url.length > 5) {
+    return url;
+  }
   if (msg.base64_content && msg.base64_content.length > 10) {
     if (msg.base64_content.startsWith('data:')) {
       return msg.base64_content;
     }
     const mime = msg.mimetype || inferMimeType(msg.media_type || msg.content_type);
     return `data:${mime};base64,${msg.base64_content}`;
-  }
-  // Mapeia o campo media_url (ou direct URL no wacrm message)
-  const url = msg.media_url || msg.mediaUrl;
-  if (url && url.length > 5) {
-    return url;
   }
   return null;
 }

@@ -315,8 +315,10 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // Insert chats_dashboard (UI lê isso)
-      await supabase.from("chats_dashboard").insert({
+      // Insert chats_dashboard (UI lê isso). Duplicata (23505) = Meta reentregou
+      // → NÃO dispara o agente de novo (antes virava resposta DUPLA).
+      let msgDup = false;
+      const { error: dashErr } = await supabase.from("chats_dashboard").insert({
         instance_name: instanceName,
         message_id: m.messageId,
         remote_jid: m.remoteJid,
@@ -326,13 +328,17 @@ export async function POST(req: NextRequest) {
         ...(mediaUrl ? { media_url: mediaUrl } : {}),
         ...(m.type !== "text" ? { media_type: m.type } : {}),
         created_at: new Date(m.timestamp * 1000).toISOString(),
-      }).then(({ error }) => {
-        if (error && error.code !== "23505") console.warn("[Cloud Webhook] dash insert:", error.message);
       });
+      if (dashErr) {
+        if (dashErr.code === "23505") {
+          return NextResponse.json({ ok: true, skipped: true, reason: "duplicata" });
+        }
+        console.warn("[Cloud Webhook] dash insert:", dashErr.message);
+      }
 
       // Insert messages (V2)
       if (sessionRow?.id) {
-        await supabase.from("messages").insert({
+        const { error: msgErr } = await supabase.from("messages").insert({
           session_id: sessionRow.id,
           message_id: m.messageId,
           sender,
@@ -342,9 +348,11 @@ export async function POST(req: NextRequest) {
           file_name: m.fileName || null,
           delivery_status: "pending",
           created_at: new Date(m.timestamp * 1000).toISOString(),
-        }).then(({ error }) => {
-          if (error && error.code !== "23505") console.warn("[Cloud Webhook] messages insert:", error.message);
         });
+        if (msgErr) {
+          if (msgErr.code === "23505") msgDup = true;
+          else console.warn("[Cloud Webhook] messages insert:", msgErr.message);
+        }
 
         // Update session
         const updPayload: any = { last_message_at: new Date().toISOString() };
@@ -356,6 +364,10 @@ export async function POST(req: NextRequest) {
 
       // Dispara agente com texto direto (igual webhook Evolution).
       // Áudio: `content` já contém a transcrição (ou placeholder de falha).
+      // Duplicata (Meta reentregou) → NÃO dispara de novo (resposta dupla).
+      if (msgDup) {
+        return NextResponse.json({ ok: true, skipped: true, reason: "duplicata-messages" });
+      }
       if (content && (m.text || m.caption || m.type === "audio") && sessionRow?.id && !groupDisabled) {
         const eff = await getEffectiveStatus(sessionRow as any);
         if (eff.isActive) {
@@ -370,17 +382,29 @@ export async function POST(req: NextRequest) {
               created_at: new Date().toISOString(),
             }).then(() => {}, () => {});
           }
-          fetch(`${INTERNAL_BASE}/api/agent/process`, {
-            method: "POST",
-            // Header interno obrigatório — sem ele o agent/process rejeita
-            // (cookie não existe em chamada server-to-server → 401 silencioso).
-            headers: {
-              "Content-Type": "application/json",
-              [INTERNAL_SECRET_HEADER]: getInternalSecret(),
-            },
-            body: JSON.stringify({ instanceName, remoteJid: m.remoteJid, text: m.text || m.caption || content, sessionId: sessionRow.id }),
-            signal: AbortSignal.timeout(120_000),
-          }).catch(() => {});
+          try {
+            // FIX crítico: era fetch fire-and-forget — Next standalone CANCELA o
+            // trabalho pendente quando o handler retorna (mesmo bug já corrigido
+            // nos webhooks legado e GO). Agora invoca em-processo, awaited.
+            const agentMod = await import("@/app/api/agent/process/route");
+            const fakeReq = new NextRequest("http://internal/api/agent/process", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                [INTERNAL_SECRET_HEADER]: getInternalSecret(),
+              },
+              body: JSON.stringify({ instanceName, remoteJid: m.remoteJid, text: m.text || m.caption || content, sessionId: sessionRow.id }),
+            });
+            await agentMod.POST(fakeReq);
+          } catch (e: any) {
+            console.warn("[Cloud Webhook] dispatch do agente falhou:", e?.message);
+            supabase.from("webhook_logs").insert({
+              instance_name: instanceName,
+              event: "AGENT_DISPATCH_FAIL",
+              payload: { error: String(e?.message || e), via: "direct-call" },
+              created_at: new Date().toISOString(),
+            }).then(() => {}, () => {});
+          }
         } else {
           await supabase.from("webhook_logs").insert({
             instance_name: instanceName,
