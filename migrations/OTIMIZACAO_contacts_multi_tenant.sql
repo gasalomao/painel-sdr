@@ -37,14 +37,16 @@ WHERE ch.remote_jid IS NOT NULL AND ch.remote_jid <> ''
   );
 
 -- 3) Reaponta sessões presas ao contato de outro tenant
+--    (condição nc.client_id = s.client_id vai no WHERE: Postgres não permite
+--    referenciar a tabela-alvo do UPDATE dentro do JOIN do FROM)
 UPDATE public.sessions s
 SET contact_id = nc.id
 FROM public.contacts oc
 JOIN public.contacts nc
   ON nc.remote_jid = oc.remote_jid
- AND nc.client_id  = s.client_id
 WHERE s.contact_id = oc.id
-  AND oc.client_id <> s.client_id;
+  AND oc.client_id <> s.client_id
+  AND nc.client_id = s.client_id;
 
 -- 4) Nova regra: um contato POR (cliente, número)
 ALTER TABLE public.contacts
