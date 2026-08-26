@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse, after } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { evolution, getEvolutionConfig } from "@/lib/evolution";
 import { getEffectiveStatus } from "@/lib/bot-status";
@@ -529,11 +529,15 @@ async function healLeadNameFromPushName(remoteJid: string, pushName: string | un
 }
 
 async function findOrCreateContact(remoteJid: string, pushName: string | undefined, clientId: string) {
-  // Tenta encontrar contato existente (busca pelo JID único de forma ampla, sem escopar rigidamente por client_id no SELECT primário, para curar e evitar colisão de tenants)
+  // FIX multi-tenant: busca ESCOPADA por client_id. Antes era ampla "para curar
+  // colisão de tenants" — com a constraint composta (client_id, remote_jid) da
+  // migração OTIMIZACAO_contacts_multi_tenant.sql, cada tenant tem SEU contato
+  // para o mesmo número; buscar sem escopo pegava o do outro e invertia dono.
   const { data: existing } = await supabase
     .from("contacts")
     .select("id, push_name, client_id")
     .eq("remote_jid", remoteJid)
+    .eq("client_id", clientId)
     .maybeSingle();
 
   if (existing) {
@@ -565,20 +569,28 @@ async function findOrCreateContact(remoteJid: string, pushName: string | undefin
 
   if (error) {
     if (error.code === "23505") {
-      // Retry resiliente: busca pelo JID único de forma ampla
+      // Retry resiliente: MESMO tenant (constraint composta). Busca escopada —
+      // se a linha existente for de OUTRO tenant, cria o próprio (permitido
+      // após a migração) em vez de herdar o contato alheio.
       const { data: retry } = await supabase
         .from("contacts").select("id, client_id")
-        .eq("remote_jid", remoteJid).single();
-      
+        .eq("remote_jid", remoteJid)
+        .eq("client_id", clientId)
+        .maybeSingle();
+
       if (retry) {
-        if (!retry.client_id || retry.client_id === DEFAULT_CLIENT_ID) {
-          await supabase
-            .from("contacts")
-            .update({ client_id: clientId })
-            .eq("id", retry.id);
-        }
         return retry.id;
       }
+
+      // Linha global antiga de outro tenant (migração não rodou ainda):
+      // tenta criar de novo; se seguir conflitando, desiste com log claro.
+      console.warn(`[contact] remote_jid ${remoteJid} pertence a outro tenant — rode OTIMIZACAO_contacts_multi_tenant.sql`);
+      const { data: retry2 } = await supabase
+        .from("contacts").select("id")
+        .eq("remote_jid", remoteJid)
+        .not("client_id", "is", null)
+        .limit(1);
+      return retry2?.[0]?.id ?? null;
     }
     throw error;
   }
@@ -1008,35 +1020,27 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // === UPLOAD + DESCRICAO DE IMAGEM/DOCUMENTO (background, não bloqueia) ===
-      if (hasMedia && base64Media && (msgType === "image" || msgType === "document") && !fromMe) {
-        after(async () => {
-          try {
-            const url = await uploadMediaBase64(base64Media, remoteJid, effMimetype);
-            if (url) console.log("[Media] Uploaded:", url);
-
-            if (msgType === "image") {
-              const desc = await describeImageWithGemini(base64Media, effMimetype, clientId);
-              if (desc) {
-                enrichedContent = `📷 ${desc}`;
-                const upd: Record<string, any> = { content: enrichedContent };
-                if (url) upd.media_url = url;
-                await supabase.from("chats_dashboard").update(upd).eq("message_id", finalId).then(() => {}, () => {});
-              }
-            } else if (msgType === "document") {
-              const fileName = extractFileName(message);
-              const desc = await describeDocumentWithGemini(base64Media, effMimetype, fileName, clientId);
-              if (desc) {
-                enrichedContent = `📄 ${fileName ? `[${fileName}] ` : ""}${desc}`;
-                const upd: Record<string, any> = { content: enrichedContent };
-                if (url) upd.media_url = url;
-                await supabase.from("chats_dashboard").update(upd).eq("message_id", finalId).then(() => {}, () => {});
-              }
-            }
-          } catch (e: any) {
-            console.error("[Media] Pipeline imagem/doc falhou:", e?.message);
+      // === UPLOAD + DESCRICAO DE IMAGEM/DOCUMENTO/VÍDEO (INLINE) ===
+      // FIX crítico: isto rodava dentro de after(), que é NO-OP em deploy
+      // standalone (comentário ~922 confirma) — imagem ficava "[📷 Imagem]"
+      // eterna sem preview nem descrição, IA respondia cega, e vídeo NUNCA
+      // tinha upload. Agora é inline, igual áudio/GO/Cloud.
+      let mediaUrlInline: string | null = null;
+      if (hasMedia && base64Media && !fromMe && (msgType === "image" || msgType === "document" || msgType === "video")) {
+        try {
+          mediaUrlInline = await uploadMediaBase64(base64Media, remoteJid, effMimetype);
+          if (msgType === "image") {
+            const desc = await describeImageWithGemini(base64Media, effMimetype, clientId);
+            if (desc) enrichedContent = `📷 ${desc}`;
+          } else if (msgType === "document") {
+            const fileName = extractFileName(message);
+            const desc = await describeDocumentWithGemini(base64Media, effMimetype, fileName, clientId);
+            if (desc) enrichedContent = `📄 ${fileName ? `[${fileName}] ` : ""}${desc}`;
           }
-        });
+          // vídeo: só upload (não há descrição de vídeo)
+        } catch (e: any) {
+          console.error("[Media] Pipeline imagem/doc/vídeo falhou:", e?.message);
+        }
       }
 
       // === 1. SALVA PRIMEIRO NO chats_dashboard ===
@@ -1047,8 +1051,8 @@ export async function POST(req: NextRequest) {
         (hasMedia ? mediaPlaceholder(msgType) : null) ||
         (msgType && msgType !== "text" ? mediaPlaceholder(msgType) : null);
 
-      let mediaUrl: string | null = null;
-      if (hasMedia && base64Media && msgType === "audio") {
+      let mediaUrl: string | null = mediaUrlInline;
+      if (!mediaUrl && hasMedia && base64Media && msgType === "audio") {
         try {
           mediaUrl = await uploadMediaBase64(base64Media, remoteJid, effMimetype);
         } catch {}
@@ -1250,7 +1254,9 @@ export async function POST(req: NextRequest) {
             });
             // Next 13+ Route Handler aceita Request; o cast pra NextRequest é seguro
             // porque agent/process não usa nada exclusivo do NextRequest extras.
-            await agentMod.POST(fakeReq as any);
+            // Serializa por sessão (anti-resposta-dupla em msgs rápidas).
+            const { withSessionLock } = await import("@/lib/session-lock");
+            await withSessionLock(session.id, () => agentMod.POST(fakeReq as any));
             console.log("[Webhook] ✓ Agent dispatch concluído pra", maskJid(remoteJid));
           } catch (e: any) {
             console.error("[Webhook] Erro ao disparar IA:", e?.message);

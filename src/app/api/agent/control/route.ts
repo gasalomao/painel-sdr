@@ -139,23 +139,19 @@ export async function POST(req: NextRequest) {
       targetInstance = "default";
     }
 
-    // Busca sessões por contact_id OU por remote_jid (variações)
+    // Busca sessões SOMENTE por contact_id.
+    // FIX crítico: sessions NÃO tem coluna remote_jid (migration 005) — o
+    // .or("contact_id..., remote_jid.in....") retornava erro do PostgREST
+    // (silencioso no supabase-js) e sessionRows vinha SEMPRE vazio. Resultado:
+    // pausar uma conversa que nunca recebeu mensagem era um no-op silencioso
+    // (IA respondia mesmo pausada) e o insert com remote_jid falhava PGRST204.
     let sessionRows: any[] = [];
     if (contact) {
       const { data } = await supabase
         .from("sessions")
         .select("id, contact_id, instance_name, bot_status, paused_by, paused_at, resume_at")
         .eq("client_id", auth.clientId)
-        .or(`contact_id.eq.${contact.id},remote_jid.in.(${jids.map((j) => `"${j}"`).join(",")})`)
-        .order("last_message_at", { ascending: false, nullsFirst: false })
-        .limit(5);
-      if (data) sessionRows = data;
-    } else {
-      const { data } = await supabase
-        .from("sessions")
-        .select("id, contact_id, instance_name, bot_status, paused_by, paused_at, resume_at")
-        .eq("client_id", auth.clientId)
-        .in("remote_jid", jids)
+        .eq("contact_id", contact.id)
         .order("last_message_at", { ascending: false, nullsFirst: false })
         .limit(5);
       if (data) sessionRows = data;
@@ -163,13 +159,12 @@ export async function POST(req: NextRequest) {
 
     let session = sessionRows && sessionRows.length > 0 ? sessionRows[0] : null;
 
-    if (!session) {
+    if (!session && contact) {
       const { data: newSession } = await supabase
         .from("sessions")
         .insert({
           client_id: auth.clientId,
-          contact_id: contact?.id || null,
-          remote_jid: remoteJid,
+          contact_id: contact.id,
           instance_name: targetInstance,
           bot_status: "bot_active",
         })
@@ -193,9 +188,6 @@ export async function POST(req: NextRequest) {
         if (contactId) {
           await supabase.from("sessions").update(patch).eq("client_id", auth.clientId).eq("contact_id", contactId);
         }
-        if (jids.length > 0) {
-          await supabase.from("sessions").update(patch).eq("client_id", auth.clientId).in("remote_jid", jids);
-        }
 
         return NextResponse.json({ success: true, bot_status: "bot_paused", resume_at: null, blocked: true, permanent: true });
       }
@@ -216,9 +208,6 @@ export async function POST(req: NextRequest) {
         if (contactId) {
           await supabase.from("sessions").update(patch).eq("client_id", auth.clientId).eq("contact_id", contactId);
         }
-        if (jids.length > 0) {
-          await supabase.from("sessions").update(patch).eq("client_id", auth.clientId).in("remote_jid", jids);
-        }
 
         return NextResponse.json({ success: true, bot_status: "human_takeover", resume_at: resumeAt, minutes, blocked: true, permanent: false });
       }
@@ -235,9 +224,6 @@ export async function POST(req: NextRequest) {
         }
         if (contactId) {
           await supabase.from("sessions").update(patch).eq("client_id", auth.clientId).eq("contact_id", contactId);
-        }
-        if (jids.length > 0) {
-          await supabase.from("sessions").update(patch).eq("client_id", auth.clientId).in("remote_jid", jids);
         }
 
         return NextResponse.json({ success: true, bot_status: "bot_active", resume_at: null, blocked: false, permanent: false });

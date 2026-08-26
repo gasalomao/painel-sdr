@@ -255,13 +255,28 @@ export async function POST(req: NextRequest) {
              .gte("created_at", batchStartTime)
              .order("created_at", { ascending: true });
           if (batchMsgs && batchMsgs.length > 0) {
-             const contents = Array.from(new Set(batchMsgs.map(m => m.content).filter(Boolean)));
-             if (!contents.includes(text)) contents.unshift(text);
-             finalProcessText = contents.join("\n");
-             console.log(`[BUFFER] Lote de ${batchMsgs.length} mensagens consolidado.`);
-          }
+              const contents = Array.from(new Set(batchMsgs.map(m => m.content).filter(Boolean)));
+              if (!contents.includes(text)) contents.unshift(text);
+              // FIX janela de perda: msg inserida DEPOIS do 1º SELECT e ANTES do
+              // delete ficava em terra-de-ninguém (excluída do lote, e o próprio
+              // dispatch dela batia no lock → nunca processada). Re-lê agora,
+              // imediatamente antes de soltar o lock.
+              const { data: lateMsgs } = await supabase.from("chats_dashboard")
+                 .select("content")
+                 .eq("remote_jid", remoteJid)
+                 .eq("instance_name", instanceName)
+                 .eq("sender_type", "customer")
+                 .gte("created_at", batchStartTime)
+                 .order("created_at", { ascending: true });
+              const allContents = Array.from(new Set([...contents, ...(lateMsgs || []).map(m => m.content).filter(Boolean)]));
+              if (allContents.length > contents.length || !allContents.includes(text)) {
+                 if (!allContents.includes(text)) allContents.unshift(text);
+                 finalProcessText = allContents.join("\n");
+                 console.log(`[BUFFER] Lote FINAL com ${allContents.length} mensagens (re-leitura pegou atrasadas).`);
+              }
+           }
 
-          await supabase.from("chat_buffers").delete().eq("remote_jid", remoteJid).eq("instance_name", instanceName);
+           await supabase.from("chat_buffers").delete().eq("remote_jid", remoteJid).eq("instance_name", instanceName);
         }
        } // fim if (!skipBufferWait)
      } // fim if (bufferSeconds > 0)
@@ -1878,7 +1893,11 @@ ${capturedVariablesPrompt}
        } else {
           // Custom Tool Handler
           const matchTool = customTools.find((ct: any) => ct.name === call.name);
-          if (matchTool) {
+          if (matchTool && isTestMode) {
+              // Modo teste NÃO dispara automação real (n8n/Make de produção).
+              functionResultRes = { simulated: true, message: "Modo teste: automação externa suprimida." };
+              callLogs.push({ role: "system", content: `[TESTE] Webhook Custom "${matchTool.name}" suprimido` });
+          } else if (matchTool) {
               console.log("[MCP] Webhook Tool Request ->", matchTool.name);
               try {
                   const reqWb = await fetch(matchTool.webhook_url, {

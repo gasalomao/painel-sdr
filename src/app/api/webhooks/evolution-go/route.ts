@@ -349,7 +349,10 @@ export async function POST(req: NextRequest) {
             });
             // FIX Next 16: NÃO fire-and-forget. Next standalone cancela trabalho
             // pendente após handler retorn. Bloqueia ~3-7s; Evolution aceita até 30s.
-            await agentMod.POST(fakeReq);
+            // Serializa por sessão: 2 msgs rápidas não geram 2 respostas
+            // paralelas/conflitantes — a 2ª espera a 1ª e responde com contexto.
+            const { withSessionLock } = await import("@/lib/session-lock");
+            await withSessionLock(session.id, () => agentMod.POST(fakeReq));
           } catch (e: any) {
             console.warn("[evo-go-webhook] agente falhou:", e?.message);
             await supabase
