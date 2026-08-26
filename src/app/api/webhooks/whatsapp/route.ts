@@ -2,7 +2,7 @@ import { NextRequest, NextResponse, after } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { evolution, getEvolutionConfig } from "@/lib/evolution";
 import { getEffectiveStatus } from "@/lib/bot-status";
-import { shouldSkipGroupActions, getTranscriptionMethod } from "@/lib/bot-status";
+import { shouldSkipGroupActions, getTranscriptionMethod, getTranscriptionModels } from "@/lib/bot-status";
 import { isManualSend, isAiSend, isPendingAutomatedSend } from "@/lib/manual-send-registry";
 import { clientIdFromInstance, DEFAULT_CLIENT_ID } from "@/lib/tenant";
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
@@ -949,7 +949,10 @@ export async function POST(req: NextRequest) {
           // (ordem definida em shared-helpers.transcribeAudioDetailed).
           try {
             const { transcribeAudioDetailed } = await import("@/app/api/webhooks/shared-helpers");
-            const det = await transcribeAudioDetailed(base64Media, effMimetype, finalId, transcriptionMethod);
+            const orModels = session?.agent_id
+              ? await getTranscriptionModels(session.agent_id)
+              : [];
+            const det = await transcribeAudioDetailed(base64Media, effMimetype, finalId, transcriptionMethod, { models: orModels });
             if (det) {
               transcript = det.text;
               transcribeProvider = det.provider;

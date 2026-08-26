@@ -1184,6 +1184,7 @@ export default function AgentePage() {
                 awayMessage={awayMessage} setAwayMessage={setAwayMessage}
                 disableGroups={disableGroups} setDisableGroups={setDisableGroups}
                 transcriptionMethod={transcriptionMethod} setTranscriptionMethod={setTranscriptionMethod}
+                agentId={activeAgentId}
                 onSave={saveSchedules}
                 saving={savingConfig}
               />

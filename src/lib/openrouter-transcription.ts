@@ -44,13 +44,30 @@ export function audioFormatFromMime(mime: string | null | undefined): string {
 }
 
 /**
- * Constrói a cadeia de tentativas: grátis primeiro, depois pagos; no máx
- * MAX_MODELS modelos. Pura — testável sem rede.
+ * Constrói a cadeia de tentativas.
+ * - COM customOrder (escolhido na UI): usa exatamente essa ordem, descartando
+ *   ids que não estão na lista de modelos de áudio atuais ou duplicados.
+ * - SEM customOrder: grátis primeiro, depois pagos; no máx MAX_MODELS.
+ * Pura — testável sem rede.
  */
 export function buildAudioAttemptChain(
   models: Array<Pick<OpenRouterModel, "id" | "pricing">>,
   max = MAX_MODELS,
+  customOrder?: string[],
 ): string[] {
+  const known = new Set(models.map((m) => m.id));
+  if (customOrder?.length) {
+    const seenCustom = new Set<string>();
+    const ordered: string[] = [];
+    for (const id of customOrder) {
+      if (!known.has(id) || seenCustom.has(id)) continue;
+      seenCustom.add(id);
+      ordered.push(id);
+      if (ordered.length >= max) break;
+    }
+    return ordered;
+  }
+
   const free = models.filter((m) => isFreePricing(m.pricing)).map((m) => m.id);
   const paid = models.filter((m) => !isFreePricing(m.pricing)).map((m) => m.id);
   const seen = new Set<string>();
@@ -111,10 +128,14 @@ async function callOnce(
 /**
  * Tenta transcrever com a cadeia completa (modelo × chave). Retorna na 1ª
  * sucesso; null se tudo falhar ou não houver chave/modelo configurado.
+ *
+ * @param opts.models Ordem escolhida pelo usuário na UI (se presente, VENCE a
+ *                    ordenação grátis-primeiro; ids desconhecidos são ignorados).
  */
 export async function transcribeAudioWithOpenRouter(
   base64: string,
   mimetype: string,
+  opts?: { models?: string[] },
 ): Promise<OpenRouterTranscription | null> {
   try {
     const [keysInfo, audioModels] = await Promise.all([
@@ -122,7 +143,7 @@ export async function transcribeAudioWithOpenRouter(
       listOpenRouterAudioModels(),
     ]);
     const keys = keysInfo.openrouterKeys.filter(Boolean);
-    const chain = buildAudioAttemptChain(audioModels);
+    const chain = buildAudioAttemptChain(audioModels, MAX_MODELS, opts?.models);
     if (!keys.length || !chain.length) return null;
 
     const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");

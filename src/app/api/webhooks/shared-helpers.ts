@@ -229,12 +229,17 @@ const TRANSCRIPTION_STEPS: Record<TranscriptionMethodValue, string[]> = {
 /**
  * Transcreve com fallback completo e informa o provedor que funcionou
  * ("whisper" | "openrouter:<model>" | "gemini"). Null se tudo falhar.
+ *
+ * @param extra.models Ordem de modelos OpenRouter escolhida pelo usuário
+ *                     (salva em agent_settings.options.transcription_models).
+ *                     Aplica nos métodos "auto" E "openrouter".
  */
 export async function transcribeAudioDetailed(
   base64: string,
   mimetype: string,
   debugMessageId?: string,
   method: TranscriptionMethodValue = "auto",
+  extra?: { models?: string[] },
 ): Promise<{ text: string; provider: string } | null> {
   if (method === "disabled") return null;
   void debugMessageId;
@@ -254,6 +259,7 @@ export async function transcribeAudioDetailed(
       return await transcribeAudioWithOpenRouter(
         base64.replace(/^data:.*?;base64,/, ""),
         mimetype,
+        { models: extra?.models },
       );
     } catch {
       return null;
@@ -311,8 +317,9 @@ export async function transcribeAudio(
   mimetype: string,
   debugMessageId?: string,
   method: TranscriptionMethodValue = "auto",
+  extra?: { models?: string[] },
 ): Promise<string | null> {
-  const r = await transcribeAudioDetailed(base64, mimetype, debugMessageId, method);
+  const r = await transcribeAudioDetailed(base64, mimetype, debugMessageId, method, extra);
   return r?.text ?? null;
 }
 

@@ -17,7 +17,7 @@ import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { whatsappCloud } from "@/lib/whatsapp-cloud";
 import { resolveChannel, resolveInstanceFromPhoneNumberId } from "@/lib/channel";
 import { getEffectiveStatus } from "@/lib/bot-status";
-import { shouldSkipGroupActions, getTranscriptionMethod } from "@/lib/bot-status";
+import { shouldSkipGroupActions, getTranscriptionMethod, getTranscriptionModels } from "@/lib/bot-status";
 import { isManualSend } from "@/lib/manual-send-registry";
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
 import { createHmac, timingSafeEqual } from "node:crypto";
@@ -293,7 +293,8 @@ export async function POST(req: NextRequest) {
                 console.warn("[Cloud Media] upload falhou:", upErr?.message);
               }
               const { transcribeAudio } = await import("@/app/api/webhooks/shared-helpers");
-              const t = await transcribeAudio(base64, fMime || "audio/ogg", m.messageId, transcriptionMethod);
+              const orModels = sessionRow?.agent_id ? await getTranscriptionModels(sessionRow.agent_id) : [];
+              const t = await transcribeAudio(base64, fMime || "audio/ogg", m.messageId, transcriptionMethod, { models: orModels });
               content = t ? `🎤 ${t}` : "[🎤 O cliente enviou um áudio que não consegui transcrever]";
             } else {
               content = "[🎤 O cliente enviou um áudio que não consegui transcrever]";

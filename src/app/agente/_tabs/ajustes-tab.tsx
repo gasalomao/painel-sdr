@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { Clock, Users, Mic } from "lucide-react";
+import { Clock, Users, Mic, ArrowUp, ArrowDown, X, Plus } from "lucide-react";
 import { Toggle } from "../_components/toggle";
 import { SaveButton } from "../_components/save-button";
 
@@ -12,67 +12,191 @@ export type ScheduleRow = { day: string; active: boolean; start: string; end: st
 export type TranscriptionMethod = "auto" | "whisper" | "gemini" | "openrouter" | "disabled";
 
 const TRANSCRIPTION_OPTIONS: { value: TranscriptionMethod; label: string; desc: string }[] = [
-  { value: "auto", label: "Automático", desc: "Whisper primeiro (grátis), depois OpenRouter free e Gemini se falhar" },
+  { value: "auto", label: "Automático", desc: "Whisper primeiro (grátis), depois seus modelos OpenRouter e Gemini se falhar" },
   { value: "whisper", label: "Whisper (VPS)", desc: "Local e grátis — não gasta tokens" },
-  { value: "openrouter", label: "OpenRouter (Cloud)", desc: "Modelos multimodal com áudio — grátis primeiro, fallback automático entre modelos/chaves" },
+  { value: "openrouter", label: "OpenRouter (Cloud)", desc: "Escolha os modelos e a ordem — se um falhar tenta o próximo" },
   { value: "gemini", label: "Gemini (Cloud)", desc: "Melhor qualidade — gasta tokens da API" },
   { value: "disabled", label: "Desativado", desc: "Não transcreve áudios" },
 ];
 
 type AudioModel = { id: string; name: string; free: boolean };
 
-/** Lista ao vivo dos modelos OpenRouter que aceitam áudio (grátis primeiro). */
-function OpenRouterModelList() {
-  const [models, setModels] = useState<AudioModel[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+/**
+ * Seletor de modelos OpenRouter de transcrição de áudio COM ORDEM de fallback.
+ * Aplica nos métodos "auto" E "openrouter". Salva sozinho (debounce 600ms) em
+ * agent_settings.options.transcription_models via /api/agent/transcription-models.
+ * Lista vazia = padrão grátis → pagos.
+ */
+function TranscriptionModelPicker({ agentId }: { agentId: number | null }) {
+  const [all, setAll] = useState<AudioModel[] | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
+  const [chosen, setChosen] = useState<string[]>([]);
+  const [orderLoaded, setOrderLoaded] = useState(false);
+  const [search, setSearch] = useState("");
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Guarda pra qual agente a ordem carregou — evita salvar lista do agente A no B durante troca. */
+  const loadedForRef = useRef<number | null>(null);
 
+  // Catálogo ao vivo do OpenRouter
   useEffect(() => {
     let alive = true;
     fetch("/api/openrouter-audio-models")
       .then((r) => r.json())
       .then((d) => {
         if (!alive) return;
-        if (d?.success && Array.isArray(d.models)) setModels(d.models);
-        else setError(d?.error || "Falha ao listar modelos.");
+        if (d?.success && Array.isArray(d.models)) setAll(d.models);
+        else setListError(d?.error || "Falha ao listar modelos.");
       })
-      .catch(() => alive && setError("Falha ao listar modelos."));
+      .catch(() => alive && setListError("Falha ao listar modelos."));
     return () => { alive = false; };
   }, []);
 
-  if (error) return <p className="text-xs text-red-400/80">{error}</p>;
-  if (!models) return <p className="text-xs text-muted-foreground">Carregando modelos OpenRouter...</p>;
-  if (!models.length)
-    return (
-      <p className="text-xs text-muted-foreground">
-        Nenhum modelo de áudio retornado. Configure a API Key do OpenRouter em{" "}
-        <a href="/configuracoes" className="text-primary underline decoration-dotted">Configurações</a>.
-      </p>
-    );
+  // Ordem salva do agente — reseta estado ANTES do fetch (troca de agente
+  // não pode herdar a lista do anterior nem salvar nela).
+  useEffect(() => {
+    setOrderLoaded(false);
+    setChosen([]);
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    if (!agentId) { loadedForRef.current = null; setOrderLoaded(true); return; }
+    let alive = true;
+    fetch(`/api/agent/transcription-models?agent_id=${agentId}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (!alive) return;
+        setChosen(Array.isArray(d?.models) ? d.models : []);
+        loadedForRef.current = agentId;
+        setOrderLoaded(true);
+      })
+      .catch(() => {
+        if (!alive) return;
+        loadedForRef.current = agentId;
+        setOrderLoaded(true);
+      });
+    return () => { alive = false; };
+  }, [agentId]);
+
+  const persist = (next: string[]) => {
+    setChosen(next);
+    if (!agentId || !orderLoaded || loadedForRef.current !== agentId) return;
+    setSaveState("saving");
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      try {
+        const r = await fetch("/api/agent/transcription-models", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ agent_id: agentId, models: next }),
+        });
+        setSaveState(r.ok ? "saved" : "error");
+      } catch {
+        setSaveState("error");
+      }
+    }, 600);
+  };
+
+  const move = (idx: number, dir: -1 | 1) => {
+    const j = idx + dir;
+    if (j < 0 || j >= chosen.length) return;
+    const next = [...chosen];
+    [next[idx], next[j]] = [next[j], next[idx]];
+    persist(next);
+  };
+
+  const nameOf = (id: string): string => all?.find((m) => m.id === id)?.name || id;
+  const isFree = (id: string): boolean => !!all?.find((m) => m.id === id)?.free;
+
+  if (listError) return <p className="text-xs text-red-400/80">{listError}</p>;
+  if (!all) return <p className="text-xs text-muted-foreground">Carregando modelos OpenRouter...</p>;
+
+  const freeCount = all.filter((m) => m.free).length;
+  const available = all
+    .filter((m) => !chosen.includes(m.id))
+    .filter((m) => !search.trim() || `${m.name} ${m.id}`.toLowerCase().includes(search.toLowerCase()));
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        {models.length} modelos aceitam áudio ({models.filter((m) => m.free).length} grátis). Ordem de fallback: grátis → pagos.
+        {all.length} modelos aceitam áudio ({freeCount} grátis). A transcrição tenta na ordem abaixo; se um falhar,
+        passa pro próximo. Válido nos modos <span className="text-primary">Automático</span> e{" "}
+        <span className="text-primary">OpenRouter</span>.
       </p>
-      <div className="flex flex-wrap gap-1.5">
-        {models.slice(0, 12).map((m) => (
-          <span
-            key={m.id}
-            title={m.id}
-            className={cn(
-              "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px]",
-              m.free
-                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-                : "border-white/[0.08] bg-white/[0.02] text-muted-foreground",
-            )}
-          >
-            {m.free && <span className="font-semibold">GRÁTIS</span>}
-            {m.name}
+
+      {/* Ordem escolhida */}
+      <div className="space-y-1.5">
+        <div className="flex items-baseline justify-between">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Ordem de tentativa ({chosen.length})
+          </p>
+          <span className={cn(
+            "text-[10px]",
+            saveState === "saved" && "text-emerald-400",
+            saveState === "saving" && "text-muted-foreground",
+            saveState === "error" && "text-red-400",
+          )}>
+            {saveState === "saved" && "Salvo ✓"}
+            {saveState === "saving" && "Salvando..."}
+            {saveState === "error" && "Erro ao salvar"}
           </span>
-        ))}
-        {models.length > 12 && (
-          <span className="text-[11px] text-muted-foreground self-center">+{models.length - 12} outros</span>
+        </div>
+        {chosen.length === 0 ? (
+          <p className="text-xs text-muted-foreground italic border border-dashed border-white/[0.08] rounded-lg p-3">
+            Nenhum modelo escolhido — usa o padrão automático: grátis primeiro, depois pagos (máx 8).
+          </p>
+        ) : (
+          chosen.map((id, i) => (
+            <div key={id} className="flex items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.02] px-2.5 py-1.5">
+              <span className="text-[10px] font-black text-primary w-5">{i + 1}.</span>
+              {isFree(id) && (
+                <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 text-[9px] font-bold px-1.5 py-0.5">GRÁTIS</span>
+              )}
+              <span className="text-xs text-foreground truncate flex-1" title={id}>{nameOf(id)}</span>
+              <button type="button" onClick={() => move(i, -1)} disabled={i === 0}
+                className="p-1 rounded hover:bg-white/[0.06] disabled:opacity-25" aria-label="Subir prioridade">
+                <ArrowUp className="w-3.5 h-3.5 text-muted-foreground" />
+              </button>
+              <button type="button" onClick={() => move(i, 1)} disabled={i === chosen.length - 1}
+                className="p-1 rounded hover:bg-white/[0.06] disabled:opacity-25" aria-label="Baixar prioridade">
+                <ArrowDown className="w-3.5 h-3.5 text-muted-foreground" />
+              </button>
+              <button type="button" onClick={() => persist(chosen.filter((c) => c !== id))}
+                className="p-1 rounded hover:bg-red-500/15" aria-label="Remover">
+                <X className="w-3.5 h-3.5 text-red-400/70" />
+              </button>
+            </div>
+          ))
         )}
+      </div>
+
+      {/* Catálogo disponível */}
+      <div className="space-y-2">
+        <Input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Buscar modelo..."
+          className="bg-white/[0.02] border-white/[0.08] h-8 text-xs rounded-lg"
+        />
+        <div className="max-h-56 overflow-y-auto space-y-1 pr-1">
+          {available.length === 0 && (
+            <p className="text-xs text-muted-foreground italic p-2">Nenhum modelo restante{search ? " para essa busca" : ""}.</p>
+          )}
+          {available.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              onClick={() => persist([...chosen, m.id])}
+              disabled={chosen.length >= 10}
+              title={`Adicionar "${m.name}" ao final da ordem`}
+              className="w-full flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] hover:border-primary/40 disabled:opacity-40 px-2.5 py-1.5 text-left transition-colors"
+            >
+              {m.free && (
+                <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 text-[9px] font-bold px-1.5 py-0.5 shrink-0">GRÁTIS</span>
+              )}
+              <span className="text-xs text-foreground/90 truncate flex-1">{m.name}</span>
+              <Plus className="w-3.5 h-3.5 text-primary/60 shrink-0" />
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -89,6 +213,7 @@ export function AjustesTab({
   setDisableGroups,
   transcriptionMethod,
   setTranscriptionMethod,
+  agentId,
   onSave,
   saving,
 }: {
@@ -102,6 +227,8 @@ export function AjustesTab({
   setDisableGroups: (v: boolean) => void;
   transcriptionMethod: TranscriptionMethod;
   setTranscriptionMethod: (v: TranscriptionMethod) => void;
+  /** Agente ativo — o seletor de modelos salva a ordem por agente. */
+  agentId?: number | null;
   onSave: () => void;
   saving: boolean;
 }) {
@@ -287,9 +414,9 @@ export function AjustesTab({
           ))}
         </div>
 
-        {transcriptionMethod === "openrouter" && (
+        {(transcriptionMethod === "openrouter" || transcriptionMethod === "auto") && (
           <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
-            <OpenRouterModelList />
+            <TranscriptionModelPicker agentId={agentId ?? null} />
           </div>
         )}
       </div>

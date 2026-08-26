@@ -134,6 +134,37 @@ export async function getTranscriptionMethod(agentId: number | string | null | u
   }) as Promise<TranscriptionMethod>;
 }
 
+/**
+ * Ordem de modelos OpenRouter de transcrição escolhida pelo usuário
+ * (agent_settings.options.transcription_models). Aplica nos métodos "auto" E
+ * "openrouter". Vazio/inválido = [] → cadeia padrão grátis-primeiro.
+ */
+export async function getTranscriptionModels(agentId: number | string | null | undefined): Promise<string[]> {
+  if (!agentId) return [];
+  return cachedSetting(`tmod:${agentId}`, async () => {
+    try {
+      const { data } = await supabaseAdmin
+        .from("agent_settings")
+        .select("options")
+        .eq("id", agentId)
+        .maybeSingle();
+      const raw = (data?.options as any)?.transcription_models;
+      if (!Array.isArray(raw)) return [];
+      return raw
+        .map((s: unknown) => String(s || "").trim())
+        .filter(Boolean)
+        .slice(0, 10);
+    } catch {
+      return [];
+    }
+  }) as Promise<string[]>;
+}
+
+/** Invalida o cache da ordem de modelos — usar após salvar pela UI. */
+export function invalidateTranscriptionModelsCache(agentId: number | string) {
+  settingsCache.delete(`tmod:${agentId}`);
+}
+
 /* ============================================================
    PAUSA "GLOBAL" — agora POR INSTÂNCIA
    ============================================================ */

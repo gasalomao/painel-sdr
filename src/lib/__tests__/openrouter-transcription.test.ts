@@ -122,6 +122,44 @@ describe("openrouter-transcription — cadeia e chamadas", () => {
     expect(audioFormatFromMime(null)).toBe("ogg");
   });
 
+  // ===== ORDEM CUSTOMIZADA (seletor de modelos na UI) =====
+
+  it("buildAudioAttemptChain respeita ordem customizada e filtra ids desconhecidos/duplicados", async () => {
+    const { buildAudioAttemptChain } = await import("@/lib/openrouter-transcription");
+    const models = [
+      { id: "free/b", pricing: { prompt: "0" } },
+      { id: "paid/a", pricing: { prompt: "0.01" } },
+      { id: "paid/c", pricing: { prompt: "0.02" } },
+    ];
+    // Ordem do usuário vence (mesmo pagos antes de grátis)
+    expect(buildAudioAttemptChain(models, 8, ["paid/c", "free/b"])).toEqual(["paid/c", "free/b"]);
+    // Id desconhecido é descartado; duplicado entra uma vez
+    expect(buildAudioAttemptChain(models, 8, ["nao/existe", "paid/a", "paid/a"])).toEqual(["paid/a"]);
+    // Sem customOrder → comportamento padrão (grátis primeiro)
+    expect(buildAudioAttemptChain(models, 8, [])).toEqual(["free/b", "paid/a", "paid/c"]);
+    expect(buildAudioAttemptChain(models, 8, undefined)).toEqual(["free/b", "paid/a", "paid/c"]);
+  });
+
+  it("transcribeAudioWithOpenRouter usa a ordem escolhida pelo usuário via opts.models", async () => {
+    fetchMock = vi.fn(async (_url: any, init?: any) => {
+      const model = JSON.parse(init.body).model;
+      if (model === "paid/audio-a") return new Response(JSON.stringify({ choices: [{ message: { content: "ok pago" } }] }), { status: 200 });
+      return new Response(JSON.stringify({ error: "nope" }), { status: 500 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { transcribeAudioWithOpenRouter } = await import("@/lib/openrouter-transcription");
+    const r = await transcribeAudioWithOpenRouter("dGVzdA==", "audio/ogg", {
+      models: ["paid/audio-a", "free/audio-b"], // usuário quer o pago PRIMEIRO
+    });
+    expect(r).toEqual({ text: "ok pago", model: "paid/audio-a" });
+    // 1ª tentativa = modelo que o usuário escolheu primeiro
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).model).toBe("paid/audio-a");
+    // Só tenta os escolhidos — o 2º modelo nunca é chamado (1º retornou ok)
+    const triedModels = fetchMock.mock.calls.map((c: any) => JSON.parse(c[1].body).model);
+    expect(triedModels).toEqual(["paid/audio-a"]);
+  });
+
   it("tenta grátis primeiro; chave 429 → rotaciona pra próxima chave antes do próximo modelo", async () => {
     fetchMock = vi.fn(async (url: any, init?: any) => {
       const model = JSON.parse(init.body).model;
@@ -211,6 +249,26 @@ describe("shared-helpers transcribeAudio — ordem de fallback com OpenRouter", 
     expect(r?.provider.startsWith("openrouter:")).toBe(true);
     expect(r?.text).toBe("transcricao OR");
     expect(transcribeAudioWithWhisper).not.toHaveBeenCalled();
+  });
+
+  it("extra.models é repassado ao OpenRouter — ordem escolhida pelo usuário vence no modo auto", async () => {
+    const fetchSpy = vi.fn(async (_url: any, init?: any) => {
+      const model = JSON.parse(init.body).model;
+      if (model === "paid/audio-a") return new Response(JSON.stringify({ choices: [{ message: { content: "via custom" } }] }), { status: 200 });
+      return new Response(JSON.stringify({ error: "no" }), { status: 500 });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const { transcribeAudioWithWhisper } = await import("@/lib/whisper-manager");
+    (transcribeAudioWithWhisper as any).mockResolvedValue(null);
+
+    const { transcribeAudioDetailed } = await import("@/app/api/webhooks/shared-helpers");
+    const r = await transcribeAudioDetailed("dGVzdA==", "audio/ogg", "m5", "auto", {
+      models: ["paid/audio-a", "free/audio-b"],
+    });
+
+    expect(r).toEqual({ text: "via custom", provider: "openrouter:paid/audio-a" });
+    expect(String(fetchSpy.mock.calls[0][0])).toContain("openrouter.ai");
+    expect(JSON.parse(fetchSpy.mock.calls[0][1].body).model).toBe("paid/audio-a");
   });
 
   it('método "auto": whisper → openrouter → gemini (OR tentado antes do Gemini)', async () => {
