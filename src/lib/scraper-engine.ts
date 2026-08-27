@@ -139,6 +139,10 @@ let lastSearchNiche = "Leads";
 let lastSearchRegion = "Exportados";
 let currentAutomationId: string | null = null;
 let currentClientId: string | null = null;
+// Guard de geração: cada runScraper pega um número. Um run substituído por
+// forceRestart NÃO pode resetar isScraping/keepRunning nem marcar a automação
+// como erro no finally — isso matava o run novo que acabou de nascer.
+let runGeneration = 0;
 
 // SSE clients (apenas o /captador via browser inscreve)
 const sseClients: Set<ReadableStreamDefaultController> = new Set();
@@ -484,6 +488,8 @@ async function saveLeadAndSync(lead: Lead, settings: ScraperSettings): Promise<n
 
 async function runScraper(niches: string[], regions: string[], settings: ScraperSettings) {
   if (isScraping) return;
+  const myGen = ++runGeneration;
+  const isCurrentRun = () => myGen === runGeneration;
   isScraping = true;
   isPaused = false;
   keepRunning = true;
@@ -601,7 +607,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
     let expansionsLeft = 10; // teto de cidades extras — bounding box de custo/tempo
 
     outer: for (let i = 0; i < queue.length; i++) {
-      if (!keepRunning) {
+      if (!keepRunning || !isCurrentRun()) {
         sendLog("Parada recebida. Abortando fila.", "warning");
         break;
       }
@@ -677,7 +683,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
       let scrolling = true;
       sendLog("Rolando para capturar cartões...", "info");
 
-      while (scrolling && keepRunning) {
+      while (scrolling && keepRunning && isCurrentRun()) {
         await page.evaluate(() => {
           const feed = document.querySelector('[role="feed"]');
           if (feed) feed.scrollBy(0, 1000);
@@ -697,7 +703,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
         });
 
         for (const lead of newLeads) {
-          if (!keepRunning) break;
+          if (!keepRunning || !isCurrentRun()) break;
           while (isPaused && keepRunning) await sleep(1000);
           if (!keepRunning) break;
 
@@ -1835,9 +1841,11 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
       }
     }
 
-    sendLog(`🎉 Fila processada! Total: ${leadsStore.length} leads`, "success");
+    if (isCurrentRun()) sendLog(`🎉 Fila processada! Total: ${leadsStore.length} leads`, "success");
 
-    if (settings.webhookEnabled && settings.mode === "batch" && settings.webhookUrl && leadsStore.length > 0) {
+    // Run substituído por um restart não dispara webhook em massa — os
+    // leads dele já foram zerados pelo run novo (leadsStore é compartilhado).
+    if (settings.webhookEnabled && settings.mode === "batch" && settings.webhookUrl && leadsStore.length > 0 && isCurrentRun()) {
       sendLog("Enviando em massa para n8n...", "info");
       try {
         const payload = leadsStore.map(formatLeadForN8n);
@@ -1856,6 +1864,14 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
     sendLog(`❌ Erro no scraper: ${scraperError}`, "error");
   } finally {
     if (browser) await browser.close().catch(() => {});
+    // Run SUBSTITUÍDO por forceRestart: só fecha o próprio browser e sai.
+    // Resetar isScraping/marcar automação em erro aqui matava o run novo
+    // (bug: restart deixava o run antigo "concluir" com 0 leads por cima
+    // do run recém-nascido).
+    if (!isCurrentRun()) {
+      sendLog(`♻️ Run substituído por um restart — ignorando conclusão deste run.`, "info");
+      return;
+    }
     isScraping = false;
     isPaused = false;
     broadcast({ event: "status", isScraping: false, isPaused: false, leadCount: leadsStore.length });
