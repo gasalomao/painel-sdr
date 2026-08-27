@@ -81,15 +81,15 @@ const TABS = [
 ] as const;
 type TabKey = typeof TABS[number]["key"];
 
-const DEFAULT_TEMPLATE = `{{saudacao}}! Tudo bem?
+const DEFAULT_TEMPLATE = `{{saudacao}}! Tudo bem? Aqui é a Sarah, da Salomão AI.
 
-Estava dando uma olhada no perfil da {{nome_empresa}} no Google e parabéns pela nota {{avaliacao}} com {{reviews}} avaliações!
+Achei a {{nome_empresa}} no Google pesquisando sobre {{ramo}} e me chamou muita atenção nota de vocês (nota {{avaliacao}} com {{reviews}} avaliações, parabéns!).
 
-Notei que muitos clientes chegam até vocês pelas buscas, mas ainda falta uma página própria no setor de {{ramo}} para converter quem pesquisa online.
+Fui procurar o site de vocês pra ver mais detalhes e vi que ainda não têm um no ar. Hoje em dia muita gente acha o perfil no Google, mas se não vê um site na hora com os serviços, acaba indo pro concorrente.
 
-Trabalho com desenvolvimento web e montei uma prévia visual completa de um site com as informações públicas do estabelecimento de vocês.
+Por conta disso, já deixei montado um modelo de site pronto pra vocês verem como ficaria na prática.
 
-Posso te enviar o PDF da prévia por aqui sem compromisso para você ver como ficou?`;
+Você prefere que eu te mande o link aqui por mensagem ou prefere marcar uma reunião rápida para te mostrar como ficou? Qual você prefere? (É totalmente sem compromisso).`;
 
 const VENDEDOR_DEFAULT = "Salomão";
 
