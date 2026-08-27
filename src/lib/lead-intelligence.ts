@@ -82,6 +82,8 @@ function liLog(tag: string, msg: string, extra?: any) {
   else console.log(`[${ts}][lead-intel:${tag}] ${msg}`);
 }
 
+import { isValidCityName } from "@/lib/geo-regions";
+
 /**
  * Extrai cidade + estado de um endereço estilo Google Maps.
  * Ex: "R. X, 123 - Bairro, São Paulo - SP, 01000-000" → { cidade: "São Paulo", estado: "SP" }
@@ -100,13 +102,19 @@ function extractLocation(endereco: string | null | undefined): { cidade: string;
   // Cidade: a parte que contém o UF, sem o UF e sem CEP.
   for (const p of parts) {
     if (ufRe.test(p)) {
-      cidade = p.replace(ufRe, "").replace(/[-–—]/g, " ").replace(/\d{5}-?\d{3}/, "").replace(/\s+/g, " ").trim();
-      break;
+      const candidate = p.replace(ufRe, "").replace(/[-–—]/g, " ").replace(/\d{5}-?\d{3}/, "").replace(/\s+/g, " ").trim();
+      if (isValidCityName(candidate)) {
+        cidade = candidate;
+        break;
+      }
     }
   }
-  // Fallback: se não achou pelo UF, pega penúltima parte (heurística de Maps).
+  // Fallback: se não achou pelo UF, pega penúltima parte (se for cidade válida).
   if (!cidade && parts.length >= 2) {
-    cidade = parts[parts.length - 2].replace(ufRe, "").replace(/\d{5}-?\d{3}/, "").trim();
+    const candidate = parts[parts.length - 2].replace(ufRe, "").replace(/\d{5}-?\d{3}/, "").trim();
+    if (isValidCityName(candidate)) {
+      cidade = candidate;
+    }
   }
   return { cidade, estado, full: [cidade, estado].filter(Boolean).join(" - ") };
 }
