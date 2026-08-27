@@ -192,12 +192,28 @@ function isWithinAllowedHour(c: CampaignRow): boolean {
   return isWithinHourWindow(c.allowed_start_hour, c.allowed_end_hour);
 }
 
+/**
+ * Função pura para testabilidade e precisão: verifica se uma hora 'h' (0-23)
+ * está dentro da janela configurada.
+ *
+ * Regras:
+ * - Dia inteiro: (0..23 ou 0..24 ou endHour >= 24) → sempre true.
+ * - Mesma hora: (10..10) → apenas durante as 10h (10:00 a 10:59).
+ * - Janela regular (ex: 8h às 18h): permite de 8:00 até 17:59 (h >= 8 && h < 18).
+ *   Às 18:00 encerra o expediente e bloqueia disparos.
+ * - Janela invertida (ex: 22h às 6h): permite de 22:00 até 5:59 (h >= 22 || h < 6).
+ */
+export function isHourInWindow(h: number, startHour: number, endHour: number): boolean {
+  if (startHour === 0 && endHour >= 23) return true;
+  if (endHour >= 24) return true;
+  if (startHour === endHour) return h === startHour;
+  if (startHour < endHour) return h >= startHour && h < endHour;
+  return h >= startHour || h < endHour;
+}
+
 export function isWithinHourWindow(startHour: number, endHour: number): boolean {
   const h = nowHourBRT();
-  // Janela INCLUSIVA nas duas pontas: config "8h às 23h" tem que enviar até
-  // 23:59 — antes, h < endHour bloqueava a hora final inteira (23:00-23:59).
-  if (startHour <= endHour) return h >= startHour && h <= endHour;
-  return h >= startHour || h <= endHour;
+  return isHourInWindow(h, startHour, endHour);
 }
 
 export function jitterMs(min: number, max: number): number {
@@ -633,8 +649,17 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
   // "template" vs "resposta da IA" depois no painel de histórico.
   let aiInputText: string | null = null;
 
-  // Se "Personalizar com IA" estiver ativo, passa pelo Gemini ANTES de enviar
-  if (c.personalize_with_ai) {
+  // MENSAGEM PRÉ-GERADA (pré-geração fora da janela): reaproveita o texto que
+  // a IA já escreveu — sem nova chamada de IA no momento do envio.
+  if (c.personalize_with_ai && target.rendered_message) {
+    text = target.rendered_message;
+    aiInputText = target.ai_input || null;
+    await addCampaignLog(campaignId,
+      `♻️ Msg pré-gerada por IA usada para ${target.nome_negocio || target.remote_jid}: "${text.slice(0, 140)}${text.length > 140 ? "…" : ""}"`, "info");
+  }
+  // Se "Personalizar com IA" estiver ativo (e não há pré-gerada), passa pelo
+  // Gemini ANTES de enviar
+  else if (c.personalize_with_ai) {
     aiInputText = text;
     try {
       await addCampaignLog(campaignId, `Personalizando mensagem com IA para ${target.nome_negocio}...`, "info");
@@ -1023,6 +1048,18 @@ export async function startCampaign(campaignId: string): Promise<{ ok: boolean; 
   await addCampaignLog(campaignId,
     `Preflight OK. 1º disparo em ~${Math.round(firstDelay / 1000)}s (ritmo configurado da campanha).`, "success");
   scheduleNext(campaignId, firstDelay);
+
+  // PRÉ-GERAÇÃO COM IA: começa JÁ, mesmo fora da janela de envio — quando a
+  // janela abrir, o envio só lê o texto pronto (rendered_message) em vez de
+  // chamar a IA na hora. Fire-and-forget: não atrasa o 1º envio; targets que
+  // a pré-geração não cobrir caem no caminho normal (IA no momento do envio).
+  {
+    const { data: camp } = await supabase.from("campaigns").select("personalize_with_ai").eq("id", campaignId).maybeSingle();
+    if (camp?.personalize_with_ai) {
+      preGenerateCampaignMessages(campaignId).catch(e =>
+        console.error(`[CAMPAIGN ${campaignId}] pré-geração falhou:`, (e as Error)?.message));
+    }
+  }
   return { ok: true };
 }
 
@@ -1142,6 +1179,126 @@ export function isCampaignActive(campaignId: string): boolean {
 /* ============================================================
    PERSONALIZAÇÃO COM IA (opcional, com web_search opcional)
    ============================================================ */
+
+/**
+ * PRÉ-GERAÇÃO DE MENSAGENS COM IA — roda no startCampaign (e pode ser chamada
+ * fora da janela de horário). Para cada target pending, gera o texto
+ * personalizado e grava em campaign_targets.rendered_message. O envio depois
+ * só lê o texto pronto — sem chamada de IA no momento do disparo.
+ *
+ * Gravação é condicional (status=pending AND rendered_message IS NULL via
+ * re-fetch): target já enviado/pré-gerado por outro caminho não é sobrescrito.
+ * Falha individual de IA NÃO marca erro — o envio tenta de novo na hora.
+ */
+export async function preGenerateCampaignMessages(campaignId: string): Promise<{ ok: boolean; generated: number; skipped: number; failed: number; error?: string }> {
+  const { data: c } = await supabase.from("campaigns").select("*").eq("id", campaignId).maybeSingle();
+  if (!c) return { ok: false, generated: 0, skipped: 0, failed: 0, error: "Campanha não encontrada" };
+  if (!c.personalize_with_ai) return { ok: true, generated: 0, skipped: 0, failed: 0 };
+  if (c.status !== "running") return { ok: false, generated: 0, skipped: 0, failed: 0, error: "Campanha não está running" };
+
+  const { data: targets } = await supabase
+    .from("campaign_targets")
+    .select("id, remote_jid, nome_negocio, ramo_negocio")
+    .eq("campaign_id", campaignId)
+    .eq("status", "pending")
+    .is("rendered_message", null)
+    .order("created_at", { ascending: true });
+  if (!targets || targets.length === 0) {
+    await addCampaignLog(campaignId, "🧠 Pré-geração: nenhuma mensagem pendente de gerar.", "info");
+    return { ok: true, generated: 0, skipped: 0, failed: 0 };
+  }
+
+  const foraDaJanela = !isWithinAllowedHour(c as any);
+  await addCampaignLog(campaignId,
+    `🧠 Pré-gerando ${targets.length} mensagem(ns) com IA${foraDaJanela ? " (fora da janela de envio — o disparo espera, a IA não)" : ""}...`, "info");
+
+  let generated = 0, failed = 0, skipped = 0;
+  for (const target of targets) {
+    // lead do CRM p/ variáveis do template (mesmo select do caminho de envio)
+    const cols = "nome_negocio, ramo_negocio, telefone, endereco, website, instagram, facebook, avaliacao, reviews, status, categoria, resumo_avaliacoes";
+    let leadFull: any = null;
+    {
+      let res = await supabase.from("leads_extraidos").select(cols).eq("remoteJid", target.remote_jid).maybeSingle();
+      if (res.error && res.error.code === "PGRST204") {
+        res = await supabase.from("leads_extraidos").select(cols.replace(", resumo_avaliacoes", "")).eq("remoteJid", target.remote_jid).maybeSingle();
+      }
+      leadFull = res.data || null;
+    }
+    const renderCtx = {
+      remoteJid: target.remote_jid,
+      nome_negocio: leadFull?.nome_negocio || target.nome_negocio,
+      ramo_negocio: leadFull?.ramo_negocio || target.ramo_negocio,
+      push_name: null,
+      telefone: leadFull?.telefone || null,
+      endereco: leadFull?.endereco || null,
+      website: leadFull?.website || null,
+      instagram: leadFull?.instagram || null,
+      facebook: leadFull?.facebook || null,
+      avaliacao: leadFull?.avaliacao ?? null,
+      reviews: leadFull?.reviews ?? null,
+      status: leadFull?.status || null,
+      categoria: leadFull?.categoria || null,
+      resumo_avaliacoes: leadFull?.resumo_avaliacoes || null,
+    };
+
+    const baseText = renderTemplate(c.message_template, renderCtx);
+    let text = baseText;
+    try {
+      const aiText = await personalizeWithAI({
+        baseMessage: baseText,
+        model: c.ai_model || "gemini-1.5-flash",
+        customPrompt: c.ai_prompt ? renderTemplate(c.ai_prompt, renderCtx) : null,
+        nomeEmpresa: target.nome_negocio || "",
+        ramo: target.ramo_negocio || "",
+        useWebSearch: !!c.use_web_search,
+        campaignId: c.id,
+        campaignName: c.name,
+        remoteJid: target.remote_jid,
+        instanceName: c.instance_name,
+      });
+      if (aiText && aiText.trim()) text = aiText.trim();
+    } catch (e: any) {
+      failed++;
+      console.warn(`[CAMPAIGN ${c.name}] Pré-geração falhou p/ ${target.nome_negocio}: ${e?.message}`);
+      continue; // envio tenta de novo na hora
+    }
+
+    // Rede de segurança — mesma blindagem do caminho de envio: nenhuma
+    // {{variavel}} pode sobreviver à IA.
+    text = renderTemplate(text, renderCtx);
+    if (/\{\{.*?\}\}|\{.*?\}/.test(text)) {
+      text = text
+        .replace(/\{\{\s*[\w-]+\s*\}\}/g, "")
+        .replace(/\{\s*[\w-]+\s*\}/g, "")
+        .replace(/[ \t]{2,}/g, " ")
+        .replace(/\s+([.,!?])/g, "$1")
+        .trim();
+    }
+
+    // Grava SÓ se ainda pending e ainda sem mensagem (não pisa em já enviado).
+    const { data: upd } = await supabase
+      .from("campaign_targets")
+      .update({ rendered_message: text, ai_input: baseText })
+      .eq("id", target.id)
+      .eq("status", "pending")
+      .is("rendered_message", null)
+      .select("id")
+      .maybeSingle();
+    if (upd) {
+      generated++;
+      await addCampaignLog(campaignId,
+        `🧠 IA preparou msg de ${target.nome_negocio || target.remote_jid}: "${text.slice(0, 100)}${text.length > 100 ? "…" : ""}"`, "success");
+    } else {
+      skipped++;
+    }
+    await new Promise(r => setTimeout(r, 400)); // respiro entre chamadas de IA
+  }
+
+  await addCampaignLog(campaignId,
+    `🧠 Pré-geração concluída: ${generated} pronta(s) · ${skipped} pulada(s) · ${failed} falha(s) (envio tenta de novo).`,
+    failed > 0 ? "warning" : "success");
+  return { ok: true, generated, skipped, failed };
+}
 
 async function personalizeWithAI(opts: {
   baseMessage: string;
