@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { buildReviewsInput, DEFAULT_REVIEWS_PROMPT } from "@/lib/reviews-ai";
 import { renderTemplate } from "@/lib/template-vars";
 import { splitMessage } from "@/lib/agent-format";
-import { generateText } from "@/lib/ai-provider";
+import { generateText, startAiChat } from "@/lib/ai-provider";
 import { getAiKeys } from "@/lib/ai-keys";
 
 describe("E2E Pipeline Prospecção de Sites", () => {
@@ -149,4 +149,110 @@ Gostaria de apresentar uma proposta rápida de desenvolvimento de site para a {{
 
     console.log("\n✓ E2E Pipeline validado com sucesso!");
   }, 120000);
+
+  /**
+   * Fluxo da AUTOMAÇÃO de prospecção com "Reescrever com IA" + "Humanizar
+   * (picotar)" ligados — espelha campaign-worker.personalizeWithAI +
+   * splitMessage: template renderizado → IA reescreve (modelo free
+   * OpenRouter do catálogo ATUAL) → splitMessage pica em chunks humanos.
+   */
+  it("automação: IA reescreve disparo (modelo free) e splitMessage pica em chunks", async () => {
+    const keys = await getAiKeys();
+    if (!keys.openrouter) {
+      console.log("Sem chave OpenRouter — pulando teste live de automação (IA).");
+      return;
+    }
+
+    // 1. Template renderizado (mesma base da automação de prospecção de sites)
+    const baseMessage = renderTemplate(
+      `{{saudacao}}! Tudo bem?
+
+Estava dando uma olhada no perfil da {{nome_empresa}} no Google e parabéns pela nota {{avaliacao}} com {{reviews}} avaliações!
+
+Notei que muitos clientes chegam até vocês pelas buscas, mas ainda falta uma página própria no setor de {{ramo}} para converter quem pesquisa online.
+
+Posso te enviar o PDF da prévia de um site sem compromisso para você ver como ficou?`,
+      {
+        nome_negocio: "Padaria Pão de Nozes",
+        ramo_negocio: "Panificadora",
+        avaliacao: 4.8,
+        reviews: 92,
+      },
+    );
+    expect(baseMessage).toContain("Padaria Pão de Nozes");
+    expect(baseMessage).not.toContain("{{");
+
+    // 2. IA reescreve — mesma chamada do campaign-worker.personalizeWithAI,
+    //    tentando os modelos :free REAIS do catálogo atual do OpenRouter.
+    const freeChain = [
+      "openrouter:minimax/minimax-m3:free",
+      "openrouter:liquid/lfm-2.5-2.6b:free",
+      "openrouter:nvidia/nemotron-3.5-lightning:free",
+    ];
+    let rewritten = "";
+    let usedModel = "";
+    for (const modelRef of freeChain) {
+      try {
+        const session = await startAiChat({
+          modelRef,
+          systemInstruction: `Você é um SDR experiente fazendo uma primeira abordagem PROFISSIONAL via WhatsApp.
+
+DADOS DO LEAD:
+- Empresa: Padaria Pão de Nozes
+- Ramo: Panificadora
+
+MENSAGEM-BASE (template do operador):
+"""
+${baseMessage}
+"""
+
+INSTRUÇÕES:
+- Reescreva a MENSAGEM-BASE de forma natural, curta (até 3 frases), em PT-BR.
+- Mantenha o sentido original do template.
+- Personalize SUTILMENTE pra empresa/ramo (sem inventar nada).
+- Devolva APENAS a mensagem final, sem aspas e sem explicação.`,
+          history: [],
+          tools: [],
+          thinkingBudget: 0,
+          openrouterApiKey: keys.openrouter,
+        });
+        const turn = await session.sendUser(
+          "Gere a mensagem final agora. IMPORTANTE: escreva o texto REAL e completo, NUNCA use variáveis ou chaves {{ }} na resposta.",
+        );
+        if (turn.text?.trim()) {
+          rewritten = turn.text.trim();
+          usedModel = session.modelUsed();
+          break;
+        }
+      } catch (err: any) {
+        console.warn(`Modelo ${modelRef} falhou: ${err?.message}`);
+      }
+    }
+
+    // Rede de segurança: se todos os :free estouraram quota agora, o teste
+    // ainda valida o picotamento com o texto-base (o split é lógica pura).
+    const finalMessage = rewritten || baseMessage;
+    console.log(`\n=== AUTOMAÇÃO: IA reescreveu? ${rewritten ? `SIM (${usedModel})` : "não (quota free esgotada agora) — usando base"} ===`);
+    console.log(`"${finalMessage}"`);
+    if (rewritten) {
+      expect(rewritten.length).toBeGreaterThan(20);
+      expect(rewritten).not.toContain("{{");
+    }
+
+    // 3. Picotamento (humanize_messages=true no campaign-worker)
+    const chunks = splitMessage(finalMessage);
+    console.log(`\n=== AUTOMAÇÃO: ${chunks.length} chunks picotados ===`);
+    chunks.forEach((c, i) => console.log(`[${i + 1}] (${c.length} chars) ${c.slice(0, 60)}${c.length > 60 ? "…" : ""}`));
+
+    // Contrato do picotamento: nenhum chunk vazio, nenhum > 450 chars.
+    expect(chunks.length).toBeGreaterThanOrEqual(1);
+    chunks.forEach((c) => {
+      expect(c.trim().length).toBeGreaterThan(0);
+      expect(c.length).toBeLessThanOrEqual(450);
+    });
+    // A junção dos chunks preserva o conteúdo completo entregue ao lead.
+    expect(chunks.join("\n\n").replace(/\s+/g, " ")).toContain(
+      finalMessage.replace(/\s+/g, " ").slice(0, 40),
+    );
+  }, 90000);
 });

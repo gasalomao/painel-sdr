@@ -17,7 +17,7 @@ import {
   Send, Play, Pause, Square, Loader2, Search, Globe, BarChart3,
   CheckCircle2, XCircle, Star, Ban, RefreshCw,
   Rocket, Terminal, Filter, TrendingUp, Building2, Link2, Link2Off, Trash2, MapPin, ExternalLink,
-  Clock, MessageSquare, ChevronRight, Bot, Smartphone, Zap, Repeat, Plus,
+  Clock, MessageSquare, ChevronRight, Bot, Smartphone, Zap, Repeat, Plus, Scissors,
 } from "lucide-react";
 import { renderTemplate, type TemplateContext } from "@/lib/template-vars";
 import { supabase } from "@/lib/supabase";
@@ -487,6 +487,7 @@ export default function ProspeccaoSitesPage() {
   const [autoFuMinSec, setAutoFuMinSec] = useState(60);
   const [autoFuMaxSec, setAutoFuMaxSec] = useState(240);
   const [autoPersonalize, setAutoPersonalize] = useState(false);
+  const [autoHumanize, setAutoHumanize] = useState(false);
   const [autoAiModel, setAutoAiModel] = useState("");
   const [autoAiPrompt, setAutoAiPrompt] = useState("");
   const [autoCaptureAllReviews, setAutoCaptureAllReviews] = useState(false);
@@ -611,6 +612,7 @@ export default function ProspeccaoSitesPage() {
           dispatch_min_interval: autoMinSec,
           dispatch_max_interval: autoMaxSec,
           dispatch_personalize: autoPersonalize,
+          dispatch_humanize: autoHumanize,
           dispatch_ai_model: autoPersonalize ? (autoAiModel || null) : null,
           dispatch_ai_prompt: autoPersonalize ? (autoAiPrompt || null) : null,
           followup_enabled: autoFollowup,
@@ -1986,6 +1988,21 @@ export default function ProspeccaoSitesPage() {
                       </div>
                     </div>
                   )}
+                </div>
+
+                {/* Humanizar disparo (picotar mensagem) */}
+                <div className={cn(
+                  "rounded-lg border p-3 space-y-2 transition-colors",
+                  autoHumanize ? "border-emerald-400/40 bg-emerald-500/5" : "border-white/10 bg-white/[0.02]"
+                )}>
+                  <label className="flex items-center gap-2 text-xs cursor-pointer">
+                    <Switch checked={autoHumanize} onCheckedChange={setAutoHumanize} />
+                    <Scissors className="w-3.5 h-3.5 text-emerald-300" />
+                    <span className="font-bold text-emerald-200">Humanizar disparo (picotar mensagem)</span>
+                  </label>
+                  <p className="text-[10px] text-white/40 leading-relaxed">
+                    Cada disparo chega <strong>dividido em várias mensagens curtas</strong> com pausa de digitação entre elas (2-5s), igual ao Agente de IA — muito mais humano e menos risco de banimento.
+                  </p>
                 </div>
 
                 {/* Resumo de avaliações com IA (antes do disparo) — reviews-ai */}
