@@ -406,11 +406,16 @@ export default function WhatsAppPage() {
       setLoading(true);
       // SECURITY: nunca select("*" — provider_config carrega webhook_secret e
       // possíveis API keys que não podem ir pro browser.
-      const { data: conns } = await supabase
+      // ponytail: phone_number/owner_phone/updated_at não existem na tabela
+      // (owner_phone vive em provider_config->owner_phone) — selecioná-los
+      // faz o Postgres errar 42703 e a lista vir vazia.
+      const { data: conns, error: connsErr } = await supabase
           .from("channel_connections")
-          .select("id, instance_name, client_id, agent_id, status, phone_number, owner_phone, created_at, updated_at")
+          .select("id, instance_name, client_id, agent_id, status, created_at")
           .eq("client_id", clientId)
           .order("created_at");
+
+      if (connsErr) console.error("[WhatsApp] Falha ao carregar conexões:", connsErr.message);
 
       if (conns) {
         setConnections(conns);
