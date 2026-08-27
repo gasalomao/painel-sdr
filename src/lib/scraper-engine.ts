@@ -15,6 +15,7 @@ import { supabase, supabaseAdmin } from "@/lib/supabase";
 import { getEvolutionConfig } from "@/lib/evolution";
 import { summarizeReviewsForLead } from "@/lib/reviews-ai";
 import { extractLocation } from "@/lib/lead-intelligence";
+import { getNeighboringCities, isValidCityName, extractUFFromText, ufFromCep, computeExpansionCandidates, proximitySearchTerm, normRegionName } from "@/lib/geo-regions";
 import os from "os";
 import fs from "fs";
 import path from "path";
@@ -128,6 +129,10 @@ export interface ScraperSettings {
    *  (fluxo Busca do /prospeccao-sites). Automação NÃO passa isto — ela roda
    *  o resumo em batch na fase de dispatch (automation-worker). */
   reviews_ai?: { enabled?: boolean; model?: string; prompt?: string | null };
+  /** Run de REPOSIÇÃO (automation-worker): captura leads extras pra repor
+   *  inválidos. No finally NÃO marca a automação como erro quando captura 0
+   *  nem sinaliza _scrapeFinishedAt — quem orquestra é o próprio worker. */
+  topup?: boolean;
 }
 
 // ---- Estado in-memory (singleton no processo Node) ----
@@ -601,10 +606,12 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
     // última busca da fila acaba abaixo do limite, enfileirar o mesmo nicho
     // nessas cidades. Places repetidos entre buscas já são dedupados por
     // processedPlaceKeys — expandir nunca gera lead duplicado.
-    const norm = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+    const norm = normRegionName;
     const searchedRegions = new Set<string>(regions.map(r => norm(r)));
     const cityCounts = new Map<string, number>();
     let expansionsLeft = 10; // teto de cidades extras — bounding box de custo/tempo
+    // Semeadura de proximidade (expansão universal pra lugar não mapeado): 1x por região por run.
+    const proximitySeededRegions = new Set<string>();
 
     outer: for (let i = 0; i < queue.length; i++) {
       if (!keepRunning || !isCurrentRun()) {
@@ -790,8 +797,10 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
 
           // Colhe a cidade do endereço ANTES de qualquer descarte — até os
           // descartados alimentam o mapa de cidades vizinhas pra expansão.
+          // Filtra estritamente por isValidCityName para impedir que ruas e
+          // avenidas (ex: "Av. Amazonas") virem termos de busca.
           const loc = extractLocation(cardData.fullAddress);
-          if (loc.cidade && loc.cidade.length >= 3 && !/\d/.test(loc.cidade)) {
+          if (loc.cidade && isValidCityName(loc.cidade)) {
             cityCounts.set(loc.cidade, (cityCounts.get(loc.cidade) || 0) + 1);
           }
 
@@ -1398,6 +1407,18 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 if (mainExtracted.featuredReviews) featuredReviews = mainExtracted.featuredReviews;
                 if (mainExtracted.additionalCategories) additionalCategories = mainExtracted.additionalCategories;
                 if (mainExtracted.addressComponents) addressComponents = mainExtracted.addressComponents;
+                // Colheita de cidade REAL do painel de detalhes — fonte
+                // universal: o Google SEMPRE traz "Cidade, UF" no painel, para
+                // qualquer lugar do Brasil (conhecido ou não no dicionário).
+                if (addressComponents?.cidade) {
+                  const detUf =
+                    (addressComponents.estado ? String(addressComponents.estado).toUpperCase() : "") ||
+                    (cep ? ufFromCep(cep) : "") || "";
+                  const key = detUf ? `${addressComponents.cidade} - ${detUf}` : addressComponents.cidade;
+                  if (isValidCityName(addressComponents.cidade)) {
+                    cityCounts.set(key, (cityCounts.get(key) || 0) + 1);
+                  }
+                }
               }
 
               // ============================================================
@@ -1812,9 +1833,13 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
 
       // ─── PONTO DE EXPANSÃO ───
       // Roda SÓ na última busca da fila: se ainda falta lead pro limite e
-      // sobrou cota de expansão, enfileira o nicho nas cidades vizinhas mais
-      // vistas nos endereços. O for externo re-avalia queue.length a cada
-      // iteração, então o push simplesmente continua o trabalho.
+      // sobrou cota de expansão, enfileira o nicho nas cidades vizinhas reais.
+      // Camadas (em ordem):
+      //  1) Região metropolitana oficial (dictionary) quando conhecida;
+      //  2) Cidades vizinhas colhidas dos endereços reais (painel de detalhes
+      //     do Google — universal, qualquer cidade do Brasil);
+      //  3) Fallback universal: busca de proximidade ("{nicho} perto de
+      //     {região}") alimenta a camada 2, então expande em seguida.
       if (
         i === queue.length - 1 &&
         settings.mode === "batch" &&
@@ -1823,20 +1848,41 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
         keepRunning &&
         expansionsLeft > 0
       ) {
-        const next = Array.from(cityCounts.entries())
-          .filter(([c]) => !searchedRegions.has(norm(c)))
-          .sort((a, b) => b[1] - a[1])   // cidade mais frequente primeiro
-          .slice(0, Math.min(5, expansionsLeft));
-        if (next.length === 0) {
-          sendLog(`🧭 Fila esgotada: ${leadsStore.length}/${maxLeads} leads e nenhuma cidade vizinha nova nos resultados pra expandir. Encerrando.`, "info");
-        } else {
-          for (const [c] of next) searchedRegions.add(norm(c));
-          expansionsLeft -= next.length;
-          queue.push(...next.flatMap(([c]) => niches.map(n => `${n.trim()} ${c}`)));
+        const candidates = computeExpansionCandidates({
+          regions,
+          cityCounts,
+          alreadySearched: searchedRegions,
+          limit: Math.min(5, expansionsLeft),
+        });
+
+        if (candidates.length > 0) {
+          for (const c of candidates) searchedRegions.add(norm(c));
+          expansionsLeft -= candidates.length;
+          queue.push(...candidates.flatMap(c => niches.map(n => `${n.trim()} ${c}`)));
           sendLog(
-            `🧭 ${leadsStore.length}/${maxLeads} leads e fila esgotada — expandindo pra cidade(s) vizinha(s): ${next.map(([c]) => c).join(", ")}.`,
+            `🧭 ${leadsStore.length}/${maxLeads} leads e fila esgotada — expandindo pra cidade(s) vizinha(s): ${candidates.join(", ")}.`,
             "info"
           );
+        } else {
+          // Sem candidato conhecido — semeia UMA busca de proximidade por região,
+          // cujos resultados (endereços reais do painel de detalhes) colhem as
+          // cidades vizinhas pra expansão na próxima passada. Universal: cobre
+          // até cidades minúsculas não mapeadas.
+          const toSeed = regions.filter(r => !proximitySeededRegions.has(norm(r)));
+          if (toSeed.length > 0) {
+            for (const r of toSeed) proximitySeededRegions.add(norm(r));
+            for (const n of niches) {
+              for (const r of toSeed) queue.push(proximitySearchTerm(n, r));
+            }
+            sendLog(
+              `🧭 ${leadsStore.length}/${maxLeads} leads e fila esgotada — buscando nas cercanias de ${toSeed.join(", ")} pra descobrir cidades vizinhas.`,
+              "info"
+            );
+            // Semeadura não consome cota de expansão: quem gasta é o próximo
+            // ponto de expansão (com candidatos reais colhidos).
+          } else {
+            sendLog(`🧭 Fila esgotada: ${leadsStore.length}/${maxLeads} leads e nenhuma cidade vizinha nova pra expandir. Encerrando.`, "info");
+          }
         }
       }
     }
@@ -1884,7 +1930,9 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
     // Se o scraper estava atrelado a uma automação E falhou OU não captou
     // nada, marca o row em erro imediatamente — em vez de esperar o tick
     // global descobrir 5min depois. Usuário vê a causa real direto no card.
-    if (attachedAutomationId) {
+    // Runs de REPOSIÇÃO (topup) pulam isto: capturar 0 extras não é erro da
+    // automação — o worker segue com os leads válidos que já tem.
+    if (attachedAutomationId && !settings.topup) {
       const client = supabaseAdmin || supabase;
       try {
         if (scraperError) {
@@ -1963,6 +2011,8 @@ export interface StartOpts {
   automation_id?: string | null;
   client_id?: string | null;
   reviews_ai?: { enabled?: boolean; model?: string; prompt?: string | null };
+  /** Run de reposição de leads inválidos (não marca automação em erro). */
+  topup?: boolean;
   /** Se true, reseta qualquer captura travada anterior e força o início limpo. */
   forceRestart?: boolean;
 }
@@ -1999,6 +2049,7 @@ export function startScraperRun(opts: StartOpts): { ok: boolean; error?: string;
     captureAllReviews: opts.captureAllReviews,
     maxLeads: opts.maxLeads,
     reviews_ai: opts.reviews_ai,
+    topup: opts.topup,
   });
   return { ok: true };
 }

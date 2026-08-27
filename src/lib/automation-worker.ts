@@ -313,32 +313,8 @@ async function startDispatchPhase(
   const scope = resolveCapturedLeadScope(a.scrape_filters, a.started_at);
   if (!scope.ok) return markError(a.id, scope.reason);
 
-  // Pega SÓ os leads colhidos durante esta automação.
-  // FILTRO POR TENANT crítico: sem ele cliente A disparava pra leads do B.
-  // DEDUPE por remoteJid (logo abaixo): se o scraper salvou o mesmo lead 2x,
-  // aqui só vai 1 disparo pra esse número.
-  // NOTA: estes 3 filtros espelham, 1:1, o applyScope() do teste de regressão.
-  let leadsQuery = supabase
-    .from("leads_extraidos")
-    .select("id, remoteJid, nome_negocio, ramo_negocio")
-    .not("remoteJid", "is", null);
-  if (scope.baselineMaxId !== null) leadsQuery = leadsQuery.gt("id", scope.baselineMaxId);
-  if ((a as any).client_id) leadsQuery = leadsQuery.eq("client_id", (a as any).client_id);
-  if (scope.startedAt) leadsQuery = leadsQuery.gte("created_at", scope.startedAt);
-  const { data: rawLeads, error } = await leadsQuery;
-  if (error) return markError(a.id, `Falha lendo leads colhidos: ${error.message}`);
-  // Deduplicação client-side: mantém só o primeiro de cada remoteJid.
-  const seenJids = new Set<string>();
-  const leads = (rawLeads || []).filter(l => {
-    if (!l.remoteJid || seenJids.has(l.remoteJid)) return false;
-    seenJids.add(l.remoteJid);
-    return true;
-  });
-  if (rawLeads && rawLeads.length !== leads.length) {
-    await log(a.id, "scrape", "warning",
-      `🔁 Deduplicados ${rawLeads.length - leads.length} lead(s) repetidos antes de criar campanha (não vão receber duplicado).`,
-    );
-  }
+  let leads = await selectCapturedLeads(a, scope);
+
   if (leads.length === 0) {
     // Nada pra disparar → conclui.
     await log(a.id, "state", "warning", "Nenhum lead colhido. Automação encerrada sem disparar.");
@@ -455,128 +431,10 @@ async function startDispatchPhase(
     }
   }
 
-  // ───────── UNIFICAÇÃO PRECOCE DE JID CANÔNICO (WhatsApp) ─────────
-  // Scraper extrai telefones e gera JIDs brutos (que no Brasil podem vir com
-  // o nono dígito a mais). A Evolution API resolve o JID canônico real do
-  // WhatsApp (sem o nono dígito para contas antigas). Unificar precocemente
-  // garante que o "Lead Intelligence" já grave a análise sob o JID canônico real,
-  // impedindo gastos duplicados redundantes na IA, e que os targets da campanha
-  // já nasçam perfeitos para que o /chat vincule nome e briefing no primeiro instante.
-  const phoneNumbers = leads.map(l => l.remoteJid.replace(/@.*$/, "").replace(/\D/g, "")).filter(Boolean);
-  if (phoneNumbers.length > 0) {
-    await log(a.id, "scrape", "info", `🔍 Validando e unificando JIDs canônicos de ${leads.length} lead(s) via Evolution API...`);
-    try {
-      const checkResult = await channel.checkWhatsAppNumbersDetailed(phoneNumbers, a.instance_name);
-      
-      // Iremos processar cada lead e atualizar sua referência
-      for (const lead of leads) {
-        const phone = lead.remoteJid.replace(/@.*$/, "").replace(/\D/g, "");
-        const entry = checkResult[phone] || Object.values(checkResult).find((v: any) => v.jid && v.jid.includes(phone)) || null;
-        
-        if (entry && entry.jid) {
-          const sendJid = entry.jid;
-          if (sendJid !== lead.remoteJid) {
-            console.log(`[AUTOMATION ${a.id}] JID divergente na automação. Original: ${lead.remoteJid} · Canônico: ${sendJid}. Unificando precocemente...`);
-            
-            // 1. Tentar atualizar a tabela leads_extraidos de forma resiliente para o JID canônico
-            try {
-              const { error: updErr } = await supabase
-                .from("leads_extraidos")
-                .update({ remoteJid: sendJid })
-                .eq("id", lead.id);
-
-              if (updErr) {
-                // Se der erro 23505 (unique remoteJid colision), faz o merge do CRM e deleta a duplicada
-                if (updErr.code === "23505" || updErr.message?.includes("unique")) {
-                  console.log(`[AUTOMATION ${a.id}] JID canônico ${sendJid} já existe em leads_extraidos. Iniciando merge precoce de inteligência e dados.`);
-                  const { data: oldLead } = await supabase
-                    .from("leads_extraidos")
-                    .select("*")
-                    .eq("id", lead.id)
-                    .maybeSingle();
-
-                  if (oldLead) {
-                    const mergePayload: Record<string, any> = {};
-                    const fieldsToMerge = [
-                      "nome_negocio", "ramo_negocio", "categoria", "endereco", "website",
-                      "instagram", "facebook", "avaliacao", "reviews", "status",
-                      "intelligence", "intelligence_at", "icp_score", "lead_type",
-                      "justificativa_ia", "resumo_ia", "ia_last_analyzed_at"
-                    ];
-
-                    for (const field of fieldsToMerge) {
-                      if (oldLead[field] !== undefined && oldLead[field] !== null) {
-                        mergePayload[field] = oldLead[field];
-                      }
-                    }
-
-                    // Atualiza o registro canônico que já existia com os dados do lead capturado
-                    await supabase
-                      .from("leads_extraidos")
-                      .update(mergePayload)
-                      .eq("remoteJid", sendJid);
-
-                    // Deleta o lead capturado antigo duplicado
-                    await supabase
-                      .from("leads_extraidos")
-                      .delete()
-                      .eq("id", oldLead.id);
-
-                    // Busca o ID do lead canônico correspondente para atualizar a lista em memória
-                    const { data: canonicalLead } = await supabase
-                      .from("leads_extraidos")
-                      .select("id")
-                      .eq("remoteJid", sendJid)
-                      .maybeSingle();
-
-                    if (canonicalLead) {
-                      lead.id = canonicalLead.id;
-                    }
-                    console.log(`[AUTOMATION ${a.id}] Merge precoce concluído para JID ${sendJid}.`);
-                  }
-                } else {
-                  throw updErr;
-                }
-              }
-            } catch (err) {
-              console.error(`[AUTOMATION ${a.id}] Erro na unificação precoce de leads_extraidos:`, err);
-            }
-
-            lead.remoteJid = sendJid;
-          }
-        }
-      }
-
-      // Filtra leads que existem no WhatsApp (se entry.exists === false, nós removemos da lista)
-      const initialCount = leads.length;
-      const validLeads = [];
-      for (const lead of leads) {
-        const phone = lead.remoteJid.replace(/@.*$/, "").replace(/\D/g, "");
-        const entry = checkResult[phone] || Object.values(checkResult).find((v: any) => v.jid && v.jid.includes(phone)) || null;
-        
-        if (entry && entry.exists === false) {
-          // Atualiza status do lead no banco para que o CRM saiba que o número é inválido
-          await supabase
-            .from("leads_extraidos")
-            .update({ status: "invalid_number" })
-            .eq("id", lead.id);
-          continue;
-        }
-        validLeads.push(lead);
-      }
-
-      // Sobrescreve a lista de leads na memória
-      leads.length = 0;
-      leads.push(...validLeads);
-
-      if (leads.length !== initialCount) {
-        await log(a.id, "scrape", "warning", `⊘ Removidos ${initialCount - leads.length} lead(s) com números inválidos/sem WhatsApp antes do Lead Intelligence e envio.`);
-      }
-
-    } catch (err: any) {
-      await log(a.id, "scrape", "warning", `⚠️ Falha durante a validação precoce de JIDs: ${err?.message || err}. Prosseguindo com leads originais.`);
-    }
-  }
+  // ───────── VALIDAÇÃO WHATSAPP + REPOSIÇÃO DOS INVÁLIDOS ─────────
+  const validated = await canonicalizeAndFilterLeads(a, leads);
+  leads = validated.leads;
+  await topUpInvalidLeads(a, scope, leads, validated.removed);
 
   // ───────── LEAD INTELLIGENCE (opcional, antes do disparo) ─────────
   // Fluxo certo da automação: extrair → analisar (se ligado) → disparar.
@@ -748,9 +606,254 @@ async function startDispatchPhase(
 }
 
 /**
- * Verifica se a campanha de disparo terminou. Devolve também a contagem de
- * targets por status pra o tick conseguir logar o progresso.
+ * Seleciona do CRM SÓ os leads colhidos durante esta automação (escopo por
+ * _baselineMaxId/startedAt + tenant). Deduplica por remoteJid.
  */
+async function selectCapturedLeads(
+  a: AutomationRow,
+  scope: { baselineMaxId: number | null; startedAt: string | null },
+): Promise<{ id: any; remoteJid: string; nome_negocio: string | null; ramo_negocio: string | null }[]> {
+  let leadsQuery = supabase
+    .from("leads_extraidos")
+    .select("id, remoteJid, nome_negocio, ramo_negocio")
+    .not("remoteJid", "is", null);
+  if (scope.baselineMaxId !== null) leadsQuery = leadsQuery.gt("id", scope.baselineMaxId);
+  if ((a as any).client_id) leadsQuery = leadsQuery.eq("client_id", (a as any).client_id);
+  if (scope.startedAt) leadsQuery = leadsQuery.gte("created_at", scope.startedAt);
+  const { data: rawLeads, error } = await leadsQuery;
+  if (error) throw new Error(`Falha lendo leads colhidos: ${error.message}`);
+  const seenJids = new Set<string>();
+  const leads = (rawLeads || []).filter((l: any) => {
+    if (!l.remoteJid || seenJids.has(l.remoteJid)) return false;
+    seenJids.add(l.remoteJid);
+    return true;
+  });
+  if (rawLeads && rawLeads.length !== leads.length) {
+    await log(a.id, "scrape", "warning",
+      `🔁 Deduplicados ${rawLeads.length - leads.length} lead(s) repetidos antes de criar campanha (não vão receber duplicado).`,
+    );
+  }
+  return leads;
+}
+
+/**
+ * Validação WhatsApp + unificação de JID canônico. Remove da lista (e marca
+ * no CRM) leads cujo número não existe no WhatsApp. Devolve a lista válida e
+ * quantos foram removidos.
+ */
+async function canonicalizeAndFilterLeads(
+  a: AutomationRow,
+  leads: { id: any; remoteJid: string; nome_negocio: string | null; ramo_negocio: string | null }[],
+): Promise<{ leads: typeof leads; removed: number }> {
+  // ───────── UNIFICAÇÃO PRECOCE DE JID CANÔNICO (WhatsApp) ─────────
+  // Scraper extrai telefones e gera JIDs brutos (que no Brasil podem vir com
+  // o nono dígito a mais). A Evolution API resolve o JID canônico real do
+  // WhatsApp (sem o nono dígito para contas antigas). Unificar precocemente
+  // garante que o "Lead Intelligence" já grave a análise sob o JID canônico real,
+  // impedindo gastos duplicados redundantes na IA, e que os targets da campanha
+  // já nasçam perfeitos para que o /chat vincule nome e briefing no primeiro instante.
+  const phoneNumbers = leads.map(l => l.remoteJid.replace(/@.*$/, "").replace(/\D/g, "")).filter(Boolean);
+  if (phoneNumbers.length > 0) {
+    await log(a.id, "scrape", "info", `🔍 Validando e unificando JIDs canônicos de ${leads.length} lead(s) via Evolution API...`);
+    try {
+      const checkResult = await channel.checkWhatsAppNumbersDetailed(phoneNumbers, a.instance_name);
+      
+      // Iremos processar cada lead e atualizar sua referência
+      for (const lead of leads) {
+        const phone = lead.remoteJid.replace(/@.*$/, "").replace(/\D/g, "");
+        const entry = checkResult[phone] || Object.values(checkResult).find((v: any) => v.jid && v.jid.includes(phone)) || null;
+        
+        if (entry && entry.jid) {
+          const sendJid = entry.jid;
+          if (sendJid !== lead.remoteJid) {
+            console.log(`[AUTOMATION ${a.id}] JID divergente na automação. Original: ${lead.remoteJid} · Canônico: ${sendJid}. Unificando precocemente...`);
+            
+            // 1. Tentar atualizar a tabela leads_extraidos de forma resiliente para o JID canônico
+            try {
+              const { error: updErr } = await supabase
+                .from("leads_extraidos")
+                .update({ remoteJid: sendJid })
+                .eq("id", lead.id);
+
+              if (updErr) {
+                // Se der erro 23505 (unique remoteJid colision), faz o merge do CRM e deleta a duplicada
+                if (updErr.code === "23505" || updErr.message?.includes("unique")) {
+                  console.log(`[AUTOMATION ${a.id}] JID canônico ${sendJid} já existe em leads_extraidos. Iniciando merge precoce de inteligência e dados.`);
+                  const { data: oldLead } = await supabase
+                    .from("leads_extraidos")
+                    .select("*")
+                    .eq("id", lead.id)
+                    .maybeSingle();
+
+                  if (oldLead) {
+                    const mergePayload: Record<string, any> = {};
+                    const fieldsToMerge = [
+                      "nome_negocio", "ramo_negocio", "categoria", "endereco", "website",
+                      "instagram", "facebook", "avaliacao", "reviews", "status",
+                      "intelligence", "intelligence_at", "icp_score", "lead_type",
+                      "justificativa_ia", "resumo_ia", "ia_last_analyzed_at"
+                    ];
+
+                    for (const field of fieldsToMerge) {
+                      if (oldLead[field] !== undefined && oldLead[field] !== null) {
+                        mergePayload[field] = oldLead[field];
+                      }
+                    }
+
+                    // Atualiza o registro canônico que já existia com os dados do lead capturado
+                    await supabase
+                      .from("leads_extraidos")
+                      .update(mergePayload)
+                      .eq("remoteJid", sendJid);
+
+                    // Deleta o lead capturado antigo duplicado
+                    await supabase
+                      .from("leads_extraidos")
+                      .delete()
+                      .eq("id", oldLead.id);
+
+                    // Busca o ID do lead canônico correspondente para atualizar a lista em memória
+                    const { data: canonicalLead } = await supabase
+                      .from("leads_extraidos")
+                      .select("id")
+                      .eq("remoteJid", sendJid)
+                      .maybeSingle();
+
+                    if (canonicalLead) {
+                      lead.id = canonicalLead.id;
+                    }
+                    console.log(`[AUTOMATION ${a.id}] Merge precoce concluído para JID ${sendJid}.`);
+                  }
+                } else {
+                  throw updErr;
+                }
+              }
+            } catch (err) {
+              console.error(`[AUTOMATION ${a.id}] Erro na unificação precoce de leads_extraidos:`, err);
+            }
+
+            lead.remoteJid = sendJid;
+          }
+        }
+      }
+
+      // Filtra leads que existem no WhatsApp (se entry.exists === false, nós removemos da lista)
+      const initialCount = leads.length;
+      const validLeads = [];
+      for (const lead of leads) {
+        const phone = lead.remoteJid.replace(/@.*$/, "").replace(/\D/g, "");
+        const entry = checkResult[phone] || Object.values(checkResult).find((v: any) => v.jid && v.jid.includes(phone)) || null;
+        
+        if (entry && entry.exists === false) {
+          // Atualiza status do lead no banco para que o CRM saiba que o número é inválido
+          await supabase
+            .from("leads_extraidos")
+            .update({ status: "invalid_number" })
+            .eq("id", lead.id);
+          continue;
+        }
+        validLeads.push(lead);
+      }
+
+      if (validLeads.length !== initialCount) {
+        await log(a.id, "scrape", "warning", `⊘ Removidos ${initialCount - validLeads.length} lead(s) com números inválidos/sem WhatsApp antes do Lead Intelligence e envio.`);
+      }
+      return { leads: validLeads, removed: initialCount - validLeads.length };
+
+    } catch (err: any) {
+      await log(a.id, "scrape", "warning", `⚠️ Falha durante a validação precoce de JIDs: ${err?.message || err}. Prosseguindo com leads originais.`);
+      return { leads, removed: 0 };
+    }
+  }
+  return { leads, removed: 0 };
+}
+
+/**
+ * REPOSIÇÃO (top-up): a validação de WhatsApp remove números inválidos DEPOIS
+ * da captação — sem isto a automação disparava pro objetivo menos os inválidos
+ * (40 captados − 6 inválidos = 34 enviados com objetivo 45). Aqui a gente
+ * re-captura a diferença antes de criar a campanha. Máx. 2 rodadas pra não
+ * loopar infinito em região com muitos números mortos.
+ */
+async function topUpInvalidLeads(
+  a: AutomationRow,
+  scope: { baselineMaxId: number | null; startedAt: string | null },
+  leads: { id: any; remoteJid: string; nome_negocio: string | null; ramo_negocio: string | null }[],
+  removedCount: number,
+): Promise<void> {
+  const objetivo = Number(a.scrape_max_leads) || 0;
+  if (objetivo <= 0 || leads.length >= objetivo || removedCount <= 0) return;
+
+  const filters = a.scrape_filters || {};
+  const roundsDone = Number(filters._topupRounds) || 0;
+  if (roundsDone >= 2) {
+    await log(a.id, "scrape", "warning",
+      `♻️ Ainda faltam ${objetivo - leads.length} lead(s) pro objetivo, mas o limite de 2 reposições foi atingido. Seguindo com ${leads.length}.`);
+    return;
+  }
+
+  const deficit = objetivo - leads.length;
+  await log(a.id, "scrape", "info",
+    `♻️ Reposição: ${removedCount} inválido(s) removido(s) → ${leads.length}/${objetivo} leads. Capturando até ${deficit} lead(s) adicional(is)...`);
+
+  const r = startScraperRun({
+    niches: Array.isArray(a.niches) ? a.niches : [],
+    regions: Array.isArray(a.regions) ? a.regions : [],
+    mode: "batch",
+    filterEmpty: filters.filterEmpty !== false,
+    filterDuplicates: filters.filterDuplicates !== false,
+    filterLandlines: filters.filterLandlines === true,
+    filterWithWebsite: filters.filterWithWebsite === true,
+    captureAllReviews: filters.captureAllReviews === true,
+    webhookEnabled: false,
+    maxLeads: deficit,
+    automation_id: a.id,
+    client_id: (a as any).client_id || null,
+    forceRestart: false,
+    topup: true,
+  });
+  if (!r.ok) {
+    await log(a.id, "scrape", "warning", `♻️ Reposição não iniciou (${r.error || "scraper ocupado"}). Seguindo com ${leads.length} lead(s).`);
+    return;
+  }
+
+  // Espera o run de reposição terminar (poll 5s, teto 20min — captação de
+  // poucos leads leva poucos minutos; se estourar, segue com o que tem).
+  const deadline = Date.now() + 20 * 60 * 1000;
+  while (getScraperStatus().isScraping && Date.now() < deadline) {
+    await new Promise(res => setTimeout(res, 5000));
+  }
+  if (getScraperStatus().isScraping) {
+    await log(a.id, "scrape", "warning",
+      `♻️ Reposição demorou mais que 20min — seguindo com ${leads.length} lead(s) válidos. Os extras ficam no CRM pra próxima.`);
+    return;
+  }
+
+  // Re-seleciona o escopo inteiro e valida SÓ os leads novos.
+  const fresh = await selectCapturedLeads(a, scope);
+  const known = new Set(leads.map(l => String(l.id)));
+  const novos = fresh.filter(l => !known.has(String(l.id)));
+  if (novos.length === 0) {
+    await log(a.id, "scrape", "info", `♻️ Reposição não achou leads novos (região esgotada). Seguindo com ${leads.length}.`);
+  } else {
+    await log(a.id, "scrape", "info", `♻️ Validando ${novos.length} lead(s) novo(s) da reposição...`);
+    const validNovos = await canonicalizeAndFilterLeads(a, novos);
+    leads.push(...validNovos.leads);
+    await log(a.id, "scrape", "success",
+      `♻️ Reposição: +${validNovos.leads.length} lead(s) válido(s) → ${leads.length}/${objetivo}.`);
+  }
+
+  // Persiste a rodada pra um restart da automação não re-repor sem parar.
+  try {
+    const { data: row } = await supabase.from("automations").select("scrape_filters").eq("id", a.id).maybeSingle();
+    await supabase.from("automations").update({
+      scrape_filters: { ...((row?.scrape_filters as any) || {}), _topupRounds: roundsDone + 1 },
+      updated_at: new Date().toISOString(),
+    }).eq("id", a.id);
+  } catch { /* best-effort */ }
+}
+
+
 async function checkDispatchDone(a: AutomationRow): Promise<{
   done: boolean;
   status: string | null;
