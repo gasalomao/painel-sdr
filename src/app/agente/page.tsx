@@ -991,6 +991,7 @@ export default function AgentePage() {
       if (data.status && data.status !== "agent_active" && !data.text && !data.chunks) {
         const statusMessages: Record<string, string> = {
           agent_inactive: "⚠️ Agente inativo. Ative-o na aba Informações.",
+          agent_tenant_mismatch: "⚠️ Agente não pertence ao cliente desta instância WhatsApp. Ajuste a conexão em WhatsApp.",
           ai_paused: `⏸️ IA pausada: ${data.reason || "motivo desconhecido"}.`,
           out_of_office: "🕐 Fora do horário de atendimento configurado.",
           batching_active: "⏳ Agurdando buffer de mensagens (não aplicável em teste).",

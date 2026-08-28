@@ -77,17 +77,13 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 2. Buscas Paralelas Iniciais: Conexão, Config Global, Lead e Contato.
-    // O lead (leads_extraidos) e o contato (contacts) trazem todas as variáveis
-    // dinâmicas que o prompt do agente pode usar ({{nome_empresa}}, {{ramo}}, etc).
-    const [channelRes, orgRes, leadRes, contactRes] = await Promise.all([
+    // 2. Buscas Paralelas Iniciais: Conexão e Config Global.
+    // (Lead e contato mudaram pro 2º Promise.all — precisam do client_id do
+    // channel pra ficarem escopados no tenant. Mesmo paralelismo de antes.)
+    const [channelRes, orgRes] = await Promise.all([
        supabase.from("channel_connections").select("agent_id, client_id").eq("instance_name", instanceName).maybeSingle(),
        // Chaves de IA via cache (30s) — era um select(*) a cada mensagem recebida.
        getAiKeys().catch(() => null),
-       !isTestMode ? supabase.from("leads_extraidos")
-         .select('"remoteJid", nome_negocio, ramo_negocio, categoria, endereco, website, avaliacao, reviews, telefone, status')
-         .eq("remoteJid", remoteJid).maybeSingle() : Promise.resolve({ data: null }),
-       !isTestMode ? supabase.from("contacts").select("push_name, phone_number").eq("remote_jid", remoteJid).maybeSingle() : Promise.resolve({ data: null }),
     ]);
 
     const channel = channelRes.data;
@@ -103,28 +99,8 @@ export async function POST(req: NextRequest) {
     const orgConfig = orgRes
       ? { api_key: orgRes.gemini, openrouter_api_key: orgRes.openrouter }
       : null;
-    let leadRow = leadRes.data || null;
-    let contactRow = contactRes.data || null;
-
-    if (isTestMode && testLeadData) {
-       // Shape precisa bater com o select acima — 10 colunas, mesmo que vazias no teste.
-       leadRow = {
-           remoteJid: testLeadData.remoteJid || remoteJid,
-           nome_negocio: testLeadData.nome_negocio || null,
-           ramo_negocio: testLeadData.ramo_negocio || null,
-           categoria: testLeadData.categoria || null,
-           endereco: testLeadData.endereco || null,
-           website: testLeadData.website || null,
-           avaliacao: testLeadData.avaliacao || null,
-           reviews: testLeadData.reviews || null,
-           telefone: testLeadData.telefone || null,
-           status: testLeadData.status || null,
-       };
-       contactRow = {
-           push_name: testLeadData.push_name || null,
-           phone_number: testLeadData.telefone || null,
-       };
-    }
+    let leadRow: any = null;
+    let contactRow: any = null;
 
     // 2. Determinar AgentID e Buscar Dados do Agente em Paralelo
     const agentId = Number(req.headers.get("x-test-agent-id")) || channel?.agent_id || 1;
@@ -133,33 +109,62 @@ export async function POST(req: NextRequest) {
     const clientId: string = (channel as any)?.client_id || "00000000-0000-0000-0000-000000000001";
 
     // Buscar histórico — SEMPRE via chats_dashboard por remote_jid, ignorando
-    // instance_name. Cobre dois cenários:
+    // instance_name (mas DENTRO do tenant). Cobre dois cenários:
     //
     //  1. Conversa normal: o número aparece em chats_dashboard, IA carrega
     //     últimas 25 mensagens daquele contato.
-    //  2. CROSS-INSTANCE: cliente apagou instância "sdr" (modo padrão,
-    //     mensagens preservadas) e reconectou MESMO número em "sdr_v2".
-    //     A V2 messages table cria session NOVA pra (contact_id, sdr_v2),
-    //     então `messages.session_id=novoId` retorna VAZIO — IA "começaria
-    //     do zero" perdendo o contexto. chats_dashboard preserva tudo por
-    //     remote_jid → IA enxerga a conversa unificada.
+    //  2. CROSS-INSTANCE: cliente apagou instância "sdr" e reconectou MESMO
+    //     número em "sdr_v2" (mesmo tenant) — chats_dashboard preserva tudo
+    //     por remote_jid → IA enxerga a conversa unificada.
+    //
+    // Filtro client_id (100% preenchido no banco): número que é lead/conversa
+    // de OUTRO tenant não vaza contexto no prompt deste.
     //
     // Janela adaptativa (linha ~370): se >15 turnos, corta pra 3 inicial +
     // 12 final + marcador de skip. Conversas curtas passam intactas.
     const HIST_LIMIT = 25;
     const historyQuery = !isTestMode
-       ? supabase.from("chats_dashboard").select("sender_type, content, created_at").eq("remote_jid", remoteJid).order("created_at", { ascending: false }).limit(HIST_LIMIT)
+       ? supabase.from("chats_dashboard").select("sender_type, content, created_at").eq("remote_jid", remoteJid).eq("client_id", clientId).order("created_at", { ascending: false }).limit(HIST_LIMIT)
        : Promise.resolve({ data: [] });
 
-    const [agentRes, stagesRes, histRes, kbRes] = await Promise.all([
+    const [agentRes, stagesRes, histRes, kbRes, leadRes, contactRes] = await Promise.all([
        supabase.from("agent_settings").select("*").eq("id", agentId).single(),
        supabase.from("agent_stages").select("*").eq("agent_id", agentId).order("order_index"),
        historyQuery,
        supabase.from("agent_knowledge").select("id, title").eq("agent_id", agentId).order("title"),
+       // Lead e contato SÓ do tenant desta sessão (mesma paralelização de antes,
+       // agora com clientId já resolvido do channel).
+       !isTestMode ? supabase.from("leads_extraidos")
+          .select('"remoteJid", nome_negocio, ramo_negocio, categoria, endereco, website, avaliacao, reviews, telefone, status')
+          .eq("remoteJid", remoteJid).eq("client_id", clientId).maybeSingle() : Promise.resolve({ data: null }),
+       !isTestMode ? supabase.from("contacts").select("push_name, phone_number").eq("remote_jid", remoteJid).eq("client_id", clientId).maybeSingle() : Promise.resolve({ data: null }),
     ]);
 
     const agentConfig = agentRes.data;
     const leadStages = stagesRes.data;
+    leadRow = (leadRes as any).data || null;
+    contactRow = (contactRes as any).data || null;
+
+    if (isTestMode && testLeadData) {
+        // Shape precisa bater com o select acima — 10 colunas, mesmo que vazias no teste.
+        leadRow = {
+            remoteJid: testLeadData.remoteJid || remoteJid,
+            nome_negocio: testLeadData.nome_negocio || null,
+            ramo_negocio: testLeadData.ramo_negocio || null,
+            categoria: testLeadData.categoria || null,
+            endereco: testLeadData.endereco || null,
+            website: testLeadData.website || null,
+            avaliacao: testLeadData.avaliacao || null,
+            reviews: testLeadData.reviews || null,
+            telefone: testLeadData.telefone || null,
+            status: testLeadData.status || null,
+        };
+        contactRow = {
+            push_name: testLeadData.push_name || null,
+            phone_number: testLeadData.telefone || null,
+        };
+    }
+
     const historico = histRes.data || [];
     const knowledgeTopics: { id: string; title: string }[] = (kbRes.data || []).filter((k: any) => k.title);
 
@@ -197,24 +202,35 @@ export async function POST(req: NextRequest) {
         console.log(`[AGENT] Agent ID ${agentId} is INACTIVE but running in TEST MODE — bypassing gate.`);
       }
 
-      // IDOR guard (modo teste via UI): x-test-agent-id é controlado pelo
-      // caller — agente de OUTRO tenant não pode ser testado. Posse verificada
-      // via channel_connections (agent_id → client_id). Agente SEM canal
-      // vinculado passa (agente novo ainda não conectado — residual: agentes
-      // órfãos de outro tenant ficam testáveis; correção definitiva é coluna
-      // client_id em agent_settings + backfill).
-      const testAgentHeaderId = Number(req.headers.get("x-test-agent-id")) || 0;
-      if (isTestMode && tenantCtx && testAgentHeaderId && agentConfig) {
-        const { data: ownerChannels } = await supabase
-          .from("channel_connections")
-          .select("client_id")
-          .eq("agent_id", testAgentHeaderId)
-          .limit(5);
-        const owners = new Set((ownerChannels || []).map((c: any) => c.client_id));
-        if (owners.size > 0 && !owners.has(tenantCtx.clientId)) {
-          console.warn(`[AGENT] Teste bloqueado: agente ${testAgentHeaderId} pertence a outro cliente.`);
-          return NextResponse.json({ success: false, error: "Agente não encontrado neste cliente." }, { status: 403 });
-        }
+      // ISOLAMENTO TENANT DO AGENTE — agent_settings.client_id (100% preenchido
+      // no banco). Dois gates:
+      //  a) Modo teste via UI (cookie): agente de outro cliente → 403 claro.
+      //  b) Produção (webhook interno): canal apontando agente de outro
+      //     cliente = má configuração → trata como inativo (não responde,
+     //     loga pra diagnóstico). Nunca deixa agente errado atender tenant errado.
+      const agentOwnerClient: string | null = (agentConfig as any)?.client_id || null;
+      if (isTestMode && tenantCtx && agentOwnerClient && agentOwnerClient !== tenantCtx.clientId) {
+        console.warn(`[AGENT] Teste bloqueado: agente ${agentId} pertence a outro cliente.`);
+        return NextResponse.json({ success: false, error: "Agente não encontrado neste cliente." }, { status: 403 });
+      }
+      // Só compara quando o canal TEM client_id real — channel sem client_id
+      // cai no DEFAULT (instância legacy/não registrada) e não pode ser
+      // silenciada por comparação contra um uuid de fallback.
+      if (!isTestMode && agentOwnerClient && channel?.client_id && agentOwnerClient !== clientId) {
+        console.warn(`[AGENT] Agente ${agentId} (client ${agentOwnerClient}) não pertence ao client do canal (${clientId}) — tratando como inativo.`);
+        await supabase.from("webhook_logs").insert({
+          instance_name: instanceName,
+          client_id: clientId,
+          event: "AGENT_TENANT_MISMATCH",
+          payload: { agent_id: agentId, agent_client: agentOwnerClient, channel_client: clientId, remote_jid: maskJid(remoteJid) },
+          created_at: new Date().toISOString(),
+        }).then(() => {}, () => {});
+        return NextResponse.json({ success: true, status: "agent_tenant_mismatch" });
+      }
+      if (!isTestMode && !agentOwnerClient) {
+        // Deploy antes de backfill total: sem owner conhecido não bloqueia
+        // (compat), mas deixa rastro pra diagnosticar cobertura.
+        console.warn(`[AGENT] Agente ${agentId} sem client_id — sem gate de tenant (verificar backfill).`);
       }
 
     console.log(`[AGENT] Processing for Agent: ${agentConfig.name} (ID: ${agentId})`);
@@ -278,11 +294,12 @@ export async function POST(req: NextRequest) {
        {
           console.log(`[BUFFER] LIDER: Aguardando ${bufferSeconds}s para consolidar mensagens de ${maskJid(remoteJid)}...`);
           await new Promise(resolve => setTimeout(resolve, bufferSeconds * 1000));
-          const { data: batchMsgs } = await supabase.from("chats_dashboard")
-             .select("content")
-             .eq("remote_jid", remoteJid)
-             .eq("instance_name", instanceName)
-             .eq("sender_type", "customer")
+           const { data: batchMsgs } = await supabase.from("chats_dashboard")
+              .select("content")
+              .eq("remote_jid", remoteJid)
+              .eq("instance_name", instanceName)
+              .eq("client_id", clientId)
+              .eq("sender_type", "customer")
              .gte("created_at", batchStartTime)
              .order("created_at", { ascending: true });
           if (batchMsgs && batchMsgs.length > 0) {
@@ -296,6 +313,7 @@ export async function POST(req: NextRequest) {
                  .select("content")
                  .eq("remote_jid", remoteJid)
                  .eq("instance_name", instanceName)
+                 .eq("client_id", clientId)
                  .eq("sender_type", "customer")
                  .gte("created_at", batchStartTime)
                  .order("created_at", { ascending: true });
@@ -565,16 +583,18 @@ export async function POST(req: NextRequest) {
     let leadContextBlock = "";
     if (!isTestMode) {
       try {
-        const [leadRes, lastCampaignTargetRes, lastFollowupTargetRes] = await Promise.all([
-          supabase
+         const [leadRes, lastCampaignTargetRes, lastFollowupTargetRes] = await Promise.all([
+           supabase
             .from("leads_extraidos")
             .select("nome_negocio, ramo_negocio, categoria, telefone, endereco, website, status, primeiro_contato_source, primeiro_contato_at")
             .eq("remoteJid", remoteJid)
+            .eq("client_id", clientId)
             .maybeSingle(),
           supabase
             .from("campaign_targets")
             .select("rendered_message, sent_at, status, campaigns(name)")
             .eq("remote_jid", remoteJid)
+            .eq("client_id", clientId)
             .order("sent_at", { ascending: false })
             .limit(1)
             .maybeSingle(),
@@ -582,6 +602,7 @@ export async function POST(req: NextRequest) {
             .from("followup_targets")
             .select("current_step, last_sent_at, last_rendered, status, followup_campaigns(name, steps)")
             .eq("remote_jid", remoteJid)
+            .eq("client_id", clientId)
             .order("last_sent_at", { ascending: false })
             .limit(1)
             .maybeSingle(),
@@ -2189,6 +2210,7 @@ ${capturedVariablesPrompt}
           content: caption || `[Imagem] ${mediaUrl}`,
           status_envio: mediaRes?.ok === false ? "error" : "sent",
           instance_name: instanceName,
+          client_id: clientId,
           media_url: mediaUrl,
           media_type: "image",
           created_at: nowIsoMedia,
@@ -2272,6 +2294,7 @@ ${capturedVariablesPrompt}
           content: text,
           status_envio: sendResult?.ok === false ? "error" : "sent",
           instance_name: instanceName,
+          client_id: clientId,
           created_at: nowIso,
         }).then(() => {}, () => {});
 
@@ -2324,6 +2347,7 @@ ${capturedVariablesPrompt}
                 content: text,
                 status_envio: "sent",
                 instance_name: instanceName,
+                client_id: clientId,
                 created_at: nowIso,
               }).then(() => {}, () => {});
               return msgId;
