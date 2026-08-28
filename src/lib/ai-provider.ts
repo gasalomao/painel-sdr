@@ -298,6 +298,10 @@ export interface AiUsage {
   /** true quando o provedor não devolveu usage real (ex: DeepSeek via reverse
    *  sem métrica no SSE). Caller repasse pra metadata.estimated do logTokenUsage. */
   estimated?: boolean;
+  /** Tokens de prompt atendidos por cache implícito (Gemini implicit caching /
+   *  OpenAI-compat prompt_tokens_details.cached_tokens) — 75-90% mais baratos.
+   *  Presente só quando o provedor reporta >0. Usado p/ medir cache hit rate. */
+  cachedTokens?: number;
 }
 
 function emptyUsage(): AiUsage {
@@ -312,7 +316,8 @@ function geminiUsage(resp: any): AiUsage {
   const promptTokens = Number(meta.promptTokenCount || 0);
   const completionTokens = Number(meta.candidatesTokenCount || 0);
   const totalTokens = Number(meta.totalTokenCount || (promptTokens + completionTokens));
-  return { promptTokens, completionTokens, totalTokens };
+  const cachedTokens = Number(meta.cachedContentTokenCount || 0);
+  return { promptTokens, completionTokens, totalTokens, ...(cachedTokens > 0 ? { cachedTokens } : {}) };
 }
 
 function openRouterUsage(json: any): AiUsage {
@@ -321,7 +326,8 @@ function openRouterUsage(json: any): AiUsage {
   const completionTokens = Number(u.completion_tokens || 0);
   const totalTokens = Number(u.total_tokens || (promptTokens + completionTokens));
   const estimated = u?.estimated === true;
-  return { promptTokens, completionTokens, totalTokens, estimated };
+  const cachedTokens = Number(u?.prompt_tokens_details?.cached_tokens || 0);
+  return { promptTokens, completionTokens, totalTokens, estimated, ...(cachedTokens > 0 ? { cachedTokens } : {}) };
 }
 
 // =====================================================================

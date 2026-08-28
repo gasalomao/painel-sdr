@@ -24,9 +24,13 @@ const INTERNAL_BASE = `http://localhost:${process.env.PORT || 3000}`;
 export async function POST(req: NextRequest) {
   // AUTH: aceita cookie de sessão (UI /agente teste) OU header de segredo interno
   // (chamado pelo webhook do whatsapp via internal fetch).
+  // Chamada via cookie (UI) carrega o escopo do tenant pra validações de
+  // posse abaixo. Chamada interna (worker, X-Internal-Secret) não tem cookie.
+  let tenantCtx: { clientId: string } | null = null;
   if (!hasInternalSecret(req)) {
     const ctx = await requireClientId(req);
     if (!ctx.ok) return ctx.response;
+    tenantCtx = { clientId: ctx.clientId };
   }
 
   try {
@@ -87,6 +91,13 @@ export async function POST(req: NextRequest) {
     ]);
 
     const channel = channelRes.data;
+    // POSSE DA INSTÂNCIA (anti cross-tenant por cookie): chamada autenticada
+    // via UI só pode processar instância do próprio cliente. Worker interno
+    // (X-Internal-Secret) não passa por aqui.
+    if (tenantCtx && channel?.client_id && channel.client_id !== tenantCtx.clientId) {
+      console.warn(`[AGENT] Instância "${instanceName}" não pertence ao cliente da sessão — bloqueado.`);
+      return NextResponse.json({ success: false, error: "Instância não vinculada a este cliente." }, { status: 403 });
+    }
     // Shape compatível com a leitura antiga de ai_organizer_config (só estas
     // 2 chaves são usadas no pipeline).
     const orgConfig = orgRes
@@ -182,9 +193,29 @@ export async function POST(req: NextRequest) {
        }).then(() => {}, () => {});
        return NextResponse.json({ success: true, status: "group_disabled" });
      }
-     if (isTestMode && agentConfig && !agentConfig.is_active) {
-       console.log(`[AGENT] Agent ID ${agentId} is INACTIVE but running in TEST MODE — bypassing gate.`);
-     }
+      if (isTestMode && agentConfig && !agentConfig.is_active) {
+        console.log(`[AGENT] Agent ID ${agentId} is INACTIVE but running in TEST MODE — bypassing gate.`);
+      }
+
+      // IDOR guard (modo teste via UI): x-test-agent-id é controlado pelo
+      // caller — agente de OUTRO tenant não pode ser testado. Posse verificada
+      // via channel_connections (agent_id → client_id). Agente SEM canal
+      // vinculado passa (agente novo ainda não conectado — residual: agentes
+      // órfãos de outro tenant ficam testáveis; correção definitiva é coluna
+      // client_id em agent_settings + backfill).
+      const testAgentHeaderId = Number(req.headers.get("x-test-agent-id")) || 0;
+      if (isTestMode && tenantCtx && testAgentHeaderId && agentConfig) {
+        const { data: ownerChannels } = await supabase
+          .from("channel_connections")
+          .select("client_id")
+          .eq("agent_id", testAgentHeaderId)
+          .limit(5);
+        const owners = new Set((ownerChannels || []).map((c: any) => c.client_id));
+        if (owners.size > 0 && !owners.has(tenantCtx.clientId)) {
+          console.warn(`[AGENT] Teste bloqueado: agente ${testAgentHeaderId} pertence a outro cliente.`);
+          return NextResponse.json({ success: false, error: "Agente não encontrado neste cliente." }, { status: 403 });
+        }
+      }
 
     console.log(`[AGENT] Processing for Agent: ${agentConfig.name} (ID: ${agentId})`);
     
@@ -488,8 +519,18 @@ export async function POST(req: NextRequest) {
             if (senderKey === "human" || senderKey === "user_panel" || senderKey === "operator") {
               prefix = "[Atendente Humano da Empresa]: ";
             }
+            // ECONOMIA DE TOKENS: no HISTÓRICO, URLs de imagem ([IMAGEM: ...],
+            // ![](url)) são ruído caro pro modelo — só importa saber que uma
+            // foto foi enviada. A URL completa segue no chats_dashboard e na
+            // resposta ATUAL (path de envio não é afetado).
+            let safeContent = m.content ? m.content : "[Mídia/Comando]";
+            if (safeContent !== "[Mídia/Comando]") {
+              safeContent = safeContent
+                .replace(/\[IMAGEM:\s*https?:\/\/[^\s\]]+\]/gi, "[foto enviada]")
+                .replace(/!\[[^\]]*\]\(https?:\/\/[^\s)]+\)/gi, "[foto enviada]");
+            }
             // Corta msgs individuais grandes (1000 chars já é bastante).
-            const safeContent = m.content ? (m.content.length > 600 ? m.content.substring(0, 600) + "... [cortado]" : m.content) : "[Mídia/Comando]";
+            if (safeContent.length > 600) safeContent = safeContent.substring(0, 600) + "... [cortado]";
             rawGeminiHistory.push({ role, parts: [{ text: prefix + safeContent }] });
         });
     }
@@ -566,18 +607,19 @@ export async function POST(req: NextRequest) {
           }
         }
         if (camp?.rendered_message && camp?.sent_at) {
-          const dias = Math.floor((Date.now() - new Date(camp.sent_at).getTime()) / 86400000);
-          const campName = camp?.campaigns?.name || "(sem nome)";
-          lines.push(`\n>>> Mensagem inicial JÁ enviada por disparo (campanha "${campName}", há ${dias} dia${dias === 1 ? "" : "s"}):`);
-          lines.push(`"${(camp.rendered_message || "").trim().slice(0, 500)}"`);
+           const dias = Math.floor((Date.now() - new Date(camp.sent_at).getTime()) / 86400000);
+           const campName = camp?.campaigns?.name || "(sem nome)";
+          // ECONOMIA DE TOKENS: o texto completo do disparo JÁ está no histórico
+          // da conversa (chats_dashboard) — repetir 500 chars aqui todo turno é
+          // custo duplo. Mantém só os metadados que orientam continuidade.
+          lines.push(`\n>>> Mensagem inicial JÁ enviada por disparo (campanha "${campName}", há ${dias} dia${dias === 1 ? "" : "s"}). Texto completo: veja no histórico da conversa.`);
         }
         if (fup?.last_rendered && fup?.last_sent_at) {
-          const dias = Math.floor((Date.now() - new Date(fup.last_sent_at).getTime()) / 86400000);
-          const fupName = fup?.followup_campaigns?.name || "(sem nome)";
-          const totalSteps = Array.isArray(fup?.followup_campaigns?.steps) ? fup.followup_campaigns.steps.length : null;
-          const stepInfo = totalSteps != null ? `step ${fup.current_step}/${totalSteps}` : `step ${fup.current_step}`;
-          lines.push(`\n>>> Follow-up JÁ enviada (campanha "${fupName}", ${stepInfo}, há ${dias} dia${dias === 1 ? "" : "s"}):`);
-          lines.push(`"${(fup.last_rendered || "").trim().slice(0, 500)}"`);
+           const dias = Math.floor((Date.now() - new Date(fup.last_sent_at).getTime()) / 86400000);
+           const fupName = fup?.followup_campaigns?.name || "(sem nome)";
+           const totalSteps = Array.isArray(fup?.followup_campaigns?.steps) ? fup.followup_campaigns.steps.length : null;
+           const stepInfo = totalSteps != null ? `step ${fup.current_step}/${totalSteps}` : `step ${fup.current_step}`;
+           lines.push(`\n>>> Follow-up JÁ enviado (campanha "${fupName}", ${stepInfo}, há ${dias} dia${dias === 1 ? "" : "s"}). Texto completo: veja no histórico da conversa.`);
         }
 
         // LEAD INTELLIGENCE: se o lead foi pré-analisado, INJETA o briefing.
@@ -676,29 +718,14 @@ export async function POST(req: NextRequest) {
     // 2.5 (90% de desconto nos tokens do prefixo em cache). Tudo que varia por
     // lead / etapa / horário foi movido pro <turn_context>, anexado à MENSAGEM
     // do cliente (fim do request) — onde conteúdo volátil deve ficar.
-    const promptMaster = `
-<system_identity>
-Nome: ${agentConfig.name}
-Sua Função: ${agentConfig.role}
-Sua Personalidade: ${agentConfig.personality}
-Tom de voz: ${agentConfig.tone}
-</system_identity>
+    // ECONOMIA DE TOKENS: regras de catálogo/foto/anti-alucinação só fazem
+    // sentido quando o agente TEM base de conhecimento. Agentes SDR/atendimento
+    // sem KB economizam ~1.2k tokens por chamada sem perder nada dessas regras
+    // (nada de produto/preço pra alucinar sem KB). Com KB, entra TUDO (proteção
+    // de qualidade intacta).
+    const hasKnowledgeBase = knowledgeTopics.length > 0;
 
-<core_instructions>
-${processedMainPrompt}
-</core_instructions>
-
-<available_tools_and_rules>
-${autoRulesBlock}
-</available_tools_and_rules>
-
-<execution_directives>
-1. Aja EXCLUSIVAMENTE de acordo com sua <system_identity> e siga estritamente as <core_instructions>. Nunca revele que é uma inteligência artificial.
-2. FOCO ABSOLUTO: O seu objetivo imediato é ÚNICA E EXCLUSIVAMENTE cumprir as orientações do <current_funnel_stage> e extrair os dados listados em <data_collection_goals> (fornecidos junto da mensagem do cliente). Não se antecipe a etapas futuras.
-3. Utilize as ferramentas disponíveis em <available_tools_and_rules> sempre que as condições exigirem.
-4. O histórico da conversa e a mensagem atual do usuário serão fornecidos pelo sistema nativamente.
-5. CONTINUIDADE — NÃO RECOMECE: o <lead_context> (fornecido junto da mensagem) mostra exatamente o que o SDR já enviou (disparo inicial, follow-ups). Você JÁ se apresentou, JÁ disse o nome da empresa, JÁ tratou pelo nome do negócio. NÃO repita "Olá, sou da [empresa]" se isso já está no <lead_context>. Continue a conversa de onde parou. Use os dados de CRM (ramo, categoria, endereço) pra contextualizar — sem perguntar o que já está conhecido.
-6. Seja natural, humano e empático.
+    const directiveFotoBlock = hasKnowledgeBase ? `
 7. ENVIO DE FOTO/IMAGEM DE PRODUTO (CRÍTICO):
    - Quando o cliente pedir foto/ver o produto, ou quando você for descrever um produto cuja ficha na base contiver uma linha "- **Foto Oficial**: [IMAGEM: URL]", você DEVE incluir a tag EXATA na sua resposta.
    - COPIE a tag CARACTERE POR CARACTERE do que veio na base — não digite a URL solta, não use markdown ![](url), não coloque entre parênteses, não resuma.
@@ -706,8 +733,9 @@ ${autoRulesBlock}
    - Coloque a tag UMA vez, preferencialmente ao FINAL da mensagem.
    - PROIBIDO inventar/modificar URL. Se a ficha do produto NÃO trouxe uma tag [IMAGEM:], NÃO escreva nenhuma — diga apenas que vai enviar a foto depois.
    - Exemplo: a base trouxe "### PRODUTO: Camiseta Polo\\n- **Preço**: R$ 99\\n- **Foto Oficial**: [IMAGEM: https://cdn.loja.com/polo.jpg]" → sua resposta: "Tenho a Camiseta Polo por R$ 99! Olha a foto:\\n[IMAGEM: https://cdn.loja.com/polo.jpg]"
-</execution_directives>
+` : "";
 
+    const antiHallucinationBlock = hasKnowledgeBase ? `
 <anti_hallucination_rules>
 ## REGRA DE OURO — ZERO ALUCINAÇÃO EM PRODUTOS/PREÇOS/ESTOQUE
 
@@ -784,7 +812,37 @@ Câmera telefoto 3x, titânio
 
 Qual te chamou mais a atenção? Quer ver algum com mais detalhes?
 </anti_hallucination_rules>
+` : `
+<anti_hallucination_rules>
+NÃO INVENTE informações sobre produtos, preços, prazos, horários ou políticas da empresa que não estejam na conversa ou no contexto fornecido. Em dúvida, diga que vai verificar. Nunca chute valores nem prometa o que não pode confirmar.
+</anti_hallucination_rules>
 `;
+
+    const promptMaster = `
+<system_identity>
+Nome: ${agentConfig.name}
+Sua Função: ${agentConfig.role}
+Sua Personalidade: ${agentConfig.personality}
+Tom de voz: ${agentConfig.tone}
+</system_identity>
+
+<core_instructions>
+${processedMainPrompt}
+</core_instructions>
+
+<available_tools_and_rules>
+${autoRulesBlock}
+</available_tools_and_rules>
+
+<execution_directives>
+1. Aja EXCLUSIVAMENTE de acordo com sua <system_identity> e siga estritamente as <core_instructions>. Nunca revele que é uma inteligência artificial.
+2. FOCO ABSOLUTO: O seu objetivo imediato é ÚNICA E EXCLUSIVAMENTE cumprir as orientações do <current_funnel_stage> e extrair os dados listados em <data_collection_goals> (fornecidos junto da mensagem do cliente). Não se antecipe a etapas futuras.
+3. Utilize as ferramentas disponíveis em <available_tools_and_rules> sempre que as condições exigirem.
+4. O histórico da conversa e a mensagem atual do usuário serão fornecidos pelo sistema nativamente.
+5. CONTINUIDADE — NÃO RECOMECE: o <lead_context> (fornecido junto da mensagem) mostra exatamente o que o SDR já enviou (disparo inicial, follow-ups). Você JÁ se apresentou, JÁ disse o nome da empresa, JÁ tratou pelo nome do negócio. NÃO repita "Olá, sou da [empresa]" se isso já está no <lead_context>. Continue a conversa de onde parou. Use os dados de CRM (ramo, categoria, endereço) pra contextualizar — sem perguntar o que já está conhecido.
+6. Seja natural, humano e empático.
+${directiveFotoBlock}</execution_directives>
+${antiHallucinationBlock}`;
 
     // CONTEXTO DO TURNO (volátil) — vai anexado à mensagem do cliente, NÃO ao
     // systemInstruction. Assim o prefixo cacheável fica estável entre turnos.
@@ -821,15 +879,14 @@ ${capturedVariablesPrompt}
           parameters: {
              type: SchemaType.OBJECT,
              properties: {
-                query: {
-                   type: SchemaType.STRING,
-                   description:
-                      `Termos da busca (3-6 palavras-chave). Use o vocabulário do cliente, ` +
-                      `não precisa bater literal com o título. Exemplos: ` +
-                      `"preço iPhone 15", "estoque camiseta polo G", "horário sábado", ` +
-                      `"política cancelamento", "garantia notebook dell". ` +
-                      `Tópicos atuais na base: ${topicList}`,
-                },
+                 query: {
+                    type: SchemaType.STRING,
+                    description:
+                       `Termos da busca (3-6 palavras-chave). Use o vocabulário do cliente, ` +
+                       `não precisa bater literal com o título. Exemplos: ` +
+                       `"preço iPhone 15", "estoque camiseta polo G", "horário sábado", ` +
+                       `"política cancelamento", "garantia notebook dell".`,
+                 },
              },
              required: ["query"],
           },
@@ -1077,6 +1134,12 @@ ${capturedVariablesPrompt}
       const t = Number(agentConfig.options.temperature);
       if (Number.isFinite(t)) temperature = t;
     }
+    // ECONOMIA DE TOKENS (opt-in): admin pode limitar completion tokens por agente
+    // (options.max_output_tokens). WhatsApp raramente precisa > 800. Default:
+    // sem limite (comportamento atual preservado).
+    const maxOutputTokens = Number(agentConfig.options?.max_output_tokens) > 0
+      ? Number(agentConfig.options.max_output_tokens)
+      : undefined;
 
     const timeContext = `[Sistema: Hoje é ${agora.toLocaleDateString("pt-BR")}, ${agora.toLocaleTimeString("pt-BR")}]`;
     let prefetchedWebResearch = "";
@@ -1116,6 +1179,7 @@ ${capturedVariablesPrompt}
       history: neutralHistory,
       tools: functionDeclarations,
       temperature,
+      maxOutputTokens,
       reasoningMode,
       geminiApiKey,
       openrouterApiKey,
@@ -1152,6 +1216,8 @@ ${capturedVariablesPrompt}
 
     // Acumula tokens dessa interação (1 inicial + N de tool-loop)
     let totalPrompt = turn.usage.promptTokens, totalCompletion = turn.usage.completionTokens, totalAll = turn.usage.totalTokens;
+    // Tokens cacheados (implicit caching) — mede cache hit rate no /tokens.
+    let totalCached = turn.usage.cachedTokens || 0;
     // Estimado = se QUALQUER turn não trouxe usage real (ex: DeepSeek via reverse).
     let usageEstimated = turn.usage.estimated === true;
 
@@ -1897,10 +1963,17 @@ ${capturedVariablesPrompt}
               // Modo teste NÃO dispara automação real (n8n/Make de produção).
               functionResultRes = { simulated: true, message: "Modo teste: automação externa suprimida." };
               callLogs.push({ role: "system", content: `[TESTE] Webhook Custom "${matchTool.name}" suprimido` });
-          } else if (matchTool) {
-              console.log("[MCP] Webhook Tool Request ->", matchTool.name);
-              try {
-                  const reqWb = await fetch(matchTool.webhook_url, {
+           } else if (matchTool) {
+               console.log("[MCP] Webhook Tool Request ->", matchTool.name);
+               try {
+                   // SSRF guard: URL vem de config do tenant — bloqueia scheme
+                   // inválido e hosts/IPs internos (metadata, rede privada).
+                   const { assertPublicHttpUrl } = await import("@/lib/safe-url");
+                   const guard = assertPublicHttpUrl(matchTool.webhook_url);
+                   if (!guard.ok) {
+                      throw new Error(`webhook_url bloqueada (${guard.reason})`);
+                   }
+                   const reqWb = await fetch(matchTool.webhook_url, {
                      method: "POST",
                      headers: { "Content-Type": "application/json" },
                      body: JSON.stringify({ query: callArgs.query, remoteJid, instanceName }),
@@ -1920,10 +1993,11 @@ ${capturedVariablesPrompt}
        } // fim do for (const call of turn.toolCalls)
 
        // Devolve os resultados das ferramentas e pega o próximo turno.
-       turn = await session.sendToolResults(toolResults);
-       finalAnswer = turn.text;
-       totalPrompt += turn.usage.promptTokens; totalCompletion += turn.usage.completionTokens; totalAll += turn.usage.totalTokens;
-       if (turn.usage.estimated) usageEstimated = true;
+        turn = await session.sendToolResults(toolResults);
+        finalAnswer = turn.text;
+        totalPrompt += turn.usage.promptTokens; totalCompletion += turn.usage.completionTokens; totalAll += turn.usage.totalTokens;
+        totalCached += turn.usage.cachedTokens || 0;
+        if (turn.usage.estimated) usageEstimated = true;
     }
 
     // Loga consumo total de tokens dessa interação
@@ -1939,7 +2013,7 @@ ${capturedVariablesPrompt}
       promptTokens: totalPrompt,
       completionTokens: totalCompletion,
       totalTokens: totalAll,
-      metadata: { remoteJid, instanceName, isTestMode, estimated: usageEstimated || undefined },
+      metadata: { remoteJid, instanceName, isTestMode, estimated: usageEstimated || undefined, cachedTokens: totalCached || undefined },
     });
 
     finalAnswer = finalAnswer.replace(/^```\w*\n?/g, "").replace(/\n?```$/g, "").trim();

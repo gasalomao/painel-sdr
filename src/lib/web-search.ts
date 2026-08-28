@@ -117,6 +117,11 @@ function filterAds(results: SearchResult[]): SearchResult[] {
 
 export async function webFetchPage(url: string): Promise<{ success: boolean; title?: string; content?: string; error?: string }> {
   if (!url?.startsWith("http")) return { success: false, error: "URL inválida. Deve iniciar com http/https." };
+  // SSRF guard: a URL vem de tool call da IA (influenciável por prompt
+  // injection do cliente) — bloqueia scheme estranho e hosts internos.
+  const { assertPublicHttpUrl } = await import("@/lib/safe-url");
+  const guard = assertPublicHttpUrl(url);
+  if (!guard.ok) return { success: false, error: `URL bloqueada por política de segurança (${guard.reason}).` };
 
   const cleanUrl = url.trim();
   const key = process.env.JINA_API_KEY;
