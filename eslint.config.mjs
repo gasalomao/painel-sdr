@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Assets vendor minificados e scripts one-off CommonJS não são fonte:
+    "public/**",
+    "scripts/recover-sdr-chats.js",
   ]),
   {
     // Política de lint: o codebase usa `any` extensivamente (~1300 casos em

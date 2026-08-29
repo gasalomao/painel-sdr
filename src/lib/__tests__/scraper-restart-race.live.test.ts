@@ -29,7 +29,9 @@ const BROWSER_PATHS = [
   "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
 ];
 
-describe("Scraper restart race (live)", () => {
+// OPT-IN: só roda com RUN_LIVE_TESTS=1 — liga o scraper real (Puppeteer).
+const d = process.env.RUN_LIVE_TESTS === "1" ? describe : describe.skip;
+d("Scraper restart race (live)", () => {
   it("restart com forceRestart não deixa o run antigo concluir por cima do novo", async () => {
     const hasBrowser = BROWSER_PATHS.some((p) => fs.existsSync(p)) || !!process.env.PUPPETEER_EXECUTABLE_PATH;
     if (!hasBrowser) {

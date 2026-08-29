@@ -68,13 +68,23 @@ export async function proxy(req: NextRequest) {
   }
 
   // Chamadas server-to-server internas (scheduler, workers, webhook→agent):
-  // passam direto se trouxerem o X-Internal-Secret. O próprio endpoint
-  // valida o secret. Sem essa passagem, o proxy.ts retornava 401 ANTES do
-  // endpoint conseguir checar o header — quebrava todo o scheduler do
-  // organizador, follow-up workers etc.
-  // SAFE: presença do header só BYPASSA o gate de cookie — endpoint ainda
-  // valida o valor exato. Sem o secret correto, endpoint devolve 401 igual.
-  if (pathname.startsWith("/api/") && req.headers.get(INTERNAL_SECRET_HEADER)) {
+  // passam direto com o X-Internal-Secret CORRETO (valor, não só presença).
+  // SECURITY FIX: antes bastava PRESENÇA do header — presença sem comparar o
+  // valor abria bypass total em rotas que não revalidam o secret no handler
+  // (ex: /api/admin/*, devolvendo dados sem sessão). Rotas /api/admin nunca
+  // são chamadas server-to-server: exigem admin JWT sempre.
+  // (Edge runtime: env de build. Se o secret não estiver disponível aqui, o
+  // header cai no fluxo normal de cookie — scheduler loga 401 e o env pode
+  // ser corrigido no build.)
+  const internalSecret = process.env.AUTH_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+  const internalHeader = req.headers.get(INTERNAL_SECRET_HEADER);
+  if (
+    pathname.startsWith("/api/") &&
+    !pathname.startsWith("/api/admin") &&
+    internalHeader &&
+    internalSecret &&
+    internalHeader === internalSecret
+  ) {
     return NextResponse.next();
   }
 

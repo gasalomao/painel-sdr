@@ -103,7 +103,12 @@ export async function POST(req: NextRequest) {
     let contactRow: any = null;
 
     // 2. Determinar AgentID e Buscar Dados do Agente em Paralelo
-    const agentId = Number(req.headers.get("x-test-agent-id")) || channel?.agent_id || 1;
+    // SECURITY: header x-test-agent-id só é aceito em dev/test OU com
+    // X-Internal-Secret válido. Em prod sem secret, ignorar p/ evitar que
+    // caller externo force prompt/regras de outro agente.
+    const isInternalOrDev = process.env.NODE_ENV !== "production" || hasInternalSecret(req);
+    const testAgentHeader = isInternalOrDev ? Number(req.headers.get("x-test-agent-id")) : 0;
+    const agentId = (testAgentHeader && !isNaN(testAgentHeader) ? testAgentHeader : null) || channel?.agent_id || 1;
     // Multi-tenant: identifica o cliente pelo client_id da channel_connection.
     // Toda token usage / message gravada nessa request fica vinculada a este cliente.
     const clientId: string = (channel as any)?.client_id || "00000000-0000-0000-0000-000000000001";

@@ -62,14 +62,16 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ success: false, error: "ID e conteúdo são obrigatórios para edição." }, { status: 400 });
       }
 
+      // SECURITY: update escopado no tenant do caller — sem isso, id de
+      // outro tenant era editado E reescrito p/ client_id do atacante.
       const { data, error } = await supabaseAdmin
         .from("agent_knowledge")
         .update({
           title: titleToUse,
           content: contentToUse,
-          client_id: auth.clientId,
         })
         .eq("id", id)
+        .eq("client_id", auth.clientId)
         .select("*")
         .single();
 
@@ -99,11 +101,17 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ success: false, error: "ID é obrigatório para exclusão." }, { status: 400 });
       }
 
-      await deleteKnowledgeChunks(id).catch(() => {});
-      const { error } = await supabaseAdmin.from("agent_knowledge").delete().eq("id", id);
+      // SECURITY: delete escopado no tenant; chunks só são limpos se a row
+      // era mesmo do caller (senão índice de outro tenant era apagado).
+      const { error } = await supabaseAdmin
+        .from("agent_knowledge")
+        .delete()
+        .eq("id", id)
+        .eq("client_id", auth.clientId);
       if (error) {
         return NextResponse.json({ success: false, error: error.message }, { status: 500 });
       }
+      await deleteKnowledgeChunks(id).catch(() => {});
 
       return NextResponse.json({ success: true });
     }

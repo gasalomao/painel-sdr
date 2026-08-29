@@ -31,7 +31,7 @@ function TranscriptionModelPicker({ agentId }: { agentId: number | null }) {
   const [all, setAll] = useState<AudioModel[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [chosen, setChosen] = useState<string[]>([]);
-  const [orderLoaded, setOrderLoaded] = useState(false);
+  const [orderLoaded, setOrderLoaded] = useState(!agentId);
   const [search, setSearch] = useState("");
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -52,13 +52,19 @@ function TranscriptionModelPicker({ agentId }: { agentId: number | null }) {
     return () => { alive = false; };
   }, []);
 
-  // Ordem salva do agente — reseta estado ANTES do fetch (troca de agente
-  // não pode herdar a lista do anterior nem salvar nela).
-  useEffect(() => {
-    setOrderLoaded(false);
+  // Reset ao trocar de agente — durante o render (padrão React 19, sem
+  // effect): troca de agente não herda a lista do anterior nem salva nela.
+  const [prevAgentId, setPrevAgentId] = useState(agentId);
+  if (agentId !== prevAgentId) {
+    setPrevAgentId(agentId);
+    setOrderLoaded(!agentId);
     setChosen([]);
+  }
+
+  // Ordem salva do agente (apenas fetch — resets ficam no render acima).
+  useEffect(() => {
     if (saveTimer.current) clearTimeout(saveTimer.current);
-    if (!agentId) { loadedForRef.current = null; setOrderLoaded(true); return; }
+    if (!agentId) { loadedForRef.current = null; return; }
     let alive = true;
     fetch(`/api/agent/transcription-models?agent_id=${agentId}`)
       .then((r) => r.json())

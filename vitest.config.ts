@@ -8,6 +8,11 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["src/**/*.test.ts"],
+    // Suites live (live-*, *.live, *.e2e, test_*, whisper/petshop) agora se
+    // AUTOPULAM via guards de env (LIVE_E2E / RUN_LIVE_TESTS / LIVE_PETSHOP /
+    // E2E_*) dentro dos arquivos — npm test fica offline e verde, e a
+    // execução explícita funciona: $env:LIVE_E2E="1"; npx vitest run <arquivo>.
+    exclude: ["**/node_modules/**"],
     globals: false,
     clearMocks: true,
     restoreMocks: true,

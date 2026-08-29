@@ -15,16 +15,17 @@ export async function DELETE(req: NextRequest) {
   
   try {
     const body = await req.json().catch(() => ({}));
-    const { messageIds, conversationId, clientId: bodyClientId } = body as {
+    const { messageIds, conversationId } = body as {
       messageIds?: string[];
       conversationId?: string;
-      clientId?: string;
     };
 
-    const targetClientId = session?.clientId || bodyClientId;
-    if (!targetClientId) {
-      return NextResponse.json({ error: "Não autorizado: clientId não encontrado" }, { status: 401 });
+    // SECURITY: escopo vem SÓ da sessão autenticada — clientId do body é
+    // dado do atacante, nunca autoridade de tenant.
+    if (!session?.clientId) {
+      return NextResponse.json({ error: "Não autorizado" }, { status: 401 });
     }
+    const targetClientId = session.clientId;
 
     if (!messageIds?.length && !conversationId) {
       return NextResponse.json(

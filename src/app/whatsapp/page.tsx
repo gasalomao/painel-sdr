@@ -411,7 +411,9 @@ export default function WhatsAppPage() {
       // faz o Postgres errar 42703 e a lista vir vazia.
       const { data: conns, error: connsErr } = await supabase
           .from("channel_connections")
-          .select("id, instance_name, client_id, agent_id, status, created_at")
+          // provider_config->phone_number_id: extrai SÓ o campo de exibição do
+          // JSON — webhook_secret continua fora do browser.
+          .select("id, instance_name, client_id, agent_id, status, created_at, provider, provider_config->phone_number_id")
           .eq("client_id", clientId)
           .order("created_at");
 

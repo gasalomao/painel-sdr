@@ -5,7 +5,9 @@ import { splitMessage } from "@/lib/agent-format";
 import { generateText, startAiChat } from "@/lib/ai-provider";
 import { getAiKeys } from "@/lib/ai-keys";
 
-describe("E2E Pipeline Prospecção de Sites", () => {
+// OPT-IN: só roda com LIVE_E2E=1 — pipeline com IA real (conta pode ser cobrada).
+const d = process.env.LIVE_E2E === "1" ? describe : describe.skip;
+d("E2E Pipeline Prospecção de Sites", () => {
   it("executa o fluxo completo ponta a ponta com IA, template e splitMessage", async () => {
     // 1. Dados simulados do Lead capturado do Google Maps (sem website)
     const mockLead = {

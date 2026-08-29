@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useCallback, useRef, useReducer } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -115,12 +115,21 @@ const ORDER_LABELS: Record<string, string> = {
  * Antes um setTick global re-renderizava a página inteira (2.2k linhas) por segundo.
  */
 function CountdownCard({ cd }: { cd: { secs: number; nextAt: number } | undefined }) {
-  const [, force] = useReducer((n: number) => n + 1, 0);
+  const [remainingState, setRemaining] = useState<number | null>(null);
+  const nextAt = cd?.nextAt;
   useEffect(() => {
-    const t = setInterval(force, 1000);
-    return () => clearInterval(t);
-  }, [force]);
-  const remaining = cd ? Math.max(0, Math.ceil((cd.nextAt - Date.now()) / 1000)) : null;
+    if (nextAt === undefined) return;
+    const tick = () => setRemaining(Math.max(0, Math.ceil((nextAt - Date.now()) / 1000)));
+    // Primeira medição via rAF — Date.now() fora do render (regra de pureza React 19).
+    const raf = requestAnimationFrame(tick);
+    const t = setInterval(tick, 1000);
+    return () => {
+      cancelAnimationFrame(raf);
+      clearInterval(t);
+    };
+  }, [nextAt]);
+  // Caso sem countdown derivado no render — puro, sem setState no effect.
+  const remaining = nextAt === undefined ? null : remainingState;
   if (remaining === null || remaining <= 0) {
     return (
       <div className="flex items-center gap-2 p-2 rounded-lg bg-green-500/5 border border-green-500/20">

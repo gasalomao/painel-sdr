@@ -798,10 +798,12 @@ function ConversationItem({
   const initials = displayName.charAt(0).toUpperCase();
   const isHumanTakeover = conversation.status === "open"; // bot_paused
 
-  // Reset imgError if avatar_url changes
-  useEffect(() => {
+  // Reset imgError quando o avatar muda — ajuste no render, sem effect.
+  const [prevAvatar, setPrevAvatar] = useState(contact?.avatar_url);
+  if (contact?.avatar_url !== prevAvatar) {
+    setPrevAvatar(contact?.avatar_url);
     setImgError(false);
-  }, [contact?.avatar_url]);
+  }
 
   const handleClick = useCallback(() => {
     onSelect(conversation);

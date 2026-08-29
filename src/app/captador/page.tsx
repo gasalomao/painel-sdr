@@ -27,10 +27,18 @@ interface ReviewDetalhe {
   nota?: string;
   data?: string;
   texto?: string;
-  fotoAutor?: string;
-  fotos?: string[];
+  fotoAutor?: string;  fotos?: string[];
   respostaDono?: string;
   util?: number;
+}
+
+/** hostname seguro p/ render — lead.website pode vir sem esquema/inválido do scraper. */
+function safeHostname(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
 }
 
 interface BusinessDetails {
@@ -611,7 +619,7 @@ export default function CaptadorPage() {
                               </Button>
                             </TableCell>
                             <TableCell className="max-w-[150px] truncate">
-                              {lead.website ? <a href={lead.website} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">{new URL(lead.website).hostname}</a> : "—"}
+                              {lead.website ? <a href={lead.website} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">{safeHostname(lead.website)}</a> : "—"}
                             </TableCell>
                             <TableCell className="text-muted-foreground whitespace-nowrap">{lead.extractedAt}</TableCell>
                           </TableRow>

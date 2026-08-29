@@ -20,7 +20,9 @@ async function cleanup(id: string) {
   await supabaseAdmin.from("campaigns").delete().eq("id", id);
 }
 
-describe("Pré-geração de mensagens com IA (live)", () => {
+// OPT-IN: só roda com RUN_LIVE_TESTS=1 — usa IA real e grava no banco.
+const d = process.env.RUN_LIVE_TESTS === "1" ? describe : describe.skip;
+d("Pré-geração de mensagens com IA (live)", () => {
   afterAll(async () => {
     for (const id of createdCampaignIds) await cleanup(id);
   });

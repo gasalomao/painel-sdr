@@ -17,10 +17,11 @@ const nextConfig: NextConfig = {
       { protocol: "https", hostname: "lh3.googleusercontent.com" },
     ],
   },
-  // Type-check e ESLint são pesados pra caramba no Next 16 (Turbopack roda
-  // workers de ~2 GB cada). Em VPS modesta o build estoura OOM. Desligamos
-  // aqui — o IDE continua mostrando os erros em desenvolvimento.
-  typescript: { ignoreBuildErrors: true },
+  // Type-check no build REATIVADO (2026-08-28): `npx tsc --noEmit` está limpo
+  // e o `ignoreBuildErrors: true` de antes mascarava regressões silenciosas.
+  // Se a VPS modesta voltar a estourar OOM no build, use
+  // NODE_OPTIONS=--max-old-space-size=4096 npm run build em vez de re-desligar.
+  typescript: { ignoreBuildErrors: false },
   serverExternalPackages: [
     "puppeteer-core",
     "puppeteer-extra",
