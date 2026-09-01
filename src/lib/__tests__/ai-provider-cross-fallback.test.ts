@@ -12,7 +12,7 @@
  * Sem rede real: fetch, @google/generative-ai e ai-keys mockados.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { generateText, startAiChat } from "../ai-provider";
+import { AiEmptyResponseError, ProviderHttpError, generateText, startAiChat } from "../ai-provider";
 import { resetGatewayCooldown } from "../gateway-cooldown";
 import { invalidateGatewayModelsCache } from "../gateway-model-discovery";
 
@@ -23,7 +23,10 @@ const st = vi.hoisted(() => ({
   orCalls: 0,
   /** Se true, generateContent/sendMessage do Gemini lançam erro de quota. */
   geminiFails: false,
+  geminiContent: "GEMINI-OK",
+  geminiUsage: {} as Record<string, number>,
   geminiCalls: 0,
+  proxyRunning: true,
 }));
 
 vi.mock("@/lib/ai-keys", () => ({
@@ -32,7 +35,7 @@ vi.mock("@/lib/ai-keys", () => ({
 }));
 
 vi.mock("@/lib/gateway-proxy-manager", () => ({
-  ensureProxyRunning: async () => ({ running: true, installed: true }),
+  ensureProxyRunning: async () => ({ running: st.proxyRunning, installed: true }),
 }));
 
 vi.mock("@/lib/gemini-model-discovery", async () => {
@@ -52,13 +55,14 @@ vi.mock("@google/generative-ai", () => ({
           sendMessage: async () => {
             st.geminiCalls++;
             if (st.geminiFails) throw QUOTA_ERR;
-            return { response: { text: () => "GEMINI-OK", functionCalls: () => [], usageMetadata: {} } };
+             return { response: { text: () => st.geminiContent, functionCalls: () => [], usageMetadata: st.geminiUsage } };
+
           },
         }),
         generateContent: async () => {
           st.geminiCalls++;
           if (st.geminiFails) throw QUOTA_ERR;
-          return { response: { text: () => "GEMINI-OK", usageMetadata: {} } };
+          return { response: { text: () => st.geminiContent, usageMetadata: st.geminiUsage } };
         },
       };
     }
@@ -77,7 +81,10 @@ beforeEach(() => {
   st.orQueue = [];
   st.orCalls = 0;
   st.geminiFails = false;
+  st.geminiContent = "GEMINI-OK";
+  st.geminiUsage = {};
   st.geminiCalls = 0;
+  st.proxyRunning = true;
   st.keys = {
     gemini: null,
     openrouter: "fake-or-key",
@@ -130,10 +137,28 @@ describe("generateText — escada cross-provider", () => {
     expect(st.orCalls).toBe(1);
   });
 
+  it("resposta vazia no Gemini soma uso antes do fallback OpenRouter", async () => {
+    st.keys.gemini = "fake-gemini-key";
+    st.geminiContent = "";
+    st.geminiUsage = { promptTokenCount: 7, candidatesTokenCount: 3, totalTokenCount: 10 };
+    const res = await generateText({ modelRef: "gemini:gemini-2.5-flash", prompt: "oi", geminiApiKey: st.keys.gemini });
+
+    expect(res.text).toBe("OR-OK");
+    expect(res.usage).toMatchObject({ promptTokens: 8, completionTokens: 4, totalTokens: 12 });
+  });
+
   it("Gemini sem chave configurada → erro de conta → OpenRouter atende", async () => {
     st.keys.gemini = null;
     const res = await generateText({ modelRef: "gemini:gemini-2.5-flash", prompt: "oi" });
     expect(res.text).toBe("OR-OK");
+    expect(res.didFallback).toBe(true);
+  });
+
+  it("OpenRouter sem chave configurada → erro de conta → Gemini atende", async () => {
+    st.keys.openrouter = null;
+    st.keys.gemini = "fake-gemini-key";
+    const res = await generateText({ modelRef: "openrouter:algum/modelo", prompt: "oi" });
+    expect(res.text).toBe("GEMINI-OK");
     expect(res.didFallback).toBe(true);
   });
 
@@ -152,8 +177,59 @@ describe("generateText — escada cross-provider", () => {
     st.orQueue = [{ status: 429, msg: "rate limited" }, { status: 429, msg: "rate limited" }];
     await expect(
       generateText({ modelRef: "gemini:gemini-2.5-flash", prompt: "oi", geminiApiKey: st.keys.gemini }),
-    ).rejects.toThrow(/quota/i);
+    ).rejects.toThrow(/rate limited/i);
     expect(st.orCalls).toBe(1); // tentou o rung OpenRouter com a única chave antes de falhar
+  });
+
+  it("vazio seguido de 429 preserva o erro terminal e o uso anterior", async () => {
+    st.keys.gemini = "fake-gemini-key";
+    st.orQueue = [{ status: 200, content: "" }, { status: 429, msg: "rate limited" }];
+    st.geminiFails = true;
+
+    const error = await generateText({
+      modelRef: "openrouter:algum/modelo",
+      prompt: "oi",
+      openrouterApiKey: st.keys.openrouter,
+      geminiApiKey: st.keys.gemini,
+    }).catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(ProviderHttpError);
+    expect(error).not.toBeInstanceOf(AiEmptyResponseError);
+    expect(error.usage.totalTokens).toBe(2);
+    expect(st.geminiCalls).toBe(1);
+  });
+
+  it("429 seguido de vazio preserva a saída vazia terminal e todo o uso", async () => {
+    st.keys.gemini = "fake-gemini-key";
+    st.geminiContent = "";
+    st.geminiUsage = { promptTokenCount: 7, candidatesTokenCount: 3, totalTokenCount: 10 };
+    st.orQueue = [{ status: 429, msg: "rate limited" }, { status: 200, content: "" }];
+
+    const error = await generateText({
+      modelRef: "openrouter:algum/modelo",
+      prompt: "oi",
+      openrouterApiKey: st.keys.openrouter,
+      geminiApiKey: st.keys.gemini,
+    }).catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(AiEmptyResponseError);
+    expect(error.usage.totalTokens).toBe(12);
+  });
+
+  it("não repete Gemini bare e prefixed na mesma escada", async () => {
+    st.keys.gemini = "fake-gemini-key";
+    st.keys.gatewayFallbackModel = "gemini-2.5-flash";
+    st.geminiFails = true;
+    st.orQueue = [{ status: 200, content: "OR-OK" }];
+
+    const res = await generateText({
+      modelRef: "gemini:gemini-2.5-flash",
+      prompt: "oi",
+      geminiApiKey: st.keys.gemini,
+    });
+
+    expect(res.text).toBe("OR-OK");
+    expect(st.geminiCalls).toBe(1);
   });
 
   it("noGatewayFallback=true desliga a escada (passos de combo propagam a falha)", async () => {
@@ -179,7 +255,25 @@ describe("startAiChat — migração de sessão no 1º turno", () => {
     });
     const r = await session.sendUser("oi");
     expect(r.text).toBe("OR-OK");
+    expect(session.provider).toBe("openrouter");
     expect(session.modelUsed()).toBe("openai/gpt-4o-mini");
+  });
+
+  it("Gateway sem proxy usa a escada pública sem repetir o fallback", async () => {
+    st.proxyRunning = false;
+    st.keys.gatewayFallbackModel = "openrouter:openai/gpt-4o-mini";
+    st.orQueue = [{ status: 200, content: "OR-OK" }];
+
+    const session = await startAiChat({
+      modelRef: "gateway:modelo-ausente",
+      systemInstruction: "sys",
+      history: [],
+      tools: [],
+    });
+    const r = await session.sendUser("oi");
+
+    expect(r.text).toBe("OR-OK");
+    expect(st.orCalls).toBe(1);
   });
 
   it("depois do 1º turno bem-sucedido NÃO migra mais (contexto preservado)", async () => {
@@ -196,6 +290,22 @@ describe("startAiChat — migração de sessão no 1º turno", () => {
     st.geminiFails = true; // morre DEPOIS do 1º turno
     await expect(session.sendUser("de novo")).rejects.toThrow(/quota/i);
     expect(st.orCalls).toBe(0); // não migrou no meio da conversa
+  });
+
+  it("erro 400 do OpenRouter não migra para Gemini", async () => {
+    st.keys.gemini = "fake-gemini-key";
+    st.orQueue = [{ status: 400, msg: "invalid payload" }];
+    const session = await startAiChat({
+      modelRef: "openrouter:algum/modelo",
+      systemInstruction: "sys",
+      history: [],
+      tools: [],
+      openrouterApiKey: st.keys.openrouter,
+      geminiApiKey: st.keys.gemini,
+    });
+
+    await expect(session.sendUser("oi")).rejects.toThrow(/invalid payload/);
+    expect(st.geminiCalls).toBe(0);
   });
 
   it("OpenRouter todo em cooldown + Gemini OK → makeFallback interno resolve (não duplica rung)", async () => {

@@ -118,7 +118,8 @@ describe("generateText", () => {
     });
     expect(out.text).toBe("olá mundo");
     expect(out.provider).toBe("openrouter");
-    expect(out.usage).toEqual({ promptTokens: 10, completionTokens: 5, totalTokens: 15, estimated: false });
+    expect(out.usage).toMatchObject({ promptTokens: 10, completionTokens: 5, totalTokens: 15, estimated: false });
+    expect(out.usage.attempts).toEqual([{ provider: "openrouter", model: "openai/gpt-4o-mini", promptTokens: 10, completionTokens: 5, totalTokens: 15 }]);
 
     const [url, opts] = fetchMock.mock.calls[0];
     expect(url).toContain("/chat/completions");
@@ -127,6 +128,48 @@ describe("generateText", () => {
     expect(body.model).toBe("openai/gpt-4o-mini"); // sem prefixo
     expect(body.messages[0]).toEqual({ role: "system", content: "Você é um SDR" });
     expect(body.messages[1]).toEqual({ role: "user", content: "Boa tarde" });
+  });
+
+  it("ignora breakdown externo e rejeita tipos inválidos em usage", async () => {
+    fetchMock.mockResolvedValue(orResponse({
+      choices: [{ message: { content: "ok" } }],
+      usage: {
+        prompt_tokens: true,
+        completion_tokens: [7],
+        total_tokens: { value: 15 },
+        attempts: Array.from({ length: 1_000 }, () => ({
+          provider: "gateway",
+          model: "modelo-injetado",
+          promptTokens: 1,
+          completionTokens: 1,
+          totalTokens: 2,
+        })),
+      },
+    }));
+    const { generateText } = await import("../ai-provider");
+    const out = await generateText({
+      modelRef: "openrouter:openai/gpt-4o-mini",
+      prompt: "Teste",
+      openrouterApiKey: "sk-or-test",
+    });
+
+    expect(out.usage).toMatchObject({ promptTokens: 0, completionTokens: 0, totalTokens: 0 });
+    expect(out.usage.attempts).toBeUndefined();
+  });
+
+  it("não aceita total de usage menor que prompt mais completion", async () => {
+    fetchMock.mockResolvedValue(orResponse({
+      choices: [{ message: { content: "ok" } }],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 3 },
+    }));
+    const { generateText } = await import("../ai-provider");
+    const out = await generateText({
+      modelRef: "openrouter:openai/gpt-4o-mini",
+      prompt: "Teste",
+      openrouterApiKey: "sk-or-test",
+    });
+
+    expect(out.usage).toMatchObject({ promptTokens: 10, completionTokens: 5, totalTokens: 15 });
   });
 
   it("OpenRouter jsonMode → manda response_format json_object", async () => {
@@ -152,6 +195,23 @@ describe("generateText", () => {
     expect(out.provider).toBe("gemini");
     expect(out.usage.totalTokens).toBe(10);
     expect(fetchMock).not.toHaveBeenCalled(); // Gemini não usa fetch aqui
+  });
+
+  it("Gemini: resposta vazia com uso gera erro técnico recuperável", async () => {
+    h.generateContentImpl = () => ({
+      response: { text: () => "", usageMetadata: { promptTokenCount: 7, candidatesTokenCount: 3, totalTokenCount: 10 } },
+    });
+    const { AiEmptyResponseError, generateText } = await import("../ai-provider");
+
+    const error = await generateText({
+      modelRef: "gemini-2.5-flash",
+      prompt: "oi",
+      geminiApiKey: "AIza",
+      noGatewayFallback: true,
+    }).catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(AiEmptyResponseError);
+    expect(error).toMatchObject({ provider: "gemini", model: "gemini-2.5-flash", usage: { totalTokens: 10 } });
   });
 
   it("Gemini: modelo morto (404 generateContent) → fallback automático pro best", async () => {
@@ -212,6 +272,58 @@ describe("startAiChat OpenRouter — ferramentas e contexto", () => {
     expect(body.tool_choice).toBe("auto");
   });
 
+  it("rejeita resposta com tokens, mas sem texto nem tool call", async () => {
+    fetchMock.mockResolvedValue(orResponse({
+      choices: [{ message: { content: "" } }],
+      usage: { prompt_tokens: 100, completion_tokens: 200, total_tokens: 300 },
+    }));
+    const { AiEmptyResponseError, startAiChat } = await import("../ai-provider");
+    const session = await startAiChat({
+      modelRef: "openrouter:nvidia/nemotron-test",
+      systemInstruction: "S",
+      history: [],
+      tools,
+      openrouterApiKey: "k",
+      noGatewayFallback: true,
+    });
+
+    const error = await session.sendUser("oi").catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(AiEmptyResponseError);
+    expect(error).toMatchObject({
+      provider: "openrouter",
+      model: "nvidia/nemotron-test",
+      completionTokens: 200,
+      usage: { promptTokens: 100, completionTokens: 200, totalTokens: 300 },
+    });
+  });
+
+  it("soma uso anterior quando o turno após ferramenta retorna vazio", async () => {
+    const { AiEmptyResponseError, prependAiUsage } = await import("../ai-provider");
+    const error = new AiEmptyResponseError("openrouter", "x/y", {
+      promptTokens: 20,
+      completionTokens: 10,
+      totalTokens: 30,
+      cachedTokens: 4,
+    });
+
+    const combined = prependAiUsage(error, {
+      promptTokens: 100,
+      completionTokens: 10,
+      totalTokens: 110,
+      estimated: true,
+      cachedTokens: 6,
+    });
+
+    expect(combined.usage).toEqual({
+      promptTokens: 120,
+      completionTokens: 20,
+      totalTokens: 140,
+      estimated: true,
+      cachedTokens: 10,
+    });
+  });
+
   it("tool call → sendToolResults responde com role:tool + tool_call_id e mantém TODO o contexto", async () => {
     // 1º request: modelo pede a tool. 2º: responde texto final.
     fetchMock
@@ -244,6 +356,31 @@ describe("startAiChat OpenRouter — ferramentas e contexto", () => {
     expect(JSON.parse(toolMsg.content)).toEqual({ price: 99 });
     // a mensagem do assistente que pediu a tool foi preservada com tool_calls
     expect(body2.messages[2].tool_calls[0].id).toBe("call_1");
+  });
+
+  it("falha em sendToolResults remove a mensagem tool antes do retry", async () => {
+    fetchMock
+      .mockResolvedValueOnce(orResponse({
+        choices: [{ message: { content: "", tool_calls: [{ id: "call_1", type: "function", function: { name: "buscar", arguments: "{}" } }] } }],
+        usage: { total_tokens: 1 },
+      }))
+      .mockResolvedValueOnce({ ok: false, status: 400, json: async () => ({ error: { message: "temporário" } }) })
+      .mockResolvedValueOnce(orResponse({
+        choices: [{ message: { content: "ok" } }],
+        usage: { total_tokens: 1 },
+      }));
+
+    const { startAiChat } = await import("../ai-provider");
+    const session = await startAiChat({
+      modelRef: "openrouter:x/y", systemInstruction: "S", history: [], tools, openrouterApiKey: "k",
+    });
+    await session.sendUser("oi");
+    const result = [{ name: "buscar", id: "call_1", response: { ok: true } }];
+    await expect(session.sendToolResults(result)).rejects.toThrow(/temporário/);
+    await expect(session.sendToolResults(result)).resolves.toMatchObject({ text: "ok" });
+
+    const retryBody = JSON.parse(fetchMock.mock.calls[2][1].body);
+    expect(retryBody.messages.filter((message: any) => message.role === "tool")).toHaveLength(1);
   });
 });
 

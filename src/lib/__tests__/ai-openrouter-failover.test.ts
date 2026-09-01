@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { generateText } from "../ai-provider";
-import { resetGatewayCooldown, isEndpointDead, isEndpointCooling } from "../gateway-cooldown";
+import { resetGatewayCooldown } from "../gateway-cooldown";
 
 const st = vi.hoisted(() => ({
   openrouterCalls: [] as Array<{ key: string; model: string }>,
@@ -85,8 +85,6 @@ describe("OpenRouter Multi-Key Failover (9Router-style)", () => {
     expect(st.openrouterCalls).toHaveLength(2);
     expect(st.openrouterCalls[0].key).toBe("sk-or-v1-key1");
     expect(st.openrouterCalls[1].key).toBe("sk-or-v1-key2");
-    // Cooldown tem escopo CHAVE+MODELO — quota 429 da OpenRouter é por modelo.
-    expect(isEndpointCooling("or_sk-or-v1…key1::anthropic/claude-3.5-haiku")).toBe(true);
   });
 
   it("marca chave como DEAD em 401/403 e avança para a próxima", async () => {
@@ -104,8 +102,36 @@ describe("OpenRouter Multi-Key Failover (9Router-style)", () => {
     });
 
     expect(res.text).toBe("KEY2_AFTER_401");
-    // 401/403 é problema de CREDENCIAL — vale pro modelo todos, marca a chave.
-    expect(isEndpointDead("or_sk-or-v1…key1")).toBe(true);
+
+    const second = await generateText({
+      modelRef: "openrouter:openai/gpt-4o-mini",
+      prompt: "Outro modelo",
+      openrouterKeys: ["sk-or-v1-key1", "sk-or-v1-key2"],
+    });
+
+    expect(second.text).toBe("KEY2_AFTER_401");
+    expect(st.openrouterCalls.map((call) => call.key)).toEqual([
+      "sk-or-v1-key1",
+      "sk-or-v1-key2",
+      "sk-or-v1-key2",
+    ]);
+  });
+
+  it("não confunde chaves distintas com o mesmo sufixo", async () => {
+    const invalidKey = "sk-or-v1-invalid-shared";
+    const validKey = "sk-or-v1-valid-shared";
+    st.openrouterHandler = (key) => key === invalidKey
+      ? { status: 401, content: "", msg: "Unauthorized" }
+      : { status: 200, content: "VALID_KEY_OK", msg: "" };
+
+    const res = await generateText({
+      modelRef: "openrouter:openai/gpt-4o-mini",
+      prompt: "Teste",
+      openrouterKeys: [invalidKey, validKey],
+    });
+
+    expect(res.text).toBe("VALID_KEY_OK");
+    expect(st.openrouterCalls.map((call) => call.key)).toEqual([invalidKey, validKey]);
   });
 
   it("429 num modelo free NÃO derruba os outros modelos da mesma chave", async () => {

@@ -10,18 +10,67 @@ import { getEvolutionConfig } from "@/lib/evolution";
 import { requireClientId } from "@/lib/tenant";
 import { hasInternalSecret } from "@/lib/internal-auth";
 import { maskJid } from "@/lib/pii";
-import { resolveFunnelStage, checkSchedulesSync, splitMessage } from "@/lib/agent-format";
+import { resolveFunnelStage, checkSchedulesSync, resolveAgentOutput, splitMessage } from "@/lib/agent-format";
 import { parseAgendaDateTime, isDuplicateSlot, hasAgentOverlapConflict } from "@/lib/agenda-logic";
 import { indexKnowledgeDocument } from "@/lib/rag";
 import { getAiKeys } from "@/lib/ai-keys";
 import { formatResultsForAI, needsFreshWebSearch, webSearch } from "@/lib/web-search";
+import { addAiUsage, aiUsageFromError, AiEmptyResponseError, parseModelRef, prependAiErrorUsage, providerDisplayName, providerOf, startAiChat, type AiProvider, type AiUsage } from "@/lib/ai-provider";
 
 export const dynamic = 'force-dynamic';
 
 // Para chamadas internas (server-to-server), sempre usar localhost
 const INTERNAL_BASE = `http://localhost:${process.env.PORT || 3000}`;
 
+async function logAgentUsage(
+  usage: AiUsage,
+  context: {
+    agentId: number | null;
+    agentLabel: string | null;
+    clientId: string;
+    fallbackProvider: AiProvider;
+    fallbackModel: string;
+    remoteJid: string | null;
+    instanceName: string;
+    isTestMode: boolean;
+    extraMetadata?: Record<string, unknown>;
+  },
+): Promise<void> {
+  const attempts = usage.attempts?.length
+    ? usage.attempts
+    : [{ provider: context.fallbackProvider, model: context.fallbackModel, ...usage }];
+  await Promise.all(attempts.map((attempt) => logTokenUsage({
+    source: "agent",
+    sourceId: context.agentId,
+    sourceLabel: context.agentLabel,
+    clientId: context.clientId,
+    model: attempt.model,
+    provider: providerDisplayName(attempt.provider),
+    promptTokens: attempt.promptTokens,
+    completionTokens: attempt.completionTokens,
+    totalTokens: attempt.totalTokens,
+    metadata: {
+      remoteJid: context.remoteJid ? maskJid(context.remoteJid) : null,
+      instanceName: context.instanceName,
+      isTestMode: context.isTestMode,
+      estimated: attempt.estimated || undefined,
+      cachedTokens: attempt.cachedTokens || undefined,
+      ...context.extraMetadata,
+    },
+  })));
+}
+
 export async function POST(req: NextRequest) {
+  let diagnosticInstanceName = "unknown";
+  let diagnosticRemoteJid: string | null = null;
+  let diagnosticAgentId: number | null = null;
+  let diagnosticAgentLabel: string | null = null;
+  let diagnosticClientId: string | null = null;
+  let diagnosticIsTestMode = false;
+  let diagnosticModel = "unknown";
+  let diagnosticProvider: AiProvider = "gemini";
+  let diagnosticUsage: AiUsage | null = null;
+  let usageLogged = false;
   // AUTH: aceita cookie de sessão (UI /agente teste) OU header de segredo interno
   // (chamado pelo webhook do whatsapp via internal fetch).
   // Chamada via cookie (UI) carrega o escopo do tenant pra validações de
@@ -37,20 +86,15 @@ export async function POST(req: NextRequest) {
     const payloadBody = await req.json();
     const defaultInstance = (await getEvolutionConfig()).instance;
     const { remoteJid, isStatusUpdate, instanceName: reqInstanceName, text, isTestMode = false, testHistory = [], sessionId, testState, testLeadData, forceActive = false } = payloadBody;
+    diagnosticIsTestMode = isTestMode;
     let instanceName = reqInstanceName || defaultInstance;
+    diagnosticInstanceName = instanceName;
+    diagnosticRemoteJid = typeof remoteJid === "string" ? remoteJid : null;
 
     if (!remoteJid || !text) {
        return NextResponse.json({ success: false, error: "Missing remoteJid or text" });
     }
 
-    // Log de entrada — fire-and-forget: nunca atrasa o processamento da mensagem.
-    supabase.from("webhook_logs").insert({
-       instance_name: instanceName,
-       event: "AGENT_PROCESS_START",
-       payload: { remoteJid, text_preview: text.slice(0, 50), isTestMode },
-       created_at: new Date().toISOString()
-    }).then(() => {}, () => {});
-    
     if (isStatusUpdate) {
        return NextResponse.json({ success: true, ignored: true });
     }
@@ -69,7 +113,7 @@ export async function POST(req: NextRequest) {
           await supabase.from("webhook_logs").insert({
             instance_name: instanceName,
             event: "AGENT_SKIP_PAUSED",
-            payload: { remoteJid, reason: eff.reason, resumeAt: eff.resumeAt },
+            payload: { remote_jid: maskJid(remoteJid), reason: eff.reason, resumeAt: eff.resumeAt },
             created_at: new Date().toISOString(),
           });
           return NextResponse.json({ success: true, status: "ai_paused", reason: eff.reason });
@@ -94,6 +138,13 @@ export async function POST(req: NextRequest) {
       console.warn(`[AGENT] Instância "${instanceName}" não pertence ao cliente da sessão — bloqueado.`);
       return NextResponse.json({ success: false, error: "Instância não vinculada a este cliente." }, { status: 403 });
     }
+    supabase.from("webhook_logs").insert({
+      instance_name: instanceName,
+      client_id: channel?.client_id || null,
+      event: "AGENT_PROCESS_START",
+      payload: { remote_jid: maskJid(remoteJid), text_length: String(text).length, isTestMode },
+      created_at: new Date().toISOString(),
+    }).then(() => {}, () => {});
     // Shape compatível com a leitura antiga de ai_organizer_config (só estas
     // 2 chaves são usadas no pipeline).
     const orgConfig = orgRes
@@ -109,9 +160,11 @@ export async function POST(req: NextRequest) {
     const isInternalOrDev = process.env.NODE_ENV !== "production" || hasInternalSecret(req);
     const testAgentHeader = isInternalOrDev ? Number(req.headers.get("x-test-agent-id")) : 0;
     const agentId = (testAgentHeader && !isNaN(testAgentHeader) ? testAgentHeader : null) || channel?.agent_id || 1;
+    diagnosticAgentId = agentId;
     // Multi-tenant: identifica o cliente pelo client_id da channel_connection.
     // Toda token usage / message gravada nessa request fica vinculada a este cliente.
     const clientId: string = (channel as any)?.client_id || "00000000-0000-0000-0000-000000000001";
+    diagnosticClientId = clientId;
 
     // Buscar histórico — SEMPRE via chats_dashboard por remote_jid, ignorando
     // instance_name (mas DENTRO do tenant). Cobre dois cenários:
@@ -146,6 +199,7 @@ export async function POST(req: NextRequest) {
     ]);
 
     const agentConfig = agentRes.data;
+    diagnosticAgentLabel = agentConfig?.name || `Agente #${agentId}`;
     const leadStages = stagesRes.data;
     leadRow = (leadRes as any).data || null;
     contactRow = (contactRes as any).data || null;
@@ -343,7 +397,7 @@ export async function POST(req: NextRequest) {
           await supabase.from("webhook_logs").insert({
              instance_name: instanceName,
              event: "AGENT_STOP_HOURS",
-             payload: { remoteJid, action: "Send Away Message" },
+             payload: { remote_jid: maskJid(remoteJid), action: "Send Away Message" },
              created_at: new Date().toISOString()
           });
           await fetch(`${INTERNAL_BASE}/api/send-message`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ remoteJid, text: awayMsg, instanceName }) });
@@ -357,17 +411,6 @@ export async function POST(req: NextRequest) {
     const geminiApiKey = agentConfig.options?.gemini_api_key || orgConfig?.api_key || null;
     const openrouterApiKey = agentConfig.options?.openrouter_api_key || (orgConfig as any)?.openrouter_api_key || null;
     const finalApiKey = geminiApiKey; // RAG/embeddings
-    if (!geminiApiKey && !openrouterApiKey) {
-       // Log persistente — antes esse erro voltava só no body do JSON, sem
-       // rastro pro admin descobrir. Agora /api/webhooks/diagnose mostra.
-       await supabase.from("webhook_logs").insert({
-          instance_name: instanceName,
-          event: "AGENT_NO_API_KEY",
-          payload: { agent_id: agentId, agent_name: agentConfig.name, remote_jid: maskJid(remoteJid), hint: "Configure API Key Gemini ou OpenRouter em /configuracoes" },
-          created_at: new Date().toISOString(),
-       }).then(() => {}, () => {});
-       return NextResponse.json({ success: false, error: "API Key não configurada." });
-    }
 
     // 5. Prompt Base — expande variáveis {{kb:Título}} + variáveis dinâmicas ({{saudacao}}, etc)
     const rawMainPrompt: string = agentConfig.main_prompt || "";
@@ -1087,7 +1130,6 @@ ${capturedVariablesPrompt}
 
     // Inicializa o roteamento de provedor (Gemini ou OpenRouter) pelo modelo.
     const { resolveModel } = await import("@/lib/ai-default-model");
-    const { startAiChat, providerOf, providerDisplayName } = await import("@/lib/ai-provider");
     // target_model do agente é setado pelo admin em /agente (info-tab admin-only).
     // resolveModel ignora optsModel se clientId non-admin — burlaria controle custo.
     // Mas agente é recurso do tenant: target_model amarrado ao agente é decisão
@@ -1108,23 +1150,8 @@ ${capturedVariablesPrompt}
       return NextResponse.json({ success: false, error: "Modelo IA não configurado pelo admin" }, { status: 400 });
     }
     const agentProvider = providerOf(modelId);
-    // Checagem de chave POR PROVEDOR do modelo escolhido.
-    if (agentProvider === "gemini" && !geminiApiKey) {
-      await supabase.from("webhook_logs").insert({
-         instance_name: instanceName, event: "AGENT_NO_API_KEY",
-         payload: { agent_id: agentId, remote_jid: maskJid(remoteJid), hint: "Modelo Gemini selecionado mas sem API Key Gemini em /configuracoes" },
-         created_at: new Date().toISOString(),
-      }).then(() => {}, () => {});
-      return NextResponse.json({ success: false, error: "API Key Gemini não configurada." });
-    }
-    if (agentProvider === "openrouter" && !openrouterApiKey) {
-      await supabase.from("webhook_logs").insert({
-         instance_name: instanceName, event: "AGENT_NO_API_KEY",
-         payload: { agent_id: agentId, remote_jid: maskJid(remoteJid), hint: "Modelo OpenRouter selecionado mas sem API Key OpenRouter em /configuracoes" },
-         created_at: new Date().toISOString(),
-      }).then(() => {}, () => {});
-      return NextResponse.json({ success: false, error: "API Key OpenRouter não configurada." });
-    }
+    diagnosticModel = parseModelRef(modelId).model;
+    diagnosticProvider = agentProvider;
     console.log(`[AGENT] Usando modelo: ${modelId} (provider=${agentProvider})`);
 
     const minifiedPromptMaster = promptMaster
@@ -1177,7 +1204,7 @@ ${capturedVariablesPrompt}
           await supabase.from("webhook_logs").insert({
             instance_name: instanceName,
             event: "AGENT_WEB_SEARCH_PREFETCH",
-            payload: { remoteJid, query: finalProcessText.slice(0, 500), results: results.length },
+            payload: { remote_jid: maskJid(remoteJid), query_length: finalProcessText.length, results: results.length },
             created_at: new Date().toISOString(),
           });
         }
@@ -1212,15 +1239,6 @@ ${capturedVariablesPrompt}
     });
 
     let turn = await session.sendUser(firstTurnMessage);
-    const effectiveModelId = session.modelUsed();
-    if (effectiveModelId !== modelId && agentProvider === "gemini") {
-      console.warn(`[AGENT] Modelo "${modelId}" morto. Usando "${effectiveModelId}" no lugar.`);
-      // Auto-cura: atualiza o agent_settings pra próxima chamada já usar o vivo.
-      supabase.from("agent_settings")
-        .update({ target_model: effectiveModelId })
-        .eq("id", agentId)
-        .then(() => {}, () => {});
-    }
 
     let finalAnswer = turn.text;
 
@@ -1242,6 +1260,7 @@ ${capturedVariablesPrompt}
 
     // Acumula tokens dessa interação (1 inicial + N de tool-loop)
     let totalPrompt = turn.usage.promptTokens, totalCompletion = turn.usage.completionTokens, totalAll = turn.usage.totalTokens;
+    diagnosticUsage = turn.usage;
     // Tokens cacheados (implicit caching) — mede cache hit rate no /tokens.
     let totalCached = turn.usage.cachedTokens || 0;
     // Estimado = se QUALQUER turn não trouxe usage real (ex: DeepSeek via reverse).
@@ -1251,8 +1270,10 @@ ${capturedVariablesPrompt}
     // (ex: list_google_calendar_events → cancel_google_calendar_event).
     // Limite de 5 pra evitar loop infinito caso o modelo fique chamando tool.
     const callLogs: any[] = [];
+    let toolIterations = 0;
     for (let iter = 0; iter < 5; iter++) {
        if (!turn.toolCalls || turn.toolCalls.length === 0) break;
+       toolIterations = iter + 1;
        // Processa TODAS as tool calls do turno (Gemini costuma mandar 1; o
        // OpenRouter pode mandar várias e exige resposta pra cada tool_call_id).
        const toolResults: any[] = [];
@@ -2019,35 +2040,74 @@ ${capturedVariablesPrompt}
        } // fim do for (const call of turn.toolCalls)
 
        // Devolve os resultados das ferramentas e pega o próximo turno.
-        turn = await session.sendToolResults(toolResults);
+        try {
+          turn = await session.sendToolResults(toolResults);
+        } catch (err) {
+          throw diagnosticUsage ? prependAiErrorUsage(err, diagnosticUsage) : err;
+        }
         finalAnswer = turn.text;
         totalPrompt += turn.usage.promptTokens; totalCompletion += turn.usage.completionTokens; totalAll += turn.usage.totalTokens;
         totalCached += turn.usage.cachedTokens || 0;
         if (turn.usage.estimated) usageEstimated = true;
+        diagnosticUsage = diagnosticUsage ? addAiUsage(diagnosticUsage, turn.usage) : turn.usage;
     }
 
     // Loga consumo total de tokens dessa interação
-    logTokenUsage({
-      source: "agent",
-      sourceId: agentId ? String(agentId) : null,
-      sourceLabel: agentConfig?.name || `Agente #${agentId}`,
-      // Vincula o gasto ao cliente — sem isso, o painel /tokens do cliente
-      // não enxerga o consumo e admin vê os dados misturados.
-      clientId,
-      model: effectiveModelId,
-      provider: providerDisplayName(agentProvider),
+    await logAgentUsage(diagnosticUsage || {
       promptTokens: totalPrompt,
       completionTokens: totalCompletion,
       totalTokens: totalAll,
-      metadata: { remoteJid, instanceName, isTestMode, estimated: usageEstimated || undefined, cachedTokens: totalCached || undefined },
+      ...(usageEstimated ? { estimated: true } : {}),
+      ...(totalCached > 0 ? { cachedTokens: totalCached } : {}),
+    }, {
+      agentId,
+      agentLabel: agentConfig?.name || `Agente #${agentId}`,
+      clientId,
+      fallbackModel: session.modelUsed(),
+      fallbackProvider: session.provider,
+      remoteJid,
+      instanceName,
+      isTestMode,
     });
+    usageLogged = true;
 
-    finalAnswer = finalAnswer.replace(/^```\w*\n?/g, "").replace(/\n?```$/g, "").trim();
+    const outputDecision = resolveAgentOutput(finalAnswer, turn.toolCalls?.length || 0);
 
-    if (!finalAnswer) {
-      finalAnswer = "Desculpe, pode repetir? Não entendi direito.";
-      console.warn(`[AGENT] IA retornou resposta vazia para ${remoteJid} — usando fallback.`);
+    if (!outputDecision.send && outputDecision.suppressed === "tool_loop_exhausted") {
+      await supabase.from("webhook_logs").insert({
+        instance_name: instanceName,
+        client_id: clientId,
+        event: "AGENT_TOOL_LOOP_EXHAUSTED",
+        payload: {
+          agent_id: agentId,
+          remote_jid: maskJid(remoteJid),
+          model: session.modelUsed(),
+          tool_iterations: toolIterations,
+          pending_tool_calls: turn.toolCalls.length,
+        },
+        created_at: new Date().toISOString(),
+      }).then(() => {}, () => {});
+      return NextResponse.json({ success: true, ai_responded: false, suppressed: outputDecision.suppressed });
     }
+
+    if (!outputDecision.send) {
+      await supabase.from("webhook_logs").insert({
+        instance_name: instanceName,
+        client_id: clientId,
+        event: "AGENT_EMPTY_OUTPUT",
+        payload: {
+          agent_id: agentId,
+          remote_jid: maskJid(remoteJid),
+          model: session.modelUsed(),
+          completion_tokens: totalCompletion,
+          tool_iterations: toolIterations,
+        },
+        created_at: new Date().toISOString(),
+      }).then(() => {}, () => {});
+      return NextResponse.json({ success: true, ai_responded: false, suppressed: outputDecision.suppressed });
+    }
+
+    finalAnswer = outputDecision.text;
 
     // Normaliza qualquer imagem em markdown (![alt](url)) ou URL solta de imagem para o formato [IMAGEM: url]
     finalAnswer = finalAnswer.replace(/!\[[^\]]*\]\((https?:\/\/[^\s\)]+)\)/gi, "[IMAGEM: $1]");
@@ -2083,10 +2143,6 @@ ${capturedVariablesPrompt}
     let lastSendResult: any = null;
     let anySendError: string | null = null;
 
-    // ============================================================
-        // Safety-net anti-{{var}}: variável não resolvida NUNCA chega ao cliente.
-    finalAnswer = finalAnswer.replace(/\{\{[^}]*\}\}/g, "").replace(/[ \t]{2,}/g, " ").trim();
-
 // GATE FINAL DE PAUSA — entre o início do processamento (buffer de
     // mensagens, tool loop, Google Calendar, delays de digitação) e o envio
     // podem se passar dezenas de segundos. Se o operador assumiu a conversa
@@ -2107,7 +2163,7 @@ ${capturedVariablesPrompt}
             supabase.from("webhook_logs").insert({
               instance_name: instanceName,
               event: "AGENT_SUPPRESSED_PAUSED",
-              payload: { remoteJid, reason: effFinal.reason, preview: finalAnswer.slice(0, 50) },
+              payload: { remote_jid: maskJid(remoteJid), reason: effFinal.reason, text_length: finalAnswer.length },
               created_at: new Date().toISOString(),
             }).then(() => {}, () => {});
             return NextResponse.json({ success: true, suppressed: "paused_before_send", reason: effFinal.reason });
@@ -2481,20 +2537,55 @@ ${capturedVariablesPrompt}
        instance_name: instanceName,
        event: anySendError ? "AGENT_SEND_ERROR" : "AGENT_SEND_SUCCESS",
        payload: anySendError
-         ? { remoteJid, error: anySendError }
-         : { remoteJid, text_preview: finalAnswer.slice(0, 50), chunks: messageChunks.length },
+         ? { remote_jid: maskJid(remoteJid), error: anySendError }
+         : { remote_jid: maskJid(remoteJid), text_length: finalAnswer.length, chunks: messageChunks.length },
        created_at: new Date().toISOString()
     }).then(() => {}, () => {});
 
     return NextResponse.json({ success: true, ai_responded: true, sendResult: lastSendResult, sendError: anySendError, testStateUpdate });
 
   } catch (err: any) {
+    const errorUsage = aiUsageFromError(err) || diagnosticUsage;
+    if (!usageLogged && diagnosticClientId && errorUsage?.totalTokens) {
+      await logAgentUsage(errorUsage, {
+        agentId: diagnosticAgentId,
+        agentLabel: diagnosticAgentLabel,
+        clientId: diagnosticClientId,
+        fallbackModel: err instanceof AiEmptyResponseError ? err.model : diagnosticModel,
+        fallbackProvider: err instanceof AiEmptyResponseError ? err.provider : diagnosticProvider,
+        remoteJid: diagnosticRemoteJid,
+        instanceName: diagnosticInstanceName,
+        isTestMode: diagnosticIsTestMode,
+        extraMetadata: err instanceof AiEmptyResponseError ? { emptyOutput: true } : { failed: true },
+      });
+      usageLogged = true;
+    }
+    if (err instanceof AiEmptyResponseError) {
+      console.warn(`[AGENT] Resposta vazia suprimida para ${diagnosticRemoteJid ? maskJid(diagnosticRemoteJid) : "destinatário desconhecido"}.`);
+      await supabase.from("webhook_logs").insert({
+        instance_name: diagnosticInstanceName,
+        client_id: diagnosticClientId,
+        event: "AGENT_EMPTY_OUTPUT",
+        payload: {
+          agent_id: diagnosticAgentId,
+          remote_jid: diagnosticRemoteJid ? maskJid(diagnosticRemoteJid) : null,
+          model: err.model,
+          provider: err.provider,
+          prompt_tokens: err.usage.promptTokens,
+          completion_tokens: err.usage.completionTokens,
+          total_tokens: err.usage.totalTokens,
+        },
+        created_at: new Date().toISOString(),
+      }).then(() => {}, () => {});
+      return NextResponse.json({ success: true, ai_responded: false, suppressed: "empty_output" });
+    }
     console.error("[Agent Process Error]:", err);
     try {
       await supabase.from("webhook_logs").insert({
-         instance_name: "unknown",
+         instance_name: diagnosticInstanceName,
+         client_id: diagnosticClientId,
          event: "AGENT_CRITICAL_ERROR",
-         payload: { error: err.message, stack: err.stack?.slice(0, 300) },
+         payload: { agent_id: diagnosticAgentId, error: err.message, stack: err.stack?.slice(0, 300) },
          created_at: new Date().toISOString()
       });
     } catch (_) { /* ignore logging errors */ }

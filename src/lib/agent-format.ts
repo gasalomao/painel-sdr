@@ -21,6 +21,32 @@ export type FunnelResolution = {
   skippedStages: number[];
 };
 
+export function sanitizeAgentAnswer(text: string): string {
+  return text
+    .trim()
+    .replace(/^```\w*\r?\n?/g, "")
+    .replace(/\r?\n?```$/g, "")
+    .replace(/\{\{[^}]*\}\}/g, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+export type AgentOutputDecision =
+  | { send: true; text: string }
+  | { send: false; suppressed: "empty_output" | "tool_loop_exhausted" };
+
+export function resolveAgentOutput(text: string, pendingToolCalls: number): AgentOutputDecision {
+  if (pendingToolCalls > 0) return { send: false, suppressed: "tool_loop_exhausted" };
+  const sanitized = sanitizeAgentAnswer(text);
+  return sanitized ? { send: true, text: sanitized } : { send: false, suppressed: "empty_output" };
+}
+
+export function sandboxSuppressionMessage(suppressed: unknown): string | null {
+  if (suppressed === "empty_output") return "Resposta vazia suprimida. Nenhuma mensagem foi enviada.";
+  if (suppressed === "tool_loop_exhausted") return "Limite de ferramentas atingido. Nenhuma mensagem foi enviada.";
+  return null;
+}
+
 /**
  * Avança pelas etapas do funil a partir de `startIndex`, pulando as que não
  * batem a condição (equals / not_equals / contains, case-insensitive) e

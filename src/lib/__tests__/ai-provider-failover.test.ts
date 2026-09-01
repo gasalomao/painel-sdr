@@ -292,6 +292,24 @@ describe("integração: failover de CONTAS (mesmo modelo)", () => {
     expect(isEndpointDead("ep1")).toBe(true);
   });
 
+  it("resposta vazia na conta 1 → resposta pela conta 2 do mesmo modelo", async () => {
+    st.modelsByEp = { ep1: ["nemotron"], ep2: ["nemotron"] };
+    st.chat = (base) => base === EP1 ? ok("") : ok("EP2-OK");
+    st.keys.gatewayFallbackModel = null;
+    const session = await startAiChat({
+      modelRef: "gateway:nemotron",
+      systemInstruction: "sys",
+      history: [],
+      tools: [],
+    });
+
+    const result = await session.sendUser("oi");
+
+    expect(result.text).toBe("EP2-OK");
+    expect(session.modelUsed()).toBe("nemotron");
+    expect(st.calls).toHaveLength(2);
+  });
+
   it("400 bad request puro → relança sem trocar de conta e sem cooldown", async () => {
     st.endpoints = [st.endpoints[0]]; // só ep1
     st.keys.gatewayEndpoints = st.endpoints;
@@ -349,5 +367,50 @@ describe("integração: cascata de COMBOS (contas primeiro, modelo depois)", () 
     expect(res.text).toBe("GPT4O-OK");
     expect(session.modelUsed()).toBe("gpt-4o");
     expect(st.geminiCalls).toBe(0);
+  });
+
+  it("startAiChat: resposta vazia do modelo 1 → cascata pro modelo 2", async () => {
+    st.modelsByEp = { ep1: ["claude-3-7-sonnet", "gpt-4o"] };
+    st.chat = (_base, model) => model === "claude-3-7-sonnet" ? ok("") : ok("GPT4O-OK");
+    st.keys.aiCombos = [COMBO];
+    const session = await startAiChat({
+      modelRef: "combo:c",
+      systemInstruction: "sys",
+      history: [],
+      tools: [],
+      geminiApiKey: "AIza-test",
+    });
+
+    const res = await session.sendUser("oi");
+
+    expect(res.text).toBe("GPT4O-OK");
+    expect(session.modelUsed()).toBe("gpt-4o");
+    expect(st.calls.map((call) => call.model)).toEqual(["claude-3-7-sonnet", "gpt-4o"]);
+  });
+
+  it("startAiChat: inicialização falha, próximo modelo retorna vazio e terceiro responde", async () => {
+    st.modelsByEp = { ep1: ["modelo-vazio", "modelo-ok"] };
+    st.chat = (_base, model) => model === "modelo-vazio" ? ok("") : ok("TERCEIRO-OK");
+    st.keys.aiCombos = [{
+      id: "tres-passos",
+      name: "Três passos",
+      models: [
+        { modelRef: "gemini:gemini-sem-chave", enabled: true },
+        { modelRef: "gateway:modelo-vazio", enabled: true },
+        { modelRef: "gateway:modelo-ok", enabled: true },
+      ],
+    }];
+    const session = await startAiChat({
+      modelRef: "combo:tres-passos",
+      systemInstruction: "sys",
+      history: [],
+      tools: [],
+    });
+
+    const result = await session.sendUser("oi");
+
+    expect(result.text).toBe("TERCEIRO-OK");
+    expect(session.modelUsed()).toBe("modelo-ok");
+    expect(st.calls.map((call) => call.model)).toEqual(["modelo-vazio", "modelo-ok"]);
   });
 });

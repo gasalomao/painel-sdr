@@ -34,7 +34,6 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { pickBestFlashModel } from "@/lib/gemini-model-discovery";
 import { isDeadModelError } from "@/lib/gemini-call";
 import { COMBO_PREFIX, resolveComboSteps } from "@/lib/ai-combos";
-import { getAiKeys } from "@/lib/ai-keys";
 
 /**
  * Timeout por chamada de IA — sem isso um gateway/proxy pendurado bloqueia a
@@ -85,6 +84,7 @@ const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
  */
 export class ProviderHttpError extends Error {
   status: number;
+  usage?: AiUsage;
   /** Id da conexão/conta (quando aplicável) pra marcação de cooldown/morto. */
   endpointId?: string;
   constructor(status: number, message: string, endpointId?: string) {
@@ -92,6 +92,25 @@ export class ProviderHttpError extends Error {
     this.name = "ProviderHttpError";
     this.status = status;
     if (endpointId) this.endpointId = endpointId;
+  }
+}
+
+export class AiEmptyResponseError extends Error {
+  provider: AiProvider;
+  model: string;
+  usage: AiUsage;
+  completionTokens: number;
+
+  constructor(provider: AiProvider, model: string, usage: AiUsage | number, cause?: unknown) {
+    super(`${provider}:${model} retornou resposta vazia sem ferramentas.`);
+    this.name = "AiEmptyResponseError";
+    this.provider = provider;
+    this.model = model;
+    this.usage = typeof usage === "number"
+      ? { promptTokens: 0, completionTokens: usage, totalTokens: usage }
+      : usage;
+    this.completionTokens = this.usage.completionTokens;
+    if (cause !== undefined) Object.assign(this, { cause });
   }
 }
 
@@ -291,6 +310,16 @@ export function providerDisplayName(p: AiProvider): string {
   return "Gemini";
 }
 
+export interface AiUsageAttempt {
+  provider: AiProvider;
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  estimated?: boolean;
+  cachedTokens?: number;
+}
+
 export interface AiUsage {
   promptTokens: number;
   completionTokens: number;
@@ -302,32 +331,144 @@ export interface AiUsage {
    *  OpenAI-compat prompt_tokens_details.cached_tokens) — 75-90% mais baratos.
    *  Presente só quando o provedor reporta >0. Usado p/ medir cache hit rate. */
   cachedTokens?: number;
+  attempts?: AiUsageAttempt[];
 }
 
 function emptyUsage(): AiUsage {
   return { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 }
 
-function geminiUsage(resp: any): AiUsage {
+function withUsageAttempt(usage: AiUsage, provider: AiProvider, model: string): AiUsage {
+  if (usage.attempts || usage.totalTokens <= 0) return usage;
+  return {
+    ...usage,
+    attempts: [{
+      provider,
+      model,
+      promptTokens: usage.promptTokens,
+      completionTokens: usage.completionTokens,
+      totalTokens: usage.totalTokens,
+      ...(usage.estimated ? { estimated: true } : {}),
+      ...(usage.cachedTokens ? { cachedTokens: usage.cachedTokens } : {}),
+    }],
+  };
+}
+
+function normalizeTokenCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value > 0
+    ? Math.min(value, 100_000_000)
+    : 0;
+}
+
+function usageTotal(reported: unknown, promptTokens: number, completionTokens: number): number {
+  return Math.max(normalizeTokenCount(reported), promptTokens + completionTokens);
+}
+
+function geminiUsage(resp: any, model?: string): AiUsage {
   const meta = resp?.usageMetadata
     || resp?.response?.usageMetadata
     || resp?.candidates?.[0]?.usageMetadata
     || {};
-  const promptTokens = Number(meta.promptTokenCount || 0);
-  const completionTokens = Number(meta.candidatesTokenCount || 0);
-  const totalTokens = Number(meta.totalTokenCount || (promptTokens + completionTokens));
-  const cachedTokens = Number(meta.cachedContentTokenCount || 0);
-  return { promptTokens, completionTokens, totalTokens, ...(cachedTokens > 0 ? { cachedTokens } : {}) };
+  const promptTokens = normalizeTokenCount(meta.promptTokenCount);
+  const completionTokens = normalizeTokenCount(meta.candidatesTokenCount);
+  const totalTokens = usageTotal(meta.totalTokenCount, promptTokens, completionTokens);
+  const cachedTokens = normalizeTokenCount(meta.cachedContentTokenCount);
+  const usage = { promptTokens, completionTokens, totalTokens, ...(cachedTokens > 0 ? { cachedTokens } : {}) };
+  return model ? withUsageAttempt(usage, "gemini", model) : usage;
 }
 
-function openRouterUsage(json: any): AiUsage {
+function openRouterUsage(json: any, provider?: AiProvider, model?: string): AiUsage {
   const u = json?.usage || {};
-  const promptTokens = Number(u.prompt_tokens || 0);
-  const completionTokens = Number(u.completion_tokens || 0);
-  const totalTokens = Number(u.total_tokens || (promptTokens + completionTokens));
+  const promptTokens = normalizeTokenCount(u.prompt_tokens);
+  const completionTokens = normalizeTokenCount(u.completion_tokens);
+  const totalTokens = usageTotal(u.total_tokens, promptTokens, completionTokens);
   const estimated = u?.estimated === true;
-  const cachedTokens = Number(u?.prompt_tokens_details?.cached_tokens || 0);
-  return { promptTokens, completionTokens, totalTokens, estimated, ...(cachedTokens > 0 ? { cachedTokens } : {}) };
+  const cachedTokens = normalizeTokenCount(u?.prompt_tokens_details?.cached_tokens);
+  const usage: AiUsage = {
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    estimated,
+    ...(cachedTokens > 0 ? { cachedTokens } : {}),
+  };
+  return provider && model ? withUsageAttempt(usage, provider, model) : usage;
+}
+
+export function addAiUsage(left: AiUsage, right: AiUsage): AiUsage {
+  const cachedTokens = (left.cachedTokens || 0) + (right.cachedTokens || 0);
+  const attempts = [...(left.attempts || []), ...(right.attempts || [])].reduce<AiUsageAttempt[]>((all, attempt) => {
+    const existing = all.find((item) => item.provider === attempt.provider && item.model === attempt.model);
+    if (!existing) {
+      all.push({ ...attempt });
+    } else {
+      existing.promptTokens += attempt.promptTokens;
+      existing.completionTokens += attempt.completionTokens;
+      existing.totalTokens += attempt.totalTokens;
+      existing.cachedTokens = (existing.cachedTokens || 0) + (attempt.cachedTokens || 0) || undefined;
+      existing.estimated = existing.estimated || attempt.estimated || undefined;
+    }
+    return all;
+  }, []);
+  return {
+    promptTokens: left.promptTokens + right.promptTokens,
+    completionTokens: left.completionTokens + right.completionTokens,
+    totalTokens: left.totalTokens + right.totalTokens,
+    ...(left.estimated || right.estimated ? { estimated: true } : {}),
+    ...(cachedTokens > 0 ? { cachedTokens } : {}),
+    ...(attempts.length > 0 ? { attempts } : {}),
+  };
+}
+
+function attachAiUsage(error: unknown, usage: AiUsage): Error {
+  const target = error instanceof Error ? error : new Error(String(error));
+  const current = (target as Error & { usage?: AiUsage }).usage;
+  (target as Error & { usage?: AiUsage }).usage = current ? addAiUsage(usage, current) : usage;
+  return target;
+}
+
+function setAiUsage(error: unknown, usage: AiUsage): Error {
+  const target = error instanceof Error ? error : new Error(String(error));
+  (target as Error & { usage?: AiUsage }).usage = usage;
+  return target;
+}
+
+export function aiUsageFromError(error: unknown): AiUsage | null {
+  const usage = (error as { usage?: AiUsage } | null)?.usage;
+  return usage && Number.isFinite(usage.totalTokens) ? usage : null;
+}
+
+export function prependAiUsage(error: AiEmptyResponseError, priorUsage: AiUsage): AiEmptyResponseError {
+  return new AiEmptyResponseError(error.provider, error.model, addAiUsage(priorUsage, error.usage), error);
+}
+
+export function prependAiErrorUsage(error: unknown, priorUsage: AiUsage): Error {
+  return error instanceof AiEmptyResponseError ? prependAiUsage(error, priorUsage) : attachAiUsage(error, priorUsage);
+}
+
+function requireUsableOpenAIResponse(json: any, provider: AiProvider, model: string): any {
+  const message = json?.choices?.[0]?.message || {};
+  const hasText = String(message.content || "").trim().length > 0;
+  const hasTools = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
+  if (!hasText && !hasTools) {
+    throw new AiEmptyResponseError(provider, model, openRouterUsage(json, provider, model));
+  }
+  return json;
+}
+
+function withAccumulatedUsage(json: any, accumulated: AiUsage, provider: AiProvider, model: string): any {
+  const usage = addAiUsage(accumulated, openRouterUsage(json, provider, model));
+  return {
+    ...json,
+    usage: {
+      ...(json?.usage || {}),
+      prompt_tokens: usage.promptTokens,
+      completion_tokens: usage.completionTokens,
+      total_tokens: usage.totalTokens,
+      ...(usage.attempts ? { attempts: usage.attempts } : {}),
+      ...(usage.estimated ? { estimated: true } : {}),
+      ...(usage.cachedTokens ? { prompt_tokens_details: { ...(json?.usage?.prompt_tokens_details || {}), cached_tokens: usage.cachedTokens } } : {}),
+    },
+  };
 }
 
 // =====================================================================
@@ -442,30 +583,37 @@ async function openRouterChatWithFailover(
     throw new Error("OpenRouter API Key não configurada.");
   }
 
-  const candidates = rawList.map((key) => {
-    // ID determinístico pro cooldown. NÃO usa prefixo da chave (vazaria
-    // material da key nos logs) — só chars fixos + sufixo curto p/ leitura.
-    const id = `or_sk-or-v1…${key.slice(-4)}`;
-    return { key, id };
-  });
+  const candidates = await Promise.all(rawList.map(async (key) => {
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
+    const id = `openrouter:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+    return { key, id, label: `or_…${key.slice(-4)}` };
+  }));
 
   let lastErr: unknown = null;
+  let accumulatedUsage = emptyUsage();
   // Cooldown com escopo CHAVE+MODELO: limites free/429 da OpenRouter são
   // POR MODELO. Sem o modelo no ID, um único :free estourado colocava a
   // chave inteira em cooldown e derrubava TODOS os outros modelos.
   const model = String(body?.model || "");
   for (const c of candidates) {
     const coolId = model ? `${c.id}::${model}` : c.id;
-    if (isEndpointUnavailable(coolId)) continue;
+    const coolLabel = model ? `${c.label}::${model}` : c.label;
+    if (isEndpointUnavailable(c.id) || isEndpointUnavailable(coolId)) continue;
     try {
-      return await openRouterChat(c.key, body, coolId);
+      const json = await openRouterChat(c.key, body, coolId);
+      return withAccumulatedUsage(requireUsableOpenAIResponse(json, "openrouter", model), accumulatedUsage, "openrouter", model);
     } catch (err) {
       lastErr = err;
+      if (err instanceof AiEmptyResponseError) {
+        accumulatedUsage = addAiUsage(accumulatedUsage, err.usage);
+        markEndpointCooldown(coolId);
+        console.warn(`[ai-provider:openrouter] ${coolLabel} retornou resposta vazia. Rotacionando para próxima chave.`);
+        continue;
+      }
       if (err instanceof ProviderHttpError) {
         if (err.status === 401 || err.status === 403) {
-          // Credencial inválida vale pro modelo TODOS — marca a chave crua.
           markEndpointDead(c.id);
-          console.warn(`[ai-provider:openrouter] Chave ${c.id} marcada MORTA (HTTP ${err.status}). Rotacionando para próxima chave OpenRouter.`);
+          console.warn(`[ai-provider:openrouter] Chave ${c.label} marcada MORTA (HTTP ${err.status}). Rotacionando para próxima chave OpenRouter.`);
           continue;
         }
         if (
@@ -475,19 +623,23 @@ async function openRouterChatWithFailover(
           (/unavailable for free|not a valid model id/i.test(err.message) && !/support tool use/i.test(err.message))
         ) {
           markEndpointCooldown(coolId);
-          console.warn(`[ai-provider:openrouter] ${coolId} falhou (${err.message.slice(0, 80)}). Rotacionando para próxima chave/modelo.`);
+          console.warn(`[ai-provider:openrouter] ${coolLabel} falhou (${err.message.slice(0, 80)}). Rotacionando para próxima chave/modelo.`);
           continue;
         }
-        throw err;
+        throw accumulatedUsage.totalTokens > 0 ? attachAiUsage(err, accumulatedUsage) : err;
       }
-      console.warn(`[ai-provider:openrouter] Chave ${c.id} falhou (rede/timeout). Rotacionando:`, (err as any)?.message);
+      console.warn(`[ai-provider:openrouter] Chave ${c.label} falhou (rede/timeout). Rotacionando:`, (err as any)?.message);
       continue;
     }
   }
 
-  throw lastErr instanceof Error
+  if (lastErr instanceof AiEmptyResponseError) {
+    throw new AiEmptyResponseError(lastErr.provider, lastErr.model, accumulatedUsage, lastErr);
+  }
+  const terminalError = lastErr instanceof Error
     ? lastErr
     : new ProviderHttpError(429, "Todas as chaves OpenRouter falharam ou estão em cooldown. Tente novamente mais tarde.");
+  throw accumulatedUsage.totalTokens > 0 ? attachAiUsage(terminalError, accumulatedUsage) : terminalError;
 }
 
 async function gatewayChat(baseUrl: string, apiKey: string | null, body: Record<string, any>, endpointId?: string): Promise<any> {
@@ -655,13 +807,20 @@ async function gatewayChatWithFailover(
   }
 
   let lastErr: unknown = null;
+  let accumulatedUsage = emptyUsage();
   for (const c of candidates) {
     // Pula endpoints sabidamente indisponíveis (cooldown/morto) ANTES de chamar.
     if (c.endpointId && isEndpointUnavailable(c.endpointId)) continue;
     try {
-      return await gatewayChat(c.baseUrl, c.apiKey, body, c.endpointId);
+      const json = await gatewayChat(c.baseUrl, c.apiKey, body, c.endpointId);
+      return withAccumulatedUsage(requireUsableOpenAIResponse(json, "gateway", model), accumulatedUsage, "gateway", model);
     } catch (err) {
       lastErr = err;
+      if (err instanceof AiEmptyResponseError) {
+        accumulatedUsage = addAiUsage(accumulatedUsage, err.usage);
+        console.warn(`[ai-provider] Conta ${c.endpointId || c.baseUrl} retornou resposta vazia. Failover pra próxima.`);
+        continue;
+      }
       if (err instanceof ProviderHttpError && c.endpointId) {
         // 401/403 → credencial morta: marca p/ sempre pular até restart.
         if (err.status === 401 || err.status === 403) {
@@ -677,7 +836,7 @@ async function gatewayChatWithFailover(
         }
         // Outro 4xx (400 bad request, etc.) → erro do request; outra conta dará
         // o mesmo. Relança (não adianta trocar).
-        throw err;
+        throw accumulatedUsage.totalTokens > 0 ? attachAiUsage(err, accumulatedUsage) : err;
       }
       // Erro de rede/timeout (não ProviderHttpError) → tenta próxima conta.
       console.warn(`[ai-provider] Conta ${c.endpointId || c.baseUrl} falhou (rede/timeout). Failover:`, (err as any)?.message);
@@ -685,9 +844,13 @@ async function gatewayChatWithFailover(
     }
   }
   // Esgotou todos os candidatos (ou todos em cooldown/mortos).
-  throw lastErr instanceof Error
+  if (lastErr instanceof AiEmptyResponseError) {
+    throw new AiEmptyResponseError(lastErr.provider, lastErr.model, accumulatedUsage, lastErr);
+  }
+  const terminalError = lastErr instanceof Error
     ? lastErr
     : new Error("Todas as contas do gateway falharam ou estão em cooldown. Tente novamente mais tarde.");
+  throw accumulatedUsage.totalTokens > 0 ? attachAiUsage(terminalError, accumulatedUsage) : terminalError;
 }
 
 // =====================================================================
@@ -763,6 +926,7 @@ export interface GenerateTextResult {
  * morto já tem retry interno próprio).
  */
 function isAccountLevelError(err: unknown): boolean {
+  if (err instanceof AiEmptyResponseError) return true;
   if (err instanceof ProviderHttpError) {
     if (isFailoverableStatus(err.status, err.message)) return true;
     const msg = String(err.message || "");
@@ -796,15 +960,19 @@ interface LadderKeys {
  */
 async function buildLadder(requestedRef: string, keys: LadderKeys | null): Promise<string[]> {
   const ladder = [requestedRef];
-  const seenModels = new Set<string>([requestedRef]);
+  const modelKey = (ref: string) => {
+    const parsed = parseModelRef(ref);
+    return `${parsed.provider}:${parsed.model}`;
+  };
+  const seenModels = new Set<string>([modelKey(requestedRef)]);
   const seenProviders = new Set<string>([providerOf(requestedRef)]);
 
   const push = (ref: string | null | undefined, allowSameProvider = false) => {
     const r = (ref || "").trim();
-    if (!r || seenModels.has(r)) return;
+    if (!r || seenModels.has(modelKey(r))) return;
     const p = providerOf(r);
     if (!allowSameProvider && seenProviders.has(p)) return;
-    seenModels.add(r);
+    seenModels.add(modelKey(r));
     seenProviders.add(p);
     ladder.push(r);
   };
@@ -828,7 +996,7 @@ async function buildLadder(requestedRef: string, keys: LadderKeys | null): Promi
 }
 
 /** Lê as chaves pra montar a escada — best-effort (DB fora = escada vazia). */
-async function ladderKeys(opts: { geminiApiKey?: string | null; openrouterApiKey?: string | null; openrouterKeys?: string[] | null }): Promise<LadderKeys | null> {
+async function ladderKeys(opts: { geminiApiKey?: string | null; openrouterApiKey?: string | null; openrouterKeys?: string[] | null; fallbackModelRef?: string | null }): Promise<LadderKeys | null> {
   try {
     const { getAiKeys } = await import("@/lib/ai-keys");
     const keys = await getAiKeys();
@@ -836,7 +1004,7 @@ async function ladderKeys(opts: { geminiApiKey?: string | null; openrouterApiKey
       gemini: opts.geminiApiKey || keys?.gemini || null,
       openrouter: opts.openrouterApiKey || keys?.openrouter || null,
       openrouterKeys: opts.openrouterKeys || keys?.openrouterKeys || null,
-      gatewayFallbackModel: keys?.gatewayFallbackModel || null,
+      gatewayFallbackModel: opts.fallbackModelRef || keys?.gatewayFallbackModel || null,
     };
   } catch {
     return null;
@@ -855,6 +1023,7 @@ async function generateTextSingle(opts: GenerateTextOpts): Promise<GenerateTextR
     }
 
     let lastErr: unknown = null;
+    let accumulatedUsage = emptyUsage();
     for (let i = 0; i < steps.length; i++) {
       const stepRef = steps[i];
       try {
@@ -866,23 +1035,22 @@ async function generateTextSingle(opts: GenerateTextOpts): Promise<GenerateTextR
         });
         return {
           ...result,
+          usage: addAiUsage(accumulatedUsage, result.usage),
           didFallback: i > 0,
         };
       } catch (err) {
         lastErr = err;
+        const usage = aiUsageFromError(err);
+        if (usage) accumulatedUsage = addAiUsage(accumulatedUsage, usage);
         console.warn(`[ai-provider:combo] Passo ${i + 1}/${steps.length} (${stepRef}) falhou (${(err as any)?.message}). Avançando para o próximo modelo do combo.`);
       }
     }
 
-    // Se todos os passos do combo falharam, tenta o fallback global (opts ou banco).
-    const comboGlobalFallback = (opts.fallbackModelRef || "").trim() || keys?.gatewayFallbackModel || null;
-    if (comboGlobalFallback && comboGlobalFallback !== opts.modelRef) {
-      console.warn(`[ai-provider:combo] Todos os modelos do combo "${model}" falharam. Acionando fallback global: "${comboGlobalFallback}".`);
-      const res = await generateText({ ...opts, modelRef: comboGlobalFallback, fallbackModelRef: null });
-      return { ...res, didFallback: true };
+    if (lastErr instanceof AiEmptyResponseError) {
+      throw new AiEmptyResponseError(lastErr.provider, lastErr.model, accumulatedUsage, lastErr);
     }
-
-    throw lastErr instanceof Error ? lastErr : new Error(`Todos os ${steps.length} modelos do combo "${model}" falharam.`);
+    const terminalError = lastErr instanceof Error ? lastErr : new Error(`Todos os ${steps.length} modelos do combo "${model}" falharam.`);
+    throw accumulatedUsage.totalTokens > 0 ? setAiUsage(terminalError, accumulatedUsage) : terminalError;
   }
 
   if (provider === "openrouter") {
@@ -899,18 +1067,13 @@ async function generateTextSingle(opts: GenerateTextOpts): Promise<GenerateTextR
       openrouterKeys: opts.openrouterKeys,
     });
     const text = String(json?.choices?.[0]?.message?.content || "").trim();
-    return { text, usage: openRouterUsage(json), provider, modelUsed: model, didFallback: false };
+    return { text, usage: openRouterUsage(json, provider, model), provider, modelUsed: model, didFallback: false };
   }
 
   if (provider === "gateway") {
     const creds = await resolveGatewayCreds(opts, model);
     if (!creds.baseUrl) {
-      // Sem proxy configurado: se houver reserva, usa ela; senão erro claro.
-      if (creds.fallbackModelRef && creds.fallbackModelRef !== opts.modelRef) {
-        const r = await generateText({ ...opts, modelRef: creds.fallbackModelRef, gatewayBaseUrl: null, fallbackModelRef: null });
-        return { ...r, didFallback: true };
-      }
-      throw new Error("Gateway de assinatura não configurado. Defina a URL do proxy em Configurações.");
+      throw new ProviderHttpError(0, "Gateway de assinatura indisponível: defina a URL do proxy em Configurações.");
     }
     const messages: any[] = [];
     if (opts.system) messages.push(buildSystemMessage(opts.system, provider, model));
@@ -920,19 +1083,9 @@ async function generateTextSingle(opts: GenerateTextOpts): Promise<GenerateTextR
     if (opts.maxOutputTokens != null) body.max_tokens = opts.maxOutputTokens;
     if (opts.jsonMode) body.response_format = { type: "json_object" };
     applyReasoning(body, resolveReasoningMode(opts.reasoningMode, opts.thinkingBudget), provider, model);
-    try {
-      const json = await gatewayChatWithFailover(model, body, { baseUrl: creds.baseUrl, apiKey: creds.apiKey, endpointId: creds.endpointId });
-      const text = String(json?.choices?.[0]?.message?.content || "").trim();
-      return { text, usage: openRouterUsage(json), provider, modelUsed: model, didFallback: false };
-    } catch (err) {
-      // "Nunca quebra": gateway caiu/deslogou → cai pro modelo de reserva (API key).
-      if (creds.fallbackModelRef && creds.fallbackModelRef !== opts.modelRef) {
-        console.warn(`[ai-provider] Gateway falhou (${(err as any)?.message}). Caindo pro fallback "${creds.fallbackModelRef}".`);
-        const r = await generateText({ ...opts, modelRef: creds.fallbackModelRef, gatewayBaseUrl: null, fallbackModelRef: null });
-        return { ...r, didFallback: true };
-      }
-      throw err;
-    }
+    const json = await gatewayChatWithFailover(model, body, { baseUrl: creds.baseUrl, apiKey: creds.apiKey, endpointId: creds.endpointId });
+    const text = String(json?.choices?.[0]?.message?.content || "").trim();
+    return { text, usage: openRouterUsage(json, provider, model), provider, modelUsed: model, didFallback: false };
   }
 
   // Gemini
@@ -965,9 +1118,12 @@ async function generateTextSingle(opts: GenerateTextOpts): Promise<GenerateTextR
 
   try {
     const res = await run(model);
+    const text = res.response.text().trim();
+    const usage = geminiUsage(res, model);
+    if (!text) throw new AiEmptyResponseError("gemini", model, usage);
     return {
-      text: res.response.text().trim(),
-      usage: geminiUsage(res),
+      text,
+      usage,
       provider,
       modelUsed: model,
       didFallback: false,
@@ -978,9 +1134,12 @@ async function generateTextSingle(opts: GenerateTextOpts): Promise<GenerateTextR
     if (!fallback || fallback === model) throw err;
     console.warn(`[ai-provider] Gemini "${model}" morto. Retentando com "${fallback}".`);
     const res = await run(fallback);
+    const text = res.response.text().trim();
+    const usage = geminiUsage(res, fallback);
+    if (!text) throw new AiEmptyResponseError("gemini", fallback, usage);
     return {
-      text: res.response.text().trim(),
-      usage: geminiUsage(res),
+      text,
+      usage,
       provider,
       modelUsed: fallback,
       didFallback: true,
@@ -1000,6 +1159,8 @@ export async function generateText(opts: GenerateTextOpts): Promise<GenerateText
   try {
     return await generateTextSingle(opts);
   } catch (err) {
+    let lastErr: unknown = err;
+    let accumulatedUsage = aiUsageFromError(err) || emptyUsage();
     if (!isAccountLevelError(err)) throw err;
     const keys = await ladderKeys(opts);
     const ladder = await buildLadder(opts.modelRef, keys);
@@ -1014,13 +1175,18 @@ export async function generateText(opts: GenerateTextOpts): Promise<GenerateText
           openrouterApiKey: keys?.openrouter || null,
           openrouterKeys: keys?.openrouterKeys || null,
         });
-        return { ...res, didFallback: true };
+        return { ...res, usage: addAiUsage(accumulatedUsage, res.usage), didFallback: true };
       } catch (rungErr) {
+        lastErr = rungErr;
+        const usage = aiUsageFromError(rungErr);
+        if (usage) accumulatedUsage = addAiUsage(accumulatedUsage, usage);
         console.warn(`[ai-provider] Degrau "${rung}" falhou (${String((rungErr as any)?.message || rungErr).slice(0, 80)}). Tentando próximo da escada.`);
-        // Continua para o próximo degrau
       }
     }
-    throw err; // esgotou a escada inteira — aí sim falha de verdade
+    if (lastErr instanceof AiEmptyResponseError) {
+      throw new AiEmptyResponseError(lastErr.provider, lastErr.model, accumulatedUsage, lastErr);
+    }
+    throw accumulatedUsage.totalTokens > 0 ? setAiUsage(lastErr, accumulatedUsage) : lastErr;
   }
 }
 
@@ -1059,6 +1225,13 @@ export interface AiTurnResult {
   text: string;
   toolCalls: AiToolCall[];
   usage: AiUsage;
+}
+
+function requireUsableTurn(turn: AiTurnResult, provider: AiProvider, model: string): AiTurnResult {
+  if (!turn.text.trim() && turn.toolCalls.length === 0) {
+    throw new AiEmptyResponseError(provider, model, turn.usage);
+  }
+  return turn;
 }
 
 export interface AiChatSession {
@@ -1105,26 +1278,61 @@ export interface StartAiChatOpts {
  * Só lança quando NENHUMA conta/provider consegue atender.
  */
 export async function startAiChat(opts: StartAiChatOpts): Promise<AiChatSession> {
-  const inner = await startAiChatSingle(opts);
+  let inner: AiChatSession;
+  let initialRungIndex = 0;
+  let resolvedKeys: LadderKeys | null = null;
+  let resolvedLadder: string[] | null = null;
+  try {
+    inner = await startAiChatSingle(opts);
+  } catch (err) {
+    if (opts.noGatewayFallback || !isAccountLevelError(err)) throw err;
+    resolvedKeys = await ladderKeys(opts);
+    resolvedLadder = await buildLadder(opts.modelRef, resolvedKeys);
+    let lastErr: unknown = err;
+    let initialized: AiChatSession | null = null;
+    for (let index = 1; index < resolvedLadder.length; index++) {
+      const rung = resolvedLadder[index];
+      try {
+        initialized = await startAiChatSingle({
+          ...opts,
+          modelRef: rung,
+          noGatewayFallback: true,
+          geminiApiKey: opts.geminiApiKey || resolvedKeys?.gemini || null,
+          openrouterApiKey: opts.openrouterApiKey || resolvedKeys?.openrouter || null,
+          openrouterKeys: opts.openrouterKeys || resolvedKeys?.openrouterKeys || null,
+        });
+        initialRungIndex = index;
+        break;
+      } catch (rungErr) {
+        lastErr = rungErr;
+      }
+    }
+    if (!initialized) throw lastErr;
+    inner = initialized;
+  }
   if (opts.noGatewayFallback) return inner;
 
   let migrated: AiChatSession | null = null;
   let successfulTurns = 0;
 
   return {
-    provider: inner.provider,
+    get provider() { return migrated ? migrated.provider : inner.provider; },
     modelUsed: () => (migrated ? migrated.modelUsed() : inner.modelUsed()),
     async sendUser(text: string) {
       if (migrated) return migrated.sendUser(text);
+      let accumulatedUsage = emptyUsage();
       try {
         const r = await inner.sendUser(text);
         successfulTurns++;
         return r;
       } catch (err) {
+        let lastErr: unknown = err;
+        const initialUsage = aiUsageFromError(err);
+        if (initialUsage) accumulatedUsage = addAiUsage(accumulatedUsage, initialUsage);
         if (successfulTurns > 0 || !isAccountLevelError(err)) throw err;
-        const keys = await ladderKeys(opts);
-        const ladder = await buildLadder(opts.modelRef, keys);
-        for (const rung of ladder.slice(1)) {
+        const keys = resolvedKeys || await ladderKeys(opts);
+        const ladder = resolvedLadder || await buildLadder(opts.modelRef, keys);
+        for (const rung of ladder.slice(initialRungIndex + 1)) {
           try {
             console.warn(`[ai-provider] Sessão "${opts.modelRef}" falhou no 1º turno (${String((err as any)?.message || err).slice(0, 120)}). Migrando pro fallback cross-provider "${rung}".`);
             const s = await startAiChatSingle({
@@ -1138,13 +1346,18 @@ export async function startAiChat(opts: StartAiChatOpts): Promise<AiChatSession>
             const r = await s.sendUser(text);
             migrated = s;
             successfulTurns++;
-            return r;
+            return { ...r, usage: addAiUsage(accumulatedUsage, r.usage) };
           } catch (rungErr) {
+            lastErr = rungErr;
+            const usage = aiUsageFromError(rungErr);
+            if (usage) accumulatedUsage = addAiUsage(accumulatedUsage, usage);
             console.warn(`[ai-provider] Degrau de sessão "${rung}" falhou (${String((rungErr as any)?.message || rungErr).slice(0, 80)}). Tentando próximo.`);
-            // rung morreu também → tenta o próximo da escada
           }
         }
-        throw err; // esgotou a escada inteira
+        if (lastErr instanceof AiEmptyResponseError) {
+          throw new AiEmptyResponseError(lastErr.provider, lastErr.model, accumulatedUsage, lastErr);
+        }
+        throw accumulatedUsage.totalTokens > 0 ? setAiUsage(lastErr, accumulatedUsage) : lastErr;
       }
     },
     async sendToolResults(results: AiToolResult[]) {
@@ -1169,13 +1382,8 @@ async function startAiChatSingle(opts: StartAiChatOpts): Promise<AiChatSession> 
     let activeSession: AiChatSession | null = null;
     let turnsCount = 0;
 
-    async function initSessionAtIndex(index: number): Promise<AiChatSession> {
+    async function initSessionAtIndex(index: number): Promise<{ session: AiChatSession; index: number }> {
       if (index >= steps.length) {
-        const comboGlobalFallback = (opts.fallbackModelRef || "").trim() || keys?.gatewayFallbackModel || null;
-        if (comboGlobalFallback && comboGlobalFallback !== opts.modelRef) {
-          console.warn(`[ai-provider:combo] Todos os modelos do combo "${model}" falharam na inicialização. Acionando fallback global: "${comboGlobalFallback}".`);
-          return startAiChat({ ...opts, modelRef: comboGlobalFallback, fallbackModelRef: null });
-        }
         throw new Error(`Todos os ${steps.length} modelos do combo "${model}" falharam.`);
       }
 
@@ -1187,35 +1395,48 @@ async function startAiChatSingle(opts: StartAiChatOpts): Promise<AiChatSession> 
           fallbackModelRef: null,
           noGatewayFallback: true, // Sem makeFallback global: falha propaga p/ cascata
         });
-        return session;
+        return { session, index };
       } catch (err) {
         console.warn(`[ai-provider:combo] Falha ao iniciar modelo ${index + 1}/${steps.length} (${targetRef}): ${(err as any)?.message}. Tentando próximo modelo do combo.`);
         return initSessionAtIndex(index + 1);
       }
     }
 
-    activeSession = await initSessionAtIndex(0);
+    const initialized = await initSessionAtIndex(0);
+    activeSession = initialized.session;
+    currentIndex = initialized.index;
 
     return {
-      provider: "combo",
+      get provider() { return activeSession ? activeSession.provider : "combo"; },
       modelUsed: () => activeSession ? activeSession.modelUsed() : steps[currentIndex] || model,
       async sendUser(text: string) {
-        if (!activeSession) {
-          activeSession = await initSessionAtIndex(currentIndex);
-        }
-        try {
-          const res = await activeSession.sendUser(text);
-          turnsCount++;
-          return res;
-        } catch (err) {
-          // Se falhou no primeiro turno, tenta o próximo modelo do combo
-          if (turnsCount === 0 && currentIndex + 1 < steps.length) {
-            currentIndex++;
-            console.warn(`[ai-provider:combo] Turno inicial falhou no modelo ${steps[currentIndex - 1]} (${(err as any)?.message}). Cascata para ${steps[currentIndex]}.`);
-            activeSession = await initSessionAtIndex(currentIndex);
-            return activeSession.sendUser(text);
+        let accumulatedUsage = emptyUsage();
+        while (true) {
+          if (!activeSession) {
+            const initialized = await initSessionAtIndex(currentIndex);
+            activeSession = initialized.session;
+            currentIndex = initialized.index;
           }
-          throw err;
+          try {
+            const res = await activeSession.sendUser(text);
+            turnsCount++;
+            return { ...res, usage: addAiUsage(accumulatedUsage, res.usage) };
+          } catch (err) {
+            const usage = aiUsageFromError(err);
+            if (usage) accumulatedUsage = addAiUsage(accumulatedUsage, usage);
+            if (turnsCount > 0 || currentIndex + 1 >= steps.length) {
+              if (err instanceof AiEmptyResponseError) {
+                throw new AiEmptyResponseError(err.provider, err.model, accumulatedUsage, err);
+              }
+              throw accumulatedUsage.totalTokens > 0 ? setAiUsage(err, accumulatedUsage) : err;
+            }
+            const failedModel = steps[currentIndex];
+            currentIndex++;
+            console.warn(`[ai-provider:combo] Turno inicial falhou no modelo ${failedModel} (${(err as any)?.message}). Cascata para ${steps[currentIndex]}.`);
+            const initialized = await initSessionAtIndex(currentIndex);
+            activeSession = initialized.session;
+            currentIndex = initialized.index;
+          }
         }
       },
       async sendToolResults(results: AiToolResult[]) {
@@ -1235,32 +1456,17 @@ async function startAiChatSingle(opts: StartAiChatOpts): Promise<AiChatSession> 
           openrouterApiKey: opts.openrouterApiKey,
           openrouterKeys: opts.openrouterKeys,
         }),
-      makeFallback: opts.geminiApiKey ? async () => {
-        // Usa a reserva ESCOLHIDA pelo usuário se configurada; senão o melhor flash descoberto
-        let target = opts.fallbackModelRef || (await ladderKeys(opts))?.gatewayFallbackModel || null;
-        if (!target) {
-          try { target = (await pickBestFlashModel()) || "gemini-2.5-flash"; }
-          catch { target = "gemini-2.5-flash"; }
-        }
-        console.warn(`[ai-provider] OpenRouter falhou em todas as chaves. Fazendo fallback de último caso para "${target}".`);
-        return startAiChat({ ...opts, modelRef: target });
-      } : undefined
     });
   }
 
   if (provider === "gateway") {
     const creds = await resolveGatewayCreds(opts, model);
-    const fb = creds.fallbackModelRef && creds.fallbackModelRef !== opts.modelRef ? creds.fallbackModelRef : null;
     if (!creds.baseUrl) {
-      // Sem proxy: usa a reserva direto, ou erro claro.
-      if (fb) return startAiChat({ ...opts, modelRef: fb, gatewayBaseUrl: null, fallbackModelRef: null });
-      throw new Error("Gateway de assinatura não configurado. Defina a URL do proxy em Configurações.");
+      throw new ProviderHttpError(0, "Gateway de assinatura não configurado. Defina a URL do proxy em Configurações.");
     }
     return startOpenAICompatibleChat(opts, model, {
       provider: "gateway",
       post: (body) => gatewayChatWithFailover(model, body, { baseUrl: creds.baseUrl, apiKey: creds.apiKey, endpointId: creds.endpointId }),
-      // "Nunca quebra": se a 1ª mensagem falhar, migra a sessão pro fallback (API key).
-      makeFallback: fb ? () => startAiChat({ ...opts, modelRef: fb, gatewayBaseUrl: null, fallbackModelRef: null }) : undefined,
     });
   }
 
@@ -1304,7 +1510,7 @@ function startGeminiChat(opts: StartAiChatOpts, requestedModel: string): AiChatS
     }));
     let text = "";
     try { text = result.response.text().trim(); } catch { text = ""; }
-    return { text, toolCalls: calls, usage: geminiUsage(result) };
+    return requireUsableTurn({ text, toolCalls: calls, usage: geminiUsage(result, usedModel) }, "gemini", usedModel);
   }
 
   return {
@@ -1344,12 +1550,6 @@ interface OACChatDeps {
   provider: "openrouter" | "gateway";
   /** POST /chat/completions já com baseURL+headers do provedor. */
   post: (body: Record<string, any>) => Promise<any>;
-  /**
-   * (Só gateway) Fábrica de sessão de RESERVA. Se a 1ª mensagem falhar (proxy
-   * fora / conta deslogada), a sessão migra transparente pro fallback (API
-   * key) — garante "nunca quebra".
-   */
-  makeFallback?: () => Promise<AiChatSession>;
 }
 
 function startOpenAICompatibleChat(opts: StartAiChatOpts, model: string, deps: OACChatDeps): AiChatSession {
@@ -1381,11 +1581,6 @@ function startOpenAICompatibleChat(opts: StartAiChatOpts, model: string, deps: O
   // Modo de raciocínio universal (resolve 1x; mesmo valor em todos os turnos
   // do loop de tools — incl. o retry sem tools). Mapeado por applyReasoning.
   const rMode = resolveReasoningMode(opts.reasoningMode, opts.thinkingBudget);
-
-  // Estado do fallback de sessão (só gateway). Migra UMA vez, na 1ª mensagem.
-  let fallbackSession: AiChatSession | null = null;
-  let migrated = false;
-  let successfulTurns = 0;
 
   async function call(): Promise<AiTurnResult> {
     const body: Record<string, any> = { model, messages };
@@ -1431,33 +1626,28 @@ function startOpenAICompatibleChat(opts: StartAiChatOpts, model: string, deps: O
           return { name: tc.function?.name, args, id: tc.id };
         })
       : [];
-    return { text: String(msg.content || "").trim(), toolCalls, usage: openRouterUsage(json) };
+    return requireUsableTurn(
+      { text: String(msg.content || "").trim(), toolCalls, usage: openRouterUsage(json, deps.provider, model) },
+      deps.provider,
+      model,
+    );
   }
 
   return {
     provider: deps.provider,
-    modelUsed: () => (migrated && fallbackSession ? fallbackSession.modelUsed() : model),
+    modelUsed: () => model,
     async sendUser(text: string) {
-      if (migrated && fallbackSession) return fallbackSession.sendUser(text);
+      const userMessageIndex = messages.length;
       messages.push({ role: "user", content: text });
       try {
-        const r = await call();
-        successfulTurns++;
-        return r;
+        return await call();
       } catch (err) {
-        // Só migra na PRIMEIRA mensagem (sem turnos bem-sucedidos ainda) — não
-        // troca de modelo no meio da conversa pra não perder contexto.
-        if (deps.makeFallback && successfulTurns === 0) {
-          console.warn(`[ai-provider] Sessão ${providerLabel} falhou na 1ª msg (${(err as any)?.message}). Migrando pro fallback.`);
-          fallbackSession = await deps.makeFallback();
-          migrated = true;
-          return fallbackSession.sendUser(text);
-        }
+        messages.splice(userMessageIndex);
         throw err;
       }
     },
     async sendToolResults(results: AiToolResult[]) {
-      if (migrated && fallbackSession) return fallbackSession.sendToolResults(results);
+      const toolMessageIndex = messages.length;
       for (const r of results) {
         messages.push({
           role: "tool",
@@ -1465,7 +1655,12 @@ function startOpenAICompatibleChat(opts: StartAiChatOpts, model: string, deps: O
           content: typeof r.response === "string" ? r.response : JSON.stringify(r.response),
         });
       }
-      return call();
+      try {
+        return await call();
+      } catch (err) {
+        messages.splice(toolMessageIndex);
+        throw err;
+      }
     },
   };
 }

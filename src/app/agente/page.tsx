@@ -15,6 +15,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Header } from "@/components/layout/header";
 import { supabase } from "@/lib/supabase";
 import { renderTemplate } from "@/lib/template-vars";
+import { sandboxSuppressionMessage } from "@/lib/agent-format";
 import { cn } from "@/lib/utils";
 import { useClientSession } from "@/lib/use-session";
 import { Activity, FlaskConical, Info, ListTree, Settings, type LucideIcon } from "lucide-react";
@@ -999,6 +1000,12 @@ export default function AgentePage() {
         };
         const msg = statusMessages[data.status] || `⚠️ Status inesperado: ${data.status}`;
         setTestMessages((prev) => [...prev, { role: "agent", isError: true, content: msg }]);
+        return;
+      }
+
+      const suppressionMessage = sandboxSuppressionMessage(data.suppressed);
+      if (suppressionMessage) {
+        setTestMessages((prev) => [...prev, { role: "tool", content: suppressionMessage }]);
         return;
       }
 

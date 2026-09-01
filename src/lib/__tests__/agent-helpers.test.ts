@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { resolveFunnelStage, checkSchedulesSync, splitMessage, type FunnelStage } from "../agent-format";
+import { resolveFunnelStage, checkSchedulesSync, resolveAgentOutput, sanitizeAgentAnswer, sandboxSuppressionMessage, splitMessage, type FunnelStage } from "../agent-format";
 
 /* ============================================================
    FUNIL — resolveFunnelStage
@@ -89,6 +89,39 @@ describe("checkSchedulesSync", () => {
     // 2026-05-28 é quinta — não está na lista
     const now = new Date("2026-05-28T13:00:00Z");
     expect(checkSchedulesSync(schedules, now)).toBe(true);
+  });
+});
+
+describe("sanitizeAgentAnswer", () => {
+  test("remove cercas markdown e variáveis não resolvidas", () => {
+    expect(sanitizeAgentAnswer("```text\nOlá {{nome}}\n```")).toBe("Olá");
+  });
+
+  test("retorna vazio quando não existe conteúdo enviável", () => {
+    expect(sanitizeAgentAnswer("```\n{{nome}}\n```")).toBe("");
+    expect(sanitizeAgentAnswer(" \r\n```text\r\n{{nome}}\r\n``` \r\n")).toBe("");
+  });
+});
+
+describe("resolveAgentOutput", () => {
+  test("autoriza somente texto enviável sanitizado", () => {
+    expect(resolveAgentOutput("```text\nOlá {{nome}}\n```", 0)).toEqual({ send: true, text: "Olá" });
+  });
+
+  test("suprime conteúdo vazio sem fabricar fallback", () => {
+    expect(resolveAgentOutput("```\n{{nome}}\n```", 0)).toEqual({ send: false, suppressed: "empty_output" });
+  });
+
+  test("suprime resposta enquanto houver ferramenta pendente", () => {
+    expect(resolveAgentOutput("texto parcial", 1)).toEqual({ send: false, suppressed: "tool_loop_exhausted" });
+  });
+});
+
+describe("sandboxSuppressionMessage", () => {
+  test("transforma supressão em diagnóstico fora do histórico do agente", () => {
+    expect(sandboxSuppressionMessage("empty_output")).toBe("Resposta vazia suprimida. Nenhuma mensagem foi enviada.");
+    expect(sandboxSuppressionMessage("tool_loop_exhausted")).toBe("Limite de ferramentas atingido. Nenhuma mensagem foi enviada.");
+    expect(sandboxSuppressionMessage("unknown")).toBeNull();
   });
 });
 

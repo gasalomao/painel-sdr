@@ -14,13 +14,11 @@
 const locks = new Map<string, Promise<unknown>>();
 
 export async function withSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
-  const prev = locks.get(sessionId) ?? Promise.resolve();
+  const previous = locks.get(sessionId) ?? Promise.resolve();
   let release!: () => void;
-  const current = prev.then(
-    () => new Promise<void>((r) => release()),
-    () => new Promise<void>((r) => release())
-  );
+  const current = new Promise<void>((resolve) => { release = resolve; });
   locks.set(sessionId, current);
+  await previous;
   try {
     return await fn();
   } finally {
