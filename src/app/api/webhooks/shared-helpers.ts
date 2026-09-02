@@ -502,12 +502,13 @@ export async function healLeadNameFromPushName(remoteJid: string, pushName: stri
  *
  * Evita martelar a Evolution: se já tem URL fresca, pula.
  */
-export async function refreshProfilePicIfStale(remoteJid: string, instanceName?: string): Promise<void> {
-  if (!instanceName) return;
+export async function refreshProfilePicIfStale(remoteJid: string, instanceName: string, clientId: string): Promise<void> {
+  if (!instanceName || !clientId) return;
   try {
     const { data: contact } = await supabase
       .from("contacts")
       .select("profile_pic_url, profile_pic_fetched_at")
+      .eq("client_id", clientId)
       .eq("remote_jid", remoteJid)
       .maybeSingle();
 
@@ -532,12 +533,14 @@ export async function refreshProfilePicIfStale(remoteJid: string, instanceName?:
           profile_pic_url: url,
           profile_pic_fetched_at: new Date().toISOString(),
         })
+        .eq("client_id", clientId)
         .eq("remote_jid", remoteJid);
     } else {
       // Marca como buscado mesmo sem URL (evita retry a cada mensagem).
       await supabase
         .from("contacts")
         .update({ profile_pic_fetched_at: new Date().toISOString() })
+        .eq("client_id", clientId)
         .eq("remote_jid", remoteJid);
     }
   } catch {

@@ -17,11 +17,13 @@ import { whatsappCloud, type WhatsAppCloudConfig } from "@/lib/whatsapp-cloud";
 import { evolutionGo } from "@/lib/providers/evolution-go";
 import { evolutionV2 } from "@/lib/providers/evolution-v2";
 import type { WhatsAppProvider, SendResult, MediaData, ConnectionStatus, QRCodeResult } from "@/lib/providers/types";
+import { fetchPublicHttpUrl } from "@/lib/safe-url";
 
 export type ResolvedChannel = {
   instance_name: string;
   provider: "evolution_go" | "whatsapp_cloud" | "evolution" | string;
   agent_id?: number | null;
+  client_id?: string | null;
   status?: string | null;
   cloud?: WhatsAppCloudConfig | null;
 };
@@ -37,7 +39,7 @@ export async function resolveChannel(instanceName: string, opts: { fresh?: boole
 
   const { data } = await supabase
     .from("channel_connections")
-    .select("instance_name, provider, agent_id, status, provider_config")
+    .select("instance_name, provider, agent_id, client_id, status, provider_config")
     .eq("instance_name", instanceName)
     .maybeSingle();
 
@@ -60,6 +62,7 @@ export async function resolveChannel(instanceName: string, opts: { fresh?: boole
     instance_name: instanceName,
     provider,
     agent_id: data?.agent_id ?? null,
+    client_id: data?.client_id ?? null,
     status: data?.status ?? null,
     cloud,
   };
@@ -72,15 +75,21 @@ export function invalidateChannelCache(instanceName?: string) {
   else channelCache.clear();
 }
 
-/** Resolve qual instance_name deve responder a um phone_number_id da Cloud API (vinda do webhook). */
-export async function resolveInstanceFromPhoneNumberId(phoneNumberId: string): Promise<string | null> {
+export async function resolveConnectionFromPhoneNumberId(
+  phoneNumberId: string,
+): Promise<{ instanceName: string; clientId: string } | null> {
   const { data } = await supabase
     .from("channel_connections")
-    .select("instance_name, provider_config")
+    .select("instance_name, client_id")
     .eq("provider", "whatsapp_cloud")
     .eq("provider_config->>phone_number_id", phoneNumberId)
     .maybeSingle();
-  return data?.instance_name || null;
+  if (!data?.instance_name || !data?.client_id) return null;
+  return { instanceName: data.instance_name, clientId: data.client_id };
+}
+
+export async function resolveInstanceFromPhoneNumberId(phoneNumberId: string): Promise<string | null> {
+  return (await resolveConnectionFromPhoneNumberId(phoneNumberId))?.instanceName || null;
 }
 
 function ensureCloudConfig(ch: ResolvedChannel): WhatsAppCloudConfig {
@@ -130,7 +139,45 @@ const MEDIA_CACHE_TTL_MS = 6 * 3600 * 1000; // 6h — produtos mudam raramente
  */
 const MEDIA_CACHE_MAX_BYTES = 48 * 1024 * 1024;
 const MEDIA_CACHE_ITEM_MAX_BYTES = 8 * 1024 * 1024;
+const REMOTE_MEDIA_MAX_BYTES = 100 * 1024 * 1024;
 let mediaCacheBytes = 0;
+
+class MediaTooLargeError extends Error {
+  constructor(size?: number) {
+    super(size
+      ? `Mídia remota excede o limite de 100MB (${(size / 1024 / 1024).toFixed(1)}MB)`
+      : "Mídia remota excede o limite de 100MB");
+    this.name = "MediaTooLargeError";
+  }
+}
+
+async function readBodyBounded(response: Response, maxBytes: number): Promise<Buffer> {
+  const declaredSize = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredSize) && declaredSize > maxBytes) {
+    await response.body?.cancel().catch(() => {});
+    throw new MediaTooLargeError(declaredSize);
+  }
+  if (!response.body) return Buffer.alloc(0);
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw new MediaTooLargeError(total);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, total);
+}
 
 function cachePutBounded(url: string, entry: { base64: string; mimetype: string; ts: number }) {
   const size = entry.base64.length;
@@ -160,7 +207,7 @@ async function fetchUrlAsBase64(url: string): Promise<{ base64: string; mimetype
   }
 
   try {
-    const res = await fetch(url, {
+    const res = await fetchPublicHttpUrl(url, {
       signal: AbortSignal.timeout(60000), // 60s — arquivos até 100MB em conexões lentas
       headers: { "User-Agent": "painel-sdr-media/1.0" },
     });
@@ -169,12 +216,9 @@ async function fetchUrlAsBase64(url: string): Promise<{ base64: string; mimetype
       return null;
     }
     const mimetype = res.headers.get("content-type") || "image/jpeg";
-    const buf = Buffer.from(await res.arrayBuffer());
-    // Limite 100MB — WhatsApp aceita documentos até 100MB; imagens/vídeos/áudio têm limites menores.
-    // Apenas avisa — não rejeita (Evolution/Baileys decide se aceita ou não por tipo).
-    if (buf.length > 100 * 1024 * 1024) {
-      console.warn(`[channel] Mídia ${url} tem ${(buf.length / 1024 / 1024).toFixed(1)}MB (>100MB) — WhatsApp pode rejeitar.`);
-    }
+    // Limita durante o streaming. Validar só após arrayBuffer() permitia que uma
+    // resposta sem Content-Length consumisse memória sem limite antes do check.
+    const buf = await readBodyBounded(res, REMOTE_MEDIA_MAX_BYTES);
     const base64 = buf.toString("base64");
 
     // Cache com orçamento em bytes (ver MEDIA_CACHE_MAX_BYTES acima).
@@ -183,6 +227,7 @@ async function fetchUrlAsBase64(url: string): Promise<{ base64: string; mimetype
     return { base64, mimetype };
   } catch (err: any) {
     console.warn(`[channel] fetchUrlAsBase64 erro pra ${url}:`, err?.message);
+    if (err instanceof MediaTooLargeError) throw err;
     return null;
   }
 }
@@ -365,6 +410,10 @@ export async function fetchProfilePicture(remoteJid: string, instanceName: strin
 export async function bulkSyncProfilePics(instanceName: string): Promise<number> {
   const ch = await resolveChannel(instanceName);
   if (ch.provider === "whatsapp_cloud") return 0;
+  if (!ch.client_id) {
+    console.error(`[bulkSync] instância "${instanceName}" sem client_id — abortando para não misturar tenants.`);
+    return 0;
+  }
 
   const { primary, fallback } = await getProvider(instanceName);
 
@@ -394,6 +443,7 @@ export async function bulkSyncProfilePics(instanceName: string): Promise<number>
   const validUpdates = contacts
     .filter((c) => c.profilePicUrl && c.profilePicUrl.startsWith("http"))
     .map((c) => ({
+      client_id: ch.client_id,
       remote_jid: c.remoteJid,
       phone_number: c.remoteJid.replace(/@.*$/, "").replace(/\D/g, ""),
       profile_pic_url: c.profilePicUrl,
@@ -409,12 +459,13 @@ export async function bulkSyncProfilePics(instanceName: string): Promise<number>
           .from("contacts")
           .upsert(
             {
+              client_id: ch.client_id,
               remote_jid: u.remote_jid,
               phone_number: u.phone_number,
               profile_pic_url: u.profile_pic_url,
               profile_pic_fetched_at: now,
             },
-            { onConflict: "remote_jid" }
+            { onConflict: "client_id,remote_jid" }
           )
       )
     );

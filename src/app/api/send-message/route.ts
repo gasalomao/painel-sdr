@@ -3,7 +3,7 @@ import { evolution, getEvolutionConfig } from "@/lib/evolution";
 import * as channel from "@/lib/channel";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { registerManualSend } from "@/lib/manual-send-registry";
-import { requireClientId, DEFAULT_CLIENT_ID } from "@/lib/tenant";
+import { isInstanceOwnedByClient, requireClientId } from "@/lib/tenant";
 
 // Mesmo bucket público usado pelo webhook de entrada (ver webhooks/whatsapp/route.ts).
 // Mantemos o upload para não inflar o DB com data URIs gigantes de áudio/imagem.
@@ -87,16 +87,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Obrigatório enviar text ou media" }, { status: 400 });
     }
 
-    // OWNERSHIP: instância pertence ao cliente logado? (admin pula check)
-    if (!ctx.isAdmin) {
-      const { data: conn } = await supabase
-        .from("channel_connections")
-        .select("client_id")
-        .eq("instance_name", instanceName)
-        .maybeSingle();
-      if (!conn || conn.client_id !== ctx.clientId) {
-        return NextResponse.json({ error: "Instância não pertence à sua conta" }, { status: 403 });
-      }
+    // A sessão admin continua limitada ao próprio escopo. Para operar outro
+    // tenant, o admin deve personificá-lo; nunca autorize canal por papel global.
+    if (!(await isInstanceOwnedByClient(String(instanceName), ctx.clientId))) {
+      return NextResponse.json({ error: "Instância não pertence à sua conta" }, { status: 403 });
     }
 
     let cleanJid = String(remoteJid).trim();
@@ -119,7 +113,9 @@ export async function POST(req: NextRequest) {
       const { data: recentDup } = await supabase
         .from("chats_dashboard")
         .select("id, message_id")
-        .eq("remote_jid", remoteJid)
+        .eq("remote_jid", cleanJid)
+        .eq("client_id", ctx.clientId)
+        .eq("instance_name", instanceName)
         .eq("sender_type", "human")
         .eq("content", trimmedText)
         .gte("created_at", sinceDedup)
@@ -170,7 +166,7 @@ export async function POST(req: NextRequest) {
     if (media && media.base64) {
       outMimetype = inferMimeForType(media.type, media.mimetype);
       outMediaType = media.type === "document" ? "document" : media.type;
-      outMediaUrl = await uploadOutgoingMedia(media.base64, remoteJid, outMimetype, media.fileName);
+      outMediaUrl = await uploadOutgoingMedia(media.base64, cleanJid, outMimetype, media.fileName);
     }
 
     // Registra IMEDIATAMENTE que esta msg foi enviada manualmente.
@@ -183,23 +179,31 @@ export async function POST(req: NextRequest) {
     let sessionId: string | null = null;
 
     try {
-      const { data: contact } = await supabase.from("contacts").select("id, client_id").eq("remote_jid", remoteJid).maybeSingle();
+      const { data: contact } = await supabase
+        .from("contacts")
+        .select("id")
+        .eq("remote_jid", cleanJid)
+        .eq("client_id", ctx.clientId)
+        .maybeSingle();
       if (contact) {
         contactId = contact.id;
-        if (ctx.clientId && (!contact.client_id || contact.client_id === DEFAULT_CLIENT_ID)) {
-          await supabase.from("contacts").update({ client_id: ctx.clientId }).eq("id", contactId);
-        }
       } else {
         const { data: nc } = await supabase.from("contacts").insert({
           client_id: ctx.clientId,
-          remote_jid: remoteJid,
-          phone_number: evolution.extractPhone(remoteJid),
+          remote_jid: cleanJid,
+          phone_number: evolution.extractPhone(cleanJid),
         }).select("id").single();
         contactId = nc?.id || null;
       }
 
       if (contactId) {
-        const { data: session } = await supabase.from("sessions").select("id").eq("contact_id", contactId).eq("instance_name", instanceName).maybeSingle();
+        const { data: session } = await supabase
+          .from("sessions")
+          .select("id")
+          .eq("contact_id", contactId)
+          .eq("instance_name", instanceName)
+          .eq("client_id", ctx.clientId)
+          .maybeSingle();
         if (session) {
           sessionId = session.id;
         } else {
@@ -240,7 +244,7 @@ export async function POST(req: NextRequest) {
         await supabase.from("messages").update({
           sender: 'human',
           delivery_status: finalStatus,
-        }).eq("message_id", msgId);
+        }).eq("message_id", msgId).eq("client_id", ctx.clientId);
       } else if (insertErr) {
         console.warn("[SEND-MESSAGE] messages insert:", insertErr.message);
       }
@@ -249,7 +253,7 @@ export async function POST(req: NextRequest) {
     // Legado chats_dashboard — mesmo tratamento
     const dashPayload: Record<string, any> = {
       client_id: ctx.clientId,
-      remote_jid: remoteJid,
+      remote_jid: cleanJid,
       instance_name: instanceName,
       message_id: msgId,
       sender_type: 'human',
@@ -287,7 +291,7 @@ export async function POST(req: NextRequest) {
       if (outMediaUrl) upd.media_url = outMediaUrl;
       if (outMediaType) upd.media_type = outMediaType;
       if (outMimetype) upd.mimetype = outMimetype;
-      await supabase.from("chats_dashboard").update(upd).eq("message_id", msgId);
+      await supabase.from("chats_dashboard").update(upd).eq("message_id", msgId).eq("client_id", ctx.clientId);
     } else if (dashErr) {
       console.warn("[SEND-MESSAGE] chats_dashboard insert:", dashErr.message);
     }
@@ -299,7 +303,8 @@ export async function POST(req: NextRequest) {
       await supabase
         .from("sessions")
         .update({ last_message_at: now, last_message: text || "" })
-        .eq("id", sessionId);
+        .eq("id", sessionId)
+        .eq("client_id", ctx.clientId);
     }
 
     // === 4. Resposta ===

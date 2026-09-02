@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   SESSION_COOKIE,
   verifySession,
-  isSessionLive,
+  isSessionLiveStrict,
   findClientById,
   hashPassword,
   verifyPassword,
@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
   const token = req.cookies.get(SESSION_COOKIE)?.value;
   if (!token) return NextResponse.json({ ok: false, error: "Não autenticado" }, { status: 401 });
   const claims = await verifySession(token);
-  if (!claims || !(await isSessionLive(claims.sessionId, token))) {
+  if (!claims || !(await isSessionLiveStrict(claims.sessionId, token))) {
     return NextResponse.json({ ok: false, error: "Sessão inválida" }, { status: 401 });
   }
 

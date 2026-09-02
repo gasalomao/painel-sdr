@@ -38,6 +38,11 @@ vi.mock("@/lib/gateway-proxy-manager", () => ({
   ensureProxyRunning: async () => ({ running: st.proxyRunning, installed: true }),
 }));
 
+vi.mock("@/lib/deepseek-chat-manager", () => ({
+  countActiveTokens: () => 0,
+  listTokens: () => [],
+}));
+
 vi.mock("@/lib/gemini-model-discovery", async () => {
   const actual: any = await vi.importActual("@/lib/gemini-model-discovery");
   return { ...actual, pickBestFlashModel: async () => "gemini-2.5-flash" };

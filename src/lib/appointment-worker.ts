@@ -29,6 +29,7 @@ import { renderTemplate } from "@/lib/template-vars";
 import { findOrCreateContactSession, persistOutgoingMessage } from "@/lib/campaign-worker";
 import { registerPendingAutomatedSend } from "@/lib/manual-send-registry";
 import { shouldSendReminder, reminderKey } from "@/lib/agenda-logic";
+import { isInstanceOwnedByClient } from "@/lib/tenant";
 
 type ReminderSpec = {
   offset_minutes: number;
@@ -107,6 +108,7 @@ async function buildReminderVars(appt: AppointmentRow, tz: string): Promise<Reco
       .from("leads_extraidos")
       .select("nome_negocio, ramo_negocio, telefone, email, endereco, website, observacoes, instagram, facebook")
       .eq("id", appt.lead_id)
+      .eq("client_id", appt.client_id)
       .maybeSingle();
     if (r.error) {
       // Migration 008 não aplicada — query reduzida
@@ -114,6 +116,7 @@ async function buildReminderVars(appt: AppointmentRow, tz: string): Promise<Reco
         .from("leads_extraidos")
         .select("nome_negocio, ramo_negocio, telefone")
         .eq("id", appt.lead_id)
+        .eq("client_id", appt.client_id)
         .maybeSingle();
     }
     const lead = r.data as any;
@@ -136,6 +139,7 @@ async function buildReminderVars(appt: AppointmentRow, tz: string): Promise<Reco
       .from("contacts")
       .select("push_name")
       .eq("remote_jid", appt.remote_jid)
+      .eq("client_id", appt.client_id)
       .maybeSingle();
     if (ct?.push_name) vars["nome"] = ct.push_name;
   }
@@ -174,7 +178,12 @@ export async function tickReminders(): Promise<{ checked: number; sent: number; 
   for (const appt of (appts || []) as AppointmentRow[]) {
     // Pula shadow rows do google_sync (não têm remote_jid real)
     if (!appt.remote_jid || appt.remote_jid.startsWith("google:")) continue;
-    if (!appt.agent_id) continue;
+    if (!appt.agent_id || !appt.instance_name) continue;
+    if (!(await isInstanceOwnedByClient(appt.instance_name, appt.client_id))) {
+      errors++;
+      console.error(`[appointment-worker] instância "${appt.instance_name}" não pertence ao client_id do appointment ${appt.id}`);
+      continue;
+    }
 
     // Lê config de reminders do agente
     const { data: ag } = await supabase
@@ -212,20 +221,24 @@ export async function tickReminders(): Promise<{ checked: number; sent: number; 
         alreadySent: sentAlready.has(key),
       })) continue;
 
-      // Claim atômico: tenta adicionar a key em reminders_sent SE ela ainda
-      // não está lá. Postgres JSONB array com array_append não tem checagem
-      // de unicidade nativa, então usamos UPDATE...WHERE NOT contains.
-      const newSent = [...(appt.reminders_sent || []), key];
+      // Compare-and-swap atômico: além de exigir que a key não exista, o WHERE
+      // exige o snapshot completo lido por este worker. Claims simultâneos de
+      // offsets diferentes não podem sobrescrever o array um do outro.
+      const previousSent = [...(appt.reminders_sent || [])];
+      const newSent = [...previousSent, key];
       const { data: claimed, error: claimErr } = await supabase
         .from("appointments")
         .update({ reminders_sent: newSent })
         .eq("id", appt.id)
-        .not("reminders_sent", "cs", JSON.stringify([key])) // skip se já tem
+        .eq("client_id", appt.client_id)
+        .eq("status", "confirmed")
+        .eq("reminders_sent", JSON.stringify(previousSent))
+        .not("reminders_sent", "cs", JSON.stringify([key]))
         .select("id")
         .maybeSingle();
 
       if (claimErr || !claimed) {
-        // Outro worker pegou ou row mudou — pula.
+        // Outro worker pegou, lembrete já saiu ou o agendamento mudou — pula.
         continue;
       }
 
@@ -240,15 +253,15 @@ export async function tickReminders(): Promise<{ checked: number; sent: number; 
           rem.message || "{nome}, lembrete do seu agendamento às {hora_agendamento}.",
           { variables: vars, nome_negocio: vars.nome_negocio, telefone: vars.telefone, push_name: vars.nome }
         );
-        if (!appt.instance_name) {
-          console.warn(`[appointment-worker] appt ${appt.id} sem instance_name — pulando envio`);
-          continue;
-        }
-        
         // Registra o envio pendente antes de disparar o sendMessage para evitar race conditions com o webhook echo
         registerPendingAutomatedSend(appt.instance_name, appt.remote_jid, message);
 
         const result = await channel.sendMessage(appt.remote_jid, message, appt.instance_name);
+        if (!result || result.ok === false) {
+          throw new Error(result?.error || "Provider recusou o envio do lembrete");
+        }
+        appt.reminders_sent = newSent;
+        sentAlready.add(key);
         sent++;
         console.log(`[REMINDER] enviado ${key} pra ${appt.remote_jid} (appt ${appt.id})`);
 
@@ -262,13 +275,14 @@ export async function tickReminders(): Promise<{ checked: number; sent: number; 
             (result as any)?.key?.id ||
             (result as any)?.data?.key?.id ||
             `reminder-${appt.id}-${key}-${Date.now()}`;
-          const sess = await findOrCreateContactSession(appt.remote_jid, appt.instance_name);
+          const sess = await findOrCreateContactSession(appt.client_id, appt.remote_jid, appt.instance_name);
           await persistOutgoingMessage({
             sessionId: sess?.sessionId || null,
             remoteJid: appt.remote_jid,
             instanceName: appt.instance_name,
             msgId,
             text: message,
+            clientId: appt.client_id,
           });
         } catch (persistErr: any) {
           console.warn(`[REMINDER] enviado mas falhou ao salvar no histórico (appt ${appt.id}):`, persistErr?.message);
@@ -276,9 +290,20 @@ export async function tickReminders(): Promise<{ checked: number; sent: number; 
       } catch (e: any) {
         errors++;
         console.error(`[REMINDER] falha enviando ${key} pra ${appt.id}:`, e?.message);
-        // Reverte o claim pra tentar de novo no próximo tick
-        const reverted = (appt.reminders_sent || []);
-        await supabase.from("appointments").update({ reminders_sent: reverted }).eq("id", appt.id);
+        // Só reverte o claim se a linha ainda contém EXATAMENTE o snapshot que
+        // este worker escreveu. Evita apagar um claim criado por outro worker
+        // ou por um recovery entre a falha e o rollback.
+        const { data: rolledBack } = await supabase
+          .from("appointments")
+          .update({ reminders_sent: previousSent })
+          .eq("id", appt.id)
+          .eq("client_id", appt.client_id)
+          .eq("reminders_sent", JSON.stringify(newSent))
+          .select("id")
+          .maybeSingle();
+        if (!rolledBack) {
+          console.warn(`[REMINDER] rollback ignorado para ${appt.id}/${key}: estado mudou após a falha; mantendo fail-closed.`);
+        }
       }
     }
   }
@@ -366,6 +391,7 @@ export async function tickAutoPromote(): Promise<{ promoted: number; errors: num
               .from("leads_extraidos")
               .select("status")
               .eq("id", appt.lead_id)
+              .eq("client_id", appt.client_id)
               .maybeSingle();
             if ((leadNow?.status || "") === configuredFrom) targetKey = configuredTo;
           } else {

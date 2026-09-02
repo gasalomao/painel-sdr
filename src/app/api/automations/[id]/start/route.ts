@@ -17,6 +17,6 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     .eq("client_id", auth.clientId)
     .maybeSingle();
   if (!owned) return NextResponse.json({ ok: false, error: "Automação não encontrada" }, { status: 404 });
-  const r = await startAutomation(id);
+  const r = await startAutomation(id, auth.clientId);
   return NextResponse.json(r);
 }

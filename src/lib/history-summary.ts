@@ -73,13 +73,15 @@ async function cheapModelForSummary(): Promise<{
  * @param middleMsgs Mensagens intermediárias (entre as 3 primeiras e 12 últimas).
  */
 export async function summarizeMiddleMessages(
+  clientId: string,
   remoteJid: string,
   middleMsgs: Array<{ sender_type?: string; content?: string }>,
 ): Promise<string | null> {
   if (!middleMsgs || middleMsgs.length === 0) return null;
 
+  const cacheKey = `${clientId}:${remoteJid}`;
   const hash = contentHash(middleMsgs);
-  const cached = MEM_CACHE.get(remoteJid);
+  const cached = MEM_CACHE.get(cacheKey);
   if (cached && cached.hash === hash && Date.now() - cached.at < MEM_TTL_MS) {
     return cached.summary; // cache hit — mesmo conteúdo, reaproveita.
   }
@@ -113,7 +115,7 @@ export async function summarizeMiddleMessages(
     });
     const summary = (result.text || "").trim();
     if (!summary) return null;
-    MEM_CACHE.set(remoteJid, { hash, summary, at: Date.now() });
+    MEM_CACHE.set(cacheKey, { hash, summary, at: Date.now() });
     return summary;
   } catch (err: any) {
     console.warn("[history-summary] falha gerando resumo do meio (não-fatal):", err?.message);
@@ -122,8 +124,8 @@ export async function summarizeMiddleMessages(
 }
 
 /** Invalida o cache de um contato (ex.: ao apagar a conversa). */
-export function invalidateHistorySummary(remoteJid: string): void {
-  MEM_CACHE.delete(remoteJid);
+export function invalidateHistorySummary(clientId: string, remoteJid: string): void {
+  MEM_CACHE.delete(`${clientId}:${remoteJid}`);
 }
 
 /** DB: persistência opcional do resumo por contato (se quisermos sobreviver a restart). */

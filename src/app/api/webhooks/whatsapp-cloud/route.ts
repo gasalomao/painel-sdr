@@ -15,12 +15,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { whatsappCloud } from "@/lib/whatsapp-cloud";
-import { resolveChannel, resolveInstanceFromPhoneNumberId } from "@/lib/channel";
+import { resolveChannel, resolveConnectionFromPhoneNumberId } from "@/lib/channel";
 import { getEffectiveStatus } from "@/lib/bot-status";
 import { shouldSkipGroupActions, getTranscriptionMethod, getTranscriptionModels } from "@/lib/bot-status";
 import { isManualSend } from "@/lib/manual-send-registry";
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { shouldLogOnce } from "@/lib/webhook-security";
 
 export const dynamic = "force-dynamic";
 
@@ -38,36 +39,63 @@ const ENV_APP_SECRET = process.env.WHATSAPP_CLOUD_APP_SECRET || "";
  *   - "no_header" → header não veio (testes locais; Meta sempre manda em prod)
  *   - "invalid"   → assinatura veio e NÃO confere — rejeitar
  */
+type MetaSignatureResult = {
+  status: "valid" | "missing" | "no_header" | "invalid";
+  clientIds: string[];
+  logClientId: string | null;
+};
+
 async function verifyMetaSignature(
   signatureHeader: string | null,
   rawBody: string,
   phoneNumberIds: string[],
-): Promise<"valid" | "missing" | "no_header" | "invalid"> {
-  // Coleta app_secrets candidatos (env + provider_config das conexões mencionadas no evento)
-  const secrets: string[] = [];
-  if (ENV_APP_SECRET) secrets.push(ENV_APP_SECRET);
-  if (phoneNumberIds.length > 0) {
-    const { data } = await supabase
+): Promise<MetaSignatureResult> {
+  const { data } = phoneNumberIds.length > 0
+    ? await supabase
       .from("channel_connections")
-      .select("provider_config")
+      .select("client_id, provider_config")
       .eq("provider", "whatsapp_cloud")
-      .in("provider_config->>phone_number_id", phoneNumberIds);
-    for (const row of data || []) {
-      const s = (row as any)?.provider_config?.app_secret;
-      if (s && typeof s === "string") secrets.push(s);
-    }
+      .in("provider_config->>phone_number_id", phoneNumberIds)
+    : { data: [] as any[] };
+
+  const connections = (data || []).filter((row) => row?.client_id);
+  const clientIds = Array.from(new Set(connections.map((row) => row.client_id)));
+  const base = { clientIds, logClientId: clientIds.length === 1 ? clientIds[0] : null };
+
+  let hasConfiguredSecret = !!ENV_APP_SECRET;
+  const m = signatureHeader ? /^sha256=([0-9a-f]+)$/i.exec(signatureHeader.trim()) : null;
+  const recv = m ? Buffer.from(m[1], "hex") : null;
+  const wellFormed = !!recv && recv.length === 32;
+
+  if (!signatureHeader) {
+    return { ...base, status: hasConfiguredSecret || connections.some((row) => row.provider_config?.app_secret) ? "no_header" : "missing" };
   }
-  if (secrets.length === 0) return "missing";
-  if (!signatureHeader) return "no_header";
-  const m = /^sha256=([0-9a-f]+)$/i.exec(signatureHeader.trim());
-  if (!m) return "invalid";
-  const recv = Buffer.from(m[1], "hex");
-  if (recv.length !== 32) return "invalid";
-  for (const secret of secrets) {
+  if (!wellFormed || !recv) return { ...base, status: "invalid" };
+
+  const digestMatches = (secret: string) => {
     const expected = createHmac("sha256", secret).update(rawBody, "utf8").digest();
-    if (expected.length === recv.length && timingSafeEqual(expected, recv)) return "valid";
+    return expected.length === recv.length && timingSafeEqual(expected, recv);
+  };
+
+  // Segredo específico da conexão só pode validar seu próprio phone_number_id;
+  // o secret global do app é a exceção intencional (plataforma, não tenant).
+  const validPhoneIds = new Set<string>();
+  for (const row of connections) {
+    const cfg = row.provider_config || {};
+    const phoneId = cfg.phone_number_id;
+    const candidates = [cfg.app_secret, ENV_APP_SECRET].filter((s): s is string => typeof s === "string" && !!s);
+    if (candidates.length > 0) hasConfiguredSecret = true;
+    if (candidates.some(digestMatches) && phoneId) validPhoneIds.add(String(phoneId));
   }
-  return "invalid";
+
+  // Sem conexão cadastrada, ENV continua como modo legado até provisionamento.
+  if (connections.length === 0 && ENV_APP_SECRET && digestMatches(ENV_APP_SECRET)) {
+    return { ...base, status: "valid" };
+  }
+  if (phoneNumberIds.length > 0 && phoneNumberIds.every((id) => validPhoneIds.has(id))) {
+    return { ...base, status: "valid" };
+  }
+  return { ...base, status: "invalid" };
 }
 
 // ============================================================
@@ -142,28 +170,36 @@ export async function POST(req: NextRequest) {
   ].filter(Boolean) as string[]));
   const sigHeader = req.headers.get("x-hub-signature-256");
   const sigResult = await verifyMetaSignature(sigHeader, rawBody, phoneIds);
-  if (sigResult === "invalid") {
+  const logCtx = { client_id: sigResult.logClientId ?? undefined, instance_name: "whatsapp_cloud" };
+  if (sigResult.status === "invalid") {
     await supabase.from("webhook_logs").insert({
-      instance_name: "whatsapp_cloud",
+      ...logCtx,
       event: "CLOUD_SIGNATURE_INVALID",
       payload: { phone_ids: phoneIds, has_header: !!sigHeader },
       created_at: new Date().toISOString(),
     }).then(() => {}, () => {});
     return NextResponse.json({ success: false, error: "Assinatura inválida" }, { status: 401 });
   }
-  if (sigResult !== "valid" && process.env.NODE_ENV !== "production") {
-    console.warn(`[Cloud Webhook] HMAC ${sigResult} — aceito em dev. Configure app_secret + X-Hub-Signature-256 pra prod.`);
-  } else if (sigResult === "no_header" && process.env.NODE_ENV === "production") {
-    // App_secret configurado mas Meta não mandou header → bloqueia
+  if (sigResult.status === "no_header") {
     await supabase.from("webhook_logs").insert({
-      instance_name: "whatsapp_cloud",
+      ...logCtx,
       event: "CLOUD_SIGNATURE_MISSING_HEADER",
       payload: { phone_ids: phoneIds },
       created_at: new Date().toISOString(),
     }).then(() => {}, () => {});
     return NextResponse.json({ success: false, error: "Header de assinatura ausente" }, { status: 401 });
   }
-  // sigResult === "missing" em prod = sem app_secret cadastrado → loga warning mas aceita (rollout).
+  if (sigResult.status === "missing" && process.env.NODE_ENV === "production") {
+    return NextResponse.json({ success: false, error: "App secret não configurado" }, { status: 401 });
+  }
+  if (sigResult.status === "missing" && shouldLogOnce("cloud-no-secret", "whatsapp_cloud")) {
+    await supabase.from("webhook_logs").insert({
+      ...logCtx,
+      event: "CLOUD_NO_APP_SECRET",
+      payload: { hint: "Sem app_secret cadastrado — webhook forjável. Configure o secret do app Meta." },
+      created_at: new Date().toISOString(),
+    }).then(() => {}, () => {});
+  }
 
   // Log raw pra debug — só uma linha resumida pra não inflar a tabela
   await supabase.from("webhook_logs").insert({
@@ -179,23 +215,26 @@ export async function POST(req: NextRequest) {
 
   // ====== STATUS UPDATES ======
   for (const s of parsed.statuses) {
+    const connection = await resolveConnectionFromPhoneNumberId(s.phoneNumberId);
+    if (!connection) continue;
     const map: Record<string, string> = {
       sent: "sent", delivered: "delivered", read: "read", failed: "error",
     };
     const norm = map[s.status] || s.status;
     await Promise.all([
-      supabase.from("messages").update({ delivery_status: norm }).eq("message_id", s.messageId),
-      supabase.from("chats_dashboard").update({ status_envio: norm }).eq("message_id", s.messageId),
+      supabase.from("messages").update({ delivery_status: norm }).eq("message_id", s.messageId).eq("client_id", connection.clientId),
+      supabase.from("chats_dashboard").update({ status_envio: norm }).eq("message_id", s.messageId).eq("client_id", connection.clientId),
     ]);
   }
 
   // ====== INCOMING MESSAGES ======
   for (const m of parsed.messages) {
     try {
-      const instanceName = await resolveInstanceFromPhoneNumberId(m.phoneNumberId);
-      if (!instanceName) {
+      const connection = await resolveConnectionFromPhoneNumberId(m.phoneNumberId);
+      if (!connection) {
         console.warn(`[Cloud Webhook] Mensagem para phone_number_id=${m.phoneNumberId} sem conexão cadastrada — ignorada.`);
         await supabase.from("webhook_logs").insert({
+          client_id: sigResult.logClientId ?? undefined,
           instance_name: "whatsapp_cloud",
           event: "CLOUD_NO_INSTANCE",
           payload: { phone_number_id: m.phoneNumberId, message_id: m.messageId },
@@ -203,11 +242,12 @@ export async function POST(req: NextRequest) {
         }).then(() => {}, () => {});
         continue;
       }
+      const { instanceName, clientId } = connection;
 
       // Anti-duplicação: se já temos a msg, pula
       const [{ data: dupV2 }, { data: dupLegacy }] = await Promise.all([
-        supabase.from("messages").select("id").eq("message_id", m.messageId).maybeSingle(),
-        supabase.from("chats_dashboard").select("id").eq("message_id", m.messageId).maybeSingle(),
+        supabase.from("messages").select("id").eq("message_id", m.messageId).eq("client_id", clientId).maybeSingle(),
+        supabase.from("chats_dashboard").select("id").eq("message_id", m.messageId).eq("client_id", clientId).maybeSingle(),
       ]);
       if (dupV2 || dupLegacy) continue;
 
@@ -216,14 +256,15 @@ export async function POST(req: NextRequest) {
       let sessionRow: any = null;
       try {
         const { data: existing } = await supabase
-          .from("contacts").select("id, push_name").eq("remote_jid", m.remoteJid).maybeSingle();
+          .from("contacts").select("id, push_name").eq("remote_jid", m.remoteJid).eq("client_id", clientId).maybeSingle();
         if (existing) {
           contactId = existing.id;
           if (m.pushName && existing.push_name !== m.pushName) {
-            await supabase.from("contacts").update({ push_name: m.pushName }).eq("id", contactId);
+            await supabase.from("contacts").update({ push_name: m.pushName }).eq("id", contactId).eq("client_id", clientId);
           }
         } else {
           const ins = await supabase.from("contacts").insert({
+            client_id: clientId,
             remote_jid: m.remoteJid,
             phone_number: m.from,
             push_name: m.pushName || null,
@@ -235,12 +276,13 @@ export async function POST(req: NextRequest) {
           const { data: existSess } = await supabase
             .from("sessions")
             .select("id, contact_id, instance_name, bot_status, paused_by, paused_at, resume_at, agent_id, unread_count")
-            .eq("contact_id", contactId).eq("instance_name", instanceName).maybeSingle();
+            .eq("contact_id", contactId).eq("instance_name", instanceName).eq("client_id", clientId).maybeSingle();
           if (existSess) {
             sessionRow = existSess;
           } else {
             const ch = await resolveChannel(instanceName);
             const ns = await supabase.from("sessions").insert({
+              client_id: clientId,
               contact_id: contactId,
               instance_name: instanceName,
               agent_id: ch.agent_id || 1,
@@ -329,6 +371,7 @@ export async function POST(req: NextRequest) {
         : effectiveMime;
 
       const { error: dashErr } = await supabase.from("chats_dashboard").insert({
+        client_id: clientId,
         instance_name: instanceName,
         message_id: m.messageId,
         remote_jid: m.remoteJid,
@@ -350,6 +393,7 @@ export async function POST(req: NextRequest) {
       // Insert messages (V2)
       if (sessionRow?.id) {
         const { error: msgErr } = await supabase.from("messages").insert({
+          client_id: clientId,
           session_id: sessionRow.id,
           message_id: m.messageId,
           sender,
@@ -368,7 +412,7 @@ export async function POST(req: NextRequest) {
         // Update session
         const updPayload: any = { last_message_at: new Date().toISOString() };
         updPayload.unread_count = (sessionRow.unread_count || 0) + 1;
-        supabase.from("sessions").update(updPayload).eq("id", sessionRow.id).then(() => {}, () => {});
+        supabase.from("sessions").update(updPayload).eq("id", sessionRow.id).eq("client_id", clientId).then(() => {}, () => {});
       }
 
       // (mídia já processada inline acima, antes do insert)
@@ -387,6 +431,7 @@ export async function POST(req: NextRequest) {
           const internalSecretValue = getInternalSecret();
           if (!internalSecretValue) {
             supabase.from("webhook_logs").insert({
+              client_id: clientId,
               instance_name: instanceName,
               event: "AGENT_DISPATCH_NO_SECRET",
               payload: { hint: "AUTH_SECRET ou SUPABASE_SERVICE_ROLE_KEY vazio no env; /api/agent/process vai rejeitar com 401", remote_jid: m.remoteJid },
@@ -412,6 +457,7 @@ export async function POST(req: NextRequest) {
           } catch (e: any) {
             console.warn("[Cloud Webhook] dispatch do agente falhou:", e?.message);
             supabase.from("webhook_logs").insert({
+              client_id: clientId,
               instance_name: instanceName,
               event: "AGENT_DISPATCH_FAIL",
               payload: { error: String(e?.message || e), via: "direct-call" },
@@ -420,6 +466,7 @@ export async function POST(req: NextRequest) {
           }
         } else {
           await supabase.from("webhook_logs").insert({
+            client_id: clientId,
             instance_name: instanceName,
             event: "AGENT_SKIP_PAUSED",
             payload: { remoteJid: m.remoteJid, bot_status: sessionRow.bot_status, source: "cloud" },

@@ -50,7 +50,6 @@ export async function proxy(req: NextRequest) {
     pathname.startsWith("/_next") ||
     pathname.startsWith("/api/auth/") ||
     pathname.startsWith("/api/webhooks/") ||
-    pathname.startsWith("/api/whisper-status") ||
     // DeepSeek: as rotas de captura (import-bookmarklet, userscript.user.js) e
     // o proxy OpenAI-shape (/v1/*) são chamadas CROSS-ORIGIN — do navegador do
     // usuário no chat.deepseek.com (sem cookie de sessão do painel). O token é

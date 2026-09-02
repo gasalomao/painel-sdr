@@ -22,6 +22,12 @@ export type CapturedLeadScope =
   | { ok: true; baselineMaxId: number | null; startedAt: string | null }
   | { ok: false; reason: string };
 
+export function requireAutomationClientId(value: unknown): string {
+  const clientId = typeof value === "string" ? value.trim() : "";
+  if (!clientId) throw new Error("Automação sem client_id; execução bloqueada para evitar acesso cross-tenant.");
+  return clientId;
+}
+
 /**
  * @param scrapeFilters    coluna `automations.scrape_filters` (JSONB) — guarda
  *                         config do usuário + marcadores de runtime (`_*`).

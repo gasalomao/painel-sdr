@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveCapturedLeadScope, type CapturedLeadScope } from "../automation-lead-scope";
+import { requireAutomationClientId, resolveCapturedLeadScope, type CapturedLeadScope } from "../automation-lead-scope";
 
 // ===========================================================================
 // Lead = forma mínima da linha de leads_extraidos relevante pro disparo.
@@ -35,6 +35,14 @@ function applyScope(scope: Extract<CapturedLeadScope, { ok: true }>, leads: Lead
 // ===========================================================================
 // resolveCapturedLeadScope — resolução dos marcadores
 // ===========================================================================
+describe("requireAutomationClientId", () => {
+  it("rejeita automação sem tenant e normaliza tenant válido", () => {
+    expect(() => requireAutomationClientId(null)).toThrow(/sem client_id/i);
+    expect(() => requireAutomationClientId("   ")).toThrow(/cross-tenant/i);
+    expect(requireAutomationClientId(" tenant-A ")).toBe("tenant-A");
+  });
+});
+
 describe("resolveCapturedLeadScope", () => {
   const SCRAPE_START = "2026-05-22T03:00:00.000Z";
 

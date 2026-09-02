@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
-import { requireClientId } from "@/lib/tenant";
+import { isInstanceOwnedByClient, requireClientId } from "@/lib/tenant";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 
 export const dynamic = "force-dynamic";
@@ -46,6 +46,9 @@ export async function POST(req: NextRequest) {
         { success: false, error: "Faltam campos obrigatórios: name, instance_name" },
         { status: 400 }
       );
+    }
+    if (!(await isInstanceOwnedByClient(instance_name, ctx.clientId))) {
+      return NextResponse.json({ success: false, error: "Instância não pertence a este cliente" }, { status: 403 });
     }
     if (!Array.isArray(steps) || steps.length === 0) {
       return NextResponse.json(

@@ -1,15 +1,15 @@
-// Gera src/lib/setup-sql.ts a partir de SETUP_COMPLETO.sql.
+// Gera src/lib/setup-sql.ts a partir de migrations/SETUP_COMPLETO.sql.
 // Rode: node scripts/build-setup-sql.mjs
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 const root = process.cwd();
-const sqlPath = join(root, "SETUP_COMPLETO.sql");
+const sqlPath = join(root, "migrations", "SETUP_COMPLETO.sql");
 const outPath = join(root, "src", "lib", "setup-sql.ts");
 
 if (!existsSync(sqlPath)) {
-  console.log("[build-setup-sql] SETUP_COMPLETO.sql não encontrado — pulando regeração (usando setup-sql.ts existente).");
-  process.exit(0);
+  console.error("[build-setup-sql] migrations/SETUP_COMPLETO.sql não encontrado — geração abortada.");
+  process.exit(1);
 }
 
 const sql = readFileSync(sqlPath, "utf8");
@@ -20,8 +20,8 @@ const escaped = sql
   .replace(/`/g, "\\`")
   .replace(/\$\{/g, "\\${");
 
-const content = `// GERADO AUTOMATICAMENTE a partir de SETUP_COMPLETO.sql.
-// Pra atualizar: edite SETUP_COMPLETO.sql e rode \`node scripts/build-setup-sql.mjs\`.
+const content = `// GERADO AUTOMATICAMENTE a partir de migrations/SETUP_COMPLETO.sql.
+// Pra atualizar: edite migrations/SETUP_COMPLETO.sql e rode \`node scripts/build-setup-sql.mjs\`.
 // Não edite este arquivo manualmente.
 
 export const SETUP_SQL = \`${escaped}\`;

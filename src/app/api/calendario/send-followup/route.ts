@@ -18,7 +18,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
-import { requireClientId } from "@/lib/tenant";
+import { isInstanceOwnedByClient, requireClientId } from "@/lib/tenant";
 import * as channel from "@/lib/channel";
 import { renderTemplate } from "@/lib/template-vars";
 import { findOrCreateContactSession, persistOutgoingMessage } from "@/lib/campaign-worker";
@@ -58,6 +58,7 @@ export async function POST(req: NextRequest) {
       .from("leads_extraidos")
       .select("nome_negocio, ramo_negocio, endereco, website, telefone, avaliacao, reviews, status, email, observacoes, instagram, facebook, \"remoteJid\"")
       .eq("id", appt.lead_id)
+      .eq("client_id", appt.client_id)
       .maybeSingle();
     if (lead) leadCtx = lead;
   }
@@ -67,6 +68,7 @@ export async function POST(req: NextRequest) {
       .from("contacts")
       .select("push_name")
       .eq("remote_jid", appt.remote_jid)
+      .eq("client_id", appt.client_id)
       .maybeSingle();
     if (ct?.push_name) leadCtx.push_name = ct.push_name;
   }
@@ -76,16 +78,9 @@ export async function POST(req: NextRequest) {
   if (!targetInstance) {
     return NextResponse.json({ ok: false, error: "Sem instância configurada — passe instance_name no body" }, { status: 400 });
   }
-  // Ownership da instância
-  if (!auth.isAdmin) {
-    const { data: chConn } = await supabaseAdmin
-      .from("channel_connections")
-      .select("client_id")
-      .eq("instance_name", targetInstance)
-      .maybeSingle();
-    if (chConn?.client_id && chConn.client_id !== auth.clientId) {
-      return NextResponse.json({ ok: false, error: "Instância não pertence a este cliente" }, { status: 403 });
-    }
+  // Ownership da instância: usa o tenant do agendamento inclusive quando um admin dispara.
+  if (!(await isInstanceOwnedByClient(targetInstance, appt.client_id))) {
+    return NextResponse.json({ ok: false, error: "Instância não pertence a este cliente" }, { status: 403 });
   }
 
   // 4. Variáveis específicas do agendamento (além das padrão do lead)
@@ -127,6 +122,9 @@ export async function POST(req: NextRequest) {
     registerPendingAutomatedSend(targetInstance, appt.remote_jid, rendered);
 
     const result = await channel.sendMessage(appt.remote_jid, rendered, targetInstance);
+    if (!result || result.ok === false) {
+      throw new Error(result?.error || "Provider recusou o envio do follow-up");
+    }
 
     // Persiste no histórico (sessions/messages/chats_dashboard) pra que o
     // follow-up apareça no /chat e a IA tenha o contexto. Best-effort: a
@@ -137,9 +135,11 @@ export async function POST(req: NextRequest) {
         (result as any)?.data?.key?.id ||
         `appt-followup-${appt.id}-${Date.now()}`;
       const sess = await findOrCreateContactSession(
+        appt.client_id,
         appt.remote_jid,
         targetInstance,
         leadCtx.nome_negocio || leadCtx.push_name || null,
+        appt.agent_id,
       );
       await persistOutgoingMessage({
         sessionId: sess?.sessionId || null,
@@ -147,6 +147,7 @@ export async function POST(req: NextRequest) {
         instanceName: targetInstance,
         msgId,
         text: rendered,
+        clientId: appt.client_id,
       });
     } catch (persistErr: any) {
       console.warn("[send-followup] enviado mas falhou ao salvar no histórico:", persistErr?.message);

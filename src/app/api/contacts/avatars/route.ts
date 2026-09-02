@@ -24,25 +24,26 @@ import { requireClientId } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
-async function ensureInstanceOwnership(instanceName: string | null, clientId: string): Promise<boolean> {
-  if (!instanceName) return true;
+async function resolveInstanceClientId(instanceName: string | null): Promise<string | null> {
+  if (!instanceName) return null;
   const { data } = await supabaseAdmin
     .from("channel_connections")
     .select("client_id")
     .eq("instance_name", instanceName)
     .maybeSingle();
-  return data?.client_id === clientId;
+  return data?.client_id || null;
 }
 
 // Cache TTL — Evolution assina URLs com expiração ~7d, mas a foto em si
 // pode mudar antes. 24h é um meio-termo decente.
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
-async function getCachedAvatars(jids: string[]) {
+async function getCachedAvatars(jids: string[], clientId: string) {
   if (jids.length === 0) return new Map<string, { url: string | null; fetchedAt: number | null }>();
   const { data } = await supabaseAdmin
     .from("contacts")
     .select("remote_jid, profile_pic_url, profile_pic_fetched_at")
+    .eq("client_id", clientId)
     .in("remote_jid", jids);
   const map = new Map<string, { url: string | null; fetchedAt: number | null }>();
   for (const r of data || []) {
@@ -54,22 +55,22 @@ async function getCachedAvatars(jids: string[]) {
   return map;
 }
 
-async function refreshOne(jid: string, instance: string): Promise<string | null> {
+async function refreshOne(jid: string, instance: string, clientId: string): Promise<string | null> {
   try {
     // channel.fetchProfilePicture roteia: Evolution → busca real, Cloud → null.
     const url = await fetchProfilePicture(jid, instance);
-    // Upsert no contacts (cria se não existir). UNIQUE(remote_jid) cuida.
     const phone = jid.replace(/@.*$/, "").replace(/\D/g, "");
     await supabaseAdmin
       .from("contacts")
       .upsert(
         {
+          client_id: clientId,
           remote_jid: jid,
           phone_number: phone,
           profile_pic_url: url,
           profile_pic_fetched_at: new Date().toISOString(),
         },
-        { onConflict: "remote_jid" },
+        { onConflict: "client_id,remote_jid" },
       );
     return url;
   } catch (err: any) {
@@ -78,13 +79,13 @@ async function refreshOne(jid: string, instance: string): Promise<string | null>
   }
 }
 
-async function handle(jids: string[], instanceParam: string | null, force: boolean) {
+async function handle(jids: string[], instanceParam: string | null, force: boolean, clientId: string) {
   const cleanJids = Array.from(new Set(jids.filter(Boolean))).slice(0, 200); // hard cap pra DoS
   if (cleanJids.length === 0) return { success: true, avatars: {} as Record<string, string | null> };
 
   const instance = instanceParam || (await getEvolutionConfig()).instance;
   if (!instance) return { success: true, avatars: {} as Record<string, string | null> };
-  const cached = await getCachedAvatars(cleanJids);
+  const cached = await getCachedAvatars(cleanJids, clientId);
   const result: Record<string, string | null> = {};
   const stale: string[] = [];
 
@@ -102,7 +103,7 @@ async function handle(jids: string[], instanceParam: string | null, force: boole
   const CHUNK = 10;
   for (let i = 0; i < stale.length; i += CHUNK) {
     const batch = stale.slice(i, i + CHUNK);
-    const settled = await Promise.allSettled(batch.map(jid => refreshOne(jid, instance)));
+    const settled = await Promise.allSettled(batch.map(jid => refreshOne(jid, instance, clientId)));
     settled.forEach((s, idx) => {
       if (s.status === "fulfilled") result[batch[idx]] = s.value;
     });
@@ -117,11 +118,15 @@ export async function GET(req: NextRequest) {
     if (!auth.ok) return auth.response;
     const jids = (req.nextUrl.searchParams.get("jids") || "").split(",").map(s => s.trim()).filter(Boolean);
     const instance = req.nextUrl.searchParams.get("instance");
-    if (!(await ensureInstanceOwnership(instance, auth.clientId))) {
+    const ownerClientId = await resolveInstanceClientId(instance);
+    if (!ownerClientId) {
+      return NextResponse.json({ success: false, error: "Instância não encontrada" }, { status: 404 });
+    }
+    if (ownerClientId !== auth.clientId && !auth.isAdmin) {
       return NextResponse.json({ success: false, error: "Instância não pertence a este cliente" }, { status: 403 });
     }
     const force = req.nextUrl.searchParams.get("force") === "1";
-    return NextResponse.json(await handle(jids, instance, force));
+    return NextResponse.json(await handle(jids, instance, force, ownerClientId));
   } catch (e: any) {
     return NextResponse.json({ success: false, error: e?.message || String(e) }, { status: 500 });
   }
@@ -134,10 +139,14 @@ export async function POST(req: NextRequest) {
     const body = await req.json().catch(() => ({}));
     const jids = Array.isArray(body.jids) ? body.jids : [];
     const instance = body.instance || null;
-    if (!(await ensureInstanceOwnership(instance, auth.clientId))) {
+    const ownerClientId = await resolveInstanceClientId(instance);
+    if (!ownerClientId) {
+      return NextResponse.json({ success: false, error: "Instância não encontrada" }, { status: 404 });
+    }
+    if (ownerClientId !== auth.clientId && !auth.isAdmin) {
       return NextResponse.json({ success: false, error: "Instância não pertence a este cliente" }, { status: 403 });
     }
-    return NextResponse.json(await handle(jids, instance, !!body.force));
+    return NextResponse.json(await handle(jids, instance, !!body.force, ownerClientId));
   } catch (e: any) {
     return NextResponse.json({ success: false, error: e?.message || String(e) }, { status: 500 });
   }

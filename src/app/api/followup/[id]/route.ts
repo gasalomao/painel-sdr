@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
-import { requireClientId } from "@/lib/tenant";
+import { isInstanceOwnedByClient, requireClientId } from "@/lib/tenant";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 
 export const dynamic = "force-dynamic";
@@ -12,13 +12,12 @@ export const dynamic = "force-dynamic";
 async function ownsFollowup(req: NextRequest, id: string) {
   const tenant = await requireClientId(req);
   if (!tenant.ok) return { ok: false as const, res: tenant.response };
-  if (tenant.isAdmin) return { ok: true as const, isAdmin: true, clientId: tenant.clientId };
   const { data } = await supabase.from("followup_campaigns").select("client_id").eq("id", id).maybeSingle();
   if (!data) return { ok: false as const, res: NextResponse.json({ success: false, error: "Não encontrada" }, { status: 404 }) };
-  if (data.client_id !== tenant.clientId) {
+  if (!tenant.isAdmin && data.client_id !== tenant.clientId) {
     return { ok: false as const, res: NextResponse.json({ success: false, error: "Sem permissão" }, { status: 403 }) };
   }
-  return { ok: true as const, isAdmin: false, clientId: tenant.clientId };
+  return { ok: true as const, isAdmin: tenant.isAdmin, clientId: data.client_id };
 }
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -30,6 +29,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     .from("followup_campaigns")
     .select("*")
     .eq("id", id)
+    .eq("client_id", own.clientId)
     .maybeSingle();
   if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   if (!camp) return NextResponse.json({ success: false, error: "Não encontrada" }, { status: 404 });
@@ -38,6 +38,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     .from("followup_targets")
     .select("*")
     .eq("followup_campaign_id", id)
+    .eq("client_id", own.clientId)
     .order("created_at", { ascending: false })
     .limit(500);
 
@@ -53,6 +54,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     const body = await req.json();
     // SaaS guard: cliente comum não pode escolher modelo arbitrário no PATCH.
     await enforceClientDefaultModel(body, { clientId: own.clientId, isAdmin: own.isAdmin }, ["ai_model"]);
+    if ("instance_name" in body && !(await isInstanceOwnedByClient(String(body.instance_name), own.clientId))) {
+      return NextResponse.json({ success: false, error: "Instância não pertence a este cliente" }, { status: 403 });
+    }
     const allowed = [
       "name",
       "instance_name",
@@ -79,6 +83,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       .from("followup_campaigns")
       .update(update)
       .eq("id", id)
+      .eq("client_id", own.clientId)
       .select()
       .single();
     if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
@@ -92,7 +97,11 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
   const { id } = await params;
   const own = await ownsFollowup(req, id);
   if (!own.ok) return own.res;
-  const { error } = await supabase.from("followup_campaigns").delete().eq("id", id);
+  const { error } = await supabase
+    .from("followup_campaigns")
+    .delete()
+    .eq("id", id)
+    .eq("client_id", own.clientId);
   if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   return NextResponse.json({ success: true });
 }

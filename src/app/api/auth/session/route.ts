@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { SESSION_COOKIE, verifySession, isSessionLive } from "@/lib/auth";
+import { SESSION_COOKIE, verifySession, isSessionLiveStrict } from "@/lib/auth";
 import { resolveModelForClient } from "@/lib/ai-default-model";
 
 export const dynamic = "force-dynamic";
@@ -14,7 +14,7 @@ export async function GET(req: NextRequest) {
   if (!token) return NextResponse.json({ authenticated: false });
   const claims = await verifySession(token);
   if (!claims) return NextResponse.json({ authenticated: false });
-  const live = await isSessionLive(claims.sessionId, token);
+  const live = await isSessionLiveStrict(claims.sessionId, token);
   if (!live) return NextResponse.json({ authenticated: false, reason: "revoked_or_expired" });
 
   const defaultAiModel = await resolveModelForClient(claims.clientId);

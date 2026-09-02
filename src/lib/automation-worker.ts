@@ -20,12 +20,16 @@ import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { startCampaign, pauseCampaign } from "@/lib/campaign-worker";
 import { enrollLeads } from "@/lib/followup-worker";
 import { startScraperRun, stopScraper, getStatus as getScraperStatus } from "@/lib/scraper-engine";
-import { resolveCapturedLeadScope } from "@/lib/automation-lead-scope";
+import { requireAutomationClientId as requireClientId, resolveCapturedLeadScope } from "@/lib/automation-lead-scope";
 import { summarizeReviewsForLead } from "@/lib/reviews-ai";
 import { evolution } from "@/lib/evolution";
 import * as channel from "@/lib/channel";
 
 type AutomationRow = any;
+
+function requireAutomationClientId(a: AutomationRow): string {
+  return requireClientId(a?.client_id);
+}
 
 /** Debounce anti-clique-múltiplo no botão Iniciar: id → último start (ms).
  *  Log real (EasyPanel) mostrou 3 clicks em <2s → 3 startAutomation
@@ -56,6 +60,25 @@ const lastProgressLog = new Map<
  * via realtime em automation_logs. NUNCA throw — falha em log nunca pode
  * derrubar o pipeline.
  */
+const automationTenantCache = new Map<string, string>();
+
+async function resolveAutomationClientId(automationId: string): Promise<string | null> {
+  const cached = automationTenantCache.get(automationId);
+  if (cached) return cached;
+  const { data } = await supabase
+    .from("automations")
+    .select("client_id")
+    .eq("id", automationId)
+    .maybeSingle();
+  try {
+    const clientId = requireClientId(data?.client_id);
+    automationTenantCache.set(automationId, clientId);
+    return clientId;
+  } catch {
+    return null;
+  }
+}
+
 async function log(
   automationId: string,
   kind: "scrape" | "dispatch" | "followup" | "reply" | "state" | "error",
@@ -64,8 +87,11 @@ async function log(
   extra?: { remote_jid?: string; metadata?: Record<string, any> }
 ) {
   try {
+    const clientId = await resolveAutomationClientId(automationId);
+    if (!clientId) return;
     await supabase.from("automation_logs").insert({
       automation_id: automationId,
+      client_id: clientId,
       kind,
       level,
       message: String(message).slice(0, 1000),
@@ -80,8 +106,9 @@ async function log(
 /** Marca a automação com erro mas mantém ela viva pra retry manual. */
 async function markError(id: string, msg: string) {
   console.error(`[AUTOMATION ${id}] ERRO:`, msg);
+  const clientId = await resolveAutomationClientId(id);
   await log(id, "error", "error", msg);
-  await supabase
+  let query = supabase
     .from("automations")
     .update({
       status: "error",
@@ -91,6 +118,8 @@ async function markError(id: string, msg: string) {
       updated_at: new Date().toISOString(),
     })
     .eq("id", id);
+  query = clientId ? query.eq("client_id", clientId) : query.is("client_id", null);
+  await query;
 }
 
 /**
@@ -107,13 +136,15 @@ async function startScrapingPhase(a: AutomationRow): Promise<void> {
   }
 
   const filters = a.scrape_filters || {};
+  const clientId = requireAutomationClientId(a);
 
   // Conta leads ANTES (filtrando por tenant) pra detectar incremento depois.
   // SEM filtro por client_id era cross-tenant: outro cliente scrapeando inflava
   // o "scrapedNow" e podia disparar campanha pra leads alheios.
-  let beforeQ = supabase.from("leads_extraidos").select("*", { count: "exact", head: true });
-  if ((a as any).client_id) beforeQ = beforeQ.eq("client_id", (a as any).client_id);
-  const { count: before } = await beforeQ;
+  const { count: before } = await supabase
+    .from("leads_extraidos")
+    .select("*", { count: "exact", head: true })
+    .eq("client_id", clientId);
 
   // Marca d'água: maior `id` existente AGORA na tabela (global, não por
   // tenant — id é sequência única). Todo lead que o scraper inserir terá
@@ -123,6 +154,7 @@ async function startScrapingPhase(a: AutomationRow): Promise<void> {
   const { data: maxRow } = await supabase
     .from("leads_extraidos")
     .select("id")
+    .eq("client_id", clientId)
     .order("id", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -134,7 +166,7 @@ async function startScrapingPhase(a: AutomationRow): Promise<void> {
     last_error: null,
     last_error_at: null,
     updated_at: new Date().toISOString(),
-  }).eq("id", a.id);
+  }).eq("id", a.id).eq("client_id", clientId);
 
   await log(a.id, "state", "info",
     `🚀 Automação iniciada. Captando leads em ${niches.length} nicho(s) × ${regions.length} região(ões). Limite: ${a.scrape_max_leads}.`,
@@ -157,9 +189,17 @@ async function startScrapingPhase(a: AutomationRow): Promise<void> {
       webhookEnabled: false,
       maxLeads: Number(a.scrape_max_leads) || 200,  // ← respeita o limite configurado
       automation_id: a.id,
-      client_id: (a as any).client_id || null, // tagging multi-tenant
+      client_id: clientId,
       forceRestart: true,
     });
+    if (!r.ok && r.busy) {
+      await supabase.from("automations").update({
+        phase: "idle",
+        updated_at: new Date().toISOString(),
+      }).eq("id", a.id).eq("client_id", clientId);
+      await log(a.id, "scrape", "info", "⏳ Scraper ocupado por outra captura. Nova tentativa no próximo ciclo.");
+      return;
+    }
     if (!r.ok) {
       return markError(a.id, `Scraper rejeitou: ${r.error}`);
     }
@@ -188,7 +228,7 @@ async function startScrapingPhase(a: AutomationRow): Promise<void> {
       _lastProgressAt: nowIso,
     },
     updated_at: nowIso,
-  }).eq("id", a.id);
+  }).eq("id", a.id).eq("client_id", clientId);
 }
 
 /**
@@ -210,6 +250,7 @@ type ScrapeCheck = {
 };
 
 async function checkScrapingDone(a: AutomationRow): Promise<ScrapeCheck> {
+  const clientId = requireAutomationClientId(a);
   const baseline = (a.scrape_filters?._baselineCount as number) || 0;
   const scrapeStartedAtMs = a.scrape_filters?._scrapeStartedAt
     ? new Date(a.scrape_filters._scrapeStartedAt).getTime()
@@ -219,9 +260,10 @@ async function checkScrapingDone(a: AutomationRow): Promise<ScrapeCheck> {
     : scrapeStartedAtMs;
 
   // Mesmo filtro de tenant do startScrapingPhase — count cross-tenant inflava o resultado
-  let nowQ = supabase.from("leads_extraidos").select("*", { count: "exact", head: true });
-  if ((a as any).client_id) nowQ = nowQ.eq("client_id", (a as any).client_id);
-  const { count: now } = await nowQ;
+  const { count: now } = await supabase
+    .from("leads_extraidos")
+    .select("*", { count: "exact", head: true })
+    .eq("client_id", clientId);
   const scrapedNow = Math.max(0, (now || 0) - baseline);
 
   const idleSeconds = Math.round((Date.now() - lastProgressAtMs) / 1000);
@@ -274,6 +316,7 @@ async function startDispatchPhase(
   a: AutomationRow,
   doneInfo?: { reason: string | null; scrapedNow: number }
 ): Promise<void> {
+  const clientId = requireAutomationClientId(a);
   // GUARDA DE IDEMPOTÊNCIA: se já existe campanha pra esta automação,
   // NÃO cria outra. Antes, race condition entre 2 ticks ou re-clicks fazia
   // 2 campanhas pros mesmos leads → mesmo número recebia 2x → ban no zap.
@@ -289,6 +332,7 @@ async function startDispatchPhase(
     .from("automations")
     .update({ phase: "dispatching", updated_at: new Date().toISOString() })
     .eq("id", a.id)
+    .eq("client_id", clientId)
     .eq("phase", "scraping")  // <-- só se ainda estiver scraping
     .select("id")
     .maybeSingle();
@@ -323,7 +367,7 @@ async function startDispatchPhase(
       status: "done",
       last_error: "Nenhum lead colhido — automação encerrada sem disparar.",
       updated_at: new Date().toISOString(),
-    }).eq("id", a.id);
+    }).eq("id", a.id).eq("client_id", clientId);
     return;
   }
   await log(a.id, "scrape", "success",
@@ -372,7 +416,7 @@ async function startDispatchPhase(
           leadId: l.id,
           model: reviewsAiCfg.model,
           customPrompt: reviewsAiCfg.prompt || null,
-          clientId: (a as any).client_id || null,
+          clientId,
           source: "automation",
           automationId: a.id,
         });
@@ -539,7 +583,7 @@ async function startDispatchPhase(
   // essa campanha (ela vive só dentro do card da automação). Se a coluna
   // não existir (DB antigo), tenta sem ela e segue.
   const campInsert: any = {
-    client_id: (a as any).client_id || null,
+    client_id: clientId,
     name: `[Auto] ${a.name}`,
     instance_name: a.instance_name,
     agent_id: a.agent_id,
@@ -578,6 +622,7 @@ async function startDispatchPhase(
   // 2) campaign_targets
   const targets = leads.map(l => ({
     campaign_id: camp.id,
+    client_id: clientId,
     remote_jid: l.remoteJid,
     nome_negocio: l.nome_negocio,
     ramo_negocio: l.ramo_negocio,
@@ -594,7 +639,7 @@ async function startDispatchPhase(
     campaign_id: camp.id,
     scraped_count: leads.length,
     updated_at: new Date().toISOString(),
-  }).eq("id", a.id);
+  }).eq("id", a.id).eq("client_id", clientId);
 
   const r = await startCampaign(camp.id);
   if (!r.ok) return markError(a.id, `Falha startando campanha: ${r.error}`);
@@ -613,12 +658,13 @@ async function selectCapturedLeads(
   a: AutomationRow,
   scope: { baselineMaxId: number | null; startedAt: string | null },
 ): Promise<{ id: any; remoteJid: string; nome_negocio: string | null; ramo_negocio: string | null }[]> {
+  const clientId = requireAutomationClientId(a);
   let leadsQuery = supabase
     .from("leads_extraidos")
     .select("id, remoteJid, nome_negocio, ramo_negocio")
+    .eq("client_id", clientId)
     .not("remoteJid", "is", null);
   if (scope.baselineMaxId !== null) leadsQuery = leadsQuery.gt("id", scope.baselineMaxId);
-  if ((a as any).client_id) leadsQuery = leadsQuery.eq("client_id", (a as any).client_id);
   if (scope.startedAt) leadsQuery = leadsQuery.gte("created_at", scope.startedAt);
   const { data: rawLeads, error } = await leadsQuery;
   if (error) throw new Error(`Falha lendo leads colhidos: ${error.message}`);
@@ -645,6 +691,7 @@ async function canonicalizeAndFilterLeads(
   a: AutomationRow,
   leads: { id: any; remoteJid: string; nome_negocio: string | null; ramo_negocio: string | null }[],
 ): Promise<{ leads: typeof leads; removed: number }> {
+  const clientId = requireAutomationClientId(a);
   // ───────── UNIFICAÇÃO PRECOCE DE JID CANÔNICO (WhatsApp) ─────────
   // Scraper extrai telefones e gera JIDs brutos (que no Brasil podem vir com
   // o nono dígito a mais). A Evolution API resolve o JID canônico real do
@@ -673,7 +720,8 @@ async function canonicalizeAndFilterLeads(
               const { error: updErr } = await supabase
                 .from("leads_extraidos")
                 .update({ remoteJid: sendJid })
-                .eq("id", lead.id);
+                .eq("id", lead.id)
+                .eq("client_id", clientId);
 
               if (updErr) {
                 // Se der erro 23505 (unique remoteJid colision), faz o merge do CRM e deleta a duplicada
@@ -683,6 +731,7 @@ async function canonicalizeAndFilterLeads(
                     .from("leads_extraidos")
                     .select("*")
                     .eq("id", lead.id)
+                    .eq("client_id", clientId)
                     .maybeSingle();
 
                   if (oldLead) {
@@ -704,19 +753,22 @@ async function canonicalizeAndFilterLeads(
                     await supabase
                       .from("leads_extraidos")
                       .update(mergePayload)
-                      .eq("remoteJid", sendJid);
+                      .eq("remoteJid", sendJid)
+                      .eq("client_id", clientId);
 
                     // Deleta o lead capturado antigo duplicado
                     await supabase
                       .from("leads_extraidos")
                       .delete()
-                      .eq("id", oldLead.id);
+                      .eq("id", oldLead.id)
+                      .eq("client_id", clientId);
 
                     // Busca o ID do lead canônico correspondente para atualizar a lista em memória
                     const { data: canonicalLead } = await supabase
                       .from("leads_extraidos")
                       .select("id")
                       .eq("remoteJid", sendJid)
+                      .eq("client_id", clientId)
                       .maybeSingle();
 
                     if (canonicalLead) {
@@ -749,7 +801,8 @@ async function canonicalizeAndFilterLeads(
           await supabase
             .from("leads_extraidos")
             .update({ status: "invalid_number" })
-            .eq("id", lead.id);
+            .eq("id", lead.id)
+            .eq("client_id", clientId);
           continue;
         }
         validLeads.push(lead);
@@ -785,6 +838,7 @@ async function topUpInvalidLeads(
   if (objetivo <= 0 || leads.length >= objetivo || removedCount <= 0) return;
 
   const filters = a.scrape_filters || {};
+  const clientId = requireAutomationClientId(a);
   const roundsDone = Number(filters._topupRounds) || 0;
   if (roundsDone >= 2) {
     await log(a.id, "scrape", "warning",
@@ -808,7 +862,7 @@ async function topUpInvalidLeads(
     webhookEnabled: false,
     maxLeads: deficit,
     automation_id: a.id,
-    client_id: (a as any).client_id || null,
+    client_id: clientId,
     forceRestart: false,
     topup: true,
   });
@@ -820,10 +874,10 @@ async function topUpInvalidLeads(
   // Espera o run de reposição terminar (poll 5s, teto 20min — captação de
   // poucos leads leva poucos minutos; se estourar, segue com o que tem).
   const deadline = Date.now() + 20 * 60 * 1000;
-  while (getScraperStatus().isScraping && Date.now() < deadline) {
+  while (getScraperStatus(clientId, a.id).isScraping && Date.now() < deadline) {
     await new Promise(res => setTimeout(res, 5000));
   }
-  if (getScraperStatus().isScraping) {
+  if (getScraperStatus(clientId, a.id).isScraping) {
     await log(a.id, "scrape", "warning",
       `♻️ Reposição demorou mais que 20min — seguindo com ${leads.length} lead(s) válidos. Os extras ficam no CRM pra próxima.`);
     return;
@@ -845,11 +899,11 @@ async function topUpInvalidLeads(
 
   // Persiste a rodada pra um restart da automação não re-repor sem parar.
   try {
-    const { data: row } = await supabase.from("automations").select("scrape_filters").eq("id", a.id).maybeSingle();
+    const { data: row } = await supabase.from("automations").select("scrape_filters").eq("id", a.id).eq("client_id", clientId).maybeSingle();
     await supabase.from("automations").update({
       scrape_filters: { ...((row?.scrape_filters as any) || {}), _topupRounds: roundsDone + 1 },
       updated_at: new Date().toISOString(),
-    }).eq("id", a.id);
+    }).eq("id", a.id).eq("client_id", clientId);
   } catch { /* best-effort */ }
 }
 
@@ -864,10 +918,12 @@ async function checkDispatchDone(a: AutomationRow): Promise<{
 }> {
   const empty = { done: false, status: null, sent: 0, failed: 0, pending: 0, total: 0 };
   if (!a.campaign_id) return empty;
+  const clientId = requireAutomationClientId(a);
   const { data: c } = await supabase
     .from("campaigns")
     .select("status")
     .eq("id", a.campaign_id)
+    .eq("client_id", clientId)
     .maybeSingle();
   const status = c?.status || null;
 
@@ -876,6 +932,7 @@ async function checkDispatchDone(a: AutomationRow): Promise<{
       .from("campaign_targets")
       .select("*", { count: "exact", head: true })
       .eq("campaign_id", a.campaign_id)
+      .eq("client_id", clientId)
       .eq("status", st);
     return count || 0;
   };
@@ -899,6 +956,7 @@ async function checkDispatchDone(a: AutomationRow): Promise<{
  * FASE 3 — Cria a follow-up campaign e enrola os leads que foram disparados.
  */
 async function startFollowupPhase(a: AutomationRow): Promise<void> {
+  const clientId = requireAutomationClientId(a);
   // Idempotência: se já criou follow-up, pula.
   if (a.followup_campaign_id) {
     console.log(`[AUTOMATION ${a.id}] startFollowupPhase já criou follow-up ${a.followup_campaign_id} — pulando.`);
@@ -909,6 +967,7 @@ async function startFollowupPhase(a: AutomationRow): Promise<void> {
     .from("automations")
     .update({ phase: "following", updated_at: new Date().toISOString() })
     .eq("id", a.id)
+    .eq("client_id", clientId)
     .eq("phase", "dispatching")
     .select("id")
     .maybeSingle();
@@ -931,7 +990,7 @@ async function startFollowupPhase(a: AutomationRow): Promise<void> {
       phase: "done",
       status: "done",
       updated_at: new Date().toISOString(),
-    }).eq("id", a.id);
+    }).eq("id", a.id).eq("client_id", clientId);
     return;
   }
 
@@ -940,6 +999,7 @@ async function startFollowupPhase(a: AutomationRow): Promise<void> {
     .from("campaign_targets")
     .select("remote_jid")
     .eq("campaign_id", a.campaign_id)
+    .eq("client_id", clientId)
     .eq("status", "sent");
   if (!targets || targets.length === 0) {
     await supabase.from("automations").update({
@@ -947,7 +1007,7 @@ async function startFollowupPhase(a: AutomationRow): Promise<void> {
       status: "done",
       last_error: "Nenhum lead foi disparado com sucesso — pulando follow-up.",
       updated_at: new Date().toISOString(),
-    }).eq("id", a.id);
+    }).eq("id", a.id).eq("client_id", clientId);
     return;
   }
 
@@ -955,7 +1015,7 @@ async function startFollowupPhase(a: AutomationRow): Promise<void> {
   const { data: fcamp, error: fcErr } = await supabase
     .from("followup_campaigns")
     .insert({
-      client_id: (a as any).client_id || null,
+      client_id: clientId,
       name: `[Auto] ${a.name}`,
       instance_name: a.instance_name,
       ai_enabled: !!a.followup_ai_enabled,
@@ -984,16 +1044,17 @@ async function startFollowupPhase(a: AutomationRow): Promise<void> {
   const { data: leadRows } = await supabase
     .from("leads_extraidos")
     .select("id")
+    .eq("client_id", clientId)
     .in("remoteJid", remoteJids);
   const leadIds = (leadRows || []).map((l: any) => l.id);
-  const r = await enrollLeads({ campaignId: fcamp.id, leadIds });
+  const r = await enrollLeads({ campaignId: fcamp.id, leadIds, clientId });
   if (!r.ok) return markError(a.id, `Falha enrolando follow-up: ${r.error}`);
 
   await supabase.from("automations").update({
     phase: "following",
     followup_campaign_id: fcamp.id,
     updated_at: new Date().toISOString(),
-  }).eq("id", a.id);
+  }).eq("id", a.id).eq("client_id", clientId);
   console.log(`[AUTOMATION ${a.id}] Follow-up ${fcamp.id} ativo com ${r.enrolled} leads.`);
   await log(a.id, "dispatch", "success",
     `✓ Disparo concluído. ${targets.length} lead(s) entregue(s).`,
@@ -1011,10 +1072,12 @@ async function startFollowupPhase(a: AutomationRow): Promise<void> {
  */
 async function checkFollowupDone(a: AutomationRow): Promise<{ done: boolean; active: number }> {
   if (!a.followup_campaign_id) return { done: false, active: 0 };
+  const clientId = requireAutomationClientId(a);
   const { count: ativos } = await supabase
     .from("followup_targets")
     .select("*", { count: "exact", head: true })
     .eq("followup_campaign_id", a.followup_campaign_id)
+    .eq("client_id", clientId)
     .in("status", ["pending", "waiting"]);
   return { done: (ativos || 0) === 0, active: ativos || 0 };
 }
@@ -1026,6 +1089,7 @@ async function tickOne(a: AutomationRow) {
   if (a.status !== "running") return;
 
   try {
+    const clientId = requireAutomationClientId(a);
     if (a.phase === "idle") {
       // GUARDA: 2 ticks concorrentes (imediato + 60s) podem ler phase=idle
       // juntos e disparar o scraper 2×. O Set segura o segundo até o
@@ -1063,7 +1127,7 @@ async function tickOne(a: AutomationRow) {
         scraped_count: r.scrapedNow,
         scrape_filters: nextFilters,
         updated_at: new Date().toISOString(),
-      }).eq("id", a.id);
+      }).eq("id", a.id).eq("client_id", clientId);
       if (r.done) {
         // O log de transição vive DENTRO do startDispatchPhase, só pra quem
         // ganha a trava atômica — senão 2 ticks concorrentes duplicam a linha.
@@ -1109,7 +1173,7 @@ async function tickOne(a: AutomationRow) {
           phase: "done",
           status: "done",
           updated_at: new Date().toISOString(),
-        }).eq("id", a.id);
+        }).eq("id", a.id).eq("client_id", clientId);
         await log(a.id, "state", "success", "🏁 Automação concluída. Todos os leads foram processados.");
       } else {
         // Heartbeat de follow-up — só grava quando o nº de leads ativos muda.
@@ -1165,7 +1229,8 @@ export async function tickAllAutomations(): Promise<number> {
 /** Liga uma automação. SEMPRE reseta pra idle e re-tick — clicar Iniciar
  *  significa "rode agora", mesmo se o status já estava como running de uma
  *  tentativa anterior travada (que era o motivo de "nada acontecer"). */
-export async function startAutomation(id: string): Promise<{ ok: boolean; error?: string; phase?: string }> {
+export async function startAutomation(id: string, clientIdInput: string): Promise<{ ok: boolean; error?: string; phase?: string }> {
+  const clientId = requireClientId(clientIdInput);
   // GUARDA anti-duplo-clique: se um Iniciar desta automação aconteceu há
   // menos de 8s, ignora. O primeiro click já está processando (reset +
   // tick + scraper); um segundo click nesse intervalo só criaria corrida
@@ -1176,8 +1241,9 @@ export async function startAutomation(id: string): Promise<{ ok: boolean; error?
   }
   lastStartAt.set(id, Date.now());
 
-  const { data: a } = await supabase.from("automations").select("*").eq("id", id).maybeSingle();
+  const { data: a } = await supabase.from("automations").select("*").eq("id", id).eq("client_id", clientId).maybeSingle();
   if (!a) return { ok: false, error: "Automação não encontrada." };
+  automationTenantCache.set(id, clientId);
 
   await log(id, "state", "info", "▶️ Botão Iniciar acionado — validando configuração…");
 
@@ -1203,25 +1269,22 @@ export async function startAutomation(id: string): Promise<{ ok: boolean; error?
     try {
       await pauseCampaign(a.campaign_id);
       // Marca status="cancelled" pra ela não retomar em recoverRunningCampaigns.
-      await supabase.from("campaigns")
-        .update({ status: "cancelled", finished_at: new Date().toISOString() })
-        .eq("id", a.campaign_id);
+       await supabase.from("campaigns")
+         .update({ status: "cancelled", finished_at: new Date().toISOString() })
+         .eq("id", a.campaign_id)
+         .eq("client_id", clientId);
     } catch (e) {
       console.warn(`[AUTOMATION] cancelamento de campanha antiga falhou: ${(e as Error).message}`);
     }
   }
   if (a.followup_campaign_id) {
     try {
-      await supabase.from("followup_campaigns")
-        .update({ status: "cancelled", updated_at: new Date().toISOString() })
-        .eq("id", a.followup_campaign_id);
+       await supabase.from("followup_campaigns")
+         .update({ status: "cancelled", updated_at: new Date().toISOString() })
+         .eq("id", a.followup_campaign_id)
+         .eq("client_id", clientId);
     } catch {}
   }
-
-  // Reseta qualquer scraper in-memory antigo pra garantir arranque limpo do robô
-  try {
-    stopScraper();
-  } catch {}
 
   // Reset COMPLETO em todos os casos. Sem early-return: clicar Iniciar = recomeçar.
   // Limpa também os _baselineCount/_scrapeStartedAt/_lastProgressAt antigos pra
@@ -1244,7 +1307,7 @@ export async function startAutomation(id: string): Promise<{ ok: boolean; error?
     scraped_count: 0,
     scrape_filters: cleanFilters,
     updated_at: new Date().toISOString(),
-  }).eq("id", id);
+  }).eq("id", id).eq("client_id", clientId);
   if (updErr) return fail("Erro interno ao iniciar automação: " + updErr.message);
 
   // Tick síncrono imediato — garante que phase muda pra "scraping" e o
@@ -1256,7 +1319,7 @@ export async function startAutomation(id: string): Promise<{ ok: boolean; error?
   }
 
   // Lê o estado atualizado pra retornar pra UI.
-  const { data: after } = await supabase.from("automations").select("phase, last_error").eq("id", id).maybeSingle();
+  const { data: after } = await supabase.from("automations").select("phase, last_error").eq("id", id).eq("client_id", clientId).maybeSingle();
   if (after?.last_error) return { ok: false, error: after.last_error };
   return { ok: true, phase: after?.phase };
 }
@@ -1272,9 +1335,11 @@ export async function startAutomation(id: string): Promise<{ ok: boolean; error?
  * Quando o usuário clicar Iniciar de novo, startAutomation faz reset duro
  * (phase=idle, campaign_id=null, etc.) e recomeça do zero.
  */
-export async function pauseAutomation(id: string): Promise<{ ok: boolean; stopped: { scraper: boolean; campaign: boolean; followup: boolean } }> {
-  const { data: a } = await supabase.from("automations").select("*").eq("id", id).maybeSingle();
+export async function pauseAutomation(id: string, clientIdInput: string): Promise<{ ok: boolean; stopped: { scraper: boolean; campaign: boolean; followup: boolean } }> {
+  const clientId = requireClientId(clientIdInput);
+  const { data: a } = await supabase.from("automations").select("*").eq("id", id).eq("client_id", clientId).maybeSingle();
   if (!a) return { ok: false as any, stopped: { scraper: false, campaign: false, followup: false } };
+  automationTenantCache.set(id, clientId);
 
   const stopped = { scraper: false, campaign: false, followup: false };
 
@@ -1282,9 +1347,9 @@ export async function pauseAutomation(id: string): Promise<{ ok: boolean; stoppe
   //    estado in-memory, e pode estar servindo /captador também). Heurística:
   //    se a fase é "scraping" + scraper rodando, esta é nossa.
   try {
-    const sc = getScraperStatus();
-    if (sc.isScraping && a.phase === "scraping") {
-      stopScraper();
+    const sc = getScraperStatus(clientId, id);
+    if (sc.isScraping && sc.automationId === id && a.phase === "scraping") {
+      stopScraper(clientId, id);
       stopped.scraper = true;
       await log(id, "scrape", "warning", "⏸ Scraper parado pelo usuário.");
     }
@@ -1310,7 +1375,8 @@ export async function pauseAutomation(id: string): Promise<{ ok: boolean; stoppe
       await supabase
         .from("followup_campaigns")
         .update({ status: "paused", updated_at: new Date().toISOString() })
-        .eq("id", a.followup_campaign_id);
+        .eq("id", a.followup_campaign_id)
+        .eq("client_id", clientId);
       stopped.followup = true;
       await log(id, "followup", "warning", "⏸ Follow-up pausado pelo usuário.");
     } catch (e) {
@@ -1322,7 +1388,8 @@ export async function pauseAutomation(id: string): Promise<{ ok: boolean; stoppe
   await supabase
     .from("automations")
     .update({ status: "paused", phase: "paused", updated_at: new Date().toISOString() })
-    .eq("id", id);
+    .eq("id", id)
+    .eq("client_id", clientId);
   await log(id, "state", "warning",
     `⏸ Automação pausada. Etapas paradas: ${[
       stopped.scraper && "scraper",

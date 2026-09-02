@@ -11,12 +11,11 @@ import {
   resumeScraper,
   clearLeads,
   getLeads,
-  getStatus,
   sendLeadsBatch,
   attachSseClient,
   detachSseClient,
 } from "@/lib/scraper-engine";
-import { SESSION_COOKIE, verifySession } from "@/lib/auth";
+import { isSessionLiveStrict, SESSION_COOKIE, verifySession } from "@/lib/auth";
 import { cookies } from "next/headers";
 
 // --- GET: SSE Stream ---
@@ -26,15 +25,23 @@ export async function GET() {
   const cookieStore = await cookies();
   const token = cookieStore.get(SESSION_COOKIE)?.value;
   const session = token ? await verifySession(token) : null;
-  if (!session) {
+  if (!session?.clientId || !session.sessionId || !token || !(await isSessionLiveStrict(session.sessionId, token))) {
     return new Response("Não autenticado", { status: 401 });
   }
+  let streamController: ReadableStreamDefaultController | null = null;
+  let closeTimer: ReturnType<typeof setTimeout> | null = null;
   const stream = new ReadableStream({
     start(controller) {
-      attachSseClient(controller);
+      streamController = controller;
+      attachSseClient(controller, session.clientId);
+      closeTimer = setTimeout(() => {
+        detachSseClient(controller);
+        try { controller.close(); } catch {}
+      }, 60_000);
     },
-    cancel(controller) {
-      detachSseClient(controller as unknown as ReadableStreamDefaultController);
+    cancel() {
+      if (closeTimer) clearTimeout(closeTimer);
+      if (streamController) detachSseClient(streamController);
     },
   });
   return new Response(stream, {
@@ -51,7 +58,7 @@ export async function POST(req: NextRequest) {
   const cookieStore = await cookies();
   const token = cookieStore.get(SESSION_COOKIE)?.value;
   const session = token ? await verifySession(token) : null;
-  if (!session) {
+  if (!session?.clientId || !session.sessionId || !token || !(await isSessionLiveStrict(session.sessionId, token))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -72,7 +79,6 @@ export async function POST(req: NextRequest) {
         filterWithWebsite: body.filterWithWebsite === true,
         captureAllReviews: body.captureAllReviews === true,
         maxLeads: body.maxLeads,            // /captador também pode passar limite
-        automation_id: body.automation_id,
         client_id: session.clientId,
         reviews_ai: body.reviews_ai,        // resumo automático pós-save (Busca)
       });
@@ -83,26 +89,26 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: true, attached_automation: body.automation_id || null });
     }
     case "stop": {
-      stopScraper();
+      if (!stopScraper(session.clientId)) return NextResponse.json({ error: "Extrator indisponível." }, { status: 409 });
       return NextResponse.json({ success: true });
     }
     case "pause": {
-      pauseScraper();
+      if (!pauseScraper(session.clientId)) return NextResponse.json({ error: "Extrator indisponível." }, { status: 409 });
       return NextResponse.json({ success: true });
     }
     case "resume": {
-      resumeScraper();
+      if (!resumeScraper(session.clientId)) return NextResponse.json({ error: "Extrator indisponível." }, { status: 409 });
       return NextResponse.json({ success: true });
     }
     case "clear": {
-      clearLeads();
+      if (!clearLeads(session.clientId)) return NextResponse.json({ error: "Extrator indisponível." }, { status: 409 });
       return NextResponse.json({ success: true });
     }
     case "get_leads": {
-      return NextResponse.json(getLeads());
+      return NextResponse.json(getLeads(session.clientId));
     }
     case "send_batch": {
-      const r = await sendLeadsBatch(body.webhookUrl);
+      const r = await sendLeadsBatch(body.webhookUrl, session.clientId);
       if (!r.ok) return NextResponse.json({ error: r.error }, { status: 500 });
       return NextResponse.json({ success: true, count: r.count });
     }

@@ -25,7 +25,7 @@ import {
 } from "@/lib/campaign-worker";
 import { logTokenUsage } from "@/lib/token-usage";
 import { registerPendingAutomatedSend } from "@/lib/manual-send-registry";
-import { clientIdFromInstance } from "@/lib/tenant";
+import { isInstanceOwnedByClient } from "@/lib/tenant";
 
 type FollowupStep = {
   day_offset: number;
@@ -34,6 +34,7 @@ type FollowupStep = {
 
 type FollowupCampaign = {
   id: string;
+  client_id: string;
   name: string;
   instance_name: string;
   ai_enabled: boolean;
@@ -56,6 +57,7 @@ type FollowupCampaign = {
 
 type FollowupTarget = {
   id: string;
+  client_id: string;
   followup_campaign_id: string;
   lead_id: number | null;
   remote_jid: string;
@@ -77,6 +79,7 @@ let followupLogsAvailable: boolean | null = null;
 
 export async function addFollowupLog(
   campaignId: string,
+  clientId: string,
   message: string,
   level: "info" | "success" | "warning" | "error" = "info"
 ) {
@@ -87,13 +90,14 @@ export async function addFollowupLog(
     supabase.from("followup_campaigns").update({
       last_error: message.slice(0, 500),
       last_error_at: new Date().toISOString(),
-    }).eq("id", campaignId).then(() => {}, () => {});
+    }).eq("id", campaignId).eq("client_id", clientId).then(() => {}, () => {});
   }
 
   if (followupLogsAvailable === false) return;
   try {
     const { error } = await supabase.from("followup_logs").insert({
       followup_campaign_id: campaignId,
+      client_id: clientId,
       message,
       level,
     });
@@ -108,11 +112,12 @@ export async function addFollowupLog(
   } catch {}
 }
 
-async function loadCampaign(id: string): Promise<FollowupCampaign | null> {
+async function loadCampaign(id: string, clientId: string): Promise<FollowupCampaign | null> {
   const { data } = await supabase
     .from("followup_campaigns")
     .select("*")
     .eq("id", id)
+    .eq("client_id", clientId)
     .maybeSingle();
   return (data as FollowupCampaign) || null;
 }
@@ -126,18 +131,19 @@ async function getApiKey(): Promise<string | null> {
   return data?.api_key || null;
 }
 
-async function clientRespondedSince(remoteJid: string, sinceIso: string): Promise<boolean> {
+async function clientRespondedSince(remoteJid: string, sinceIso: string, clientId: string): Promise<boolean> {
   const { data } = await supabase
     .from("chats_dashboard")
     .select("id")
     .eq("remote_jid", remoteJid)
+    .eq("client_id", clientId)
     .eq("is_from_me", false)
     .gt("created_at", sinceIso)
     .limit(1);
   return !!(data && data.length > 0);
 }
 
-export async function getConversationHistory(remoteJid: string, limit = 80): Promise<string> {
+export async function getConversationHistory(remoteJid: string, clientId: string, limit = 80): Promise<string> {
   // Limit DEFAULT 80 (era 20). A IA do follow-up agora analisa a CONVERSA
   // INTEIRA pra entender exatamente o contexto: quais perguntas foram feitas,
   // o que o cliente respondeu, em que estágio do funil está, e adaptar a
@@ -147,6 +153,7 @@ export async function getConversationHistory(remoteJid: string, limit = 80): Pro
     .from("chats_dashboard")
     .select("content, is_from_me, created_at")
     .eq("remote_jid", remoteJid)
+    .eq("client_id", clientId)
     .order("created_at", { ascending: false })
     .limit(limit);
   if (!data || data.length === 0) return "(sem histórico — este é o primeiro contato)";
@@ -161,6 +168,7 @@ export async function getConversationHistory(remoteJid: string, limit = 80): Pro
  */
 async function moveLeadExhausted(opts: {
   remoteJid: string;
+  clientId: string;
   attempts: number;
   campaignName: string;
 }) {
@@ -171,6 +179,7 @@ async function moveLeadExhausted(opts: {
     .from("leads_extraidos")
     .select("id, status")
     .eq("remoteJid", opts.remoteJid)
+    .eq("client_id", opts.clientId)
     .maybeSingle();
 
   const nowIso = new Date().toISOString();
@@ -187,9 +196,11 @@ async function moveLeadExhausted(opts: {
           ia_last_analyzed_at: nowIso,
           updated_at: nowIso,
         })
-        .eq("id", lead.id);
+        .eq("id", lead.id)
+        .eq("client_id", opts.clientId);
 
       await supabase.from("historico_ia_leads").insert({
+        client_id: opts.clientId,
         remote_jid: opts.remoteJid,
         nome_negocio: null,
         status_antigo: lead.status || "nenhum",
@@ -206,11 +217,12 @@ async function moveLeadExhausted(opts: {
  * Quando o cliente respondeu, promove o lead para "interessado" (se ainda não
  * estiver num estágio mais alto).
  */
-async function moveLeadResponded(remoteJid: string) {
+async function moveLeadResponded(remoteJid: string, clientId: string) {
   const { data: lead } = await supabase
     .from("leads_extraidos")
     .select("id, status")
     .eq("remoteJid", remoteJid)
+    .eq("client_id", clientId)
     .maybeSingle();
   if (!lead) return;
 
@@ -222,7 +234,8 @@ async function moveLeadResponded(remoteJid: string) {
     await supabase
       .from("leads_extraidos")
       .update({ status: "interessado", updated_at: new Date().toISOString() })
-      .eq("id", lead.id);
+      .eq("id", lead.id)
+      .eq("client_id", clientId);
   }
 }
 
@@ -241,10 +254,9 @@ export async function personalizeFollowupWithAI(opts: {
   stepNumber: number;
   campaignId?: string;
   campaignName?: string;
+  clientId: string;
   /** remoteJid pra puxar o briefing IA cacheado (lead-intelligence). */
   remoteJid?: string;
-  /** instance_name da campanha — pra resolver o client_id dono do gasto de IA. */
-  instanceName?: string;
 }): Promise<string> {
   const { resolveModel } = await import("@/lib/ai-default-model");
   const modelId = await resolveModel(opts.model);
@@ -255,7 +267,7 @@ export async function personalizeFollowupWithAI(opts: {
   if (opts.remoteJid) {
     try {
       const { getCachedIntelligence, intelligenceToPromptContext } = await import("@/lib/lead-intelligence");
-      const intel = await getCachedIntelligence(opts.remoteJid);
+      const intel = await getCachedIntelligence(opts.remoteJid, opts.clientId);
       if (intel) intelContext = intelligenceToPromptContext(intel) + "\n\n";
     } catch {}
   }
@@ -315,16 +327,6 @@ Antes de escrever, faça essa análise mental (não devolva, é só pra você):
     openrouterApiKey: keys.openrouter,
   });
 
-  // Resolve client_id dono da campanha pela instância — sem isso, o gasto
-  // cai no Default client e o /tokens do tenant fica sem custo de follow-up.
-  let clientIdForLog: string | undefined;
-  if (opts.instanceName) {
-    try {
-      const resolved = await clientIdFromInstance(opts.instanceName);
-      if (resolved) clientIdForLog = resolved;
-    } catch { /* não-fatal, loga como default */ }
-  }
-
   logTokenUsage({
     source: "followup",
     sourceId: opts.campaignId || null,
@@ -334,7 +336,7 @@ Antes de escrever, faça essa análise mental (não devolva, é só pra você):
     promptTokens: out.usage.promptTokens,
     completionTokens: out.usage.completionTokens,
     totalTokens: out.usage.totalTokens,
-    clientId: clientIdForLog,
+    clientId: opts.clientId,
     metadata: { stepNumber: opts.stepNumber, nome_empresa: opts.nome_empresa },
   });
 
@@ -354,18 +356,20 @@ async function processTarget(
 
   // 1. Cliente respondeu? Se sim, encerra follow-up.
   if (target.last_sent_at) {
-    const responded = await clientRespondedSince(target.remote_jid, target.last_sent_at);
+    const responded = await clientRespondedSince(target.remote_jid, target.last_sent_at, camp.client_id);
     if (responded) {
       await supabase
         .from("followup_targets")
         .update({ status: "responded", updated_at: new Date().toISOString() })
-        .eq("id", target.id);
-      await moveLeadResponded(target.remote_jid);
+        .eq("id", target.id)
+        .eq("client_id", camp.client_id);
+      await moveLeadResponded(target.remote_jid, camp.client_id);
       await supabase
         .from("followup_campaigns")
-        .update({ total_responded: (await countByStatus(camp.id, "responded")) })
-        .eq("id", camp.id);
-      await addFollowupLog(camp.id, `🎉 ${nomeLead} RESPONDEU ao follow-up — lead movido p/ "interessado" no CRM.`, "success");
+        .update({ total_responded: (await countByStatus(camp.id, camp.client_id, "responded")) })
+        .eq("id", camp.id)
+        .eq("client_id", camp.client_id);
+      await addFollowupLog(camp.id, camp.client_id, `🎉 ${nomeLead} RESPONDEU ao follow-up — lead movido p/ "interessado" no CRM.`, "success");
       return "responded";
     }
   }
@@ -377,21 +381,24 @@ async function processTarget(
     await supabase
       .from("followup_targets")
       .update({ status: "exhausted", updated_at: new Date().toISOString() })
-      .eq("id", target.id);
+      .eq("id", target.id)
+      .eq("client_id", camp.client_id);
     await moveLeadExhausted({
       remoteJid: target.remote_jid,
+      clientId: camp.client_id,
       attempts: target.current_step,
       campaignName: camp.name,
     });
     await supabase
       .from("followup_campaigns")
-      .update({ total_exhausted: (await countByStatus(camp.id, "exhausted")) })
-      .eq("id", camp.id);
-    await addFollowupLog(camp.id, `⊘ ${nomeLead} ESGOTADO — ${target.current_step} follow-ups sem resposta → CRM "sem_interesse".`, "warning");
+      .update({ total_exhausted: (await countByStatus(camp.id, camp.client_id, "exhausted")) })
+      .eq("id", camp.id)
+      .eq("client_id", camp.client_id);
+    await addFollowupLog(camp.id, camp.client_id, `⊘ ${nomeLead} ESGOTADO — ${target.current_step} follow-ups sem resposta → CRM "sem_interesse".`, "warning");
     return "exhausted";
   }
 
-  await addFollowupLog(camp.id, `Processando ${nomeLead} — step ${target.current_step + 1}/${camp.steps.length}...`, "info");
+  await addFollowupLog(camp.id, camp.client_id, `Processando ${nomeLead} — step ${target.current_step + 1}/${camp.steps.length}...`, "info");
 
   // Busca o lead completo no CRM pra abastecer TODAS as variáveis do template
   // ({{endereco}}, {{website}}, {{avaliacao}}, {{ramo}}, etc) — não só o nome.
@@ -400,12 +407,13 @@ async function processTarget(
   let leadFull: any = null;
   {
     const cols = "nome_negocio, ramo_negocio, telefone, endereco, website, instagram, facebook, avaliacao, reviews, status, categoria, resumo_avaliacoes";
-    let res = await supabase.from("leads_extraidos").select(cols).eq("remoteJid", target.remote_jid).maybeSingle();
+    let res = await supabase.from("leads_extraidos").select(cols).eq("remoteJid", target.remote_jid).eq("client_id", camp.client_id).maybeSingle();
     if (res.error && res.error.code === "PGRST204") {
       res = await supabase
         .from("leads_extraidos")
         .select(cols.replace(", resumo_avaliacoes", ""))
         .eq("remoteJid", target.remote_jid)
+        .eq("client_id", camp.client_id)
         .maybeSingle();
     }
     leadFull = res.data || null;
@@ -419,6 +427,7 @@ async function processTarget(
       .from("contacts")
       .select("push_name")
       .eq("remote_jid", target.remote_jid)
+      .eq("client_id", camp.client_id)
       .maybeSingle();
     pushName = (contact as any)?.push_name || null;
   }
@@ -452,8 +461,8 @@ async function processTarget(
   if (camp.ai_enabled && camp.ai_model) {
     aiInputText = text;
     try {
-      await addFollowupLog(camp.id, `Personalizando mensagem com IA para ${nomeLead}...`, "info");
-      const history = await getConversationHistory(target.remote_jid, 20);
+      await addFollowupLog(camp.id, camp.client_id, `Personalizando mensagem com IA para ${nomeLead}...`, "info");
+      const history = await getConversationHistory(target.remote_jid, camp.client_id, 20);
       const ai = await personalizeFollowupWithAI({
         baseMessage: text,
         customPrompt: camp.ai_prompt ? renderTemplate(camp.ai_prompt, renderCtx) : "",
@@ -465,16 +474,16 @@ async function processTarget(
         stepNumber: target.current_step + 1,
         campaignId: camp.id,
         campaignName: camp.name,
+        clientId: camp.client_id,
         remoteJid: target.remote_jid,  // ← injeta briefing
-        instanceName: camp.instance_name,  // ← resolve clientId dono do gasto
       });
       if (ai && ai.trim()) {
         text = ai.trim();
-        await addFollowupLog(camp.id, `IA gerou: "${text.slice(0, 140)}${text.length > 140 ? "…" : ""}"`, "success");
+        await addFollowupLog(camp.id, camp.client_id, `IA gerou: "${text.slice(0, 140)}${text.length > 140 ? "…" : ""}"`, "success");
       }
     } catch (e: any) {
       console.warn(`[FOLLOWUP ${camp.name}] IA falhou, usando template: ${e.message}`);
-      await addFollowupLog(camp.id, `IA falhou (${e.message}). Enviando template cru.`, "warning");
+      await addFollowupLog(camp.id, camp.client_id, `IA falhou (${e.message}). Enviando template cru.`, "warning");
     }
   }
 
@@ -486,7 +495,7 @@ async function processTarget(
   // Aqui, qualquer {{...}} ou {...} que ainda reste (variável desconhecida)
   // é REMOVIDA. O cliente JAMAIS pode receber chaves cruas no WhatsApp.
   if (/\{\{.*?\}\}|\{.*?\}/.test(text)) {
-    await addFollowupLog(camp.id,
+    await addFollowupLog(camp.id, camp.client_id,
       `⚠️ A mensagem de follow-up continha variável {{...}} ou {...} não preenchida — removida automaticamente antes do envio.`, "warning");
     text = text
       .replace(/\{\{\s*[\w-]+\s*\}\}/g, "")  // remove {{var}} ou {{var-name}}
@@ -506,6 +515,7 @@ async function processTarget(
 
     // Sessão criada uma vez e reusada em todos os chunks.
     const sess = await findOrCreateContactSession(
+      camp.client_id,
       target.remote_jid,
       camp.instance_name,
       target.nome_negocio
@@ -523,6 +533,9 @@ async function processTarget(
 
       registerPendingAutomatedSend(camp.instance_name, target.remote_jid, chunkText);
       const result = await channel.sendMessage(target.remote_jid, chunkText, camp.instance_name);
+      if (!result || result.ok === false) {
+        throw new Error(result?.error || "Provider recusou o envio do follow-up");
+      }
 
       // Persiste cada chunk no chat (pra IA ter contexto de todas as partes).
       const chunkMsgId = (result as any)?.messageId || (result as any)?.key?.id || (result as any)?.data?.key?.id || `followup-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`;
@@ -534,11 +547,12 @@ async function processTarget(
           instanceName: camp.instance_name,
           msgId: chunkMsgId,
           text: chunkText,
+          clientId: camp.client_id,
         });
       } catch (persistErr: any) {
         const m = `⚠ Follow-up enviado no WhatsApp mas falhou ao salvar no chats_dashboard: ${persistErr?.message}.`;
         console.warn(`[FOLLOWUP ${camp.name}] ${m}`);
-        await addFollowupLog(camp.id, m, "warning");
+        await addFollowupLog(camp.id, camp.client_id, m, "warning");
       }
     }
 
@@ -558,8 +572,11 @@ async function processTarget(
           },
           camp.instance_name,
         );
+        if (!mediaResult || mediaResult.ok === false) {
+          throw new Error(mediaResult?.error || "Provider recusou o envio da mídia");
+        }
         const mediaMsgId = (mediaResult as any)?.messageId || (mediaResult as any)?.key?.id || `media-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-        await addFollowupLog(camp.id, `📎 Mídia enviada → ${target.nome_negocio || target.remote_jid}`, "info");
+        await addFollowupLog(camp.id, camp.client_id, `📎 Mídia enviada → ${target.nome_negocio || target.remote_jid}`, "info");
         try {
           await persistOutgoingMessage({
             sessionId: sess?.sessionId || null,
@@ -567,11 +584,12 @@ async function processTarget(
             instanceName: camp.instance_name,
             msgId: mediaMsgId,
             text: camp.media_caption || "",
+            clientId: camp.client_id,
           });
         } catch { /* best-effort */ }
       } catch (mediaErr: any) {
         console.warn(`[FOLLOWUP ${camp.name}] Mídia falhou: ${mediaErr?.message}`);
-        await addFollowupLog(camp.id, `⚠ Mídia falhou: ${mediaErr?.message}`, "warning");
+        await addFollowupLog(camp.id, camp.client_id, `⚠ Mídia falhou: ${mediaErr?.message}`, "warning");
       }
     }
 
@@ -598,16 +616,39 @@ async function processTarget(
       updated_at: nowIso,
     };
     if (aiInputText) updatePayload.ai_input = aiInputText;
-    let upd = await supabase.from("followup_targets").update(updatePayload).eq("id", target.id);
+    const targetScope = {
+      id: target.id,
+      client_id: camp.client_id,
+      current_step: target.current_step,
+      status: "processing",
+    };
+    let upd = await supabase
+      .from("followup_targets")
+      .update(updatePayload)
+      .eq("id", targetScope.id)
+      .eq("client_id", targetScope.client_id)
+      .eq("current_step", targetScope.current_step)
+      .eq("status", targetScope.status);
     if (upd.error && (upd.error as any).code === "PGRST204" && "ai_input" in updatePayload) {
       delete updatePayload.ai_input;
-      upd = await supabase.from("followup_targets").update(updatePayload).eq("id", target.id);
+      upd = await supabase
+        .from("followup_targets")
+        .update(updatePayload)
+        .eq("id", targetScope.id)
+        .eq("client_id", targetScope.client_id)
+        .eq("current_step", targetScope.current_step)
+        .eq("status", targetScope.status);
+    }
+    if (upd.error) {
+      console.error(`[FOLLOWUP] falha ao persistir avanço do target ${target.id}:`, upd.error.message);
+      return "failed";
     }
 
     await supabase
       .from("followup_campaigns")
-      .update({ total_sent: (await countSentTotal(camp.id)) })
-      .eq("id", camp.id);
+      .update({ total_sent: (await countSentTotal(camp.id, camp.client_id)) })
+      .eq("id", camp.id)
+      .eq("client_id", camp.client_id);
 
     // Mantém o lead em "follow-up" no CRM e deixa um rastro no histórico (pra quem
     // olha o kanban ver "1 follow-up feito agora"). Só mexe se estiver em estados
@@ -618,6 +659,7 @@ async function processTarget(
         .from("leads_extraidos")
         .select("id, status")
         .eq("remoteJid", target.remote_jid)
+        .eq("client_id", camp.client_id)
         .maybeSingle();
       if (lead) {
         const orderRank: Record<string, number> = {
@@ -631,10 +673,11 @@ async function processTarget(
             resumo_ia: `Follow-up ${nextStep}/${camp.steps.length} enviado agora ("${camp.name}"). Aguardando resposta do cliente.`,
             ia_last_analyzed_at: nowIso2,
             updated_at: nowIso2,
-          }).eq("id", lead.id);
+          }).eq("id", lead.id).eq("client_id", camp.client_id);
         }
       }
       await supabase.from("historico_ia_leads").insert({
+        client_id: camp.client_id,
         remote_jid: target.remote_jid,
         nome_negocio: target.nome_negocio,
         status_antigo: "follow-up",
@@ -647,11 +690,12 @@ async function processTarget(
       console.warn(`[FOLLOWUP ${camp.name}] atualização do kanban falhou: ${leadErr?.message}`);
     }
 
-    console.log(`[FOLLOWUP ${camp.name}] ✓ Step ${target.current_step + 1} → ${target.remote_jid}`);
+    console.log(`[FOLLOWUP ${camp.name}] ✓ Step ${nextStep} → ${target.remote_jid}`);
     // Inclui a MENSAGEM REAL enviada (truncada). Operador precisa ver o conteúdo.
     const fuPreview = String(text || "").replace(/\s+/g, " ").slice(0, 240);
     await addFollowupLog(
       camp.id,
+      camp.client_id,
       `✓ Follow-up ${nextStep}/${camp.steps.length} → ${nomeLead}\n📨 "${fuPreview}${(text || "").length > 240 ? "…" : ""}"\nPróximo: ${new Date(nextSendAt).toLocaleDateString("pt-BR")}`,
       "success",
     );
@@ -664,28 +708,31 @@ async function processTarget(
         error_message: String(err?.message || err).slice(0, 300),
         updated_at: new Date().toISOString(),
       })
-      .eq("id", target.id);
+      .eq("id", target.id)
+      .eq("client_id", camp.client_id);
     console.error(`[FOLLOWUP ${camp.name}] ✗ ${target.remote_jid}: ${err?.message || err}`);
-    await addFollowupLog(camp.id, `✗ Falha ao enviar p/ ${nomeLead}: ${err?.message || err}`, "error");
+    await addFollowupLog(camp.id, camp.client_id, `✗ Falha ao enviar p/ ${nomeLead}: ${err?.message || err}`, "error");
     return "failed";
   }
 }
 
-async function countByStatus(campaignId: string, status: string): Promise<number> {
+async function countByStatus(campaignId: string, clientId: string, status: string): Promise<number> {
   const { count } = await supabase
     .from("followup_targets")
     .select("*", { count: "exact", head: true })
     .eq("followup_campaign_id", campaignId)
+    .eq("client_id", clientId)
     .eq("status", status);
   return count || 0;
 }
 
-async function countSentTotal(campaignId: string): Promise<number> {
+async function countSentTotal(campaignId: string, clientId: string): Promise<number> {
   // Sent total = soma dos current_step de todos os targets (cada step == 1 envio feito)
   const { data } = await supabase
     .from("followup_targets")
     .select("current_step")
-    .eq("followup_campaign_id", campaignId);
+    .eq("followup_campaign_id", campaignId)
+    .eq("client_id", clientId);
   if (!data) return 0;
   return data.reduce((acc, t: any) => acc + (t.current_step || 0), 0);
 }
@@ -694,15 +741,22 @@ async function countSentTotal(campaignId: string): Promise<number> {
 // tickCampaign: processa todos os targets elegíveis de uma campanha
 // ============================================================
 
-export async function tickCampaign(campaignId: string): Promise<{
+export async function tickCampaign(campaignId: string, clientId: string): Promise<{
   ok: boolean;
   processed: number;
   error?: string;
 }> {
-  const camp = await loadCampaign(campaignId);
+  if (!clientId?.trim()) return { ok: false, processed: 0, error: "clientId é obrigatório" };
+  const camp = await loadCampaign(campaignId, clientId);
   if (!camp) return { ok: false, processed: 0, error: "Campanha não encontrada" };
   if (camp.status !== "active" && camp.status !== "draft") {
     return { ok: false, processed: 0, error: `Campanha está ${camp.status}` };
+  }
+  if (!(await isInstanceOwnedByClient(camp.instance_name, camp.client_id))) {
+    const error = `Instância "${camp.instance_name}" não pertence ao cliente da campanha`;
+    await addFollowupLog(camp.id, camp.client_id, error, "error");
+    await supabase.from("followup_campaigns").update({ status: "paused" }).eq("id", camp.id).eq("client_id", camp.client_id);
+    return { ok: false, processed: 0, error };
   }
   if (!isWithinHourWindow(camp.allowed_start_hour, camp.allowed_end_hour)) {
     return { ok: false, processed: 0, error: "Fora da janela permitida" };
@@ -716,6 +770,7 @@ export async function tickCampaign(campaignId: string): Promise<{
     .from("followup_targets")
     .select("*")
     .eq("followup_campaign_id", campaignId)
+    .eq("client_id", clientId)
     .in("status", ["pending", "waiting", "failed"])
     .or(`next_send_at.is.null,next_send_at.lte.${nowIso}`)
     .order("created_at", { ascending: true })
@@ -737,6 +792,9 @@ export async function tickCampaign(campaignId: string): Promise<{
       .from("followup_targets")
       .update({ status: "processing", updated_at: new Date().toISOString() })
       .eq("id", t.id)
+      .eq("client_id", clientId)
+      .eq("current_step", t.current_step)
+      .eq("status", t.status) // CAS: outro ciclo pode ter avançado/pulado depois do SELECT inicial
       .in("status", ["pending", "waiting", "failed"])
       .select("id")
       .maybeSingle();
@@ -745,6 +803,7 @@ export async function tickCampaign(campaignId: string): Promise<{
       continue;
     }
 
+    const claimedStep = t.current_step;
     let r: string | null = null;
     try {
       r = await processTarget(camp, t, apiKey);
@@ -754,8 +813,28 @@ export async function tickCampaign(campaignId: string): Promise<{
       await supabase
         .from("followup_targets")
         .update({ status: "failed", last_error: err?.message?.slice(0, 500) || "exception", updated_at: new Date().toISOString() })
-        .eq("id", t.id);
+        .eq("id", t.id)
+        .eq("client_id", clientId)
+        .eq("status", "processing");
       r = "failed";
+    }
+
+    // Confirma posse depois do processamento, antes de contar/agendar o próximo.
+    // Se recovery/outro ciclo reassumiu, este resultado é descartado — não se
+    // conta como processado nem se sobrescreve o novo estado.
+    const { data: stillOwned } = await supabase
+      .from("followup_targets")
+      .select("id, status, current_step")
+      .eq("id", t.id)
+      .eq("client_id", clientId)
+      .maybeSingle();
+    if (!stillOwned) {
+      console.warn(`[FOLLOWUP] target ${t.id} desapareceu durante o processamento — resultado descartado.`);
+      continue;
+    }
+    if (r === "sent" && !(stillOwned.status === "waiting" && stillOwned.current_step === claimedStep + 1)) {
+      console.warn(`[FOLLOWUP] target ${t.id} mudou de dono durante o envio — resultado desta execução descartado.`);
+      continue;
     }
     if (r === "sent" || r === "failed") {
       processed++;
@@ -770,7 +849,8 @@ export async function tickCampaign(campaignId: string): Promise<{
   await supabase
     .from("followup_campaigns")
     .update({ updated_at: new Date().toISOString() })
-    .eq("id", campaignId);
+    .eq("id", campaignId)
+    .eq("client_id", clientId);
 
   return { ok: true, processed };
 }
@@ -782,13 +862,24 @@ export async function tickCampaign(campaignId: string): Promise<{
 export async function enrollLeads(opts: {
   campaignId: string;
   leadIds: number[];
+  clientId: string;
 }): Promise<{ ok: boolean; enrolled: number; error?: string }> {
-  const { leadIds, campaignId } = opts;
+  const { leadIds, campaignId, clientId } = opts;
+  if (!clientId?.trim()) return { ok: false, enrolled: 0, error: "clientId é obrigatório" };
+
+  const { data: campaign } = await supabase
+    .from("followup_campaigns")
+    .select("id")
+    .eq("id", campaignId)
+    .eq("client_id", clientId)
+    .maybeSingle();
+  if (!campaign) return { ok: false, enrolled: 0, error: "Campanha não encontrada" };
   if (leadIds.length === 0) return { ok: true, enrolled: 0 };
 
   const { data: leads, error } = await supabase
     .from("leads_extraidos")
     .select("id, remoteJid, nome_negocio, ramo_negocio")
+    .eq("client_id", clientId)
     .in("id", leadIds);
   if (error) return { ok: false, enrolled: 0, error: error.message };
 
@@ -796,6 +887,7 @@ export async function enrollLeads(opts: {
     .filter((l: any) => l.remoteJid)
     .map((l: any) => ({
       followup_campaign_id: campaignId,
+      client_id: clientId,
       lead_id: l.id,
       remote_jid: l.remoteJid,
       nome_negocio: l.nome_negocio,
@@ -816,11 +908,13 @@ export async function enrollLeads(opts: {
   const { count } = await supabase
     .from("followup_targets")
     .select("*", { count: "exact", head: true })
-    .eq("followup_campaign_id", campaignId);
+    .eq("followup_campaign_id", campaignId)
+    .eq("client_id", clientId);
   await supabase
     .from("followup_campaigns")
     .update({ total_enrolled: count || 0, updated_at: new Date().toISOString() })
-    .eq("id", campaignId);
+    .eq("id", campaignId)
+    .eq("client_id", clientId);
 
   return { ok: true, enrolled: rows.length };
 }
@@ -832,7 +926,7 @@ export async function enrollLeads(opts: {
 export async function tickAllAutoCampaigns(): Promise<number> {
   const { data: camps } = await supabase
     .from("followup_campaigns")
-    .select("id")
+    .select("id, client_id")
     .eq("status", "active")
     .eq("auto_execute", true);
   if (!camps || camps.length === 0) return 0;
@@ -840,7 +934,7 @@ export async function tickAllAutoCampaigns(): Promise<number> {
   let total = 0;
   for (const c of camps) {
     try {
-      const r = await tickCampaign(c.id);
+      const r = await tickCampaign(c.id, c.client_id);
       total += r.processed;
     } catch (e: any) {
       console.error(`[FOLLOWUP TICK-ALL] Campanha ${c.id} falhou:`, e.message);

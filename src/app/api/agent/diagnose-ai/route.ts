@@ -52,7 +52,10 @@ export async function GET(req: NextRequest) {
   // Ownership: cliente comum só pode diagnosticar a própria instância.
   if (!auth.isAdmin) {
     const owner = await clientIdFromInstance(instanceName);
-    if (owner && owner !== auth.clientId) {
+    if (!owner) {
+      return NextResponse.json({ ok: false, error: "Instância sem vínculo de cliente" }, { status: 404 });
+    }
+    if (owner !== auth.clientId) {
       return NextResponse.json({ ok: false, error: "Instância não pertence a este cliente" }, { status: 403 });
     }
   }

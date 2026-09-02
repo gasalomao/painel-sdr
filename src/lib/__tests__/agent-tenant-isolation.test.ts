@@ -1,5 +1,85 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
+type Row = Record<string, unknown>;
+
+const sendState = vi.hoisted(() => ({
+  tables: {} as Record<string, Row[]>,
+  queries: [] as Array<{ table: string; filters: Array<[string, unknown]> }>,
+  writes: [] as Array<{ table: string; payload: Row }>,
+  requireClientId: vi.fn(),
+  isInstanceOwnedByClient: vi.fn(),
+  sendMessage: vi.fn(),
+}));
+
+function sendQuery(table: string) {
+  const filters: Array<[string, unknown]> = [];
+  let inserted: Row | null = null;
+  let updated: Row | null = null;
+  const rows = () => (sendState.tables[table] || []).filter((row) =>
+    filters.every(([column, value]) => row[column] === value));
+  const result = (single = false) => ({
+    data: inserted || (single ? rows()[0] || null : rows()),
+    error: null,
+  });
+  const chain = {
+    select() { return chain; },
+    eq(column: string, value: unknown) {
+      filters.push([column, value]);
+      return chain;
+    },
+    gte() { return chain; },
+    limit() { return chain; },
+    insert(payload: Row) {
+      inserted = { id: `${table}-new`, ...payload };
+      sendState.writes.push({ table, payload });
+      return chain;
+    },
+    update(payload: Row) {
+      updated = payload;
+      sendState.writes.push({ table, payload });
+      return chain;
+    },
+    async maybeSingle() {
+      sendState.queries.push({ table, filters: [...filters] });
+      return result(true);
+    },
+    async single() {
+      sendState.queries.push({ table, filters: [...filters] });
+      return result(true);
+    },
+    then(resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) {
+      sendState.queries.push({ table, filters: [...filters] });
+      if (updated) {
+        for (const row of rows()) Object.assign(row, updated);
+      }
+      return Promise.resolve(result()).then(resolve, reject);
+    },
+  };
+  return chain;
+}
+
+vi.mock("@/lib/supabase_admin", () => ({
+  supabaseAdmin: {
+    from: (table: string) => sendQuery(table),
+    storage: {},
+  },
+}));
+vi.mock("@/lib/tenant", () => ({
+  requireClientId: sendState.requireClientId,
+  isInstanceOwnedByClient: sendState.isInstanceOwnedByClient,
+}));
+vi.mock("@/lib/channel", () => ({
+  sendMessage: sendState.sendMessage,
+  sendMedia: vi.fn(),
+}));
+vi.mock("@/lib/evolution", () => ({
+  getEvolutionConfig: vi.fn(async () => ({ instance: "inst-a" })),
+  evolution: { extractPhone: (jid: string) => jid.replace(/\D/g, "") },
+}));
+vi.mock("@/lib/manual-send-registry", () => ({ registerManualSend: vi.fn() }));
+
+import { POST as sendManualMessage } from "@/app/api/send-message/route";
+
 /**
  * Testes das garantias multi-tenant do /api/agent/process:
  * 1. chats_dashboard writes incluem client_id resolvido do canal
@@ -8,6 +88,86 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
  * 4. Canal com agente de outro tenant em produção retorna agent_tenant_mismatch
  * 5. Instância de outro tenant via cookie retorna 403
  */
+
+describe("POST /api/send-message — isolamento multi-tenant", () => {
+  const sharedJid = "5511999999999@s.whatsapp.net";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sendState.tables = {
+      chats_dashboard: [],
+      contacts: [
+        { id: "contact-a", client_id: "tenant-a", remote_jid: sharedJid },
+        { id: "contact-b", client_id: "tenant-b", remote_jid: sharedJid },
+      ],
+      sessions: [
+        { id: "session-a", client_id: "tenant-a", contact_id: "contact-a", instance_name: "inst" },
+        { id: "session-b", client_id: "tenant-b", contact_id: "contact-b", instance_name: "inst" },
+      ],
+      messages: [],
+    };
+    sendState.queries = [];
+    sendState.writes = [];
+    sendState.requireClientId.mockResolvedValue({
+      ok: true,
+      clientId: "tenant-b",
+      isAdmin: false,
+      impersonating: false,
+    });
+    sendState.isInstanceOwnedByClient.mockResolvedValue(true);
+    sendState.sendMessage.mockResolvedValue({ ok: true, messageId: "msg-1" });
+  });
+
+  it("deduplica e resolve contato/sessão somente dentro do tenant autenticado", async () => {
+    const req = new Request("http://localhost/api/send-message", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ remoteJid: sharedJid, text: "Olá", instanceName: "inst" }),
+    });
+
+    const response = await sendManualMessage(req as never);
+
+    expect(response.status).toBe(200);
+    expect(sendState.isInstanceOwnedByClient).toHaveBeenCalledWith("inst", "tenant-b");
+    expect(sendState.queries).toContainEqual({
+      table: "contacts",
+      filters: [["remote_jid", sharedJid], ["client_id", "tenant-b"]],
+    });
+    expect(sendState.queries).toContainEqual({
+      table: "sessions",
+      filters: [["contact_id", "contact-b"], ["instance_name", "inst"], ["client_id", "tenant-b"]],
+    });
+    expect(sendState.queries).toContainEqual(expect.objectContaining({
+      table: "chats_dashboard",
+      filters: expect.arrayContaining([["client_id", "tenant-b"], ["instance_name", "inst"]]),
+    }));
+    expect(sendState.writes).toContainEqual(expect.objectContaining({
+      table: "messages",
+      payload: expect.objectContaining({ client_id: "tenant-b", session_id: "session-b" }),
+    }));
+  });
+
+  it("não permite que admin use uma instância fora do escopo atual", async () => {
+    sendState.requireClientId.mockResolvedValue({
+      ok: true,
+      clientId: "admin-tenant",
+      isAdmin: true,
+      impersonating: false,
+    });
+    sendState.isInstanceOwnedByClient.mockResolvedValue(false);
+    const req = new Request("http://localhost/api/send-message", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ remoteJid: sharedJid, text: "Olá", instanceName: "inst-b" }),
+    });
+
+    const response = await sendManualMessage(req as never);
+
+    expect(response.status).toBe(403);
+    expect(sendState.sendMessage).not.toHaveBeenCalled();
+    expect(sendState.queries).toEqual([]);
+  });
+});
 
 describe("Multi-tenant isolation contracts", () => {
   const CLIENT_A = "00000000-0000-0000-0000-00000000a001";

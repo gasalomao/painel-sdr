@@ -76,7 +76,9 @@ CREATE TABLE IF NOT EXISTS public.agent_settings (
   client_id                  uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid,
   lead_intelligence_enabled  boolean DEFAULT false,
   is_scheduler               boolean NOT NULL DEFAULT false,
-  scheduler_config           jsonb DEFAULT '{"reminders": [{"message": "Oi {nome}! Lembrete: amanhã às {hora_agendamento} temos seu agendamento de {servico}. Confirma a presença?", "offset_minutes": 1440}, {"message": "Oi {nome}! Em 1h é o seu agendamento ({servico}). Te esperamos!", "offset_minutes": 60}], "calendar_id": "primary", "owner_phone": null, "notify_owner": false, "business_hours": {"tz": "America/Sao_Paulo", "end": "18:00", "days": [1, 2, 3, 4, 5, 6], "start": "09:00"}, "cancel_window_minutes": 120, "default_duration_minutes": 60, "auto_promote_kanban_after_minutes": 30}'::jsonb
+  scheduler_config           jsonb DEFAULT '{"reminders": [{"message": "Oi {nome}! Lembrete: amanhã às {hora_agendamento} temos seu agendamento de {servico}. Confirma a presença?", "offset_minutes": 1440}, {"message": "Oi {nome}! Em 1h é o seu agendamento ({servico}). Te esperamos!", "offset_minutes": 60}], "calendar_id": "primary", "owner_phone": null, "notify_owner": false, "business_hours": {"tz": "America/Sao_Paulo", "end": "18:00", "days": [1, 2, 3, 4, 5, 6], "start": "09:00"}, "cancel_window_minutes": 120, "default_duration_minutes": 60, "auto_promote_kanban_after_minutes": 30}'::jsonb,
+  disable_groups             boolean DEFAULT false,
+  transcription_method      text DEFAULT 'auto'::text
 );
 
 CREATE TABLE IF NOT EXISTS public.agent_stages (
@@ -109,6 +111,8 @@ CREATE TABLE IF NOT EXISTS public.ai_organizer_config (
   gateway_api_key         text,
   gateway_fallback_model  text,
   gateway_endpoints       jsonb DEFAULT '[]'::jsonb,
+  openrouter_keys         jsonb DEFAULT '[]'::jsonb,
+  ai_combos               jsonb DEFAULT '[]'::jsonb,
   model                   text,
   provider                text DEFAULT 'Gemini'::text,
   execution_hour          integer DEFAULT 20,
@@ -129,6 +133,8 @@ ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS gateway_fallback
 -- ChatGPT). Cada item: {id, label, base_url, api_key}. Os campos single acima
 -- viram a 1ª conexão (retrocompat). gateway_fallback_model continua global.
 ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS gateway_endpoints jsonb DEFAULT '[]'::jsonb;
+ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS openrouter_keys jsonb DEFAULT '[]'::jsonb;
+ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS ai_combos jsonb DEFAULT '[]'::jsonb;
 
 CREATE TABLE IF NOT EXISTS public.ai_organizer_runs (
   id              BIGSERIAL PRIMARY KEY,
@@ -271,6 +277,12 @@ CREATE TABLE IF NOT EXISTS public.automations (
   updated_at                 timestamp with time zone DEFAULT now(),
   followup_enabled           boolean DEFAULT true,
   lead_intelligence_enabled  boolean DEFAULT false,
+  dispatch_humanize          boolean NOT NULL DEFAULT false,
+  dispatch_media_url         text,
+  dispatch_media_type        text,
+  dispatch_media_caption     text,
+  dispatch_media_file_name   text,
+  dispatch_media_mimetype    text,
   client_id                  uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
 );
 
@@ -328,6 +340,12 @@ CREATE TABLE IF NOT EXISTS public.campaigns (
   updated_at                 timestamp with time zone DEFAULT now(),
   automation_id              uuid,
   lead_intelligence_enabled  boolean DEFAULT false,
+  humanize_messages          boolean NOT NULL DEFAULT false,
+  media_url                  text,
+  media_type                 text,
+  media_caption              text,
+  media_file_name            text,
+  media_mimetype             text,
   client_id                  uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
 );
 
@@ -355,7 +373,7 @@ CREATE TABLE IF NOT EXISTS public.chats_dashboard (
   id                 BIGSERIAL PRIMARY KEY,
   remote_jid         text NOT NULL,
   instance_name      text NOT NULL DEFAULT 'sdr'::text,
-  message_id         text UNIQUE,
+  message_id         text,
   sender_type        text NOT NULL DEFAULT 'customer'::text,
   content            text,
   status_envio       text,
@@ -399,7 +417,7 @@ CREATE TABLE IF NOT EXISTS public.clients (
 
 CREATE TABLE IF NOT EXISTS public.contacts (
   id                     uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  remote_jid             text NOT NULL UNIQUE,
+  remote_jid             text NOT NULL,
   phone_number           text,
   nome_negocio           text,
   push_name              text,
@@ -436,6 +454,13 @@ CREATE TABLE IF NOT EXISTS public.followup_campaigns (
   last_error_at         timestamp with time zone,
   created_at            timestamp with time zone DEFAULT now(),
   updated_at            timestamp with time zone DEFAULT now(),
+  humanize_messages     boolean NOT NULL DEFAULT false,
+  media_url             text,
+  media_type            text,
+  media_caption         text,
+  media_file_name       text,
+  media_mimetype        text,
+  source_status         text NOT NULL DEFAULT 'follow-up'::text,
   client_id             uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid
 );
 
@@ -497,7 +522,7 @@ CREATE TABLE IF NOT EXISTS public.kanban_columns (
 
 CREATE TABLE IF NOT EXISTS public.leads_extraidos (
   id                       BIGSERIAL PRIMARY KEY,
-  "remoteJid"              text UNIQUE,
+  "remoteJid"              text,
   nome_negocio             text,
   ramo_negocio             text,
   status                   text DEFAULT 'novo'::text,
@@ -524,7 +549,7 @@ CREATE TABLE IF NOT EXISTS public.leads_extraidos (
   rating                   numeric,
   next_follow_up           timestamp with time zone,
   current_stage_index      integer DEFAULT 0,
-  client_id                uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid,
+  client_id                uuid NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'::uuid,
   last_analysis_hash       text,
   last_analysis_at         timestamp with time zone,
   email                    text,
@@ -560,7 +585,7 @@ CREATE TABLE IF NOT EXISTS public.leads_extraidos (
 CREATE TABLE IF NOT EXISTS public.messages (
   id              BIGSERIAL PRIMARY KEY,
   session_id      uuid,
-  message_id      text UNIQUE,
+  message_id      text,
   sender          text NOT NULL DEFAULT 'customer'::text,
   content         text,
   media_category  text,
@@ -629,10 +654,104 @@ CREATE TABLE IF NOT EXISTS public.provider_credentials (
   updated_at  timestamp with time zone DEFAULT now()
 );
 
+ALTER TABLE public.agent_settings ADD COLUMN IF NOT EXISTS disable_groups boolean DEFAULT false;
+ALTER TABLE public.agent_settings ADD COLUMN IF NOT EXISTS transcription_method text DEFAULT 'auto';
+ALTER TABLE public.automations ADD COLUMN IF NOT EXISTS dispatch_humanize boolean NOT NULL DEFAULT false;
+ALTER TABLE public.automations ADD COLUMN IF NOT EXISTS dispatch_media_url text;
+ALTER TABLE public.automations ADD COLUMN IF NOT EXISTS dispatch_media_type text;
+ALTER TABLE public.automations ADD COLUMN IF NOT EXISTS dispatch_media_caption text;
+ALTER TABLE public.automations ADD COLUMN IF NOT EXISTS dispatch_media_file_name text;
+ALTER TABLE public.automations ADD COLUMN IF NOT EXISTS dispatch_media_mimetype text;
+ALTER TABLE public.campaigns ADD COLUMN IF NOT EXISTS humanize_messages boolean NOT NULL DEFAULT false;
+ALTER TABLE public.campaigns ADD COLUMN IF NOT EXISTS media_url text;
+ALTER TABLE public.campaigns ADD COLUMN IF NOT EXISTS media_type text;
+ALTER TABLE public.campaigns ADD COLUMN IF NOT EXISTS media_caption text;
+ALTER TABLE public.campaigns ADD COLUMN IF NOT EXISTS media_file_name text;
+ALTER TABLE public.campaigns ADD COLUMN IF NOT EXISTS media_mimetype text;
+ALTER TABLE public.followup_campaigns ADD COLUMN IF NOT EXISTS humanize_messages boolean NOT NULL DEFAULT false;
+ALTER TABLE public.followup_campaigns ADD COLUMN IF NOT EXISTS media_url text;
+ALTER TABLE public.followup_campaigns ADD COLUMN IF NOT EXISTS media_type text;
+ALTER TABLE public.followup_campaigns ADD COLUMN IF NOT EXISTS media_caption text;
+ALTER TABLE public.followup_campaigns ADD COLUMN IF NOT EXISTS media_file_name text;
+ALTER TABLE public.followup_campaigns ADD COLUMN IF NOT EXISTS media_mimetype text;
+ALTER TABLE public.followup_campaigns ADD COLUMN IF NOT EXISTS source_status text NOT NULL DEFAULT 'follow-up';
+
+ALTER TABLE public.contacts DROP CONSTRAINT IF EXISTS contacts_remote_jid_key;
+ALTER TABLE public.messages DROP CONSTRAINT IF EXISTS messages_message_id_key;
+ALTER TABLE public.chats_dashboard DROP CONSTRAINT IF EXISTS chats_dashboard_message_id_key;
+INSERT INTO public.contacts (client_id, remote_jid, phone_number, push_name)
+SELECT DISTINCT session.client_id, contact.remote_jid, contact.phone_number, contact.push_name
+FROM public.sessions AS session
+JOIN public.contacts AS contact ON contact.id = session.contact_id
+WHERE session.client_id <> contact.client_id
+  AND NOT EXISTS (
+    SELECT 1 FROM public.contacts AS owned
+    WHERE owned.client_id = session.client_id AND owned.remote_jid = contact.remote_jid
+  );
+INSERT INTO public.contacts (client_id, remote_jid, phone_number)
+SELECT DISTINCT chat.client_id, chat.remote_jid,
+  COALESCE(NULLIF(SPLIT_PART(chat.remote_jid, '@', 1), ''), chat.remote_jid)
+FROM public.chats_dashboard AS chat
+WHERE chat.remote_jid IS NOT NULL
+  AND chat.remote_jid <> ''
+  AND NOT EXISTS (
+    SELECT 1 FROM public.contacts AS contact
+    WHERE contact.client_id = chat.client_id AND contact.remote_jid = chat.remote_jid
+  );
+UPDATE public.sessions AS session
+SET contact_id = owned.id
+FROM public.contacts AS original
+JOIN public.contacts AS owned ON owned.remote_jid = original.remote_jid
+WHERE session.contact_id = original.id
+  AND original.client_id <> session.client_id
+  AND owned.client_id = session.client_id;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM public.contacts
+    GROUP BY client_id, remote_jid
+    HAVING COUNT(*) > 1
+  ) THEN
+    RAISE EXCEPTION 'contacts contém remote_jid duplicado no mesmo tenant; faça merge antes de continuar';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.messages
+    WHERE message_id IS NOT NULL
+    GROUP BY client_id, message_id
+    HAVING COUNT(*) > 1
+  ) THEN
+    RAISE EXCEPTION 'messages contém message_id duplicado no mesmo tenant; faça merge antes de continuar';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.chats_dashboard
+    WHERE message_id IS NOT NULL
+    GROUP BY client_id, message_id
+    HAVING COUNT(*) > 1
+  ) THEN
+    RAISE EXCEPTION 'chats_dashboard contém message_id duplicado no mesmo tenant; faça merge antes de continuar';
+  END IF;
+END
+$$;
+
+REVOKE ALL ON TABLE public.clients FROM anon, authenticated;
+REVOKE ALL ON TABLE public.auth_sessions FROM anon, authenticated;
+ALTER TABLE public.clients ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.auth_sessions ENABLE ROW LEVEL SECURITY;
+
 -- =====================================================================
 -- CONSTRAINTS COMPOSTAS / UNIQUE (idempotente via DO blocks)
 -- =====================================================================
 DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'contacts_client_remote_jid_key') THEN
+    ALTER TABLE public.contacts ADD CONSTRAINT contacts_client_remote_jid_key UNIQUE (client_id, remote_jid);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'messages_client_message_id_key') THEN
+    ALTER TABLE public.messages ADD CONSTRAINT messages_client_message_id_key UNIQUE (client_id, message_id);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chats_dashboard_client_message_id_key') THEN
+    ALTER TABLE public.chats_dashboard ADD CONSTRAINT chats_dashboard_client_message_id_key UNIQUE (client_id, message_id);
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_campaign_target') THEN
     ALTER TABLE public.campaign_targets ADD CONSTRAINT uq_campaign_target UNIQUE (campaign_id, remote_jid);
   END IF;
@@ -776,6 +895,32 @@ CREATE INDEX IF NOT EXISTS idx_historico_ia_leads_client ON public.historico_ia_
 CREATE INDEX IF NOT EXISTS idx_kanban_columns_client ON public.kanban_columns USING btree (client_id, order_index);
 
 -- leads_extraidos
+UPDATE public.leads_extraidos AS lead
+SET client_id = connection.client_id
+FROM public.channel_connections AS connection
+WHERE lead.client_id IS NULL
+  AND lead.instance_name = connection.instance_name
+  AND connection.client_id IS NOT NULL;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM public.leads_extraidos WHERE client_id IS NULL) THEN
+    RAISE EXCEPTION 'leads_extraidos contém client_id nulo; corrija o ownership antes de continuar';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.leads_extraidos
+    WHERE "remoteJid" IS NOT NULL
+    GROUP BY client_id, "remoteJid"
+    HAVING COUNT(*) > 1
+  ) THEN
+    RAISE EXCEPTION 'leads_extraidos contém remoteJid duplicado no mesmo tenant; faça merge antes de continuar';
+  END IF;
+END
+$$;
+ALTER TABLE public.leads_extraidos ALTER COLUMN client_id SET NOT NULL;
+ALTER TABLE public.leads_extraidos DROP CONSTRAINT IF EXISTS "leads_extraidos_remoteJid_key";
+DROP INDEX IF EXISTS public.idx_leads_extraidos_client_remotejid;
+CREATE UNIQUE INDEX idx_leads_extraidos_client_remotejid
+  ON public.leads_extraidos USING btree (client_id, "remoteJid");
 CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client         ON public.leads_extraidos USING btree (client_id);
 CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_created ON public.leads_extraidos USING btree (client_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_email   ON public.leads_extraidos USING btree (client_id, email) WHERE (email IS NOT NULL);

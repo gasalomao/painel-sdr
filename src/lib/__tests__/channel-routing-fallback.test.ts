@@ -15,8 +15,13 @@ const mocks = vi.hoisted(() => {
     mockV2FetchPic: vi.fn(),
     mockCloudSendText: vi.fn(),
     mockCloudSendMedia: vi.fn(),
+    mockFetchPublicHttpUrl: vi.fn(),
   };
 });
+
+vi.mock("@/lib/safe-url", () => ({
+  fetchPublicHttpUrl: mocks.mockFetchPublicHttpUrl,
+}));
 
 vi.mock("@/lib/supabase_admin", () => ({
   supabaseAdmin: {
@@ -234,6 +239,47 @@ describe("channel routing and fallback tests", () => {
       expect(res.ok).toBe(true);
       expect(res.messageId).toBe("media_cloud");
       expect(mocks.mockCloudSendMedia).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects remote media declared above 100MB before reading it", async () => {
+      const cancel = vi.fn().mockResolvedValue(undefined);
+      mocks.mockFetchPublicHttpUrl.mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers({ "content-length": String(101 * 1024 * 1024) }),
+        body: { cancel },
+      });
+
+      await expect(sendMedia("551199999999", "caption", {
+        type: "document",
+        mediaUrl: "https://cdn.example.com/large.pdf",
+      }, "go_inst")).rejects.toThrow("limite de 100MB");
+
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(mocks.mockGoSendMedia).not.toHaveBeenCalled();
+      expect(mocks.mockV2SendMedia).not.toHaveBeenCalled();
+    });
+
+    it("cancels a chunked remote media stream when it crosses 100MB", async () => {
+      const cancel = vi.fn().mockResolvedValue(undefined);
+      const releaseLock = vi.fn();
+      const read = vi.fn().mockResolvedValueOnce({
+        done: false,
+        value: { byteLength: 100 * 1024 * 1024 + 1 },
+      });
+      mocks.mockFetchPublicHttpUrl.mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers(),
+        body: { getReader: () => ({ read, cancel, releaseLock }) },
+      });
+
+      await expect(sendMedia("551199999999", "caption", {
+        type: "document",
+        mediaUrl: "https://cdn.example.com/chunked.pdf",
+      }, "go_inst")).rejects.toThrow("limite de 100MB");
+
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(releaseLock).toHaveBeenCalledTimes(1);
+      expect(mocks.mockGoSendMedia).not.toHaveBeenCalled();
     });
   });
 

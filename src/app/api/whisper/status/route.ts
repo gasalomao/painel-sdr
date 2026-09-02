@@ -1,4 +1,5 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { isAdminRequest } from "@/lib/auth";
 import { getWhisperStatus } from "@/lib/whisper-manager";
 import { execFile } from "child_process";
 import { promisify } from "util";
@@ -7,7 +8,10 @@ const execFileAsync = promisify(execFile);
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  if (!(await isAdminRequest(req))) {
+    return NextResponse.json({ success: false, error: "Apenas admin" }, { status: 403 });
+  }
   const status = await getWhisperStatus();
 
   let ffmpegAvailable = false;

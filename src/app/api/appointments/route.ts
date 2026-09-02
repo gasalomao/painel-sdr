@@ -15,7 +15,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
-import { requireClientId } from "@/lib/tenant";
+import { isInstanceOwnedByClient, requireClientId } from "@/lib/tenant";
 import { createCalendarEvent, GoogleCalendarError, hasCalendarConnected } from "@/lib/google-calendar";
 
 export const dynamic = "force-dynamic";
@@ -100,26 +100,31 @@ export async function POST(req: NextRequest) {
   if (end <= start) {
     return NextResponse.json({ ok: false, error: "end_at deve ser depois de start_at" }, { status: 400 });
   }
+  if (instance_name && !(await isInstanceOwnedByClient(String(instance_name), auth.clientId))) {
+    return NextResponse.json({ ok: false, error: "Instância não pertence a este cliente" }, { status: 403 });
+  }
 
-  // Ownership: se agent_id passado, valida que pertence ao client_id (a menos que admin).
-  if (agent_id && !auth.isAdmin) {
+  // IDs relacionados também precisam existir no escopo atual. Admin opera outro
+  // tenant por impersonação; o papel global não autoriza misturar referências.
+  if (agent_id) {
     const { data: ag } = await supabaseAdmin
       .from("agent_settings")
-      .select("client_id")
+      .select("id")
       .eq("id", Number(agent_id))
+      .eq("client_id", auth.clientId)
       .maybeSingle();
-    if (ag?.client_id && ag.client_id !== auth.clientId) {
+    if (!ag) {
       return NextResponse.json({ ok: false, error: "Agente não pertence a este cliente" }, { status: 403 });
     }
   }
-  // Idem pra lead_id.
-  if (lead_id && !auth.isAdmin) {
+  if (lead_id) {
     const { data: ld } = await supabaseAdmin
       .from("leads_extraidos")
-      .select("client_id")
+      .select("id")
       .eq("id", Number(lead_id))
+      .eq("client_id", auth.clientId)
       .maybeSingle();
-    if (ld?.client_id && ld.client_id !== auth.clientId) {
+    if (!ld) {
       return NextResponse.json({ ok: false, error: "Lead não pertence a este cliente" }, { status: 403 });
     }
   }

@@ -7,7 +7,7 @@
  * aparece sozinho no seletor — igual à descoberta de modelos Gemini.
  */
 
-import { supabase } from "@/lib/supabase";
+import { supabaseAdmin } from "@/lib/supabase_admin";
 
 export type OpenRouterModel = {
   id: string;            // ex: "anthropic/claude-3.5-sonnet"
@@ -27,7 +27,7 @@ const TTL_MS = 10 * 60 * 1000;
 
 async function getKey(): Promise<string | null> {
   try {
-    const { data } = await supabase
+    const { data } = await supabaseAdmin
       .from("ai_organizer_config")
       .select("openrouter_api_key")
       .eq("id", 1)

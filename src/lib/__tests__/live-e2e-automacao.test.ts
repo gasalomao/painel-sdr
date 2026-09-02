@@ -13,6 +13,7 @@ import { listAvailableOpenRouterModels } from "@/lib/openrouter-model-discovery"
 import { getEvolutionConfig } from "@/lib/evolution";
 import { embedTexts } from "@/lib/rag";
 import { supabaseAdmin } from "@/lib/supabase_admin";
+import { DEFAULT_CLIENT_ID } from "@/lib/tenant";
 
 // ============================================================
 // STUB DE ENVIO — grava as chamadas, não envia nada de verdade.
@@ -76,6 +77,7 @@ describe.skipIf(!LIVE)("E2E ao vivo — automação (envio stubado)", () => {
       const { data: camp, error: campErr } = await db()
         .from("followup_campaigns")
         .insert({
+          client_id: DEFAULT_CLIENT_ID,
           name: `${MARK} Follow-up Live`,
           instance_name: "e2e-test-instance",
           ai_enabled: true,
@@ -100,6 +102,7 @@ describe.skipIf(!LIVE)("E2E ao vivo — automação (envio stubado)", () => {
         .from("followup_targets")
         .insert({
           followup_campaign_id: campaignId,
+          client_id: DEFAULT_CLIENT_ID,
           lead_id: null,
           remote_jid: fakeJid,
           nome_negocio: `${MARK} Lead Fantasma`,
@@ -112,7 +115,7 @@ describe.skipIf(!LIVE)("E2E ao vivo — automação (envio stubado)", () => {
 
       // 3. Tick da campanha ISOLADA — pipeline real inteiro
       const { tickCampaign } = await import("@/lib/followup-worker");
-      const r = await tickCampaign(campaignId);
+      const r = await tickCampaign(campaignId, DEFAULT_CLIENT_ID);
       console.log(`[E2E] tickCampaign → ${JSON.stringify(r)}`);
       expect(r.ok).toBe(true);
       expect(r.processed).toBe(1);

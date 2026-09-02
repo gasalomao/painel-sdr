@@ -28,7 +28,10 @@ export async function GET(req: NextRequest) {
       .select("client_id")
       .eq("instance_name", instance)
       .maybeSingle();
-    if (conn?.client_id && conn.client_id !== auth.clientId) {
+    if (!conn?.client_id) {
+      return NextResponse.json({ error: "Instância sem vínculo de cliente" }, { status: 404 });
+    }
+    if (conn.client_id !== auth.clientId) {
       return NextResponse.json({ error: "Instância não pertence a este cliente" }, { status: 403 });
     }
   }

@@ -42,25 +42,24 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         .select("id")
         .eq("status", sourceStatus)
         .limit(5000);
-      if (!ctx.isAdmin) leadsQ = leadsQ.eq("client_id", ctx.clientId);
+      leadsQ = leadsQ.eq("client_id", camp.client_id);
       const { data: leads } = await leadsQ;
       leadIds = leadIds.concat((leads || []).map((l: any) => l.id));
     }
 
     leadIds = Array.from(new Set(leadIds.filter((n) => Number.isFinite(n))));
 
-    // Se enroll manual veio com lead_ids, valida ownership de cada um
-    if (!ctx.isAdmin && leadIds.length > 0) {
+    if (leadIds.length > 0) {
       const { data: owned } = await supabase
         .from("leads_extraidos")
         .select("id")
-        .eq("client_id", ctx.clientId)
+        .eq("client_id", camp.client_id)
         .in("id", leadIds);
       const ownedSet = new Set((owned || []).map((l: any) => l.id));
       leadIds = leadIds.filter(id => ownedSet.has(id));
     }
 
-    const r = await enrollLeads({ campaignId: id, leadIds });
+    const r = await enrollLeads({ campaignId: id, leadIds, clientId: camp.client_id });
     if (!r.ok) return NextResponse.json({ success: false, error: r.error }, { status: 500 });
     return NextResponse.json({ success: true, enrolled: r.enrolled });
   } catch (err: any) {

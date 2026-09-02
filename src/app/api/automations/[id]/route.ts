@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
-import { requireClientId } from "@/lib/tenant";
+import { isInstanceOwnedByClient, requireClientId } from "@/lib/tenant";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 
 export const dynamic = "force-dynamic";
@@ -66,6 +66,15 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     const body = await req.json();
     // SaaS guard: cliente comum não escolhe modelo no PATCH.
     await enforceClientDefaultModel(body, tenant, ["dispatch_ai_model", "followup_ai_model"]);
+    let ownerQuery = supabase.from("automations").select("client_id").eq("id", id);
+    if (!tenant.isAdmin) ownerQuery = ownerQuery.eq("client_id", tenant.clientId);
+    const { data: owner } = await ownerQuery.maybeSingle();
+    if (!owner?.client_id) {
+      return NextResponse.json({ success: false, error: "Não encontrada" }, { status: 404 });
+    }
+    if ("instance_name" in body && !(await isInstanceOwnedByClient(String(body.instance_name), owner.client_id))) {
+      return NextResponse.json({ success: false, error: "Instância não pertence a este cliente" }, { status: 403 });
+    }
     const update: Record<string, any> = { updated_at: new Date().toISOString() };
     for (const key of EDITABLE_FIELDS) {
       if (key in body) update[key] = body[key];
@@ -78,9 +87,12 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     // sabe quais leads são desta captação (já causou "disparar pro CRM
     // inteiro"). Preserva qualquer chave que comece com "_".
     if ("scrape_filters" in update) {
-      let curQ = supabase.from("automations").select("scrape_filters").eq("id", id);
-      if (!tenant.isAdmin) curQ = curQ.eq("client_id", tenant.clientId);
-      const { data: cur } = await curQ.maybeSingle();
+      const { data: cur } = await supabase
+        .from("automations")
+        .select("scrape_filters")
+        .eq("id", id)
+        .eq("client_id", owner.client_id)
+        .maybeSingle();
       const markers: Record<string, any> = {};
       for (const [k, v] of Object.entries(cur?.scrape_filters || {})) {
         if (k.startsWith("_")) markers[k] = v;
@@ -88,9 +100,11 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
       update.scrape_filters = { ...(update.scrape_filters || {}), ...markers };
     }
 
-    let q = supabase.from("automations").update(update).eq("id", id);
-    if (!tenant.isAdmin) q = q.eq("client_id", tenant.clientId);
-    const { error } = await q;
+    const { error } = await supabase
+      .from("automations")
+      .update(update)
+      .eq("id", id)
+      .eq("client_id", owner.client_id);
     if (error) throw error;
     return NextResponse.json({ success: true });
   } catch (e: any) {
@@ -105,20 +119,30 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
   try {
     // Pega referências pra também parar campanhas filhas — só se a automação
     // pertence ao tenant atual (ou se for admin).
-    let lookupQ = supabase.from("automations").select("campaign_id, followup_campaign_id").eq("id", id);
+    let lookupQ = supabase.from("automations").select("client_id, campaign_id, followup_campaign_id").eq("id", id);
     if (!tenant.isAdmin) lookupQ = lookupQ.eq("client_id", tenant.clientId);
     const { data: a } = await lookupQ.maybeSingle();
     if (!a) return NextResponse.json({ success: false, error: "Não encontrada ou sem permissão" }, { status: 404 });
 
     if (a?.campaign_id) {
-      await supabase.from("campaigns").update({ status: "stopped" }).eq("id", a.campaign_id);
+      await supabase
+        .from("campaigns")
+        .update({ status: "stopped" })
+        .eq("id", a.campaign_id)
+        .eq("client_id", a.client_id);
     }
     if (a?.followup_campaign_id) {
-      await supabase.from("followup_campaigns").update({ status: "stopped" }).eq("id", a.followup_campaign_id);
+      await supabase
+        .from("followup_campaigns")
+        .update({ status: "stopped" })
+        .eq("id", a.followup_campaign_id)
+        .eq("client_id", a.client_id);
     }
-    let delQ = supabase.from("automations").delete().eq("id", id);
-    if (!tenant.isAdmin) delQ = delQ.eq("client_id", tenant.clientId);
-    const { error } = await delQ;
+    const { error } = await supabase
+      .from("automations")
+      .delete()
+      .eq("id", id)
+      .eq("client_id", a.client_id);
     if (error) throw error;
     return NextResponse.json({ success: true });
   } catch (e: any) {

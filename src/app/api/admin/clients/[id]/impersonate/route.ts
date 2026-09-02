@@ -3,7 +3,7 @@ import {
   SESSION_COOKIE,
   SESSION_TTL,
   verifySession,
-  isSessionLive,
+  isSessionLiveStrict,
   findClientById,
   signSession,
   createAuthSession,
@@ -21,14 +21,14 @@ export const dynamic = "force-dynamic";
  *   - impersonating = true
  *
  * A sessão ANTIGA (admin) é revogada — o admin sai da conta dele.
- * Pra voltar, ele faz logout + login normal de novo (ou clica "voltar pra admin"
- * que vai pra POST /api/admin/stop-impersonate, que faz o caminho inverso).
+ * Pra voltar, stop-impersonate reemite um token admin NOVO a partir do
+ * actorId da sessão impersonada (nenhum token antigo é reaproveitado).
  */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const token = req.cookies.get(SESSION_COOKIE)?.value;
   if (!token) return NextResponse.json({ ok: false, error: "Não autenticado" }, { status: 401 });
   const claims = await verifySession(token);
-  if (!claims || !(await isSessionLive(claims.sessionId, token))) {
+  if (!claims || !(await isSessionLiveStrict(claims.sessionId, token))) {
     return NextResponse.json({ ok: false, error: "Sessão inválida" }, { status: 401 });
   }
   if (!claims.isAdmin) return NextResponse.json({ ok: false, error: "Apenas admin" }, { status: 403 });
@@ -62,14 +62,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
   const res = NextResponse.json({ ok: true, clientId: target.id, name: target.name });
 
-  // Salva o token atual (do admin) para permitir restauração posterior
-  res.cookies.set("ADMIN_SESSION_COOKIE", token, {
-    httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
-    path: "/",
-    maxAge: SESSION_TTL,
-  });
+  // Security: revoga a sessão do admin AGORA. O caminho de volta
+  // (stop-impersonate) reemite um token novo a partir do actorId — cookie
+  // legado com o token do admin não é mais gravado nem confiável.
+  await revokeSession(claims.sessionId).catch(() => {});
+  res.cookies.delete("ADMIN_SESSION_COOKIE");
 
   res.cookies.set(SESSION_COOKIE, newToken, {
     httpOnly: true,

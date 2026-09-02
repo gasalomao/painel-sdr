@@ -17,5 +17,7 @@ export async function POST(req: NextRequest) {
   }
   const res = NextResponse.json({ ok: true });
   res.cookies.set(SESSION_COOKIE, "", { httpOnly: true, path: "/", maxAge: 0 });
+  // Legado: cookie de restore de impersonação nunca pode sobreviver ao logout.
+  res.cookies.delete("ADMIN_SESSION_COOKIE");
   return res;
 }

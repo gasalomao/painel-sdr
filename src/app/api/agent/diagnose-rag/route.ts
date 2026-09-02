@@ -44,7 +44,7 @@ export async function GET(req: NextRequest) {
   if (!agent) {
     return NextResponse.json({ ok: false, error: "Agente não encontrado" }, { status: 404 });
   }
-  if (!auth.isAdmin && agent.client_id && agent.client_id !== auth.clientId) {
+  if (!auth.isAdmin && agent.client_id !== auth.clientId) {
     return NextResponse.json({ ok: false, error: "Agente não pertence a este cliente" }, { status: 403 });
   }
 

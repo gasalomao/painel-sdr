@@ -47,6 +47,8 @@ export async function POST(
         .from("followup_targets")
         .select("*")
         .eq("id", target_id)
+        .eq("followup_campaign_id", id)
+        .eq("client_id", auth.clientId)
         .maybeSingle();
       target = data;
     } else if (remote_jid) {
@@ -54,6 +56,7 @@ export async function POST(
         .from("leads_extraidos")
         .select("id, remoteJid, nome_negocio, ramo_negocio")
         .eq("remoteJid", remote_jid)
+        .eq("client_id", auth.clientId)
         .maybeSingle();
       target = {
         remote_jid,
@@ -79,7 +82,7 @@ export async function POST(
           step_index: stepIdx,
           step: null,
           rendered: null,
-          history: await getConversationHistory(target.remote_jid, 20),
+          history: await getConversationHistory(target.remote_jid, auth.clientId, 20),
           ai_used: false,
           ai_message: null,
           note: "Este target já esgotou todos os passos — nada seria enviado.",
@@ -93,7 +96,7 @@ export async function POST(
       ramo_negocio: target.ramo_negocio,
     });
 
-    const history = await getConversationHistory(target.remote_jid, 20);
+    const history = await getConversationHistory(target.remote_jid, auth.clientId, 20);
 
     let ai_message: string | null = null;
     let ai_error: string | null = null;
@@ -119,7 +122,9 @@ export async function POST(
             history,
             apiKey,
             stepNumber: stepIdx + 1,
-            instanceName: camp.instance_name,
+            campaignId: id,
+            clientId: auth.clientId,
+            remoteJid: target.remote_jid,
           });
         } catch (e: any) {
           ai_error = e?.message || String(e);

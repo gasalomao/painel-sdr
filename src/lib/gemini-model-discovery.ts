@@ -14,7 +14,7 @@
  *   Hardcodar = bug recorrente toda vez que eles giram a lista.
  */
 
-import { supabase } from "@/lib/supabase";
+import { supabaseAdmin } from "@/lib/supabase_admin";
 
 export type GeminiModel = {
   id: string;          // ex: "gemini-2.5-flash"
@@ -34,7 +34,7 @@ export async function listAvailableGeminiModels(force = false): Promise<GeminiMo
   if (!force && CACHE && Date.now() - CACHE.at < TTL_MS) return CACHE.models;
 
   try {
-    const { data: cfg } = await supabase
+    const { data: cfg } = await supabaseAdmin
       .from("ai_organizer_config")
       .select("api_key")
       .eq("id", 1)

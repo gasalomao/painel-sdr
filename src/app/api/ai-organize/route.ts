@@ -35,7 +35,7 @@ export async function POST(req: NextRequest) {
     if (!runId) return;
     try {
       const duration = Date.now() - runStartedAt.getTime();
-      await adminClient.from("ai_organizer_runs").update({
+      let q = adminClient.from("ai_organizer_runs").update({
         finished_at: new Date().toISOString(),
         duration_ms: duration,
         chats_analyzed: chatsAnalyzed,
@@ -45,6 +45,8 @@ export async function POST(req: NextRequest) {
         summary: extra.summary || null,
         batch_id: batchIdForRun,
       }).eq("id", runId);
+      if (clientIdScope) q = q.eq("client_id", clientIdScope);
+      await q;
     } catch (e: any) {
       console.warn("[AI-ORGANIZE] Falha ao fechar run:", e?.message);
     }
@@ -83,8 +85,14 @@ export async function POST(req: NextRequest) {
           { status: 403 }
         );
       }
-      // Força escopo do próprio cliente mesmo se body não trouxe
       clientIdScope = sessionClientId;
+    }
+    if (!isInternal && !clientIdScope) clientIdScope = sessionClientId;
+    if (!clientIdScope) {
+      return NextResponse.json(
+        { success: false, error: "clientId é obrigatório para executar o organizador" },
+        { status: 400 },
+      );
     }
 
     // Abre registro da execução antes de qualquer coisa — vale mesmo se falhar.
@@ -98,6 +106,7 @@ export async function POST(req: NextRequest) {
           status: "running",
           model: model || null,
           provider: provider || null,
+          client_id: clientIdScope,
         })
         .select("id")
         .single();
@@ -231,6 +240,7 @@ export async function POST(req: NextRequest) {
         .from("historico_ia_leads")
         .select("remote_jid, status_antigo, status_novo, created_at")
         .in("remote_jid", numerosProcessados)
+        .eq("client_id", clientIdScope)
         .gte("created_at", last24h);
       (recentChanges || []).forEach((r: any) => {
         if (r.status_antigo !== r.status_novo) recentlyTouchedByIa.add(r.remote_jid);
@@ -308,6 +318,7 @@ export async function POST(req: NextRequest) {
         .from("chats_dashboard")
         .select("remote_jid, sender_type, created_at")
         .in("remote_jid", numerosProcessados)
+        .eq("client_id", clientIdScope)
         .lt("created_at", startOfDay.toISOString());
       for (const jid of numerosProcessados) {
         preHistMap[jid] = { sdrBefore: 0, clientBefore: 0, firstSdrAt: null, lastClientAt: null };
@@ -801,14 +812,15 @@ export async function POST(req: NextRequest) {
                last_analysis_hash: hashAtualMap[jid] || null,
                last_analysis_at: nowIso,
                lead_type: leadType,
-               nome_negocio: "Lead Via Chat ("+jid.split("@")[0]+")",
-               ...(clientIdScope ? { client_id: clientIdScope } : {}),
+                nome_negocio: "Lead Via Chat ("+jid.split("@")[0]+")",
+                client_id: clientIdScope,
            });
            alteracoes++;
            movido = true;
        } else {
-           const update: any = {
-               remoteJid: jid,
+            const update: any = {
+                remoteJid: jid,
+                client_id: clientIdScope,
                justificativa_ia: razao,
                resumo_ia: resumo,
                ia_last_analyzed_at: nowIso,
@@ -847,7 +859,7 @@ export async function POST(req: NextRequest) {
         const slice = upsertsBatch.slice(i, i + CHUNK);
         const { error: upErr } = await adminClient
           .from("leads_extraidos")
-          .upsert(slice, { onConflict: "remoteJid" });
+          .upsert(slice, { onConflict: "client_id,remoteJid" });
         if (upErr) {
           console.error("[AI-ORGANIZE] batch upsert erro:", upErr.message);
         }
@@ -881,7 +893,8 @@ export async function POST(req: NextRequest) {
             status_novo: l.novoStatus,
             razao: l.razao,
             resumo: l.resumo,
-            batch_id: batch_id
+            batch_id: batch_id,
+            client_id: clientIdScope
         }));
         const { error: histErr } = await adminClient.from("historico_ia_leads").insert(logsToInsert);
         if (histErr) {

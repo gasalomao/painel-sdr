@@ -73,7 +73,17 @@ function createMockQuery(table: string) {
       return this;
     },
     delete() { this._isDelete = true; return this; },
-    eq(col: string, val: any) { this._filters.push((row: any) => row[col] === val); return this; },
+    eq(col: string, val: any) {
+      this._filters.push((row: any) => {
+        const rv = row[col];
+        if (Array.isArray(rv) && Array.isArray(val)) {
+          return rv.length === val.length && rv.every((item: any, idx: number) => item === val[idx]);
+        }
+        if (Array.isArray(rv) || Array.isArray(val)) return false;
+        return rv === val;
+      });
+      return this;
+    },
     neq(col: string, val: any) { this._filters.push((row: any) => row[col] !== val); return this; },
     in(col: string, vals: any[]) { this._filters.push((row: any) => vals.includes(row[col])); return this; },
     gt(col: string, val: any) { this._filters.push((row: any) => row[col] > val); return this; },
@@ -192,6 +202,7 @@ vi.mock("@/lib/manual-send-registry", () => ({
 
 vi.mock("@/lib/tenant", () => ({
   clientIdFromInstance: vi.fn().mockResolvedValue("client-123"),
+  isInstanceOwnedByClient: vi.fn().mockResolvedValue(true),
 }));
 
 vi.mock("@/lib/campaign-worker", () => ({
@@ -228,6 +239,7 @@ import {
   enrollLeads,
   getConversationHistory,
   personalizeFollowupWithAI,
+  tickAllAutoCampaigns,
 } from "../followup-worker";
 
 // ============================================================
@@ -279,6 +291,7 @@ function makeTarget(overrides: Partial<any> = {}): any {
   return {
     id: "target-001",
     followup_campaign_id: "camp-001",
+    client_id: "client-123",
     lead_id: 1,
     remote_jid: "5511999999999@s.whatsapp.net",
     nome_negocio: "Padaria São João",
@@ -299,6 +312,7 @@ function makeLead(overrides: Partial<any> = {}): any {
     remoteJid: "5511999999999@s.whatsapp.net",
     nome_negocio: "Padaria São João",
     ramo_negocio: "Alimentação",
+    client_id: "client-123",
     status: "follow-up",
     telefone: null,
     endereco: null,
@@ -339,6 +353,7 @@ beforeEach(async () => {
   aiKeys.getAiKeys.mockResolvedValue({ gemini: "key-gem", openrouter: "key-or" });
   const tenant: any = await import("@/lib/tenant");
   tenant.clientIdFromInstance.mockResolvedValue("client-123");
+  tenant.isInstanceOwnedByClient.mockResolvedValue(true);
 });
 
 // ============================================================
@@ -347,14 +362,14 @@ beforeEach(async () => {
 
 describe("tickCampaign — validação", () => {
   it("campanha não encontrada → erro", async () => {
-    const r = await tickCampaign("nonexistent");
+    const r = await tickCampaign("nonexistent", "client-123");
     expect(r.ok).toBe(false);
     expect(r.error).toContain("não encontrada");
   });
 
   it("campanha pausada → erro", async () => {
     setTable("followup_campaigns", [makeCampaign({ status: "paused" })]);
-    const r = await tickCampaign("camp-001");
+    const r = await tickCampaign("camp-001", "client-123");
     expect(r.ok).toBe(false);
     expect(r.error).toContain("paused");
   });
@@ -362,7 +377,7 @@ describe("tickCampaign — validação", () => {
   it("campanha draft → processa (permite teste manual)", async () => {
     setTable("followup_campaigns", [makeCampaign({ status: "draft" })]);
     setTable("followup_targets", []);
-    const r = await tickCampaign("camp-001");
+    const r = await tickCampaign("camp-001", "client-123");
     expect(r.ok).toBe(true);
     expect(r.processed).toBe(0);
   });
@@ -370,7 +385,7 @@ describe("tickCampaign — validação", () => {
   it("sem targets elegíveis → 0 processed", async () => {
     setTable("followup_campaigns", [makeCampaign()]);
     setTable("followup_targets", []);
-    const r = await tickCampaign("camp-001");
+    const r = await tickCampaign("camp-001", "client-123");
     expect(r.ok).toBe(true);
     expect(r.processed).toBe(0);
   });
@@ -378,7 +393,7 @@ describe("tickCampaign — validação", () => {
   it("target com status 'responded' é ignorado", async () => {
     setTable("followup_campaigns", [makeCampaign()]);
     setTable("followup_targets", [makeTarget({ status: "responded" })]);
-    const r = await tickCampaign("camp-001");
+    const r = await tickCampaign("camp-001", "client-123");
     expect(r.ok).toBe(true);
     expect(r.processed).toBe(0);
   });
@@ -386,7 +401,7 @@ describe("tickCampaign — validação", () => {
   it("target com status 'exhausted' é ignorado", async () => {
     setTable("followup_campaigns", [makeCampaign()]);
     setTable("followup_targets", [makeTarget({ status: "exhausted" })]);
-    const r = await tickCampaign("camp-001");
+    const r = await tickCampaign("camp-001", "client-123");
     expect(r.ok).toBe(true);
     expect(r.processed).toBe(0);
   });
@@ -396,7 +411,7 @@ describe("tickCampaign — validação", () => {
     setTable("followup_targets", [
       makeTarget({ next_send_at: new Date(Date.now() + 86400000).toISOString() }),
     ]);
-    const r = await tickCampaign("camp-001");
+    const r = await tickCampaign("camp-001", "client-123");
     expect(r.ok).toBe(true);
     expect(r.processed).toBe(0);
   });
@@ -419,16 +434,49 @@ describe("processTarget — cliente respondeu", () => {
     setTable("followup_targets", [target]);
     setTable("leads_extraidos", [lead]);
     setTable("chats_dashboard", [
-      { id: "msg1", remote_jid: target.remote_jid, is_from_me: false, created_at: new Date(Date.now() - 3600000).toISOString(), content: "Tenho interesse" },
+      { id: "msg1", client_id: "client-123", remote_jid: target.remote_jid, is_from_me: false, created_at: new Date(Date.now() - 3600000).toISOString(), content: "Tenho interesse" },
     ]);
 
-    const r = await tickCampaign("camp-001");
+    const r = await tickCampaign("camp-001", "client-123");
     expect(r.ok).toBe(true);
     expect(r.processed).toBe(1);
 
     // Target foi atualizado para responded
     const updated = mockTableState.followup_targets[0];
     expect(updated.status).toBe("responded");
+  });
+
+  it("não cruza histórico, resposta nem status entre tenants com o mesmo JID", async () => {
+    const remoteJid = "5511888888888@s.whatsapp.net";
+    const lastSentAt = new Date(Date.now() - 7200000).toISOString();
+    setTable("followup_campaigns", [
+      makeCampaign({ id: "camp-a", client_id: "tenant-a", steps: [{ day_offset: 1, template: "Oi" }] }),
+      makeCampaign({ id: "camp-b", client_id: "tenant-b", steps: [{ day_offset: 1, template: "Oi" }] }),
+    ]);
+    setTable("followup_targets", [
+      makeTarget({ id: "target-a", followup_campaign_id: "camp-a", client_id: "tenant-a", remote_jid: remoteJid, current_step: 1, last_sent_at: lastSentAt }),
+      makeTarget({ id: "target-b", followup_campaign_id: "camp-b", client_id: "tenant-b", remote_jid: remoteJid, current_step: 1, last_sent_at: lastSentAt }),
+    ]);
+    setTable("leads_extraidos", [
+      makeLead({ id: 1, client_id: "tenant-a", remoteJid, status: "follow-up" }),
+      makeLead({ id: 2, client_id: "tenant-b", remoteJid, status: "novo" }),
+    ]);
+    setTable("chats_dashboard", [
+      { id: "a1", client_id: "tenant-a", remote_jid: remoteJid, is_from_me: true, created_at: new Date(Date.now() - 3600000).toISOString(), content: "histórico A" },
+      { id: "b1", client_id: "tenant-b", remote_jid: remoteJid, is_from_me: false, created_at: new Date(Date.now() - 1800000).toISOString(), content: "resposta B" },
+    ]);
+
+    const historyA = await getConversationHistory(remoteJid, "tenant-a");
+    expect(historyA).toContain("histórico A");
+    expect(historyA).not.toContain("resposta B");
+
+    const r = await tickCampaign("camp-a", "tenant-a");
+    expect(r.ok).toBe(true);
+    expect(mockTableState.followup_targets.find((target) => target.id === "target-a")?.status).toBe("exhausted");
+    expect(mockTableState.followup_targets.find((target) => target.id === "target-b")?.status).toBe("pending");
+    expect(mockTableState.leads_extraidos.find((lead) => lead.client_id === "tenant-a")?.status).toBe("sem_interesse");
+    expect(mockTableState.leads_extraidos.find((lead) => lead.client_id === "tenant-b")?.status).toBe("novo");
+    expect(mockTableState.historico_ia_leads.every((entry) => entry.client_id === "tenant-a")).toBe(true);
   });
 
   it("não rebaixa lead terminal (fechado/sem_interesse/descartado)", async () => {
@@ -442,10 +490,10 @@ describe("processTarget — cliente respondeu", () => {
     setTable("followup_targets", [target]);
     setTable("leads_extraidos", [lead]);
     setTable("chats_dashboard", [
-      { id: "msg1", remote_jid: target.remote_jid, is_from_me: false, created_at: new Date(Date.now() - 3600000).toISOString(), content: "Obrigado" },
+      { id: "msg1", client_id: "client-123", remote_jid: target.remote_jid, is_from_me: false, created_at: new Date(Date.now() - 3600000).toISOString(), content: "Obrigado" },
     ]);
 
-    await tickCampaign("camp-001");
+    await tickCampaign("camp-001", "client-123");
 
     // Lead permanece fechado
     expect(mockTableState.leads_extraidos[0].status).toBe("fechado");
@@ -467,7 +515,7 @@ describe("processTarget — step esgotado", () => {
     setTable("followup_targets", [target]);
     setTable("leads_extraidos", [makeLead({ status: "follow-up" })]);
 
-    const r = await tickCampaign("camp-001");
+    const r = await tickCampaign("camp-001", "client-123");
     expect(r.ok).toBe(true);
 
     const updated = mockTableState.followup_targets[0];
@@ -483,7 +531,7 @@ describe("processTarget — step esgotado", () => {
     setTable("followup_targets", [target]);
     setTable("leads_extraidos", [makeLead({ status: "sem_interesse" })]);
 
-    await tickCampaign("camp-001");
+    await tickCampaign("camp-001", "client-123");
 
     expect(mockTableState.leads_extraidos[0].status).toBe("sem_interesse");
   });
@@ -495,7 +543,7 @@ describe("processTarget — step esgotado", () => {
     setTable("followup_targets", [target]);
     setTable("leads_extraidos", [makeLead({ status: "follow-up" })]);
 
-    await tickCampaign("camp-001");
+    await tickCampaign("camp-001", "client-123");
 
     expect(mockTableState.historico_ia_leads.length).toBeGreaterThanOrEqual(1);
     const entry = mockTableState.historico_ia_leads.find(e => e.status_novo === "sem_interesse");
@@ -517,9 +565,9 @@ describe("processTarget — envio normal", () => {
     setTable("followup_campaigns", [camp]);
     setTable("followup_targets", [target]);
     setTable("leads_extraidos", [lead]);
-    setTable("contacts", [{ remote_jid: target.remote_jid, push_name: "João" }]);
+    setTable("contacts", [{ client_id: "client-123", remote_jid: target.remote_jid, push_name: "João" }]);
 
-    const r = await tickCampaign("camp-001");
+    const r = await tickCampaign("camp-001", "client-123");
     expect(r.ok).toBe(true);
     expect(r.processed).toBe(1);
 
@@ -544,7 +592,7 @@ describe("processTarget — envio normal", () => {
     setTable("leads_extraidos", [makeLead()]);
     setTable("contacts", []);
 
-    await tickCampaign("camp-001");
+    await tickCampaign("camp-001", "client-123");
 
     // channel.sendMessage deve ter sido chamado pelo menos 1x
     const { sendMessage } = await import("@/lib/channel");
@@ -559,7 +607,7 @@ describe("processTarget — envio normal", () => {
     setTable("followup_targets", [makeTarget({ current_step: 0 })]);
     setTable("leads_extraidos", [makeLead()]);
 
-    await tickCampaign("camp-001");
+    await tickCampaign("camp-001", "client-123");
 
     const updated = mockTableState.followup_targets[0];
     expect(updated.status).toBe("failed");
@@ -587,7 +635,7 @@ describe("processTarget — mídia no último step", () => {
     setTable("followup_targets", [target]);
     setTable("leads_extraidos", [makeLead()]);
 
-    await tickCampaign("camp-001");
+    await tickCampaign("camp-001", "client-123");
 
     const { sendMedia } = await import("@/lib/channel");
     expect(sendMedia).not.toHaveBeenCalled();
@@ -608,7 +656,7 @@ describe("processTarget — mídia no último step", () => {
     setTable("followup_targets", [target]);
     setTable("leads_extraidos", [makeLead()]);
 
-    await tickCampaign("camp-001");
+    await tickCampaign("camp-001", "client-123");
 
     const { sendMedia } = await import("@/lib/channel");
     expect(sendMedia).toHaveBeenCalled();
@@ -622,7 +670,7 @@ describe("processTarget — mídia no último step", () => {
     setTable("followup_targets", [target]);
     setTable("leads_extraidos", [makeLead()]);
 
-    await tickCampaign("camp-001");
+    await tickCampaign("camp-001", "client-123");
 
     const { sendMedia } = await import("@/lib/channel");
     expect(sendMedia).not.toHaveBeenCalled();
@@ -646,7 +694,7 @@ describe("processTarget — day_offset", () => {
     setTable("followup_targets", [target]);
     setTable("leads_extraidos", [makeLead()]);
 
-    await tickCampaign("camp-001");
+    await tickCampaign("camp-001", "client-123");
 
     const updated = mockTableState.followup_targets[0];
     const nextTime = new Date(updated.next_send_at).getTime();
@@ -669,7 +717,7 @@ describe("processTarget — day_offset", () => {
     setTable("followup_targets", [target]);
     setTable("leads_extraidos", [makeLead()]);
 
-    await tickCampaign("camp-001");
+    await tickCampaign("camp-001", "client-123");
 
     const updated = mockTableState.followup_targets[0];
     const nextTime = new Date(updated.next_send_at).getTime();
@@ -695,7 +743,7 @@ describe("processTarget — IA ativa", () => {
     setTable("leads_extraidos", [makeLead()]);
     setTable("contacts", []);
 
-    await tickCampaign("camp-001");
+    await tickCampaign("camp-001", "client-123");
 
     const { generateText } = await import("@/lib/ai-provider");
     expect(generateText).toHaveBeenCalled();
@@ -716,7 +764,7 @@ describe("processTarget — IA ativa", () => {
     setTable("followup_targets", [target]);
     setTable("leads_extraidos", [makeLead()]);
 
-    await tickCampaign("camp-001");
+    await tickCampaign("camp-001", "client-123");
 
     const updated = mockTableState.followup_targets[0];
     // Template foi renderizado como fallback
@@ -732,7 +780,7 @@ describe("processTarget — IA ativa", () => {
     setTable("followup_targets", [target]);
     setTable("leads_extraidos", [makeLead()]);
 
-    await tickCampaign("camp-001");
+    await tickCampaign("camp-001", "client-123");
 
     expect(generateText).not.toHaveBeenCalled();
 
@@ -761,7 +809,7 @@ describe("processTarget — rede de segurança variáveis", () => {
     setTable("followup_targets", [target]);
     setTable("leads_extraidos", [makeLead()]);
 
-    await tickCampaign("camp-001");
+    await tickCampaign("camp-001", "client-123");
 
     const updated = mockTableState.followup_targets[0];
     // A rede de segurança roda renderTemplate novamente + remove chaves
@@ -782,22 +830,39 @@ describe("enrollLeads", () => {
       makeLead({ id: 2, remoteJid: "5512@s.whatsapp.net" }),
     ]);
 
-    const r = await enrollLeads({ campaignId: "camp-001", leadIds: [1, 2] });
+    const r = await enrollLeads({ campaignId: "camp-001", leadIds: [1, 2], clientId: "client-123" });
     expect(r.ok).toBe(true);
     expect(r.enrolled).toBe(2);
+    expect(mockTableState.followup_targets.every((target) => target.client_id === "client-123")).toBe(true);
+  });
+
+  it("rejeita enroll sem tenant explícito", async () => {
+    const r = await enrollLeads({ campaignId: "camp-001", leadIds: [1], clientId: "" });
+    expect(r).toMatchObject({ ok: false, enrolled: 0 });
+  });
+
+  it("rejeita campanha de outro tenant", async () => {
+    setTable("followup_campaigns", [makeCampaign({ client_id: "tenant-b" })]);
+    setTable("leads_extraidos", [makeLead({ id: 1 })]);
+
+    const r = await enrollLeads({ campaignId: "camp-001", leadIds: [1], clientId: "client-123" });
+    expect(r).toMatchObject({ ok: false, enrolled: 0, error: "Campanha não encontrada" });
+    expect(mockTableState.followup_targets).toHaveLength(0);
   });
 
   it("lead sem remoteJid é filtrado", async () => {
+    setTable("followup_campaigns", [makeCampaign()]);
     setTable("leads_extraidos", [
       makeLead({ id: 1, remoteJid: "" }),
     ]);
-    const r = await enrollLeads({ campaignId: "camp-001", leadIds: [1] });
+    const r = await enrollLeads({ campaignId: "camp-001", leadIds: [1], clientId: "client-123" });
     expect(r.ok).toBe(true);
     expect(r.enrolled).toBe(0);
   });
 
   it("leadIds vazio → 0 enrolled, sem erro", async () => {
-    const r = await enrollLeads({ campaignId: "camp-001", leadIds: [] });
+    setTable("followup_campaigns", [makeCampaign()]);
+    const r = await enrollLeads({ campaignId: "camp-001", leadIds: [], clientId: "client-123" });
     expect(r.ok).toBe(true);
     expect(r.enrolled).toBe(0);
   });
@@ -811,7 +876,7 @@ describe("enrollLeads", () => {
       makeLead({ id: 1, remoteJid: "5511@s.whatsapp.net" }),
     ]);
 
-    const r = await enrollLeads({ campaignId: "camp-001", leadIds: [1] });
+    const r = await enrollLeads({ campaignId: "camp-001", leadIds: [1], clientId: "client-123" });
     expect(r.ok).toBe(true);
     // NÃO criou novo target (ignoreDuplicates true)
     const targets = mockTableState.followup_targets.filter(t => t.followup_campaign_id === "camp-001");
@@ -826,17 +891,17 @@ describe("enrollLeads", () => {
 describe("getConversationHistory", () => {
   it("histórico vazio → mensagem de primeiro contato", async () => {
     setTable("chats_dashboard", []);
-    const r = await getConversationHistory("5599@s.whatsapp.net");
+    const r = await getConversationHistory("5599@s.whatsapp.net", "client-123");
     expect(r).toContain("sem histórico");
     expect(r).toContain("primeiro contato");
   });
 
   it("histórico com mensagens → formato [data] SDR/CLIENTE: texto", async () => {
     setTable("chats_dashboard", [
-      { remote_jid: "5599@s.whatsapp.net", content: "Oi, tudo bem?", is_from_me: true, created_at: "2026-01-01T10:00:00Z" },
-      { remote_jid: "5599@s.whatsapp.net", content: "Sim, pode ser", is_from_me: false, created_at: "2026-01-01T11:00:00Z" },
+      { client_id: "client-123", remote_jid: "5599@s.whatsapp.net", content: "Oi, tudo bem?", is_from_me: true, created_at: "2026-01-01T10:00:00Z" },
+      { client_id: "client-123", remote_jid: "5599@s.whatsapp.net", content: "Sim, pode ser", is_from_me: false, created_at: "2026-01-01T11:00:00Z" },
     ]);
-    const r = await getConversationHistory("5599@s.whatsapp.net");
+    const r = await getConversationHistory("5599@s.whatsapp.net", "client-123");
     expect(r).toContain("SDR");
     expect(r).toContain("CLIENTE");
     expect(r).toContain("Oi, tudo bem?");
@@ -845,13 +910,14 @@ describe("getConversationHistory", () => {
 
   it("respeita limit (max N mensagens)", async () => {
     const msgs = Array.from({ length: 100 }, (_, i) => ({
+      client_id: "client-123",
       remote_jid: "5599@s.whatsapp.net",
       content: `msg ${i}`,
       is_from_me: i % 2 === 0,
       created_at: new Date(2026, 0, 1, 10, i).toISOString(),
     }));
     setTable("chats_dashboard", msgs);
-    const r = await getConversationHistory("5599@s.whatsapp.net", 10);
+    const r = await getConversationHistory("5599@s.whatsapp.net", "client-123", 10);
     const lines = r.split("\n").filter(Boolean);
     expect(lines.length).toBeLessThanOrEqual(10);
   });
@@ -878,6 +944,7 @@ describe("personalizeFollowupWithAI", () => {
       ramo: "Alimentação",
       history: "(sem histórico)",
       stepNumber: 1,
+      clientId: "client-123",
     });
 
     expect(r.startsWith('"')).toBe(false);
@@ -897,7 +964,7 @@ describe("personalizeFollowupWithAI", () => {
       stepNumber: 1,
       campaignId: "camp-001",
       campaignName: "Campanha Teste",
-      instanceName: "test_instance",
+      clientId: "client-123",
     });
 
     expect(logTokenUsage).toHaveBeenCalledWith(
@@ -912,8 +979,7 @@ describe("personalizeFollowupWithAI", () => {
     );
   });
 
-  it("resolve clientId dono do gasto via instanceName", async () => {
-    const { clientIdFromInstance } = await import("@/lib/tenant");
+  it("usa o clientId explícito como dono do gasto", async () => {
     const { logTokenUsage } = await import("@/lib/token-usage");
 
     await personalizeFollowupWithAI({
@@ -924,10 +990,9 @@ describe("personalizeFollowupWithAI", () => {
       ramo: "",
       history: "",
       stepNumber: 1,
-      instanceName: "my_instance",
+      clientId: "client-123",
     });
 
-    expect(clientIdFromInstance).toHaveBeenCalledWith("my_instance");
     expect(logTokenUsage).toHaveBeenCalledWith(
       expect.objectContaining({ clientId: "client-123" })
     );
@@ -948,10 +1013,10 @@ describe("moveLeadResponded — hierarquia", () => {
     setTable("followup_targets", [target]);
     setTable("leads_extraidos", [makeLead({ status: "novo" })]);
     setTable("chats_dashboard", [
-      { id: "m1", remote_jid: target.remote_jid, is_from_me: false, created_at: new Date().toISOString(), content: "Oi" },
+      { id: "m1", client_id: "client-123", remote_jid: target.remote_jid, is_from_me: false, created_at: new Date().toISOString(), content: "Oi" },
     ]);
 
-    await tickCampaign("camp-001");
+    await tickCampaign("camp-001", "client-123");
 
     expect(mockTableState.leads_extraidos[0].status).toBe("interessado");
   });
@@ -965,10 +1030,10 @@ describe("moveLeadResponded — hierarquia", () => {
     setTable("followup_targets", [target]);
     setTable("leads_extraidos", [makeLead({ status: "agendado" })]);
     setTable("chats_dashboard", [
-      { id: "m1", remote_jid: target.remote_jid, is_from_me: false, created_at: new Date().toISOString(), content: "Oi" },
+      { id: "m1", client_id: "client-123", remote_jid: target.remote_jid, is_from_me: false, created_at: new Date().toISOString(), content: "Oi" },
     ]);
 
-    await tickCampaign("camp-001");
+    await tickCampaign("camp-001", "client-123");
 
     // agendado está acima de interessado — NÃO deve ser alterado
     expect(mockTableState.leads_extraidos[0].status).toBe("agendado");
@@ -980,21 +1045,24 @@ describe("moveLeadResponded — hierarquia", () => {
 // ============================================================
 
 describe("tickAllAutoCampaigns", () => {
-  it("processa apenas campanhas active+auto_execute", async () => {
-    // This is tested indirectly via tickCampaign per campaign;
-    // tickAll filters status=active AND auto_execute=true
+  it("processa apenas campanhas active+auto_execute com seu client_id", async () => {
     setTable("followup_campaigns", [
-      makeCampaign({ id: "c1", status: "active", auto_execute: true }),
-      makeCampaign({ id: "c2", status: "active", auto_execute: false }),
-      makeCampaign({ id: "c3", status: "paused", auto_execute: true }),
+      makeCampaign({ id: "c1", client_id: "tenant-a", status: "active", auto_execute: true, steps: [] }),
+      makeCampaign({ id: "c2", client_id: "tenant-b", status: "active", auto_execute: false, steps: [] }),
+      makeCampaign({ id: "c3", client_id: "tenant-c", status: "paused", auto_execute: true, steps: [] }),
+    ]);
+    setTable("followup_targets", [
+      makeTarget({ id: "t1", followup_campaign_id: "c1", client_id: "tenant-a" }),
+      makeTarget({ id: "t2", followup_campaign_id: "c2", client_id: "tenant-b" }),
+      makeTarget({ id: "t3", followup_campaign_id: "c3", client_id: "tenant-c" }),
     ]);
 
-    // tickAll queries status=active, auto_execute=true
-    const active = mockTableState.followup_campaigns.filter(
-      c => c.status === "active" && c.auto_execute === true
-    );
-    expect(active.length).toBe(1);
-    expect(active[0].id).toBe("c1");
+    const processed = await tickAllAutoCampaigns();
+
+    expect(processed).toBe(1);
+    expect(mockTableState.followup_targets.find((target) => target.id === "t1")?.status).toBe("exhausted");
+    expect(mockTableState.followup_targets.find((target) => target.id === "t2")?.status).toBe("pending");
+    expect(mockTableState.followup_targets.find((target) => target.id === "t3")?.status).toBe("pending");
   });
 });
 
@@ -1048,10 +1116,72 @@ describe("tickCampaign — claim atômico", () => {
     setTable("followup_targets", [makeTarget({ status: "processing" })]);
     setTable("leads_extraidos", [makeLead()]);
 
-    const r = await tickCampaign("camp-001");
+    const r = await tickCampaign("camp-001", "client-123");
     expect(r.ok).toBe(true);
     // O claim UPDATE .in("status", ["pending","waiting","failed"]) não match "processing"
     // → claim.data null → skipped → processed=0
     expect(r.processed).toBe(0);
+  });
+
+  it("perda do claim durante o processamento impede que o resultado seja gravado", async () => {
+    setTable("followup_campaigns", [makeCampaign()]);
+    setTable("followup_targets", [makeTarget()]);
+    setTable("leads_extraidos", [makeLead()]);
+
+    const { sendMessage } = await import("@/lib/channel");
+    (sendMessage as any).mockImplementationOnce(async () => {
+      const target = mockTableState.followup_targets[0];
+      target.status = "waiting";
+      target.current_step = 9;
+      return { ok: true, messageId: "msg-late", status: "sent" };
+    });
+
+    await tickCampaign("camp-001", "client-123");
+
+    const updated = mockTableState.followup_targets[0];
+    expect(updated.status).toBe("waiting");
+    expect(updated.current_step).toBe(9);
+    expect(updated.last_message_id).not.toBe("msg-late");
+  });
+});
+
+describe("processTarget — recusa estruturada do provider", () => {
+  it("sendMessage ok:false marca target failed sem avançar step", async () => {
+    setTable("followup_campaigns", [makeCampaign()]);
+    setTable("followup_targets", [makeTarget()]);
+    setTable("leads_extraidos", [makeLead()]);
+
+    const { sendMessage } = await import("@/lib/channel");
+    (sendMessage as any).mockResolvedValueOnce({ ok: false, error: "instância desconectada" });
+
+    await tickCampaign("camp-001", "client-123");
+
+    const updated = mockTableState.followup_targets[0];
+    expect(updated.status).toBe("failed");
+    expect(updated.current_step).toBe(0);
+    expect(updated.error_message).toContain("instância desconectada");
+  });
+
+  it("sendMedia ok:false em loga sem bloquear avanço do step", async () => {
+    const { sendMedia } = await import("@/lib/channel");
+    (sendMedia as any).mockResolvedValueOnce({ ok: false, error: "mídia indisponível" });
+
+    const camp = makeCampaign({
+      media_url: "https://example.com/foto.jpg",
+      media_type: "image",
+      steps: [{ day_offset: 2, template: "Oi {{nome_empresa}}!" }],
+    });
+    const target = makeTarget({ current_step: 0 });
+
+    setTable("followup_campaigns", [camp]);
+    setTable("followup_targets", [target]);
+    setTable("leads_extraidos", [makeLead()]);
+
+    await tickCampaign("camp-001", "client-123");
+
+    const updated = mockTableState.followup_targets[0];
+    expect(updated.status).toBe("waiting");
+    expect(updated.current_step).toBe(1);
+    expect(updated.error_message).toBeNull();
   });
 });

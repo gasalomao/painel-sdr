@@ -12,7 +12,7 @@ const { mockContactsUpsert, mockSupabase } = vi.hoisted(() => {
         return {
           select: vi.fn().mockReturnValue({
             eq: vi.fn().mockReturnValue({
-              maybeSingle: vi.fn().mockResolvedValue({ data: { provider: "evolution", provider_config: {} } }),
+              maybeSingle: vi.fn().mockResolvedValue({ data: { provider: "evolution", client_id: "client-123", provider_config: {} } }),
             }),
           }),
         };
@@ -62,6 +62,10 @@ describe("bulkSyncProfilePics — escalabilidade e sincronização em lote", () 
     const count = await bulkSyncProfilePics("inst-1");
     expect(count).toBe(2);
     expect(mockContactsUpsert).toHaveBeenCalledTimes(2);
+    expect(mockContactsUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({ client_id: "client-123" }),
+      { onConflict: "client_id,remote_jid" },
+    );
   });
 });
 

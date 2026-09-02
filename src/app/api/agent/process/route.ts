@@ -189,7 +189,8 @@ export async function POST(req: NextRequest) {
        supabase.from("agent_settings").select("*").eq("id", agentId).single(),
        supabase.from("agent_stages").select("*").eq("agent_id", agentId).order("order_index"),
        historyQuery,
-       supabase.from("agent_knowledge").select("id, title").eq("agent_id", agentId).order("title"),
+        // SEC-H4: títulos vão pro prompt — só do tenant (legado client_id NULL continua visível)
+        supabase.from("agent_knowledge").select("id, title").eq("agent_id", agentId).or(`client_id.eq.${clientId},client_id.is.null`).order("title"),
        // Lead e contato SÓ do tenant desta sessão (mesma paralelização de antes,
        // agora com clientId já resolvido do channel).
        !isTestMode ? supabase.from("leads_extraidos")
@@ -567,7 +568,7 @@ export async function POST(req: NextRequest) {
             // Gera com modelo barato + reasoningMode=0, cacheado por conteúdo (hash).
             // Se falhar, cai no placeholder legado como fallback (não-fatal).
             const { summarizeMiddleMessages } = await import("@/lib/history-summary");
-            const summary = await summarizeMiddleMessages(remoteJid, middle).catch(() => null);
+            const summary = await summarizeMiddleMessages(clientId, remoteJid, middle).catch(() => null);
             const middleContent = summary
               ? `[Resumo de ${skipped} mensagens intermediárias da conversa — a IA deve usar estas informações como contexto]: ${summary}`
               : `[...${skipped} mensagens intermediárias omitidas pra economizar contexto. Resumo: cliente já passou pelo disparo inicial e está em diálogo ativo...]`;
@@ -697,7 +698,7 @@ export async function POST(req: NextRequest) {
         // repetir o que já foi dito, mais cirúrgicas pra dor real do nicho.
         try {
           const { getCachedIntelligence } = await import("@/lib/lead-intelligence");
-          const intel = await getCachedIntelligence(remoteJid);
+          const intel = await getCachedIntelligence(remoteJid, clientId);
           if (intel) {
             const intelLines: string[] = ["", "# 🎯 BRIEFING ESTRATÉGICO (Lead Intelligence)"];
             intelLines.push(`Tipo de lead: ${intel.lead_type} | ICP score: ${intel.icp_score}/100`);
@@ -1337,18 +1338,20 @@ ${capturedVariablesPrompt}
              const safeQuery = raw.toLowerCase().replace(/[%_,()]/g, " ").replace(/\s+/g, " ").trim();
              if (safeQuery) {
                 let docs: any[] = [];
-                const titleHit = await supabase.from("agent_knowledge")
-                   .select("id, title, content")
-                   .eq("agent_id", agentId)
-                   .ilike("title", `%${safeQuery}%`)
-                   .limit(3);
-                docs = titleHit.data || [];
-                if (docs.length === 0) {
-                   const contentHit = await supabase.from("agent_knowledge")
-                      .select("id, title, content")
-                      .eq("agent_id", agentId)
-                      .ilike("content", `%${safeQuery}%`)
-                      .limit(3);
+                 const titleHit = await supabase.from("agent_knowledge")
+                    .select("id, title, content")
+                    .eq("agent_id", agentId)
+                    .or(`client_id.eq.${clientId},client_id.is.null`)
+                    .ilike("title", `%${safeQuery}%`)
+                    .limit(3);
+                 docs = titleHit.data || [];
+                 if (docs.length === 0) {
+                    const contentHit = await supabase.from("agent_knowledge")
+                       .select("id, title, content")
+                       .eq("agent_id", agentId)
+                       .or(`client_id.eq.${clientId},client_id.is.null`)
+                       .ilike("content", `%${safeQuery}%`)
+                       .limit(3);
                    docs = contentHit.data || [];
                 }
                 if (docs.length > 0) {
@@ -1919,33 +1922,53 @@ ${capturedVariablesPrompt}
                auth.setCredentials(oauthTokens);
                const calendar = google.calendar({ version: 'v3', auth });
 
-               const eventId = String(callArgs.event_id || "").trim();
-               if (!eventId) throw new Error("event_id vazio. Chame list_google_calendar_events primeiro.");
+                const eventId = String(callArgs.event_id || "").trim();
+                if (!eventId) throw new Error("event_id vazio. Chame list_google_calendar_events primeiro.");
 
-               await calendar.events.delete({
-                   calendarId: 'primary',
-                   eventId,
-                   sendUpdates: 'all',
-               });
+                // Escopo por contato: o evento só pode ser cancelado se existir um
+                // appointment DESTE tenant vinculado ao contato atual da conversa.
+                const digits = (v: string | null | undefined) => (v || "").replace(/\D/g, "");
+                const { data: apptRow, error: apptLookupErr } = await supabase
+                    .from("appointments")
+                    .select("id, remote_jid, title, service_name, start_at")
+                    .eq("client_id", clientId)
+                    .eq("google_event_id", eventId)
+                    .maybeSingle();
+                if (apptLookupErr) throw new Error("Falha ao validar ownership do evento.");
+                const wrongTenant = !apptRow;
+                const wrongContact = !wrongTenant && digits(apptRow.remote_jid) !== digits(remoteJid);
+                if (wrongTenant || wrongContact) {
+                    functionResultRes = { cancelled: false, message: wrongTenant
+                        ? "Evento não pertence a esta conversa/agenda local. Peça ao cliente pra confirmar a data e chame list_google_calendar_events de novo."
+                        : "Esse evento pertence a outro contato. Só posso cancelar compromissos desta conversa." };
+                    callLogs.push({ role: "system", content: `[Google Calendar] Cancel ${eventId} | Recusado: ${wrongTenant ? "sem appointment do contato" : "outro contato"}` });
+                } else {
 
-               // Atualiza appointments local (se existe) pra refletir cancelamento.
-               // .select() captura os dados ANTES de zerar — usados no resumo IA.
-               let cancelledAppt: any = null;
-               try {
-                  const { data: cancelledRows } = await supabase
-                     .from("appointments")
-                     .update({
-                        status: "cancelled",
-                        cancelled_at: new Date().toISOString(),
-                        cancelled_reason: (callArgs.reason as string) || "Cancelado pela IA via WhatsApp",
-                        google_event_id: null,
-                     })
-                     .eq("google_event_id", eventId)
-                     .select("title, service_name, start_at");
-                  cancelledAppt = cancelledRows?.[0] || null;
-               } catch (apptErr: any) {
-                  console.warn("[Agent/Cancel] Falha atualizando appointments:", apptErr?.message);
-               }
+                await calendar.events.delete({
+                    calendarId: 'primary',
+                    eventId,
+                    sendUpdates: 'all',
+                });
+
+                // Atualiza appointments local (se existe) pra refletir cancelamento.
+                // .select() captura os dados ANTES de zerar — usados no resumo IA.
+                let cancelledAppt: any = null;
+                try {
+                   const { data: cancelledRows } = await supabase
+                      .from("appointments")
+                      .update({
+                         status: "cancelled",
+                         cancelled_at: new Date().toISOString(),
+                         cancelled_reason: (callArgs.reason as string) || "Cancelado pela IA via WhatsApp",
+                         google_event_id: null,
+                      })
+                      .eq("client_id", clientId)
+                      .eq("id", apptRow.id)
+                      .select("title, service_name, start_at");
+                   cancelledAppt = cancelledRows?.[0] || null;
+                } catch (apptErr: any) {
+                   console.warn("[Agent/Cancel] Falha atualizando appointments:", apptErr?.message);
+                }
 
                // RESUMO IA PRO DONO — cancelamento. Lê a conversa e avisa o dono.
                try {
@@ -1970,6 +1993,7 @@ ${capturedVariablesPrompt}
                    cancelled: true,
                    message: `Evento ${eventId} cancelado com sucesso. Avise o cliente que a reunião foi desmarcada${callArgs.reason ? ` (motivo: ${callArgs.reason})` : ""}.`
                };
+                }
            } catch (mcpErr: any) {
                console.error("[MCP Cancel Error]:", mcpErr);
                const msg = /not found|resource.*not.*exist/i.test(mcpErr.message)
@@ -2015,12 +2039,8 @@ ${capturedVariablesPrompt}
                try {
                    // SSRF guard: URL vem de config do tenant — bloqueia scheme
                    // inválido e hosts/IPs internos (metadata, rede privada).
-                   const { assertPublicHttpUrl } = await import("@/lib/safe-url");
-                   const guard = assertPublicHttpUrl(matchTool.webhook_url);
-                   if (!guard.ok) {
-                      throw new Error(`webhook_url bloqueada (${guard.reason})`);
-                   }
-                   const reqWb = await fetch(matchTool.webhook_url, {
+                    const { fetchPublicHttpUrl } = await import("@/lib/safe-url");
+                    const reqWb = await fetchPublicHttpUrl(matchTool.webhook_url, {
                      method: "POST",
                      headers: { "Content-Type": "application/json" },
                      body: JSON.stringify({ query: callArgs.query, remoteJid, instanceName }),

@@ -12,15 +12,15 @@ Easypanel → serviço Supabase → Environment → cole TUDO abaixo → Save �
 ########################################################
 # Secrets - YOU MUST CHANGE THESE BEFORE GOING INTO PRODUCTION
 ########################################################
-POSTGRES_PASSWORD=your-super-secret-and-long-postgres-password
-JWT_SECRET=31f060502cd39271a0a646cb2b0463a362bd063f519f9b42c3696a6426de00ee
-ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNzg2NzM3NzgyLCJleHAiOjIxMDIwOTc3ODJ9.mmRJtbLFlihENc5nG--kUTniPHWDApLlWWJVTnvhbkY
-SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIiwiaXNzIjoic3VwYWJhc2UiLCJpYXQiOjE3ODY3Mzc3ODIsImV4cCI6MjEwMjA5Nzc4Mn0.Sq7NpaEF_s9bdVLELBItQwhbJ1d6z7QZJ2WX7BpZ8YE
-DASHBOARD_USERNAME=gasalomao
-DASHBOARD_PASSWORD=f7c2a9e41d8b3m6Kq2Xw
-SECRET_KEY_BASE=9f4d2b8a7c1e5f3a9b6d2c8e4f1a7b3d5c9e2f6a8b4d1c7e3f5a9b2d6c8e4f1a
-VAULT_ENC_KEY=your-32-character-encryption-key
-PG_META_CRYPTO_KEY=your-encryption-key-32-chars-min
+POSTGRES_PASSWORD=<ROTATE_IN_SECRET_MANAGER>
+JWT_SECRET=<ROTATE_IN_SECRET_MANAGER>
+ANON_KEY=<REGENERATE_AFTER_JWT_ROTATION>
+SERVICE_ROLE_KEY=<REGENERATE_AFTER_JWT_ROTATION>
+DASHBOARD_USERNAME=<CONFIGURE_IN_SECRET_MANAGER>
+DASHBOARD_PASSWORD=<ROTATE_IN_SECRET_MANAGER>
+SECRET_KEY_BASE=<ROTATE_IN_SECRET_MANAGER>
+VAULT_ENC_KEY=<PRESERVE_OR_ROTATE_WITH_MIGRATION_PLAN>
+PG_META_CRYPTO_KEY=<PRESERVE_OR_ROTATE_WITH_MIGRATION_PLAN>
 
 ########
 # PostgreSQL
@@ -107,7 +107,7 @@ GOOGLE_PROJECT_ID=GOOGLE_PROJECT_ID
 GOOGLE_PROJECT_NUMBER=GOOGLE_PROJECT_NUMBER
 ```
 
-**Login do Studio (salve!):** usuário `gasalomao` / senha `f7c2a9e41d8b3m6Kq2Xw`
+**Login do Studio:** configure usuário e senha pelo gerenciador de segredos; nunca registre os valores neste repositório.
 
 ---
 
@@ -118,30 +118,30 @@ Easypanel → serviço do painel → Environment → cole TUDO abaixo → Save �
 ```
 # ============= SUPABASE =============
 NEXT_PUBLIC_SUPABASE_URL=https://sistema-supabase.ridnii.easypanel.host
-NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNzg2NzM3NzgyLCJleHAiOjIxMDIwOTc3ODJ9.mmRJtbLFlihENc5nG--kUTniPHWDApLlWWJVTnvhbkY
-SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIiwiaXNzIjoic3VwYWJhc2UiLCJpYXQiOjE3ODY3Mzc3ODIsImV4cCI6MjEwMjA5Nzc4Mn0.Sq7NpaEF_s9bdVLELBItQwhbJ1d6z7QZJ2WX7BpZ8YE
+NEXT_PUBLIC_SUPABASE_ANON_KEY=<REGENERATE_AFTER_JWT_ROTATION>
+SUPABASE_SERVICE_ROLE_KEY=<REGENERATE_AFTER_JWT_ROTATION>
 
 # ============= AUTH =============
 # Assina o JWT de sessão do painel + X-Internal-Secret
-AUTH_SECRET=5793a0481a799fb3b64291d4bd5a08e40989244784f207e3cb3b8a7e8e4eff79
+AUTH_SECRET=<ROTATE_IN_SECRET_MANAGER>
 
 # ============= EVOLUTION API (legado — fallback) =============
 EVOLUTION_API_URL=https://sistema-evolution-api.ridnii.easypanel.host
-EVOLUTION_API_KEY=Gabriel@3074
+EVOLUTION_API_KEY=<ROTATE_IN_SECRET_MANAGER>
 EVOLUTION_INSTANCE=sdr
 
 # ============= EVOLUTION GO =============
 EVOLUTION_GO_URL=https://sistema-evolution-go.ridnii.easypanel.host
-EVOLUTION_GO_KEY=Gabriel@30741852
+EVOLUTION_GO_KEY=<ROTATE_IN_SECRET_MANAGER>
 
 # ============= REDIS =============
 REDIS_HOST=sistema_redis
 REDIS_PORT=6379
-REDIS_PASSWORD=Gabriel@3074
+REDIS_PASSWORD=<ROTATE_IN_SECRET_MANAGER>
 REDIS_USERNAME=default
 
 # ============= APP =============
-ADMIN_PASSWORD=Gabriel@3074
+ADMIN_PASSWORD=<ROTATE_IN_SECRET_MANAGER>
 NEXT_PUBLIC_APP_URL=https://sistema-sdr.ridnii.easypanel.host
 INTERNAL_APP_URL=http://localhost:3000
 PORT=3000
@@ -165,13 +165,11 @@ NODE_ENV=production
 | Item | Antes | Agora |
 |---|---|---|
 | Chaves Supabase | JWTs demo públicos (qualquer um acessava o banco) | Novas, assinadas com JWT_SECRET novo |
-| DASHBOARD_PASSWORD | `Gabriel@3074` | forte e única |
+| DASHBOARD_PASSWORD | valor exposto no histórico | segredo forte e único no gerenciador |
 | DISABLE_SIGNUP | false | true (app não usa signup do Supabase) |
 | SECRET_KEY_BASE | default público | novo |
 | AUTH_SECRET (painel) | não existia (fallback = SERVICE_ROLE) | segredo próprio |
 
-**Não mexi de propósito:** `POSTGRES_PASSWORD`, `VAULT_ENC_KEY`, `PG_META_CRYPTO_KEY`
-(o volume do Postgres já foi criado com eles; trocar pela env QUEBRA o banco) e
-chaves Evolution/Redis/ADMIN (rotacionar depois nos respectivos painéis, se quiser).
+**Rotação obrigatória:** JWT/Supabase, Dashboard, AUTH, Evolution, Redis e ADMIN foram expostos no histórico e devem ser substituídos nos respectivos serviços. Para `POSTGRES_PASSWORD`, `VAULT_ENC_KEY` e `PG_META_CRYPTO_KEY`, execute uma migração planejada; alterar somente a env pode indisponibilizar dados existentes.
 
 Os REVOKEs de segurança no banco continuam valendo (já rodados, ficam no banco).

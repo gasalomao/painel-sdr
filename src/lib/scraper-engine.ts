@@ -16,6 +16,7 @@ import { getEvolutionConfig } from "@/lib/evolution";
 import { summarizeReviewsForLead } from "@/lib/reviews-ai";
 import { extractLocation } from "@/lib/lead-intelligence";
 import { getNeighboringCities, isValidCityName, extractUFFromText, ufFromCep, computeExpansionCandidates, proximitySearchTerm, normRegionName } from "@/lib/geo-regions";
+import { fetchPublicHttpUrl } from "@/lib/safe-url";
 import os from "os";
 import fs from "fs";
 import path from "path";
@@ -135,39 +136,57 @@ export interface ScraperSettings {
   topup?: boolean;
 }
 
-// ---- Estado in-memory (singleton no processo Node) ----
-let isScraping = false;
-let isPaused = false;
-let leadsStore: Lead[] = [];
-let keepRunning = true;
-let lastSearchNiche = "Leads";
-let lastSearchRegion = "Exportados";
-let currentAutomationId: string | null = null;
-let currentClientId: string | null = null;
-// Guard de geração: cada runScraper pega um número. Um run substituído por
-// forceRestart NÃO pode resetar isScraping/keepRunning nem marcar a automação
-// como erro no finally — isso matava o run novo que acabou de nascer.
+type RunContext = {
+  generation: number;
+  clientId: string;
+  automationId: string | null;
+  isScraping: boolean;
+  isStopping: boolean;
+  isPaused: boolean;
+  keepRunning: boolean;
+  leads: Lead[];
+  niche: string;
+  region: string;
+};
+
+let activeRun: RunContext | null = null;
 let runGeneration = 0;
+const leadsByOwner = new Map<string, Lead[]>();
+const searchByOwner = new Map<string, { niche: string; region: string }>();
+const sseClients = new Map<ReadableStreamDefaultController, string | null>();
 
-// SSE clients (apenas o /captador via browser inscreve)
-const sseClients: Set<ReadableStreamDefaultController> = new Set();
+function normalizeClientId(clientId?: string | null): string | null {
+  const normalized = typeof clientId === "string" ? clientId.trim() : "";
+  return normalized || null;
+}
 
-export function attachSseClient(ctrl: ReadableStreamDefaultController) {
-  sseClients.add(ctrl);
-  // Envia estado atual imediato
+function ownerKey(clientId: string, automationId: string | null): string {
+  return `${clientId}:${automationId || "manual"}`;
+}
+
+function hasRunAccess(clientId?: string | null, automationId: string | null = null): boolean {
+  const normalized = normalizeClientId(clientId);
+  if (!normalized || !activeRun || activeRun.clientId !== normalized) return false;
+  return activeRun.automationId === automationId;
+}
+
+export function attachSseClient(ctrl: ReadableStreamDefaultController, clientId: string | null): void {
+  sseClients.set(ctrl, normalizeClientId(clientId));
+  const status = getStatus(clientId);
   try {
     ctrl.enqueue(new TextEncoder().encode(
-      `data: ${JSON.stringify({ event: "status", isScraping, isPaused, leadCount: leadsStore.length })}\n\n`
+      `data: ${JSON.stringify({ event: "status", isScraping: status.isScraping, isPaused: status.isPaused, leadCount: status.leadCount })}\n\n`
     ));
   } catch {}
 }
-export function detachSseClient(ctrl: ReadableStreamDefaultController) {
+export function detachSseClient(ctrl: ReadableStreamDefaultController): void {
   sseClients.delete(ctrl);
 }
 
-function broadcast(data: Record<string, unknown>) {
+function broadcastToClient(clientId: string, data: Record<string, unknown>): void {
   const msg = `data: ${JSON.stringify(data)}\n\n`;
-  for (const ctrl of sseClients) {
+  for (const [ctrl, subscribedClientId] of sseClients) {
+    if (subscribedClientId !== clientId) continue;
     try {
       ctrl.enqueue(new TextEncoder().encode(msg));
     } catch {
@@ -176,8 +195,8 @@ function broadcast(data: Record<string, unknown>) {
   }
 }
 
-async function logToAutomation(message: string, level: "info" | "success" | "warning" | "error" = "info", kind: "scrape" | "state" | "error" = "scrape") {
-  if (!currentAutomationId) return;
+async function logToAutomation(clientId: string, automationId: string | null, message: string, level: "info" | "success" | "warning" | "error" = "info", kind: "scrape" | "state" | "error" = "scrape") {
+  if (!automationId) return;
   try {
     const client = supabaseAdmin || supabase;
     if (!client) return;
@@ -185,7 +204,8 @@ async function logToAutomation(message: string, level: "info" | "success" | "war
     // Sem checar isso, uma falha de gravação (RLS, constraint) ficava
     // invisível e o log da automação parecia "incompleto" sem motivo.
     const { error } = await client.from("automation_logs").insert({
-      automation_id: currentAutomationId,
+      automation_id: automationId,
+      client_id: clientId,
       kind,
       level,
       message: String(message).slice(0, 1000),
@@ -197,16 +217,16 @@ async function logToAutomation(message: string, level: "info" | "success" | "war
   }
 }
 
-function sendLog(message: string, type: string = "info") {
+function sendRunLog(run: RunContext, message: string, type: string = "info") {
   const timestamp = new Date().toLocaleTimeString("pt-BR");
-  broadcast({ event: "log", message, type, timestamp });
+  if (!run.automationId) broadcastToClient(run.clientId, { event: "log", message, type, timestamp });
   console.log(`[SCRAPER] ${type.toUpperCase()}: ${message}`);
-  if (currentAutomationId && !message.startsWith("[DEBUG]")) {
+  if (run.automationId && !message.startsWith("[DEBUG]")) {
     const lvl: "info" | "success" | "warning" | "error" =
       type === "success" ? "success" :
       type === "warning" ? "warning" :
       type === "error" ? "error" : "info";
-    logToAutomation(message, lvl).catch(() => {});
+    logToAutomation(run.clientId, run.automationId, message, lvl).catch(() => {});
   }
 }
 
@@ -274,7 +294,7 @@ export function placeUrlKey(url: string): string {
   return url.replace(/\/@[^/]+/, "").replace(/[?&]hl=[^&]*/g, "").replace(/\/+$/, "");
 }
 
-export function formatLeadForN8n(lead: Lead) {
+export function formatLeadForN8n(lead: Lead, search?: { niche: string; region: string }) {
   // Caminho CHAVE-VALOR p/ integrações n8n/Zapier/Make (chaves snake_case,
   // fácil de mapear). Inclui TODOS os campos capturados do Maps — não perde
   // mais reviews, fotos, horários, popular times, redes sociais, etc.
@@ -285,8 +305,8 @@ export function formatLeadForN8n(lead: Lead) {
     telefone: lead.phones || "",
     endereco: lead.fullAddress || "",
     categoria_do_negocio: lead.categories || "",
-    nicho_pesquisado: lastSearchNiche || "",
-    regiao_pesquisada: lastSearchRegion || "",
+    nicho_pesquisado: search?.niche || "",
+    regiao_pesquisada: search?.region || "",
     avaliacao: lead.averageRating || "",
     numero_avaliacoes: lead.reviewCount || "",
     website: lead.website || "",
@@ -337,20 +357,17 @@ export function formatLeadForN8n(lead: Lead) {
  *
  * Retorna `null` se NÃO está no CRM, ou string descritiva se está (pra log).
  */
-export async function checkCrmDuplicate(remoteJid: string, clientId?: string | null): Promise<string | null> {
+export async function checkCrmDuplicate(remoteJid: string, clientId: string): Promise<string | null> {
   if (!remoteJid) return null;
+  const normalizedClientId = normalizeClientId(clientId);
+  if (!normalizedClientId) throw new Error("client_id obrigatório para consultar duplicatas do CRM");
   try {
     const client = supabaseAdmin || supabase;
     if (!client) return null;
-    
-    let leadQ = client.from("leads_extraidos").select("id").eq("remoteJid", remoteJid);
-    let contactQ = client.from("contacts").select("id").eq("remote_jid", remoteJid);
-    
-    if (clientId) {
-      leadQ = leadQ.eq("client_id", clientId);
-      contactQ = contactQ.eq("client_id", clientId);
-    }
-    
+
+    const leadQ = client.from("leads_extraidos").select("id").eq("remoteJid", remoteJid).eq("client_id", normalizedClientId);
+    const contactQ = client.from("contacts").select("id").eq("remote_jid", remoteJid).eq("client_id", normalizedClientId);
+
     const [leadRow, contactRow] = await Promise.all([
       leadQ.maybeSingle(),
       contactQ.maybeSingle(),
@@ -363,7 +380,7 @@ export async function checkCrmDuplicate(remoteJid: string, clientId?: string | n
   }
 }
 
-async function saveLeadAndSync(lead: Lead, settings: ScraperSettings): Promise<number | null> {
+async function saveLeadAndSync(lead: Lead, settings: ScraperSettings, run: RunContext): Promise<number | null> {
   const hasWhatsApp = !!lead.remoteJid;
 
   try {
@@ -372,9 +389,9 @@ async function saveLeadAndSync(lead: Lead, settings: ScraperSettings): Promise<n
 
     // Se tem WhatsApp, checa duplicata
     if (hasWhatsApp) {
-      const dupSource = await checkCrmDuplicate(lead.remoteJid, currentClientId);
+      const dupSource = await checkCrmDuplicate(lead.remoteJid, run.clientId);
       if (dupSource) {
-        sendLog(`⏭️ "${lead.name}" já estava no CRM (${dupSource}) — pulando`, "info");
+        sendRunLog(run, `⏭️ "${lead.name}" já estava no CRM (${dupSource}) — pulando`, "info");
         return null;
       }
     }
@@ -386,7 +403,7 @@ async function saveLeadAndSync(lead: Lead, settings: ScraperSettings): Promise<n
     //     do SETUP_COMPLETO.sql); se o banco for muito antigo e não tiver
     //     elas, o fallback abaixo retira-as e tenta de novo.
     const fullPayload = {
-      client_id: currentClientId || null,
+      client_id: run.clientId,
       remoteJid: lead.remoteJid || null,
       nome_negocio: lead.name,
       telefone: lead.phones,
@@ -454,30 +471,30 @@ async function saveLeadAndSync(lead: Lead, settings: ScraperSettings): Promise<n
       insError = retry.error as any;
       if (!insError) savedId = retry.data?.id ?? null;
       if (!insError) {
-        sendLog(`(banco antigo — lead salvo sem colunas extras do Maps/reviews)`, "warning");
+        sendRunLog(run, `(banco antigo — lead salvo sem colunas extras do Maps/reviews)`, "warning");
       }
     }
 
     if (insError) throw insError;
 
     if (hasWhatsApp) {
-      sendLog(`✅ Salvo: ${lead.name}`, "success");
+      sendRunLog(run, `✅ Salvo: ${lead.name}`, "success");
     } else {
-      sendLog(`✅ Salvo: ${lead.name} (sem WhatsApp — status: sem_contato)`, "success");
+      sendRunLog(run, `✅ Salvo: ${lead.name} (sem WhatsApp — status: sem_contato)`, "success");
     }
 
     // Webhook realtime (best-effort): falha aqui não derruba o save.
     if (settings.webhookEnabled && settings.mode === "realtime" && settings.webhookUrl) {
       try {
-        const payload = formatLeadForN8n(lead);
-        await fetch(settings.webhookUrl, {
+        const payload = formatLeadForN8n(lead, { niche: run.niche, region: run.region });
+        await fetchPublicHttpUrl(settings.webhookUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
-        sendLog(`[Webhook] Lead enviado: ${lead.name}`, "success");
+        sendRunLog(run, `[Webhook] Lead enviado: ${lead.name}`, "success");
       } catch (err) {
-        sendLog(`[Webhook] Falha ao enviar para n8n: ${(err as Error).message}`, "error");
+        sendRunLog(run, `[Webhook] Falha ao enviar para n8n: ${(err as Error).message}`, "error");
       }
     }
 
@@ -486,25 +503,19 @@ async function saveLeadAndSync(lead: Lead, settings: ScraperSettings): Promise<n
     const msg = err?.message || String(err);
     const detail = err?.details || err?.hint || "";
     console.error("Erro ao salvar no Supabase (CRM):", msg, detail);
-    sendLog(`❌ Falha ao salvar "${lead.name}": ${msg}${detail ? ` (${detail})` : ""}`, "error");
+    sendRunLog(run, `❌ Falha ao salvar "${lead.name}": ${msg}${detail ? ` (${detail})` : ""}`, "error");
     return null;
   }
 }
 
-async function runScraper(niches: string[], regions: string[], settings: ScraperSettings) {
-  if (isScraping) return;
-  const myGen = ++runGeneration;
-  const isCurrentRun = () => myGen === runGeneration;
-  isScraping = true;
-  isPaused = false;
-  keepRunning = true;
-  leadsStore = [];
-  broadcast({ event: "status", isScraping: true, isPaused: false, leadCount: 0 });
-  sendLog("Iniciando o Robô do lado do Servidor...", "info");
+async function runScraper(niches: string[], regions: string[], settings: ScraperSettings, run: RunContext) {
+  const isCurrentRun = () => activeRun === run && run.generation === runGeneration;
+  const leadsStore = run.leads;
+  const attachedAutomationId = run.automationId;
+  const currentClientId = run.clientId;
+  broadcastToClient(run.clientId, { event: "status", isScraping: true, isPaused: false, leadCount: 0 });
+  sendRunLog(run, "Iniciando o Robô do lado do Servidor...", "info");
 
-  // Captura o automation_id antes do finally pra poder atualizar o row
-  // mesmo se algo der errado e currentAutomationId for resetado.
-  const attachedAutomationId = currentAutomationId;
   let scraperError: string | null = null;
   let crmSkipped = 0; // contador de leads pulados por já estarem no CRM (escopo do finally)
 
@@ -518,8 +529,8 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
     if (!executablePath) {
       if (os.platform() === "win32") {
         executablePath = findChromeOnWindows() || undefined;
-        if (executablePath) sendLog(`Ambiente Windows detectado. Usando: ${executablePath}`, "info");
-        else sendLog("Aviso: Navegador não encontrado no Windows. Tente instalar o Chrome.", "warning");
+        if (executablePath) sendRunLog(run, `Ambiente Windows detectado. Usando: ${executablePath}`, "info");
+        else sendRunLog(run, "Aviso: Navegador não encontrado no Windows. Tente instalar o Chrome.", "warning");
       } else {
         const linuxPaths = [
           "/usr/bin/chromium-browser",
@@ -593,7 +604,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
     // Negócio já processado em OUTRA busca da mesma execução (mesmo place,
     // URL normalizada sem viewport) → não abre detalhe nem reviews de novo.
     const processedPlaceKeys = new Set<string>();
-    sendLog(`📋 Fila: ${queue.length} buscas${settings.maxLeads ? ` · limite ${settings.maxLeads} leads` : ""}`, "info");
+    sendRunLog(run, `📋 Fila: ${queue.length} buscas${settings.maxLeads ? ` · limite ${settings.maxLeads} leads` : ""}`, "info");
 
     const maxLeads = Number(settings.maxLeads) || 0; // 0 = sem limite
 
@@ -614,27 +625,27 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
     const proximitySeededRegions = new Set<string>();
 
     outer: for (let i = 0; i < queue.length; i++) {
-      if (!keepRunning || !isCurrentRun()) {
-        sendLog("Parada recebida. Abortando fila.", "warning");
+      if (!run.keepRunning || !isCurrentRun()) {
+        sendRunLog(run, "Parada recebida. Abortando fila.", "warning");
         break;
       }
       // Já bateu o limite ANTES de começar a próxima busca? Para já.
       if (maxLeads > 0 && leadsStore.length >= maxLeads) {
-        sendLog(`✓ Limite de ${maxLeads} leads atingido. Encerrando captação.`, "success");
+        sendRunLog(run, `✓ Limite de ${maxLeads} leads atingido. Encerrando captação.`, "success");
         break;
       }
-      while (isPaused && keepRunning) await sleep(1000);
-      if (!keepRunning) break;
+      while (run.isPaused && run.keepRunning) await sleep(1000);
+      if (!run.keepRunning) break;
 
       const searchTerm = queue[i];
-      sendLog(`(${i + 1}/${queue.length}) Buscando: "${searchTerm}"...`, "info");
+      sendRunLog(run, `(${i + 1}/${queue.length}) Buscando: "${searchTerm}"...`, "info");
 
       const encodedSearch = encodeURIComponent(searchTerm).replace(/%20/g, "+");
       await page.goto(`https://www.google.com/maps/search/${encodedSearch}?hl=pt-BR`, {
         waitUntil: "domcontentloaded",
         timeout: 60000,
       });
-      sendLog("Mapa carregado. Aguardando resultados...", "info");
+      sendRunLog(run, "Mapa carregado. Aguardando resultados...", "info");
 
       // ---- Bypassing Google Consent / Cookie Page ----
       try {
@@ -642,22 +653,22 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
           const isConsentUrl = window.location.href.includes("consent.google.com");
           if (isConsentUrl) return true;
           const text = document.body.innerText.toLowerCase();
-          return text.includes("antes de continuar para o google") || 
-                 text.includes("before you continue to google") || 
+          return text.includes("antes de continuar para o google") ||
+                 text.includes("before you continue to google") ||
                  text.includes("antes de continuar para o youtube") ||
                  text.includes("antes de continuar");
         });
 
         if (hasConsent) {
-          sendLog("Detectado aviso de privacidade/consentimento do Google. Aceitando...", "warning");
+          sendRunLog(run, "Detectado aviso de privacidade/consentimento do Google. Aceitando...", "warning");
           await page.evaluate(() => {
             const buttons = Array.from(document.querySelectorAll('button'));
             const acceptButton = buttons.find(b => {
               const text = (b.textContent || b.innerText || "").toLowerCase();
-              return text.includes('aceitar tudo') || 
-                     text.includes('accept all') || 
-                     text.includes('concordo') || 
-                     text.includes('i agree') || 
+              return text.includes('aceitar tudo') ||
+                     text.includes('accept all') ||
+                     text.includes('concordo') ||
+                     text.includes('i agree') ||
                      text.includes('agree') ||
                      text.includes('aceitar') ||
                      text.includes('aceito');
@@ -682,15 +693,15 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
       try {
         await page.waitForSelector('[role="feed"]', { timeout: 15000 });
       } catch {
-        sendLog(`Nenhuma lista para "${searchTerm}". Pulando.`, "warning");
+        sendRunLog(run, `Nenhuma lista para "${searchTerm}". Pulando.`, "warning");
         continue;
       }
 
       const extractedPlaces = new Set<string>();
       let scrolling = true;
-      sendLog("Rolando para capturar cartões...", "info");
+      sendRunLog(run, "Rolando para capturar cartões...", "info");
 
-      while (scrolling && keepRunning && isCurrentRun()) {
+      while (scrolling && run.keepRunning && isCurrentRun()) {
         await page.evaluate(() => {
           const feed = document.querySelector('[role="feed"]');
           if (feed) feed.scrollBy(0, 1000);
@@ -710,9 +721,9 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
         });
 
         for (const lead of newLeads) {
-          if (!keepRunning || !isCurrentRun()) break;
-          while (isPaused && keepRunning) await sleep(1000);
-          if (!keepRunning) break;
+          if (!run.keepRunning || !isCurrentRun()) break;
+          while (run.isPaused && run.keepRunning) await sleep(1000);
+          if (!run.keepRunning) break;
 
           if (extractedPlaces.has(lead.name)) continue;
           extractedPlaces.add(lead.name);
@@ -807,7 +818,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
           // Descarte ULTRAPRECOCE: site já visível no card → nem abre o
           // painel de detalhes (pula navegação + reviews + filtros).
           if (settings.filterWithWebsite && cardData.website) {
-            sendLog(`🚫 Descartado (Com site): ${lead.name}`, "warning");
+            sendRunLog(run, `🚫 Descartado (Com site): ${lead.name}`, "warning");
             continue;
           }
 
@@ -1429,7 +1440,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
               const earlyCheck = evaluateLeadFilters(phoneStr.replace(/\D/g, ""), websiteStr, settings, leadsStore);
               if (!earlyCheck.pass) {
                 discardedByFilters = earlyCheck.reason;
-                sendLog(`🚫 Descartado (${earlyCheck.reason}): ${lead.name}`, "warning");
+                sendRunLog(run, `🚫 Descartado (${earlyCheck.reason}): ${lead.name}`, "warning");
               }
 
               // ============================================================
@@ -1442,7 +1453,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 const earlyDup = earlyJid ? await checkCrmDuplicate(earlyJid, currentClientId) : null;
                 if (earlyDup) {
                   crmSkipped++;
-                  sendLog(`⏭️ Já no CRM (${earlyDup}): ${lead.name}`, "info");
+                  sendRunLog(run, `⏭️ Já no CRM (${earlyDup}): ${lead.name}`, "info");
                   discardedByFilters = `Já no CRM (${earlyDup})`;
                 }
               }
@@ -1463,7 +1474,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                   // preview do Overview (2-3 .jftiEf soltos) e o loop nunca
                   // via a lista completa. Clique em aba já ativa é no-op.
                   if (settings.captureAllReviews) {
-                    sendLog(`📝 Carregando todas as avaliações disponíveis: ${cardData.name}`, "info");
+                    sendRunLog(run, `📝 Carregando todas as avaliações disponíveis: ${cardData.name}`, "info");
                   }
                   const reviewWaitSel = '.jftiEf, div[data-review-id], div[role="feed"]';
                   await detailsPage.evaluate(() => {
@@ -1682,7 +1693,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                       let expected = parseInt(rawCount.replace(/\D/g, ""), 10) || 0;
                       const kMatch = rawCount.match(/([\d.,]+)\s*[kK]/);
                       if (!expected && kMatch) expected = Math.round(parseFloat(kMatch[1].replace(",", ".")) * 1000);
-                      sendLog(
+                      sendRunLog(run,
                         `📝 ${reviewsDetalhes.length} avaliações capturadas${expected > 0 ? ` (de ~${expected} no Google)` : ""}: ${cardData.name}`,
                         "success",
                       );
@@ -1715,7 +1726,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
             const dupSource = jid ? await checkCrmDuplicate(jid, currentClientId) : null;
             if (dupSource) {
               crmSkipped++;
-              sendLog(`⏭️ Já no CRM (${dupSource}): ${cardData.name}`, "info");
+              sendRunLog(run, `⏭️ Já no CRM (${dupSource}): ${cardData.name}`, "info");
             } else {
               // ---- Fallback final de rating: se nem card nem painel detalhe
               // devolveram nota (raro, mas acontece em variantes de DOM),
@@ -1781,42 +1792,43 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 additionalCategories,
                 addressComponents,
               };
+              if (!isCurrentRun()) break;
               leadsStore.push(finalLead);
-              broadcast({ event: "new_lead", lead: finalLead, count: leadsStore.length });
-              const savedLeadId = await saveLeadAndSync(finalLead, settings);
+              broadcastToClient(run.clientId, { event: "new_lead", lead: finalLead, count: leadsStore.length });
+              const savedLeadId = await saveLeadAndSync(finalLead, settings, run);
 
               // Resumo automático de avaliações com IA — roda NA HORA em cada
               // lead salvo (fluxo Busca com "Resumir avaliações com IA" ligado).
               // Best-effort: falha não interrompe a captura.
               if (savedLeadId && settings.reviews_ai?.enabled && settings.reviews_ai.model) {
-                sendLog(`🧠 Resumindo avaliações de "${finalLead.name}" com IA (${settings.reviews_ai.model})...`, "info");
+                sendRunLog(run, `🧠 Resumindo avaliações de "${finalLead.name}" com IA (${settings.reviews_ai.model})...`, "info");
                 try {
                   const r = await summarizeReviewsForLead({
                     leadId: savedLeadId,
                     model: settings.reviews_ai.model,
                     customPrompt: settings.reviews_ai.prompt || null,
-                    clientId: currentClientId,
+                    clientId: run.clientId,
                     source: "capture",
                   });
                   if ("error" in r) {
-                    sendLog(`⚠️ Reviews-IA "${finalLead.name}": ${r.error}`, "warning");
+                    sendRunLog(run, `⚠️ Reviews-IA "${finalLead.name}": ${r.error}`, "warning");
                   } else {
-                    sendLog(`🧠 Resumo de avaliações ${r.cached ? "(cache) " : ""}salvo: ${finalLead.name}`, "success");
+                    sendRunLog(run, `🧠 Resumo de avaliações ${r.cached ? "(cache) " : ""}salvo: ${finalLead.name}`, "success");
                   }
                 } catch (e: any) {
-                  sendLog(`⚠️ Reviews-IA falhou (${finalLead.name}): ${e?.message || e}`, "warning");
+                  sendRunLog(run, `⚠️ Reviews-IA falhou (${finalLead.name}): ${e?.message || e}`, "warning");
                 }
               }
 
               // Bateu o limite? Para tudo agora — sai do scroll, sai da fila.
               if (maxLeads > 0 && leadsStore.length >= maxLeads) {
-                sendLog(`🎯 Limite de ${maxLeads} leads atingido. Encerrando.`, "success");
+                sendRunLog(run, `🎯 Limite de ${maxLeads} leads atingido. Encerrando.`, "success");
                 scrolling = false;
                 break outer;
               }
             }
           } else if (!discardedByFilters) {
-            sendLog(`🚫 Descartado (${finalCheck.reason}): ${lead.name}`, "warning");
+            sendRunLog(run, `🚫 Descartado (${finalCheck.reason}): ${lead.name}`, "warning");
           }
         }
 
@@ -1827,7 +1839,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
         });
         if (isEnd) {
           scrolling = false;
-          sendLog(`Fim dos resultados para "${searchTerm}". Total: ${extractedPlaces.size}`, "info");
+          sendRunLog(run, `Fim dos resultados para "${searchTerm}". Total: ${extractedPlaces.size}`, "info");
         }
       }
 
@@ -1845,7 +1857,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
         settings.mode === "batch" &&
         maxLeads > 0 &&
         leadsStore.length < maxLeads &&
-        keepRunning &&
+        run.keepRunning &&
         expansionsLeft > 0
       ) {
         const candidates = computeExpansionCandidates({
@@ -1859,7 +1871,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
           for (const c of candidates) searchedRegions.add(norm(c));
           expansionsLeft -= candidates.length;
           queue.push(...candidates.flatMap(c => niches.map(n => `${n.trim()} ${c}`)));
-          sendLog(
+          sendRunLog(run,
             `🧭 ${leadsStore.length}/${maxLeads} leads e fila esgotada — expandindo pra cidade(s) vizinha(s): ${candidates.join(", ")}.`,
             "info"
           );
@@ -1874,40 +1886,40 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
             for (const n of niches) {
               for (const r of toSeed) queue.push(proximitySearchTerm(n, r));
             }
-            sendLog(
+            sendRunLog(run,
               `🧭 ${leadsStore.length}/${maxLeads} leads e fila esgotada — buscando nas cercanias de ${toSeed.join(", ")} pra descobrir cidades vizinhas.`,
               "info"
             );
             // Semeadura não consome cota de expansão: quem gasta é o próximo
             // ponto de expansão (com candidatos reais colhidos).
           } else {
-            sendLog(`🧭 Fila esgotada: ${leadsStore.length}/${maxLeads} leads e nenhuma cidade vizinha nova pra expandir. Encerrando.`, "info");
+            sendRunLog(run, `🧭 Fila esgotada: ${leadsStore.length}/${maxLeads} leads e nenhuma cidade vizinha nova pra expandir. Encerrando.`, "info");
           }
         }
       }
     }
 
-    if (isCurrentRun()) sendLog(`🎉 Fila processada! Total: ${leadsStore.length} leads`, "success");
+    if (isCurrentRun()) sendRunLog(run, `🎉 Fila processada! Total: ${leadsStore.length} leads`, "success");
 
     // Run substituído por um restart não dispara webhook em massa — os
     // leads dele já foram zerados pelo run novo (leadsStore é compartilhado).
     if (settings.webhookEnabled && settings.mode === "batch" && settings.webhookUrl && leadsStore.length > 0 && isCurrentRun()) {
-      sendLog("Enviando em massa para n8n...", "info");
+      sendRunLog(run, "Enviando em massa para n8n...", "info");
       try {
-        const payload = leadsStore.map(formatLeadForN8n);
-        await fetch(settings.webhookUrl, {
+        const payload = leadsStore.map((lead) => formatLeadForN8n(lead, { niche: run.niche, region: run.region }));
+        await fetchPublicHttpUrl(settings.webhookUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
-        sendLog(`[Webhook] ${payload.length} leads enviados em massa!`, "success");
+        sendRunLog(run, `[Webhook] ${payload.length} leads enviados em massa!`, "success");
       } catch (err) {
-        sendLog(`[Webhook] Falha no envio em massa: ${(err as Error).message}`, "error");
+        sendRunLog(run, `[Webhook] Falha no envio em massa: ${(err as Error).message}`, "error");
       }
     }
   } catch (err) {
     scraperError = (err as Error).message || String(err);
-    sendLog(`❌ Erro no scraper: ${scraperError}`, "error");
+    sendRunLog(run, `❌ Erro no scraper: ${scraperError}`, "error");
   } finally {
     if (browser) await browser.close().catch(() => {});
     // Run SUBSTITUÍDO por forceRestart: só fecha o próprio browser e sai.
@@ -1915,17 +1927,21 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
     // (bug: restart deixava o run antigo "concluir" com 0 leads por cima
     // do run recém-nascido).
     if (!isCurrentRun()) {
-      sendLog(`♻️ Run substituído por um restart — ignorando conclusão deste run.`, "info");
+      sendRunLog(run, `♻️ Run substituído por um restart — ignorando conclusão deste run.`, "info");
       return;
     }
-    isScraping = false;
-    isPaused = false;
-    broadcast({ event: "status", isScraping: false, isPaused: false, leadCount: leadsStore.length });
-    sendLog(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, "info");
-    sendLog(`🏁 Captação concluída`, "success");
-    sendLog(`   ✅ ${leadsStore.length} lead(s) novo(s) salvo(s)`, "success");
-    if (crmSkipped > 0) sendLog(`   ⏭️ ${crmSkipped} lead(s) pulado(s) (já no CRM)`, "info");
-    sendLog(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, "info");
+    run.isScraping = false;
+    run.isStopping = false;
+    run.isPaused = false;
+    activeRun = null;
+    if (!run.automationId) {
+      broadcastToClient(run.clientId, { event: "status", isScraping: false, isPaused: false, leadCount: leadsStore.length });
+    }
+    sendRunLog(run, `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, "info");
+    sendRunLog(run, `🏁 Captação concluída`, "success");
+    sendRunLog(run, `   ✅ ${leadsStore.length} lead(s) novo(s) salvo(s)`, "success");
+    if (crmSkipped > 0) sendRunLog(run, `   ⏭️ ${crmSkipped} lead(s) pulado(s) (já no CRM)`, "info");
+    sendRunLog(run, `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, "info");
 
     // Se o scraper estava atrelado a uma automação E falhou OU não captou
     // nada, marca o row em erro imediatamente — em vez de esperar o tick
@@ -1942,7 +1958,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
             last_error: `Scraper falhou: ${scraperError}`.slice(0, 500),
             last_error_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
-          }).eq("id", attachedAutomationId);
+          }).eq("id", attachedAutomationId).eq("client_id", run.clientId);
         } else if (leadsStore.length === 0) {
           // Scraper rodou OK mas Google Maps não retornou nada pros termos
           // pesquisados. Marca erro pra usuário ajustar nicho/região.
@@ -1952,7 +1968,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
             last_error: "Scraper terminou sem captar nenhum lead. Verifica se nicho + região retornam resultados no Google Maps manualmente.",
             last_error_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
-          }).eq("id", attachedAutomationId);
+          }).eq("id", attachedAutomationId).eq("client_id", run.clientId);
         } else {
           // SUCESSO com leads. Sinaliza a conclusão DEFINITIVA do scrape
           // (`_scrapeFinishedAt`) — assim o automation-worker avança pro
@@ -1962,6 +1978,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
               .from("automations")
               .select("scrape_filters")
               .eq("id", attachedAutomationId)
+              .eq("client_id", run.clientId)
               .maybeSingle();
             const filters = {
               ...((row?.scrape_filters as Record<string, any>) || {}),
@@ -1970,7 +1987,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
             await client.from("automations").update({
               scrape_filters: filters,
               updated_at: new Date().toISOString(),
-            }).eq("id", attachedAutomationId);
+            }).eq("id", attachedAutomationId).eq("client_id", run.clientId);
           } catch (e) {
             console.warn("[SCRAPER-ENGINE] falha marcando _scrapeFinishedAt:", (e as Error).message);
           }
@@ -1987,7 +2004,6 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
         console.warn("[SCRAPER-ENGINE] falha atualizando automação após scrape:", (e as Error).message);
       }
     }
-    currentAutomationId = null;
   }
 }
 
@@ -2022,23 +2038,45 @@ export interface StartOpts {
  * background. Se já estiver rodando, retorna { ok: true, alreadyRunning: true }
  * e atrela o automation_id (se passado) ao run em andamento.
  */
-export function startScraperRun(opts: StartOpts): { ok: boolean; error?: string; alreadyRunning?: boolean } {
+export function startScraperRun(opts: StartOpts): { ok: boolean; error?: string; alreadyRunning?: boolean; busy?: boolean } {
+  const clientId = normalizeClientId(opts.client_id);
+  const automationId = opts.automation_id || null;
+  if (!clientId) return { ok: false, error: "client_id é obrigatório." };
   if (!opts.niches?.length || !opts.regions?.length) {
     return { ok: false, error: "Forneça pelo menos 1 nicho e 1 região." };
   }
-  if (isScraping && opts.forceRestart) {
-    stopScraper();
-  } else if (isScraping) {
-    if (opts.automation_id) currentAutomationId = opts.automation_id;
-    return { ok: true, alreadyRunning: true };
+  if (activeRun) {
+    if (!hasRunAccess(clientId, automationId)) {
+      return { ok: false, busy: true, error: "O extrator está ocupado por outra captura." };
+    }
+    if (activeRun.isStopping) {
+      return { ok: false, busy: true, error: "O extrator ainda está encerrando a captura anterior." };
+    }
+    if (!opts.forceRestart) return { ok: true, alreadyRunning: true };
+    activeRun.keepRunning = false;
+    activeRun.isScraping = false;
+    activeRun.isStopping = false;
+    activeRun.isPaused = false;
   }
-  isScraping = false;
-  lastSearchNiche = opts.niches[0];
-  lastSearchRegion = opts.regions[0];
-  currentAutomationId = opts.automation_id || null;
-  currentClientId = opts.client_id || null;
-  // Fire-and-forget — runScraper tem try/finally que reseta isScraping=false.
-  runScraper(opts.niches, opts.regions, {
+
+  const generation = ++runGeneration;
+  const leads: Lead[] = [];
+  const run: RunContext = {
+    generation,
+    clientId,
+    automationId,
+    isScraping: true,
+    isStopping: false,
+    isPaused: false,
+    keepRunning: true,
+    leads,
+    niche: opts.niches[0],
+    region: opts.regions[0],
+  };
+  activeRun = run;
+  leadsByOwner.set(ownerKey(clientId, automationId), leads);
+  searchByOwner.set(ownerKey(clientId, automationId), { niche: run.niche, region: run.region });
+  void runScraper(opts.niches, opts.regions, {
     webhookUrl: opts.webhookUrl,
     webhookEnabled: opts.webhookEnabled,
     mode: opts.mode,
@@ -2050,54 +2088,82 @@ export function startScraperRun(opts: StartOpts): { ok: boolean; error?: string;
     maxLeads: opts.maxLeads,
     reviews_ai: opts.reviews_ai,
     topup: opts.topup,
-  });
+  }, run);
   return { ok: true };
 }
 
-export function stopScraper() {
-  keepRunning = false;
-  isScraping = false;
-  isPaused = false;
-  sendLog("Parando robô...", "warning");
+export function stopScraper(clientId: string | null, automationId: string | null = null): boolean {
+  if (!hasRunAccess(clientId, automationId) || !activeRun) return false;
+  const run = activeRun;
+  run.keepRunning = false;
+  run.isScraping = false;
+  run.isStopping = true;
+  run.isPaused = false;
+  sendRunLog(run, "Parando robô...", "warning");
+  return true;
 }
-export function pauseScraper() {
-  isPaused = true;
-  sendLog("Extração pausada.", "warning");
-  broadcast({ event: "status", isScraping: true, isPaused: true, leadCount: leadsStore.length });
+
+export function pauseScraper(clientId: string | null, automationId: string | null = null): boolean {
+  if (!hasRunAccess(clientId, automationId) || !activeRun?.isScraping || activeRun.isStopping) return false;
+  activeRun.isPaused = true;
+  sendRunLog(activeRun, "Extração pausada.", "warning");
+  broadcastToClient(activeRun.clientId, { event: "status", isScraping: true, isPaused: true, leadCount: activeRun.leads.length });
+  return true;
 }
-export function resumeScraper() {
-  isPaused = false;
-  sendLog("Extração retomada.", "info");
-  broadcast({ event: "status", isScraping: true, isPaused: false, leadCount: leadsStore.length });
+
+export function resumeScraper(clientId: string | null, automationId: string | null = null): boolean {
+  if (!hasRunAccess(clientId, automationId) || !activeRun?.isScraping || !activeRun.isPaused || activeRun.isStopping) return false;
+  activeRun.isPaused = false;
+  sendRunLog(activeRun, "Extração retomada.", "info");
+  broadcastToClient(activeRun.clientId, { event: "status", isScraping: true, isPaused: false, leadCount: activeRun.leads.length });
+  return true;
 }
-export function clearLeads() {
-  leadsStore = [];
-  broadcast({ event: "leads_update", leads: [], count: 0 });
+
+export function clearLeads(clientId: string | null, automationId: string | null = null): boolean {
+  const normalized = normalizeClientId(clientId);
+  if (!normalized) return false;
+  if (activeRun?.clientId === normalized && activeRun.automationId !== automationId) return false;
+  const leads = leadsByOwner.get(ownerKey(normalized, automationId)) || [];
+  leads.length = 0;
+  leadsByOwner.set(ownerKey(normalized, automationId), leads);
+  broadcastToClient(normalized, { event: "leads_update", leads: [], count: 0 });
+  return true;
 }
-export function getLeads() {
-  return { leads: leadsStore, count: leadsStore.length };
+
+export function getLeads(clientId: string | null, automationId: string | null = null): { leads: Lead[]; count: number } {
+  const normalized = normalizeClientId(clientId);
+  if (!normalized) return { leads: [], count: 0 };
+  if (activeRun?.clientId === normalized && activeRun.automationId !== automationId) return { leads: [], count: 0 };
+  const leads = leadsByOwner.get(ownerKey(normalized, automationId)) || [];
+  return { leads, count: leads.length };
 }
-export function getStatus() {
-  return { isScraping, isPaused, leadCount: leadsStore.length };
+
+export function getStatus(clientId: string | null, automationId: string | null = null): { isScraping: boolean; isPaused: boolean; leadCount: number; automationId?: string | null } {
+  const normalized = normalizeClientId(clientId);
+  if (!normalized) return { isScraping: false, isPaused: false, leadCount: 0 };
+  const leads = leadsByOwner.get(ownerKey(normalized, automationId)) || [];
+  if (!hasRunAccess(normalized, automationId) || !activeRun) return { isScraping: false, isPaused: false, leadCount: leads.length };
+  return { isScraping: activeRun.isScraping || activeRun.isStopping, isPaused: activeRun.isPaused, leadCount: leads.length, automationId: activeRun.automationId };
 }
-export async function sendLeadsBatch(webhookUrl: string) {
-  if (!webhookUrl || leadsStore.length === 0) return { ok: false, error: "Sem leads ou URL" };
+
+export async function sendLeadsBatch(webhookUrl: string, clientId: string | null, automationId: string | null = null) {
+  const normalized = normalizeClientId(clientId);
+  if (!normalized) return { ok: false, error: "Extrator indisponível." };
+  if (activeRun?.clientId === normalized && activeRun.automationId !== automationId) return { ok: false, error: "Extrator indisponível." };
+  const key = ownerKey(normalized, automationId);
+  const leads = [...(leadsByOwner.get(key) || [])];
+  if (!webhookUrl || leads.length === 0) return { ok: false, error: "Sem leads ou URL" };
+  const search = searchByOwner.get(key);
   try {
-    const payload = leadsStore.map(formatLeadForN8n);
-    const res = await fetch(webhookUrl, {
+    const payload = leads.map((lead) => formatLeadForN8n(lead, search));
+    const res = await fetchPublicHttpUrl(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (res.ok) {
-      sendLog(`[Webhook] Lista com ${payload.length} leads enviada!`, "success");
-      return { ok: true, count: payload.length };
-    } else {
-      sendLog(`[Webhook] Erro: ${res.status}`, "error");
-      return { ok: false, error: `Erro: ${res.status}` };
-    }
+    if (res.ok) return { ok: true, count: payload.length };
+    return { ok: false, error: `Erro: ${res.status}` };
   } catch (err) {
-    sendLog(`[Webhook] Falha: ${(err as Error).message}`, "error");
     return { ok: false, error: (err as Error).message };
   }
 }

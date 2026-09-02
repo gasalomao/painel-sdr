@@ -24,6 +24,7 @@ import { supabaseAdmin } from "@/lib/supabase_admin";
 
 const LIVE = process.env.LIVE_E2E === "1";
 const MAX_LEADS = Number(process.env.LIVE_MAX_LEADS || 3);
+const LIVE_CLIENT_ID = process.env.LIVE_CLIENT_ID?.trim() || "";
 const POLL_MS = 4000;
 const TIMEOUT_SCRAPER_MS = 10 * 60 * 1000;
 
@@ -50,6 +51,7 @@ describe.skipIf(!LIVE)("E2E ao vivo — prospecção + IA free", () => {
   it(
     "scraper ao vivo capta até maxLeads com filtros",
     async () => {
+      expect(LIVE_CLIENT_ID, "Defina LIVE_CLIENT_ID com o tenant de staging").toBeTruthy();
       const r = startScraperRun({
         niches: [process.env.LIVE_NICHE || "clinica estetica"],
         regions: [process.env.LIVE_REGION || "Vitoria ES"],
@@ -62,7 +64,7 @@ describe.skipIf(!LIVE)("E2E ao vivo — prospecção + IA free", () => {
         captureAllReviews: true,
         maxLeads: MAX_LEADS,
         automation_id: null,
-        client_id: null,
+        client_id: LIVE_CLIENT_ID,
         reviews_ai: { enabled: false },
       });
       expect(r.ok).toBe(true);
@@ -71,17 +73,17 @@ describe.skipIf(!LIVE)("E2E ao vivo — prospecção + IA free", () => {
       let done = false;
       while (Date.now() - t0 < TIMEOUT_SCRAPER_MS) {
         await new Promise((res) => setTimeout(res, POLL_MS));
-        const st = getStatus();
+        const st = getStatus(LIVE_CLIENT_ID);
         console.log(
           `[E2E][${Math.round((Date.now() - t0) / 1000)}s] scraping=${st.isScraping} paused=${st.isPaused} leads=${st.leadCount}`,
         );
         if (!st.isScraping) { done = true; break; }
       }
       if (!done) {
-        stopScraper();
+        stopScraper(LIVE_CLIENT_ID);
         throw new Error("Timeout aguardando scraper terminar");
       }
-      const st = getStatus();
+      const st = getStatus(LIVE_CLIENT_ID);
       console.log(`[E2E] concluído em ${Math.round((Date.now() - t0) / 1000)}s, leads=${st.leadCount}`);
       expect(st.leadCount).toBeGreaterThanOrEqual(0);
     },

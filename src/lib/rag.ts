@@ -544,6 +544,12 @@ export async function searchKnowledge(opts: {
           .select("id, title, content")
           .eq("agent_id", agentId);
 
+        // SEC-H4: fallback textual também respeita o tenant (or-groups distintos
+        // são ANDed pelo PostgREST: (título/conteúdo) AND (cliente)).
+        if (clientId) {
+          q = q.or(`client_id.eq.${clientId},client_id.is.null`);
+        }
+
         const firstTerm = cleanTerms[0];
         q = q.or(`title.ilike.%${firstTerm}%,content.ilike.%${firstTerm}%`);
 

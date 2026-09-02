@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
-import { hashPassword, revokeAllClientSessions } from "@/lib/auth";
+import { hashPassword, isAdminRequest, revokeAllClientSessions } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -11,7 +11,10 @@ export const dynamic = "force-dynamic";
  * DELETE /api/admin/clients/[id]        → apaga cliente (CASCADE leva todos os dados tenant — confirmação na UI)
  */
 
-export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  if (!(await isAdminRequest(req))) {
+    return NextResponse.json({ ok: false, error: "Apenas admin" }, { status: 403 });
+  }
   const { id } = await params;
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
   const { data, error } = await supabaseAdmin
@@ -25,6 +28,9 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
 }
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  if (!(await isAdminRequest(req))) {
+    return NextResponse.json({ ok: false, error: "Apenas admin" }, { status: 403 });
+  }
   const { id } = await params;
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
   const body = await req.json().catch(() => ({}));
@@ -68,7 +74,10 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   return NextResponse.json({ ok: true, client: data });
 }
 
-export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  if (!(await isAdminRequest(req))) {
+    return NextResponse.json({ ok: false, error: "Apenas admin" }, { status: 403 });
+  }
   const { id } = await params;
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
   // Bloqueia delete do cliente Default

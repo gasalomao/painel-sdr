@@ -1,4 +1,58 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
+
+const reminderState = vi.hoisted(() => ({
+  appointment: null as Record<string, any> | null,
+  reminders: [] as Array<{ offset_minutes: number; message: string }>,
+  claimSnapshots: [] as string[],
+  sendMessage: vi.fn(),
+  isInstanceOwnedByClient: vi.fn(),
+}));
+
+function reminderQuery(table: string) {
+  let updatePayload: Record<string, unknown> | null = null;
+  const filters: Array<[string, unknown]> = [];
+  const chain = {
+    select() { return chain; },
+    update(payload: Record<string, unknown>) { updatePayload = payload; return chain; },
+    eq(column: string, value: unknown) { filters.push([column, value]); return chain; },
+    gt() { return chain; },
+    lt() { return chain; },
+    not() { return chain; },
+    async maybeSingle() {
+      if (table === "agent_settings") {
+        return { data: { scheduler_config: { reminders: reminderState.reminders } }, error: null };
+      }
+      if (table === "appointments" && updatePayload && reminderState.appointment) {
+        const snapshot = String(filters.find(([column]) => column === "reminders_sent")?.[1]);
+        reminderState.claimSnapshots.push(snapshot);
+        const current = JSON.stringify(reminderState.appointment.reminders_sent || []);
+        if (snapshot !== current) return { data: null, error: null };
+        Object.assign(reminderState.appointment, updatePayload);
+        return { data: { id: reminderState.appointment.id }, error: null };
+      }
+      return { data: null, error: null };
+    },
+    then(resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) {
+      const value = table === "appointments" && !updatePayload && reminderState.appointment
+        ? { data: [reminderState.appointment], error: null }
+        : { data: null, error: null };
+      return Promise.resolve(value).then(resolve, reject);
+    },
+  };
+  return chain;
+}
+
+vi.mock("@/lib/supabase_admin", () => ({
+  supabaseAdmin: { from: (table: string) => reminderQuery(table) },
+}));
+vi.mock("@/lib/channel", () => ({ sendMessage: reminderState.sendMessage }));
+vi.mock("@/lib/campaign-worker", () => ({
+  findOrCreateContactSession: vi.fn(async () => ({ sessionId: "session-1" })),
+  persistOutgoingMessage: vi.fn(async () => undefined),
+}));
+vi.mock("@/lib/manual-send-registry", () => ({ registerPendingAutomatedSend: vi.fn() }));
+vi.mock("@/lib/tenant", () => ({ isInstanceOwnedByClient: reminderState.isInstanceOwnedByClient }));
+
 import {
   parseAgendaDateTime,
   hasExplicitTimezone,
@@ -10,6 +64,7 @@ import {
   rangesOverlap,
   hasAgentOverlapConflict,
 } from "../agenda-logic";
+import { tickReminders } from "../appointment-worker";
 
 /* ============================================================
    TIMEZONE — parseAgendaDateTime (bug do 07h em vez de 10h)
@@ -177,6 +232,50 @@ describe("reminderKey", () => {
   it("formata offset → chave", () => {
     expect(reminderKey(30)).toBe("30min");
     expect(reminderKey(1440)).toBe("1440min");
+  });
+});
+
+describe("tickReminders — claim concorrente", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-01T12:45:00Z"));
+    vi.clearAllMocks();
+    reminderState.appointment = {
+      id: "appt-1",
+      client_id: "tenant-a",
+      agent_id: 7,
+      lead_id: null,
+      remote_jid: "5511999999999@s.whatsapp.net",
+      instance_name: "inst-a",
+      title: "Consulta",
+      service_name: "Consulta",
+      start_at: "2026-06-01T13:00:00Z",
+      end_at: "2026-06-01T14:00:00Z",
+      status: "confirmed",
+      reminders_sent: [],
+      google_event_id: null,
+      metadata: {},
+    };
+    reminderState.reminders = [
+      { offset_minutes: 60, message: "Lembrete de 60" },
+      { offset_minutes: 30, message: "Lembrete de 30" },
+    ];
+    reminderState.claimSnapshots = [];
+    reminderState.isInstanceOwnedByClient.mockResolvedValue(true);
+    reminderState.sendMessage.mockResolvedValue({ ok: true, messageId: "msg-1" });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("preserva o primeiro offset ao reclamar o segundo no mesmo tick", async () => {
+    const result = await tickReminders();
+
+    expect(result).toEqual({ checked: 1, sent: 2, errors: 0 });
+    expect(reminderState.claimSnapshots).toEqual(["[]", '["60min"]']);
+    expect(reminderState.appointment?.reminders_sent).toEqual(["60min", "30min"]);
+    expect(reminderState.sendMessage).toHaveBeenCalledTimes(2);
   });
 });
 

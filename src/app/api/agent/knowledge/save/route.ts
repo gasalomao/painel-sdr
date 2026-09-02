@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
-import { indexKnowledgeDocument, deleteKnowledgeChunks } from "@/lib/rag";
+import { indexKnowledgeDocument } from "@/lib/rag";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +23,18 @@ export async function POST(req: NextRequest) {
     if (action === "create") {
       if (!contentToUse) {
         return NextResponse.json({ success: false, error: "O conteúdo da base de conhecimento não pode estar vazio." }, { status: 400 });
+      }
+
+      // SECURITY (SEC-H4): o agente precisa pertencer ao tenant (ou ser
+      // legado sem dono) — sem isso dava pra anexar conteúdo no agent_id
+      // de outro tenant e envenenar o agente dele.
+      const { data: agentRow } = await supabaseAdmin
+        .from("agent_settings")
+        .select("id, client_id")
+        .eq("id", numAgentId)
+        .maybeSingle();
+      if (!agentRow || (agentRow.client_id && agentRow.client_id !== auth.clientId)) {
+        return NextResponse.json({ success: false, error: "Agente inválido para este tenant." }, { status: 403 });
       }
 
       const { data, error } = await supabaseAdmin
@@ -84,9 +96,11 @@ export async function POST(req: NextRequest) {
       const { data: org } = await supabaseAdmin.from("ai_organizer_config").select("api_key").eq("id", 1).maybeSingle();
       const apiKey = org?.api_key || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
 
+      // Reindexa com o agent_id REAL da row (o do body poderia apontar pra
+      // agente de outro tenant mesmo com o update escopado por client_id).
       indexKnowledgeDocument({
         knowledgeId: data.id,
-        agentId: numAgentId,
+        agentId: data.agent_id,
         clientId: auth.clientId,
         title: titleToUse,
         content: contentToUse,
@@ -103,15 +117,19 @@ export async function POST(req: NextRequest) {
 
       // SECURITY: delete escopado no tenant; chunks só são limpos se a row
       // era mesmo do caller (senão índice de outro tenant era apagado).
-      const { error } = await supabaseAdmin
+      const { data, error } = await supabaseAdmin
         .from("agent_knowledge")
         .delete()
         .eq("id", id)
-        .eq("client_id", auth.clientId);
+        .eq("client_id", auth.clientId)
+        .select("id")
+        .maybeSingle();
       if (error) {
         return NextResponse.json({ success: false, error: error.message }, { status: 500 });
       }
-      await deleteKnowledgeChunks(id).catch(() => {});
+      if (!data) {
+        return NextResponse.json({ success: false, error: "Documento não encontrado." }, { status: 404 });
+      }
 
       return NextResponse.json({ success: true });
     }

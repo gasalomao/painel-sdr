@@ -1555,11 +1555,12 @@ export { extractLocation };
  *
  * Usado por: campaign-worker (personalizeWithAI) e automation-worker.
  */
-export async function getCachedIntelligence(remoteJid: string): Promise<LeadIntelligence | null> {
+export async function getCachedIntelligence(remoteJid: string, clientId: string): Promise<LeadIntelligence | null> {
   const { data } = await supabaseAdmin
     .from("leads_extraidos")
     .select("intelligence, intelligence_at")
     .eq("remoteJid", remoteJid)
+    .eq("client_id", clientId)
     .maybeSingle();
   if (!data?.intelligence) return null;
   // Mesmo se velho, retorna — quem chama decide. Reanálise só por trigger explícito.

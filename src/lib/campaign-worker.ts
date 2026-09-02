@@ -19,12 +19,13 @@ import * as channel from "@/lib/channel";
 import { renderTemplate } from "@/lib/template-vars";
 import { webSearch, formatResultsForAI } from "@/lib/web-search";
 import { logTokenUsage } from "@/lib/token-usage";
-import { DEFAULT_CLIENT_ID, clientIdFromInstance } from "@/lib/tenant";
 import { registerAiSend, registerPendingAutomatedSend } from "@/lib/manual-send-registry";
 import { splitMessage } from "@/lib/agent-format";
+import { isInstanceOwnedByClient } from "@/lib/tenant";
 
 type CampaignRow = {
   id: string;
+  client_id: string;
   name: string;
   instance_name: string;
   agent_id: number | null;
@@ -108,6 +109,7 @@ async function addCampaignLog(campaignId: string, message: string, level: "info"
 async function preflightCheck(campaignId: string): Promise<{ ok: boolean; error?: string }> {
   const { data: c } = await supabase.from("campaigns").select("*").eq("id", campaignId).single();
   if (!c) return { ok: false, error: "Campanha não encontrada no banco." };
+  if (!c.client_id) return { ok: false, error: "Campanha sem client_id — vincule a campanha a um cliente antes de disparar." };
 
   // Checa env
   const evoUrl = process.env.EVOLUTION_API_URL || "";
@@ -236,31 +238,24 @@ function normalizeJid(jid: string): string {
  *                 lead responder, é esse agente que assume a conversa no /chat.
  *                 Se omitido, cai pro agente da instância (channel_connections).
  */
-export async function findOrCreateContactSession(remoteJidRaw: string, instanceName: string, nomeNegocio?: string | null, agentId?: number | null) {
+export async function findOrCreateContactSession(clientId: string, remoteJidRaw: string, instanceName: string, nomeNegocio?: string | null, agentId?: number | null): Promise<{ contactId: string; sessionId: string | null } | null> {
   const remoteJid = normalizeJid(remoteJidRaw);
   const phone = remoteJid.replace(/@.*$/, "").replace(/\D/g, "");
 
-  // Busca as configurações do canal para pegar o client_id e o agent_id
   const { data: chan } = await supabase
     .from("channel_connections")
-    .select("agent_id, client_id")
+    .select("agent_id")
     .eq("instance_name", instanceName)
+    .eq("client_id", clientId)
     .maybeSingle();
-
-  const clientId = chan?.client_id || DEFAULT_CLIENT_ID;
 
   // 1. contact — race-safe: se o webhook da Evolution criou em paralelo, o
   // INSERT bate em 23505. Re-SELECT pra pegar o id criado pelo outro lado em
   // vez de perder a sessão (esse era o motivo da 1ª msg às vezes não salvar).
   const { data: existingContact } = await supabase
-    .from("contacts").select("id, push_name, client_id").eq("remote_jid", remoteJid).maybeSingle();
+    .from("contacts").select("id, push_name, client_id")
+    .eq("client_id", clientId).eq("remote_jid", remoteJid).maybeSingle();
   let contactId = existingContact?.id;
-
-  // Se o contato existe, mas está com o client_id default ou nulo,
-  // fazemos o backfill do client_id correto para unificar o CRM
-  if (existingContact && (!existingContact.client_id || existingContact.client_id === DEFAULT_CLIENT_ID)) {
-    await supabase.from("contacts").update({ client_id: clientId }).eq("id", contactId);
-  }
 
   if (!contactId) {
     const ins = await supabase.from("contacts").insert({
@@ -270,23 +265,20 @@ export async function findOrCreateContactSession(remoteJidRaw: string, instanceN
     if (ins.data?.id) {
       contactId = ins.data.id;
     } else if ((ins.error as any)?.code === "23505") {
-      const retry = await supabase.from("contacts").select("id, push_name, client_id").eq("remote_jid", remoteJid).maybeSingle();
+      const retry = await supabase.from("contacts").select("id, push_name")
+        .eq("client_id", clientId).eq("remote_jid", remoteJid).maybeSingle();
       contactId = retry.data?.id;
-
-      if (contactId && (!retry.data?.client_id || retry.data?.client_id === DEFAULT_CLIENT_ID)) {
-        await supabase.from("contacts").update({ client_id: clientId }).eq("id", contactId);
-      }
 
       // Outro processo criou o contato sem nome → preenche com o do negócio.
       if (contactId && nomeNegocio && !retry.data?.push_name) {
-        await supabase.from("contacts").update({ push_name: nomeNegocio }).eq("id", contactId);
+        await supabase.from("contacts").update({ push_name: nomeNegocio }).eq("id", contactId).eq("client_id", clientId);
       }
     }
   } else if (nomeNegocio && !existingContact?.push_name) {
     // Contato JÁ existe mas sem nome (ex: criado pelo echo do webhook antes
     // do disparo). Preenche com o nome do negócio captado pela automação —
     // sem isto, a conversa aparece no /chat só como número.
-    await supabase.from("contacts").update({ push_name: nomeNegocio }).eq("id", contactId);
+    await supabase.from("contacts").update({ push_name: nomeNegocio }).eq("id", contactId).eq("client_id", clientId);
   }
   if (!contactId) return null;
 
@@ -294,7 +286,7 @@ export async function findOrCreateContactSession(remoteJidRaw: string, instanceN
   // o unique de (contact_id, instance_name) dispara 23505 — recuperamos a
   // sessão existente em vez de devolver sessionId=null.
   const { data: existingSession } = await supabase.from("sessions")
-    .select("id, agent_id").eq("contact_id", contactId).eq("instance_name", instanceName).maybeSingle();
+    .select("id, agent_id").eq("contact_id", contactId).eq("instance_name", instanceName).eq("client_id", clientId).maybeSingle();
   if (existingSession?.id) return { contactId, sessionId: existingSession.id };
 
   // Prioridade do agente: o explícito (config do disparo/automação) →
@@ -307,7 +299,7 @@ export async function findOrCreateContactSession(remoteJidRaw: string, instanceN
   let sessionId = ins.data?.id || null;
   if (!sessionId && (ins.error as any)?.code === "23505") {
     const retry = await supabase.from("sessions").select("id")
-      .eq("contact_id", contactId).eq("instance_name", instanceName).maybeSingle();
+      .eq("contact_id", contactId).eq("instance_name", instanceName).eq("client_id", clientId).maybeSingle();
     sessionId = retry.data?.id || null;
   }
   return { contactId, sessionId };
@@ -319,6 +311,7 @@ export async function persistOutgoingMessage(opts: {
   instanceName: string;
   msgId: string;
   text: string;
+  clientId?: string | null;
 }) {
   // Registra que este envio é automático/AI para que o webhook não auto-pause a IA!
   registerAiSend(opts.msgId);
@@ -330,20 +323,27 @@ export async function persistOutgoingMessage(opts: {
   // chats_dashboard ficava com client_id=NULL → o /chat (que filtra por
   // client_id) NÃO mostrava esses disparos. Esse era o motivo dos disparos
   // sumirem da lista de conversas mesmo estando salvos no banco.
-  let resolvedClientId: string | null = null;
-  try {
-    const { data: chConn } = await supabase
-      .from("channel_connections")
-      .select("client_id")
-      .eq("instance_name", opts.instanceName)
-      .maybeSingle();
-    resolvedClientId = chConn?.client_id || null;
-  } catch { /* não-fatal */ }
+  let resolvedClientId: string | null = opts.clientId || null;
+  if (!resolvedClientId) {
+    try {
+      const { data: chConn } = await supabase
+        .from("channel_connections")
+        .select("client_id")
+        .eq("instance_name", opts.instanceName)
+        .maybeSingle();
+      resolvedClientId = chConn?.client_id || null;
+    } catch { /* não-fatal */ }
+  }
+  if (!resolvedClientId) {
+    throw new Error(`client_id ausente para persistir mensagem da instância "${opts.instanceName}"`);
+  }
 
-  // V2 messages — upsert por message_id pra blindar race com webhook outgoing.
+  // V2 messages — upsert por tenant+message_id. O conflito global deixou de
+  // existir e misturaria tenants que por acaso compartilhem o mesmo id.
   if (opts.sessionId) {
     try {
       const msgPayload: Record<string, any> = {
+        client_id: resolvedClientId,
         session_id: opts.sessionId,
         message_id: opts.msgId,
         sender: "ai",
@@ -352,14 +352,7 @@ export async function persistOutgoingMessage(opts: {
         delivery_status: "sent",
         created_at: now,
       };
-      if (resolvedClientId) msgPayload.client_id = resolvedClientId;
-      let { error: msgErr } = await supabase.from("messages").upsert(msgPayload, { onConflict: "message_id" });
-      // Fallback: se a coluna client_id não existir (DB antigo), tenta sem ela.
-      if (msgErr && (msgErr as any).code === "PGRST204") {
-        delete msgPayload.client_id;
-        const retry = await supabase.from("messages").upsert(msgPayload, { onConflict: "message_id" });
-        msgErr = retry.error;
-      }
+      const { error: msgErr } = await supabase.from("messages").upsert(msgPayload, { onConflict: "client_id,message_id" });
       if (msgErr) throw msgErr;
       await supabase.from("sessions").update({ last_message_at: now }).eq("id", opts.sessionId);
     } catch (e: any) {
@@ -370,6 +363,7 @@ export async function persistOutgoingMessage(opts: {
   // chats_dashboard — onde o /chat lê.
   try {
     const dashPayload: Record<string, any> = {
+      client_id: resolvedClientId,
       instance_name: opts.instanceName,
       message_id: opts.msgId,
       remote_jid: remoteJid,
@@ -378,18 +372,9 @@ export async function persistOutgoingMessage(opts: {
       status_envio: "sent",
       created_at: now,
     };
-    if (resolvedClientId) dashPayload.client_id = resolvedClientId;
-    let { error } = await supabase
+    const { error } = await supabase
       .from("chats_dashboard")
-      .upsert(dashPayload, { onConflict: "message_id" });
-    // Fallback se a coluna client_id não existir.
-    if (error && (error as any).code === "PGRST204") {
-      delete dashPayload.client_id;
-      const retry = await supabase
-        .from("chats_dashboard")
-        .upsert(dashPayload, { onConflict: "message_id" });
-      error = retry.error;
-    }
+      .upsert(dashPayload, { onConflict: "client_id,message_id" });
     if (error) throw error;
   } catch (e: any) {
     console.error("[persist] chats_dashboard error:", e.message);
@@ -400,6 +385,25 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
   const { data: c } = await supabase.from("campaigns").select("*").eq("id", campaignId).single();
   if (!c) return "stopped";
   if (c.status !== "running") return "stopped";
+
+  const clientId: string | null = c.client_id || null;
+  if (!clientId) {
+    const msg = "Campanha sem client_id — disparo abortado (fail-closed multi-tenant).";
+    console.error(`[CAMPAIGN ${campaignId}] ${msg}`);
+    await addCampaignLog(campaignId, msg, "error");
+    await supabase.from("campaigns").update({
+      status: "paused", last_error: msg, last_error_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    }).eq("id", campaignId);
+    return "stopped";
+  }
+  if (!(await isInstanceOwnedByClient(c.instance_name, clientId))) {
+    const msg = `Instância "${c.instance_name}" não pertence ao cliente da campanha — disparo pausado.`;
+    await addCampaignLog(campaignId, msg, "error");
+    await supabase.from("campaigns").update({
+      status: "paused", last_error: msg, last_error_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    }).eq("id", campaignId).eq("client_id", clientId);
+    return "stopped";
+  }
 
   if (!isWithinAllowedHour(c as any)) {
     const msg = `⏰ Fora do horário permitido — agora são ${nowHourBRT()}h, a janela é ${c.allowed_start_hour}h-${c.allowed_end_hour}h. O disparo retoma sozinho quando a janela abrir.`;
@@ -450,7 +454,27 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     .maybeSingle();
 
   if (!candidate) {
-    // Sem pending — termina.
+    // Sem pending pode significar dois estados bem diferentes: tudo terminal
+    // (done) ou alguém enviando agora (processing). Marcar done com processing
+    // ativo aborta a campanha enquanto um envio ainda está em voo.
+    const { count: processingCount, error: processingErr } = await supabase
+      .from("campaign_targets")
+      .select("id", { count: "exact", head: true })
+      .eq("campaign_id", campaignId)
+      .eq("status", "processing");
+    if (processingErr) {
+      const msg = `Falha ao checar targets em processamento: ${processingErr.message}`;
+      await addCampaignLog(campaignId, msg, "error");
+      await supabase.from("campaigns").update({
+        status: "paused", last_error: msg.slice(0, 500), last_error_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      }).eq("id", campaignId);
+      return "stopped";
+    }
+    if ((processingCount || 0) > 0) {
+      await addCampaignLog(campaignId, "Há target em processamento — aguardando finalização antes de concluir.", "info");
+      return "continue";
+    }
+
     await supabase.from("campaigns").update({ status: "done", finished_at: new Date().toISOString() }).eq("id", campaignId);
     await addCampaignLog(campaignId, "Campanha finalizada. Todos os leads foram processados.", "success");
     console.log(`[CAMPAIGN ${c.name}] Concluída.`);
@@ -478,6 +502,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     .from("leads_extraidos")
     .select("opt_out")
     .eq("remoteJid", target.remote_jid)
+    .eq("client_id", clientId)
     .maybeSingle();
   if (optRow?.opt_out) {
     await supabase.from("campaign_targets").update({
@@ -540,7 +565,8 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
             const { error: updErr } = await supabase
               .from("leads_extraidos")
               .update({ remoteJid: sendJid })
-              .eq("remoteJid", target.remote_jid);
+              .eq("remoteJid", target.remote_jid)
+              .eq("client_id", clientId);
 
             if (updErr) {
               if (updErr.code === "23505" || updErr.message?.includes("unique")) {
@@ -549,6 +575,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
                   .from("leads_extraidos")
                   .select("*")
                   .eq("remoteJid", target.remote_jid)
+                  .eq("client_id", clientId)
                   .maybeSingle();
 
                 if (oldLead) {
@@ -569,12 +596,14 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
                   await supabase
                     .from("leads_extraidos")
                     .update(mergePayload)
-                    .eq("remoteJid", sendJid);
+                    .eq("remoteJid", sendJid)
+                    .eq("client_id", clientId);
 
                   await supabase
                     .from("leads_extraidos")
                     .delete()
-                    .eq("id", oldLead.id);
+                    .eq("id", oldLead.id)
+                    .eq("client_id", clientId);
 
                   console.log(`[CAMPAIGN ${c.name}] Merge e deleção do lead duplicado ${target.remote_jid} concluídos.`);
                 }
@@ -599,13 +628,14 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
   let leadFull: any = null;
   {
     const cols = "nome_negocio, ramo_negocio, telefone, endereco, website, instagram, facebook, avaliacao, reviews, status, categoria, resumo_avaliacoes";
-    const q = supabase.from("leads_extraidos").select(cols).eq("remoteJid", target.remote_jid);
+    const q = supabase.from("leads_extraidos").select(cols).eq("remoteJid", target.remote_jid).eq("client_id", clientId);
     let res = await q.maybeSingle();
     if (res.error && res.error.code === "PGRST204") {
       res = await supabase
         .from("leads_extraidos")
         .select(cols.replace(", resumo_avaliacoes", ""))
         .eq("remoteJid", target.remote_jid)
+        .eq("client_id", clientId)
         .maybeSingle();
     }
     leadFull = res.data || null;
@@ -672,8 +702,8 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
         useWebSearch: !!c.use_web_search,
         campaignId: c.id,
         campaignName: c.name,
-        remoteJid: target.remote_jid,  // ← injeta briefing cacheado
-        instanceName: c.instance_name,  // ← resolve clientId dono do gasto
+        remoteJid: target.remote_jid,
+        clientId,
       });
       if (aiText && aiText.trim()) {
         text = aiText.trim();
@@ -727,7 +757,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     // (evita N round-trips pra mesma session).
     let sess: { sessionId: string | null } | null = null;
     try {
-      sess = await findOrCreateContactSession(sendJid, c.instance_name, renderCtx.nome_negocio, c.agent_id);
+      sess = await findOrCreateContactSession(clientId, sendJid, c.instance_name, renderCtx.nome_negocio, c.agent_id);
     } catch (sessErr: any) {
       console.warn(`[CAMPAIGN ${c.name}] findOrCreateContactSession falhou (best-effort): ${sessErr?.message || sessErr}`);
     }
@@ -748,6 +778,9 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
 
       // Envia (sendMessage já faz "composing" presence antes).
       const result = await channel.sendMessage(sendJid, chunkText, c.instance_name);
+      if (!result || result.ok === false) {
+        throw new Error(result?.error || "Provider recusou o envio da campanha");
+      }
       const chunkMsgId = (result as any)?.messageId || (result as any)?.key?.id || (result as any)?.data?.key?.id || `bulk-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`;
       lastMsgId = chunkMsgId;
 
@@ -759,6 +792,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
           instanceName: c.instance_name,
           msgId: chunkMsgId,
           text: chunkText,
+          clientId,
         });
       } catch (persistErr: any) {
         const m = `⚠ Mensagem foi enviada no WhatsApp mas falhou ao salvar no chats_dashboard: ${persistErr?.message || persistErr}. Vai precisar refresh no /chat pra aparecer.`;
@@ -782,6 +816,9 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
           },
           c.instance_name,
         );
+        if (!mediaResult || mediaResult.ok === false) {
+          throw new Error(mediaResult?.error || "Provider recusou o envio da mídia");
+        }
         const mediaMsgId = (mediaResult as any)?.messageId || (mediaResult as any)?.key?.id || `media-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
         await addCampaignLog(campaignId, `📎 Mídia enviada → ${target.nome_negocio || target.remote_jid}`, "info");
         try {
@@ -791,6 +828,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
             instanceName: c.instance_name,
             msgId: mediaMsgId,
             text: c.media_caption || "",
+            clientId,
           });
         } catch { /* best-effort */ }
       } catch (mediaErr: any) {
@@ -830,6 +868,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
         .from("leads_extraidos")
         .select("id, status")
         .eq("remoteJid", target.remote_jid)
+        .eq("client_id", clientId)
         .maybeSingle();
 
       const nowIso = new Date().toISOString();
@@ -855,13 +894,15 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
               primeiro_contato_source: "disparo",
               updated_at: nowIso,
             })
-            .eq("id", existingLead.id);
+            .eq("id", existingLead.id)
+            .eq("client_id", clientId);
           if (updErr) {
             // Fallback: algumas colunas podem não existir ainda
             if ((updErr as any).code === "PGRST204") {
               await supabase.from("leads_extraidos")
                 .update({ status: "primeiro_contato" })
-                .eq("id", existingLead.id);
+                .eq("id", existingLead.id)
+                .eq("client_id", clientId);
               console.warn(`[CAMPAIGN ${c.name}] leads_extraidos sem colunas primeiro_contato_at/source. Rode a migração correspondente.`);
             } else {
               throw updErr;
@@ -874,6 +915,8 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
       } else {
         // Sem lead — cria no estágio primeiro_contato direto
         const { error: insErr } = await supabase.from("leads_extraidos").insert({
+          client_id: clientId,
+          instance_name: c.instance_name,
           remoteJid: target.remote_jid,
           nome_negocio: target.nome_negocio || `Lead Disparo (${target.remote_jid.split("@")[0]})`,
           ramo_negocio: target.ramo_negocio || null,
@@ -883,6 +926,8 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
         });
         if (insErr && (insErr as any).code === "PGRST204") {
           await supabase.from("leads_extraidos").insert({
+            client_id: clientId,
+            instance_name: c.instance_name,
             remoteJid: target.remote_jid,
             nome_negocio: target.nome_negocio || `Lead Disparo (${target.remote_jid.split("@")[0]})`,
             ramo_negocio: target.ramo_negocio || null,
@@ -1068,23 +1113,33 @@ export async function startCampaign(campaignId: string): Promise<{ ok: boolean; 
  * Chamado no boot do servidor (instrumentation.ts).
  */
 export async function recoverRunningCampaigns(): Promise<number> {
-  // Antes de retomar: reseta targets em "processing" → "pending".
-  // Se o servidor crashou enquanto um target estava sendo enviado, fica
-  // travado em "processing". Sem reset, o claim atômico nunca pegaria mais
-  // ele e a campanha pararia de avançar.
-  // CUIDADO: só faz isso na recuperação, no boot. Em runtime normal, "processing"
-  // significa "outro worker está enviando agora — não toca".
+  // ponytail: sem lease/version no banco, um target "processing" pode ter a
+  // mensagem já entregue ao provider; reenfileirar aqui reenviaria o WhatsApp.
+  // Preferimos pausar para revisão manual (perde envio, não duplica). Adicionar
+  // reenvio quando existir idempotency/lease persistido.
   try {
-    const { data: stuck } = await supabase
+    const { data: stuck, error: stuckErr } = await supabase
       .from("campaign_targets")
-      .update({ status: "pending" })
-      .eq("status", "processing")
-      .select("id");
-    if (stuck && stuck.length > 0) {
-      console.log(`[CAMPAIGN RECOVER] ${stuck.length} target(s) destravado(s) de 'processing' → 'pending'.`);
+      .select("campaign_id")
+      .eq("status", "processing");
+    if (stuckErr) throw stuckErr;
+
+    const stuckCampaignIds = [...new Set((stuck || []).map((r: any) => r.campaign_id).filter(Boolean))];
+    for (const stuckCampaignId of stuckCampaignIds) {
+      const msg = "Recuperação encontrou target(s) em 'processing'. Para evitar reenvio duplicado após crash, a campanha foi pausada; revise o envio no WhatsApp e retome manualmente.";
+      await supabase
+        .from("campaigns")
+        .update({ status: "paused", last_error: msg, last_error_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .eq("id", stuckCampaignId)
+        .eq("status", "running");
+      await addCampaignLog(stuckCampaignId, msg, "error");
+    }
+    if (stuckCampaignIds.length > 0) {
+      console.warn(`[CAMPAIGN RECOVER] ${stuckCampaignIds.length} campanha(s) pausada(s) por processing ambíguo.`);
     }
   } catch (e) {
-    console.warn("[CAMPAIGN RECOVER] reset de processing falhou:", (e as Error).message);
+    console.error("[CAMPAIGN RECOVER] falha ao auditar processing — retries manuais necessários:", (e as Error).message);
+    return 0;
   }
 
   const { data: running } = await supabase
@@ -1135,20 +1190,29 @@ export async function tickRunningCampaigns(): Promise<number> {
     const idleMs = Date.now() - new Date(c.updated_at || 0).getTime();
     if (idleMs < maxGapMs) continue;
 
-    // Campanha `running` sem timer = ninguém disparando. Targets presos em
-    // "processing" são de um envio que morreu junto com o timer — destrava.
+    // ponytail: sem lease, "processing" pode representar envio já aceito pelo
+    // provider. Não destravamos automaticamente: pausamos para revisão e
+    // preferimos perder a retomada a disparar duplicado.
     try {
-      const { data: stuck } = await supabase
+      const { count: stuckCount, error: stuckErr } = await supabase
         .from("campaign_targets")
-        .update({ status: "pending" })
+        .select("id", { count: "exact", head: true })
         .eq("campaign_id", c.id)
-        .eq("status", "processing")
-        .select("id");
-      if (stuck && stuck.length > 0) {
-        console.log(`[CAMPAIGN TICK] "${c.name}": ${stuck.length} target(s) destravado(s).`);
+        .eq("status", "processing");
+      if (stuckErr) throw stuckErr;
+      if ((stuckCount || 0) > 0) {
+        const msg = `Auto-recuperação encontrou ${stuckCount} target(s) em processing. Campanha pausada para evitar reenvio duplicado; revise manualmente.`;
+        await supabase
+          .from("campaigns")
+          .update({ status: "paused", last_error: msg, last_error_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+          .eq("id", c.id)
+          .eq("status", "running");
+        await addCampaignLog(c.id, msg, "error");
+        continue;
       }
     } catch (e) {
-      console.warn("[CAMPAIGN TICK] reset de processing falhou:", (e as Error).message);
+      console.warn("[CAMPAIGN TICK] auditoria de processing falhou:", (e as Error).message);
+      continue;
     }
 
     console.log(`[CAMPAIGN TICK] "${c.name}" (${c.id}) está running mas sem timer — reativando.`);
@@ -1193,6 +1257,7 @@ export function isCampaignActive(campaignId: string): boolean {
 export async function preGenerateCampaignMessages(campaignId: string): Promise<{ ok: boolean; generated: number; skipped: number; failed: number; error?: string }> {
   const { data: c } = await supabase.from("campaigns").select("*").eq("id", campaignId).maybeSingle();
   if (!c) return { ok: false, generated: 0, skipped: 0, failed: 0, error: "Campanha não encontrada" };
+  if (!c.client_id) return { ok: false, generated: 0, skipped: 0, failed: 0, error: "Campanha sem client_id" };
   if (!c.personalize_with_ai) return { ok: true, generated: 0, skipped: 0, failed: 0 };
   if (c.status !== "running") return { ok: false, generated: 0, skipped: 0, failed: 0, error: "Campanha não está running" };
 
@@ -1218,9 +1283,9 @@ export async function preGenerateCampaignMessages(campaignId: string): Promise<{
     const cols = "nome_negocio, ramo_negocio, telefone, endereco, website, instagram, facebook, avaliacao, reviews, status, categoria, resumo_avaliacoes";
     let leadFull: any = null;
     {
-      let res = await supabase.from("leads_extraidos").select(cols).eq("remoteJid", target.remote_jid).maybeSingle();
+      let res = await supabase.from("leads_extraidos").select(cols).eq("remoteJid", target.remote_jid).eq("client_id", c.client_id).maybeSingle();
       if (res.error && res.error.code === "PGRST204") {
-        res = await supabase.from("leads_extraidos").select(cols.replace(", resumo_avaliacoes", "")).eq("remoteJid", target.remote_jid).maybeSingle();
+        res = await supabase.from("leads_extraidos").select(cols.replace(", resumo_avaliacoes", "")).eq("remoteJid", target.remote_jid).eq("client_id", c.client_id).maybeSingle();
       }
       leadFull = res.data || null;
     }
@@ -1254,7 +1319,7 @@ export async function preGenerateCampaignMessages(campaignId: string): Promise<{
         campaignId: c.id,
         campaignName: c.name,
         remoteJid: target.remote_jid,
-        instanceName: c.instance_name,
+        clientId: c.client_id,
       });
       if (aiText && aiText.trim()) text = aiText.trim();
     } catch (e: any) {
@@ -1311,8 +1376,7 @@ async function personalizeWithAI(opts: {
   campaignName?: string;
   /** remoteJid pra puxar o briefing cacheado de lead-intelligence (se houver). */
   remoteJid?: string;
-  /** instance_name da campanha — pra resolver o client_id dono do gasto de IA. */
-  instanceName?: string;
+  clientId: string;
 }): Promise<string> {
   // API keys centrais — mesmas que o resto do sistema usa (Configurações).
   const { getAiKeys } = await import("@/lib/ai-keys");
@@ -1345,7 +1409,7 @@ async function personalizeWithAI(opts: {
   if (opts.remoteJid) {
     try {
       const { getCachedIntelligence, intelligenceToPromptContext } = await import("@/lib/lead-intelligence");
-      const intel = await getCachedIntelligence(opts.remoteJid);
+      const intel = await getCachedIntelligence(opts.remoteJid, opts.clientId);
       if (intel) intelContext = intelligenceToPromptContext(intel) + "\n\n";
     } catch (e) {
       // Não-fatal — segue sem briefing.
@@ -1428,16 +1492,6 @@ const results = await webSearch(q, 8);
     }
   }
 
-  // Resolve client_id dono da campanha pela instância — sem isso, o gasto
-  // cai no Default client e o /tokens do tenant fica sem custo de disparo.
-  let clientIdForLog: string | undefined;
-  if (opts.instanceName) {
-    try {
-      const resolved = await clientIdFromInstance(opts.instanceName);
-      if (resolved) clientIdForLog = resolved;
-    } catch { /* não-fatal, loga como default */ }
-  }
-
   logTokenUsage({
     source: "disparo",
     sourceId: opts.campaignId || null,
@@ -1447,7 +1501,7 @@ const results = await webSearch(q, 8);
     promptTokens: tp,
     completionTokens: tc,
     totalTokens: tt,
-    clientId: clientIdForLog,
+    clientId: opts.clientId,
     metadata: { useWebSearch: opts.useWebSearch, nomeEmpresa: opts.nomeEmpresa },
   });
 

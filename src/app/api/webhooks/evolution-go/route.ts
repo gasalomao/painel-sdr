@@ -29,9 +29,10 @@ import {
   findOrCreateContact, findOrCreateSession, healLeadNameFromPushName,
   refreshProfilePicIfStale,
 } from "../shared-helpers";
-import { clientIdFromInstance, DEFAULT_CLIENT_ID } from "@/lib/tenant";
+
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
 import { isAiSend, isManualSend, isPendingAutomatedSend } from "@/lib/manual-send-registry";
+import { safeSecretEqual, shouldLogOnce } from "@/lib/webhook-security";
 import { shouldSkipGroupActions, getTranscriptionMethod } from "@/lib/bot-status";
 
 export const dynamic = "force-dynamic";
@@ -50,6 +51,11 @@ export async function POST(req: NextRequest) {
     const eventType = eventTypeRaw.toUpperCase();
     const instanceName = String(body.instance || body.instanceName || "");
     const raw = body.data || body;
+    if (!instanceName) {
+      return NextResponse.json({ ok: false, error: "Instância ausente" }, { status: 400 });
+    }
+
+    let clientId: string | null = null;
 
     // Ignora eventos que não são de mensagem (CONNECTION, QRCODE, PRESENCE, etc).
     // FIX: events de STATUS (messages.update/delete) carregam data.key e antes
@@ -65,35 +71,49 @@ export async function POST(req: NextRequest) {
 
     // ===== VALIDAÇÃO DE ORIGEM (mesma política do webhook whatsapp/route.ts) =====
     // Secret per-instância em channel_connections.provider_config.webhook_secret.
-    // Padrão não-bloqueante (só registra mismatch em webhook_logs); setar
-    // webhook_strict=true pra rejeitar com 401 — bloqueia payloads forjados.
+    // SEC-C3: com secret configurado, divergência retorna 401 por padrão.
+    // Sem secret, registra risco; webhook_strict=false permite migração sem bloqueio.
     const secretInstance = String(body.instance || body.instanceName || "");
     if (secretInstance) {
       try {
-        const { data: conn } = await supabase
+        const { data: conn, error: connError } = await supabase
           .from("channel_connections")
-          .select("provider_config")
+          .select("client_id, provider_config")
           .eq("instance_name", secretInstance)
           .maybeSingle();
-        const cfg = (conn?.provider_config || {}) as any;
+        if (connError || !conn?.client_id) throw connError || new Error("connection_not_found");
+        clientId = conn.client_id;
+        const cfg = (conn.provider_config || {}) as any;
         const expected = cfg.webhook_secret as string | undefined;
-        if (expected) {
-          const got = req.headers.get("x-webhook-secret") || req.headers.get("x-internal-secret");
-          if (got !== expected) {
-            const reason = got ? "header_mismatch" : "header_absent";
-            console.warn(`>>> evo-go webhook secret mismatch em ${secretInstance}: ${reason} (strict=${!!cfg.webhook_strict})`);
-            await supabase.from("webhook_logs").insert({
-              instance_name: secretInstance,
-              event: cfg.webhook_strict ? "WEBHOOK_SECRET_REJECTED" : "WEBHOOK_SECRET_MISMATCH",
-              payload: { reason, strict: !!cfg.webhook_strict },
-              created_at: new Date().toISOString(),
-            }).then(() => {}, () => {});
-            if (cfg.webhook_strict) {
-              return NextResponse.json({ ok: false, error: "Não autorizado" }, { status: 401 });
-            }
+        const strict = cfg.webhook_strict !== false;
+        const got = req.headers.get("x-webhook-secret") || req.headers.get("x-internal-secret");
+        if (!expected && strict) {
+          return NextResponse.json({ ok: false, error: "Webhook secret não configurado" }, { status: 401 });
+        }
+        if (expected && !safeSecretEqual(got, expected)) {
+          const reason = got ? "header_mismatch" : "header_absent";
+          console.warn(`>>> evo-go webhook secret mismatch em ${secretInstance}: ${reason} (strict=${strict})`);
+          await supabase.from("webhook_logs").insert({
+            client_id: clientId,
+            instance_name: secretInstance,
+            event: strict ? "WEBHOOK_SECRET_REJECTED" : "WEBHOOK_SECRET_MISMATCH",
+            payload: { reason, strict },
+            created_at: new Date().toISOString(),
+          }).then(() => {}, () => {});
+          if (strict) {
+            return NextResponse.json({ ok: false, error: "Não autorizado" }, { status: 401 });
           }
         }
-      } catch { /* lookup falho não bloqueia — backwards compat */ }
+        if (!expected && shouldLogOnce("no-secret", secretInstance)) {
+          console.warn(`>>> evo-go webhook sem secret em ${secretInstance} (strict=false)`);
+        }
+      } catch {
+        return NextResponse.json({ ok: false, error: "Instância não cadastrada" }, { status: 401 });
+      }
+    }
+
+    if (!clientId) {
+      return NextResponse.json({ ok: false, error: "Instância não cadastrada" }, { status: 401 });
     }
 
     // ===== Extrair dados (formato whatsmeow) =====
@@ -111,9 +131,10 @@ export async function POST(req: NextRequest) {
     const fromMe = key.fromMe ?? raw.fromMe ?? false;
     const messageId = String(key.id || raw.id || raw.messageId || "");
     if (!messageId) return NextResponse.json({ ok: true, skipped: true, reason: "sem messageId" });
+    const dedupeKey = `${clientId}:${messageId}`;
 
     // Anti-duplicação em memória (rápido).
-    if (seenMessageIds.has(messageId)) {
+    if (seenMessageIds.has(dedupeKey)) {
       return NextResponse.json({ ok: true, skipped: true, reason: "mem-dup" });
     }
     if (seenMessageIds.size > 5000) {
@@ -128,9 +149,10 @@ export async function POST(req: NextRequest) {
       .from("chats_dashboard")
       .select("id")
       .eq("message_id", messageId)
+      .eq("client_id", clientId)
       .maybeSingle();
     if (existing) {
-      seenMessageIds.add(messageId);
+      seenMessageIds.add(dedupeKey);
       return NextResponse.json({ ok: true, skipped: true, reason: "db-dup" });
     }
 
@@ -141,10 +163,6 @@ export async function POST(req: NextRequest) {
     const fileName = extractFileName(unwrapped);
     const quoted = extractQuoted(unwrapped);
     const pushName = raw.pushName || raw.push_name || "";
-
-    // ===== Resolver client_id (multi-tenant) =====
-    // Webhook público não tem cookie — resolve dono pelo nome da instância.
-    const clientId = (await clientIdFromInstance(instanceName)) || DEFAULT_CLIENT_ID;
 
     // ===== Criar/atualizar contato + sessão =====
     const contact = await findOrCreateContact(remoteJid, pushName || undefined, clientId);
@@ -168,7 +186,7 @@ export async function POST(req: NextRequest) {
     // Não bloqueia o processamento da mensagem. Só busca se o contato
     // não tem foto ou a URL está stale (>24h).
     if (!fromMe && instanceName) {
-      refreshProfilePicIfStale(remoteJid, instanceName).catch(() => {});
+      refreshProfilePicIfStale(remoteJid, instanceName, clientId).catch(() => {});
     }
 
     // ===== Classificar sender (anti-eco: distingue IA / humano / cliente) =====
@@ -253,14 +271,14 @@ export async function POST(req: NextRequest) {
       // Corrida de concorrência: outro request salvou a mesma mensagem
       // primeiro → é duplicata OK, não erro (evita retry infinito do GO).
       if ((insertErr as any).code === "23505") {
-        seenMessageIds.add(messageId);
+        seenMessageIds.add(dedupeKey);
         return NextResponse.json({ ok: true, skipped: true, reason: "db-dup-insert" });
       }
       console.error("[evo-go-webhook] erro salvando:", insertErr.message);
       return NextResponse.json({ ok: false, error: insertErr.message }, { status: 500 });
     }
 
-    seenMessageIds.add(messageId);
+    seenMessageIds.add(dedupeKey);
 
     // ===== Salvar também em messages (V2) + bump session (igual ao legado) =====
     if (session?.id) {
@@ -284,7 +302,7 @@ export async function POST(req: NextRequest) {
       if (!fromMe) {
         bumpPayload.unread_count = (session as any).unread_count ? (session as any).unread_count + 1 : 1;
       }
-      supabase.from("sessions").update(bumpPayload).eq("id", session.id).then(() => {}, () => {});
+      supabase.from("sessions").update(bumpPayload).eq("id", session.id).eq("client_id", clientId).then(() => {}, () => {});
     }
 
     // ===== Auto-pausa só quando HUMANO responde (eco da IA não pausa) =====
@@ -297,6 +315,7 @@ export async function POST(req: NextRequest) {
             .from("chats_dashboard")
             .select("id")
             .eq("remote_jid", remoteJid)
+            .eq("client_id", clientId)
             .eq("sender_type", "ai")
             .eq("content", text)
             .gte("created_at", new Date(Date.now() - 30_000).toISOString())

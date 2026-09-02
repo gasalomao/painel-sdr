@@ -1,4 +1,5 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { isAdminRequest } from "@/lib/auth";
 import fs from "fs";
 import path from "path";
 import { execFile, execFileSync } from "child_process";
@@ -9,7 +10,10 @@ const execFileAsync = promisify(execFile);
 export const dynamic = 'force-dynamic';
 export const maxDuration = 30;
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  if (!(await isAdminRequest(req))) {
+    return NextResponse.json({ success: false, error: "Apenas admin" }, { status: 403 });
+  }
   const results: Record<string, any> = {};
 
   // 1. Environment

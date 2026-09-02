@@ -32,6 +32,8 @@ const BROWSER_PATHS = [
 // OPT-IN: só roda com RUN_LIVE_TESTS=1 — liga o scraper real (Puppeteer).
 const d = process.env.RUN_LIVE_TESTS === "1" ? describe : describe.skip;
 d("Scraper restart race (live)", () => {
+  const clientId = "00000000-0000-0000-0000-000000000001";
+
   it("restart com forceRestart não deixa o run antigo concluir por cima do novo", async () => {
     const hasBrowser = BROWSER_PATHS.some((p) => fs.existsSync(p)) || !!process.env.PUPPETEER_EXECUTABLE_PATH;
     if (!hasBrowser) {
@@ -55,7 +57,7 @@ d("Scraper restart race (live)", () => {
         mode: "batch",
         maxLeads: 2,
         filterDuplicates: true,
-        client_id: "00000000-0000-0000-0000-000000000001", // tenant default — não polui gasalomao
+        client_id: clientId, // tenant default — não polui gasalomao
       });
       expect(r1.ok).toBe(true);
 
@@ -70,14 +72,14 @@ d("Scraper restart race (live)", () => {
         mode: "batch",
         maxLeads: 2,
         filterDuplicates: true,
-        client_id: "00000000-0000-0000-0000-000000000001",
+        client_id: clientId,
         forceRestart: true,
       });
       expect(r2.ok).toBe(true);
 
       // Espera o run 2 terminar (browser real + Google Maps: até 150s).
       const deadline = Date.now() + 150_000;
-      while (getStatus().isScraping && Date.now() < deadline) {
+      while (getStatus(clientId).isScraping && Date.now() < deadline) {
         await sleep(2000);
       }
 
@@ -90,9 +92,9 @@ d("Scraper restart race (live)", () => {
 
       expect(substituidos).toBe(1);           // guard disparou pro run 1
       expect(concluidas).toBe(1);             // SÓ o run 2 concluiu (run 1 calado)
-      expect(getStatus().isScraping).toBe(false); // estado final estável
+      expect(getStatus(clientId).isScraping).toBe(false); // estado final estável
     } finally {
-      stopScraper(); // garante que nada fica rodando se o teste falhar no meio
+      stopScraper(clientId); // garante que nada fica rodando se o teste falhar no meio
       console.log = origLog;
     }
   }, 200_000);

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { startCampaign, pauseCampaign, cancelCampaign, isCampaignActive } from "@/lib/campaign-worker";
-import { requireClientId } from "@/lib/tenant";
+import { isInstanceOwnedByClient, requireClientId } from "@/lib/tenant";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 
 export const dynamic = "force-dynamic";
@@ -14,13 +14,12 @@ export const dynamic = "force-dynamic";
 async function ownsCampaign(req: NextRequest, id: string): Promise<{ ok: true; isAdmin: boolean; clientId: string } | { ok: false; res: NextResponse }> {
   const tenant = await requireClientId(req);
   if (!tenant.ok) return { ok: false, res: tenant.response };
-  if (tenant.isAdmin) return { ok: true, isAdmin: true, clientId: tenant.clientId };
   const { data } = await supabase.from("campaigns").select("client_id").eq("id", id).maybeSingle();
   if (!data) return { ok: false, res: NextResponse.json({ success: false, error: "Não encontrada" }, { status: 404 }) };
-  if (data.client_id !== tenant.clientId) {
+  if (!tenant.isAdmin && data.client_id !== tenant.clientId) {
     return { ok: false, res: NextResponse.json({ success: false, error: "Sem permissão" }, { status: 403 }) };
   }
-  return { ok: true, isAdmin: false, clientId: tenant.clientId };
+  return { ok: true, isAdmin: tenant.isAdmin, clientId: data.client_id };
 }
 
 /** GET /api/campaigns/:id — detalhes + targets + progresso */
@@ -28,9 +27,19 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   const { id } = await params;
   const own = await ownsCampaign(req, id);
   if (!own.ok) return own.res;
-  const { data: campaign } = await supabase.from("campaigns").select("*").eq("id", id).single();
+  const { data: campaign } = await supabase
+    .from("campaigns")
+    .select("*")
+    .eq("id", id)
+    .eq("client_id", own.clientId)
+    .single();
   if (!campaign) return NextResponse.json({ success: false, error: "Não encontrada" }, { status: 404 });
-  const { data: targets } = await supabase.from("campaign_targets").select("*").eq("campaign_id", id).order("created_at");
+  const { data: targets } = await supabase
+    .from("campaign_targets")
+    .select("*")
+    .eq("campaign_id", id)
+    .eq("client_id", own.clientId)
+    .order("created_at");
   return NextResponse.json({ success: true, campaign, targets, active_in_memory: isCampaignActive(id) });
 }
 
@@ -59,6 +68,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   // SaaS guard: cliente comum não pode mudar modelo no PATCH. Sobrescreve
   // ai_model do body pelo client.default_ai_model antes do whitelist.
   await enforceClientDefaultModel(body, { clientId: own.clientId, isAdmin: own.isAdmin }, ["ai_model"]);
+  if ("instance_name" in body && !(await isInstanceOwnedByClient(String(body.instance_name), own.clientId))) {
+    return NextResponse.json({ success: false, error: "Instância não pertence a este cliente" }, { status: 403 });
+  }
 
   const ALLOWED_FIELDS = [
     "name", "instance_name", "message_template", "agent_id",
@@ -79,7 +91,13 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (min && max && min > max) return NextResponse.json({ success: false, error: "min > max" }, { status: 400 });
   }
 
-  const { data, error } = await supabase.from("campaigns").update(update).eq("id", id).select().single();
+  const { data, error } = await supabase
+    .from("campaigns")
+    .update(update)
+    .eq("id", id)
+    .eq("client_id", own.clientId)
+    .select()
+    .single();
   if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   return NextResponse.json({ success: true, campaign: data });
 }
@@ -90,6 +108,6 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
   const own = await ownsCampaign(req, id);
   if (!own.ok) return own.res;
   await cancelCampaign(id).catch(() => {});
-  await supabase.from("campaigns").delete().eq("id", id);
+  await supabase.from("campaigns").delete().eq("id", id).eq("client_id", own.clientId);
   return NextResponse.json({ success: true });
 }

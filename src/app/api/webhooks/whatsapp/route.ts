@@ -1,14 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
-import { evolution, getEvolutionConfig } from "@/lib/evolution";
+import { evolution } from "@/lib/evolution";
 import { getEffectiveStatus } from "@/lib/bot-status";
 import { shouldSkipGroupActions, getTranscriptionMethod, getTranscriptionModels } from "@/lib/bot-status";
 import { isManualSend, isAiSend, isPendingAutomatedSend } from "@/lib/manual-send-registry";
-import { clientIdFromInstance, DEFAULT_CLIENT_ID } from "@/lib/tenant";
+import { DEFAULT_CLIENT_ID } from "@/lib/tenant";
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
 import { maskJid, truncForLog } from "@/lib/pii";
 import { refreshProfilePicIfStale, sanitizeLogPayload } from "../shared-helpers";
 import { getOrganizerConfig } from "@/lib/organizer-config-cache";
+import { safeSecretEqual, shouldLogOnce } from "@/lib/webhook-security";
 
 export const dynamic = 'force-dynamic';
 
@@ -704,76 +705,64 @@ export async function POST(req: NextRequest) {
     const eventName = body.event || body.type || "unknown";
 
     // ============================================================
-    // VALIDAÇÃO DE ORIGEM — per-instância (não-bloqueante por padrão)
+    // VALIDAÇÃO DE ORIGEM — per-instância (STRICT por padrão)
     // ============================================================
     // O secret é gerado quando o cliente clica "Registrar Webhook" e fica em
     // channel_connections.provider_config.webhook_secret. Evolution v2 manda
-    // como X-Webhook-Secret. ANTES o webhook BLOQUEAVA com 401 quando o
-    // header não batia — resultado: cliente perdia mensagens silenciosamente
-    // se a Evolution dele re-registrou webhook sem o header (cenário comum
-    // quando cliente mexe direto no painel Evolution sem usar nosso fluxo).
+    // como X-Webhook-Secret.
     //
-    // AGORA: mismatch só LOGA em webhook_logs (visível em /api/webhooks/
-    // diagnose), não bloqueia. Cliente que quiser fechar a porta forçando
-    // 401 pode setar `channel_connections.provider_config.webhook_strict=true`.
-    const instanceForSecret = body.instance || body.instance_name;
-    let secretMismatch: string | null = null; // tag pra logar lá embaixo
-    if (instanceForSecret) {
-      try {
-        const { data: conn } = await supabase
-          .from("channel_connections")
-          .select("provider_config")
-          .eq("instance_name", instanceForSecret)
-          .maybeSingle();
-        const cfg = (conn?.provider_config || {}) as any;
-        const expected = cfg.webhook_secret as string | undefined;
-        const strict = !!cfg.webhook_strict;
-        if (expected) {
-          const got = req.headers.get("x-webhook-secret") || req.headers.get("x-internal-secret");
-          if (got !== expected) {
-            secretMismatch = got ? "header_mismatch" : "header_absent";
-            console.warn(`>>> webhook secret mismatch em ${instanceForSecret}: ${secretMismatch} (strict=${strict})`);
-            if (strict) {
-              // Persistente: deixa rastro no webhook_logs antes de rejeitar
-              await supabase.from("webhook_logs").insert({
-                instance_name: instanceForSecret,
-                event: "WEBHOOK_SECRET_REJECTED",
-                payload: { reason: secretMismatch, strict: true },
-                created_at: new Date().toISOString(),
-              }).then(() => {}, () => {});
-              return NextResponse.json({ success: false, error: "Não autorizado" }, { status: 401 });
-            }
-            // Não-strict: continua, mas registra
-            await supabase.from("webhook_logs").insert({
-              instance_name: instanceForSecret,
-              event: "WEBHOOK_SECRET_MISMATCH",
-              payload: { reason: secretMismatch, action: "accepted_anyway" },
-              created_at: new Date().toISOString(),
-            }).then(() => {}, () => {});
-          }
-        }
-      } catch {
-        /* falha de lookup não bloqueia processamento — backwards compat */
-      }
-    }
-    // Aceita QUALQUER nome de instância vindo do payload da Evolution.
-    // Fallback final = instância configurada (DB ou env), nunca um literal.
-    const instanceName = body.instance || body.instance_name || (await getEvolutionConfig()).instance;
+    // SEC-C3: antes o mismatch só LOGAVA (fail-open) — payload forjado
+    // disparava mensagens e tools do agente. Agora: se a instância TEM
+    // secret configurado, header errado/ausente → 401. Escape explícito pra
+    // migração de instância legada: provider_config.webhook_strict=false.
+    // Instância SEM secret segue aceitando (log 1x) até provisionar.
+    const instanceName = String(body.instance || body.instance_name || "");
     if (!instanceName) {
-      console.warn(">>> webhook recebido sem instância identificável; ignorando");
-      return NextResponse.json({ success: false, ignored: true, reason: "no_instance" });
+      return NextResponse.json({ success: false, error: "Instância ausente" }, { status: 400 });
     }
+
+    let clientId: string | null = null;
+    try {
+      const { data: conn, error: connError } = await supabase
+        .from("channel_connections")
+        .select("client_id, provider_config")
+        .eq("instance_name", instanceName)
+        .maybeSingle();
+      if (connError || !conn?.client_id) throw connError || new Error("connection_not_found");
+      clientId = conn.client_id;
+      const cfg = (conn.provider_config || {}) as any;
+      const expected = cfg.webhook_secret as string | undefined;
+      const strict = cfg.webhook_strict !== false;
+      const got = req.headers.get("x-webhook-secret") || req.headers.get("x-internal-secret");
+      if (!expected && strict) {
+        return NextResponse.json({ success: false, error: "Webhook secret não configurado" }, { status: 401 });
+      }
+      if (expected && !safeSecretEqual(got, expected)) {
+        const reason = got ? "header_mismatch" : "header_absent";
+        await supabase.from("webhook_logs").insert({
+          client_id: clientId,
+          instance_name: instanceName,
+          event: strict ? "WEBHOOK_SECRET_REJECTED" : "WEBHOOK_SECRET_MISMATCH",
+          payload: { reason, strict },
+          created_at: new Date().toISOString(),
+        }).then(() => {}, () => {});
+        if (strict) {
+          return NextResponse.json({ success: false, error: "Não autorizado" }, { status: 401 });
+        }
+      }
+      if (!expected && shouldLogOnce("no-secret", instanceName)) {
+        console.warn(`>>> webhook sem secret em ${instanceName} (strict=false)`);
+      }
+    } catch {
+      return NextResponse.json({ success: false, error: "Instância não cadastrada" }, { status: 401 });
+    }
+    if (!clientId) {
+      return NextResponse.json({ success: false, error: "Instância não cadastrada" }, { status: 401 });
+    }
+
     const overrideAgentId = req.nextUrl.searchParams.get("agentId");
 
     console.log(">>> [Evolution API v2] Evento:", eventName, "| Instância:", instanceName);
-
-    // ============================================================
-    // MULTI-TENANT: descobre a qual cliente esta instância pertence.
-    // Sem isso, mensagens de cliente A vazariam no painel do cliente B.
-    // Fallback Default mantém compat com webhooks de instâncias antigas
-    // que ainda não foram vinculadas a um cliente específico.
-    // ============================================================
-    const clientId = (await clientIdFromInstance(instanceName)) || DEFAULT_CLIENT_ID;
 
     // Log resumido p/ debug — payload bruto contém mídia em base64 (MBs por
     // evento). Sanitizado + fire-and-forget: nunca bloqueia o webhook.
@@ -809,6 +798,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ success: false, error: "Missing message_id or remote_jid" });
       }
 
+      const processingKey = `${clientId}:${finalId}`;
       console.log(`>>> [Webhook] Processando mensagem id: ${finalId} de: ${maskJid(remoteJid)}`);
 
       // Ignorar placeholderMessage do Baileys/Evolution (mensagem de controle pendente)
@@ -827,11 +817,11 @@ export async function POST(req: NextRequest) {
       if (!(globalThis as any).__processedMessageIds) {
         (globalThis as any).__processedMessageIds = new Set<string>();
       }
-      if ((globalThis as any).__processedMessageIds.has(finalId)) {
+      if ((globalThis as any).__processedMessageIds.has(processingKey)) {
         console.log(`>>> [Webhook] Concurrency guard: message ${finalId} already processing. Ignoring.`);
         return NextResponse.json({ success: true, message: "Já processando (concorrência bloqueada)" });
       }
-      (globalThis as any).__processedMessageIds.add(finalId);
+      (globalThis as any).__processedMessageIds.add(processingKey);
 
       try {
       // === Find or Create Contact & Session ===
@@ -857,7 +847,7 @@ export async function POST(req: NextRequest) {
         }
         // Buscar foto de perfil (fire-and-forget — não bloqueia a mensagem).
         if (!fromMe && instanceName) {
-          refreshProfilePicIfStale(remoteJid, instanceName).catch(() => {});
+          refreshProfilePicIfStale(remoteJid, instanceName, clientId).catch(() => {});
         }
       } catch (sessErr: any) {
         console.error(">>> [Webhook] ⚠ Falha ao criar contact/session (não-fatal):", sessErr?.message);
@@ -897,8 +887,8 @@ export async function POST(req: NextRequest) {
       // === ANTI-DUPLICAÇÃO REFORÇADA ===
       // Verifica em AMBAS tabelas (messages + chats_dashboard)
       const [{ data: existingV2 }, { data: existingLegacy }] = await Promise.all([
-        supabase.from("messages").select("id").eq("message_id", finalId).single(),
-        supabase.from("chats_dashboard").select("id").eq("message_id", finalId).single(),
+        supabase.from("messages").select("id").eq("message_id", finalId).eq("client_id", clientId).maybeSingle(),
+        supabase.from("chats_dashboard").select("id").eq("message_id", finalId).eq("client_id", clientId).maybeSingle(),
       ]);
 
       if (existingV2 || existingLegacy) {
@@ -1131,7 +1121,7 @@ export async function POST(req: NextRequest) {
           if (msgType !== 'text') extras.message_type = msgType + 'Message';
           if (quotedId) extras.quoted_id = quotedId;
           if (quotedText) extras.quoted_text = quotedText;
-          supabase.from("chats_dashboard").update(extras).eq("message_id", finalId).then(() => {}, () => {});
+          supabase.from("chats_dashboard").update(extras).eq("message_id", finalId).eq("client_id", clientId).then(() => {}, () => {});
         }
       }
 
@@ -1289,7 +1279,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: true, event: "message_saved", message_id: finalId, sender });
       } finally {
         if (finalId) {
-          (globalThis as any).__processedMessageIds.delete(finalId);
+          (globalThis as any).__processedMessageIds.delete(processingKey);
         }
       }
     }
@@ -1304,9 +1294,8 @@ export async function POST(req: NextRequest) {
 
       if (msgId && statusRaw !== null && statusRaw !== undefined) {
         const statusText = STATUS_MAP[statusRaw] || "sent";
-        await supabase.from("messages").update({ delivery_status: statusText }).eq("message_id", msgId);
-        // Compatibilidade
-        await supabase.from("chats_dashboard").update({ status_envio: statusText }).eq("message_id", msgId);
+        await supabase.from("messages").update({ delivery_status: statusText }).eq("message_id", msgId).eq("client_id", clientId);
+        await supabase.from("chats_dashboard").update({ status_envio: statusText }).eq("message_id", msgId).eq("client_id", clientId);
       }
       return NextResponse.json({ success: true, event: "status_updated" });
     }
@@ -1394,8 +1383,8 @@ export async function POST(req: NextRequest) {
       const data = body.data || body;
       const msgId = data.key?.id || data.id;
       if (msgId) {
-        await supabase.from("messages").update({ content: "[Mensagem apagada]" }).eq("message_id", msgId);
-        await supabase.from("chats_dashboard").update({ content: "[Mensagem apagada]" }).eq("message_id", msgId);
+        await supabase.from("messages").update({ content: "[Mensagem apagada]" }).eq("message_id", msgId).eq("client_id", clientId);
+        await supabase.from("chats_dashboard").update({ content: "[Mensagem apagada]" }).eq("message_id", msgId).eq("client_id", clientId);
       }
       return NextResponse.json({ success: true, event: "message_deleted" });
     }

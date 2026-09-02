@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
-import { verifySession } from "@/lib/auth";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
+import { isInstanceOwnedByClient, requireClientId } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
@@ -9,10 +9,8 @@ export const dynamic = "force-dynamic";
  *  Filtro: automation_id IS NULL + client_id.
  */
 export async function GET(req: NextRequest) {
-  const session = await verifySession(req);
-  if (!session) {
-    return NextResponse.json({ success: false, error: "Não autorizado" }, { status: 401 });
-  }
+  const session = await requireClientId(req);
+  if (!session.ok) return session.response;
 
   const { data, error } = await supabase
     .from("campaigns")
@@ -29,10 +27,8 @@ export async function GET(req: NextRequest) {
 
 /** POST /api/campaigns — cria campanha + targets a partir dos remoteJids */
 export async function POST(req: NextRequest) {
-  const session = await verifySession(req);
-  if (!session) {
-    return NextResponse.json({ success: false, error: "Não autorizado" }, { status: 401 });
-  }
+  const session = await requireClientId(req);
+  if (!session.ok) return session.response;
 
   try {
     const body = await req.json();
@@ -72,6 +68,26 @@ export async function POST(req: NextRequest) {
     if (Number(min_interval_seconds) > Number(max_interval_seconds)) {
       return NextResponse.json({ success: false, error: "min_interval > max_interval" }, { status: 400 });
     }
+    if (!(await isInstanceOwnedByClient(instance_name, session.clientId))) {
+      return NextResponse.json({ success: false, error: "Instância não pertence a este cliente" }, { status: 403 });
+    }
+
+    const requestedLeadIds = Array.isArray(lead_ids) ? [...new Set(lead_ids.map(Number).filter(Number.isInteger))] : [];
+    let selectedLeads: Array<{ id: number; remoteJid: string; nome_negocio: string | null; ramo_negocio: string | null }> = [];
+    if (requestedLeadIds.length > 0) {
+      const { data: leads, error: leadsError } = await supabase
+        .from("leads_extraidos")
+        .select("id, remoteJid, nome_negocio, ramo_negocio")
+        .eq("client_id", session.clientId)
+        .in("id", requestedLeadIds);
+      if (leadsError) {
+        return NextResponse.json({ success: false, error: leadsError.message }, { status: 500 });
+      }
+      selectedLeads = leads || [];
+      if (selectedLeads.length !== requestedLeadIds.length) {
+        return NextResponse.json({ success: false, error: "Um ou mais leads não pertencem a este cliente" }, { status: 403 });
+      }
+    }
 
     // Cria campanha
     const insertPayload: Record<string, any> = {
@@ -100,24 +116,21 @@ export async function POST(req: NextRequest) {
     if (cErr || !camp) return NextResponse.json({ success: false, error: cErr?.message || "Falha ao criar" }, { status: 500 });
 
     // Resolve leads → targets
-    let targetsRows: any[] = [];
-    if (lead_ids.length > 0) {
-      const { data: leads } = await supabase
-        .from("leads_extraidos")
-        .select("remoteJid, nome_negocio, ramo_negocio")
-        .in("id", lead_ids);
-      targetsRows = (leads || []).map(l => ({
+    const targetsRows: Array<Record<string, unknown>> = selectedLeads
+      .filter((lead) => !!lead.remoteJid)
+      .map((lead) => ({
         campaign_id: camp.id,
-        remote_jid: l.remoteJid,
-        nome_negocio: l.nome_negocio,
-        ramo_negocio: l.ramo_negocio,
+        client_id: session.clientId,
+        remote_jid: lead.remoteJid,
+        nome_negocio: lead.nome_negocio,
+        ramo_negocio: lead.ramo_negocio,
         status: "pending",
       }));
-    }
-    if (remote_jids.length > 0) {
-      for (const j of remote_jids) {
-        if (!targetsRows.some(t => t.remote_jid === j)) {
-          targetsRows.push({ campaign_id: camp.id, remote_jid: j, status: "pending" });
+    if (Array.isArray(remote_jids)) {
+      for (const value of remote_jids) {
+        const remoteJid = typeof value === "string" ? value.trim() : "";
+        if (remoteJid && !targetsRows.some((target) => target.remote_jid === remoteJid)) {
+          targetsRows.push({ campaign_id: camp.id, client_id: session.clientId, remote_jid: remoteJid, status: "pending" });
         }
       }
     }
@@ -125,8 +138,11 @@ export async function POST(req: NextRequest) {
     if (targetsRows.length > 0) {
       // upsert pra não falhar se houver duplicado
       const { error: tErr } = await supabase.from("campaign_targets").upsert(targetsRows, { onConflict: "campaign_id,remote_jid", ignoreDuplicates: true });
-      if (tErr) console.warn("[campaigns] erro ao inserir targets:", tErr.message);
-      await supabase.from("campaigns").update({ total_targets: targetsRows.length }).eq("id", camp.id);
+      if (tErr) {
+        await supabase.from("campaigns").delete().eq("id", camp.id).eq("client_id", session.clientId);
+        return NextResponse.json({ success: false, error: tErr.message }, { status: 500 });
+      }
+      await supabase.from("campaigns").update({ total_targets: targetsRows.length }).eq("id", camp.id).eq("client_id", session.clientId);
     }
 
     return NextResponse.json({ success: true, campaign: { ...camp, total_targets: targetsRows.length } });

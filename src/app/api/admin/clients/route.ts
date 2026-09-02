@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
-import { hashPassword } from "@/lib/auth";
+import { hashPassword, isAdminRequest } from "@/lib/auth";
 import { DEFAULT_KANBAN_COLUMNS } from "@/app/api/kanban-columns/route";
 
 export const dynamic = "force-dynamic";
@@ -12,7 +12,10 @@ export const dynamic = "force-dynamic";
  * Não exposto pra cliente: o middleware bloqueia /api/admin/* pra não-admins.
  */
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  if (!(await isAdminRequest(req))) {
+    return NextResponse.json({ ok: false, error: "Apenas admin" }, { status: 403 });
+  }
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
   const { data, error } = await supabaseAdmin
     .from("clients")
@@ -23,6 +26,9 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  if (!(await isAdminRequest(req))) {
+    return NextResponse.json({ ok: false, error: "Apenas admin" }, { status: 403 });
+  }
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
   const body = await req.json().catch(() => ({}));
   const { name, email, password, features, default_ai_model, organizer_prompt, organizer_enabled, notes, is_admin } = body;

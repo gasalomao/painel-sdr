@@ -20,6 +20,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE, verifySession, type SessionClaims } from "@/lib/auth-edge";
+import { isSessionLiveStrict } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 
 export type TenantContext =
@@ -42,7 +43,7 @@ export async function requireClientId(req: NextRequest): Promise<TenantContext> 
     return { ok: false, response: NextResponse.json({ error: "Não autenticado" }, { status: 401 }) };
   }
   const claims = await verifySession(token);
-  if (!claims) {
+  if (!claims || !(await isSessionLiveStrict(claims.sessionId, token))) {
     return { ok: false, response: NextResponse.json({ error: "Sessão inválida" }, { status: 401 }) };
   }
   return {
@@ -63,7 +64,8 @@ export async function getClientIdFromRequest(req: NextRequest): Promise<string |
   const token = req.cookies.get(SESSION_COOKIE)?.value;
   if (!token) return null;
   const claims = await verifySession(token);
-  return claims?.clientId || null;
+  if (!claims || !(await isSessionLiveStrict(claims.sessionId, token))) return null;
+  return claims.clientId || null;
 }
 
 /**
@@ -73,6 +75,17 @@ export async function getClientIdFromRequest(req: NextRequest): Promise<string |
  */
 const INSTANCE_CACHE = new Map<string, { clientId: string | null; at: number }>();
 const INSTANCE_CACHE_TTL = 60_000; // 1 minuto
+
+export async function isInstanceOwnedByClient(instanceName: string, clientId: string): Promise<boolean> {
+  if (!instanceName?.trim() || !clientId?.trim() || !supabaseAdmin) return false;
+  const { data, error } = await supabaseAdmin
+    .from("channel_connections")
+    .select("instance_name")
+    .eq("instance_name", instanceName.trim())
+    .eq("client_id", clientId)
+    .maybeSingle();
+  return !error && !!data?.instance_name;
+}
 
 export async function clientIdFromInstance(instanceName: string): Promise<string | null> {
   if (!instanceName || !supabaseAdmin) return null;

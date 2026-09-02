@@ -191,6 +191,30 @@ export async function isSessionLive(sessionId: string, token: string): Promise<b
   }
 }
 
+export async function isSessionLiveStrict(sessionId: string, token: string): Promise<boolean> {
+  if (!supabase || !sessionId || !token) return false;
+  try {
+    const { data, error } = await supabase
+      .from("auth_sessions")
+      .select("id, revoked_at, expires_at")
+      .eq("id", sessionId)
+      .eq("token_hash", hashToken(token))
+      .maybeSingle();
+    if (error || !data || data.revoked_at) return false;
+    if (data.expires_at && new Date(data.expires_at).getTime() < Date.now()) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function isAdminRequest(req: NextRequest): Promise<boolean> {
+  const token = req.cookies.get(SESSION_COOKIE)?.value;
+  if (!token) return false;
+  const claims = await verifySession(token);
+  return !!claims?.isAdmin && await isSessionLiveStrict(claims.sessionId, token);
+}
+
 export async function revokeSession(sessionId: string): Promise<void> {
   if (!supabase) return;
   await supabase.from("auth_sessions").update({ revoked_at: new Date().toISOString() }).eq("id", sessionId);
