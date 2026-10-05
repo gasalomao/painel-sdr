@@ -44,4 +44,4 @@ export function friendlyRunError(error: string | null): string {
   return error ?? "A execução não foi concluída. Os arquivos anteriores foram preservados. Revise o pedido e tente novamente.";
 }
 
-export const selectClass = "min-h-10 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50";
+export const selectClass = "min-h-10 w-full rounded-lg border border-input bg-[#0f172a] text-slate-100 px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50 [color-scheme:dark]";

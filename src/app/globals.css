@@ -45,6 +45,7 @@
 }
 
 :root {
+  color-scheme: dark;
   /* PREMIUM DARK BLUE THEME (Unconditional) */
   --background: 225 40% 6%; /* Deep Navy Blue #090e17 */
   --foreground: 210 40% 98%; /* Pure white text */

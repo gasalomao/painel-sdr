@@ -395,7 +395,7 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
           </div>
         </div>
 
-        <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-card/60 px-2.5 py-1.5 shadow-2xs transition-colors hover:border-border">
+        <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-[#0f172a] px-2.5 py-1.5 shadow-2xs transition-colors hover:border-border">
           <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground shrink-0 select-none">
             <Bot className="size-3.5 text-primary shrink-0" aria-hidden="true" />
             <span>Modelo:</span>
@@ -403,21 +403,22 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
           <select
             id="chat-model-select"
             aria-label="Modelo de IA para este pedido"
-            className="h-6 flex-1 min-w-0 bg-transparent text-[11px] font-medium text-foreground outline-none cursor-pointer truncate pr-1"
+            style={{ colorScheme: "dark" }}
+            className="h-6 flex-1 min-w-0 bg-[#0f172a] text-[11px] font-medium text-slate-100 outline-none cursor-pointer truncate pr-1"
             value={activeModelMode === "manual" ? (activeModelId || "") : activeModelMode}
             disabled={sending || project?.status === "archived"}
             onChange={(e) => void switchModel(e.target.value)}
           >
-            <option value="auto">Automático (Recomendado)</option>
-            <option value="quality">Alta Qualidade</option>
-            <option value="economy">Econômico</option>
+            <option className="bg-[#0f172a] text-slate-100" value="auto">Automático (Recomendado)</option>
+            <option className="bg-[#0f172a] text-slate-100" value="quality">Alta Qualidade</option>
+            <option className="bg-[#0f172a] text-slate-100" value="economy">Econômico</option>
             {activeModelMode === "manual" && activeModelId && !models?.some((m) => m.id === activeModelId) && (
-              <option value={activeModelId}>{activeModelId}</option>
+              <option className="bg-[#0f172a] text-slate-100" value={activeModelId}>{activeModelId}</option>
             )}
             {models && models.length > 0 && (
               <>
                 {models.some((m) => m.id.startsWith("nvidia:")) && (
-                  <optgroup label="⚡ NVIDIA NIM">
+                  <optgroup className="bg-[#0f172a] text-emerald-400 font-bold" label="⚡ NVIDIA NIM">
                     {models
                       .filter((m) => m.id.startsWith("nvidia:"))
                       .sort((a, b) => {
@@ -428,43 +429,43 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
                         return a.name.localeCompare(b.name);
                       })
                       .map((m) => (
-                        <option key={m.id} value={m.id}>
+                        <option className="bg-[#0f172a] text-slate-100" key={m.id} value={m.id}>
                           {m.name}
                         </option>
                       ))}
                   </optgroup>
                 )}
                 {models.some((m) => m.isFree && !m.id.startsWith("gemini:") && !m.id.startsWith("gateway:") && !m.id.startsWith("nvidia:")) && (
-                  <optgroup label="⭐ OpenRouter (Gratuitos)">
+                  <optgroup className="bg-[#0f172a] text-amber-400 font-bold" label="⭐ OpenRouter (Gratuitos)">
                     {models.filter((m) => m.isFree && !m.id.startsWith("gemini:") && !m.id.startsWith("gateway:") && !m.id.startsWith("nvidia:")).map((m) => (
-                      <option key={m.id} value={m.id}>
+                      <option className="bg-[#0f172a] text-slate-100" key={m.id} value={m.id}>
                         {m.name}
                       </option>
                     ))}
                   </optgroup>
                 )}
                 {models.some((m) => m.id.startsWith("gateway:")) && (
-                  <optgroup label="🔑 Gateway de Assinatura">
+                  <optgroup className="bg-[#0f172a] text-blue-400 font-bold" label="🔑 Gateway de Assinatura">
                     {models.filter((m) => m.id.startsWith("gateway:")).map((m) => (
-                      <option key={m.id} value={m.id}>
+                      <option className="bg-[#0f172a] text-slate-100" key={m.id} value={m.id}>
                         {m.name}
                       </option>
                     ))}
                   </optgroup>
                 )}
                 {models.some((m) => m.id.startsWith("gemini:")) && (
-                  <optgroup label="✨ Google Gemini">
+                  <optgroup className="bg-[#0f172a] text-cyan-400 font-bold" label="✨ Google Gemini">
                     {models.filter((m) => m.id.startsWith("gemini:")).map((m) => (
-                      <option key={m.id} value={m.id}>
+                      <option className="bg-[#0f172a] text-slate-100" key={m.id} value={m.id}>
                         {m.name}
                       </option>
                     ))}
                   </optgroup>
                 )}
                 {models.some((m) => !m.isFree && !m.id.startsWith("gemini:") && !m.id.startsWith("gateway:") && !m.id.startsWith("nvidia:")) && (
-                  <optgroup label="🌐 OpenRouter (Geral)">
+                  <optgroup className="bg-[#0f172a] text-purple-400 font-bold" label="🌐 OpenRouter (Geral)">
                     {models.filter((m) => !m.isFree && !m.id.startsWith("gemini:") && !m.id.startsWith("gateway:") && !m.id.startsWith("nvidia:")).map((m) => (
-                      <option key={m.id} value={m.id}>
+                      <option className="bg-[#0f172a] text-slate-100" key={m.id} value={m.id}>
                         {m.name}
                       </option>
                     ))}

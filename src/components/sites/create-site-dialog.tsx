@@ -226,6 +226,7 @@ export function CreateSiteDialog({ open, onOpenChange }: { open: boolean; onOpen
                 <div className="space-y-1.5">
                   <select
                     id="create-site-model-select"
+                    style={{ colorScheme: "dark" }}
                     className={selectClass}
                     value={modelMode === "manual" ? (modelId || "") : modelMode}
                     onChange={(event) => {
@@ -239,20 +240,20 @@ export function CreateSiteDialog({ open, onOpenChange }: { open: boolean; onOpen
                       }
                     }}
                   >
-                    <optgroup label="Modos Automáticos">
-                      <option value="auto">Automático (Recomendado — IA seleciona o melhor modelo)</option>
-                      <option value="quality">Alta Qualidade (Prioriza modelos premium e maior contexto)</option>
-                      <option value="economy">Econômico (Prioriza menor consumo de tokens)</option>
+                    <optgroup className="bg-[#0f172a] text-primary font-bold" label="Modos Automáticos">
+                      <option className="bg-[#0f172a] text-slate-100" value="auto">Automático (Recomendado — IA seleciona o melhor modelo)</option>
+                      <option className="bg-[#0f172a] text-slate-100" value="quality">Alta Qualidade (Prioriza modelos premium e maior contexto)</option>
+                      <option className="bg-[#0f172a] text-slate-100" value="economy">Econômico (Prioriza menor consumo de tokens)</option>
                     </optgroup>
 
                     {modelId && modelMode === "manual" && !filteredModels.some((m) => m.id === modelId) && (
-                      <option disabled value={modelId}>
+                      <option className="bg-[#0f172a] text-slate-100" disabled value={modelId}>
                         {selectedModel?.name ?? modelId} ({selectedModel ? "fora do filtro" : "indisponível"})
                       </option>
                     )}
 
                     {filteredModels.some((m) => m.id.startsWith("nvidia:")) && (
-                      <optgroup label="⚡ NVIDIA NIM">
+                      <optgroup className="bg-[#0f172a] text-emerald-400 font-bold" label="⚡ NVIDIA NIM">
                         {filteredModels
                           .filter((m) => m.id.startsWith("nvidia:"))
                           .sort((a, b) => {
@@ -263,7 +264,7 @@ export function CreateSiteDialog({ open, onOpenChange }: { open: boolean; onOpen
                             return a.name.localeCompare(b.name);
                           })
                           .map((model) => (
-                            <option key={model.id} value={model.id} disabled={model.id.length > 160}>
+                            <option className="bg-[#0f172a] text-slate-100" key={model.id} value={model.id} disabled={model.id.length > 160}>
                               {model.name}
                             </option>
                           ))}
@@ -271,12 +272,12 @@ export function CreateSiteDialog({ open, onOpenChange }: { open: boolean; onOpen
                     )}
 
                     {filteredModels.some((m) => m.isFree && !m.id.startsWith("gemini:") && !m.id.startsWith("gateway:") && !m.id.startsWith("nvidia:")) && (
-                      <optgroup label="⭐ OpenRouter (Gratuitos)">
+                      <optgroup className="bg-[#0f172a] text-amber-400 font-bold" label="⭐ OpenRouter (Gratuitos)">
                         {filteredModels
                           .filter((m) => m.isFree && !m.id.startsWith("gemini:") && !m.id.startsWith("gateway:") && !m.id.startsWith("nvidia:"))
                           .sort((a, b) => a.name.localeCompare(b.name))
                           .map((model) => (
-                            <option key={model.id} value={model.id} disabled={model.id.length > 160}>
+                            <option className="bg-[#0f172a] text-slate-100" key={model.id} value={model.id} disabled={model.id.length > 160}>
                               {model.name}
                             </option>
                           ))}
@@ -284,12 +285,12 @@ export function CreateSiteDialog({ open, onOpenChange }: { open: boolean; onOpen
                     )}
 
                     {filteredModels.some((m) => m.id.startsWith("gateway:")) && (
-                      <optgroup label="🔑 Gateway de Assinatura (Contas Conectadas)">
+                      <optgroup className="bg-[#0f172a] text-blue-400 font-bold" label="🔑 Gateway de Assinatura (Contas Conectadas)">
                         {filteredModels
                           .filter((m) => m.id.startsWith("gateway:"))
                           .sort((a, b) => a.name.localeCompare(b.name))
                           .map((model) => (
-                            <option key={model.id} value={model.id} disabled={model.id.length > 160}>
+                            <option className="bg-[#0f172a] text-slate-100" key={model.id} value={model.id} disabled={model.id.length > 160}>
                               {model.name}
                             </option>
                           ))}
@@ -297,12 +298,12 @@ export function CreateSiteDialog({ open, onOpenChange }: { open: boolean; onOpen
                     )}
 
                     {filteredModels.some((m) => m.id.startsWith("gemini:")) && (
-                      <optgroup label="✨ Google Gemini">
+                      <optgroup className="bg-[#0f172a] text-cyan-400 font-bold" label="✨ Google Gemini">
                         {filteredModels
                           .filter((m) => m.id.startsWith("gemini:"))
                           .sort((a, b) => a.name.localeCompare(b.name))
                           .map((model) => (
-                            <option key={model.id} value={model.id} disabled={model.id.length > 160}>
+                            <option className="bg-[#0f172a] text-slate-100" key={model.id} value={model.id} disabled={model.id.length > 160}>
                               {model.name}
                             </option>
                           ))}
@@ -310,12 +311,12 @@ export function CreateSiteDialog({ open, onOpenChange }: { open: boolean; onOpen
                     )}
 
                     {filteredModels.some((m) => !m.isFree && !m.id.startsWith("gemini:") && !m.id.startsWith("gateway:") && !m.id.startsWith("nvidia:")) && (
-                      <optgroup label="🌐 OpenRouter (Geral)">
+                      <optgroup className="bg-[#0f172a] text-purple-400 font-bold" label="🌐 OpenRouter (Geral)">
                         {filteredModels
                           .filter((m) => !m.isFree && !m.id.startsWith("gemini:") && !m.id.startsWith("gateway:") && !m.id.startsWith("nvidia:"))
                           .sort((a, b) => a.name.localeCompare(b.name))
                           .map((model) => (
-                            <option key={model.id} value={model.id} disabled={model.id.length > 160}>
+                            <option className="bg-[#0f172a] text-slate-100" key={model.id} value={model.id} disabled={model.id.length > 160}>
                               {model.name}
                             </option>
                           ))}
