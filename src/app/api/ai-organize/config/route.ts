@@ -44,7 +44,7 @@ export async function GET() {
     let data: Record<string, any> | null = null;
     const full = await supabase
       .from("ai_organizer_config")
-      .select("enabled, model, provider, execution_hour, last_run, api_key, openrouter_api_key, openrouter_keys, gateway_base_url, gateway_api_key, gateway_fallback_model, gateway_endpoints")
+      .select("enabled, model, provider, execution_hour, last_run, api_key, openrouter_api_key, openrouter_keys, gateway_base_url, gateway_api_key, gateway_fallback_model, gateway_endpoints, nvidia_api_key")
       .eq("id", 1)
       .maybeSingle();
     if (full.error) {
@@ -85,6 +85,16 @@ export async function GET() {
       isPrimary: idx === 0,
     }));
 
+    let hasNvidiaKey = !!(data?.nvidia_api_key && String(data.nvidia_api_key).trim().length > 0);
+    if (!hasNvidiaKey) {
+      try {
+        const appSet = await supabase.from("app_settings").select("value").eq("key", "nvidia_api_key").maybeSingle();
+        if (appSet.data?.value && String(appSet.data.value).trim().length > 0) {
+          hasNvidiaKey = true;
+        }
+      } catch { /* fallback */ }
+    }
+
     return NextResponse.json({
       success: true,
       config: {
@@ -94,6 +104,7 @@ export async function GET() {
         execution_hour: typeof data?.execution_hour === "number" ? data.execution_hour : 20,
         last_run: data?.last_run || null,
         has_api_key: !!(data?.api_key && String(data.api_key).trim().length > 0),
+        has_nvidia_key: hasNvidiaKey,
         has_openrouter_key: !!(data?.openrouter_api_key && String(data.openrouter_api_key).trim().length > 0) || openrouterKeysList.length > 0,
         openrouter_keys_count: openrouterKeysList.length,
         openrouter_keys: maskedOpenrouterKeys,
@@ -129,6 +140,7 @@ export async function PATCH(req: NextRequest) {
     const wantsModelChange = (typeof body.model === "string" && body.model.trim())
       || (typeof body.provider === "string" && body.provider.trim())
       || (typeof body.api_key === "string" && body.api_key.trim())
+      || (typeof body.nvidia_api_key === "string")
       || (typeof body.openrouter_api_key === "string" && body.openrouter_api_key.trim())
       || Array.isArray(body.openrouter_keys)
       || (typeof body.add_openrouter_key === "string" && body.add_openrouter_key.trim())
@@ -150,6 +162,19 @@ export async function PATCH(req: NextRequest) {
     if (typeof body.model === "string" && body.model.trim()) update.model = body.model.trim();
     if (typeof body.provider === "string" && body.provider.trim()) update.provider = body.provider.trim();
     if (typeof body.api_key === "string" && body.api_key.trim()) update.api_key = body.api_key.trim();
+    let nvidiaChanged = false;
+    if (typeof body.nvidia_api_key === "string") {
+      const nvVal = body.nvidia_api_key.trim();
+      update.nvidia_api_key = nvVal || null;
+      nvidiaChanged = true;
+      try {
+        await supabase.from("app_settings").upsert({
+          key: "nvidia_api_key",
+          value: nvVal,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "key" });
+      } catch { /* fallback */ }
+    }
     if (typeof body.openrouter_api_key === "string" && body.openrouter_api_key.trim()) update.openrouter_api_key = body.openrouter_api_key.trim();
 
     // Suporte multi-key OpenRouter: adicionar uma nova chave, remover por índice, reordenar prioridade ou enviar lista
@@ -270,17 +295,31 @@ export async function PATCH(req: NextRequest) {
       .from("ai_organizer_config")
       .upsert(update, { onConflict: "id" });
     if (error) {
+      const retryUpdate = { ...update };
+      let hadFixableError = false;
+
+      // Se a coluna nvidia_api_key ainda não existe no ai_organizer_config do banco,
+      // remove ela do payload (já salvamos no app_settings com sucesso acima).
+      if (/nvidia_api_key|column .* does not exist/i.test(error.message || "")) {
+        delete (retryUpdate as any).nvidia_api_key;
+        hadFixableError = true;
+      }
+
       // Banco ainda sem as colunas do gateway? Salva o resto e avisa pra rodar
       // a atualização de schema — não quebra o save dos demais campos.
       if (gatewayChanged && /gateway_(base_url|api_key|fallback_model|endpoints)|column .* does not exist/i.test(error.message || "")) {
-        // Remove TODAS as colunas de gateway (inclui os nulls legados que só
-        // setamos por causa da lista) — assim não apagamos o gateway legado de um
-        // banco que ainda não tem gateway_endpoints. Salva o resto e avisa.
-        const { gateway_base_url, gateway_api_key, gateway_fallback_model, gateway_endpoints, ...rest } = update;
-        const retry = await supabase.from("ai_organizer_config").upsert(rest, { onConflict: "id" });
+        delete (retryUpdate as any).gateway_base_url;
+        delete (retryUpdate as any).gateway_api_key;
+        delete (retryUpdate as any).gateway_fallback_model;
+        delete (retryUpdate as any).gateway_endpoints;
+        hadFixableError = true;
+        warning = "Config salva, mas algumas colunas ainda não existem no banco. Rode a atualização de schema (Configurações → Banco de dados).";
+        gatewayChanged = false;
+      }
+
+      if (hadFixableError) {
+        const retry = await supabase.from("ai_organizer_config").upsert(retryUpdate, { onConflict: "id" });
         if (retry.error) throw retry.error;
-        warning = "Config salva, mas as colunas do Gateway/Assinatura ainda não existem no banco. Rode a atualização de schema (Configurações → Banco de dados) e salve de novo.";
-        gatewayChanged = false; // não invalida cache de gateway: nada persistiu
       } else {
         throw error;
       }
@@ -297,6 +336,14 @@ export async function PATCH(req: NextRequest) {
         invalidateAiKeysCache();
         const { invalidateOpenRouterModelsCache } = await import("@/lib/openrouter-model-discovery");
         invalidateOpenRouterModelsCache();
+      } catch { /* não-fatal */ }
+    }
+    if (nvidiaChanged) {
+      try {
+        const { invalidateAiKeysCache } = await import("@/lib/ai-keys");
+        invalidateAiKeysCache();
+        const { invalidateNvidiaModelsCache } = await import("@/lib/nvidia-model-discovery");
+        invalidateNvidiaModelsCache();
       } catch { /* não-fatal */ }
     }
     if (typeof body.api_key === "string" && body.api_key.trim()) {

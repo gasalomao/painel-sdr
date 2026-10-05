@@ -7,7 +7,7 @@
  * aparece sozinho no seletor — igual à descoberta de modelos Gemini.
  */
 
-import { supabaseAdmin } from "@/lib/supabase_admin";
+import { getAiKeys } from "@/lib/ai-keys";
 
 export type OpenRouterModel = {
   id: string;            // ex: "anthropic/claude-3.5-sonnet"
@@ -19,6 +19,7 @@ export type OpenRouterModel = {
   pricing?: { prompt?: string; completion?: string };
   /** Modalidades de entrada aceitas (ex: ["text","audio"]) — undefined se a API não informou. */
   inputModalities?: string[];
+  outputModalities?: string[];
 };
 
 type Cache = { models: OpenRouterModel[]; at: number };
@@ -27,12 +28,8 @@ const TTL_MS = 10 * 60 * 1000;
 
 async function getKey(): Promise<string | null> {
   try {
-    const { data } = await supabaseAdmin
-      .from("ai_organizer_config")
-      .select("openrouter_api_key")
-      .eq("id", 1)
-      .maybeSingle();
-    const k = (data as any)?.openrouter_api_key;
+    const keys = await getAiKeys();
+    const k = keys.openrouterKeys[0] || keys.openrouter;
     return k && String(k).trim() ? String(k).trim() : null;
   } catch {
     return null;
@@ -43,11 +40,12 @@ async function getKey(): Promise<string | null> {
  * Lista modelos OpenRouter que suportam chat (output text). Cache 10 min.
  * Retorna [] se a API key não estiver configurada ou a OpenRouter estiver fora.
  */
-export async function listAvailableOpenRouterModels(force = false): Promise<OpenRouterModel[]> {
-  if (!force && CACHE && Date.now() - CACHE.at < TTL_MS) return CACHE.models;
+export async function listAvailableOpenRouterModels(force = false, includeImageOutput = false): Promise<OpenRouterModel[]> {
+  const filterModels = (models: OpenRouterModel[]) => includeImageOutput ? models : models.filter((m) => !m.outputModalities?.length || m.outputModalities.includes("text"));
+  if (!force && CACHE && Date.now() - CACHE.at < TTL_MS) return filterModels(CACHE.models);
 
   const apiKey = await getKey();
-  if (!apiKey) return CACHE?.models || [];
+  if (!apiKey) return filterModels(CACHE?.models || []);
 
   try {
     const res = await fetch("https://openrouter.ai/api/v1/models", {
@@ -56,15 +54,9 @@ export async function listAvailableOpenRouterModels(force = false): Promise<Open
     });
     const json = await res.json();
     const list: any[] = Array.isArray(json?.data) ? json.data : [];
-    if (!res.ok || !list.length) return CACHE?.models || [];
+    if (!res.ok || !list.length) return filterModels(CACHE?.models || []);
 
     const models: OpenRouterModel[] = list
-      .filter((m: any) => {
-        // Só modelos que produzem TEXTO (descarta image/embedding/etc).
-        const out = m?.architecture?.output_modalities;
-        if (Array.isArray(out) && out.length > 0) return out.includes("text");
-        return true; // sem info de modalidade → assume texto
-      })
       .map((m: any) => {
         const params: string[] = Array.isArray(m?.supported_parameters) ? m.supported_parameters : [];
         return {
@@ -77,14 +69,17 @@ export async function listAvailableOpenRouterModels(force = false): Promise<Open
           inputModalities: Array.isArray(m?.architecture?.input_modalities)
             ? m.architecture.input_modalities.map(String)
             : undefined,
+          outputModalities: Array.isArray(m?.architecture?.output_modalities)
+            ? m.architecture.output_modalities.map(String)
+            : undefined,
         };
       });
 
     CACHE = { models, at: Date.now() };
-    return models;
+    return filterModels(models);
   } catch (err) {
     console.warn("[openrouter-discovery] Falha ao listar modelos:", (err as any)?.message);
-    return CACHE?.models || [];
+    return filterModels(CACHE?.models || []);
   }
 }
 

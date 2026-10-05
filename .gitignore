@@ -47,7 +47,7 @@ Thumbs.db
 .claude-flow/
 .agents/
 .skills/
-skills/
+/skills/
 .shared-memory/
 .swarm/
 .zcode/

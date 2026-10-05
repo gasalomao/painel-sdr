@@ -26,6 +26,7 @@ import {
   LogOut,
   CalendarDays,
   Globe,
+  LayoutTemplate,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
@@ -61,6 +62,7 @@ const navItems: NavItem[] = [
   { href: "/automacao",      label: "Automação",        icon: Cpu,             feature: "automacao" },
   { href: "/disparo",        label: "Disparo em Massa", icon: Zap,             feature: "disparo" },
   { href: "/prospeccao-sites", label: "Prospecção Sites", icon: Globe,        feature: "prospeccao_sites" },
+  { href: "/sites",           label: "Sites IA",          icon: LayoutTemplate, feature: "sites" },
   { href: "/follow-up",      label: "Follow-up",        icon: Repeat,          feature: "followup" },
   { href: "/captador",       label: "Captador Maps",    icon: MapPin,          feature: "captador" },
   { href: "/whatsapp",       label: "WhatsApp",         icon: Smartphone,      feature: "whatsapp" },
@@ -120,6 +122,8 @@ function filterNav(items: NavItem[], session: SessionData | null) {
     if (item.adminOnly) return isAdmin;
     if (isAdmin) return true; // admin vê tudo
     if (!item.feature) return true;
+    // "sites" é premium opt-in: exige flag true (o backend também fail-closed).
+    if (item.feature === "sites") return features[item.feature] === true;
     return features[item.feature] !== false; // default true se não setado
   });
 }

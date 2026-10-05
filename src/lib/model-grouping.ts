@@ -79,36 +79,63 @@ export function modelFamily(rawIdOrId: string): string {
   return "Outros";
 }
 
-/** Modelo gratuito do OpenRouter (convenção: id termina em ":free"). */
+/** Modelo gratuito (OpenRouter ou NVIDIA — convenção: id termina em ":free" ou contém "free"). */
 export function isFreeModel(m: GroupableModel): boolean {
   const raw = (m.rawId || m.id || "").toLowerCase();
-  return raw.endsWith(":free");
+  return raw.endsWith(":free") || raw.includes(":free") || /\bfree\b/i.test(raw) || raw.endsWith("/free");
 }
 
 /** Rótulo do subgrupo dentro de um provedor (string vazia = sem subgrupo). */
 export function subGroupLabel(m: GroupableModel): string {
   const provider = m.provider || "gemini";
+  const raw = (m.rawId || m.id || "").toLowerCase();
+
   if (provider === "combo") {
     return "Combos Virtuais";
   }
+
   if (provider === "openrouter") {
-    if (isFreeModel(m)) return "Grátis";
+    if (isFreeModel(m)) {
+      if (/nemotron|nvidia/.test(raw)) return "Grátis — Nemotron (NVIDIA)";
+      if (/llama/.test(raw)) return "Grátis — Llama";
+      if (/deepseek/.test(raw)) return "Grátis — DeepSeek";
+      if (/gemini|gemma/.test(raw)) return "Grátis — Google";
+      if (/qwen/.test(raw)) return "Grátis — Qwen";
+      return "Grátis";
+    }
+    if (/nemotron/.test(raw)) return "Nemotron (NVIDIA)";
     return modelFamily(m.rawId || m.id);
   }
+
   if (provider === "gateway") {
+    if (/nemotron/.test(raw)) return "Nemotron (NVIDIA)";
     return modelFamily(m.rawId || m.id);
   }
+
+  if (provider === "nvidia") {
+    if (isFreeModel(m)) return "Grátis";
+    if (/nemotron/.test(raw)) return "Nemotron (NVIDIA)";
+    if (/deepseek/.test(raw)) return "DeepSeek";
+    if (/llama/.test(raw)) return "Llama (Meta)";
+    if (/mistral|mixtral|nemo\b/.test(raw)) return "Mistral";
+    if (/gemma|diffusiongemma/.test(raw)) return "Gemma (Google)";
+    if (/qwen/.test(raw)) return "Qwen";
+    if (/granite|ibm/.test(raw)) return "Granite (IBM)";
+    if (/phi/.test(raw)) return "Phi (Microsoft)";
+    return modelFamily(m.rawId || m.id);
+  }
+
   return ""; // Gemini: lista curta, sem subgrupo.
 }
 
 export type SubGroup<T extends GroupableModel = GroupableModel> = { label: string; items: T[] };
 export type ProviderGroup<T extends GroupableModel = GroupableModel> = { provider: string; subgroups: SubGroup<T>[] };
 
-const PROVIDER_ORDER = ["combo", "gateway", "openrouter", "gemini"];
+const PROVIDER_ORDER = ["combo", "gateway", "nvidia", "openrouter", "gemini"];
 
 /**
- * Agrupa por provedor (na ordem combo → gateway → openrouter → gemini) e, dentro de cada
- * um, por subgrupo. "Grátis" vem primeiro; subgrupos sem rótulo, por último.
+ * Agrupa por provedor (na ordem combo → gateway → nvidia → openrouter → gemini) e, dentro de cada
+ * um, por subgrupo. "Grátis" e "Nemotron" vêm primeiro; subgrupos sem rótulo, por último.
  */
 export function groupModels<T extends GroupableModel>(models: T[]): ProviderGroup<T>[] {
   const byProvider: Record<string, T[]> = {};
@@ -126,8 +153,35 @@ export function groupModels<T extends GroupableModel>(models: T[]): ProviderGrou
       .sort((a, b) => {
         if (a === "Combos Virtuais") return -1;
         if (b === "Combos Virtuais") return 1;
+
+        // Grátis Nemotron e Grátis sempre no topo
+        if (a === "Grátis — Nemotron (NVIDIA)") return -1;
+        if (b === "Grátis — Nemotron (NVIDIA)") return 1;
         if (a === "Grátis") return -1;
         if (b === "Grátis") return 1;
+        if (a.startsWith("Grátis")) return -1;
+        if (b.startsWith("Grátis")) return 1;
+
+        // Nemotron da NVIDIA sempre em primeiro
+        if (a === "Nemotron (NVIDIA)") return -1;
+        if (b === "Nemotron (NVIDIA)") return 1;
+
+        // Famílias populares
+        if (a === "DeepSeek") return -1;
+        if (b === "DeepSeek") return 1;
+        if (a.startsWith("Llama")) return -1;
+        if (b.startsWith("Llama")) return 1;
+        if (a === "Claude") return -1;
+        if (b === "Claude") return 1;
+        if (a.startsWith("GPT")) return -1;
+        if (b.startsWith("GPT")) return 1;
+        if (a === "Mistral") return -1;
+        if (b === "Mistral") return 1;
+        if (a.startsWith("Gemma")) return -1;
+        if (b.startsWith("Gemma")) return 1;
+
+        if (a === "Outros" || a === "Outros NIM") return 1;
+        if (b === "Outros" || b === "Outros NIM") return -1;
         if (a === "") return 1;
         if (b === "") return -1;
         return a.localeCompare(b, "pt-BR");
@@ -141,6 +195,7 @@ export function groupModels<T extends GroupableModel>(models: T[]): ProviderGrou
 export const PROVIDER_LABEL: Record<string, string> = {
   combo: "⚡ Combos Virtuais (Resilientes)",
   gateway: "Gateway (Assinatura)",
+  nvidia: "NVIDIA NIM",
   openrouter: "OpenRouter",
   gemini: "Google Gemini",
 };

@@ -3,6 +3,7 @@ import { supabase, supabaseAdmin } from "@/lib/supabase";
 import { requireClientId } from "@/lib/tenant";
 import { listAvailableOpenRouterModels } from "@/lib/openrouter-model-discovery";
 import { listAvailableGatewayModels } from "@/lib/gateway-model-discovery";
+import { listAvailableNvidiaModels } from "@/lib/nvidia-model-discovery";
 import { formatModelRef } from "@/lib/ai-provider";
 
 // Lê com service role pra contornar RLS (mesmo motivo que ai-organize).
@@ -10,15 +11,15 @@ const adminClient = supabaseAdmin || supabase;
 
 /**
  * Modelo unificado exibido nos seletores. `id` é o valor STORABLE (com prefixo
- * de provedor pro OpenRouter/Gateway; "bare" pro Gemini — retrocompatível).
+ * de provedor pro OpenRouter/Gateway/NVIDIA; "bare" pro Gemini — retrocompatível).
  * `rawId` é o id puro do provedor (pra exibição). `provider` permite agrupar.
  */
 export type UnifiedModel = {
-  id: string;          // valor salvo no banco (ex: "gemini-2.5-flash", "openrouter:...", "gateway:gpt-5", "combo:principal")
+  id: string;          // valor salvo no banco (ex: "gemini-2.5-flash", "openrouter:...", "gateway:gpt-5", "combo:principal", "nvidia:meta/llama-3.1-70b-instruct")
   rawId: string;       // id puro do provedor (ex: "anthropic/claude-3.5-sonnet", "gpt-5", "principal")
   name: string;
   description?: string;
-  provider: "gemini" | "openrouter" | "gateway" | "combo";
+  provider: "gemini" | "openrouter" | "gateway" | "combo" | "nvidia";
   supportsTools: boolean;
 };
 
@@ -56,18 +57,18 @@ export async function GET(req: NextRequest) {
     const auth = await requireClientId(req);
     if (!auth.ok) return auth.response;
 
-    // Lê em 3 camadas pra retrocompat: (1) com gateway_endpoints; se a coluna não
+    // Lê em 3 camadas pra retrocompat: (1) com gateway_endpoints e nvidia_api_key; se a coluna não
     // existir, (2) com a coluna single legada; se nem essa, (3) só o básico.
     let cfg: Record<string, any> | null = null;
     const full = await adminClient
       .from("ai_organizer_config")
-      .select("api_key, openrouter_api_key, gateway_base_url, gateway_api_key, gateway_endpoints, ai_combos")
+      .select("api_key, openrouter_api_key, gateway_base_url, gateway_api_key, gateway_endpoints, ai_combos, nvidia_api_key")
       .eq("id", 1)
       .maybeSingle();
     if (full.error) {
       const mid2 = await adminClient
         .from("ai_organizer_config")
-        .select("api_key, openrouter_api_key, gateway_base_url, gateway_api_key, gateway_endpoints")
+        .select("api_key, openrouter_api_key, gateway_base_url, gateway_api_key, gateway_endpoints, ai_combos")
         .eq("id", 1)
         .maybeSingle();
       if (mid2.error) {
@@ -91,17 +92,17 @@ export async function GET(req: NextRequest) {
         cfg = (mid2.data as any) || null;
       }
     } else {
-      d: cfg = (full.data as any) || null;
+      cfg = (full.data as any) || null;
     }
 
     const { sanitizeCombos } = await import("@/lib/ai-combos");
     const configuredCombos = sanitizeCombos(cfg?.ai_combos);
 
-    const geminiKey = cfg?.api_key && String(cfg.api_key).trim() ? String(cfg.api_key).trim() : null;
-    const openrouterKey = cfg?.openrouter_api_key && String(cfg.openrouter_api_key).trim()
-      ? String(cfg.openrouter_api_key).trim() : null;
-    // "Configurado" = existe ao menos UMA conexão (lista nova OU legado single).
-    const { parseGatewayEndpoints } = await import("@/lib/ai-keys");
+    const { getAiKeys, parseGatewayEndpoints } = await import("@/lib/ai-keys");
+    const aiKeys = await getAiKeys();
+    const geminiKey = (cfg?.api_key && String(cfg.api_key).trim()) || aiKeys.gemini;
+    const nvidiaKey = (cfg?.nvidia_api_key && String(cfg.nvidia_api_key).trim()) || aiKeys.nvidia;
+    const openrouterKey = (cfg?.openrouter_api_key && String(cfg.openrouter_api_key).trim()) || aiKeys.openrouter;
     const { countActiveTokens } = await import("@/lib/deepseek-chat-manager");
     const hasDeepSeekTokens = countActiveTokens() > 0;
     const gatewayConfigured = parseGatewayEndpoints(
@@ -110,16 +111,16 @@ export async function GET(req: NextRequest) {
       cfg?.gateway_api_key || null,
     ).length > 0 || hasDeepSeekTokens;
 
-    if (!geminiKey && !openrouterKey && !gatewayConfigured) {
+    if (!geminiKey && !openrouterKey && !gatewayConfigured && !nvidiaKey) {
       return NextResponse.json({
         success: false,
-        error: "Nenhuma fonte de IA configurada. Salve sua chave Gemini/OpenRouter ou conecte o Gateway de Assinatura em Configurações.",
+        error: "Nenhuma fonte de IA configurada. Salve sua chave Gemini/OpenRouter/NVIDIA ou conecte o Gateway de Assinatura em Configurações.",
         models: [],
       });
     }
 
-    // Busca em paralelo as três fontes (real-time, sem hardcode).
-    const [gemini, openrouter, gateway] = await Promise.all([
+    // Busca em paralelo as fontes configuradas (real-time, sem hardcode).
+    const [gemini, openrouter, gateway, nvidia] = await Promise.all([
       geminiKey ? listGemini(geminiKey) : Promise.resolve([] as UnifiedModel[]),
       openrouterKey
         ? listAvailableOpenRouterModels().then((list) =>
@@ -150,6 +151,18 @@ export async function GET(req: NextRequest) {
             }));
           })
         : Promise.resolve([] as UnifiedModel[]),
+      nvidiaKey
+        ? listAvailableNvidiaModels().then((list) =>
+            list.map((m): UnifiedModel => ({
+              id: formatModelRef("nvidia", m.id),
+              rawId: m.id,
+              name: m.name,
+              description: m.description || "NVIDIA NIM AI Foundation Endpoint",
+              provider: "nvidia",
+              supportsTools: m.supportsTools,
+            }))
+          )
+        : Promise.resolve([] as UnifiedModel[]),
     ]);
 
     const comboModels: UnifiedModel[] = configuredCombos.map((c) => ({
@@ -161,13 +174,14 @@ export async function GET(req: NextRequest) {
       supportsTools: true,
     }));
 
-    const models = [...comboModels, ...gemini, ...openrouter, ...gateway];
+    const models = [...comboModels, ...gemini, ...openrouter, ...gateway, ...nvidia];
     return NextResponse.json({
       success: true,
       models,
       providers: {
         combo: { configured: comboModels.length > 0, count: comboModels.length },
         gemini: { configured: !!geminiKey, count: gemini.length },
+        nvidia: { configured: !!nvidiaKey, count: nvidia.length },
         openrouter: { configured: !!openrouterKey, count: openrouter.length },
         gateway: { configured: gatewayConfigured, count: gateway.length },
       },

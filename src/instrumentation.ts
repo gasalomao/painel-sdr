@@ -13,6 +13,7 @@ declare global {
   var followupTicking: boolean | undefined;
   var appointmentTicking: boolean | undefined;
   var appointmentTickN: number | undefined;
+  var sitesWorkerStarted: boolean | undefined;
 }
 
 /**
@@ -293,4 +294,25 @@ export async function register() {
       globalThis.appointmentTicking = false;
     }
   }, 1000 * 60); // 1 min
+
+  // ============================================================
+  // SITE STUDIO — Worker de criação e edição de sites por IA
+  // ============================================================
+  // Em desenvolvimento ou quando explicitamente habilitado,
+  // processa a fila de runs do Site Studio automaticamente.
+  if (!globalThis.sitesWorkerStarted && (process.env.SITES_WORKER_ENABLED === "true" || process.env.NODE_ENV === "development")) {
+    globalThis.sitesWorkerStarted = true;
+    process.env.SITES_WORKER_ENABLED = "true";
+    void (async () => {
+      try {
+        console.log("[SCHEDULER] 🌐 Iniciando Site Studio Worker in-process...");
+        const { startWebsiteWorker } = await import("@/lib/sites/worker");
+        const workerController = new AbortController();
+        await startWebsiteWorker(workerController.signal);
+      } catch (err: unknown) {
+        globalThis.sitesWorkerStarted = false;
+        console.error("[SCHEDULER] Site Studio Worker encerrou:", (err as Error)?.message || err);
+      }
+    })();
+  }
 }

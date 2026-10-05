@@ -44,6 +44,7 @@ const FEATURE_LIST = [
   { key: "historico",     label: "Histórico IA" },
   { key: "tokens",        label: "Tokens IA" },
   { key: "organizador",   label: "Organizador IA" },
+  { key: "sites",         label: "Sites IA" },
   { key: "configuracoes", label: "Configurações" },
 ];
 

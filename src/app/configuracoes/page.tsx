@@ -5,7 +5,7 @@ import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Settings2, Key, Save, CheckCircle2, XCircle, Loader2, Info, Database, Copy, ExternalLink, Check, Server, Plug, RefreshCw, Bot, Trash2, Plus, ChevronDown, ChevronRight, Zap, MoveUp, MoveDown, Play } from "lucide-react";
+import { Settings2, Key, Save, CheckCircle2, XCircle, Loader2, Info, Database, Copy, ExternalLink, Check, Server, Plug, RefreshCw, Bot, Trash2, Plus, ChevronDown, ChevronRight, Zap, MoveUp, MoveDown, Play, Cpu } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ModelOptions } from "@/components/ai-module-shared";
 import { AiCombosManager } from "@/components/ai-combos-manager";
@@ -27,6 +27,14 @@ export default function ConfiguracoesPage() {
   const [orSaving, setOrSaving] = useState(false);
   const [orTesting, setOrTesting] = useState(false);
   const [orTestResult, setOrTestResult] = useState<null | { ok: boolean; message: string; count?: number }>(null);
+
+  // NVIDIA NIM API Key (modelos NVIDIA AI Foundation Endpoints / NIM).
+  const [nvKey, setNvKey] = useState("");
+  const [hasNvKey, setHasNvKey] = useState(false);
+  const [nvSaving, setNvSaving] = useState(false);
+  const [nvTesting, setNvTesting] = useState(false);
+  const [nvTestResult, setNvTestResult] = useState<null | { ok: boolean; message: string; count?: number }>(null);
+  const [openNvidia, setOpenNvidia] = useState(false);
 
   // Gateway de Assinatura — usa CONTAS/assinaturas (Gemini, Claude, ChatGPT) via
   // um proxy local OpenAI-compatível, ao invés de gastar crédito de API. Agora é
@@ -417,6 +425,7 @@ export default function ConfiguracoesPage() {
         if (d.success && d.config) {
           setHasKey(!!d.config.has_api_key);
           setHasOrKey(!!d.config.has_openrouter_key);
+          setHasNvKey(!!d.config.has_nvidia_key);
           if (Array.isArray(d.config.openrouter_keys)) {
             setOrKeysList(d.config.openrouter_keys);
           }
@@ -545,6 +554,74 @@ export default function ConfiguracoesPage() {
       setOrTestResult({ ok: false, message: e.message });
     } finally {
       setOrTesting(false);
+    }
+  }
+
+  async function handleSaveNvidia() {
+    if (!nvKey.trim()) {
+      alert("Cole a API Key da NVIDIA (nvapi-...) antes de salvar.");
+      return;
+    }
+    setNvSaving(true);
+    try {
+      const r = await fetch("/api/ai-organize/config", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nvidia_api_key: nvKey.trim() }),
+      });
+      const d = await r.json();
+      if (!d.success) throw new Error(d.error || "Falha ao salvar");
+      setHasNvKey(true);
+      setNvKey("");
+      alert("API Key da NVIDIA salva com sucesso! Os modelos NVIDIA NIM agora estão disponíveis em todos os seletores de IA do sistema.");
+    } catch (e: any) {
+      alert("Erro: " + e.message);
+    } finally {
+      setNvSaving(false);
+    }
+  }
+
+  async function handleRemoveNvidia() {
+    if (!confirm("Tem certeza que deseja remover a API Key da NVIDIA?")) return;
+    setNvSaving(true);
+    try {
+      const r = await fetch("/api/ai-organize/config", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nvidia_api_key: "" }),
+      });
+      const d = await r.json();
+      if (!d.success) throw new Error(d.error || "Falha ao remover");
+      setHasNvKey(false);
+      setNvKey("");
+      setNvTestResult(null);
+    } catch (e: any) {
+      alert("Erro: " + e.message);
+    } finally {
+      setNvSaving(false);
+    }
+  }
+
+  async function handleTestNvidia() {
+    if (!nvKey.trim() && !hasNvKey) {
+      setNvTestResult({ ok: false, message: "Cole uma API Key para testar, ou salve primeiro." });
+      return;
+    }
+    setNvTesting(true);
+    setNvTestResult(null);
+    try {
+      const r = await fetch("/api/nvidia/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: nvKey.trim() }),
+      });
+      const d = await r.json();
+      if (!d.success) throw new Error(d.error || "Falha ao validar chave");
+      setNvTestResult({ ok: true, message: d.message || "Chave NVIDIA válida!", count: d.count });
+    } catch (e: any) {
+      setNvTestResult({ ok: false, message: e.message });
+    } finally {
+      setNvTesting(false);
     }
   }
 
@@ -1900,6 +1977,142 @@ export default function ConfiguracoesPage() {
                             <p className="font-bold">{orTestResult.message}</p>
                             {typeof orTestResult.count === "number" && (
                               <p className="text-[10px] opacity-70 mt-0.5">{orTestResult.count} modelos OpenRouter disponíveis.</p>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </CardContent>
+                  )}
+                </Card>
+
+                {/* NVIDIA NIM Card */}
+                <Card className="border-emerald-500/20 bg-emerald-500/[0.03] overflow-hidden transition-all duration-300 shadow-md">
+                  <CardHeader
+                    className="cursor-pointer hover:bg-white/[0.01] transition-all flex flex-row items-center justify-between space-y-0 p-5 select-none"
+                    onClick={() => setOpenNvidia(!openNvidia)}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="w-9 h-9 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-400 border border-emerald-500/20">
+                        <Cpu className="w-5 h-5" />
+                      </div>
+                      <div className="flex flex-col gap-0.5">
+                        <CardTitle className="text-sm font-bold uppercase tracking-wider">
+                          NVIDIA NIM / AI Foundation API Key
+                        </CardTitle>
+                        <p className="text-[10px] text-muted-foreground font-medium">
+                          {hasNvKey ? "Chave configurada — modelos NVIDIA disponíveis no sistema inteiro" : "Modelos Nemotron, Llama 3.3/3.1 NVIDIA, DeepSeek NVIDIA e outros"}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      {hasNvKey ? (
+                        <span className="text-[9px] bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+                          Ativa
+                        </span>
+                      ) : (
+                        <span className="text-[9px] bg-zinc-500/10 text-zinc-400 border border-zinc-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+                          Opcional
+                        </span>
+                      )}
+                      {openNvidia ? (
+                        <ChevronDown className="w-4 h-4 text-muted-foreground transition-transform duration-300" />
+                      ) : (
+                        <ChevronRight className="w-4 h-4 text-muted-foreground transition-transform duration-300" />
+                      )}
+                    </div>
+                  </CardHeader>
+                  {openNvidia && (
+                    <CardContent className="space-y-5 p-5 border-t border-white/5 animate-in fade-in slide-in-from-top-2 duration-200">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Status:</span>
+                        {loading ? (
+                          <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+                            <Loader2 className="w-3 h-3 animate-spin" /> Verificando…
+                          </span>
+                        ) : hasNvKey ? (
+                          <div className="flex items-center gap-3">
+                            <span className="text-[10px] font-black text-green-400 flex items-center gap-1">
+                              <CheckCircle2 className="w-3 h-3" /> Configurada (salva com segurança no banco)
+                            </span>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={handleRemoveNvidia}
+                              disabled={nvSaving}
+                              className="h-6 px-2 text-red-400 hover:text-red-300 hover:bg-red-500/10 text-[10px]"
+                            >
+                              Remover
+                            </Button>
+                          </div>
+                        ) : (
+                          <span className="text-[10px] font-black text-muted-foreground flex items-center gap-1">
+                            <XCircle className="w-3 h-3" /> Não configurada (adicione sua chave nvapi-... para liberar os modelos)
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-black uppercase tracking-widest text-emerald-400">
+                          {hasNvKey ? "Atualizar API Key da NVIDIA" : "Cole sua API Key da NVIDIA (NIM / AI Foundation)"}
+                        </label>
+                        <Input
+                          type="password"
+                          value={nvKey}
+                          onChange={e => setNvKey(e.target.value)}
+                          placeholder="nvapi-..."
+                          className="bg-black/40 border-white/10 font-mono text-xs text-white focus:border-emerald-400"
+                          autoComplete="off"
+                          spellCheck={false}
+                        />
+                        <p className="text-[9px] text-muted-foreground flex items-start gap-1 leading-relaxed">
+                          <Info className="w-3 h-3 shrink-0 mt-0.5" />
+                          Obtenha seus créditos e chave em {" "}
+                          <a
+                            href="https://build.nvidia.com"
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-emerald-400 underline decoration-dotted hover:text-emerald-300 font-medium"
+                          >
+                            build.nvidia.com
+                          </a>
+                          . A NVIDIA oferece 1.000 créditos gratuitos para testar modelos como Nemotron, Llama 3.3, Mistral, DeepSeek e outros. Ao salvar, os modelos aparecem automaticamente em todos os seletores do sistema (Agente SDR, Disparos, Sites IA, Combos, etc.).
+                        </p>
+                      </div>
+
+                      <div className="flex gap-2">
+                        <Button
+                          onClick={handleSaveNvidia}
+                          disabled={nvSaving || !nvKey.trim()}
+                          className="bg-emerald-500/20 text-emerald-100 border border-emerald-500/40 hover:bg-emerald-500/30 font-bold text-xs uppercase tracking-widest gap-2"
+                        >
+                          {nvSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                          Salvar
+                        </Button>
+                        <Button
+                          onClick={handleTestNvidia}
+                          disabled={nvTesting || (!nvKey.trim() && !hasNvKey)}
+                          variant="outline"
+                          className="bg-white/5 border-white/10 text-white hover:bg-white/10 font-bold text-xs uppercase tracking-widest"
+                        >
+                          {nvTesting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+                          Testar chave
+                        </Button>
+                      </div>
+
+                      {nvTestResult && (
+                        <div
+                          className={cn(
+                            "flex items-start gap-2 p-3 rounded-xl border text-[11px]",
+                            nvTestResult.ok
+                              ? "bg-green-500/10 border-green-500/30 text-green-200"
+                              : "bg-red-500/10 border-red-500/30 text-red-200"
+                          )}
+                        >
+                          {nvTestResult.ok ? <CheckCircle2 className="w-4 h-4 shrink-0" /> : <XCircle className="w-4 h-4 shrink-0" />}
+                          <div>
+                            <p className="font-bold">{nvTestResult.message}</p>
+                            {typeof nvTestResult.count === "number" && (
+                              <p className="text-[10px] opacity-70 mt-0.5">{nvTestResult.count} modelos NVIDIA disponíveis no sistema.</p>
                             )}
                           </div>
                         </div>

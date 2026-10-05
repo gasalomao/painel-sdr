@@ -62,14 +62,24 @@ describe("isFreeModel — convenção :free do OpenRouter", () => {
 });
 
 describe("subGroupLabel — rótulo dentro do provedor", () => {
-  it("openrouter grátis → 'Grátis' vem ANTES da família", () => {
+  it("openrouter grátis com nemotron → 'Grátis — Nemotron (NVIDIA)'", () => {
+    expect(
+      subGroupLabel({
+        id: "nvidia/llama-3.1-nemotron-70b-instruct:free",
+        rawId: "nvidia/llama-3.1-nemotron-70b-instruct:free",
+        provider: "openrouter",
+      })
+    ).toBe("Grátis — Nemotron (NVIDIA)");
+  });
+
+  it("openrouter grátis com llama → 'Grátis — Llama'", () => {
     expect(
       subGroupLabel({
         id: "meta-llama/llama-3.1-70b:free",
         rawId: "meta-llama/llama-3.1-70b:free",
         provider: "openrouter",
       })
-    ).toBe("Grátis");
+    ).toBe("Grátis — Llama");
   });
 
   it("openrouter pago → família do modelo", () => {
@@ -80,6 +90,26 @@ describe("subGroupLabel — rótulo dentro do provedor", () => {
         provider: "openrouter",
       })
     ).toBe("Claude");
+  });
+
+  it("nvidia nemotron → 'Nemotron (NVIDIA)'", () => {
+    expect(
+      subGroupLabel({
+        id: "nvidia:nvidia/nemotron-4-340b-instruct",
+        rawId: "nvidia/nemotron-4-340b-instruct",
+        provider: "nvidia",
+      })
+    ).toBe("Nemotron (NVIDIA)");
+  });
+
+  it("nvidia deepseek → 'DeepSeek'", () => {
+    expect(
+      subGroupLabel({
+        id: "nvidia:deepseek-ai/deepseek-v4.1-flash",
+        rawId: "deepseek-ai/deepseek-v4.1-flash",
+        provider: "nvidia",
+      })
+    ).toBe("DeepSeek");
   });
 
   it("gateway → sempre família (nunca 'Grátis')", () => {
@@ -110,11 +140,12 @@ describe("groupModels — ordem provedor + subgrupos", () => {
     { id: "meta-llama/llama-3:free", rawId: "meta-llama/llama-3:free", provider: "openrouter" },
     { id: "claude-3-5", rawId: "claude-3-5", provider: "gateway" },
     { id: "gpt-4o-mini", rawId: "gpt-4o-mini", provider: "gateway" },
+    { id: "nvidia:nvidia/nemotron-4-340b-instruct", rawId: "nvidia/nemotron-4-340b-instruct", provider: "nvidia" },
   ];
 
-  it("ordena provedores: gateway → openrouter → gemini", () => {
+  it("ordena provedores: gateway → nvidia → openrouter → gemini", () => {
     const groups = groupModels(models);
-    expect(groups.map((g) => g.provider)).toEqual(["gateway", "openrouter", "gemini"]);
+    expect(groups.map((g) => g.provider)).toEqual(["gateway", "nvidia", "openrouter", "gemini"]);
   });
 
   it("gateway vem primeiro (assinatura priorizada)", () => {
@@ -125,8 +156,18 @@ describe("groupModels — ordem provedor + subgrupos", () => {
   it("openrouter: 'Grátis' vem antes de famílias pagas", () => {
     const groups = groupModels(models);
     const or = groups.find((g) => g.provider === "openrouter")!;
-    expect(or.subgroups[0].label).toBe("Grátis");
+    expect(or.subgroups[0].label).toBe("Grátis — Llama");
     expect(or.subgroups[1].label).toBe("GPT (OpenAI)");
+  });
+
+  it("nvidia: Nemotron (NVIDIA) vem primeiro", () => {
+    const list: GroupableModel[] = [
+      { id: "nvidia:meta/llama-3.2-11b-vision-instruct", rawId: "meta/llama-3.2-11b-vision-instruct", provider: "nvidia" },
+      { id: "nvidia:nvidia/nemotron-4-340b-instruct", rawId: "nvidia/nemotron-4-340b-instruct", provider: "nvidia" },
+    ];
+    const groups = groupModels(list);
+    const nv = groups.find((g) => g.provider === "nvidia")!;
+    expect(nv.subgroups[0].label).toBe("Nemotron (NVIDIA)");
   });
 
   it("gateway: agrupa por família (GPT, Claude)", () => {
@@ -141,9 +182,10 @@ describe("groupModels — ordem provedor + subgrupos", () => {
     expect(groupModels([])).toEqual([]);
   });
 
-  it("PROVIDER_LABEL tem os 3 provedores", () => {
+  it("PROVIDER_LABEL tem os 4 provedores", () => {
     expect(PROVIDER_LABEL.gemini).toBeTruthy();
     expect(PROVIDER_LABEL.openrouter).toBeTruthy();
     expect(PROVIDER_LABEL.gateway).toBeTruthy();
+    expect(PROVIDER_LABEL.nvidia).toBe("NVIDIA NIM");
   });
 });

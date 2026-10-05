@@ -3,8 +3,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { runInNewContext } from "node:vm";
 
 const scriptPath = resolve(process.cwd(), "scripts/build-setup-sql.mjs");
+const websiteSql = readFileSync(resolve(process.cwd(), "migrations/016_website_studio.sql"), "utf8");
 const tempDirs: string[] = [];
 
 function makeTempProject(): string {
@@ -23,6 +25,7 @@ describe("scripts/build-setup-sql.mjs", () => {
     mkdirSync(join(cwd, "migrations"), { recursive: true });
     writeFileSync(join(cwd, "SETUP_COMPLETO.sql"), "SELECT 'RAIZ_ERRADA';\n", "utf8");
     writeFileSync(join(cwd, "migrations", "SETUP_COMPLETO.sql"), "SELECT 'CANONICA';\n", "utf8");
+    writeFileSync(join(cwd, "migrations", "016_website_studio.sql"), websiteSql, "utf8");
 
     const result = spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" });
 
@@ -31,6 +34,53 @@ describe("scripts/build-setup-sql.mjs", () => {
     expect(generated).toContain("SELECT 'CANONICA'");
     expect(generated).not.toContain("RAIZ_ERRADA");
     expect(generated).toContain("migrations/SETUP_COMPLETO.sql");
+    const sql = runInNewContext(generated.replace("export const SETUP_SQL =", "globalThis.sql =")) as string;
+    expect(sql).toBe(`SELECT 'CANONICA';\n\n\n${websiteSql.trim()}\n`);
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION public.website_complete_run");
+  });
+
+  it("preserva as fontes SQL reais no round-trip e gera saída determinística", () => {
+    const cwd = makeTempProject();
+    const canonical = readFileSync(resolve("migrations/SETUP_COMPLETO.sql"), "utf8");
+    mkdirSync(join(cwd, "migrations"));
+    writeFileSync(join(cwd, "migrations", "SETUP_COMPLETO.sql"), canonical);
+    writeFileSync(join(cwd, "migrations", "016_website_studio.sql"), websiteSql);
+
+    expect(spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" }).status).toBe(0);
+    const output = join(cwd, "src", "lib", "setup-sql.ts");
+    const generated = readFileSync(output, "utf8");
+    const sql = runInNewContext(generated.replace("export const SETUP_SQL =", "globalThis.sql =")) as string;
+    expect(sql).toBe(`${canonical}\n\n${websiteSql.trim()}\n`);
+    expect(spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" }).status).toBe(0);
+    expect(readFileSync(output, "utf8")).toBe(generated);
+  });
+
+  it("não duplica o SQL completo, mas não confunde uma função isolada com a migration", () => {
+    const cwd = makeTempProject();
+    mkdirSync(join(cwd, "migrations"));
+    writeFileSync(join(cwd, "migrations", "016_website_studio.sql"), websiteSql);
+    const base = join(cwd, "migrations", "SETUP_COMPLETO.sql");
+    writeFileSync(base, websiteSql);
+    expect(spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" }).status).toBe(0);
+    let generated = readFileSync(join(cwd, "src", "lib", "setup-sql.ts"), "utf8");
+    expect(generated.match(/CREATE TABLE IF NOT EXISTS public.website_settings/g)).toHaveLength(1);
+    writeFileSync(base, "CREATE OR REPLACE FUNCTION public.website_create_project");
+    expect(spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" }).status).toBe(0);
+    generated = readFileSync(join(cwd, "src", "lib", "setup-sql.ts"), "utf8");
+    expect(generated).toContain("CREATE OR REPLACE FUNCTION public.website_finish_deployment");
+  });
+
+  it("aborta sem a migration do Studio e preserva a saída existente", () => {
+    const cwd = makeTempProject();
+    mkdirSync(join(cwd, "migrations"));
+    mkdirSync(join(cwd, "src", "lib"), { recursive: true });
+    writeFileSync(join(cwd, "migrations", "SETUP_COMPLETO.sql"), "SELECT 1;");
+    const output = join(cwd, "src", "lib", "setup-sql.ts");
+    writeFileSync(output, "ANTIGO");
+    const result = spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("016_website_studio.sql não encontrado");
+    expect(readFileSync(output, "utf8")).toBe("ANTIGO");
   });
 
   it("a fonte canônica inclui colunas incrementais exigidas pelo runtime", () => {

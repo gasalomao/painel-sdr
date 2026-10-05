@@ -31,6 +31,7 @@ const PATH_TO_FEATURE: Record<string, string> = {
   "/tokens":       "tokens",
   "/organizador":  "organizador",
   "/configuracoes": "configuracoes",
+  "/sites":        "sites",
 };
 
 function getFeatureForPath(pathname: string): string | null {
@@ -59,6 +60,9 @@ export async function proxy(req: NextRequest) {
     pathname.startsWith("/api/deepseek-chat/import-bookmarklet") ||
     pathname.startsWith("/api/deepseek-chat/userscript.user.js") ||
     pathname.startsWith("/api/deepseek-chat/v1/") ||
+    // Site Studio: endpoint público de formulários dos sites publicados —
+    // validação real (origem, schema, rate limit, idempotência) é do handler.
+    pathname.startsWith("/api/sites/forms/") ||
     pathname === "/login" ||
     pathname === "/favicon.ico" ||
     pathname.match(/\.(png|jpg|svg|ico|webp)$/i)
@@ -126,7 +130,9 @@ export async function proxy(req: NextRequest) {
   const feature = getFeatureForPath(pathname);
   if (feature) {
     const features = claims.features || {};
-    const allowed = features[feature] !== false; // default = true se não setado
+    // "sites" é premium opt-in: exige flag true (mesma regra fail-closed
+    // do requireSitesContext nas APIs).
+    const allowed = feature === "sites" ? features[feature] === true : features[feature] !== false;
     if (!allowed) {
       const url = req.nextUrl.clone();
       url.pathname = "/";

@@ -56,7 +56,7 @@ export function withAiTimeout<T>(p: Promise<T>, label = "IA"): Promise<T> {
   return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
 
-export type AiProvider = "gemini" | "openrouter" | "gateway" | "combo";
+export type AiProvider = "gemini" | "openrouter" | "gateway" | "combo" | "nvidia";
 
 export interface ModelRef {
   provider: AiProvider;
@@ -66,6 +66,7 @@ export interface ModelRef {
 
 export const OPENROUTER_PREFIX = "openrouter:";
 export const GEMINI_PREFIX = "gemini:";
+export const NVIDIA_PREFIX = "nvidia:";
 /**
  * Gateway de ASSINATURA — proxy local OpenAI-compatible (ex: CLIProxyAPI) que
  * conversa com a sua CONTA logada (ChatGPT / Claude Pro-Max / Gemini) em vez de
@@ -73,6 +74,7 @@ export const GEMINI_PREFIX = "gemini:";
  */
 export const GATEWAY_PREFIX = "gateway:";
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+export const NVIDIA_BASE = "https://integrate.api.nvidia.com/v1";
 
 /**
  * Erro HTTP de provedor OpenAI-compatible (gateway/openrouter) que PRESERVA o
@@ -245,7 +247,7 @@ export function buildSystemMessage(
   const m = (model || "").toLowerCase();
   // Só vale a pena pra Claude (tem cache_control explícito). OpenAI/Gemini já
   // cacheiam implicitamente o prefixo estável — não precisam declarar.
-  if (provider !== "gateway" && provider !== "openrouter") {
+  if (provider !== "gateway" && provider !== "openrouter" && provider !== "nvidia") {
     return { role: "system", content: systemInstruction };
   }
   if (!/claude|anthropic/.test(m)) {
@@ -274,6 +276,9 @@ export function parseModelRef(ref: string | null | undefined): ModelRef {
   if (s.startsWith(GATEWAY_PREFIX)) {
     return { provider: "gateway", model: s.slice(GATEWAY_PREFIX.length).trim() };
   }
+  if (s.startsWith(NVIDIA_PREFIX)) {
+    return { provider: "nvidia", model: s.slice(NVIDIA_PREFIX.length).trim() };
+  }
   if (s.startsWith(OPENROUTER_PREFIX)) {
     return { provider: "openrouter", model: s.slice(OPENROUTER_PREFIX.length).trim() };
   }
@@ -289,6 +294,7 @@ export function parseModelRef(ref: string | null | undefined): ModelRef {
 export function formatModelRef(provider: AiProvider, model: string): string {
   const m = (model || "").trim();
   if (provider === "combo") return `${COMBO_PREFIX}${m}`;
+  if (provider === "nvidia") return `${NVIDIA_PREFIX}${m}`;
   if (provider === "openrouter") return `${OPENROUTER_PREFIX}${m}`;
   if (provider === "gateway") return `${GATEWAY_PREFIX}${m}`;
   return m; // Gemini fica "bare" pra retrocompatibilidade.
@@ -305,6 +311,7 @@ export function providerOf(ref: string | null | undefined): AiProvider {
  */
 export function providerDisplayName(p: AiProvider): string {
   if (p === "combo") return "Combo Virtual";
+  if (p === "nvidia") return "NVIDIA NIM";
   if (p === "openrouter") return "OpenRouter";
   if (p === "gateway") return "Gateway";
   return "Gemini";
@@ -447,6 +454,10 @@ export function prependAiErrorUsage(error: unknown, priorUsage: AiUsage): Error 
 
 function requireUsableOpenAIResponse(json: any, provider: AiProvider, model: string): any {
   const message = json?.choices?.[0]?.message || {};
+  const reasoning = String(message.reasoning_content || message.reasoning || message.thought || "").trim();
+  if (!message.content && reasoning) {
+    message.content = reasoning;
+  }
   const hasText = String(message.content || "").trim().length > 0;
   const hasTools = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
   if (!hasText && !hasTools) {
@@ -511,12 +522,14 @@ async function openAICompatibleChat(
   headers: Record<string, string>,
   label: string,
   endpointId?: string,
+  signal?: AbortSignal,
 ): Promise<any> {
+  signal?.throwIfAborted();
   const res = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(AI_CALL_TIMEOUT_MS),
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(AI_CALL_TIMEOUT_MS)]) : AbortSignal.timeout(AI_CALL_TIMEOUT_MS),
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -532,8 +545,24 @@ async function openAICompatibleChat(
   return json;
 }
 
-async function openRouterChat(apiKey: string, body: Record<string, any>, keyId?: string): Promise<any> {
-  return openAICompatibleChat(OPENROUTER_BASE, body, openRouterHeaders(apiKey), "OpenRouter", keyId);
+async function openRouterChat(apiKey: string, body: Record<string, any>, keyId?: string, signal?: AbortSignal): Promise<any> {
+  return openAICompatibleChat(OPENROUTER_BASE, body, openRouterHeaders(apiKey), "OpenRouter", keyId, signal);
+}
+
+export interface OpenRouterResponse {
+  model?: string;
+  choices?: Array<{ finish_reason?: string | null; message?: { role?: string; content?: string | null; tool_calls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>; images?: Array<{ image_url: { url: string } }> } }>;
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; attempts?: AiUsageAttempt[]; cost?: number };
+}
+
+export interface ControlledOpenRouterOptions {
+  openrouterApiKey?: string | null;
+  openrouterKeys?: string[] | null;
+  signal?: AbortSignal;
+  maxAttempts?: number;
+  attemptBudget?: { remaining: number };
+  allowImages?: boolean;
+  allowEmptyContent?: boolean;
 }
 
 /**
@@ -543,10 +572,11 @@ async function openRouterChat(apiKey: string, body: Record<string, any>, keyId?:
  * 401/403 → marca chave como MORTA (inválida) e tenta a PRÓXIMA chave.
  * 400 (Bad Request) → relança (erro de payload/modelo, trocar chave não resolve).
  */
-async function openRouterChatWithFailover(
-  body: Record<string, any>,
-  opts: { openrouterApiKey?: string | null; openrouterKeys?: string[] | null }
-): Promise<any> {
+export async function openRouterChatWithFailover(
+  body: Record<string, unknown>,
+  opts: ControlledOpenRouterOptions = {}
+): Promise<OpenRouterResponse> {
+  opts.signal?.throwIfAborted();
   const { markEndpointCooldown, markEndpointDead, isEndpointUnavailable } = await import("@/lib/gateway-cooldown");
 
   // Coleta lista inicial de chaves fornecidas explicitamente
@@ -595,14 +625,23 @@ async function openRouterChatWithFailover(
   // POR MODELO. Sem o modelo no ID, um único :free estourado colocava a
   // chave inteira em cooldown e derrubava TODOS os outros modelos.
   const model = String(body?.model || "");
+  let attempts = 0;
+  const maxAttempts = opts.maxAttempts === undefined ? Infinity : Math.max(1, Math.min(3, Math.trunc(opts.maxAttempts) || 1));
   for (const c of candidates) {
+    opts.signal?.throwIfAborted();
+    if (attempts >= maxAttempts || (opts.attemptBudget && opts.attemptBudget.remaining <= 0)) break;
     const coolId = model ? `${c.id}::${model}` : c.id;
     const coolLabel = model ? `${c.label}::${model}` : c.label;
     if (isEndpointUnavailable(c.id) || isEndpointUnavailable(coolId)) continue;
     try {
-      const json = await openRouterChat(c.key, body, coolId);
-      return withAccumulatedUsage(requireUsableOpenAIResponse(json, "openrouter", model), accumulatedUsage, "openrouter", model);
+      attempts++;
+      if (opts.attemptBudget) opts.attemptBudget.remaining--;
+      const json = await openRouterChat(c.key, body, coolId, opts.signal);
+      const hasImages = opts.allowImages && Array.isArray(json?.choices?.[0]?.message?.images) && json.choices[0].message.images.length > 0;
+      const allowEmpty = Boolean(opts.allowEmptyContent) || hasImages;
+      return withAccumulatedUsage(allowEmpty ? json : requireUsableOpenAIResponse(json, "openrouter", model), accumulatedUsage, "openrouter", model);
     } catch (err) {
+      if (opts.signal?.aborted) throw attachAiUsage(opts.signal.reason ?? err, accumulatedUsage);
       lastErr = err;
       if (err instanceof AiEmptyResponseError) {
         accumulatedUsage = addAiUsage(accumulatedUsage, err.usage);
@@ -703,7 +742,7 @@ interface GatewayCreds {
  * roda no caminho gateway, mantendo o ai-provider desacoplado do banco nos
  * caminhos Gemini/OpenRouter.
  */
-async function resolveGatewayCreds(opts: {
+export async function resolveGatewayCreds(opts: {
   gatewayBaseUrl?: string | null;
   gatewayApiKey?: string | null;
   fallbackModelRef?: string | null;
@@ -783,10 +822,11 @@ async function resolveGatewayCreds(opts: {
  * Ponto ÚNICO de injeção: usado tanto por generateText quanto pela sessão
  * (startOpenAICompatibleChat via deps.post) — cobre os dois caminhos de uma vez.
  */
-async function gatewayChatWithFailover(
+export async function gatewayChatWithFailover(
   model: string,
   body: Record<string, any>,
   primary: { baseUrl: string; apiKey: string | null; endpointId?: string },
+  opts?: { allowEmptyContent?: boolean },
 ): Promise<any> {
   const { listEndpointsForModel } = await import("@/lib/gateway-model-discovery");
   const { markEndpointCooldown, markEndpointDead, isEndpointUnavailable } = await import("@/lib/gateway-cooldown");
@@ -813,7 +853,7 @@ async function gatewayChatWithFailover(
     if (c.endpointId && isEndpointUnavailable(c.endpointId)) continue;
     try {
       const json = await gatewayChat(c.baseUrl, c.apiKey, body, c.endpointId);
-      return withAccumulatedUsage(requireUsableOpenAIResponse(json, "gateway", model), accumulatedUsage, "gateway", model);
+      return withAccumulatedUsage(opts?.allowEmptyContent ? json : requireUsableOpenAIResponse(json, "gateway", model), accumulatedUsage, "gateway", model);
     } catch (err) {
       lastErr = err;
       if (err instanceof AiEmptyResponseError) {
@@ -877,6 +917,8 @@ export interface GenerateTextOpts {
   maxOutputTokens?: number | null;
   /** Chave Gemini (se não vier, o caller deve garantir uma). */
   geminiApiKey?: string | null;
+  /** Chave NVIDIA NIM única. */
+  nvidiaApiKey?: string | null;
   /** Chave OpenRouter única ou lista/rotação multi-key. */
   openrouterApiKey?: string | null;
   /** Lista opcional de chaves OpenRouter para rotação multi-conta (9Router-style). */
@@ -940,6 +982,7 @@ function isAccountLevelError(err: unknown): boolean {
 /** Chaves mínimas que a escada precisa pra montar os rungs. */
 interface LadderKeys {
   gemini?: string | null;
+  nvidia?: string | null;
   openrouter?: string | null;
   openrouterKeys?: string[] | null;
   gatewayFallbackModel?: string | null;
@@ -987,7 +1030,12 @@ async function buildLadder(requestedRef: string, keys: LadderKeys | null): Promi
     push(best);
   }
 
-  // 3. Última rede de segurança: modelo OpenRouter barato e de alta disponibilidade (gpt-4o-mini)
+  // 3. Provedor NVIDIA NIM (se configurado)
+  if (keys?.nvidia) {
+    push("nvidia:meta/llama-3.1-70b-instruct", true);
+  }
+
+  // 4. Última rede de segurança: modelo OpenRouter barato e de alta disponibilidade (gpt-4o-mini)
   if (keys?.openrouter || (keys?.openrouterKeys?.length || 0) > 0) {
     push("openrouter:openai/gpt-4o-mini", true);
   }
@@ -996,12 +1044,13 @@ async function buildLadder(requestedRef: string, keys: LadderKeys | null): Promi
 }
 
 /** Lê as chaves pra montar a escada — best-effort (DB fora = escada vazia). */
-async function ladderKeys(opts: { geminiApiKey?: string | null; openrouterApiKey?: string | null; openrouterKeys?: string[] | null; fallbackModelRef?: string | null }): Promise<LadderKeys | null> {
+async function ladderKeys(opts: { geminiApiKey?: string | null; nvidiaApiKey?: string | null; openrouterApiKey?: string | null; openrouterKeys?: string[] | null; fallbackModelRef?: string | null }): Promise<LadderKeys | null> {
   try {
     const { getAiKeys } = await import("@/lib/ai-keys");
     const keys = await getAiKeys();
     return {
       gemini: opts.geminiApiKey || keys?.gemini || null,
+      nvidia: opts.nvidiaApiKey || keys?.nvidia || null,
       openrouter: opts.openrouterApiKey || keys?.openrouter || null,
       openrouterKeys: opts.openrouterKeys || keys?.openrouterKeys || null,
       gatewayFallbackModel: opts.fallbackModelRef || keys?.gatewayFallbackModel || null,
@@ -1084,6 +1133,32 @@ async function generateTextSingle(opts: GenerateTextOpts): Promise<GenerateTextR
     if (opts.jsonMode) body.response_format = { type: "json_object" };
     applyReasoning(body, resolveReasoningMode(opts.reasoningMode, opts.thinkingBudget), provider, model);
     const json = await gatewayChatWithFailover(model, body, { baseUrl: creds.baseUrl, apiKey: creds.apiKey, endpointId: creds.endpointId });
+    const text = String(json?.choices?.[0]?.message?.content || "").trim();
+    return { text, usage: openRouterUsage(json, provider, model), provider, modelUsed: model, didFallback: false };
+  }
+
+  if (provider === "nvidia") {
+    const { getAiKeys } = await import("@/lib/ai-keys");
+    const keys = await getAiKeys();
+    const apiKey = opts.nvidiaApiKey || keys?.nvidia;
+    if (!apiKey) throw new Error("API Key da NVIDIA NIM não configurada.");
+    const messages: any[] = [];
+    if (opts.system) messages.push(buildSystemMessage(opts.system, provider, model));
+    messages.push({ role: "user", content: opts.prompt });
+    const body: Record<string, any> = { model, messages };
+    if (opts.temperature != null && Number.isFinite(opts.temperature)) body.temperature = opts.temperature;
+    body.max_tokens = opts.maxOutputTokens != null ? opts.maxOutputTokens : 4096;
+    if (opts.jsonMode) body.response_format = { type: "json_object" };
+    applyReasoning(body, resolveReasoningMode(opts.reasoningMode, opts.thinkingBudget), provider, model);
+    const json = await openAICompatibleChat(
+      NVIDIA_BASE,
+      body,
+      {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      "NVIDIA NIM"
+    );
     const text = String(json?.choices?.[0]?.message?.content || "").trim();
     return { text, usage: openRouterUsage(json, provider, model), provider, modelUsed: model, didFallback: false };
   }
@@ -1256,6 +1331,8 @@ export interface StartAiChatOpts {
   reasoningMode?: 0 | 1 | 2 | 3 | null;
   thinkingBudget?: number | null;
   geminiApiKey?: string | null;
+  /** Chave NVIDIA NIM única. */
+  nvidiaApiKey?: string | null;
   openrouterApiKey?: string | null;
   /** Lista opcional de chaves OpenRouter para rotação multi-conta (9Router-style). */
   openrouterKeys?: string[] | null;
@@ -1298,6 +1375,7 @@ export async function startAiChat(opts: StartAiChatOpts): Promise<AiChatSession>
           modelRef: rung,
           noGatewayFallback: true,
           geminiApiKey: opts.geminiApiKey || resolvedKeys?.gemini || null,
+          nvidiaApiKey: opts.nvidiaApiKey || resolvedKeys?.nvidia || null,
           openrouterApiKey: opts.openrouterApiKey || resolvedKeys?.openrouter || null,
           openrouterKeys: opts.openrouterKeys || resolvedKeys?.openrouterKeys || null,
         });
@@ -1340,6 +1418,7 @@ export async function startAiChat(opts: StartAiChatOpts): Promise<AiChatSession>
               modelRef: rung,
               noGatewayFallback: true,
               geminiApiKey: opts.geminiApiKey || keys?.gemini || null,
+              nvidiaApiKey: opts.nvidiaApiKey || keys?.nvidia || null,
               openrouterApiKey: opts.openrouterApiKey || keys?.openrouter || null,
               openrouterKeys: opts.openrouterKeys || keys?.openrouterKeys || null,
             });
@@ -1470,6 +1549,26 @@ async function startAiChatSingle(opts: StartAiChatOpts): Promise<AiChatSession> 
     });
   }
 
+  if (provider === "nvidia") {
+    const { getAiKeys } = await import("@/lib/ai-keys");
+    const keys = await getAiKeys();
+    const apiKey = opts.nvidiaApiKey || keys?.nvidia;
+    if (!apiKey) throw new Error("API Key da NVIDIA NIM não configurada.");
+    return startOpenAICompatibleChat(opts, model, {
+      provider: "nvidia",
+      post: (body) =>
+        openAICompatibleChat(
+          NVIDIA_BASE,
+          body,
+          {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+          "NVIDIA NIM"
+        ),
+    });
+  }
+
   return startGeminiChat(opts, model);
 }
 
@@ -1547,13 +1646,13 @@ function startGeminiChat(opts: StartAiChatOpts, requestedModel: string): AiChatS
 
 interface OACChatDeps {
   /** Identidade do provedor pra rotular a sessão (modelUsed/erros). */
-  provider: "openrouter" | "gateway";
+  provider: "openrouter" | "gateway" | "nvidia";
   /** POST /chat/completions já com baseURL+headers do provedor. */
   post: (body: Record<string, any>) => Promise<any>;
 }
 
 function startOpenAICompatibleChat(opts: StartAiChatOpts, model: string, deps: OACChatDeps): AiChatSession {
-  const providerLabel = deps.provider === "gateway" ? "Gateway de assinatura" : "OpenRouter";
+  const providerLabel = deps.provider === "gateway" ? "Gateway de assinatura" : deps.provider === "nvidia" ? "NVIDIA NIM" : "OpenRouter";
 
   const tools = opts.tools.length > 0
     ? opts.tools.map((d) => ({
@@ -1588,7 +1687,7 @@ function startOpenAICompatibleChat(opts: StartAiChatOpts, model: string, deps: O
     if (temp !== undefined) body.temperature = temp;
     if (opts.maxOutputTokens != null) {
       body.max_tokens = opts.maxOutputTokens;
-    } else if (deps.provider === "openrouter") {
+    } else if (deps.provider === "openrouter" || deps.provider === "nvidia") {
       body.max_tokens = 4096;
     }
     applyReasoning(body, rMode, deps.provider, model);

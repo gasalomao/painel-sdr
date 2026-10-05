@@ -11,6 +11,7 @@ import { requireClientId } from "@/lib/tenant";
 import { listAvailableOpenRouterModels } from "@/lib/openrouter-model-discovery";
 import { formatModelRef } from "@/lib/ai-provider";
 import { listAvailableGatewayModels } from "@/lib/gateway-model-discovery";
+import { listAvailableNvidiaModels } from "@/lib/nvidia-model-discovery";
 import { parseGatewayEndpoints } from "@/lib/ai-keys";
 
 export const dynamic = "force-dynamic";
@@ -21,19 +22,21 @@ const KEY = "lead_intelligence_model";
 // isso ficava preso na versão antiga quando o admin não trocava.
 const DEFAULT_MODEL = "";
 
-type ModelOpt = { id: string; rawId: string; name: string; description?: string; provider: "gemini" | "openrouter" | "gateway"; supportsTools: boolean };
+type ModelOpt = { id: string; rawId: string; name: string; description?: string; provider: "gemini" | "openrouter" | "gateway" | "nvidia"; supportsTools: boolean };
 
-// Lista unificada Gemini + OpenRouter + Gateway (mesma fonte do /api/ai-models).
+// Lista unificada Gemini + OpenRouter + Gateway + NVIDIA (mesma fonte do /api/ai-models).
 async function listAllModels(): Promise<ModelOpt[]> {
   const { data: cfg } = await supabaseAdmin
     .from("ai_organizer_config")
-    .select("api_key, openrouter_api_key, gateway_base_url, gateway_api_key, gateway_endpoints")
+    .select("api_key, openrouter_api_key, gateway_base_url, gateway_api_key, gateway_endpoints, nvidia_api_key")
     .eq("id", 1)
     .maybeSingle();
 
-  const geminiKey = cfg?.api_key && String(cfg.api_key).trim() ? String(cfg.api_key).trim() : null;
-  const openrouterKey = (cfg as any)?.openrouter_api_key && String((cfg as any).openrouter_api_key).trim()
-    ? String((cfg as any).openrouter_api_key).trim() : null;
+  const { getAiKeys } = await import("@/lib/ai-keys");
+  const aiKeys = await getAiKeys();
+  const geminiKey = (cfg?.api_key && String(cfg.api_key).trim()) || aiKeys.gemini;
+  const nvidiaKey = ((cfg as any)?.nvidia_api_key && String((cfg as any).nvidia_api_key).trim()) || aiKeys.nvidia;
+  const openrouterKey = ((cfg as any)?.openrouter_api_key && String((cfg as any).openrouter_api_key).trim()) || aiKeys.openrouter;
   const gatewayConfigured = parseGatewayEndpoints(
     (cfg as any)?.gateway_endpoints,
     (cfg as any)?.gateway_base_url || null,
@@ -59,6 +62,13 @@ async function listAllModels(): Promise<ModelOpt[]> {
     } catch { return []; }
   })();
 
+  const nvP: Promise<ModelOpt[]> = nvidiaKey
+    ? listAvailableNvidiaModels().then(list => list.map((m): ModelOpt => ({
+        id: formatModelRef("nvidia", m.id), rawId: m.id, name: m.name, description: m.description,
+        provider: "nvidia", supportsTools: m.supportsTools,
+      })))
+    : Promise.resolve([]);
+
   const orP: Promise<ModelOpt[]> = openrouterKey
     ? listAvailableOpenRouterModels().then(list => list.map((m): ModelOpt => ({
         id: formatModelRef("openrouter", m.id), rawId: m.id, name: m.name, description: m.description,
@@ -83,8 +93,8 @@ async function listAllModels(): Promise<ModelOpt[]> {
       })
     : Promise.resolve([]);
 
-  const [g, o, gw] = await Promise.all([geminiP, orP, gwP]);
-  return [...g, ...o, ...gw];
+  const [g, nv, o, gw] = await Promise.all([geminiP, nvP, orP, gwP]);
+  return [...g, ...nv, ...o, ...gw];
 }
 
 export async function GET() {

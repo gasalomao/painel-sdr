@@ -411,6 +411,7 @@ export async function POST(req: NextRequest) {
     //    (sempre Gemini), mesmo quando o chat roda no OpenRouter.
     const geminiApiKey = agentConfig.options?.gemini_api_key || orgConfig?.api_key || null;
     const openrouterApiKey = agentConfig.options?.openrouter_api_key || (orgConfig as any)?.openrouter_api_key || null;
+    const nvidiaApiKey = agentConfig.options?.nvidia_api_key || (orgConfig as any)?.nvidia_api_key || null;
     const finalApiKey = geminiApiKey; // RAG/embeddings
 
     // 5. Prompt Base — expande variáveis {{kb:Título}} + variáveis dinâmicas ({{saudacao}}, etc)
@@ -1237,6 +1238,7 @@ ${capturedVariablesPrompt}
       reasoningMode,
       geminiApiKey,
       openrouterApiKey,
+      nvidiaApiKey,
     });
 
     let turn = await session.sendUser(firstTurnMessage);

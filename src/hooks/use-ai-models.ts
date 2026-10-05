@@ -21,7 +21,7 @@ export type AiModel = {
   rawId?: string;        // id puro do provedor (exibição)
   name: string;
   description?: string;
-  provider?: "gemini" | "openrouter" | "gateway";
+  provider?: "gemini" | "openrouter" | "gateway" | "combo" | "nvidia";
   supportsTools?: boolean;
 };
 

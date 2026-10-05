@@ -135,6 +135,7 @@ ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS gateway_fallback
 ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS gateway_endpoints jsonb DEFAULT '[]'::jsonb;
 ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS openrouter_keys jsonb DEFAULT '[]'::jsonb;
 ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS ai_combos jsonb DEFAULT '[]'::jsonb;
+ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS nvidia_api_key text;
 
 CREATE TABLE IF NOT EXISTS public.ai_organizer_runs (
   id              BIGSERIAL PRIMARY KEY,

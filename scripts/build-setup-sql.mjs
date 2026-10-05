@@ -12,7 +12,18 @@ if (!existsSync(sqlPath)) {
   process.exit(1);
 }
 
-const sql = readFileSync(sqlPath, "utf8");
+const APPENDED_MIGRATIONS = ["016_website_studio.sql"];
+
+let sql = readFileSync(sqlPath, "utf8");
+for (const migration of APPENDED_MIGRATIONS) {
+  const migrationPath = join(root, "migrations", migration);
+  if (!existsSync(migrationPath)) {
+    console.error(`[build-setup-sql] migrations/${migration} não encontrado — geração abortada.`);
+    process.exit(1);
+  }
+  const incremental = readFileSync(migrationPath, "utf8").trim();
+  if (!sql.includes(incremental)) sql += `\n\n${incremental}\n`;
+}
 
 // Escapa pra caber num template string (backtick) do JS.
 const escaped = sql

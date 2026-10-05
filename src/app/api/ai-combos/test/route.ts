@@ -43,6 +43,7 @@ export async function POST(req: NextRequest) {
           prompt,
           geminiApiKey: keys.gemini,
           openrouterApiKey: keys.openrouter,
+          nvidiaApiKey: keys.nvidia,
           gatewayBaseUrl: keys.gatewayBaseUrl,
           gatewayApiKey: keys.gatewayApiKey,
           maxOutputTokens: 20,

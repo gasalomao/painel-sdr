@@ -56,9 +56,11 @@ export interface AiKeys {
   gatewayEndpoints: GatewayEndpoint[];
   /** Combos/Filas de IA salvas em ai_organizer_config.ai_combos */
   aiCombos: AiCombo[];
+  /** Chave NVIDIA NIM (ai_organizer_config.nvidia_api_key). */
+  nvidia: string | null;
 }
 
-const EMPTY_KEYS: AiKeys = {
+export const EMPTY_KEYS: AiKeys = {
   gemini: null,
   openrouter: null,
   openrouterKeys: [],
@@ -67,6 +69,7 @@ const EMPTY_KEYS: AiKeys = {
   gatewayFallbackModel: null,
   gatewayEndpoints: [],
   aiCombos: [],
+  nvidia: null,
 };
 
 /** Normaliza um valor de coluna texto pra string-ou-null (trim, vazio→null). */
@@ -145,34 +148,43 @@ export async function getAiKeys(force = false): Promise<AiKeys> {
     let d: Record<string, unknown>;
     const full = await adminClient
       .from("ai_organizer_config")
-      .select("api_key, openrouter_api_key, openrouter_keys, gateway_base_url, gateway_api_key, gateway_fallback_model, gateway_endpoints, ai_combos")
+      .select("api_key, openrouter_api_key, openrouter_keys, gateway_base_url, gateway_api_key, gateway_fallback_model, gateway_endpoints, ai_combos, nvidia_api_key")
       .eq("id", 1)
       .maybeSingle();
     if (full.error) {
-      // Pode faltar ai_combos ou gateway_endpoints: tenta sem ai_combos
-      const mid2 = await adminClient
+      // Pode faltar nvidia_api_key ou ai_combos: tenta sem nvidia_api_key
+      const withCombos = await adminClient
         .from("ai_organizer_config")
-        .select("api_key, openrouter_api_key, openrouter_keys, gateway_base_url, gateway_api_key, gateway_fallback_model, gateway_endpoints")
+        .select("api_key, openrouter_api_key, openrouter_keys, gateway_base_url, gateway_api_key, gateway_fallback_model, gateway_endpoints, ai_combos")
         .eq("id", 1)
         .maybeSingle();
-      if (mid2.error) {
-        const mid = await adminClient
+      if (withCombos.error) {
+        const mid2 = await adminClient
           .from("ai_organizer_config")
-          .select("api_key, openrouter_api_key, gateway_base_url, gateway_api_key, gateway_fallback_model")
+          .select("api_key, openrouter_api_key, openrouter_keys, gateway_base_url, gateway_api_key, gateway_fallback_model, gateway_endpoints")
           .eq("id", 1)
           .maybeSingle();
-        if (mid.error) {
-          const base = await adminClient
+        if (mid2.error) {
+          const mid = await adminClient
             .from("ai_organizer_config")
-            .select("api_key, openrouter_api_key")
+            .select("api_key, openrouter_api_key, gateway_base_url, gateway_api_key, gateway_fallback_model")
             .eq("id", 1)
             .maybeSingle();
-          d = (base.data || {}) as Record<string, unknown>;
+          if (mid.error) {
+            const base = await adminClient
+              .from("ai_organizer_config")
+              .select("api_key, openrouter_api_key")
+              .eq("id", 1)
+              .maybeSingle();
+            d = (base.data || {}) as Record<string, unknown>;
+          } else {
+            d = (mid.data || {}) as Record<string, unknown>;
+          }
         } else {
-          d = (mid.data || {}) as Record<string, unknown>;
+          d = (mid2.data || {}) as Record<string, unknown>;
         }
       } else {
-        d = (mid2.data || {}) as Record<string, unknown>;
+        d = (withCombos.data || {}) as Record<string, unknown>;
       }
     } else {
       d = (full.data || {}) as Record<string, unknown>;
@@ -180,6 +192,15 @@ export async function getAiKeys(force = false): Promise<AiKeys> {
     const gatewayBaseUrl = txt(d.gateway_base_url);
     const gatewayApiKey = txt(d.gateway_api_key);
     const openrouter = txt(d.openrouter_api_key);
+    let nvidiaKey = txt(d.nvidia_api_key) || process.env.NVIDIA_API_KEY || null;
+    if (!nvidiaKey) {
+      try {
+        const appSet = await adminClient.from("app_settings").select("value").eq("key", "nvidia_api_key").maybeSingle();
+        if (appSet.data?.value) {
+          nvidiaKey = txt(appSet.data.value);
+        }
+      } catch { /* fallback */ }
+    }
     const keys: AiKeys = {
       gemini: txt(d.api_key),
       openrouter,
@@ -189,6 +210,7 @@ export async function getAiKeys(force = false): Promise<AiKeys> {
       gatewayFallbackModel: txt(d.gateway_fallback_model),
       gatewayEndpoints: parseGatewayEndpoints(d.gateway_endpoints, gatewayBaseUrl, gatewayApiKey),
       aiCombos: sanitizeCombos(d.ai_combos),
+      nvidia: nvidiaKey,
     };
     CACHE = { keys, at: Date.now() };
     return keys;
