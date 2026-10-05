@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { toast } from "sonner";
-import { Bot, Loader2, Paperclip, Send, Sparkles } from "lucide-react";
+import { Bot, Info, Loader2, Paperclip, Send, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { assistantText, parseSystemEvent, runStatusLabel, safeSiteUrl } from "@/lib/sites/ui-helpers";
@@ -313,39 +313,41 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
         <div className="max-h-48 space-y-2 overflow-auto">{assets.map((asset) => <label key={asset.id} className="flex min-h-10 items-center gap-2 text-xs"><input type="checkbox" className="size-4 accent-primary" checked={selected.includes(asset.id)} disabled={!selected.includes(asset.id) && selected.length >= 12} onChange={(event) => setSelected((prev) => event.target.checked ? [...prev, asset.id] : prev.filter((id) => id !== asset.id))} />{safeSiteUrl(asset.url) && <Image unoptimized src={asset.url!} width={32} height={32} alt="" className="size-8 rounded object-cover" />}<span className="break-all">{asset.name}</span></label>)}</div>
       </div>
     </details>
-    <form className="space-y-2" onSubmit={(event) => { event.preventDefault(); void send(); }}>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <label htmlFor="site-prompt" className="text-xs font-medium">Seu pedido</label>
-        <div className="flex items-center gap-2">
-          <div className="relative flex items-center">
+    <form className="space-y-2.5" onSubmit={(event) => { event.preventDefault(); void send(); }}>
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <label htmlFor="site-prompt" className="text-xs font-semibold tracking-tight text-foreground">
+            Seu pedido
+          </label>
+          <div className="relative flex items-center gap-1 shrink-0">
             <button
               type="button"
               id="skills-toggle-btn"
               onClick={() => void toggleImpeccable()}
-              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-all shadow-xs cursor-pointer border ${
+              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-all shadow-xs cursor-pointer border whitespace-nowrap ${
                 isImpeccableActive
-                  ? "bg-primary/15 hover:bg-primary/25 border-primary/40 text-primary"
+                  ? "bg-primary/15 hover:bg-primary/25 border-primary/40 text-primary font-semibold"
                   : "bg-muted/40 hover:bg-muted border-border text-muted-foreground opacity-75"
               }`}
               title={isImpeccableActive ? "Impeccable Design Ativo (clique para desativar)" : "Impeccable Design Desativado (clique para ativar)"}
             >
-              <Sparkles className={`size-3 ${isImpeccableActive ? "text-primary" : "text-muted-foreground"}`} aria-hidden="true" />
-              <span>{isImpeccableActive ? "✨ Impeccable: Ativo" : "Impeccable: Desativado"}</span>
+              <Sparkles className={`size-3 shrink-0 ${isImpeccableActive ? "text-primary" : "text-muted-foreground"}`} aria-hidden="true" />
+              <span>Impeccable: {isImpeccableActive ? "Ativo" : "Desativado"}</span>
             </button>
             <button
               type="button"
               onClick={() => setSkillsOpen((prev) => !prev)}
-              className="ml-1 p-0.5 text-muted-foreground hover:text-foreground text-[10px] rounded hover:bg-muted cursor-pointer"
+              className="p-1 text-muted-foreground hover:text-foreground rounded-md hover:bg-muted/80 cursor-pointer transition-colors"
               title="Ver detalhes da diretriz Impeccable Design"
               aria-label="Ver detalhes da skill"
             >
-              ℹ️
+              <Info className="size-3.5" aria-hidden="true" />
             </button>
 
             {skillsOpen && (
               <div
                 ref={skillsPopoverRef}
-                className="absolute right-0 sm:left-0 sm:right-auto bottom-full mb-2 z-50 w-80 sm:w-96 flex flex-col rounded-xl border border-border bg-popover/95 backdrop-blur-md p-3.5 shadow-2xl text-popover-foreground animate-in fade-in-50 zoom-in-95 duration-100"
+                className="absolute right-0 bottom-full mb-2 z-50 w-80 sm:w-96 flex flex-col rounded-xl border border-border bg-popover/95 backdrop-blur-md p-3.5 shadow-2xl text-popover-foreground animate-in fade-in-50 zoom-in-95 duration-100"
               >
                 <div className="flex items-center justify-between pb-2 border-b border-border/60">
                   <div className="flex items-center gap-1.5">
@@ -391,15 +393,17 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
               </div>
             )}
           </div>
-          <div className="flex items-center gap-1.5">
-            <span className="text-[11px] text-muted-foreground flex items-center gap-1">
-              <Bot className="size-3 text-primary" aria-hidden="true" />
-              Modelo:
-            </span>
+        </div>
+
+        <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-card/60 px-2.5 py-1.5 shadow-2xs transition-colors hover:border-border">
+          <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground shrink-0 select-none">
+            <Bot className="size-3.5 text-primary shrink-0" aria-hidden="true" />
+            <span>Modelo:</span>
+          </div>
           <select
             id="chat-model-select"
             aria-label="Modelo de IA para este pedido"
-            className="h-6 rounded border border-border/80 bg-background px-1.5 text-[11px] text-foreground outline-none transition-colors focus:border-primary max-w-[220px] truncate cursor-pointer"
+            className="h-6 flex-1 min-w-0 bg-transparent text-[11px] font-medium text-foreground outline-none cursor-pointer truncate pr-1"
             value={activeModelMode === "manual" ? (activeModelId || "") : activeModelMode}
             disabled={sending || project?.status === "archived"}
             onChange={(e) => void switchModel(e.target.value)}
@@ -469,7 +473,6 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
               </>
             )}
           </select>
-        </div>
         </div>
       </div>
       <Textarea id="site-prompt" rows={3} maxLength={16000} value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Crie uma página com serviços e contato por WhatsApp" disabled={sending} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />
