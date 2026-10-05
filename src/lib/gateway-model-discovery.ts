@@ -37,7 +37,8 @@ export type GatewayModel = {
 
 type Cache = { models: GatewayModel[]; at: number };
 let CACHE: Cache | null = null;
-const TTL_MS = 10 * 60 * 1000;
+const TTL_MS = 2 * 60 * 1000;
+const ENDPOINT_MODELS_CACHE = new Map<string, { models: GatewayModel[]; at: number }>();
 
 /**
  * Mapa modelId → conexão de origem, preenchido durante a descoberta. É o que
@@ -142,49 +143,73 @@ async function fetchEndpointModels(ep: GatewayEndpoint): Promise<GatewayModel[]>
 }
 
 /**
- * Lista modelos expostos por TODAS as conexões de gateway. Cache 10 min.
+ * Lista modelos expostos por TODAS as conexões de gateway. Cache 2 min.
  * Retorna [] se nenhuma conexão estiver configurada ou todos os proxies fora.
  * Se o mesmo modelId aparecer em duas contas, a PRIMEIRA conexão (ordem da
  * lista) ganha o roteamento — evita ambiguidade.
+ *
+ * Cache individual por endpoint: se uma conexão falhar temporariamente (ex: timeout
+ * de rede ou proxy reiniciando), os modelos previamente descobertos daquela conexão
+ * são preservados e NÃO são apagados pelos outros endpoints bem-sucedidos.
  */
 export async function listAvailableGatewayModels(force = false): Promise<GatewayModel[]> {
-  if (!force && CACHE && Date.now() - CACHE.at < TTL_MS) return CACHE.models;
+  if (!force && CACHE && Date.now() - CACHE.at < TTL_MS && CACHE.models.length > 0) return CACHE.models;
 
   const endpoints = await getEndpoints();
   if (!endpoints.length) {
     CACHE = { models: [], at: Date.now() };
     MODEL_ENDPOINT.clear();
+    MODEL_ENDPOINTS.clear();
+    ENDPOINT_MODELS_CACHE.clear();
     return [];
   }
 
-  // Todas as conexões em paralelo; uma fora não derruba as outras.
-  const settled = await Promise.allSettled(endpoints.map((ep) => fetchEndpointModels(ep)));
-
-  // Se TUDO falhou, mantém o cache anterior (não apaga modelos por uma queda
-  // temporária do proxy) — só zera se realmente não havia cache.
-  const allFailed = settled.every((s) => s.status === "fulfilled" && s.value.length === 0);
-  if (allFailed && CACHE?.models.length) return CACHE.models;
+  // Todas as conexões em paralelo com tolerância individual
+  const settled = await Promise.allSettled(
+    endpoints.map(async (ep) => {
+      const cached = ENDPOINT_MODELS_CACHE.get(ep.id);
+      if (!force && cached && Date.now() - cached.at < TTL_MS && cached.models.length > 0) {
+        return { ep, models: cached.models };
+      }
+      const fetched = await fetchEndpointModels(ep);
+      if (fetched.length > 0) {
+        ENDPOINT_MODELS_CACHE.set(ep.id, { models: fetched, at: Date.now() });
+        return { ep, models: fetched };
+      }
+      // Se a conexão falhou nesta rodada mas temos cache anterior dela, preserva
+      if (cached && cached.models.length > 0) {
+        return { ep, models: cached.models };
+      }
+      return { ep, models: [] };
+    })
+  );
 
   const epById = new Map(endpoints.map((e) => [e.id, e]));
   const merged: GatewayModel[] = [];
   const seen = new Set<string>();
   MODEL_ENDPOINT.clear();
   MODEL_ENDPOINTS.clear();
+
   for (let i = 0; i < settled.length; i++) {
     const r = settled[i];
     if (r.status !== "fulfilled") continue;
-    for (const m of r.value) {
-      const ep = epById.get(m.endpointId);
-      if (!ep) continue;
+    const { ep, models } = r.value;
+    for (const m of models) {
+      const endpoint = epById.get(m.endpointId) || ep;
       // Plural: acumula TODAS as conexões que expõem este modelo (ordem do banco).
       const arr = MODEL_ENDPOINTS.get(m.id) || [];
-      if (!arr.some((x) => x.id === ep.id)) arr.push(ep);
+      if (!arr.some((x) => x.id === endpoint.id)) arr.push(endpoint);
       MODEL_ENDPOINTS.set(m.id, arr);
       if (seen.has(m.id)) continue; // primeira conexão a expor o id vence (singular)
       seen.add(m.id);
       merged.push(m);
-      MODEL_ENDPOINT.set(m.id, ep);
+      MODEL_ENDPOINT.set(m.id, endpoint);
     }
+  }
+
+  // Se tudo falhou nesta rodada mas tínhamos cache global anterior com modelos, mantém
+  if (!merged.length && CACHE?.models.length) {
+    return CACHE.models;
   }
 
   CACHE = { models: merged, at: Date.now() };
@@ -225,6 +250,7 @@ export async function resolveGatewayEndpointForModel(modelId: string): Promise<G
 /** Invalida o cache — usar quando o admin trocar/adicionar/remover conexões. */
 export function invalidateGatewayModelsCache() {
   CACHE = null;
+  ENDPOINT_MODELS_CACHE.clear();
   MODEL_ENDPOINT.clear();
   MODEL_ENDPOINTS.clear();
 }

@@ -1,3 +1,4 @@
+import { DESIGN_DIRECTION_FIELDS } from "../impeccable";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { AiEmptyResponseError, ProviderHttpError } from "@/lib/ai-provider";
@@ -105,7 +106,7 @@ function fakeClient(): SupabaseClient {
   } as unknown as SupabaseClient;
 }
 
-import { WebsiteLeaseLost, claimWebsiteRun, createWebsiteAgentDependencies, executeWebsiteRun, startWebsiteWorker, type ClaimedRun } from "../worker";
+import { compactHistoryMessages, WebsiteLeaseLost, claimWebsiteRun, createWebsiteAgentDependencies, executeWebsiteRun, startWebsiteWorker, type ClaimedRun } from "../worker";
 
 const CLIENT = "00000000-0000-0000-0000-000000000001";
 const PROJECT = "00000000-0000-0000-0000-000000000010";
@@ -140,7 +141,7 @@ beforeEach(() => {
     clients: [{ id: CLIENT, is_active: true, is_admin: false, features: { sites: true } }],
     website_projects: [{ id: PROJECT, client_id: CLIENT, current_revision_id: REVISION, deleted_at: null, name: "Site", slug: "site", cta: { type: "form", value: "" }, client_context: {}, instructions: "", model_mode: "auto", model_id: null, selected_skill_ids: [] }],
     website_revisions: [{ id: REVISION, client_id: CLIENT, project_id: PROJECT, files: {} }],
-    website_skills: [],
+    website_skills: [{ id: WORKER, client_id: CLIENT, slug: "impeccable-design", is_enabled: false, instructions: "Worker infrastructure fixture: design disabled", version: 3 }],
     website_runs: [runRow()],
     website_messages: [],
   };
@@ -620,4 +621,45 @@ describe("website worker", () => {
     expect(state.chat).toHaveBeenCalledTimes(1);
     expect(state.tables.website_messages.some((row) => row.role === "system" && String(row.content).includes("checkpoint"))).toBe(true);
   });
+
+  it("compacts older assistant history and strips huge code blocks to economize tokens", () => {
+    const rawMessages = [
+      { role: "user", run_id: RUN, content: "mude a cor para verde" }, // Mensagem do run atual (deve ser filtrada)
+      { role: "assistant", run_id: "prior-1", content: "🎯 **Skills ativas aplicadas:** Impeccable Design\n\n```css\n" + ".btn { color: red; }\n".repeat(30) + "```\n\nAdicionei o botão de WhatsApp no header com contraste adequado." },
+      { role: "user", run_id: "prior-1", content: "coloque o whatsapp no topo" },
+      { role: "assistant", run_id: "prior-2", content: "🎯 **Skills ativas aplicadas:** Impeccable Design\n\n```tsx\n" + "export default function App() { return <div>Long code</div>; }\n".repeat(50) + "```\n\nSite criado com sucesso com paleta terrosa e tipografia editorial." },
+      { role: "user", run_id: "prior-2", content: "Crie o site para o pet shop" },
+    ];
+
+    const compacted = compactHistoryMessages(rawMessages, RUN);
+    expect(compacted).toHaveLength(4);
+    // Deve estar em ordem cronológica (antigas primeiro)
+    expect(compacted[0].role).toBe("user");
+    expect(compacted[0].content).toBe("Crie o site para o pet shop");
+    expect(compacted[1].role).toBe("assistant");
+    expect(compacted[1].content).toContain("[código aplicado no site]");
+    expect(compacted[1].content).not.toContain("Long code");
+    expect(compacted[2].role).toBe("user");
+    expect(compacted[2].content).toBe("coloque o whatsapp no topo");
+    expect(compacted[3].role).toBe("assistant");
+    expect(compacted[3].content).toContain("[código aplicado no site]");
+    expect(compacted[3].content).not.toContain(".btn { color: red; }");
+  });
+});
+
+
+it("loads private design metadata only for the exact tenant, project and base revision", async () => {
+  const direction = { mode: "persuade", ...Object.fromEntries(DESIGN_DIRECTION_FIELDS.map((field) => [field, `Direção ${field} confirmada para o projeto local.`])) };
+  state.tables.website_skills = [];
+  state.tables.website_builds = [
+    { client_id: "foreign", project_id: PROJECT, revision_id: REVISION, qa: { design_direction: { ...direction, thesis: "FOREIGN_SECRET" } } },
+    { client_id: CLIENT, project_id: "other", revision_id: REVISION, qa: { design_direction: { ...direction, thesis: "OTHER_PROJECT_SECRET" } } },
+    { client_id: CLIENT, project_id: PROJECT, revision_id: "old", qa: { design_direction: { ...direction, thesis: "OLD_REVISION_SECRET" } } },
+    { client_id: CLIENT, project_id: PROJECT, revision_id: REVISION, qa: { design_direction: direction } },
+  ];
+  const input = await createWebsiteAgentDependencies(fakeClient(), WORKER).load(claimed());
+  expect(input.designDirection).toEqual(direction);
+  expect(input.activeSkills?.some((skill) => skill.slug === "impeccable-design")).toBe(true);
+  expect(input.systemPrompt).not.toMatch(/FOREIGN_SECRET|OTHER_PROJECT_SECRET|OLD_REVISION_SECRET/);
+  expect(input.systemPrompt).toContain("DIREÇÃO PRIVADA DA REVISÃO BASE");
 });

@@ -1,9 +1,12 @@
+import { DESIGN_DIRECTION_FIELDS, IMPECCABLE_REVIEW_DIMENSIONS } from "./impeccable";
+import { BUILTIN_WEBSITE_SKILLS } from "./skills";
 import { describe, expect, it, vi } from "vitest";
 import { AiEmptyResponseError } from "@/lib/ai-provider";
-import { extractCodeBlockEdits, WebsiteAgentRuntime, type WebsiteAgentDependencies } from "./agent";
+import { extractCodeBlockEdits, websiteTokenBudget, WebsiteAgentRuntime, type WebsiteAgentDependencies } from "./agent";
 import { getStarterFiles } from "./starter";
 import { WebsiteTools, WEBSITE_TOOLS } from "./tools";
-import { normalizeWebsitePath, validateFiles, validateWebsiteContent } from "./validation";import type { WebsiteBuildResult, WebsiteModel, WebsiteProject, WebsiteRun, WebsiteSettings } from "./types";
+import { normalizeWebsitePath, validateFiles, validateWebsiteContent } from "./validation";
+import type { WebsiteAsset, WebsiteBuildResult, WebsiteModel, WebsiteProject, WebsiteRun, WebsiteSettings } from "./types";
 
 vi.mock("@/lib/supabase", () => ({ supabase: null, supabaseAdmin: null }));
 vi.mock("@/lib/supabase_admin", () => ({ supabaseAdmin: null }));
@@ -559,4 +562,229 @@ Pronto, as cores foram trocadas para azul.
     expect(savedFiles).not.toBeNull();
     expect(savedFiles!["src/tokens.css"]).toContain("--color-brand:#0066cc");
   });
+
+  it("extracts and applies surgical search-replace patch blocks without rewriting whole files", async () => {
+    let savedFiles: Record<string, string> | null = null;
+    const complete = vi.fn(async (_run: unknown, files: Record<string, string> | null) => {
+      savedFiles = files;
+    });
+    const patchResponse = `
+Com certeza! Mudei a cor principal para verde conforme solicitado:
+
+\`\`\`patch path="src/styles.css"
+${"<<<<<<< SEARCH"}
+:root{font-family:var(--font-body);color:var(--color-text);background:var(--color-bg);
+${"======="}
+:root{font-family:var(--font-body);color:var(--color-text);background:#15803d;
+${">>>>>>> REPLACE"}
+\`\`\`
+
+Pronto, a cor foi alterada cirurgicamente para verde.
+`;
+    const deps: WebsiteAgentDependencies = {
+      load: async () => ({ project, files: getStarterFiles(project), assets: [], models, settings, systemPrompt: "Prompt", history: [] }),
+      check: async () => undefined,
+      event: vi.fn(async () => undefined),
+      status: async () => undefined,
+      reserveTokens: async () => "reservation",
+      usage: async () => undefined,
+      build: async () => structuredClone(buildSuccess),
+      complete,
+      chat: vi.fn()
+        .mockResolvedValueOnce({ model: models[0].id, usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }, response: { choices: [{ message: { content: patchResponse } }] } })
+        .mockResolvedValueOnce({ model: models[1].id, usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 }, response: { choices: [{ message: { content: JSON.stringify({ passed: true, issues: [], summary: "Visual aprovado." }) } }] } }),
+    };
+
+    await new WebsiteAgentRuntime(deps).run(run, new AbortController().signal);
+    expect(complete).toHaveBeenCalledOnce();
+    expect(savedFiles).not.toBeNull();
+    expect(savedFiles!["src/styles.css"]).toBe(getStarterFiles(project)["src/styles.css"].replace("background:var(--color-bg);", "background:#15803d;"));
+    expect(extractCodeBlockEdits(patchResponse, getStarterFiles(project))).toHaveLength(1);
+    expect(deps.event).toHaveBeenCalledWith(run, expect.objectContaining({
+      role: "system",
+      content: expect.stringContaining('"tool":"patch"'),
+    }));
+  });
+
+  it("unifies prompt and image assets into a multimodal user message with public path", async () => {
+    const assetId = "00000000-0000-0000-0000-000000000077";
+    const testAsset: WebsiteAsset = {
+      id: assetId,
+      client_id: run.client_id,
+      project_id: run.project_id,
+      name: "loja-fachada.png",
+      path: `${run.client_id}/${run.project_id}/${assetId}.png`,
+      mime: "image/png",
+      size: 1024,
+      width: 800,
+      height: 600,
+      purpose: "content",
+      status: "ready",
+      url: "https://example.com/loja-fachada.png",
+      created_at: "2026-10-05T00:00:00Z",
+    };
+    const deps = dependencies();
+    const input = await deps.load(run);
+    deps.load = async () => ({ ...input, models: [models[1]], assets: [testAsset] });
+    let capturedBody: { messages: Array<{ role: string; content: unknown }> } | null = null;
+    let callCount = 0;
+    vi.mocked(deps.chat).mockImplementation(async ([model], body) => {
+      capturedBody ??= body as { messages: Array<{ role: string; content: unknown }> };
+      callCount++;
+      if (callCount === 1) {
+        return {
+          model: model.id,
+          usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 },
+          response: { choices: [{ message: { content: "Site atualizado com a imagem." } }] },
+        };
+      }
+      return {
+        model: model.id,
+        usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
+        response: { choices: [{ message: { content: JSON.stringify({ passed: true, issues: [], summary: "Visual aprovado." }) } }] },
+      };
+    });
+    await new WebsiteAgentRuntime(deps).run({ ...run, model_id: models[1].id }, new AbortController().signal);
+    expect(capturedBody).not.toBeNull();
+    const userMsg = capturedBody!.messages.find((m) => m.role === "user");
+    expect(userMsg).toBeDefined();
+    expect(Array.isArray(userMsg!.content)).toBe(true);
+    expect(userMsg!.content).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "text",
+        text: expect.stringContaining(`/assets/${assetId}.png`),
+      }),
+      expect.objectContaining({
+        type: "image_url",
+        image_url: { url: "https://example.com/loja-fachada.png" },
+      }),
+    ]));
+    expect(deps.event).toHaveBeenCalledWith(expect.objectContaining({ id: run.id }), {
+      role: "system",
+      content: JSON.stringify({ vision_assets: [assetId] }),
+    });
+  });
+
+  it("calls vision model for visual description when primary model is text-only", async () => {
+    const assetId = "00000000-0000-0000-0000-000000000078";
+    const testAsset: WebsiteAsset = {
+      id: assetId,
+      client_id: run.client_id,
+      project_id: run.project_id,
+      name: "foto-produto.jpg",
+      path: `${run.client_id}/${run.project_id}/${assetId}.jpg`,
+      mime: "image/jpeg",
+      size: 2048,
+      width: 1024,
+      height: 768,
+      purpose: "content",
+      status: "ready",
+      url: "https://example.com/foto-produto.jpg",
+      created_at: "2026-10-05T00:00:00Z",
+    };
+    const deps = dependencies();
+    const input = await deps.load(run);
+    deps.load = async () => ({ ...input, models, assets: [testAsset] });
+    const capturedBodies: Array<{ messages: Array<{ role: string; content: unknown }> }> = [];
+    let callCount = 0;
+    vi.mocked(deps.chat).mockImplementation(async ([model], body) => {
+      capturedBodies.push(body as { messages: Array<{ role: string; content: unknown }> });
+      callCount++;
+      if (callCount === 1) {
+        // Vision analysis call
+        return {
+          model: model.id,
+          usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 },
+          response: { choices: [{ message: { content: "Foto de um pão de fermentação natural dourado." } }] },
+        };
+      }
+      if (callCount === 2) {
+        // Main editing call
+        return {
+          model: model.id,
+          usage: { promptTokens: 15, completionTokens: 15, totalTokens: 30 },
+          response: { choices: [{ message: { content: "Incluído pão de fermentação natural no cardápio." } }] },
+        };
+      }
+      // Critic call
+      return {
+        model: model.id,
+        usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
+        response: { choices: [{ message: { content: JSON.stringify({ passed: true, issues: [], summary: "Visual aprovado." }) } }] },
+      };
+    });
+    await new WebsiteAgentRuntime(deps).run({ ...run, model_id: models[0].id }, new AbortController().signal);
+    expect(capturedBodies.length).toBeGreaterThanOrEqual(2);
+    // Second call is the text model receiving the prompt with visual description and asset path
+    const textModelMessages = capturedBodies[1].messages;
+    const userMsg = textModelMessages.find((m) => m.role === "user");
+    expect(userMsg).toBeDefined();
+    expect(typeof userMsg!.content).toBe("string");
+    expect(userMsg!.content).toContain(`/assets/${assetId}.jpg`);
+    expect(userMsg!.content).toContain("Foto de um pão de fermentação natural dourado.");
+  });
+});
+
+
+describe("requested logo validation", () => {
+  it("retries an omitted logo and cannot finish with a successful build", async () => {
+    const deps = dependencies();
+    const input = await deps.load(run);
+    const id = "00000000-0000-4000-8000-000000000079";
+    deps.load = async () => ({ ...input, assets: [{ id, client_id: run.client_id, project_id: run.project_id, name: "logo.png", path: `${run.client_id}/${run.project_id}/${id}.png`, mime: "image/png", size: 10, width: 1, height: 1, purpose: "logo", status: "ready", created_at: project.created_at }] });
+    await new WebsiteAgentRuntime(deps).run({ ...run, prompt: "Coloque essa logo no site" }, new AbortController().signal);
+    expect(deps.chat).toHaveBeenCalledTimes(3);
+    expect(deps.build).not.toHaveBeenCalled();
+    expect(deps.complete).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ success: false, errors: expect.arrayContaining([expect.stringContaining(`/assets/${id}.png`)]) }), expect.any(String), expect.anything());
+  });
+});
+
+
+describe("Impeccable runtime contract", () => {
+  const direction = { mode: "persuade", ...Object.fromEntries(DESIGN_DIRECTION_FIELDS.map((field) => [field, `Decisão de ${field} para a padaria de fermentação natural.`])) };
+  const checks = IMPECCABLE_REVIEW_DIMENSIONS.map((dimension) => ({ dimension, passed: true, evidence: `Desktop/mobile: evidência observada para ${dimension} na padaria.` }));
+  it("does not claim an inactive skill was applied", async () => {
+    const deps = dependencies();
+    await new WebsiteAgentRuntime(deps).run(run, new AbortController().signal);
+    expect(JSON.stringify(vi.mocked(deps.event).mock.calls)).not.toContain("skill_analysis");
+    expect(vi.mocked(deps.chat).mock.calls[0][1].tools).toEqual(WEBSITE_TOOLS);
+  });
+
+  it("requires direction for a new site before approving its source", async () => {
+    const deps = dependencies();
+    const input = await deps.load(run);
+    deps.load = async () => ({ ...input, activeSkills: [...BUILTIN_WEBSITE_SKILLS] });
+    await new WebsiteAgentRuntime(deps).run(run, new AbortController().signal);
+    expect(deps.build).not.toHaveBeenCalled();
+    expect(deps.complete).toHaveBeenCalledWith(run, expect.anything(), expect.objectContaining({ status: "failed", errors: expect.arrayContaining([expect.stringContaining("record_design_direction")]) }), expect.any(String), expect.anything());
+  });
+
+  it("persists private direction and evidence and gives the critic the business brief", async () => {
+    const deps = dependencies();
+    const input = await deps.load(run);
+    deps.load = async () => ({ ...input, activeSkills: [...BUILTIN_WEBSITE_SKILLS] });
+    vi.mocked(deps.chat)
+      .mockResolvedValueOnce({ model: models[0].id, usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }, response: { choices: [{ message: { tool_calls: [{ id: "direction", type: "function", function: { name: "record_design_direction", arguments: JSON.stringify(direction) } }] } }] } })
+      .mockResolvedValueOnce({ model: models[0].id, usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }, response: { choices: [{ message: { content: "Implementação concluída." } }] } })
+      .mockResolvedValueOnce({ model: models[1].id, usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }, response: { choices: [{ message: { content: JSON.stringify({ passed: true, issues: [], summary: "Revisão visual com evidências.", checks }) } }] } });
+    await new WebsiteAgentRuntime(deps).run(run, new AbortController().signal);
+    const completed = vi.mocked(deps.complete).mock.calls[0];
+    expect(completed[2].qa.design_direction).toEqual(direction);
+    expect(completed[2].qa.impeccable_review).toEqual(checks);
+    expect(JSON.stringify(completed[1])).not.toContain("Decisão de thesis");
+    expect(JSON.stringify(vi.mocked(deps.chat).mock.calls[2][1])).toContain(project.name);
+  });
+
+  it("rejects a generic green critic response when Impeccable is active", async () => {
+    const deps = dependencies();
+    const input = await deps.load(run);
+    deps.load = async () => ({ ...input, activeSkills: [...BUILTIN_WEBSITE_SKILLS] });
+    await expect(new WebsiteAgentRuntime(deps).run({ ...run, kind: "build" }, new AbortController().signal)).rejects.toThrow("evidências completas");
+    expect(deps.complete).not.toHaveBeenCalled();
+  });
+});
+
+
+it("never clamps oversized multimodal context to a fictional fitting budget", () => {
+  expect(() => websiteTokenBudget({ messages: [{ content: [{ type: "text", text: "x".repeat(12000) }, { type: "image_url", image_url: { url: "https://example.test/logo.png" } }] }] }, 6000, 2000)).toThrow("orçamento de contexto");
 });

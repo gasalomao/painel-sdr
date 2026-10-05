@@ -140,3 +140,16 @@ describe("website preview assets", () => {
       .toBe(`['${asset.url}2', 'https://external.example.test${path}']`);
   });
 });
+
+
+describe("preview asset wiring", () => {
+  it("resolves uploaded logos in the Sandpack input and leaves saved sources permanent", () => {
+    const source = { ...getStarterFiles(), "src/App.tsx": `<img src="${path}" />` };
+    const preview = getSitePreviewFiles(source, [asset], scope);
+    expect(JSON.stringify(preview["/src/App.tsx"])).toContain(asset.url);
+    expect(source["src/App.tsx"]).toContain(path);
+    const renewed = getSitePreviewFiles(source, [{ ...asset, url: "https://storage.example.test/renewed" }], scope);
+    expect(JSON.stringify(renewed["/src/App.tsx"])).toContain("/renewed");
+    expect(JSON.stringify(getSitePreviewFiles(source, [asset], { ...scope, client_id: "foreign" }))).not.toContain(asset.url);
+  });
+});

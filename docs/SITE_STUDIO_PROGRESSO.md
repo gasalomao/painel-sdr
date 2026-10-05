@@ -1,3 +1,19 @@
+## Atualização — 05/10/2026: Impeccable integral por etapa
+
+Integração fundamentada no upstream fixado em `87a6ab0c145adb85cbd428a99fa1377305e0818d`. Ver `docs/SITE_STUDIO_IMPECCABLE.md` para fontes, cobertura e adaptações do executor. Toggle controla prompt/ferramentas/revisão/eventos; criação carrega todos os fundamentos integrais; biblioteca completa consultável; contrato privado exigido antes de código e persistido por revisão; crítica visual exige evidências. Removidas receitas fixas por segmento. Sem migration, publicação ou chamada paga.
+
+Gates iniciais: 1.297 testes passaram (31 skipped), TypeScript e lint focado sem erros. Gates finais abaixo ao concluir.
+
+---
+
+## Atualização — 05/10/2026: imagens e custo de edição
+
+Correções e estudo detalhados em `docs/SITE_STUDIO_OTIMIZACAO.md`: ligação dos assets ao preview com renovação de URLs, intenção de logo após anexo, validação de logo omitida, patch SEARCH/REPLACE sem sobrescrita, compactação de leituras antigas e recortes explícitos de fontes. Alterações anteriores locais foram preservadas. Não houve commit, chamada paga, publicação ou migration remota.
+
+Verificação final: suíte completa passou com 1.283 testes (31 skipped); 120 testes focados passaram após integração com alterações simultâneas na seleção de modelos; TypeScript e ESLint sem erros (1.640 warnings no lint global); lint focado final sem erros; build de produção aprovado; git diff --check aprovado. O build anterior registrou 24 warnings de tracing em áreas fora do Studio. Alterações simultâneas de gateway/aliases de assets foram preservadas; a seleção foi ajustada para não usar modelo textual em QA visual nem inventar modelo OpenRouter ausente.
+
+---
+
 # Site Studio — Progresso e pendências (18/09/2026)
 
 Branch `main`, HEAD `3c3bf40`. Todas as alterações NÃO commitadas (não commitar sem pedido explícito).

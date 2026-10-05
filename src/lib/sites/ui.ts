@@ -2,11 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { ApiError } from "../../components/sites/api";
-import type { WebsiteDeployment, WebsiteFiles, WebsiteProject, WebsiteSettings } from "./types";
+import type { WebsiteAsset, WebsiteDeployment, WebsiteFiles, WebsiteProject, WebsiteSettings } from "./types";
 
 export type SiteIdentity = { authenticated: boolean; clientId: string | null; actorId?: string };
 export type DeploymentAttempt = { key: string; deploymentId?: string };
-export type StagedUpload = { id: string; file: File; url: string; problem?: string; uploadError?: string; uncertain?: boolean };
+export type StagedUpload = { id: string; file: File; url: string; problem?: string; uploadError?: string; uncertain?: boolean; purpose?: WebsiteAsset["purpose"]; purposeExplicit?: boolean };
 
 type SiteDrafts = {
   files: { files: WebsiteFiles; revisionId: string | null };

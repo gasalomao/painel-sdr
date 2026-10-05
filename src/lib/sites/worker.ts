@@ -7,6 +7,7 @@ import { WebsiteAgentRuntime, type WebsiteAgentDependencies } from "./agent";
 import { createSiteBuildProvider, SITE_PROVIDER_NOT_CONFIGURED } from "./build-provider";
 import { createSiteDeploymentProvider, resumeSiteDeployment } from "./deployment-provider";
 import { listWebsiteModels } from "./models";
+import { parseWebsiteDesignDirection, type WebsiteDesignDirection } from "./impeccable";
 import { composeWebsitePrompt, getWebsiteSettings, resolveActiveWebsiteSkills } from "./prompts";
 import { databaseError, getFiles, getProject } from "./repository";
 import { getSitesDb } from "./server";
@@ -31,6 +32,31 @@ export class WebsiteLeaseLost extends Error {
 function runQuery(db: SupabaseClient, run: WebsiteRun, workerId: string) {
   return db.from("website_runs").select("id,status,cancel_requested,lease_expires_at,worker_id")
     .eq("client_id", run.client_id).eq("project_id", run.project_id).eq("id", run.id).eq("worker_id", workerId).maybeSingle();
+}
+
+export function compactHistoryMessages(
+  messages: Array<{ role: string; content: unknown; run_id: string }>,
+  currentRunId: string,
+): Array<{ role: "user" | "assistant"; content: string }> {
+  const filtered = messages.filter((m) => m.run_id !== currentRunId && (m.role === "user" || m.role === "assistant"));
+  const recent = filtered.slice(0, 8).reverse();
+
+  return recent.map((m, index) => {
+    let content = String(m.content ?? "").trim();
+    if (m.role === "assistant") {
+      content = content.replace(/```[\s\S]*?```/g, "[código aplicado no site]");
+      const isLatestAssistant = index >= recent.length - 2;
+      const maxChars = isLatestAssistant ? 500 : 200;
+      if (content.length > maxChars) {
+        content = content.slice(0, maxChars) + "...";
+      }
+    } else {
+      if (content.length > 1000) {
+        content = content.slice(0, 1000) + "...";
+      }
+    }
+    return { role: m.role as "user" | "assistant", content };
+  });
 }
 
 export function createWebsiteAgentDependencies(db: SupabaseClient, workerId: string): WebsiteAgentDependencies {
@@ -106,10 +132,18 @@ export function createWebsiteAgentDependencies(db: SupabaseClient, workerId: str
       databaseError(error);
       const effectiveFiles = Object.keys(files).length ? files : getCleanStarterFiles(project);
       const activeSkills = resolveActiveWebsiteSkills(project, skills, run.prompt);
+      const priorBuild = await db.from("website_builds").select("qa").eq("client_id", run.client_id).eq("project_id", run.project_id)
+        .eq("revision_id", run.base_revision_id).order("created_at", { ascending: false }).limit(1).maybeSingle();
+      databaseError(priorBuild.error);
+      let designDirection: WebsiteDesignDirection | undefined;
+      if (priorBuild.data?.qa?.design_direction) {
+        try { designDirection = parseWebsiteDesignDirection(priorBuild.data.qa.design_direction); }
+        catch { /* Legacy malformed design metadata is not an instruction source. */ }
+      }
       return {
-        project, files: effectiveFiles, assets, settings, activeSkills,
-        models: await listWebsiteModels(settings), systemPrompt: composeWebsitePrompt(project, skills, settings.creative_prompt, run.prompt, effectiveFiles),
-        history: (data ?? []).filter((message) => message.run_id !== run.id).reverse().map((message) => ({ role: message.role as "user" | "assistant", content: String(message.content).slice(0, 4000) })),
+        project, files: effectiveFiles, assets, settings, activeSkills, designDirection,
+        models: await listWebsiteModels(settings), systemPrompt: composeWebsitePrompt(project, skills, settings.creative_prompt, run.prompt, effectiveFiles, designDirection),
+        history: compactHistoryMessages(data ?? [], run.id),
       };
     },
     async status(run, status) {
@@ -228,17 +262,30 @@ async function runWithLease(
   const deps = createWebsiteAgentDependencies(db, workerId);
   let checking: Promise<void> | undefined;
   let completed = false;
+  let consecutiveFailures = 0;
   const heartbeat = async () => {
     await deps.check(run);
     const { data, error } = await db.from("website_runs").update({ lease_expires_at: new Date(Date.now() + LEASE_MS).toISOString(), updated_at: new Date().toISOString() })
       .eq("client_id", run.client_id).eq("project_id", run.project_id).eq("id", run.id).eq("worker_id", workerId)
-      .eq("cancel_requested", false).in("status", activeStatuses).gt("lease_expires_at", new Date().toISOString()).select("id").maybeSingle();
+      .eq("cancel_requested", false).in("status", activeStatuses).gt("lease_expires_at", new Date(Date.now() - 30_000).toISOString()).select("id").maybeSingle();
     databaseError(error);
     if (!data) throw new WebsiteLeaseLost();
   };
   const timer = setInterval(() => {
     if (checking || signal.aborted || completed) return;
-    checking = heartbeat().catch((error: unknown) => controller.abort(error)).finally(() => { checking = undefined; });
+    checking = heartbeat().then(() => {
+      consecutiveFailures = 0;
+    }).catch((error: unknown) => {
+      consecutiveFailures++;
+      if (error instanceof WebsiteLeaseLost || signal.aborted || completed) {
+        controller.abort(error);
+        return;
+      }
+      console.warn(`[sites-worker] Heartbeat falhou (${consecutiveFailures}x):`, (error as Error)?.message || error);
+      if (consecutiveFailures >= 6) {
+        controller.abort(error);
+      }
+    }).finally(() => { checking = undefined; });
   }, POLL_MS);
   timer.unref();
   try {

@@ -34,7 +34,7 @@ const aiKeys = vi.hoisted(() => ({ keys: { openrouterKeys: [] as string[], gatew
 vi.mock("@/lib/ai-keys", () => ({ getAiKeys: async () => aiKeys.keys }));
 
 import { BUILTIN_WEBSITE_SKILLS, getEffectiveSkills, validateSkillInput } from "../skills";
-import { composeWebsitePrompt, DEFAULT_WEBSITE_SETTINGS, getWebsiteIntegrations, mergeWebsiteSettings, resetWebsitePrompt, restoreWebsitePrompt, saveWebsitePrompt, WEBSITE_SECURITY_PROMPT } from "../prompts";
+import { composeWebsitePrompt, DEFAULT_WEBSITE_SETTINGS, getWebsiteIntegrations, isExistingSiteProject, isSimpleWebsiteRequest, mergeWebsiteSettings, resetWebsitePrompt, restoreWebsitePrompt, saveWebsitePrompt, WEBSITE_SECURITY_PROMPT } from "../prompts";
 
 const clientId = "11111111-1111-4111-8111-111111111111";
 const actorId = "44444444-4444-4444-8444-444444444444";
@@ -73,7 +73,7 @@ describe("website instructions", () => {
     for (const builtin of BUILTIN_WEBSITE_SKILLS) {
       expect(builtin.id).toBe(`builtin:${builtin.slug}`);
       expect(builtin.is_builtin).toBe(true);
-      expect(builtin.version).toBe(2);
+      expect(builtin.version).toBe(3);
       expect(builtin.is_enabled).toBe(true);
       expect(builtin.description.trim().length).toBeGreaterThan(20);
       expect(/Processo[\s\S]*Checks[\s\S]*Anti-patterns[\s\S]*DoD/.test(builtin.instructions)).toBe(true);
@@ -174,4 +174,81 @@ describe("website instructions", () => {
     expect((await getWebsiteIntegrations()).worker.configured).toBe(false);
     aiKeys.keys = { ...aiKeys.keys, openrouterKeys: [] };
   });
+
+  it("accurately classifies simple surgical requests vs complex full-site generations", () => {
+    expect(isSimpleWebsiteRequest("mude a cor para verde")).toBe(true);
+    expect(isSimpleWebsiteRequest("Recrie o site completo usando verde")).toBe(false);
+    expect(isSimpleWebsiteRequest("troque a cor do botão para verde")).toBe(true);
+    expect(isSimpleWebsiteRequest("mudar para verde")).toBe(true);
+    expect(isSimpleWebsiteRequest("troque o telefone para (11) 98765-4321")).toBe(true);
+    expect(isSimpleWebsiteRequest("altere o título do hero para Casa da Fazenda")).toBe(true);
+    expect(isSimpleWebsiteRequest("coloque o whatsapp no topo")).toBe(true);
+    expect(isSimpleWebsiteRequest("aumente a fonte do título")).toBe(true);
+    expect(isSimpleWebsiteRequest("corrija o erro de ortografia no footer")).toBe(true);
+
+    expect(isSimpleWebsiteRequest("Crie um site institucional completo com catálogo de 20 produtos, integração de pagamento Stripe, área de membros com login, dashboard analítico e sistema de envio de newsletters")).toBe(false);
+  });
+
+  it("accurately detects existing site vs ungenerated starter site", () => {
+    expect(isExistingSiteProject(undefined)).toBe(false);
+    expect(isExistingSiteProject({})).toBe(false);
+    expect(isExistingSiteProject({
+      "src/App.tsx": 'export default function App() {\n  return <main><h1>Criando design autoral sob medida com a diretriz Impeccable Design...</h1></main>;\n}',
+    })).toBe(false);
+
+    expect(isExistingSiteProject({
+      "src/App.tsx": 'import { useState } from "react";\n' + "export default function App() {\n  return <><header><h1>Casa do Agricultor</h1></header><main><section><h2>Rações e Ferramentas</h2><p>Tradição no campo desde 1994 com atendimento especializado no balcão e entrega rápida em toda a região rural.</p></section></main><footer><p>Contato: (27) 99970-0577</p></footer></>;\n}\n".repeat(4),
+      "src/styles.css": ":root { --brand-primary: #1d5037; }",
+    })).toBe(true);
+  });
+
+  it("generates an optimized surgical prompt for simple edits on existing sites", () => {
+    const existingFiles = {
+      "src/App.tsx": "export default function App() {\n  return <><header><h1>Casa do Agricultor</h1></header><main><section><h2>Rações e Ferramentas</h2><p>Tradição no campo.</p></section></main><footer><p>(27) 99970-0577</p></footer></>;\n}\n".repeat(4),
+      "src/styles.css": ":root {\n  --brand-primary: #1d5037;\n  --bg-canvas: #faf7f2;\n}\n.hero { padding: 4rem; }\n",
+      "index.html": "<!doctype html><html><head><title>Casa do Agricultor</title></head><body><div id='root'></div></body></html>",
+    };
+
+    const initialPrompt = composeWebsitePrompt(project, BUILTIN_WEBSITE_SKILLS as unknown as WebsiteSkill[], "CRIATIVO", "Crie o site completo");
+    const editPrompt = composeWebsitePrompt(project, BUILTIN_WEBSITE_SKILLS as unknown as WebsiteSkill[], "CRIATIVO", "mude a cor para verde", existingFiles);
+
+    expect(initialPrompt.length).toBeGreaterThan(0);
+    expect(editPrompt.startsWith(WEBSITE_SECURITY_PROMPT)).toBe(true);
+    expect(editPrompt).toContain("REFINAMENTO / PRESERVAÇÃO");
+    expect(editPrompt).toContain("MODO DE EDIÇÃO CIRÚRGICA ATIVO");
+    expect(editPrompt).toContain("USE OBRIGATORIAMENTE a ferramenta 'patch'");
+    expect(editPrompt).toContain("--brand-primary: #1d5037");
+    // index.html não é incluído para pedidos de cor em sites existentes (economiza tokens)
+    expect(editPrompt).not.toContain("<!doctype html>");
+  });
+});
+
+
+it("removes Impeccable instructions when disabled without disabling other selected skills", () => {
+  const builtin = BUILTIN_WEBSITE_SKILLS[0];
+  const custom = skill({ id: "other", trigger_mode: "always", instructions: "CUSTOM_BRAND_RULE" });
+  const prompt = composeWebsitePrompt(project, [{ ...builtin, is_enabled: false }, custom], "OPERATOR", "Crie a página");
+  expect(prompt).not.toContain("IMPECCABLE ATIVO");
+  expect(prompt).not.toContain("REFERÊNCIA OFICIAL INTEGRAL");
+  expect(prompt).toContain("CUSTOM_BRAND_RULE");
+  expect(prompt).not.toContain("Header fixo/sticky com efeito glassmorphism");
+});
+
+it("preserves confirmed brief, operator prompt and every new-site foundation without slicing", () => {
+  const prompt = composeWebsitePrompt({ ...project, name: "Luthier Horizonte", client_context: { name: "Luthier Horizonte", services: "Restauração de violinos", city: "Vitória", notes: "Logo azul obrigatória" }, instructions: "Sem FAQ. Exibir peças reais." }, BUILTIN_WEBSITE_SKILLS, "DIREÇÃO_OPERADOR", "PEDIDO_INTEGRAL");
+  expect(prompt).toContain("Restauração de violinos");
+  expect(prompt).toContain("Logo azul obrigatória");
+  expect(prompt).toContain("Sem FAQ. Exibir peças reais.");
+  expect(prompt).toContain("DIREÇÃO_OPERADOR");
+  expect(prompt).toContain("PEDIDO_INTEGRAL");
+  expect(prompt).toContain("FIM DA REFERÊNCIA optimize");
+  expect(prompt.length).toBeLessThanOrEqual(240000);
+});
+
+it("rebases legacy toggle copies instead of restoring obsolete niche templates", async () => {
+  const builtin = BUILTIN_WEBSITE_SKILLS[0];
+  db.rows = [skill({ ...builtin, id: actorId, client_id: clientId, instructions: "DIRETRIZ MESTRA IMPECCABLE DESIGN (pbakaus/impeccable — DESIGN DE ALTO VALOR): Paleta de Cores Autoral por Nicho", is_enabled: true })];
+  const effective = (await getEffectiveSkills(clientId)).find((entry) => entry.id === builtin.id)!;
+  expect(effective.instructions).toBe(builtin.instructions);
+  expect(effective.is_enabled).toBe(true);
 });

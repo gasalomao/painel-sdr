@@ -291,7 +291,7 @@ function Editor({ projectId, clientId, draftScope }: { projectId: string; client
       <section id="editor-preview" role="tabpanel" tabIndex={0} aria-label="Preview e arquivos" className={`${tab === "preview" ? "flex" : "hidden"} flex-col h-full min-h-0 min-w-0 overflow-hidden lg:flex`}>
         <Tabs value={previewSubtab} onValueChange={(val) => setPreviewSubtab(val as "preview" | "files")} className="flex flex-1 flex-col h-full min-h-0 min-w-0 gap-0 overflow-hidden">
           <TabsList className="m-3 self-start shrink-0"><TabsTrigger value="preview">Preview</TabsTrigger><TabsTrigger value="files">Arquivos</TabsTrigger></TabsList>
-          <TabsContent value="preview" keepMounted className="flex flex-1 flex-col min-h-0 min-w-0 overflow-hidden data-[hidden]:hidden"><SitePreview files={snapshot.files} revisionId={project.current_revision_id} projectSlug={project.slug} projectName={project.name} /></TabsContent>
+          <TabsContent value="preview" keepMounted className="flex flex-1 flex-col min-h-0 min-w-0 overflow-hidden data-[hidden]:hidden"><SitePreview files={snapshot.files} projectScope={project} revisionId={project.current_revision_id} projectSlug={project.slug} projectName={project.name} /></TabsContent>
           <TabsContent value="files" keepMounted className="flex-1 min-h-0 min-w-0 overflow-auto data-[hidden]:hidden"><SiteFilesPanel draftScope={draftScope} projectId={projectId} files={snapshot.files} currentRevisionId={project.current_revision_id} onSaved={reload} onDirtyChange={setFilesDirty} onMutationStart={beginMutation} onMutationEnd={endMutation} disabled={disabled} /></TabsContent>
         </Tabs>
       </section>

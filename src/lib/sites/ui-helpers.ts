@@ -65,6 +65,7 @@ function activityPath(value: unknown): string {
 export function parseSystemEvent(content: string): string {
   try {
     const event = record(JSON.parse(content));
+    if (Array.isArray(event.active_skills) && event.active_skills.length === 0) return "Nenhuma skill ativa nesta execução.";
     if (Array.isArray(event.active_skills) && event.active_skills.length > 0) {
       const validNames = event.active_skills.filter((s): s is string => typeof s === "string" && Boolean(s.trim()));
       if (validNames.length > 0) return `Skills ativas: ${validNames.join(" · ")}`;

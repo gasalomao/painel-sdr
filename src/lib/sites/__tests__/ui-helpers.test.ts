@@ -281,3 +281,8 @@ describe("ui-helpers", () => {
     expect(isUuid("builtin:frontend-design")).toBe(false);
   });
 });
+
+
+it("reports disabled skills without claiming Impeccable applied", () => {
+  expect(parseSystemEvent(JSON.stringify({ active_skills: [] }))).toBe("Nenhuma skill ativa nesta execução.");
+});

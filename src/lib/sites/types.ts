@@ -107,6 +107,9 @@ export interface WebsiteQa {
   errors: string[];
   warnings: string[];
   visual_review?: string;
+  design_direction?: import("./impeccable").WebsiteDesignDirection;
+  impeccable_review?: import("./impeccable").ImpeccableVisualCheck[];
+  impeccable_source?: string;
 }
 export interface WebsiteArtifactFile { content: string; mime: string }
 export interface WebsiteBuildResult {

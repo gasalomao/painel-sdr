@@ -28,12 +28,23 @@ export function resolveWebsitePreviewAssets(files: WebsiteFiles, assets: readonl
       const url = new URL(asset.url);
       if (url.protocol !== "https:" || url.username || url.password || url.hash) continue;
       urls.set(path, asset.url);
+      if (asset.name && /^[a-zA-Z0-9_.-]+\.(?:png|jpg|jpeg|webp|gif|svg)$/i.test(asset.name)) {
+        urls.set(`/${asset.name}`, asset.url);
+        urls.set(`/assets/${asset.name}`, asset.url);
+      }
     } catch { continue; }
   }
-  return Object.fromEntries(Object.entries(files).map(([path, content]) => [path,
-    content.replace(assetReference, (match, prefix: string, assetPath: string, _id: string, _query: string, fragment: string | undefined) => {
+  return Object.fromEntries(Object.entries(files).map(([path, content]) => {
+    let result = content.replace(assetReference, (match, prefix: string, assetPath: string, _id: string, _query: string, fragment: string | undefined) => {
       const url = urls.get(assetPath);
       return url ? `${prefix}${url}${fragment ?? ""}` : match;
-    }),
-  ]));
+    });
+    for (const [key, signedUrl] of urls.entries()) {
+      if (key.startsWith("/assets/") && key.length > 40) continue; // já tratado pelo assetReference
+      const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(`(["'\`])(?:${escaped})(["'\`])`, "g");
+      result = result.replace(regex, `$1${signedUrl}$2`);
+    }
+    return [path, result];
+  }));
 }

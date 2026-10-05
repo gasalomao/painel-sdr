@@ -1,14 +1,18 @@
+import { DESIGN_DIRECTION_FIELDS, impeccableReference, parseWebsiteDesignDirection, type WebsiteDesignDirection } from "./impeccable";
 import type { WebsiteAsset, WebsiteFiles } from "./types";
+import { siteAssetPublicPath } from "./asset-preview";
 import { normalizeWebsitePath, validateFiles, validateWebsiteContent, WEBSITE_LIMITS } from "./validation";
 
 const string = { type: "string" };
 const definitions: Array<[string, string, Record<string, unknown>, string[]]> = [
+  ["read_design_reference", "Lê uma referência oficial integral do Impeccable em blocos; consulte o catálogo no prompt. Disponível somente quando a skill está ativa.", { name: string, offset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 20000 } }, ["name"]],
+  ["record_design_direction", "Registra a direção de design privada antes de construir; não cria arquivo publicável. Inclua decisões específicas do briefing em cada campo.", { mode: { type: "string", enum: ["persuade", "operate", "read", "experience"] }, ...Object.fromEntries(DESIGN_DIRECTION_FIELDS.map((field) => [field, { type: "string", minLength: 8, maxLength: 1200 }])) }, ["mode", ...DESIGN_DIRECTION_FIELDS]],
   ["list", "Lista os arquivos virtuais.", {}, []],
   ["read", "Lê um arquivo virtual, com offset/limit em caracteres.", { path: string, offset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 30000 } }, ["path"]],
   ["read_files", "Lê até 8 arquivos virtuais.", { paths: { type: "array", items: string, maxItems: 8 } }, ["paths"]],
   ["create", "Cria um arquivo editável inexistente.", { path: string, content: string }, ["path", "content"]],
   ["write", "Substitui um arquivo editável existente.", { path: string, content: string }, ["path", "content"]],
-  ["patch", "Substitui um trecho literal único. Não é regex.", { path: string, old: string, new: string }, ["path", "old", "new"]],
+  ["patch", "Substitui um trecho literal único no arquivo (ideal para trocar cores, textos e estilos pontuais com economia máxima de tokens; inclua 1 linha de contexto se necessário para garantir unicidade).", { path: string, old: string, new: string }, ["path", "old", "new"]],
   ["delete", "Exclui um arquivo editável.", { path: string }, ["path"]],
   ["rename", "Renomeia sem sobrescrever o destino.", { path: string, to: string }, ["path", "to"]],
   ["search", "Busca texto literal nos arquivos virtuais; máximo 40 resultados.", { query: string }, ["query"]],
@@ -19,7 +23,9 @@ const definitions: Array<[string, string, Record<string, unknown>, string[]]> = 
   ["run_validation", "Valida estaticamente o workspace. Build e visual acontecem isolados após a edição.", {}, []],
 ];
 
-export const WEBSITE_TOOLS = definitions.map(([name, description, properties, required]) => ({ type: "function" as const, function: { name, description, parameters: { type: "object", properties, required, additionalProperties: false } } }));
+const ALL_WEBSITE_TOOLS = definitions.map(([name, description, properties, required]) => ({ type: "function" as const, function: { name, description, parameters: { type: "object", properties, required, additionalProperties: false } } }));
+
+export const WEBSITE_TOOLS = ALL_WEBSITE_TOOLS.filter((tool) => !["read_design_reference", "record_design_direction"].includes(tool.function.name));
 
 function text(args: Record<string, unknown>, key: string, empty = false): string {
   const value = args[key];
@@ -30,19 +36,24 @@ function text(args: Record<string, unknown>, key: string, empty = false): string
 export class WebsiteTools {
   private workspace: WebsiteFiles;
   private checkpoints = new Map<string, WebsiteFiles>();
+  private direction: WebsiteDesignDirection | undefined;
 
-  constructor(files: WebsiteFiles, private readonly data: { context: object; assets: WebsiteAsset[] }) {
+  constructor(files: WebsiteFiles, private readonly data: { context: object; assets: WebsiteAsset[]; impeccable?: boolean; requireDesignDirection?: boolean; designDirection?: WebsiteDesignDirection }) {
     validateFiles(files);
+    this.direction = data.designDirection ? parseWebsiteDesignDirection(data.designDirection) : undefined;
     this.workspace = { ...files };
     this.checkpoints.set("initial", { ...files });
   }
 
   get files(): WebsiteFiles { return { ...this.workspace }; }
+  get designDirection(): WebsiteDesignDirection | undefined { return this.direction ? { ...this.direction } : undefined; }
+  get definitions(): typeof WEBSITE_TOOLS { return this.data.impeccable ? ALL_WEBSITE_TOOLS : WEBSITE_TOOLS; }
 
   async execute(name: string, input: unknown): Promise<unknown> {
     const definition = definitions.find(([tool]) => tool === name);
-    if (!definition) throw new Error("Ferramenta não permitida.");
+    if (!definition || (!this.data.impeccable && ["read_design_reference", "record_design_direction"].includes(name))) throw new Error("Ferramenta não permitida.");
     if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Argumentos inválidos.");
+    if (this.data.requireDesignDirection && !this.direction && ["create", "write", "patch", "delete", "rename"].includes(name)) throw new Error("Antes de construir, registre a direção específica com record_design_direction.");
     const args = input as Record<string, unknown>;
     if (Object.keys(args).some((key) => !Object.hasOwn(definition[2], key))) throw new Error("Argumentos inesperados.");
     const read = (path: string): string => {
@@ -51,6 +62,19 @@ export class WebsiteTools {
     };
     let result: unknown;
     switch (name) {
+      case "read_design_reference": {
+        const offset = args.offset ?? 0;
+        const limit = args.limit ?? 12000;
+        if (!Number.isInteger(offset) || !Number.isInteger(limit) || Number(offset) < 0 || Number(limit) < 1 || Number(limit) > 20000) throw new Error("Intervalo inválido.");
+        const content = impeccableReference(text(args, "name"));
+        result = { content: content.slice(Number(offset), Number(offset) + Number(limit)), total: content.length, nextOffset: Number(offset) + Number(limit) < content.length ? Number(offset) + Number(limit) : null };
+        break;
+      }
+      case "record_design_direction": {
+        this.direction = parseWebsiteDesignDirection(args);
+        result = { recorded: true, direction: this.direction };
+        break;
+      }
       case "list": result = Object.keys(this.workspace).sort(); break;
       case "read": {
         const offset = args.offset ?? 0;
@@ -78,7 +102,11 @@ export class WebsiteTools {
         break;
       }
       case "get_context": result = this.data.context; break;
-      case "assets": result = this.data.assets.map(({ id, name, mime, purpose, width, height }) => ({ id, name, mime, purpose, width, height })); break;
+      case "assets": result = this.data.assets.map((asset) => {
+        let public_path: string | null = null;
+        try { public_path = siteAssetPublicPath(asset); } catch { /* ignore */ }
+        return { id: asset.id, name: asset.name, mime: asset.mime, purpose: asset.purpose, width: asset.width, height: asset.height, public_path };
+      }); break;
       case "checkpoint": {
         const key = text(args, "name");
         if (!/^[a-zA-Z0-9_-]{1,60}$/.test(key) || key === "initial" || this.checkpoints.size >= 6) throw new Error("Checkpoint inválido ou limite excedido.");
@@ -112,8 +140,18 @@ export class WebsiteTools {
           }
           if (name === "patch") {
             const old = text(args, "old");
-            if (!current.includes(old) || current.indexOf(old) !== current.lastIndexOf(old)) throw new Error("Trecho ausente ou ambíguo.");
-            next[path] = current.replace(old, () => text(args, "new", true));
+            const newText = text(args, "new", true);
+            if (current.includes(old) && current.indexOf(old) === current.lastIndexOf(old)) {
+              next[path] = current.replace(old, () => newText);
+            } else {
+              const normCurrent = current.replace(/\r\n/g, "\n");
+              const normOld = old.replace(/\r\n/g, "\n");
+              if (normCurrent.includes(normOld) && normCurrent.indexOf(normOld) === normCurrent.lastIndexOf(normOld)) {
+                next[path] = normCurrent.replace(normOld, () => newText.replace(/\r\n/g, "\n"));
+              } else {
+                throw new Error("Trecho ausente ou ambíguo.");
+              }
+            }
           }
         }
         validateFiles(next);

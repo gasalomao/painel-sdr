@@ -122,12 +122,36 @@ export function selectWebsiteModels(models: WebsiteModel[], settings: WebsiteSet
   const available = filterWebsiteModels(models, settings);
   const rawTarget = selected || (mode === "economy" ? settings.economy_model : settings.quality_model);
   const cleanSelected = rawTarget ? cleanModelId(rawTarget).toLowerCase() : "";
-  const target = available.find((model) => model.id === rawTarget || cleanModelId(model.id).toLowerCase() === cleanSelected || model.id.toLowerCase() === rawTarget?.toLowerCase())
-    || (mode === "manual" && !vision && rawTarget ? models.find((m) => m.id === rawTarget || cleanModelId(m.id).toLowerCase() === cleanSelected) : undefined);
+  let target = available.find((model) => model.id === rawTarget || cleanModelId(model.id).toLowerCase() === cleanSelected || model.id.toLowerCase() === rawTarget?.toLowerCase())
+    || (mode === "manual" && rawTarget ? models.find((m) => m.id === rawTarget || cleanModelId(m.id).toLowerCase() === cleanSelected) : undefined);
+
+  // Se o usuário selecionou manualmente um modelo (ex: gateway:gemini-3.8-flash-high)
+  // e ele não estava no cache da descoberta naquele milissegundo, sintetizamos o modelo
+  // manual para não bloquear a chamada nem exibir erro indevido ao usuário.
+  if (!target && mode === "manual" && rawTarget?.startsWith("gateway:") && (!settings.model_allowlist.length || settings.model_allowlist.some((id) => cleanModelId(id) === cleanModelId(rawTarget)))) {
+    const isGateway = rawTarget.startsWith("gateway:") || (!rawTarget.includes(":") && !rawTarget.startsWith("gemini:") && !rawTarget.startsWith("nvidia:"));
+    target = {
+      id: rawTarget.includes(":") ? rawTarget : `gateway:${rawTarget}`,
+      name: `${cleanModelId(rawTarget)} (${isGateway ? "Gateway" : "Manual"})`,
+      supportsTools: true,
+      inputModalities: ["text", "image"],
+      outputModalities: ["text"],
+      contextLength: 128_000,
+      pricing: { prompt: "0", completion: "0" },
+      provider: rawTarget.startsWith("gemini:") ? "gemini" : rawTarget.startsWith("nvidia:") ? "nvidia" : rawTarget.startsWith("openrouter:") ? "openrouter" : "gateway",
+      isFree: true,
+    };
+  }
+
   if (rawTarget && !target) throw new Error(mode === "manual" ? "Modelo manual indisponível ou sem suporte a ferramentas." : "READY — AWAITING CREDENTIALS: modelo selecionado ou configurado indisponível.");
   const freeOpenRouter = (model: WebsiteModel) => !model.id.startsWith("gemini:") && !model.id.startsWith("gateway:") && !model.id.startsWith("nvidia:") && isOpenRouterFreeModel(model);
   const freeOnly = Boolean(target && freeOpenRouter(target));
   const candidates = available.filter((model) => (!vision || model.inputModalities?.includes("image")) && (!freeOnly || freeOpenRouter(model)));
+
+  if (target && (!vision || target.inputModalities?.includes("image")) && !candidates.some((c) => c.id === target.id)) {
+    candidates.unshift(target);
+  }
+
   if (!candidates.length) throw new Error("READY — AWAITING CREDENTIALS: nenhum modelo compatível disponível.");
   const primary = candidates.find((model) => model.id === target?.id);
   if (mode === "manual" && !vision) {

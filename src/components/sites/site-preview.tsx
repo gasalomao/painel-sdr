@@ -4,7 +4,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { SandpackProvider, SandpackPreview, SandpackLayout, useSandpack, type SandpackFiles } from "@codesandbox/sandpack-react";
 import { Lock, Maximize2, Minimize2, Monitor, RotateCw, Smartphone, Tablet, ZoomIn, ZoomOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { WebsiteFiles } from "@/lib/sites/types";
+import { apiJson } from "./api";
+import { resolveWebsitePreviewAssets } from "@/lib/sites/asset-preview";
+import type { WebsiteAsset, WebsiteProject, WebsiteFiles } from "@/lib/sites/types";
 import { WEBSITE_FIXED_FILES } from "@/lib/sites/starter";
 
 export const VIEWPORTS = [
@@ -15,7 +17,8 @@ export const VIEWPORTS = [
 
 export const SITE_PREVIEW_SETUP = { environment: "create-react-app", entry: "/index.tsx" } as const;
 
-export function getSitePreviewFiles(files: WebsiteFiles): SandpackFiles {
+export function getSitePreviewFiles(source: WebsiteFiles, assets: readonly WebsiteAsset[] = [], project?: Pick<WebsiteProject, "id" | "client_id">): SandpackFiles {
+  const files = project ? resolveWebsitePreviewAssets(source, assets, project) : source;
   const result: SandpackFiles = {};
   for (const [path, code] of Object.entries(files)) {
     const normalized = path.replace(/^\//, "");
@@ -71,11 +74,13 @@ export function SitePreview({
   files,
   revisionId,
   projectSlug,
+  projectScope,
 }: {
   files: WebsiteFiles;
   revisionId: string | null;
   projectSlug?: string;
   projectName?: string;
+  projectScope?: Pick<WebsiteProject, "id" | "client_id">;
 }): React.JSX.Element {
   const [viewportId, setViewportId] = useState<"desktop" | "tablet" | "mobile">("desktop");
   const [scaleMode, setScaleMode] = useState<"fit" | "100" | "custom">("fit");
@@ -91,7 +96,30 @@ export function SitePreview({
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const [screenHeight, setScreenHeight] = useState(600);
 
-  const sandpackFiles = useMemo(() => getSitePreviewFiles(files), [files]);
+  const [assetState, setAssetState] = useState<{ scope: string; assets: WebsiteAsset[] } | null>(null);
+  const projectId = projectScope?.id;
+  const clientId = projectScope?.client_id;
+  const assetScope = JSON.stringify([clientId, projectId]);
+  useEffect(() => {
+    if (!projectId || !clientId) return;
+    const controller = new AbortController();
+    let pending = false;
+    const refresh = async () => {
+      if (pending || controller.signal.aborted) return;
+      pending = true;
+      try {
+        const data = await apiJson<{ assets: WebsiteAsset[] }>(`/api/sites/${projectId}/assets`, { signal: controller.signal });
+        if (!controller.signal.aborted) setAssetState({ scope: assetScope, assets: data.assets });
+      } catch { /* Preserve last valid URLs; next interval/focus retries. */ }
+      finally { pending = false; }
+    };
+    void refresh();
+    const timer = setInterval(() => { void refresh(); }, 240_000);
+    const onFocus = () => { void refresh(); };
+    window.addEventListener("focus", onFocus);
+    return () => { controller.abort(); clearInterval(timer); window.removeEventListener("focus", onFocus); };
+  }, [projectId, clientId, assetScope, revisionId, reload]);
+  const sandpackFiles = useMemo(() => getSitePreviewFiles(files, assetState?.scope === assetScope ? assetState.assets : [], projectScope), [files, assetState, assetScope, projectScope]);
   const available = ["index.html", "src/main.tsx", "src/App.tsx"].every((path) => files[path]?.trim());
 
   const filesVersion = useMemo(() => {
