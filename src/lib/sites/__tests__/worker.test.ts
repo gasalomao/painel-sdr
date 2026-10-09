@@ -8,6 +8,7 @@ const state = vi.hoisted(() => ({
   tables: {} as Record<string, Record<string, unknown>[]>,
   rpc: vi.fn(),
   chat: vi.fn(),
+  attempt: vi.fn(),
   build: vi.fn(),
   buildConfigured: vi.fn(),
   resume: vi.fn(),
@@ -37,6 +38,10 @@ vi.mock("@/lib/ai-provider", async () => {
   const actual = await vi.importActual<typeof import("@/lib/ai-provider")>("@/lib/ai-provider");
   return { ...actual, openRouterChatWithFailover: (...args: unknown[]) => state.chat(...args) };
 });
+vi.mock("../models", async () => {
+  const actual = await vi.importActual<typeof import("../models")>("../models");
+  return { ...actual, websiteChatAttempt: (...args: unknown[]) => state.attempt(...args) };
+});
 vi.mock("../build-provider", () => ({
   createSiteBuildProvider: () => ({ configured: () => state.buildConfigured(), build: (...args: unknown[]) => state.build(...args) }),
   SITE_PROVIDER_NOT_CONFIGURED: "READY — AWAITING CREDENTIALS",
@@ -64,19 +69,24 @@ function fakeClient(): SupabaseClient {
     from(table: string) {
       const filters: Array<[string, [string, unknown]]> = [];
       let single = false;
+      let maximum = Infinity;
+      const orders: Array<{ key: string; ascending: boolean }> = [];
       let mode: "select" | "update" | "insert" = "select";
       const query: Record<string, unknown> = {
         select: () => query,
         eq: (key: string, value: unknown) => { filters.push(["eq", [key, value]]); return query; },
+        like: (key: string, value: string) => { filters.push(["like", [key, value]]); return query; },
         in: (key: string, value: unknown) => { filters.push(["in", [key, value]]); return query; },
         gt: (key: string, value: unknown) => { filters.push(["gt", [key, value]]); return query; },
         is: (key: string, value: unknown) => { filters.push(["is", [key, value]]); return query; },
-        order: () => query,
-        limit: () => query,
+        order: (key: string, options: { ascending: boolean }) => { orders.push({ key, ...options }); return query; },
+        limit: (count: number) => { maximum = count; return query; },
         maybeSingle: () => { single = true; return query; },
         insert: (row: Record<string, unknown>) => {
           if (state.insertError) return Promise.resolve({ data: null, error: state.insertError });
-          state.tables[table] ??= []; state.tables[table].push(row); return Promise.resolve({ data: null, error: null });
+          const existing = state.tables[table] ?? [];
+          state.tables[table] = [...existing, ...(Array.isArray(row) ? row : [row]).map((item, index) => ({ id: String(existing.length + index).padStart(8, "0"), created_at: new Date().toISOString(), ...item }))];
+          return Promise.resolve({ data: null, error: null });
         },
         update: (patch: Record<string, unknown>) => {
           mode = "update";
@@ -89,12 +99,20 @@ function fakeClient(): SupabaseClient {
           if (mode === "insert") return Promise.resolve({ data: null, error: null }).then(resolve);
           let rows = (state.tables[table] ?? []).filter((row) => matches(row));
           if (mode === "update") rows = (query as { rows?: unknown[] }).rows as Record<string, unknown>[];
+          rows = [...rows].sort((a, b) => {
+            for (const { key, ascending } of orders) {
+              const compared = String(a[key]).localeCompare(String(b[key]));
+              if (compared) return ascending ? compared : -compared;
+            }
+            return 0;
+          }).slice(0, maximum);
           return Promise.resolve({ data: single ? rows[0] ?? null : rows, error: null }).then(resolve);
         },
       };
       return query;
       function matches(row: Record<string, unknown>): boolean {
         return filters.every(([op, [key, value]]) => {
+          if (op === "like") return String(row[key]).startsWith(String(value).slice(0, -1));
           if (op === "eq") return row[key] === value;
           if (op === "in") return Array.isArray(value) && (value as unknown[]).includes(row[key]);
           if (op === "gt") return String(row[key]) > String(value);
@@ -153,6 +171,13 @@ beforeEach(() => {
     return { data: null, error: null };
   });
   state.chat.mockImplementation(async () => chatResult(JSON.stringify({ passed: true, issues: [], summary: "Visual aprovado." })));
+  state.attempt.mockImplementation(async (model: { id: string }, body: Record<string, unknown>, signal: AbortSignal) => {
+    const response = await state.chat({ ...body, model: model.id, stream: false }, { signal, maxAttempts: 1, attemptBudget: { remaining: 1 } });
+    return { model: model.id, response, usage: {
+      promptTokens: response.usage?.prompt_tokens ?? 0, completionTokens: response.usage?.completion_tokens ?? 0,
+      totalTokens: response.usage?.total_tokens ?? 0, attempts: response.usage?.attempts,
+    } };
+  });
   state.build.mockImplementation(async () => unconfiguredBuild);
   state.buildConfigured.mockReturnValue(true);
   state.configured.mockReturnValue(true);
@@ -321,6 +346,10 @@ describe("website worker", () => {
     const { getStarterFiles } = await import("../starter");
     state.tables.website_assets = [priorAsset];
     state.tables.website_revisions[0].files = { ...getStarterFiles(), "src/App.tsx": `export default function App(){return <img src="/assets/${priorId}.png" alt="Logo"/>}` };
+    if (kind === "agent") state.chat.mockResolvedValueOnce({
+      ...chatResult("Ajustando o texto alternativo."),
+      choices: [{ message: { content: "Ajustando o texto alternativo.", tool_calls: [{ id: "edit-logo", type: "function", function: { name: "patch", arguments: JSON.stringify({ path: "src/App.tsx", old: 'alt="Logo"', new: 'alt="Logo oficial"' }) } }] } }],
+    });
     await executeWebsiteRun(fakeClient(), claimed({ kind }), WORKER);
     expect(state.build).toHaveBeenCalledWith(expect.objectContaining({ assets: [priorAsset] }), expect.any(AbortSignal));
     expect(state.sign).not.toHaveBeenCalled();
@@ -379,6 +408,39 @@ describe("website worker", () => {
     const { logTokenUsage } = await import("@/lib/token-usage");
     expect(logTokenUsage).toHaveBeenCalledOnce();
     expect(state.tables.website_messages.at(-1)).toMatchObject({ role: "system" });
+  });
+
+  it("routes the active worker through the single-attempt transport with cancellation", async () => {
+    const deps = createWebsiteAgentDependencies(fakeClient(), WORKER);
+    const model = { id: "nvidia:test/model", name: "Test", supportsTools: true, contextLength: 100000 };
+    const signal = new AbortController().signal;
+    const expected = { model: model.id, response: chatResult("feito"), usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 } };
+    state.attempt.mockResolvedValue(expected);
+    await expect(deps.chat([model], { messages: [] }, signal)).resolves.toEqual(expected);
+    expect(state.attempt).toHaveBeenCalledWith(model, { messages: [] }, signal);
+    expect(state.chat).not.toHaveBeenCalled();
+  });
+
+  it("keeps unknown token usage reserved instead of settling it as proven zero", async () => {
+    const deps = createWebsiteAgentDependencies(fakeClient(), WORKER);
+    await deps.usage(claimed(), null, "test/model", RUN, true);
+    expect(state.rpc).toHaveBeenCalledWith("website_settle_tokens", expect.objectContaining({ p_complete: false }));
+    const message = JSON.parse(String(state.tables.website_messages.at(-1)?.content));
+    expect(message).toMatchObject({ usage: null, complete: false });
+  });
+
+  it("preserves cache and actual provider details in per-attempt telemetry", async () => {
+    const deps = createWebsiteAgentDependencies(fakeClient(), WORKER);
+    const usage = {
+      promptTokens: 30, completionTokens: 5, totalTokens: 35, cachedTokens: 20,
+      attempts: [{ provider: "gateway" as const, model: "actual/model", promptTokens: 30, completionTokens: 5, totalTokens: 35, cachedTokens: 20 }],
+    };
+    await deps.usage(claimed(), usage, "gateway:chosen/model", RUN, true);
+    const { logTokenUsage } = await import("@/lib/token-usage");
+    expect(logTokenUsage).toHaveBeenCalledWith(expect.objectContaining({
+      model: "actual/model", provider: "Gateway", cachedTokens: 20,
+      metadata: expect.objectContaining({ provider: "gateway", cached_tokens: 20, estimated: false }),
+    }));
   });
 
   it("retains the reservation when failed attempts report zero tokens", async () => {
@@ -662,4 +724,169 @@ it("loads private design metadata only for the exact tenant, project and base re
   expect(input.activeSkills?.some((skill) => skill.slug === "impeccable-design")).toBe(true);
   expect(input.systemPrompt).not.toMatch(/FOREIGN_SECRET|OTHER_PROJECT_SECRET|OLD_REVISION_SECRET/);
   expect(input.systemPrompt).toContain("DIREÇÃO PRIVADA DA REVISÃO BASE");
+});
+
+it("keeps the direction across manual editor revisions through the scoped lineage only", async () => {
+  const direction = { mode: "persuade", ...Object.fromEntries(DESIGN_DIRECTION_FIELDS.map((field) => [field, `Direção ${field} da revisão do agente.`])) };
+  const AGENT_REVISION = "00000000-0000-0000-0000-000000000012";
+  state.tables.website_skills = [];
+  state.tables.website_revisions = [
+    { id: REVISION, client_id: CLIENT, project_id: PROJECT, parent_id: AGENT_REVISION, files: {} },
+    { id: AGENT_REVISION, client_id: "foreign", project_id: PROJECT, parent_id: null, files: {} },
+    { id: AGENT_REVISION, client_id: CLIENT, project_id: PROJECT, parent_id: null, files: {} },
+  ];
+  state.tables.website_builds = [
+    { client_id: "foreign", project_id: PROJECT, revision_id: REVISION, qa: { design_direction: { ...direction, thesis: "FOREIGN_SECRET" } } },
+    { client_id: CLIENT, project_id: PROJECT, revision_id: AGENT_REVISION, qa: { design_direction: direction } },
+  ];
+  const input = await createWebsiteAgentDependencies(fakeClient(), WORKER).load(claimed());
+  expect(input.designDirection).toEqual(direction);
+  expect(input.systemPrompt).not.toContain("FOREIGN_SECRET");
+
+  state.tables.website_builds = [{ client_id: "foreign", project_id: PROJECT, revision_id: AGENT_REVISION, qa: { design_direction: direction } }];
+  expect((await createWebsiteAgentDependencies(fakeClient(), WORKER).load(claimed())).designDirection).toBeUndefined();
+});
+
+it("treats the prior direction as something to replace on explicit redesign", async () => {
+  const direction = { mode: "persuade", ...Object.fromEntries(DESIGN_DIRECTION_FIELDS.map((field) => [field, `Direção ${field} anterior do projeto.`])) };
+  state.tables.website_skills = [];
+  state.tables.website_builds = [{ client_id: CLIENT, project_id: PROJECT, revision_id: REVISION, qa: { design_direction: direction } }];
+  const input = await createWebsiteAgentDependencies(fakeClient(), WORKER).load(claimed({ prompt: "Recrie o site do zero com nova identidade." }));
+  expect(input.systemPrompt).toContain("REDESIGN SOLICITADO");
+  expect(input.systemPrompt).not.toContain("DIREÇÃO PRIVADA DA REVISÃO BASE");
+});
+
+describe("persistent checkpoints", () => {
+  it("round trips large files and rejects stale revisions and other tenants", async () => {
+    const { saveRunCheckpoint, loadRunCheckpoint } = await import("../run-checkpoint");
+    const { getStarterFiles } = await import("../starter");
+    const snapshot = { files: { ...getStarterFiles(), "src/large.ts": "//" + "á🚀".repeat(15000) }, request: "Finalize o site", assetIds: [] };
+    await saveRunCheckpoint(fakeClient(), claimed(), snapshot);
+    expect(state.tables.website_messages.every(row => String(row.content).length < 64000)).toBe(true);
+    expect(await loadRunCheckpoint(fakeClient(), claimed())).toEqual(snapshot);
+    expect((await createWebsiteAgentDependencies(fakeClient(), WORKER).load(claimed())).files).toEqual(snapshot.files);
+    expect(await loadRunCheckpoint(fakeClient(), claimed({ client_id: WORKER }))).toBeUndefined();
+    expect(await loadRunCheckpoint(fakeClient(), claimed({ project_id: WORKER }))).toBeUndefined();
+    expect(await loadRunCheckpoint(fakeClient(), claimed({ base_revision_id: WORKER }))).toBeUndefined();
+    expect(await loadRunCheckpoint(fakeClient(), claimed({ kind: "build" }))).toBeUndefined();
+    state.tables.website_messages = state.tables.website_messages.filter(row => !String(row.content).includes(":0]"));
+    await expect(loadRunCheckpoint(fakeClient(), claimed())).rejects.toThrow("incompleto");
+  });
+  it("round trips consumption counters and rejects unsafe checkpoint budgets", async () => {
+    const { saveRunCheckpoint, loadRunCheckpoint } = await import("../run-checkpoint");
+    const { getStarterFiles } = await import("../starter");
+    const budgetConsumed = { requests: 2, tools: 4, outputTokens: 300, totalTokens: 2000 };
+    const snapshot = { files: getStarterFiles(), request: "continue", assetIds: [], budgetConsumed };
+    await saveRunCheckpoint(fakeClient(), claimed(), snapshot);
+    expect((await loadRunCheckpoint(fakeClient(), claimed()))?.budgetConsumed).toEqual(budgetConsumed);
+    await expect(saveRunCheckpoint(fakeClient(), claimed(), { ...snapshot, budgetConsumed: { ...budgetConsumed, requests: -1 } })).rejects.toThrow("Orçamento");
+  });
+
+  it("persists the actual runtime budget including QA counters", async () => {
+    const { saveRunCheckpoint, loadRunCheckpoint } = await import("../run-checkpoint");
+    const { getStarterFiles } = await import("../starter");
+    const budgetConsumed = { requests: 2, tools: 4, outputTokens: 300, totalTokens: 2000, qaRequests: 1, qaOutputTokens: 100 };
+    await saveRunCheckpoint(fakeClient(), claimed(), { files: getStarterFiles(), request: "Continue", assetIds: [], budgetConsumed });
+    expect((await loadRunCheckpoint(fakeClient(), claimed()))?.budgetConsumed).toEqual(budgetConsumed);
+    await expect(saveRunCheckpoint(fakeClient(), claimed(), { files: getStarterFiles(), request: "Continue", assetIds: [], budgetConsumed: { ...budgetConsumed, qaRequests: -1 } })).rejects.toThrow("Orçamento");
+  });
+
+  it.each([null, -1, 1.5, "1", Number.MAX_SAFE_INTEGER + 1])("rejects invalid optional QA counters (%s)", async (value) => {
+    const { saveRunCheckpoint } = await import("../run-checkpoint");
+    const { getStarterFiles } = await import("../starter");
+    const budget = { requests: 1, tools: 0, outputTokens: 0, totalTokens: 2000 };
+    for (const field of ["qaRequests", "qaOutputTokens"]) {
+      const budgetConsumed = { ...budget, [field]: value } as unknown as import("../run-checkpoint").WebsiteBudgetConsumed;
+      await expect(saveRunCheckpoint(fakeClient(), claimed(), { files: getStarterFiles(), request: "continue", assetIds: [], budgetConsumed })).rejects.toThrow("Orçamento");
+    }
+  });
+
+  it("keeps recovered files but does not inherit an exhausted budget from another run", async () => {
+    const { saveRunCheckpoint } = await import("../run-checkpoint");
+    const { getStarterFiles } = await import("../starter");
+    const files = { ...getStarterFiles(), "src/recovered.ts": "export const progress = true;" };
+    await saveRunCheckpoint(fakeClient(), claimed(), { files, request: "Finalize o site", assetIds: [], budgetConsumed: { requests: 80, tools: 250, outputTokens: 250000, totalTokens: 500000 } });
+    const input = await createWebsiteAgentDependencies(fakeClient(), WORKER).load(claimed({ id: WORKER }));
+    expect(input.files).toEqual(files);
+    expect(input.pendingRequest).toBe("Finalize o site");
+    expect(input.budgetConsumed).toBeUndefined();
+  });
+
+  it("recovers structured diagnostics and next action across models", async () => {
+    const { saveRunCheckpoint, loadRunCheckpoint } = await import("../run-checkpoint");
+    const { getStarterFiles } = await import("../starter");
+    const progress = { stage: "blocked" as const, changedPaths: ["src/App.tsx"], diagnostics: ["src/App.tsx(1046,7): TS1005: ')' expected."], nextAction: "Leia as linhas1044–1048 e corrija com patch." };
+    await saveRunCheckpoint(fakeClient(), claimed(), { files: getStarterFiles(), request: "Finalize Casa do Agricultor", assetIds: [], progress });
+    expect((await loadRunCheckpoint(fakeClient(), claimed({ id: WORKER })))?.progress).toEqual(progress);
+    expect((await createWebsiteAgentDependencies(fakeClient(), WORKER).load(claimed({ id: WORKER }))).pendingProgress).toEqual(progress);
+    await expect(saveRunCheckpoint(fakeClient(), claimed(), { files: getStarterFiles(), request: "continue", assetIds: [], progress: { ...progress, stage: "ready" as never } })).rejects.toThrow("Progresso");
+    await expect(saveRunCheckpoint(fakeClient(), claimed(), { files: getStarterFiles(), request: "continue", assetIds: [], progress: { ...progress, diagnostics: ["x".repeat(2001)] } })).rejects.toThrow("Progresso");
+  });
+
+  it("round trips private QA reports without promoting a revision or storing binary evidence", async () => {
+    const { saveRunCheckpoint, loadRunCheckpoint } = await import("../run-checkpoint");
+    const { getStarterFiles } = await import("../starter");
+    const qaReport = { status: "failed" as const, technicalSuccess: true, durationMs: 1200, logs: "Build OK", errors: ["Hero cortado."], warnings: [], diagnostics: [], visualReview: "Ajustar mobile.", modelUsed: "vendor/model", stage: "visual", workspaceVersion: "a".repeat(64), truncated: false };
+    const snapshot = { files: getStarterFiles(), request: "continue", assetIds: [], qaReport, budgetConsumed: { requests: 1, tools: 0, outputTokens: 10, totalTokens: 20 } };
+    await saveRunCheckpoint(fakeClient(), claimed(), snapshot);
+    expect((await loadRunCheckpoint(fakeClient(), claimed()))?.qaReport).toEqual(qaReport);
+    const recovered = await loadRunCheckpoint(fakeClient(), claimed({ id: WORKER }));
+    expect(recovered?.qaReport).toEqual(qaReport);
+    expect(recovered?.budgetConsumed).toBeUndefined();
+    expect(await loadRunCheckpoint(fakeClient(), claimed({ client_id: WORKER }))).toBeUndefined();
+    expect(state.tables.website_builds ?? []).toEqual([]);
+    expect(JSON.stringify(state.tables.website_messages)).not.toContain('"screenshots"');
+  });
+
+  it("rejects corrupted QA evidence on load and forwards valid evidence across worker runs", async () => {
+    const { saveRunCheckpoint, loadRunCheckpoint } = await import("../run-checkpoint");
+    const { getStarterFiles } = await import("../starter");
+    const qaReport = { status: "failed" as const, technicalSuccess: false, durationMs: 0, logs: "", errors: ["Compile failed"], warnings: [], diagnostics: [], modelUsed: null, workspaceVersion: "a".repeat(64), truncated: false };
+    await saveRunCheckpoint(fakeClient(), claimed(), { files: getStarterFiles(), request: "continue", assetIds: [], qaReport });
+    expect((await createWebsiteAgentDependencies(fakeClient(), WORKER).load(claimed({ id: WORKER }))).pendingQaReport).toEqual(qaReport);
+    state.tables.website_messages = state.tables.website_messages.map((row) => ({ ...row, content: String(row.content).replace('"technicalSuccess":false', '"technicalSuccess":null') }));
+    await expect(loadRunCheckpoint(fakeClient(), claimed())).rejects.toThrow("Relatório QA");
+  });
+
+  it.each([null, { status: "ready" }, { status: "failed", logs: "x".repeat(16001) }, { status: "failed", screenshots: {} }, { status: "failed", artifact: {} }])("rejects malformed QA reports before checkpoint storage %#", async (qaReport) => {
+    const { saveRunCheckpoint } = await import("../run-checkpoint");
+    const { getStarterFiles } = await import("../starter");
+    await expect(saveRunCheckpoint(fakeClient(), claimed(), { files: getStarterFiles(), request: "continue", assetIds: [], qaReport } as never)).rejects.toThrow("Relatório QA");
+    expect(state.tables.website_messages).toEqual([]);
+  });
+
+  it("keeps browser draft reads on the exact run while worker recovery can cross runs", async () => {
+    const { saveRunCheckpoint, loadRunCheckpoint } = await import("../run-checkpoint");
+    const { getStarterFiles } = await import("../starter");
+    const snapshot = { files: getStarterFiles(), request: "continue", assetIds: [] };
+    await saveRunCheckpoint(fakeClient(), claimed(), snapshot);
+    expect(await loadRunCheckpoint(fakeClient(), claimed({ id: WORKER }), true)).toBeUndefined();
+    expect(await loadRunCheckpoint(fakeClient(), claimed({ id: WORKER }))).toEqual(snapshot);
+    expect(await loadRunCheckpoint(fakeClient(), claimed(), true)).toEqual(snapshot);
+  });
+
+  it("reports recovery before any model spending and keeps the previous complete snapshot", async () => {
+    const { CHECKPOINT_RECOVERY_WARNING, saveRunCheckpoint } = await import("../run-checkpoint");
+    const { getStarterFiles } = await import("../starter");
+    const previous = claimed({ id: PROJECT });
+    const files = { ...getStarterFiles(), "src/recovered.ts": "export const progress = true;" };
+    await saveRunCheckpoint(fakeClient(), previous, { files, request: "older", assetIds: [] });
+    await saveRunCheckpoint(fakeClient(), previous, { files: getStarterFiles(), request: "newer", assetIds: [] });
+    const marker = state.tables.website_messages.filter(row => String(row.content).includes("commit:")).at(-1)!;
+    const { id } = JSON.parse(String(marker.content).split("]")[1]) as { id: string };
+    state.tables.website_messages = state.tables.website_messages.filter(row => !String(row.content).startsWith("[site-checkpoint:" + id + ":"));
+    const input = await createWebsiteAgentDependencies(fakeClient(), WORKER).load(claimed());
+    expect(input.files).toEqual(files);
+    expect(input.pendingProgress?.diagnostics).toContain(CHECKPOINT_RECOVERY_WARNING);
+    expect(state.tables.website_messages.at(-1)?.content).toBe(CHECKPOINT_RECOVERY_WARNING);
+    expect(state.attempt).not.toHaveBeenCalled();
+  });
+
+  it("does not publish a commit marker when chunk storage fails", async () => {
+    const { saveRunCheckpoint, loadRunCheckpoint } = await import("../run-checkpoint");
+    const { getStarterFiles } = await import("../starter");
+    state.insertError = { message: "storage failed" };
+    await expect(saveRunCheckpoint(fakeClient(), claimed(), { files: getStarterFiles(), request: "continue", assetIds: [] })).rejects.toThrow();
+    expect(await loadRunCheckpoint(fakeClient(), claimed())).toBeUndefined();
+  });
 });

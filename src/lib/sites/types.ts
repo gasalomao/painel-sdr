@@ -106,6 +106,9 @@ export interface WebsiteQa {
   passed: boolean;
   errors: string[];
   warnings: string[];
+  failure_kind?: "source" | "infrastructure" | "timeout" | "cancelled";
+  stage?: string;
+  diagnostics?: string[];
   visual_review?: string;
   design_direction?: import("./impeccable").WebsiteDesignDirection;
   impeccable_review?: import("./impeccable").ImpeccableVisualCheck[];

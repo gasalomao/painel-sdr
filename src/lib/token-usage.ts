@@ -22,7 +22,9 @@ export interface TokenUsageInput {
   promptTokens?: number;
   completionTokens?: number;
   totalTokens?: number;
-  metadata?: Record<string, any>;
+  cachedTokens?: number;
+  costUsd?: number | null;
+  metadata?: Record<string, unknown>;
   /** Multi-tenant: cliente dono do gasto. Sem isso, /tokens do cliente fica
    *  vazio e admin vê tudo misturado. Default = Default client. */
   clientId?: string;
@@ -32,8 +34,14 @@ export interface TokenUsageInput {
  * Custo agora vem de `lib/pricing.ts` — fonte online (LiteLLM JSON), com cache.
  * Mantemos só este wrapper sync que assume o cache já populado.
  */
-function estimateCost(model: string, promptTokens: number, completionTokens: number): number {
+function estimateCost(model: string, promptTokens: number, completionTokens: number, cachedTokens = 0): number | null {
   const price = lookupPriceSync(model);
+  if (!price || !Number.isFinite(price.input_per_token) || price.input_per_token < 0 || !Number.isFinite(price.output_per_token) || price.output_per_token < 0) return null;
+  const cached = Number.isSafeInteger(cachedTokens) && cachedTokens > 0 ? Math.min(cachedTokens, promptTokens) : 0;
+  const cachePrice = price.cache_read_per_token;
+  if (cached > 0 && typeof cachePrice === "number" && Number.isFinite(cachePrice) && cachePrice >= 0) {
+    return Math.round((computeCost(price, promptTokens - cached, completionTokens) + cached * cachePrice) * 1e10) / 1e10;
+  }
   return computeCost(price, promptTokens, completionTokens);
 }
 
@@ -59,19 +67,14 @@ export async function logTokenUsage(input: TokenUsageInput): Promise<void> {
     const completionTokens = Number(input.completionTokens || 0);
     const totalTokens = Number(input.totalTokens || (promptTokens + completionTokens));
 
-    // LOG DEBUG SEMPRE — ajuda a entender se o tracking está chegando aqui
-    console.log(
-      `[TokenUsage] source=${input.source} label=${input.sourceLabel || "?"} model=${input.model} ` +
-      `prompt=${promptTokens} completion=${completionTokens} total=${totalTokens}`
-    );
-
     if (totalTokens <= 0) {
       console.warn(`[TokenUsage] ⚠ totalTokens=0 — usageMetadata pode não ter vindo no response. Pulando insert.`);
       return;
     }
-    // Garante que o cache de preços esteja populado (no-op depois da 1ª vez por 6h)
-    await ensurePricing().catch(() => null);
-    const cost = estimateCost(input.model, promptTokens, completionTokens);
+    const isReported = typeof input.costUsd === "number" && Number.isFinite(input.costUsd) && input.costUsd >= 0;
+    if (!isReported) await ensurePricing().catch(() => null);
+    const cost = isReported ? Number(input.costUsd) : estimateCost(input.model, promptTokens, completionTokens, input.cachedTokens);
+    const costStatus = isReported ? "reported" : cost === null ? "unknown" : "estimated";
 
     const { error } = await adminClient.from("ai_token_usage").insert({
       client_id: input.clientId || "00000000-0000-0000-0000-000000000001",
@@ -84,7 +87,7 @@ export async function logTokenUsage(input: TokenUsageInput): Promise<void> {
       completion_tokens: completionTokens,
       total_tokens: totalTokens,
       cost_usd: cost,
-      metadata: input.metadata || {},
+      metadata: { ...input.metadata, cost_status: costStatus, cost_usd: cost, ...(input.cachedTokens !== undefined ? { cached_tokens: input.cachedTokens } : {}) },
     });
     if (error) {
       // 42P01 = tabela ainda não existe (rodar SETUP_COMPLETO.sql)
@@ -93,8 +96,6 @@ export async function logTokenUsage(input: TokenUsageInput): Promise<void> {
       } else {
         console.error("[TokenUsage] Falha ao gravar:", error.message, "| code=", (error as any).code);
       }
-    } else {
-      console.log(`[TokenUsage] ✓ Gravado no banco: ${totalTokens} tokens (~$${cost.toFixed(6)})`);
     }
   } catch (err: any) {
     console.error("[TokenUsage] erro inesperado:", err?.message);

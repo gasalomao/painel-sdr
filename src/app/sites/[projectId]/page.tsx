@@ -13,7 +13,7 @@ import { apiJson, ApiError, errorMessage, friendlyRunError, isActiveRun, jsonBod
 import { SiteChat } from "@/components/sites/site-chat";
 import { SiteFilesPanel } from "@/components/sites/site-files-panel";
 import { SiteProjectPanel } from "@/components/sites/site-project-panel";
-import { isPublishableBuild, projectStatusLabel, safeSiteUrl } from "@/lib/sites/ui-helpers";
+import { completionNotice, isPublishableBuild, projectStatusLabel, safeSiteUrl } from "@/lib/sites/ui-helpers";
 import { deploymentResponse, getSiteDraft, reconcileDeploymentKeys, setSiteDraft, siteDraftScope, useDraftUnloadWarning, useSiteIdentity, type DeploymentAttempt } from "@/lib/sites/ui";
 import type { WebsiteBuild, WebsiteDeployment, WebsiteFiles, WebsiteProject, WebsiteRun } from "@/lib/sites/types";
 
@@ -31,6 +31,9 @@ export default function SiteProjectPage(): React.JSX.Element {
 function Editor({ projectId, clientId, draftScope }: { projectId: string; clientId: string; draftScope: string }): React.JSX.Element {
   const router = useRouter();
   const [snapshot, setSnapshot] = useState<{ project: WebsiteProject; files: WebsiteFiles } | null>(null);
+  const [checkpointPreview, setCheckpointPreview] = useState<{ version: string; run_id: string; base_revision_id: string | null; files: WebsiteFiles } | null>(null);
+  const checkpointEtag = useRef<{ runId: string; value: string } | null>(null);
+  const snapshotRevision = useRef<string | null>(null);
   const [runs, setRuns] = useState<WebsiteRun[]>([]);
   const [runsReady, setRunsReady] = useState(false);
   const [error, setError] = useState("");
@@ -47,6 +50,7 @@ function Editor({ projectId, clientId, draftScope }: { projectId: string; client
   const hasDraft = filesDirty || settingsDirty;
   const reloadSequence = useRef(0);
   const previousRuns = useRef(new Map<string, WebsiteRun>());
+  const runsSequence = useRef(0);
   const lifecycle = useRef<AbortController | null>(null);
   const actionLock = useRef(false);
   const [attempts] = useState(() => getSiteDraft(draftScope, "deployments") ?? { publish: new Map<string, DeploymentAttempt>(), rollback: new Map<string, DeploymentAttempt>() });
@@ -63,7 +67,7 @@ function Editor({ projectId, clientId, draftScope }: { projectId: string; client
       const latest = await apiJson<{ project: WebsiteProject }>(base, { signal });
       if (first.project.client_id !== clientId || latest.project.client_id !== clientId || latest.project.id !== projectId) throw new ApiError("Acesso não permitido.", 403);
       if (first.project.current_revision_id !== latest.project.current_revision_id) continue;
-      if (!signal?.aborted && sequence === reloadSequence.current) { setSnapshot({ project: latest.project, files: files.files }); setError(""); setRefresh((value) => value + 1); }
+      if (!signal?.aborted && sequence === reloadSequence.current) { snapshotRevision.current = latest.project.current_revision_id; setSnapshot({ project: latest.project, files: files.files }); setCheckpointPreview(null); checkpointEtag.current = null; setError(""); setRefresh((value) => value + 1); }
       return;
     }
     throw new ApiError("O projeto está sendo alterado. Aguarde e recarregue.", 409);
@@ -77,14 +81,22 @@ function Editor({ projectId, clientId, draftScope }: { projectId: string; client
       if (run.status === "completed") {
         if (run.kind === "agent") completedAgentRun = true;
         void reload(lifecycle.current?.signal)
-          .then(() => {
+          .then(async () => {
             if (run.kind === "agent") {
               setTab("preview");
               setPreviewSubtab("preview");
             }
+            try {
+              const { builds: latestBuilds } = await apiJson<{ builds: Omit<WebsiteBuild, "artifact">[] }>(`${base}/builds`, { signal: lifecycle.current?.signal });
+              const notice = completionNotice(run.kind, latestBuilds?.[0]);
+              if (notice.type === "warning") toast.warning(notice.message);
+              else if (notice.type === "info") toast.info(notice.message);
+              else toast.success(notice.message);
+            } catch {
+              toast.info("Execução encerrada. Não foi possível confirmar o relatório de validação; consulte os Ajustes.");
+            }
           })
-          .catch((err: unknown) => { if (!lifecycle.current?.signal.aborted) toast.error(errorMessage(err)); });
-        toast.success(run.kind === "build" ? "Validação concluída." : "Alterações concluídas! Visualização atualizada.");
+          .catch((err: unknown) => { if (!lifecycle.current?.signal.aborted) { setError(errorMessage(err)); toast.error(errorMessage(err)); } });
       } else if (run.status === "failed") toast.error(friendlyRunError(run.error));
       else toast.info("Execução cancelada.");
     }
@@ -94,17 +106,35 @@ function Editor({ projectId, clientId, draftScope }: { projectId: string; client
       setTab("preview");
       setPreviewSubtab("preview");
     }
-  }, [reload]);
+  }, [reload, base]);
 
   const loadRuns = useCallback(async (signal?: AbortSignal): Promise<void> => {
+    const sequence = ++runsSequence.current;
+    const stale = () => signal?.aborted || sequence !== runsSequence.current;
     const data = await apiJson<{ runs: WebsiteRun[] }>(`${base}/runs`, { signal });
-    if (!signal?.aborted) receiveRuns(data.runs);
-  }, [base, receiveRuns]);
+    if (stale()) return;
+    try {
+      const candidate = data.runs.find((run) => run.kind !== "build");
+      if (!candidate || candidate.status === "completed" || getSiteDraft(draftScope, "files") || getSiteDraft(draftScope, "project")) return;
+      const known = checkpointEtag.current?.runId === candidate.id ? checkpointEtag.current.value : undefined;
+      const response = await fetch(`${base}/files?run_id=${encodeURIComponent(candidate.id)}`, { signal, cache: "no-store", ...(known ? { headers: { "If-None-Match": known } } : {}) });
+      if (stale() || response.status === 304) return;
+      if (!response.ok) throw new ApiError("Não foi possível carregar o rascunho confirmado.", response.status);
+      const { checkpoint } = await response.json() as { checkpoint: { version: string; run_id: string; base_revision_id: string | null; files: WebsiteFiles } | null };
+      if (stale() || getSiteDraft(draftScope, "files") || getSiteDraft(draftScope, "project")) return;
+      if (checkpoint && (checkpoint.run_id !== candidate.id || checkpoint.base_revision_id !== snapshotRevision.current)) return;
+      checkpointEtag.current = { runId: candidate.id, value: response.headers.get("ETag") ?? "" };
+      setCheckpointPreview(checkpoint);
+    } finally {
+      // Apply terminal status after loading its checkpoint so polling cleanup cannot abort it.
+      if (!stale()) receiveRuns(data.runs);
+    }
+  }, [base, receiveRuns, draftScope]);
 
   useEffect(() => {
     const controller = new AbortController();
     lifecycle.current = controller;
-    void Promise.all([reload(controller.signal), loadRuns(controller.signal)]).catch((err: unknown) => {
+    void reload(controller.signal).then(() => loadRuns(controller.signal)).catch((err: unknown) => {
       if (controller.signal.aborted) return;
       const message = errorMessage(err); setError(message); toast.error(message);
       if (err instanceof ApiError && (err.status === 404 || err.status === 403)) router.replace("/sites");
@@ -162,6 +192,8 @@ function Editor({ projectId, clientId, draftScope }: { projectId: string; client
   useDraftUnloadWarning(hasDraft);
 
   function queued(run: WebsiteRun): void {
+    runsSequence.current++;
+    checkpointEtag.current = null;
     previousRuns.current.set(run.id, run);
     setRuns((prev) => [run, ...prev.filter((item) => item.id !== run.id)]);
   }
@@ -278,7 +310,7 @@ function Editor({ projectId, clientId, draftScope }: { projectId: string; client
       <div className="ml-auto flex flex-wrap gap-2"><Button variant="outline" disabled={actionDisabled} onClick={() => void publishOrValidate(false)}><CheckCircle2 aria-hidden="true" />Validar</Button><Button disabled={actionDisabled} onClick={() => void publishOrValidate(true)}><Rocket aria-hidden="true" />Publicar</Button>{url && <a href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 rounded-lg border border-border px-3 text-sm"><ExternalLink className="size-4" aria-hidden="true" />Ver site</a>}</div>
     </header>
     {hasDraft && <p role="status" className="border-b border-border px-4 py-2 text-xs text-muted-foreground">Salve ou descarte as alterações em Arquivos e Ajustes antes de executar o agente ou publicar. Rascunhos ficam nesta aba durante a navegação, mas são perdidos ao recarregar ou trocar de conta.</p>}
-    {error && <div role="alert" className="flex flex-wrap items-center gap-2 px-4 py-2 text-sm"><p>{error}</p><Button variant="outline" onClick={() => void Promise.all([reload(), loadRuns()]).catch((err: unknown) => toast.error(errorMessage(err)))}>Recarregar projeto</Button></div>}
+    {error && <div role="alert" className="flex flex-wrap items-center gap-2 px-4 py-2 text-sm"><p>{error}</p><Button variant="outline" onClick={() => void reload(lifecycle.current?.signal).then(() => loadRuns(lifecycle.current?.signal)).catch((err: unknown) => toast.error(errorMessage(err)))}>Recarregar projeto</Button></div>}
     {!working && (deploymentPending || !deploymentsReady) && <div role="status" className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2 text-xs"><p>{deploymentPending ? "Há uma publicação pendente. Novas alterações estão bloqueadas até a confirmação do servidor." : "Verificando publicações pendentes..."}</p><Button size="sm" variant="outline" onClick={() => setRefresh((value) => value + 1)}>Atualizar estado</Button></div>}
     {operation && <p role="status" className="border-b border-border px-4 py-2 text-sm text-primary">{operation} Mantenha esta página aberta.</p>}
     {operationError && <p role="alert" className="border-b border-destructive/30 px-4 py-2 text-sm">{operationError} <Link href="/sites/settings" className="text-primary underline">Configurações</Link></p>}
@@ -291,7 +323,7 @@ function Editor({ projectId, clientId, draftScope }: { projectId: string; client
       <section id="editor-preview" role="tabpanel" tabIndex={0} aria-label="Preview e arquivos" className={`${tab === "preview" ? "flex" : "hidden"} flex-col h-full min-h-0 min-w-0 overflow-hidden lg:flex`}>
         <Tabs value={previewSubtab} onValueChange={(val) => setPreviewSubtab(val as "preview" | "files")} className="flex flex-1 flex-col h-full min-h-0 min-w-0 gap-0 overflow-hidden">
           <TabsList className="m-3 self-start shrink-0"><TabsTrigger value="preview">Preview</TabsTrigger><TabsTrigger value="files">Arquivos</TabsTrigger></TabsList>
-          <TabsContent value="preview" keepMounted className="flex flex-1 flex-col min-h-0 min-w-0 overflow-hidden data-[hidden]:hidden"><SitePreview files={snapshot.files} projectScope={project} revisionId={project.current_revision_id} projectSlug={project.slug} projectName={project.name} /></TabsContent>
+          <TabsContent value="preview" keepMounted className="flex flex-1 flex-col min-h-0 min-w-0 overflow-hidden data-[hidden]:hidden">{checkpointPreview && !hasDraft && checkpointPreview.base_revision_id === project.current_revision_id && <p role="status" className="px-4 py-2 text-xs text-muted-foreground">Rascunho confirmado do agente. Build e aprovação visual ainda pendentes; a revisão salva permanece intacta.</p>}<SitePreview files={!hasDraft && checkpointPreview?.base_revision_id === project.current_revision_id ? checkpointPreview.files : snapshot.files} projectScope={project} revisionId={project.current_revision_id} projectSlug={project.slug} projectName={project.name} /></TabsContent>
           <TabsContent value="files" keepMounted className="flex-1 min-h-0 min-w-0 overflow-auto data-[hidden]:hidden"><SiteFilesPanel draftScope={draftScope} projectId={projectId} files={snapshot.files} currentRevisionId={project.current_revision_id} onSaved={reload} onDirtyChange={setFilesDirty} onMutationStart={beginMutation} onMutationEnd={endMutation} disabled={disabled} /></TabsContent>
         </Tabs>
       </section>

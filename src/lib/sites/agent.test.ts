@@ -2,7 +2,7 @@ import { DESIGN_DIRECTION_FIELDS, IMPECCABLE_REVIEW_DIMENSIONS } from "./impecca
 import { BUILTIN_WEBSITE_SKILLS } from "./skills";
 import { describe, expect, it, vi } from "vitest";
 import { AiEmptyResponseError } from "@/lib/ai-provider";
-import { extractCodeBlockEdits, websiteTokenBudget, WebsiteAgentRuntime, type WebsiteAgentDependencies } from "./agent";
+import { extractCodeBlockEdits, websiteTokenBudget, WebsiteAgentRuntime, WebsiteQaFailedError, type WebsiteAgentDependencies } from "./agent";
 import { getStarterFiles } from "./starter";
 import { WebsiteTools, WEBSITE_TOOLS } from "./tools";
 import { normalizeWebsitePath, validateFiles, validateWebsiteContent } from "./validation";
@@ -95,6 +95,203 @@ function dependencies(): WebsiteAgentDependencies {
     chat: vi.fn(async () => ({ model: models[1].id, usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }, response: { choices: [{ message: { content: JSON.stringify({ passed: true, issues: [], summary: "Visual aprovado." }) } }] } })),
   };
 }
+
+describe("completion safety and patch extraction", () => {
+  it.each([
+    '```patch path="src/styles.css"\r\n<<<<<<< SEARCH\r\nold\r\n=======\r\nnew\r\n>>>>>>> REPLACE\r\n```',
+    '### src/styles.css\n```css\n<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE\n```',
+    '```css\n// src/styles.css\n<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE\n```',
+  ])("extracts SEARCH/REPLACE only as a patch (%s)", (text) => {
+    expect(extractCodeBlockEdits(text, getStarterFiles())).toEqual([{ path: "src/styles.css", type: "patch", content: "", old: "old", new: "new" }]);
+  });
+
+  it("never infers paths for partial rewrites or malformed patches", () => {
+    expect(extractCodeBlockEdits('```css\n:root { color: red; }\n```', getStarterFiles())).toEqual([]);
+    expect(extractCodeBlockEdits('### src/styles.css\n```css\n<<<<<<< SEARCH\nmissing separator\n```', getStarterFiles())).toEqual([]);
+  });
+
+  it("rejects a no-op request without building or completing", async () => {
+    const deps = dependencies();
+    const input = await deps.load(run);
+    deps.load = async () => ({ ...input, files: { ...input.files, "src/App.tsx": input.files["src/App.tsx"] + "\n// Established" } });
+    await expect(new WebsiteAgentRuntime(deps).run(run, new AbortController().signal)).rejects.toThrow("nenhuma alteração");
+    expect(deps.complete).not.toHaveBeenCalled();
+    expect(deps.build).not.toHaveBeenCalled();
+  });
+
+  it("feeds a failed textual patch back instead of completing", async () => {
+    const deps = dependencies();
+    vi.mocked(deps.chat).mockResolvedValueOnce({ model: models[0].id, usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }, response: { choices: [{ message: { content: '```patch path="src/styles.css"\n<<<<<<< SEARCH\nABSENT\n=======\nnew\n>>>>>>> REPLACE\n```' } }] } }).mockRejectedValue(new Error("offline"));
+    await expect(new WebsiteAgentRuntime(deps).run(run, new AbortController().signal)).rejects.toThrow("offline");
+    expect(JSON.stringify(vi.mocked(deps.chat).mock.calls[1][1])).toContain("Trecho ausente ou ambíguo");
+    expect(deps.complete).not.toHaveBeenCalled();
+  });
+
+  it("does not execute reasoning as source", async () => {
+    const deps = dependencies();
+    vi.mocked(deps.chat).mockResolvedValueOnce({ model: models[0].id, usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }, response: { choices: [{ message: { content: null, reasoning: '```css path="src/styles.css"\n:root{color:red}\n```' } }] } } as never);
+    await expect(new WebsiteAgentRuntime(deps).run(run, new AbortController().signal)).rejects.toThrow("resposta vazia");
+    expect(deps.complete).not.toHaveBeenCalled();
+  });
+
+  it("fails terminal QA without promoting files and emits a bounded report", async () => {
+    const deps = dependencies();
+    vi.mocked(deps.chat).mockImplementation(async (_models, body) => ({ model: models[0].id, usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }, response: { choices: [{ message: { content: body.tools ? "Implementação concluída." : JSON.stringify({ passed: false, issues: ["Hero cortado."], summary: "Reprovado." }) } }] } }));
+    await expect(new WebsiteAgentRuntime(deps).run(run, new AbortController().signal)).rejects.toMatchObject({ name: "WebsiteQaFailedError", build: expect.objectContaining({ qa: expect.objectContaining({ passed: false }) }) });
+    expect(deps.complete).not.toHaveBeenCalled();
+    expect(deps.event).toHaveBeenCalledWith(run, expect.objectContaining({ content: expect.stringContaining('"qa_failed"') }));
+  });
+
+  it("still completes failed build-only reports without files", async () => {
+    const deps = dependencies();
+    vi.mocked(deps.build).mockResolvedValue({ ...structuredClone(buildSuccess), status: "failed", success: false, errors: ["Compile failed"], qa: { passed: false, errors: ["Compile failed"], warnings: [] } });
+    await new WebsiteAgentRuntime(deps).run({ ...run, kind: "build" }, new AbortController().signal);
+    expect(deps.complete).toHaveBeenCalledWith(expect.anything(), null, expect.objectContaining({ status: "failed" }), expect.any(String), null);
+  });
+});
+
+it("checkpoints a successful patch before result telemetry can fail", async () => {
+  const deps = dependencies();
+  deps.checkpoint = vi.fn(async () => undefined);
+  vi.mocked(deps.chat).mockResolvedValueOnce({ model: models[0].id, usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }, response: { choices: [{ message: { tool_calls: [{ id: "patch", type: "function", function: { name: "patch", arguments: JSON.stringify({ path: "src/content.json", old: "Padaria Modelo", new: "Casa do Agricultor" }) } }] } }] } });
+  vi.mocked(deps.event).mockImplementation(async (_run, event) => { const value = JSON.parse(event.content); if (value.tool === "patch" && value.result) throw new Error("telemetry offline"); });
+  await expect(new WebsiteAgentRuntime(deps).run(run, new AbortController().signal)).rejects.toThrow("telemetry offline");
+  expect(deps.checkpoint).toHaveBeenLastCalledWith(run, expect.objectContaining({ files: expect.objectContaining({ "src/content.json": expect.stringContaining("Casa do Agricultor") }), progress: expect.objectContaining({ changedPaths: ["src/content.json"] }) }));
+});
+
+it("preserves terminal QA diagnostics before failure telemetry", async () => {
+  const deps = dependencies();
+  deps.checkpoint = vi.fn(async () => undefined);
+  vi.mocked(deps.chat).mockImplementation(async (_models, body) => ({ model: models[0].id, usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }, response: { choices: [{ message: { content: body.tools ? "Implementação concluída." : JSON.stringify({ passed: false, issues: ["Hero cortado."], summary: "Reprovado." }) } }] } }));
+  vi.mocked(deps.event).mockImplementation(async (_run, event) => { if (event.content.includes('"qa_failed"')) throw new Error("qa telemetry offline"); });
+  await expect(new WebsiteAgentRuntime(deps).run(run, new AbortController().signal)).rejects.toThrow("qa telemetry offline");
+  expect(deps.checkpoint).toHaveBeenLastCalledWith(run, expect.objectContaining({
+    progress: expect.objectContaining({ stage: "blocked", diagnostics: expect.arrayContaining(["Hero cortado."]) }),
+    qaReport: expect.objectContaining({ status: "failed", technicalSuccess: true, errors: expect.arrayContaining(["Hero cortado."]), visualReview: "Reprovado.", logs: "OK", modelUsed: models[0].id }),
+  }));
+  expect(JSON.stringify(vi.mocked(deps.event).mock.calls)).not.toContain("data:image");
+  expect(deps.complete).not.toHaveBeenCalled();
+});
+
+it("preserves a failed build report even when validation telemetry fails", async () => {
+  const deps = dependencies();
+  deps.checkpoint = vi.fn(async () => undefined);
+  vi.mocked(deps.chat).mockResolvedValue({ model: models[0].id, usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }, response: { choices: [{ message: { content: "Implementação concluída." } }] } });
+  vi.mocked(deps.build).mockResolvedValue({ ...structuredClone(buildSuccess), status: "failed", success: false, errors: ["Compile failed"], qa: { passed: false, errors: ["Compile failed"], warnings: [], failure_kind: "source" } });
+  vi.mocked(deps.event).mockImplementation(async (_run, event) => { if (event.content.includes('"validation"')) throw new Error("validation telemetry offline"); });
+  await expect(new WebsiteAgentRuntime(deps).run(run, new AbortController().signal)).rejects.toThrow("validation telemetry offline");
+  expect(deps.checkpoint).toHaveBeenLastCalledWith(run, expect.objectContaining({ qaReport: expect.objectContaining({ failureKind: "source", errors: expect.arrayContaining(["Compile failed"]) }) }));
+  expect(deps.complete).not.toHaveBeenCalled();
+});
+
+it("preserves an intermediate visual rejection before the correction model fails", async () => {
+  const deps = dependencies();
+  deps.checkpoint = vi.fn(async () => undefined);
+  vi.mocked(deps.chat)
+    .mockResolvedValueOnce({ model: models[0].id, usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }, response: { choices: [{ message: { content: "Implementação concluída." } }] } })
+    .mockResolvedValueOnce({ model: models[1].id, usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }, response: { choices: [{ message: { content: JSON.stringify({ passed: false, issues: ["Hero cortado."], summary: "Ajustar mobile." }) } }] } })
+    .mockRejectedValue(new Error("correction offline"));
+  await expect(new WebsiteAgentRuntime(deps).run(run, new AbortController().signal)).rejects.toThrow("correction offline");
+  expect(deps.checkpoint).toHaveBeenLastCalledWith(run, expect.objectContaining({ qaReport: expect.objectContaining({ visualReview: "Ajustar mobile.", errors: ["Hero cortado."] }) }));
+  expect(deps.complete).not.toHaveBeenCalled();
+});
+
+it("retains recovered QA evidence when the replacement model fails before editing", async () => {
+  const deps = dependencies();
+  const input = await deps.load(run);
+  const pendingQaReport = { status: "failed" as const, technicalSuccess: false, durationMs: 0, logs: "", errors: ["Compile failed"], warnings: [], diagnostics: [], modelUsed: null, workspaceVersion: "a".repeat(64), truncated: false };
+  deps.load = async () => ({ ...input, pendingQaReport });
+  deps.checkpoint = vi.fn(async () => undefined);
+  vi.mocked(deps.chat).mockRejectedValue(new Error("provider offline"));
+  await expect(new WebsiteAgentRuntime(deps).run(run, new AbortController().signal)).rejects.toThrow("provider offline");
+  expect(deps.checkpoint).toHaveBeenLastCalledWith(run, expect.objectContaining({ qaReport: pendingQaReport }));
+  expect(deps.complete).not.toHaveBeenCalled();
+});
+
+it.each(["infrastructure", "timeout", "cancelled"] as const)("preserves %s QA without source correction or extra spending", async (failureKind) => {
+  const deps = dependencies();
+  deps.checkpoint = vi.fn(async () => undefined);
+  vi.mocked(deps.chat).mockResolvedValue({ model: models[0].id, usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }, response: { choices: [{ message: { content: "Implementação concluída." } }] } });
+  vi.mocked(deps.build).mockResolvedValue({ ...structuredClone(buildSuccess), success: false, status: "failed", errors: ["Sandbox indisponível."], qa: { passed: false, errors: ["Sandbox indisponível."], warnings: [], failure_kind: failureKind, stage: "sandbox" } });
+  await expect(new WebsiteAgentRuntime(deps).run(run, new AbortController().signal)).rejects.toBeInstanceOf(WebsiteQaFailedError);
+  expect(deps.build).toHaveBeenCalledOnce();
+  expect(deps.chat).toHaveBeenCalledOnce();
+  expect(deps.reserveTokens).toHaveBeenCalledOnce();
+  expect(deps.complete).not.toHaveBeenCalled();
+  expect(deps.checkpoint).toHaveBeenLastCalledWith(run, expect.objectContaining({ qaReport: expect.objectContaining({ failureKind, stage: "sandbox" }), progress: expect.objectContaining({ nextAction: expect.stringContaining("infraestrutura") }) }));
+});
+
+describe("repeated inspection guard", () => {
+  it("stops identical reads without losing confirmed files or announcing success", async () => {
+    const deps = dependencies();
+    deps.checkpoint = vi.fn(async () => undefined);
+    vi.mocked(deps.chat).mockResolvedValue({ model: models[0].id, usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }, response: { choices: [{ message: { tool_calls: [{ id: "read", type: "function", function: { name: "read", arguments: JSON.stringify({ path: "src/App.tsx", start_line: 1, end_line: 5 }) } }] } }] } });
+    await expect(new WebsiteAgentRuntime(deps).run(run, new AbortController().signal)).rejects.toThrow("sem progresso");
+    expect(deps.chat).toHaveBeenCalledTimes(6);
+    expect(JSON.stringify(vi.mocked(deps.chat).mock.calls[3][1])).toContain("Leitura repetida");
+    expect(deps.checkpoint).toHaveBeenLastCalledWith(run, expect.objectContaining({ files: getStarterFiles(project) }));
+    expect(deps.complete).not.toHaveBeenCalled();
+    expect(deps.build).not.toHaveBeenCalled();
+  });
+
+  it("keeps final assistant claims private until system validation", async () => {
+    const deps = dependencies();
+    vi.mocked(deps.chat).mockResolvedValueOnce({ model: models[0].id, usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }, response: { choices: [{ message: { content: "Site perfeito, validado e funcional." } }] } });
+    vi.mocked(deps.build).mockRejectedValue(new Error("sandbox offline"));
+    await expect(new WebsiteAgentRuntime(deps).run(run, new AbortController().signal)).rejects.toThrow("sandbox offline");
+    expect(deps.event).not.toHaveBeenCalledWith(run, expect.objectContaining({ role: "assistant", content: "Site perfeito, validado e funcional." }));
+    expect(deps.complete).not.toHaveBeenCalled();
+  });
+});
+
+it("applies an unambiguous displayed text edit without an implementation model call", async () => {
+  const deps = dependencies();
+  const input = await deps.load(run);
+  const files = { ...input.files, "src/App.tsx": 'export default function App(){return <h1>Tudo para o campo</h1>;}' };
+  deps.load = async () => ({ ...input, files });
+  deps.checkpoint = vi.fn(async () => undefined);
+  vi.mocked(deps.build).mockResolvedValue({ ...structuredClone(buildSuccess), success: false, status: "unconfigured", qa: { passed: false, errors: [], warnings: [] } });
+  await new WebsiteAgentRuntime(deps).run({ ...run, prompt: 'Troque o texto "Tudo para o campo" por "Casa do Agricultor".' }, new AbortController().signal);
+  expect(deps.chat).not.toHaveBeenCalled();
+  expect(deps.reserveTokens).not.toHaveBeenCalled();
+  expect(deps.complete).toHaveBeenCalledWith(expect.anything(), { ...files, "src/App.tsx": files["src/App.tsx"].replace("Tudo para o campo", "Casa do Agricultor") }, expect.objectContaining({ status: "unconfigured" }), expect.stringContaining("rascunho"), null);
+});
+
+describe("edit cost ceilings", () => {
+  const established = async (deps: WebsiteAgentDependencies) => {
+    const input = await deps.load(run);
+    deps.load = async () => ({ ...input, files: { ...input.files, "src/App.tsx": input.files["src/App.tsx"] + "\n// Established" } });
+  };
+  it("admits at most eight implementation attempts including provider fallbacks", async () => {
+    const deps = dependencies();
+    await established(deps);
+    vi.mocked(deps.chat).mockResolvedValue({ model: models[0].id, usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }, response: { choices: [{ message: { tool_calls: [{ id: "inspect", type: "function", function: { name: "list", arguments: "{}" } }] } }] } });
+    await expect(new WebsiteAgentRuntime(deps).run({ ...run, prompt: "Troque o título" }, new AbortController().signal)).rejects.toThrow("Orçamento");
+    expect(deps.chat).toHaveBeenCalledTimes(8);
+    expect(vi.mocked(deps.chat).mock.calls.every(([, body]) => body.max_tokens === 2000)).toBe(true);
+    expect(deps.complete).not.toHaveBeenCalled();
+  });
+  it("blocks hidden write calls in surgical mode", async () => {
+    const deps = dependencies();
+    await established(deps);
+    vi.mocked(deps.chat).mockResolvedValueOnce({ model: models[0].id, usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }, response: { choices: [{ message: { tool_calls: [{ id: "rewrite", type: "function", function: { name: "write", arguments: JSON.stringify({ path: "src/styles.css", content: "replacement" }) } }] } }] } }).mockRejectedValue(new Error("offline"));
+    await expect(new WebsiteAgentRuntime(deps).run({ ...run, prompt: "Troque a cor para verde" }, new AbortController().signal)).rejects.toThrow("offline");
+    const first = vi.mocked(deps.chat).mock.calls[0][1];
+    expect(JSON.stringify(first.tools)).not.toContain('"name":"write"');
+    expect(JSON.stringify(vi.mocked(deps.chat).mock.calls[1][1])).toContain("Edição pontual");
+    expect(deps.complete).not.toHaveBeenCalled();
+  });
+  it("accounts failed unknown usage conservatively before fallback", async () => {
+    const deps = dependencies();
+    await established(deps);
+    const input = await deps.load(run);
+    deps.load = async () => ({ ...input, systemPrompt: "x".repeat(95000) });
+    vi.mocked(deps.chat).mockRejectedValue(new Error("network"));
+    await expect(new WebsiteAgentRuntime(deps).run({ ...run, prompt: "Troque o título" }, new AbortController().signal)).rejects.toThrow("Orçamento");
+    expect(deps.chat).toHaveBeenCalledOnce();
+    expect(deps.usage).toHaveBeenCalledWith(expect.anything(), null, expect.any(String), "reservation", false);
+  });
+});
 
 describe("integration regressions", () => {
   it("accepts HTTPS signed assets and screenshots without fetching them locally", async () => {
@@ -246,7 +443,7 @@ describe("integration regressions", () => {
     vi.mocked(deps.chat)
       .mockResolvedValueOnce({ model: models[0].id, usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, response: { choices: [{ message: { content: null, tool_calls: [{ id: "call-1", type: "function", function: { name: "read_files", arguments: JSON.stringify({ paths: ["src/App.tsx"] }) } }] } }] } })
       .mockResolvedValueOnce({ model: models[0].id, usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, response: { choices: [{ message: { content: "Finalizei." } }] } });
-    await new WebsiteAgentRuntime(deps).run(run, new AbortController().signal);
+    await expect(new WebsiteAgentRuntime(deps).run(run, new AbortController().signal)).rejects.toBeInstanceOf(WebsiteQaFailedError);
     const persisted = JSON.stringify(vi.mocked(deps.event).mock.calls);
     expect(persisted).toContain("read_files");
     expect(persisted).not.toContain("SECRET_INTERNAL_TECHNICAL_PAYLOAD");
@@ -398,7 +595,7 @@ describe("cost admission", () => {
     vi.mocked(deps.chat).mockRejectedValueOnce(new Error("network"));
     vi.mocked(deps.usage).mockRejectedValueOnce(new Error("ledger"));
     await expect(new WebsiteAgentRuntime(deps).run(run, new AbortController().signal)).rejects.toThrow("ledger");
-    expect(deps.usage).toHaveBeenCalledWith(run, null, models[0].id, "reservation", true);
+    expect(deps.usage).toHaveBeenCalledWith(run, null, models[0].id, "reservation", false);
     expect(deps.chat).toHaveBeenCalledTimes(1);
   });
 
@@ -732,10 +929,10 @@ describe("requested logo validation", () => {
     const input = await deps.load(run);
     const id = "00000000-0000-4000-8000-000000000079";
     deps.load = async () => ({ ...input, assets: [{ id, client_id: run.client_id, project_id: run.project_id, name: "logo.png", path: `${run.client_id}/${run.project_id}/${id}.png`, mime: "image/png", size: 10, width: 1, height: 1, purpose: "logo", status: "ready", created_at: project.created_at }] });
-    await new WebsiteAgentRuntime(deps).run({ ...run, prompt: "Coloque essa logo no site" }, new AbortController().signal);
+    await expect(new WebsiteAgentRuntime(deps).run({ ...run, prompt: "Coloque essa logo no site" }, new AbortController().signal)).rejects.toMatchObject({ name: "WebsiteQaFailedError", build: expect.objectContaining({ errors: expect.arrayContaining([expect.stringContaining(`/assets/${id}.png`)]) }) });
     expect(deps.chat).toHaveBeenCalledTimes(3);
     expect(deps.build).not.toHaveBeenCalled();
-    expect(deps.complete).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ success: false, errors: expect.arrayContaining([expect.stringContaining(`/assets/${id}.png`)]) }), expect.any(String), expect.anything());
+    expect(deps.complete).not.toHaveBeenCalled();
   });
 });
 
@@ -754,9 +951,9 @@ describe("Impeccable runtime contract", () => {
     const deps = dependencies();
     const input = await deps.load(run);
     deps.load = async () => ({ ...input, activeSkills: [...BUILTIN_WEBSITE_SKILLS] });
-    await new WebsiteAgentRuntime(deps).run(run, new AbortController().signal);
+    await expect(new WebsiteAgentRuntime(deps).run(run, new AbortController().signal)).rejects.toMatchObject({ name: "WebsiteQaFailedError", build: expect.objectContaining({ errors: expect.arrayContaining([expect.stringContaining("record_design_direction")]) }) });
     expect(deps.build).not.toHaveBeenCalled();
-    expect(deps.complete).toHaveBeenCalledWith(run, expect.anything(), expect.objectContaining({ status: "failed", errors: expect.arrayContaining([expect.stringContaining("record_design_direction")]) }), expect.any(String), expect.anything());
+    expect(deps.complete).not.toHaveBeenCalled();
   });
 
   it("persists private direction and evidence and gives the critic the business brief", async () => {

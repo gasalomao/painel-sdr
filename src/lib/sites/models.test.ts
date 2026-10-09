@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { createImageGenerationProvider, listWebsiteModels, selectWebsiteModels, type WebsiteModel } from "./models";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createImageGenerationProvider, listWebsiteModels, selectWebsiteModels, websiteChatAttempt, type WebsiteModel } from "./models";
 import { DEFAULT_WEBSITE_SETTINGS } from "./prompts";
 import type { WebsiteSettings } from "./types";
 
@@ -38,15 +38,120 @@ vi.mock("@/lib/openrouter-model-discovery", () => ({
 }));
 
 const mockFailover = vi.fn();
+const mockGateway = vi.fn();
+const mockCreds = vi.fn();
+const mockKeys = vi.fn();
+vi.mock("@/lib/ai-keys", () => ({ getAiKeys: () => mockKeys() }));
+beforeEach(() => {
+  vi.resetAllMocks();
+  mockKeys.mockResolvedValue({ gemini: "test", nvidia: "test" });
+  mockCreds.mockResolvedValue({ baseUrl: "https://gateway.invalid/v1", apiKey: null, endpointId: "test" });
+  vi.stubGlobal("fetch", vi.fn(() => { throw new Error("Network forbidden"); }));
+});
+afterEach(() => vi.unstubAllGlobals());
 vi.mock("@/lib/ai-provider", async () => {
   const actual = await vi.importActual<typeof import("@/lib/ai-provider")>("@/lib/ai-provider");
   return {
     ...actual,
     openRouterChatWithFailover: (...args: unknown[]) => mockFailover(...args),
+    gatewayChatWithFailover: (...args: unknown[]) => mockGateway(...args),
+    resolveGatewayCreds: (...args: unknown[]) => mockCreds(...args),
   };
 });
 
+describe("websiteChatAttempt", () => {
+  const signal = () => new AbortController().signal;
+  const response = { choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } };
+  const body = { messages: [{ role: "user", content: "Olá 🌱" }], tools: [{ type: "function" }], tool_choice: "auto" };
+
+  it("limits OpenRouter to one physical attempt and preserves tool-capable reasoners", async () => {
+    mockFailover.mockResolvedValue(response);
+    const abort = signal();
+    await websiteChatAttempt({ ...models[0], id: "vendor/reasoner-r1", supportsTools: true }, body, abort);
+    expect(mockFailover).toHaveBeenCalledOnce();
+    expect(mockFailover).toHaveBeenCalledWith(expect.objectContaining({ model: "vendor/reasoner-r1", tools: body.tools, stream: false }), expect.objectContaining({ signal: abort, maxAttempts: 1, allowEmptyContent: true }));
+    expect(body).toHaveProperty("tools");
+  });
+
+  it("bounds gateway account failover and passes cancellation", async () => {
+    mockGateway.mockResolvedValue(response);
+    const abort = signal();
+    await websiteChatAttempt({ ...models[0], id: "gateway:code" }, body, abort);
+    expect(mockGateway).toHaveBeenCalledOnce();
+    expect(mockGateway).toHaveBeenCalledWith("code", expect.objectContaining({ model: "code" }), expect.any(Object), expect.objectContaining({ signal: abort, maxAttempts: 1 }));
+  });
+
+  it("does not fall back to OpenRouter when a Gemini key is missing", async () => {
+    mockKeys.mockResolvedValue({});
+    await expect(websiteChatAttempt({ ...models[0], id: "gemini:code" }, body, signal())).rejects.toThrow("configurada");
+    expect(mockFailover).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([400, 429, 503])("NVIDIA HTTP %s makes only one request without dropping supported tools", async (status) => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ error: { message: "Rejected" } }, { status })));
+    await expect(websiteChatAttempt({ ...models[0], id: "nvidia:deepseek/reasoner", supportsTools: true }, body, signal())).rejects.toMatchObject({ status });
+    expect(fetch).toHaveBeenCalledOnce();
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    expect(url).toBe("https://integrate.api.nvidia.com/v1/chat/completions");
+    expect(JSON.parse(String(init?.body))).toMatchObject({ model: "deepseek/reasoner", tools: body.tools });
+  });
+
+  it("removes tools only when capabilities deny them", async () => {
+    mockFailover.mockResolvedValue(response);
+    await websiteChatAttempt({ ...models[0], supportsTools: false }, body, signal());
+    expect(mockFailover.mock.calls[0][0]).not.toHaveProperty("tools");
+    expect(mockFailover.mock.calls[0][0]).not.toHaveProperty("tool_choice");
+    expect(body).toHaveProperty("tools");
+  });
+
+  it("preserves cache, reasoning, cache write and reported zero cost", async () => {
+    mockFailover.mockResolvedValue({ ...response, usage: { ...response.usage, estimated: true, cost: 0, prompt_tokens_details: { cached_tokens: 4, cache_write_tokens: 3 }, completion_tokens_details: { reasoning_tokens: 1 } } });
+    const result = await websiteChatAttempt(models[0], body, signal());
+    expect(result.usage).toMatchObject({ cachedTokens: 4, cacheWriteTokens: 3, reasoningTokens: 1, costUsd: 0, estimated: true });
+  });
+
+  it("marks absent usage unknown rather than proved zero", async () => {
+    mockFailover.mockResolvedValue({ choices: response.choices });
+    const result = await websiteChatAttempt(models[0], body, signal());
+    expect(result.usage).toMatchObject({ estimated: true, usageUnknown: true });
+    expect(result.usage.costUsd).toBeUndefined();
+  });
+
+  it.each([null, {}, { choices: [] }, { choices: [{ message: { content: null, reasoning: "not executable" } }] }, { choices: [{ message: { tool_calls: [{ id: "x", type: "function", function: { name: "write", arguments: "bad json" } }] } }] }])("rejects invalid structured response %j without retry", async (invalid) => {
+    mockFailover.mockResolvedValue(invalid);
+    await expect(websiteChatAttempt(models[0], body, signal())).rejects.toThrow();
+    expect(mockFailover).toHaveBeenCalledOnce();
+  });
+
+  it("preserves failure usage as unknown", async () => {
+    mockFailover.mockRejectedValue(new Error("Network failed"));
+    await expect(websiteChatAttempt(models[0], body, signal())).rejects.toMatchObject({ usage: { usageUnknown: true, estimated: true } });
+  });
+
+  it("aborted input makes no provider request", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(websiteChatAttempt(models[0], body, controller.signal)).rejects.toBe(controller.signal.reason);
+    expect(mockFailover).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
 describe("Website Models and Image Generation", () => {
+  it("manual selection cannot reintroduce allowlist-excluded or incompatible models", () => {
+    expect(() => selectWebsiteModels(models, { ...settings, model_allowlist: [models[1].id] }, "manual", models[0].id)).toThrow("indisponível");
+    expect(() => selectWebsiteModels([{ ...models[0], supportsTools: false }], settings, "manual", models[0].id)).toThrow("indisponível");
+    expect(() => selectWebsiteModels(models, settings, "manual", "gateway:unknown")).toThrow("indisponível");
+  });
+
+  it("explicit free-only policy rejects paid targets and textual vision fallbacks", () => {
+    const free = { ...models[0], id: "vendor/free", pricing: { prompt: "0", completion: "0" }, provider: "openrouter" as const };
+    expect(() => selectWebsiteModels([free, ...models], settings, "manual", models[0].id, false, { freeOnly: true })).toThrow();
+    expect(() => selectWebsiteModels([free, ...models], settings, "manual", free.id, true, { freeOnly: true })).toThrow();
+    expect(selectWebsiteModels([free, ...models], { ...settings, quality_model: "" }, "auto", undefined, false, { freeOnly: true })).toEqual([free]);
+  });
+
   it("filters and orders up to 3 candidates respecting allowlist and mode", async () => {
     const list = await listWebsiteModels(settings);
     expect(list.length).toBe(4);

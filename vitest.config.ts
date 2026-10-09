@@ -17,5 +17,12 @@ export default defineConfig({
     clearMocks: true,
     restoreMocks: true,
     setupFiles: ["src/lib/__tests__/setup.ts"],
+    coverage: {
+      provider: "v8",
+      include: ["src/lib/sites/**/*.ts"],
+      reportsDirectory: "coverage/site-studio",
+      reporter: ["text", "json-summary"],
+      thresholds: { lines: 80, statements: 80, functions: 80, branches: 80 },
+    },
   },
 });

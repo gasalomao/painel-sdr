@@ -181,3 +181,137 @@ export function skillTriggerLabel(mode: WebsiteSkill["trigger_mode"]): string {
 export function isUuid(value: string): boolean {
   return UUID_PATTERN.test(value);
 }
+
+export function isModelSelectionLocked(state: {
+  activeRun: boolean;
+  sending?: boolean;
+  updating?: boolean;
+  archived?: boolean;
+}): boolean {
+  return Boolean(state.activeRun || state.sending || state.updating || state.archived);
+}
+
+export type CompletionNotice = {
+  type: "success" | "info" | "warning";
+  message: string;
+};
+
+export function completionNotice(
+  kind: "agent" | "build" | undefined,
+  latestBuild: Pick<WebsiteBuild, "status" | "success" | "qa" | "screenshots"> | null | undefined
+): CompletionNotice {
+  if (kind === "build") {
+    return { type: "success", message: "Validação concluída." };
+  }
+
+  if (!latestBuild) {
+    return { type: "success", message: "Alterações concluídas! Visualização atualizada." };
+  }
+
+  if (latestBuild.status === "unconfigured") {
+    return {
+      type: "info",
+      message: "Alterações concluídas. Ambiente de validação não configurado; rascunho salvo sem verificação de renderização.",
+    };
+  }
+
+  if (latestBuild.status === "failed" || !latestBuild.success || latestBuild.qa?.passed === false) {
+    return {
+      type: "warning",
+      message: "Execução concluída, mas a validação técnica identificou ajustes necessários. Verifique a lista de validações.",
+    };
+  }
+
+  if (isPublishableBuild(latestBuild)) {
+    return {
+      type: "success",
+      message: "Alterações concluídas e validadas! Visualização atualizada.",
+    };
+  }
+
+  return {
+    type: "success",
+    message: "Alterações concluídas! Visualização atualizada.",
+  };
+}
+
+export type UsageBreakdown = {
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  isEstimated: boolean;
+  costUsd: number | null;
+};
+
+export function usageBreakdown(rawSystemContents: string[]): UsageBreakdown {
+  let totalTokens = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cachedTokens = 0;
+  let isEstimated = false;
+  let costUsd: number | null = null;
+
+  for (const raw of rawSystemContents) {
+    try {
+      const parsed = record(JSON.parse(raw));
+      const u = record(parsed.usage);
+      if (typeof u.totalTokens === "number" && Number.isSafeInteger(u.totalTokens) && u.totalTokens >= 0) {
+        totalTokens += u.totalTokens;
+      }
+      const inp = typeof u.promptTokens === "number" ? u.promptTokens : typeof u.inputTokens === "number" ? u.inputTokens : 0;
+      if (Number.isSafeInteger(inp) && inp >= 0) inputTokens += inp;
+
+      const out = typeof u.completionTokens === "number" ? u.completionTokens : typeof u.outputTokens === "number" ? u.outputTokens : 0;
+      if (Number.isSafeInteger(out) && out >= 0) outputTokens += out;
+
+      const cache = typeof u.cachedTokens === "number" ? u.cachedTokens : 0;
+      if (Number.isSafeInteger(cache) && cache >= 0) cachedTokens += cache;
+
+      if (u.estimated === true) isEstimated = true;
+
+      if (typeof u.costUsd === "number" && Number.isFinite(u.costUsd) && u.costUsd >= 0) {
+        costUsd = (costUsd ?? 0) + u.costUsd;
+      }
+    } catch {
+      // ignore malformed system events
+    }
+  }
+
+  return {
+    totalTokens,
+    inputTokens,
+    outputTokens,
+    cachedTokens,
+    isEstimated,
+    costUsd,
+  };
+}
+
+export function usageLabels(breakdown: UsageBreakdown): {
+  tokensText: string;
+  estimatedBadge: string | null;
+  costText: string;
+} {
+  const parts: string[] = [];
+  if (breakdown.inputTokens > 0) parts.push(`${breakdown.inputTokens.toLocaleString("pt-BR")} entrada`);
+  if (breakdown.outputTokens > 0) parts.push(`${breakdown.outputTokens.toLocaleString("pt-BR")} saída`);
+  if (breakdown.cachedTokens > 0) parts.push(`${breakdown.cachedTokens.toLocaleString("pt-BR")} cache`);
+
+  const breakdownSuffix = parts.length > 0 ? ` (${parts.join(" · ")})` : "";
+  const tokensText = `${breakdown.totalTokens.toLocaleString("pt-BR")} tokens${breakdownSuffix}`;
+  const estimatedBadge = breakdown.isEstimated ? "Estimado" : null;
+
+  let costText = "Custo: não informado pelo provedor";
+  if (breakdown.costUsd !== null) {
+    costText = breakdown.costUsd === 0
+      ? "Custo: Gratuito / isento"
+      : `Custo registrado: US$ ${breakdown.costUsd.toFixed(4).replace(".", ",")}`;
+  }
+
+  return {
+    tokensText,
+    estimatedBadge,
+    costText,
+  };
+}

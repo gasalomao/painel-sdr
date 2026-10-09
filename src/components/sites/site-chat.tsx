@@ -7,7 +7,7 @@ import { Bot, Image as ImageIcon, Info, Loader2, Paperclip, Send, Sparkles } fro
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { resolveWebsiteUploadPurpose, requestsWebsiteLogo } from "@/lib/sites/asset-intent";
-import { assistantText, parseSystemEvent, runStatusLabel, safeSiteUrl } from "@/lib/sites/ui-helpers";
+import { assistantText, isModelSelectionLocked, parseSystemEvent, runStatusLabel, safeSiteUrl } from "@/lib/sites/ui-helpers";
 import type { ModelMode, WebsiteAsset, WebsiteMessage, WebsiteModel, WebsiteProject, WebsiteRun, WebsiteSkill } from "@/lib/sites/types";
 import { apiJson, ApiError, errorMessage, jsonBody, selectClass } from "./api";
 import { stagedFileProblem, uploadStagedFiles, useDraftUnloadWarning, useSiteDraft, type StagedUpload } from "@/lib/sites/ui";
@@ -161,14 +161,24 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
   useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight }); }, [latestMessageId]);
 
   async function switchModel(val: string): Promise<void> {
+    if (activeRun) {
+      toast.info("Aguarde ou cancele a execução em andamento antes de trocar o modelo.");
+      return;
+    }
+    const prevMode = activeModelMode;
+    const prevId = activeModelId;
     if (["auto", "quality", "economy"].includes(val)) {
       setActiveModelMode(val as ModelMode);
       setActiveModelId("");
       try {
         await apiJson(`/api/sites/${projectId}`, jsonBody({ model_mode: val, model_id: null }, "PATCH"));
         void onProjectChanged?.();
-        toast.success(`Modelo alterado para ${val === "auto" ? "Automático" : val === "quality" ? "Alta Qualidade" : "Econômico"}. O agente continuará deste ponto.`);
-      } catch (err) { toast.error(errorMessage(err)); }
+        toast.success(`Modelo alterado para ${val === "auto" ? "Automático" : val === "quality" ? "Alta Qualidade" : "Econômico"}. O próximo pedido retomará o último progresso salvo com este modelo.`);
+      } catch (err) {
+        setActiveModelMode(prevMode);
+        setActiveModelId(prevId);
+        toast.error(errorMessage(err));
+      }
     } else {
       setActiveModelMode("manual");
       setActiveModelId(val);
@@ -176,8 +186,12 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
       try {
         await apiJson(`/api/sites/${projectId}`, jsonBody({ model_mode: "manual", model_id: val }, "PATCH"));
         void onProjectChanged?.();
-        toast.success(`Modelo alterado para ${found?.name ?? val}. O agente continuará deste ponto.`);
-      } catch (err) { toast.error(errorMessage(err)); }
+        toast.success(`Modelo alterado para ${found?.name ?? val}. O próximo pedido retomará o último progresso salvo com este modelo.`);
+      } catch (err) {
+        setActiveModelMode(prevMode);
+        setActiveModelId(prevId);
+        toast.error(errorMessage(err));
+      }
     }
   }
 
@@ -425,7 +439,7 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
             style={{ colorScheme: "dark" }}
             className="h-6 flex-1 min-w-0 bg-transparent text-[11px] font-medium text-slate-200 outline-none cursor-pointer truncate pr-1"
             value={activeModelMode === "manual" ? (activeModelId || "") : activeModelMode}
-            disabled={sending || project?.status === "archived"}
+            disabled={sending || Boolean(activeRun) || project?.status === "archived"}
             onChange={(e) => void switchModel(e.target.value)}
           >
             <option className="bg-[#0f172a] text-slate-100" value="auto">Auto (Recomendado)</option>

@@ -120,7 +120,7 @@ describe("website instructions", () => {
     const prompt = composeWebsitePrompt({ ...project, instructions: "y".repeat(40000) }, skills, "c".repeat(40000), "CURRENT_REQUEST " + "u".repeat(40000));
     expect(prompt.length).toBeLessThanOrEqual(24000);
     expect(prompt.startsWith(WEBSITE_SECURITY_PROMPT)).toBe(true);
-    expect(prompt).toContain("CURRENT_REQUEST");
+    expect(prompt).not.toContain("CURRENT_REQUEST");
     expect(prompt).toBe(composeWebsitePrompt({ ...project, instructions: "y".repeat(40000) }, skills, "c".repeat(40000), "CURRENT_REQUEST " + "u".repeat(40000)));
   });
 
@@ -173,6 +173,21 @@ describe("website instructions", () => {
     db.rpc.mockRejectedValue({ message: "rpc ausente" });
     expect((await getWebsiteIntegrations()).worker.configured).toBe(false);
     aiKeys.keys = { ...aiKeys.keys, openrouterKeys: [] };
+  });
+
+  it.each(["Continue criando o site verde", "Continue e troque a cor", "Redesign usando azul", "Crie uma página verde", "Quero nova identidade verde", "verde", "corrija o bug no pagamento"])("never classifies creation, continuation or ambiguous intent as surgical: %s", (message) => {
+    expect(isSimpleWebsiteRequest(message)).toBe(false);
+  });
+
+  it("does not preload whole source or duplicate request for surgical edits", () => {
+    const files = { "src/App.tsx": "export default function App() { return <main>UNRELATED_FULL_SOURCE</main>; }", "src/styles.css": "/* UNRELATED_CSS */\n".repeat(10000) };
+    const prompt = composeWebsitePrompt(project, BUILTIN_WEBSITE_SKILLS, "CREATIVE", "Troque o telefone para 81999999998", files);
+    expect(prompt).not.toContain("UNRELATED_FULL_SOURCE");
+    expect(prompt).not.toContain("UNRELATED_CSS");
+    expect(prompt).not.toContain("Troque o telefone para 81999999998");
+    expect(prompt).toContain("ARQUIVOS VIRTUAIS");
+    expect(prompt).toContain("read_design_reference");
+    expect(prompt.length).toBeLessThan(20000);
   });
 
   it("accurately classifies simple surgical requests vs complex full-site generations", () => {
@@ -240,7 +255,7 @@ it("preserves confirmed brief, operator prompt and every new-site foundation wit
   expect(prompt).toContain("Logo azul obrigatória");
   expect(prompt).toContain("Sem FAQ. Exibir peças reais.");
   expect(prompt).toContain("DIREÇÃO_OPERADOR");
-  expect(prompt).toContain("PEDIDO_INTEGRAL");
+  expect(prompt).not.toContain("PEDIDO_INTEGRAL");
   expect(prompt).toContain("FIM DA REFERÊNCIA optimize");
   expect(prompt.length).toBeLessThanOrEqual(240000);
 });

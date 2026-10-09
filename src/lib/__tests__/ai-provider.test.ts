@@ -118,7 +118,8 @@ describe("generateText", () => {
     });
     expect(out.text).toBe("olá mundo");
     expect(out.provider).toBe("openrouter");
-    expect(out.usage).toMatchObject({ promptTokens: 10, completionTokens: 5, totalTokens: 15, estimated: false });
+    expect(out.usage).toMatchObject({ promptTokens: 10, completionTokens: 5, totalTokens: 15 });
+    expect(out.usage.estimated).not.toBe(true);
     expect(out.usage.attempts).toEqual([{ provider: "openrouter", model: "openai/gpt-4o-mini", promptTokens: 10, completionTokens: 5, totalTokens: 15 }]);
 
     const [url, opts] = fetchMock.mock.calls[0];
@@ -154,7 +155,8 @@ describe("generateText", () => {
     });
 
     expect(out.usage).toMatchObject({ promptTokens: 0, completionTokens: 0, totalTokens: 0 });
-    expect(out.usage.attempts).toBeUndefined();
+    expect(out.usage.attempts).toEqual([expect.objectContaining({ provider: "openrouter", model: "openai/gpt-4o-mini", totalTokens: 0, usageUnknown: true })]);
+    expect(JSON.stringify(out.usage)).not.toContain("modelo-injetado");
   });
 
   it("não aceita total de usage menor que prompt mais completion", async () => {

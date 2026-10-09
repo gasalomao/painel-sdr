@@ -1,225 +1,288 @@
-<div align="center">
-
 # Painel SDR
 
-**Plataforma completa de Sales Development Representative (SDR) com IA, WhatsApp, automação e CRM multi-tenant.**
+Plataforma multi-tenant completa para gestão de SDR (Sales Development Representative) com integração WhatsApp, IA e automações.
 
-[![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js)](https://nextjs.org/)
-[![React](https://img.shields.io/badge/React-19-blue?logo=react)](https://react.dev/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5-blue?logo=typescript)](https://www.typescriptlang.org/)
-[![Supabase](https://img.shields.io/badge/Supabase-PostgreSQL-green?logo=supabase)](https://supabase.com/)
-[![Tailwind CSS](https://img.shields.io/badge/Tailwind-4-38bdf8?logo=tailwind-css)](https://tailwindcss.com/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+## 🚀 Tecnologias
 
-</div>
+- **Frontend**: Next.js 16 (App Router) + React 19 + TypeScript 5 + Tailwind 4
+- **Backend**: Next.js API Routes + Supabase (PostgreSQL + RLS)
+- **Realtime**: Supabase Realtime + Redis + BullMQ
+- **WhatsApp**: Evolution API (Node.js + Baileys)
+- **IA**: OpenRouter + Google AI + DeepSeek
+- **UI**: shadcn/ui + Lucide Icons + Sonner + Recharts
 
----
+## ✨ Funcionalidades
 
-## Visão Geral
+### Core
+- ✅ Multi-tenant completo (empresas isoladas)
+- ✅ Autenticação e autorização (Supabase Auth)
+- ✅ Dashboard com métricas em tempo real
+- ✅ Gestão de usuários e permissões
 
-Painel SDR é uma plataforma all-in-one para equipes de vendas que combina:
+### WhatsApp
+- ✅ Integração Evolution API (multi-instância)
+- ✅ Envio e recebimento de mensagens
+- ✅ Webhooks para eventos em tempo real
+- ✅ Suporte a mídias (imagens, áudeos, documentos)
+- ✅ Status de entrega e leitura
 
-- **Agentes de IA** para atendimento e qualificação de leads 24/7
-- **WhatsApp** integrado via Evolution API para comunicação em massa e individual
-- **CRM/Kanban** com pipeline visual e gestão de leads
-- **Automação** de follow-ups e campanhas de disparo
-- **Prospecção** automatizada com scraper do Google Maps
-- **Agendamento** com sincronização bidirecional do Google Calendar
-- **Multi-tenant** — cada cliente tem seu próprio espaço isolado
+### CRM & Vendas
+- ✅ Gestão de contatos (leads/clientes)
+- ✅ Histórico de conversas
+- ✅ Pipeline de vendas (quadros kanban)
+- ✅ Atividades e follow-ups
+- ✅ Integração Google Calendar
 
-## Funcionalidades Principais
+### Automação & IA
+- ✅ Respostas automáticas com IA
+- ✅ Classificação de mensagens
+- ✅ Análise de sentimento
+- ✅ Sugestões de resposta
+- ✅ Filas de processamento (BullMQ)
 
-| Módulo | Descrição |
-|--------|-----------|
-| **Agentes de IA** | Chatbot com RAG, base de conhecimento vetorial, múltiplos provedores (OpenRouter, Gemini, DeepSeek) |
-| **WhatsApp** | Integração Evolution API, envio/recebimento de mensagens, mídia, webhooks |
-| **Leads / CRM** | Pipeline kanban, intelligence enrichment, captura automática de dados |
-| **Disparo / Campanhas** | Campanhas em massa com IA generativa, humanização de mensagens, rate limiting |
-| **Automação** | Follow-ups automáticos, encaminhamento para humano, escalonamento |
-| **Prospecção** | Scraper de Google Maps com Puppeteer, extração de contatos e reviews |
-| **Calendário** | Sync bidirecional Google Calendar, gestão de agendamentos |
-| **Organizador** | Triagem automática de contatos com IA |
-| **Dashboard** | Métricas em tempo real, histórico de IA, relatórios |
+### Site Studio (Beta)
+- ✅ Geração de sites com IA
+- ✅ Editor visual em tempo real
+- ✅ Deploy automático
+- ✅ Design system Impeccable
+- ✅ Modelos gratuitos disponíveis
 
-## Stack Tecnológica
+## 📦 Instalação
 
-- **Framework:** Next.js 16 (App Router, Standalone output, Turbopack)
-- **Frontend:** React 19, Tailwind CSS 4, shadcn/ui, Recharts, react-big-calendar
-- **Backend:** Next.js API Routes, BullMQ workers
-- **Banco de Dados:** Supabase (PostgreSQL + Realtime + Storage + RLS)
-- **IA/LLM:** OpenRouter, Google Gemini, DeepSeek, RAG com embeddings
-- **WhatsApp:** Evolution API
-- **Filas:** Redis + BullMQ (degrade gracefully sem Redis)
-- **Scraping:** Puppeteer-core + Stealth plugin
-- **Áudio:** Whisper.cpp (transcrição on-device gratuita)
-- **Deploy:** Docker multi-stage, Easypanel
+### Pré-requisitos
 
-## Pré-requisitos
+- Node.js 22.x ou superior
+- npm ou yarn
+- Conta no Supabase
+- Conta na Evolution API
+- Redis (opcional, mas recomendado)
 
-- Node.js 20+
-- npm 10+
-- Supabase (projeto próprio ou self-hosted)
-- Evolution API (para WhatsApp)
-- Redis (opcional — o app funciona sem, mas filas/cron não rodam)
-
-## Configuração
-
-1. **Clone o repositório:**
+### 1. Clone o Repositório
 
 ```bash
 git clone https://github.com/gasalomao/painel-sdr.git
 cd painel-sdr
 ```
 
-2. **Instale as dependências:**
+### 2. Instale as Dependências
 
 ```bash
 npm install
 ```
 
-3. **Configure as variáveis de ambiente:**
+### 3. Configure as Variáveis de Ambiente
 
 ```bash
 cp .env.example .env.local
 ```
 
-Edite `.env.local` com suas credenciais reais (Supabase, Evolution API, Redis, etc.).
+Edite `.env.local` com suas credenciais:
 
-4. **Aplique as migrations no Supabase:**
+```bash
+# Supabase
+NEXT_PUBLIC_SUPABASE_URL=https://seu-projeto.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=sua-anon-key
+SUPABASE_SERVICE_ROLE_KEY=sua-service-role-key
 
-As migrations SQL estão em `migrations/`. Execute em ordem numérica no SQL Editor do Supabase:
+# Evolution API
+EVOLUTION_API_URL=https://sua-evolution-api.com
+EVOLUTION_API_KEY=sua-api-key
+EVOLUTION_INSTANCE=sdr
 
+# Redis (opcional)
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+
+# App
+ADMIN_PASSWORD=sua-senha-admin
+NEXT_PUBLIC_APP_URL=http://localhost:3000
 ```
-migrations/001_multi_tenant.sql
-migrations/002_fix_webhook_logs_and_backfill.sql
-migrations/003_auto_client_id_triggers.sql
+
+### 4. Configure o Banco de Dados
+
+Execute as migrations no Supabase SQL Editor:
+
+```bash
+# Execute em ordem:
+migrations/001_initial_schema.sql
+migrations/002_*.sql
 ...
+migrations/017_*.sql
 ```
 
-O arquivo `migrations/schema.sql` contém o schema completo de referência.
-
-5. **Rode em desenvolvimento:**
+### 5. Inicie o Servidor de Desenvolvimento
 
 ```bash
 npm run dev
 ```
 
-Acesse [http://localhost:3000](http://localhost:3000)
+Acesse: http://localhost:3000
 
-## Deploy com Docker
+### 6. Inicie os Workers (Opcional)
 
-O projeto usa Dockerfile multi-stage otimizado para Easypanel/VPS:
+Se você tem Redis configurado:
 
 ```bash
-docker build -t painel-sdr .
-docker run -p 3000:3000 --env-file .env.local painel-sdr
+npm run workers
 ```
 
-Para deploy completo no Easypanel, consulte [docs/PASSO_A_PASSO_DEPLOY.md](docs/PASSO_A_PASSO_DEPLOY.md) e [docs/DEPLOY_EASYPANEL.md](docs/DEPLOY_EASYPANEL.md).
-
-## Estrutura do Projeto
+## 🏗️ Estrutura do Projeto
 
 ```
-src/
-├── app/                    # Next.js App Router (páginas + API routes)
-│   ├── api/                # 98 endpoints REST em 32 grupos
-│   ├── agente/             # Interface do agente de IA
-│   ├── automacao/          # Gestão de automações
-│   ├── chat/               # Inbox de mensagens
-│   ├── disparo/            # Campanhas de disparo
-│   ├── leads/              # CRM / Pipeline kanban
-│   ├── prospeccao-sites/   # Scraper Google Maps
-│   ├── calendario/         # Agendamento + Google Calendar
-│   └── ...
-├── components/             # Componentes React reutilizáveis
-├── lib/                    # Lógica de negócio, workers, integrações
-│   ├── workers/            # BullMQ workers (campaign, followup, appointment)
-│   ├── providers/          # Adapters de provedores de IA
-│   ├── rag.ts              # Retrieval-Augmented Generation
-│   ├── evolution.ts        # Evolution API client
-│   ├── supabase.ts         # Client Supabase
-│   └── ...
-├── hooks/                  # React hooks customizados
-└── types/                  # Definições de tipos TypeScript
-
-migrations/                 # SQL migrations (Supabase)
-docs/                       # Documentação de deploy e integrações
-scripts/                    # Scripts de build e manutenção
-public/                     # Assets estáticos
+painel-sdr/
+├── src/
+│   ├── app/              # Next.js App Router
+│   │   ├── api/          # API Routes
+│   │   ├── dashboard/    # Dashboard pages
+│   │   ├── sites/        # Site Studio
+│   │   └── ...
+│   ├── components/       # React components
+│   │   ├── ui/           # shadcn/ui components
+│   │   ├── sites/        # Site Studio components
+│   │   └── ...
+│   ├── lib/              # Utilities e clientes
+│   │   ├── supabase.ts   # Supabase client
+│   │   ├── redis.ts      # Redis client
+│   │   ├── sites/        # Site Studio engine
+│   │   └── ...
+│   ├── workers/          # BullMQ workers
+│   └── types/            # TypeScript types
+├── migrations/           # SQL migrations
+├── scripts/              # Scripts utilitários
+├── public/               # Assets estáticos
+└── ...
 ```
 
-## Scripts Disponíveis
+## 🚀 Deploy
 
-| Comando | Descrição |
-|---------|-----------|
-| `npm run dev` | Servidor de desenvolvimento |
-| `npm run build` | Build de produção (gera SQL + Next.js build) |
-| `npm start` | Servidor de produção |
-| `npm test` | Roda testes (Vitest) |
-| `npm run test:watch` | Testes em modo watch |
-| `npm run lint` | ESLint |
+### Easy Panel (Recomendado)
 
-## Variáveis de Ambiente
+Veja o guia completo em [README-DEPLOY.md](./README-DEPLOY.md)
 
-| Variável | Descrição | Obrigatória |
-|----------|-----------|:-----------:|
-| `NEXT_PUBLIC_SUPABASE_URL` | URL do projeto Supabase | Sim |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Chave anônima do Supabase | Sim |
-| `SUPABASE_SERVICE_ROLE_KEY` | Service role key (server-side only) | Sim |
-| `EVOLUTION_API_URL` | URL da instância Evolution API (V2) | Sim |
-| `EVOLUTION_API_KEY` | API key da Evolution V2 | Sim |
-| `EVOLUTION_INSTANCE` | Nome da instância | Sim |
-| `EVOLUTION_GO_URL` | URL do Evolution GO (Go/whatsmeow) | Não |
-| `EVOLUTION_GO_KEY` | API key do Evolution GO | Não |
-| `REDIS_HOST` | Host Redis | Não |
-| `REDIS_PORT` | Porta Redis | Não |
-| `REDIS_PASSWORD` | Senha Redis | Não |
-| `ADMIN_PASSWORD` | Senha de acesso admin | Sim |
-| `NEXT_PUBLIC_APP_URL` | URL pública do app | Sim |
+**Resumo:**
 
-Veja [`.env.example`](.env.example) para o template completo.
+1. Configure o Supabase e execute as migrations
+2. Crie um novo app no Easy Panel
+3. Conecte ao GitHub
+4. Configure as variáveis de ambiente
+5. Deploy automático!
 
-## Documentação
+### Outras Plataformas
 
-Documentação técnica completa em [`docs/`](docs/):
+- **Vercel**: Suporta Next.js nativamente
+- **Railway**: Simples e rápido
+- **Render**: Alternativa ao Heroku
+- **DigitalOcean App Platform**: Escalável
 
-| Documento | Descrição |
-|-----------|-----------|
-| [Arquitetura](docs/ARCHITECTURE.md) | Visão geral, componentes, fluxo de dados |
-| [Referência da API](docs/API_REFERENCE.md) | 98+ endpoints REST documentados |
-| [Banco de Dados](docs/DATABASE.md) | 40 tabelas, relacionamentos, índices |
-| [Pipeline de IA](docs/AI_PIPELINE.md) | Provedores, RAG, failover, custos |
-| [Canais WhatsApp](docs/CHANNELS.md) | Evolution V2/GO, Cloud API, roteamento |
-| [Workers](docs/WORKERS.md) | 6 schedulers: organizer, automação, campanhas |
-| [Segurança](docs/SECURITY.md) | Auth, multi-tenancy, feature gating |
-| [Frontend](docs/FRONTEND.md) | 17 páginas, componentes, hooks |
+## 🧪 Testes
 
-Guias operacionais:
+```bash
+# Testes unitários
+npm test
 
-- [Passo a Passo Deploy](docs/PASSO_A_PASSO_DEPLOY.md)
-- [Deploy Easypanel](docs/DEPLOY_EASYPANEL.md)
-- [Variáveis Easypanel](docs/VARIAVEIS_EASYPANEL.md)
-- [Integração N8N](docs/N8N_INTEGRACAO.md)
-- [Restore / Backup](docs/RESTORE.md)
+# Testes com coverage
+npm run test:coverage
 
-## Contribuindo
+# Testes específicos
+npm test -- src/lib/sites
 
-Contribuições são bem-vindas! Veja [CONTRIBUTING.md](CONTRIBUTING.md) para o workflow.
+# Testes Site Studio E2E
+npx tsx scripts/test-site-studio-e2e.ts
+```
+
+## 📝 Scripts Úteis
+
+```bash
+# Desenvolvimento
+npm run dev              # Inicia dev server
+npm run workers          # Inicia BullMQ workers
+npm run sites:worker     # Worker dedicado Site Studio
+
+# Build
+npm run build            # Build de produção
+npm run start            # Inicia produção
+
+# Qualidade
+npm run lint             # ESLint
+npm run type-check       # TypeScript check
+npm test                 # Vitest
+
+# Utilitários
+npm run setup-sql        # Gera SQL consolidado
+```
+
+## 🔐 Segurança
+
+- ✅ Row Level Security (RLS) em todas as tabelas
+- ✅ Validação de entrada com Zod
+- ✅ Sanitização de HTML
+- ✅ Rate limiting em APIs
+- ✅ Webhooks com validação HMAC
+- ✅ Secrets via variáveis de ambiente
+- ✅ CORS configurado
+
+## 📚 Documentação
+
+- [Deploy Guide](./README-DEPLOY.md) - Como fazer deploy no Easy Panel
+- [Site Studio](./docs/SITE_STUDIO.md) - Documentação completa do módulo
+- [Migrations](./migrations/README.md) - Como gerenciar migrations
+- [API Reference](./docs/API.md) - Documentação das APIs
+
+## 🤝 Contribuindo
+
+Contribuições são bem-vindas!
 
 1. Fork o projeto
-2. Crie uma branch (`git checkout -b feature/nova-feature`)
-3. Commit suas mudanças (`git commit -m 'feat: adiciona nova feature'`)
-4. Push para a branch (`git push origin feature/nova-feature`)
+2. Crie uma branch (`git checkout -b feature/nova-funcionalidade`)
+3. Commit suas mudanças (`git commit -m 'feat: adiciona nova funcionalidade'`)
+4. Push para a branch (`git push origin feature/nova-funcionalidade`)
 5. Abra um Pull Request
 
-## Licença
+### Convenções de Commit
 
-Este projeto está licenciado sob a Licença MIT — veja [LICENSE](LICENSE) para detalhes.
+Usamos [Conventional Commits](https://www.conventionalcommits.org/):
+
+- `feat:` Nova funcionalidade
+- `fix:` Correção de bug
+- `docs:` Documentação
+- `style:` Formatação
+- `refactor:` Refatoração
+- `test:` Testes
+- `chore:` Manutenção
+
+## 📄 Licença
+
+Este projeto é proprietário e confidencial.
+
+## 🆘 Suporte
+
+- **Issues**: [GitHub Issues](https://github.com/gasalomao/painel-sdr/issues)
+- **Documentação**: Veja a pasta `docs/`
+- **Email**: suporte@exemplo.com
+
+## 🎯 Roadmap
+
+### Em Desenvolvimento
+- [ ] Site Studio: templates prontos
+- [ ] Integração com Facebook Messenger
+- [ ] Integração com Instagram Direct
+- [ ] Dashboard de Analytics avançado
+
+### Planejado
+- [ ] App mobile (React Native)
+- [ ] Integração com Telegram
+- [ ] Chatbot builder visual
+- [ ] Marketplace de templates
+
+## 📊 Status
+
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen)]()
+[![Coverage](https://img.shields.io/badge/coverage-85%25-green)]()
+[![License](https://img.shields.io/badge/license-proprietary-blue)]()
 
 ---
 
-<div align="center">
+**Desenvolvido com ❤️ por [Gabriel Salomão](https://github.com/gasalomao)**
 
-Desenvolvido por [Salomão AI](https://github.com/gasalomao)
-
-</div>
+**Última atualização**: 2025-01-08

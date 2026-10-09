@@ -63,7 +63,7 @@ export function composeImpeccableGuidance(files: WebsiteFiles | undefined, promp
   }
   return [adapter, `IMPECCABLE ATIVO — ${creation ? "CRIAÇÃO / NOVA DIREÇÃO" : "REFINAMENTO / PRESERVAÇÃO"} — fonte ${IMPECCABLE_REVISION}`,
     ...references.map((name) => `REFERÊNCIA OFICIAL INTEGRAL: ${name}\n${impeccableReference(name)}\nFIM DA REFERÊNCIA ${name}`),
-    `CATÁLOGO COMPLETO: ${JSON.stringify(impeccableReferenceCatalog())}`, adapter,
+    `CATÁLOGO COMPLETO: ${JSON.stringify(impeccableReferenceCatalog())}`,
   ].join("\n\n");
 }
 

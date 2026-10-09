@@ -1,5 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { assistantText, editableFile, formatRelative, isOverrideSkill, isPublishableBuild, isSelectableSkill, isUuid, matchesModelFilters, modelModeLabel, modelPriceLabel, parseSystemEvent, projectStatusLabel, runStatusLabel, safeSiteUrl, tokenUsage } from "../ui-helpers";
+import {
+  assistantText,
+  completionNotice,
+  editableFile,
+  formatRelative,
+  isModelSelectionLocked,
+  isOverrideSkill,
+  isPublishableBuild,
+  isSelectableSkill,
+  isUuid,
+  matchesModelFilters,
+  modelModeLabel,
+  modelPriceLabel,
+  parseSystemEvent,
+  projectStatusLabel,
+  runStatusLabel,
+  safeSiteUrl,
+  tokenUsage,
+  usageBreakdown,
+  usageLabels,
+} from "../ui-helpers";
 import type { WebsiteBuild, WebsiteDeployment, WebsiteSkill } from "../types";
 import { clearSiteDrafts, deploymentResponse, getSiteDraft, reconcileDeploymentKeys, setSiteDraft, siteDraftScope, stagedFileProblem, uploadStagedFiles, type DeploymentAttempt, type StagedUpload } from "../ui";
 
@@ -280,8 +300,103 @@ describe("ui-helpers", () => {
     expect(isUuid("11111111-1111-4111-8111-111111111111")).toBe(true);
     expect(isUuid("builtin:frontend-design")).toBe(false);
   });
-});
 
+  it("trava o seletor de modelos durante execução ativa, envio ou arquivamento", () => {
+    expect(isModelSelectionLocked({ activeRun: true, sending: false, updating: false, archived: false })).toBe(true);
+    expect(isModelSelectionLocked({ activeRun: false, sending: true, updating: false, archived: false })).toBe(true);
+    expect(isModelSelectionLocked({ activeRun: false, sending: false, updating: true, archived: false })).toBe(true);
+    expect(isModelSelectionLocked({ activeRun: false, sending: false, updating: false, archived: true })).toBe(true);
+    expect(isModelSelectionLocked({ activeRun: false, sending: false, updating: false, archived: false })).toBe(false);
+  });
+
+  it("distingue rascunho sem validação, validação reprovada e revisão aprovada na notificação de conclusão", () => {
+    expect(completionNotice("build", null)).toEqual({
+      type: "success",
+      message: "Validação concluída.",
+    });
+
+    const unconfigured = {
+      status: "unconfigured" as const,
+      success: true,
+      qa: { passed: true, errors: [], warnings: [] },
+      screenshots: {},
+    };
+    expect(completionNotice("agent", unconfigured)).toEqual({
+      type: "info",
+      message: "Alterações concluídas. Ambiente de validação não configurado; rascunho salvo sem verificação de renderização.",
+    });
+
+    const failed = {
+      status: "failed" as const,
+      success: false,
+      qa: { passed: false, errors: ["Erro de compilação"], warnings: [] },
+      screenshots: {},
+    };
+    expect(completionNotice("agent", failed)).toEqual({
+      type: "warning",
+      message: "Execução concluída, mas a validação técnica identificou ajustes necessários. Verifique a lista de validações.",
+    });
+
+    const approved = {
+      status: "ready" as const,
+      success: true,
+      qa: { passed: true, errors: [], warnings: [], visual_review: "Aprovado com evidência" },
+      screenshots: {
+        desktop: "data:image/png;base64,iVBORw0KGgo",
+        mobile: "data:image/png;base64,iVBORw0KGgo",
+      },
+    };
+    expect(completionNotice("agent", approved)).toEqual({
+      type: "success",
+      message: "Alterações concluídas e validadas! Visualização atualizada.",
+    });
+
+    expect(completionNotice("agent", null)).toEqual({
+      type: "success",
+      message: "Alterações concluídas! Visualização atualizada.",
+    });
+  });
+
+  it("extrai métricas detalhadas de telemetria sem inventar custo zero", () => {
+    const rawEvents = [
+      JSON.stringify({
+        usage: {
+          promptTokens: 1200,
+          completionTokens: 350,
+          cachedTokens: 400,
+          totalTokens: 1550,
+          estimated: false,
+        },
+      }),
+      JSON.stringify({
+        usage: {
+          inputTokens: 300,
+          outputTokens: 100,
+          totalTokens: 400,
+          estimated: true,
+          costUsd: 0.0025,
+        },
+      }),
+    ];
+
+    const breakdown = usageBreakdown(rawEvents);
+    expect(breakdown.totalTokens).toBe(1950);
+    expect(breakdown.inputTokens).toBe(1500);
+    expect(breakdown.outputTokens).toBe(450);
+    expect(breakdown.cachedTokens).toBe(400);
+    expect(breakdown.isEstimated).toBe(true);
+    expect(breakdown.costUsd).toBe(0.0025);
+
+    const labels = usageLabels(breakdown);
+    expect(labels.tokensText).toBe("1.950 tokens (1.500 entrada · 450 saída · 400 cache)");
+    expect(labels.estimatedBadge).toBe("Estimado");
+    expect(labels.costText).toBe("Custo registrado: US$ 0,0025");
+
+    const noCostBreakdown = usageBreakdown([JSON.stringify({ usage: { totalTokens: 500 } })]);
+    const noCostLabels = usageLabels(noCostBreakdown);
+    expect(noCostLabels.costText).toBe("Custo: não informado pelo provedor");
+  });
+});
 
 it("reports disabled skills without claiming Impeccable applied", () => {
   expect(parseSystemEvent(JSON.stringify({ active_skills: [] }))).toBe("Nenhuma skill ativa nesta execução.");

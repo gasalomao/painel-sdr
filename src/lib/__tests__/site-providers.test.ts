@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
+import { runInNewContext } from "node:vm";
+import { getStarterFiles } from "@/lib/sites/starter";
 import { PGlite } from "@electric-sql/pglite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -14,6 +17,10 @@ const state = vi.hoisted(() => ({
   dbError: false,
 }));
 
+const sandboxMock = vi.hoisted(() => ({
+  create: vi.fn(), write: vi.fn(), read: vi.fn(), run: vi.fn(), kill: vi.fn(),
+}));
+vi.mock("e2b", () => ({ Sandbox: { create: sandboxMock.create } }));
 vi.mock("@/lib/supabase_admin", () => ({ supabaseAdmin: null }));
 vi.mock("@/lib/supabase", () => ({
   get supabaseAdmin() {
@@ -1161,9 +1168,188 @@ describe("CAS SQL de deployments", () => {
 });
 
 describe("createSiteBuildProvider", () => {
+  const input = () => ({ project: projectFixture(), files: getStarterFiles(), assets: [] });
+  beforeEach(() => {
+    vi.stubEnv("E2B_API_KEY", "offline-test");
+    vi.stubEnv("E2B_SITE_TEMPLATE_ID", "offline-template");
+    sandboxMock.create.mockResolvedValue({
+      files: { write: sandboxMock.write, read: sandboxMock.read },
+      commands: { run: sandboxMock.run }, kill: sandboxMock.kill,
+    });
+    sandboxMock.read.mockResolvedValue(JSON.stringify(buildFixture()));
+    sandboxMock.kill.mockResolvedValue(undefined);
+  });
+
   it("retorna unconfigured sem credenciais E2B", async () => {
-    const result = await createSiteBuildProvider().build({ project: projectFixture(), files: {}, assets: [] });
-    expect(result).toMatchObject({ success: false, status: "unconfigured", errors: [SITE_PROVIDER_NOT_CONFIGURED] });
-    expect(result.qa.passed).toBe(false);
+    vi.stubEnv("E2B_API_KEY", undefined);
+    const result = await createSiteBuildProvider().build(input());
+    expect(result).toMatchObject({ success: false, status: "unconfigured", errors: [SITE_PROVIDER_NOT_CONFIGURED], qa: { failure_kind: "infrastructure", stage: "configuration" } });
+    expect(sandboxMock.create).not.toHaveBeenCalled();
+  });
+
+  it("mantém isolamento e budgets de 60s total e até 45s de comando", async () => {
+    const result = await createSiteBuildProvider().build(input());
+    expect(result).toMatchObject({ success: true, status: "ready", qa: { passed: true } });
+    expect(sandboxMock.create).toHaveBeenCalledWith("offline-template", expect.objectContaining({ timeoutMs: 60_000, allowInternetAccess: false, network: { allowPublicTraffic: false } }));
+    expect(sandboxMock.run.mock.calls[0][1].timeoutMs).toBeLessThanOrEqual(45_000);
+    expect(sandboxMock.kill).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserva diagnóstico de fonte curto, não logs integrais", async () => {
+    sandboxMock.read.mockResolvedValue(JSON.stringify(buildFixture({ success: false, status: "failed", logs: "private log", errors: ["src/App.tsx(8,2): error TS2322: Type mismatch"], qa: { passed: false, errors: ["src/App.tsx(8,2): error TS2322: Type mismatch"], warnings: [], failure_kind: "source", stage: "typecheck", diagnostics: ["src/App.tsx(8,2): error TS2322: Type mismatch"] } })));
+    const result = await createSiteBuildProvider().build(input());
+    expect(result.qa).toMatchObject({ failure_kind: "source", stage: "typecheck", diagnostics: ["src/App.tsx(8,2): error TS2322: Type mismatch"] });
+    expect(JSON.stringify(result.qa)).not.toContain("private log");
+    expect(sandboxMock.kill).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([null, [], { ...buildFixture(), qa: { passed: "true", errors: [], warnings: [] } }, { ...buildFixture(), screenshots: {} }])("resultado inválido falha como infraestrutura: %j", async (raw) => {
+    sandboxMock.read.mockResolvedValue(JSON.stringify(raw));
+    expect(await createSiteBuildProvider().build(input())).toMatchObject({ success: false, status: "failed", qa: { failure_kind: "infrastructure", stage: "result" } });
+    expect(sandboxMock.kill).toHaveBeenCalledTimes(1);
+  });
+
+  it("erro remoto não expõe detalhes nem pede correção de fontes", async () => {
+    sandboxMock.create.mockRejectedValue(new Error("credential private-secret template unavailable"));
+    const result = await createSiteBuildProvider().build(input());
+    expect(result.qa).toMatchObject({ failure_kind: "infrastructure", stage: "sandbox" });
+    expect(JSON.stringify(result)).not.toContain("private-secret");
+  });
+
+  it("aborto prévio vence ausência de credenciais", async () => {
+    vi.stubEnv("E2B_API_KEY", undefined);
+    const controller = new AbortController(); controller.abort();
+    expect(await createSiteBuildProvider().build(input(), controller.signal)).toMatchObject({ status: "failed", qa: { failure_kind: "cancelled" } });
+    expect(sandboxMock.create).not.toHaveBeenCalled();
+  });
+
+  it("aborta comando pendurado, mata sandbox e não lê resultado", async () => {
+    const controller = new AbortController();
+    const started = deferred();
+    sandboxMock.run.mockImplementation(() => { started.resolve(); return new Promise(() => undefined); });
+    const result = createSiteBuildProvider().build(input(), controller.signal);
+    await started.promise; controller.abort();
+    expect(await result).toMatchObject({ status: "failed", qa: { failure_kind: "cancelled", stage: "command" } });
+    expect(sandboxMock.read).not.toHaveBeenCalled();
+    expect(sandboxMock.kill).toHaveBeenCalledTimes(1);
+  });
+
+  it("timeout total mata sandbox mesmo com SDK pendurado", async () => {
+    vi.useFakeTimers();
+    const started = deferred();
+    sandboxMock.run.mockImplementation(() => { started.resolve(); return new Promise(() => undefined); });
+    const result = createSiteBuildProvider().build(input());
+    await started.promise;
+    await vi.advanceTimersByTimeAsync(60_001);
+    expect(await result).toMatchObject({ status: "failed", qa: { failure_kind: "timeout", stage: "command" } });
+    expect(sandboxMock.kill).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("falha ao matar sandbox impede resultado ready", async () => {
+    sandboxMock.kill.mockRejectedValue(new Error("kill unavailable"));
+    expect(await createSiteBuildProvider().build(input())).toMatchObject({ success: false, status: "failed", qa: { failure_kind: "infrastructure", stage: "cleanup" } });
+  });
+
+  it("cleanup pendurado permanece limitado e nunca promove QA", async () => {
+    vi.useFakeTimers();
+    const started = deferred();
+    sandboxMock.read.mockResolvedValue("invalid json");
+    sandboxMock.kill.mockImplementation(() => { started.resolve(); return new Promise(() => undefined); });
+    const result = createSiteBuildProvider().build(input());
+    await started.promise;
+    await vi.advanceTimersByTimeAsync(5001);
+    expect(await result).toMatchObject({ status: "failed", qa: { failure_kind: "infrastructure", stage: "cleanup" } });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("resposta de criação após aborto ainda mata sandbox tardio", async () => {
+    const controller = new AbortController(), started = deferred(), release = deferred();
+    sandboxMock.create.mockImplementation(async () => { started.resolve(); await release.promise; return { kill: sandboxMock.kill }; });
+    const result = createSiteBuildProvider().build(input(), controller.signal);
+    await started.promise; controller.abort();
+    expect(await result).toMatchObject({ qa: { failure_kind: "cancelled" } });
+    release.resolve(); await Promise.resolve(); await Promise.resolve();
+    expect(sandboxMock.kill).toHaveBeenCalledTimes(1);
+    expect(sandboxMock.write).not.toHaveBeenCalled();
+  });
+});
+
+// Exercises operator-owned helpers only. Never imports/runs the sandbox entrypoint or generated sources on the host.
+describe("runner isolated helpers", () => {
+  function helpers(extra: Record<string, unknown> = {}) {
+    const source = readFileSync("sandbox/site-studio/run.mjs", "utf8");
+    const start = source.indexOf("function sanitizeDiagnostic(");
+    const end = source.indexOf("let browser;", start);
+    expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
+    return runInNewContext(`${source.slice(start, end)}; ({ diagnosticsFromLogs, command, remaining, ready })`, {
+      Date, Math, Error, Promise, Buffer, setTimeout, clearTimeout,
+      logs: "", root: "/workspace/site", errors: [], deadline: Date.now() + 40_000, stage: "typecheck", spawn: () => { throw new Error("Host spawn forbidden"); }, ...extra,
+    }) as { diagnosticsFromLogs: (text: string) => string[]; command: (args: string[]) => Promise<void>; remaining: (cap?: number) => number; ready: (page: { waitForFunction: ReturnType<typeof vi.fn>; evaluate: ReturnType<typeof vi.fn> }, width: number) => Promise<void> };
+  }
+
+  it("extrai apenas fileline TS/Vite limitado e sanitiza controles, URLs, segredos e conteúdo citado", () => {
+    const text = "noise private log\n\u001b[31msrc/App.tsx(12,4): error TS2322: Type 'private user input' is not assignable token=sk-private https://secret.test\u001b[0m\n/workspace/site/src/App.tsx:7:3: ERROR: Unexpected token\n" + "noise\n".repeat(10_000);
+    const result = helpers().diagnosticsFromLogs(text);
+    expect(result).toHaveLength(2);
+    expect(result[0]).toContain("src/App.tsx(12,4): error TS2322");
+    expect(result[1]).toContain("src/App.tsx:7:3");
+    expect(result.join("\n")).not.toMatch(/private|https:|\u001b|\/workspace/);
+    expect(result.join("\n").length).toBeLessThanOrEqual(2400);
+  });
+
+  it("diagnóstico ausente não vira defeito de fonte", async () => {
+    const child = new EventEmitter();
+    Object.assign(child, { stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => true });
+    const h = helpers({ spawn: () => { queueMicrotask(() => child.emit("close", 1, null)); return child; } });
+    await expect(h.command(["tsc"])).rejects.toMatchObject({ failure_kind: "infrastructure" });
+  });
+
+  it("saída não zero com diagnóstico TS é source", async () => {
+    const child = new EventEmitter(), stdout = new EventEmitter(), stderr = new EventEmitter();
+    Object.assign(child, { stdout, stderr, kill: () => true });
+    const h = helpers({ spawn: () => { queueMicrotask(() => { stderr.emit("data", Buffer.from("src/App.tsx(1,1): error TS1005: Missing semicolon")); child.emit("close", 2, null); }); return child; } });
+    await expect(h.command(["tsc"])).rejects.toMatchObject({ failure_kind: "source", stage: "typecheck" });
+  });
+
+  it("deadline compartilhado mata compilador pendurado com SIGKILL", async () => {
+    vi.useFakeTimers();
+    const child = new EventEmitter(), kill = vi.fn();
+    Object.assign(child, { stdout: new EventEmitter(), stderr: new EventEmitter(), kill });
+    const result = helpers({ deadline: Date.now() + 100, spawn: () => child }).command(["tsc"]);
+    const assertion = expect(result).rejects.toMatchObject({ failure_kind: "timeout", stage: "typecheck" });
+    await vi.advanceTimersByTimeAsync(101); await assertion;
+    expect(kill).toHaveBeenCalledWith("SIGKILL");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("deadline expirado bloqueia subprocesso", () => {
+    expect(() => helpers({ deadline: Date.now() - 1 }).remaining()).toThrow();
+  });
+
+  it("Vite com localização em linha separada preserva fileline", () => {
+    const diagnostics = helpers().diagnosticsFromLogs("[vite:esbuild] Transform failed with 1 error:\n/workspace/site/src/App.tsx:9:4:\nERROR: Expected closing tag\nprivate full source");
+    expect(diagnostics[0]).toContain("src/App.tsx:9:4");
+    expect(diagnostics[0]).not.toContain("private full source");
+  });
+
+  it("React, fontes e lazy images usam esperas limitadas antes do paint", async () => {
+    const page = { waitForFunction: vi.fn().mockResolvedValue(undefined), evaluate: vi.fn()
+      .mockResolvedValueOnce(1700).mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined).mockResolvedValueOnce(false).mockResolvedValueOnce(undefined) };
+    await helpers().ready(page, 390);
+    expect(page.waitForFunction).toHaveBeenCalledTimes(6);
+    for (const call of page.waitForFunction.mock.calls) expect(call[2].timeout).toBeLessThanOrEqual(3000);
+    expect(page.evaluate.mock.calls.map((call) => call[1])).toEqual([undefined, 0, 800, 1600, 0, undefined, undefined]);
+  });
+
+  it("imagem quebrada é source; imagem pendente não autoriza screenshot", async () => {
+    const errors: string[] = [];
+    const page = { waitForFunction: vi.fn().mockResolvedValue(undefined), evaluate: vi.fn()
+      .mockResolvedValueOnce(10).mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined).mockResolvedValueOnce(true).mockResolvedValueOnce(undefined) };
+    await helpers({ errors }).ready(page, 390);
+    expect(errors).toEqual(["390px: Imagem quebrada."]);
+    page.waitForFunction.mockRejectedValueOnce(Object.assign(new Error("pending"), { name: "TimeoutError" }));
+    await expect(helpers().ready(page, 390)).rejects.toMatchObject({ name: "TimeoutError" });
   });
 });

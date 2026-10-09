@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { SandpackProvider, SandpackPreview, SandpackLayout, useSandpack, type SandpackFiles } from "@codesandbox/sandpack-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { SandpackProvider, SandpackPreview, SandpackLayout, useSandpack, type SandpackFiles, type SandpackPreviewRef } from "@codesandbox/sandpack-react";
 import { Lock, Maximize2, Minimize2, Monitor, RotateCw, Smartphone, Tablet, ZoomIn, ZoomOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { apiJson } from "./api";
@@ -17,25 +17,134 @@ export const VIEWPORTS = [
 
 export const SITE_PREVIEW_SETUP = { environment: "create-react-app", entry: "/index.tsx" } as const;
 
-export function getSitePreviewFiles(source: WebsiteFiles, assets: readonly WebsiteAsset[] = [], project?: Pick<WebsiteProject, "id" | "client_id">): SandpackFiles {
+export function getSitePreviewFiles(source: WebsiteFiles, assets: readonly WebsiteAsset[] = [], project?: Pick<WebsiteProject, "id" | "client_id">, candidate?: { id: string; origin: string }): SandpackFiles {
   const files = project ? resolveWebsitePreviewAssets(source, assets, project) : source;
   const result: SandpackFiles = {};
   for (const [path, code] of Object.entries(files)) {
     const normalized = path.replace(/^\//, "");
     if (typeof code !== "string" || code.includes("\0") || normalized.split("/").some((part) => !part || part === "." || part === "..")) continue;
-    if (normalized.startsWith("src/") || normalized.startsWith("public/")) result[`/${normalized}`] = { code };
+    if (normalized.startsWith("src/") || normalized.startsWith("public/")) {
+      let previewCode = code;
+      // Auto-sanitize HTML comments in JSX/TSX to prevent fatal Babel SyntaxErrors
+      if (/\.(tsx|jsx)$/.test(normalized)) {
+        previewCode = previewCode.replace(/<!--([\s\S]*?)-->/g, "{/*$1*/}");
+      }
+      result[`/${normalized}`] = { code: previewCode };
+    }
   }
   const html = files["index.html"] === undefined ? files["/index.html"] ?? "" : files["index.html"];
   if (typeof html !== "string" || html.includes("\0")) throw new Error("HTML inválido para pré-visualização");
   result["/index.html"] = { code: html, hidden: true };
   result["/index.tsx"] = {
-    code: `const previewDocument = new DOMParser().parseFromString(${JSON.stringify(html)}, "text/html");
+    code: `(() => {
+const cleanupKey = Symbol.for("site-studio.preview.cleanup");
+if (typeof window[cleanupKey] === "function") window[cleanupKey]();
+const previewDocument = new DOMParser().parseFromString(${JSON.stringify(html)}, "text/html");
 previewDocument.querySelectorAll("script").forEach((node) => node.remove());
 document.documentElement.lang = previewDocument.documentElement.lang;
 document.title = previewDocument.title;
-document.head.append(...Array.from(previewDocument.head.children));
+const headNodes = Array.from(previewDocument.head.children);
+document.head.append(...headNodes);
 document.body.replaceChildren(...Array.from(previewDocument.body.childNodes));
-require("./src/main.tsx");`,
+let active = true;
+let host;
+let details;
+let restoreProbe = () => {};
+const candidate = ${JSON.stringify(candidate ?? null)};
+const notify = (status, message) => {
+  if (active && candidate) window.parent.postMessage({ type: "preview-candidate", id: candidate.id, status, ...(message ? { message } : {}) }, candidate.origin);
+};
+const showError = (error) => {
+  if (!active) return;
+  let message = "Falha de execução sem detalhes disponíveis.";
+  try {
+    const value = error && typeof error.message === "string" ? error.message : error;
+    if (value !== null && value !== undefined && String(value).trim()) message = String(value).slice(0, 2000);
+  } catch { /* Error objects can have throwing getters or conversions. */ }
+  if (!host) {
+    host = document.createElement("div");
+    host.style.cssText = "position:fixed!important;inset:16px 16px auto!important;z-index:2147483647!important;display:block!important;";
+    const shadow = host.attachShadow({ mode: "open" });
+    const banner = document.createElement("div");
+    banner.style.cssText = "padding:20px;font:14px system-ui,sans-serif;background:#fff1f0;color:#9f1239;border:1px solid #ffa39e;border-radius:8px;max-height:50vh;overflow:auto;";
+    banner.setAttribute("role", "alert");
+    const title = document.createElement("h3");
+    title.textContent = "Erro na execução do site";
+    details = document.createElement("pre");
+    details.style.cssText = "white-space:pre-wrap;overflow-wrap:anywhere;";
+    banner.append(title, details);
+    shadow.append(banner);
+    document.body.prepend(host);
+  }
+  details.textContent = message;
+  notify("failed", message);
+};
+const onError = (event) => showError(event.error ?? event.message);
+const onRejection = (event) => showError(event.reason);
+const hot = typeof module !== "undefined" ? module.hot : undefined;
+const onStatus = (status) => {
+  // Sandpack evaluates modules before its per-module apply notifications.
+  if (!active || status !== "check") return;
+  if (host) host.remove();
+  host = undefined;
+  details = undefined;
+};
+const cleanup = () => {
+  active = false;
+  restoreProbe();
+  window.removeEventListener("error", onError);
+  window.removeEventListener("unhandledrejection", onRejection);
+  if (hot && typeof hot.removeStatusHandler === "function") hot.removeStatusHandler(onStatus);
+  if (host) host.remove();
+  headNodes.forEach((node) => node.remove());
+  if (window[cleanupKey] === cleanup) delete window[cleanupKey];
+};
+window[cleanupKey] = cleanup;
+window.addEventListener("error", onError);
+window.addEventListener("unhandledrejection", onRejection);
+if (hot) {
+  if (typeof hot.addStatusHandler === "function") hot.addStatusHandler(onStatus);
+  hot.dispose(cleanup);
+}
+try {
+  if (candidate) {
+    const React = require("react");
+    const client = require("react-dom/client");
+    const original = client.createRoot;
+    let timer;
+    let firstFrame;
+    let secondFrame;
+    const Probe = () => {
+      React.useEffect(() => {
+        timer = setTimeout(() => {
+          firstFrame = requestAnimationFrame(() => {
+            secondFrame = requestAnimationFrame(() => { if (!host) notify("ready"); });
+          });
+        }, 0);
+        return () => { clearTimeout(timer); cancelAnimationFrame(firstFrame); cancelAnimationFrame(secondFrame); };
+      }, []);
+      return null;
+    };
+    const wrapped = (...args) => {
+      const options = args[1] || {};
+      const report = (name) => (error, info) => { showError(error); if (typeof options[name] === "function") options[name](error, info); };
+      const root = original(args[0], { ...options, onUncaughtError: report("onUncaughtError") });
+      const render = root.render.bind(root);
+      root.render = (element) => render(React.createElement(React.Fragment, null, element, React.createElement(Probe)));
+      return root;
+    };
+    client.createRoot = wrapped;
+    if (client.createRoot !== wrapped) throw new Error("Entry React incompatível com a sonda de pré-visualização.");
+    restoreProbe = () => {
+      if (client.createRoot === wrapped) client.createRoot = original;
+      clearTimeout(timer); cancelAnimationFrame(firstFrame); cancelAnimationFrame(secondFrame);
+    };
+  }
+  require("./src/main.tsx");
+} catch (error) {
+  showError(error);
+}
+})();`,
     hidden: true,
   };
   const { dependencies } = JSON.parse(WEBSITE_FIXED_FILES["package.json"]) as { dependencies: Record<string, string> };
@@ -43,12 +152,52 @@ require("./src/main.tsx");`,
   return result;
 }
 
-function PreviewFrame(): React.JSX.Element {
+function PreviewFrame({ candidateId, isPending, onResult }: { candidateId: string; isPending: boolean; onResult: (id: string, status: "ready" | "failed", message?: string) => void }): React.JSX.Element {
   const { sandpack } = useSandpack();
+  const previewRef = useRef<SandpackPreviewRef>(null);
   const failed = Boolean(sandpack.error) || sandpack.status === "timeout";
+  useEffect(() => {
+    if (candidateId && failed) onResult?.(candidateId, "failed", String(sandpack.error?.message ?? "A pré-visualização excedeu o tempo limite.").slice(0, 2000));
+  }, [candidateId, failed, sandpack.error, onResult]);
+  useEffect(() => {
+    const receive = (event: MessageEvent<unknown>) => {
+      const client = previewRef.current?.getClient();
+      if (!client || event.source !== client.iframe.contentWindow || event.origin !== new URL(client.iframe.src).origin) return;
+      const value = event.data;
+      if (!value || typeof value !== "object" || Array.isArray(value)) return;
+      const data = value as Record<string, unknown>;
+      if (data.type !== "preview-candidate" || data.id !== candidateId || (data.status !== "ready" && data.status !== "failed")
+        || Object.keys(data).some(key => !["type", "id", "status", "message"].includes(key))
+        || data.message !== undefined && (typeof data.message !== "string" || data.message.length > 2000)) return;
+      onResult(candidateId, data.status as "ready" | "failed", data.message as string | undefined);
+    };
+    window.addEventListener("message", receive);
+    return () => window.removeEventListener("message", receive);
+  }, [candidateId, onResult]);
+  useEffect(() => {
+    if (!isPending) return;
+    let remaining = 60_000;
+    let started = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const pause = () => {
+      if (timer === undefined) return;
+      clearTimeout(timer); timer = undefined;
+      remaining = Math.max(0, remaining - (performance.now() - started));
+    };
+    const resume = () => {
+      pause();
+      if (document.hidden) return;
+      started = performance.now();
+      timer = setTimeout(() => onResult(candidateId, "failed", "Não foi possível confirmar a montagem inicial do site. Corrija o entry ou recarregue."), remaining);
+    };
+    resume();
+    document.addEventListener("visibilitychange", resume);
+    return () => { pause(); document.removeEventListener("visibilitychange", resume); };
+  }, [candidateId, isPending, onResult]);
   return (
     <div className="relative h-full w-full">
       <SandpackPreview
+        ref={previewRef}
         style={{ height: "100%", width: "100%", minHeight: "100%", border: 0 }}
         showNavigator={false}
         showOpenInCodeSandbox={false}
@@ -60,14 +209,65 @@ function PreviewFrame(): React.JSX.Element {
       {failed && (
         <div
           role="alert"
-          className="absolute inset-0 flex flex-col items-center justify-center bg-background/95 p-6 text-center text-sm text-foreground"
+          className="absolute inset-x-4 top-4 z-50 flex flex-col items-center justify-center rounded-lg border border-destructive/30 bg-background/95 p-4 text-center text-sm shadow-xl backdrop-blur text-foreground"
         >
-          <p className="font-semibold text-destructive">Não foi possível carregar a pré-visualização.</p>
-          <p className="mt-1 text-xs text-muted-foreground">Recarregue a página ou peça ao agente para corrigir o site.</p>
+          <p className="font-semibold text-destructive">Não foi possível carregar a pré-visualização completa.</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {sandpack.error?.message ? String(sandpack.error.message) : "Recarregue a página ou peça ao agente para corrigir o site."}
+          </p>
         </div>
       )}
     </div>
   );
+}
+
+function RetainedPreview({ files, preparationError, reload }: { files: SandpackFiles | null; preparationError: string; reload: number }): React.JSX.Element {
+  type Attempt = { id: string; version: string; files: SandpackFiles };
+  const [state, setState] = useState<{ accepted: Attempt | null; pending: Attempt | null; requested: string; error: string }>({ accepted: null, pending: null, requested: "", error: "" });
+  const version = JSON.stringify([files, reload]);
+  const currentVersion = useRef(version);
+  useLayoutEffect(() => { currentVersion.current = version; }, [version]);
+  useEffect(() => {
+    // Coalesce checkpoint updates at the next browser paint; never mutate the accepted runtime.
+    const frame = requestAnimationFrame(() => setState(previous => {
+      if (!files) return { ...previous, pending: null, requested: version, error: preparationError };
+      if (previous.requested === version) return previous;
+      if (previous.accepted?.version === version) return { ...previous, pending: null, requested: version, error: "" };
+      const id = crypto.randomUUID();
+      const entry = files["/index.tsx"];
+      const code = typeof entry === "string" ? entry : entry.code;
+      const marker = "const candidate = null;";
+      const position = code.lastIndexOf(marker);
+      if (position < 0) return { ...previous, pending: null, requested: version, error: "Bootstrap de pré-visualização incompatível." };
+      const instrumented = code.slice(0, position) + `const candidate = ${JSON.stringify({ id, origin: window.location.origin })};` + code.slice(position + marker.length);
+      return { ...previous, pending: { id, version, files: { ...files, "/index.tsx": { code: instrumented, hidden: true } } }, requested: version, error: "" };
+    }));
+    return () => cancelAnimationFrame(frame);
+  }, [files, version, preparationError]);
+  const onResult = useCallback((id: string, status: "ready" | "failed", message?: string) => {
+    setState(previous => {
+      if (previous.pending?.id !== id) {
+        return status === "failed" && previous.accepted?.id === id ? { ...previous, error: message ?? "Falha após a montagem inicial do site." } : previous;
+      }
+      if (previous.pending.version !== currentVersion.current) return previous;
+      if (status === "failed") return { ...previous, pending: null, error: message ?? "Falha na execução do site." };
+      return { ...previous, accepted: previous.pending, pending: null, error: "" };
+    });
+  }, []);
+  return <div className="relative h-full w-full">
+    {[state.accepted, state.pending].filter((attempt): attempt is Attempt => Boolean(attempt)).map(attempt => {
+      const pending = attempt.id === state.pending?.id;
+      return <div key={attempt.id} data-preview-state={pending ? "pending" : "accepted"} aria-hidden={pending && Boolean(state.accepted)} inert={pending && Boolean(state.accepted)} className="absolute inset-0" style={{ opacity: pending && state.accepted ? 0 : 1, pointerEvents: pending ? "none" : "auto" }}>
+        <SandpackProvider theme="dark" files={attempt.files} customSetup={SITE_PREVIEW_SETUP} options={{ initMode: "immediate", activeFile: "/src/App.tsx", classes: { "sp-wrapper": "!h-full !w-full !border-0 !bg-transparent", "sp-layout": "!h-full !w-full !border-0 !bg-transparent", "sp-preview": "!h-full !w-full !border-0 !bg-transparent", "sp-preview-container": "!h-full !w-full !border-0 !bg-transparent" } }}>
+          <SandpackLayout style={{ height: "100%", width: "100%", border: 0, background: "transparent" }}>
+            <PreviewFrame candidateId={attempt.id} isPending={pending} onResult={onResult} />
+          </SandpackLayout>
+        </SandpackProvider>
+      </div>;
+    })}
+    {state.error && <div role="alert" className="absolute inset-x-4 top-4 z-50 rounded-lg border border-destructive/30 bg-background p-4 text-sm"><p className="font-semibold">Não foi possível carregar a pré-visualização completa.</p><p>{state.error}</p></div>}
+    {state.pending && <p role="status" className="absolute bottom-2 left-2 rounded bg-background p-2 text-xs">Verificando montagem inicial do rascunho...</p>}
+  </div>;
 }
 
 export function SitePreview({
@@ -119,16 +319,14 @@ export function SitePreview({
     window.addEventListener("focus", onFocus);
     return () => { controller.abort(); clearInterval(timer); window.removeEventListener("focus", onFocus); };
   }, [projectId, clientId, assetScope, revisionId, reload]);
-  const sandpackFiles = useMemo(() => getSitePreviewFiles(files, assetState?.scope === assetScope ? assetState.assets : [], projectScope), [files, assetState, assetScope, projectScope]);
+  const prepared = useMemo((): { files: SandpackFiles | null; error: string } => {
+    if (!["index.html", "src/main.tsx", "src/App.tsx"].every(path => files[path]?.trim())) return { files: null, error: "Rascunho incompleto. Crie ou corrija os arquivos de entrada." };
+    try { return { files: getSitePreviewFiles(files, assetState?.scope === assetScope ? assetState.assets : [], projectScope), error: "" }; }
+    catch { return { files: null, error: "Fontes inválidas para pré-visualização. O último resultado aceito foi preservado." }; }
+  }, [files, assetState, assetScope, projectScope]);
   const available = ["index.html", "src/main.tsx", "src/App.tsx"].every((path) => files[path]?.trim());
 
-  const filesVersion = useMemo(() => {
-    let hash = revisionId ?? "init";
-    for (const [path, code] of Object.entries(files)) {
-      hash += `|${path}:${typeof code === "string" ? code.length : 0}`;
-    }
-    return hash;
-  }, [files, revisionId]);
+  const filesVersion = useMemo(() => JSON.stringify(files), [files]);
 
   useEffect(() => {
     if (firstRender.current) {
@@ -154,7 +352,7 @@ export function SitePreview({
     const observer = new ResizeObserver(() => update());
     observer.observe(el);
     return () => observer.disconnect();
-  }, [isFullscreen]);
+  }, [isFullscreen, available]);
 
   useEffect(() => {
     const screenEl = screenRef.current;
@@ -193,7 +391,7 @@ export function SitePreview({
       const scaleH = availableHeight / 1080;
       return Math.min(1, Math.max(0.2, Math.min(scaleW, scaleH)));
     }
-    const scaleW = availableWidth / 414;
+    const scaleW = availableWidth / 430;
     const scaleH = availableHeight / 892;
     return Math.min(1, Math.max(0.2, Math.min(scaleW, scaleH)));
   }, [availableWidth, availableHeight, canvasSize.width, canvasSize.height, currentViewport]);
@@ -290,7 +488,7 @@ export function SitePreview({
           {justUpdated && (
             <div className="hidden sm:flex items-center gap-1.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 px-2.5 py-1 text-xs font-medium text-emerald-600 dark:text-emerald-400 animate-in fade-in duration-300">
               <span className="size-2 rounded-full bg-emerald-500 animate-pulse" />
-              <span>Site atualizado!</span>
+              <span>Rascunho recebido</span>
             </div>
           )}
           <Button
@@ -327,11 +525,7 @@ export function SitePreview({
       </div>
 
       {/* Canvas Area */}
-      {!available ? (
-        <div className="flex flex-1 items-center justify-center rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
-          Peça ao agente para criar o site
-        </div>
-      ) : (
+      {(
         <div
           ref={canvasRef}
           className="relative flex-1 min-h-0 min-w-0 overflow-auto rounded-xl border border-border/60 bg-muted/20 p-4 flex flex-col"
@@ -341,12 +535,12 @@ export function SitePreview({
           }}
         >
           {/* Desktop Frame */}
-          {currentViewport.id === "desktop" && (
+          {(
             <div
-              className="flex flex-col rounded-xl border border-border/80 bg-card shadow-xl overflow-hidden transition-[width,height] duration-150 shrink-0"
+              className="flex flex-col rounded-xl border border-border/80 bg-card shadow-xl overflow-hidden shrink-0"
               style={{
-                width: `${Math.min(availableWidth, Math.round(1440 * effectiveScale))}px`,
-                height: scaleMode === "fit" ? "100%" : `${Math.round(900 * effectiveScale + 38)}px`,
+                width: `${Math.round(currentViewport.width * effectiveScale) + 2}px`,
+                height: currentViewport.id === "desktop" && scaleMode === "fit" ? "100%" : `${Math.round(currentViewport.height * effectiveScale + 38)}px`,
                 margin: "auto",
               }}
             >
@@ -364,10 +558,10 @@ export function SitePreview({
                 {justUpdated ? (
                   <div className="flex items-center gap-1 text-[10px] font-medium text-emerald-500 animate-in fade-in">
                     <span className="size-1.5 rounded-full bg-emerald-500 animate-ping" />
-                    <span>Atualizado</span>
+                    <span>Rascunho</span>
                   </div>
                 ) : (
-                  <div className="text-[10px] font-mono text-muted-foreground/80">1440 × 900</div>
+                  <div className="text-[10px] font-mono text-muted-foreground/80">{currentViewport.width} × {currentViewport.height}</div>
                 )}
               </div>
 
@@ -375,141 +569,18 @@ export function SitePreview({
               <div ref={screenRef} className="relative flex-1 min-h-0 w-full overflow-hidden bg-white">
                 <div
                   style={{
-                    width: "1440px",
-                    height: `${Math.round(screenHeight / effectiveScale)}px`,
+                    width: `${currentViewport.width}px`,
+                    height: `${currentViewport.id === "desktop" ? Math.round(screenHeight / effectiveScale) : currentViewport.height}px`,
                     transform: `scale(${effectiveScale})`,
                     transformOrigin: "top left",
                   }}
                 >
-                  <SandpackProvider
-                    key={`${filesVersion}:${reload}`}
-                    theme="dark"
-                    files={sandpackFiles}
-                    customSetup={SITE_PREVIEW_SETUP}
-                    options={{
-                      activeFile: "/src/App.tsx",
-                      classes: {
-                        "sp-wrapper": "!h-full !w-full !border-0 !bg-transparent",
-                        "sp-layout": "!h-full !w-full !border-0 !bg-transparent",
-                        "sp-preview": "!h-full !w-full !border-0 !bg-transparent",
-                        "sp-preview-container": "!h-full !w-full !border-0 !bg-transparent",
-                      },
-                    }}
-                  >
-                    <SandpackLayout style={{ height: "100%", width: "100%", border: 0, background: "transparent" }}>
-                      <PreviewFrame />
-                    </SandpackLayout>
-                  </SandpackProvider>
+                  <RetainedPreview key={assetScope} files={prepared.files} preparationError={prepared.error} reload={reload} />
                 </div>
               </div>
             </div>
           )}
 
-          {/* Tablet Frame */}
-          {currentViewport.id === "tablet" && (
-            <div
-              className="relative overflow-hidden transition-[width,height] duration-150 shrink-0"
-              style={{
-                width: `${Math.round(800 * effectiveScale)}px`,
-                height: `${Math.round(1080 * effectiveScale)}px`,
-                borderRadius: `${Math.round(28 * effectiveScale)}px`,
-                margin: "auto",
-              }}
-            >
-              <div
-                className="absolute top-0 left-0 flex flex-col rounded-[28px] border-[12px] border-slate-800 bg-slate-900 shadow-2xl p-1"
-                style={{
-                  width: "800px",
-                  height: "1080px",
-                  transform: `scale(${effectiveScale})`,
-                  transformOrigin: "top left",
-                }}
-              >
-                {/* Camera dot */}
-                <div className="flex items-center justify-center py-1">
-                  <span className="size-2 rounded-full bg-slate-700" />
-                </div>
-                {/* Screen */}
-                <div className="relative flex-1 rounded-[16px] bg-white overflow-hidden">
-                  <SandpackProvider
-                    key={`${filesVersion}:${reload}`}
-                    theme="dark"
-                    files={sandpackFiles}
-                    customSetup={SITE_PREVIEW_SETUP}
-                    options={{
-                      activeFile: "/src/App.tsx",
-                      classes: {
-                        "sp-wrapper": "!h-full !w-full !border-0 !bg-transparent",
-                        "sp-layout": "!h-full !w-full !border-0 !bg-transparent",
-                        "sp-preview": "!h-full !w-full !border-0 !bg-transparent",
-                        "sp-preview-container": "!h-full !w-full !border-0 !bg-transparent",
-                      },
-                    }}
-                  >
-                    <SandpackLayout style={{ height: "100%", width: "100%", border: 0, background: "transparent" }}>
-                      <PreviewFrame />
-                    </SandpackLayout>
-                  </SandpackProvider>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Mobile Frame */}
-          {currentViewport.id === "mobile" && (
-            <div
-              className="relative overflow-hidden transition-[width,height] duration-150 shrink-0"
-              style={{
-                width: `${Math.round(414 * effectiveScale)}px`,
-                height: `${Math.round(892 * effectiveScale)}px`,
-                borderRadius: `${Math.round(44 * effectiveScale)}px`,
-                margin: "auto",
-              }}
-            >
-              <div
-                className="absolute top-0 left-0 flex flex-col rounded-[44px] border-[12px] border-slate-800 bg-slate-900 shadow-2xl p-2"
-                style={{
-                  width: "414px",
-                  height: "892px",
-                  transform: `scale(${effectiveScale})`,
-                  transformOrigin: "top left",
-                }}
-              >
-                {/* Dynamic Island */}
-                <div className="flex items-center justify-center pt-0.5 pb-2">
-                  <div className="h-4 w-24 rounded-full bg-slate-950 flex items-center justify-end px-2">
-                    <span className="size-2 rounded-full bg-slate-800" />
-                  </div>
-                </div>
-                {/* Screen */}
-                <div className="relative flex-1 rounded-[28px] bg-white overflow-hidden">
-                  <SandpackProvider
-                    key={`${filesVersion}:${reload}`}
-                    theme="dark"
-                    files={sandpackFiles}
-                    customSetup={SITE_PREVIEW_SETUP}
-                    options={{
-                      activeFile: "/src/App.tsx",
-                      classes: {
-                        "sp-wrapper": "!h-full !w-full !border-0 !bg-transparent",
-                        "sp-layout": "!h-full !w-full !border-0 !bg-transparent",
-                        "sp-preview": "!h-full !w-full !border-0 !bg-transparent",
-                        "sp-preview-container": "!h-full !w-full !border-0 !bg-transparent",
-                      },
-                    }}
-                  >
-                    <SandpackLayout style={{ height: "100%", width: "100%", border: 0, background: "transparent" }}>
-                      <PreviewFrame />
-                    </SandpackLayout>
-                  </SandpackProvider>
-                </div>
-                {/* Home Indicator */}
-                <div className="flex items-center justify-center pt-2 pb-0.5">
-                  <div className="h-1 w-28 rounded-full bg-slate-600/80" />
-                </div>
-              </div>
-            </div>
-          )}
         </div>
       )}
 

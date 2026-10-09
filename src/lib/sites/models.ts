@@ -1,4 +1,4 @@
-import { addAiUsage, aiUsageFromError, openRouterChatWithFailover, ProviderHttpError, type AiUsage, type OpenRouterResponse } from "@/lib/ai-provider";
+import { addAiUsage, aiUsageFromError, AiEmptyResponseError, gatewayChatWithFailover, openRouterChatWithFailover, openRouterResponseUsage, ProviderHttpError, resolveGatewayCreds, type AiUsage, type OpenRouterResponse } from "@/lib/ai-provider";
 import { listAvailableOpenRouterModels, type OpenRouterModel } from "@/lib/openrouter-model-discovery";
 import { listAvailableGeminiModels, type GeminiModel } from "@/lib/gemini-model-discovery";
 import { listAvailableGatewayModels, type GatewayModel } from "@/lib/gateway-model-discovery";
@@ -25,6 +25,28 @@ export function isOpenRouterFreeModel(m: { id: string; pricing?: { prompt?: stri
     && Number.isFinite(prompt) && prompt === 0 && Number.isFinite(completion) && completion === 0;
 }
 
+const INCOMPATIBLE_MODEL_REGEX = /\b(lyria|whisper|tts|music|audio-preview|diffusion|flux|dall-e|midjourney|imagen|video|sora|runway|cogvideo|kling|guard|moderation|embed|rerank|bert)\b/i;
+
+/**
+ * Valida se o modelo é apto para atuar como agente de código do Site Studio.
+ * Exclui modelos de áudio (Lyria, Whisper), geradores de imagem/vídeo,
+ * embeddings/moderação e modelos sem suporte a ferramentas (tool-calling).
+ */
+export function isSuitableWebsiteAgentModel(model: WebsiteModel): boolean {
+  const clean = cleanModelId(model.id).toLowerCase();
+  const name = (model.name || "").toLowerCase();
+  if (INCOMPATIBLE_MODEL_REGEX.test(clean) || INCOMPATIBLE_MODEL_REGEX.test(name)) {
+    return false;
+  }
+  if (model.supportsTools === false) {
+    return false;
+  }
+  if (model.outputModalities?.length && !model.outputModalities.includes("text")) {
+    return false;
+  }
+  return true;
+}
+
 export function filterWebsiteModels(models: WebsiteModel[], settings: WebsiteSettings): WebsiteModel[] {
   const allowed = new Set<string>();
   for (const raw of settings.model_allowlist) {
@@ -34,7 +56,7 @@ export function filterWebsiteModels(models: WebsiteModel[], settings: WebsiteSet
   return models.filter((model) => {
     const cleanId = cleanModelId(model.id);
     return (!allowed.size || allowed.has(model.id) || allowed.has(cleanId))
-      && (!model.outputModalities?.length || model.outputModalities.includes("text"));
+      && isSuitableWebsiteAgentModel(model);
   });
 }
 
@@ -118,45 +140,55 @@ export async function listWebsiteModels(settings: WebsiteSettings, force = false
   return filterWebsiteModels(combined, settings);
 }
 
-export function selectWebsiteModels(models: WebsiteModel[], settings: WebsiteSettings, mode: ModelMode, selected?: string | null, vision = false): WebsiteModel[] {
+function modelReliabilityScore(model: WebsiteModel, primary?: WebsiteModel): number {
+  let score = 0;
+  const clean = cleanModelId(model.id).toLowerCase();
+
+  // Bônus se for do mesmo provedor que o primário
+  if (primary && model.provider === primary.provider) score += 40;
+
+  // Modelos de código de primeira linha
+  if (clean.includes("claude-3-5") || clean.includes("claude-3-7") || clean.includes("claude-sonnet") || clean.includes("claude-opus")) score += 100;
+  else if (clean.includes("gemini-2.5") || clean.includes("gemini-2.0") || clean.includes("gemini-3")) score += 95;
+  else if (clean.includes("qwen-2.5-coder") || clean.includes("qwen/qwen-2.5-coder")) score += 90;
+  else if (clean.includes("llama-3.3") || clean.includes("llama-3.1-70b")) score += 85;
+  else if (clean.includes("gpt-4o") || clean.includes("gpt-4.5")) score += 80;
+  else if (clean.includes("deepseek-chat") || clean.includes("deepseek-v3") || clean.includes("deepseek-coder")) score += 75;
+  else if (clean.includes("gemini-1.5")) score += 70;
+  else if (clean.includes("llama-3")) score += 60;
+  else if (clean.includes("mistral") || clean.includes("codestral")) score += 55;
+
+  if ((model.contextLength ?? 0) >= 128_000) score += 20;
+  else if ((model.contextLength ?? 0) >= 64_000) score += 10;
+
+  return score;
+}
+
+export interface WebsiteModelPolicy { freeOnly?: boolean }
+
+export function selectWebsiteModels(models: WebsiteModel[], settings: WebsiteSettings, mode: ModelMode, selected?: string | null, vision = false, policy: WebsiteModelPolicy = {}): WebsiteModel[] {
   const available = filterWebsiteModels(models, settings);
   const rawTarget = selected || (mode === "economy" ? settings.economy_model : settings.quality_model);
   const cleanSelected = rawTarget ? cleanModelId(rawTarget).toLowerCase() : "";
-  let target = available.find((model) => model.id === rawTarget || cleanModelId(model.id).toLowerCase() === cleanSelected || model.id.toLowerCase() === rawTarget?.toLowerCase())
-    || (mode === "manual" && rawTarget ? models.find((m) => m.id === rawTarget || cleanModelId(m.id).toLowerCase() === cleanSelected) : undefined);
-
-  // Se o usuário selecionou manualmente um modelo (ex: gateway:gemini-3.8-flash-high)
-  // e ele não estava no cache da descoberta naquele milissegundo, sintetizamos o modelo
-  // manual para não bloquear a chamada nem exibir erro indevido ao usuário.
-  if (!target && mode === "manual" && rawTarget?.startsWith("gateway:") && (!settings.model_allowlist.length || settings.model_allowlist.some((id) => cleanModelId(id) === cleanModelId(rawTarget)))) {
-    const isGateway = rawTarget.startsWith("gateway:") || (!rawTarget.includes(":") && !rawTarget.startsWith("gemini:") && !rawTarget.startsWith("nvidia:"));
-    target = {
-      id: rawTarget.includes(":") ? rawTarget : `gateway:${rawTarget}`,
-      name: `${cleanModelId(rawTarget)} (${isGateway ? "Gateway" : "Manual"})`,
-      supportsTools: true,
-      inputModalities: ["text", "image"],
-      outputModalities: ["text"],
-      contextLength: 128_000,
-      pricing: { prompt: "0", completion: "0" },
-      provider: rawTarget.startsWith("gemini:") ? "gemini" : rawTarget.startsWith("nvidia:") ? "nvidia" : rawTarget.startsWith("openrouter:") ? "openrouter" : "gateway",
-      isFree: true,
-    };
-  }
+  const targetProvider = rawTarget?.match(/^(openrouter|gemini|gateway|nvidia):/)?.[1];
+  const target = available.find((model) => {
+    const provider = model.provider || model.id.match(/^(openrouter|gemini|gateway|nvidia):/)?.[1] || "openrouter";
+    return (!targetProvider || provider === targetProvider) && (model.id === rawTarget || cleanModelId(model.id).toLowerCase() === cleanSelected || model.id.toLowerCase() === rawTarget?.toLowerCase());
+  }) || (mode === "manual" && rawTarget ? available.find((m) => cleanModelId(m.id).toLowerCase() === cleanSelected) : undefined);
 
   if (rawTarget && !target) throw new Error(mode === "manual" ? "Modelo manual indisponível ou sem suporte a ferramentas." : "READY — AWAITING CREDENTIALS: modelo selecionado ou configurado indisponível.");
-  const freeOpenRouter = (model: WebsiteModel) => !model.id.startsWith("gemini:") && !model.id.startsWith("gateway:") && !model.id.startsWith("nvidia:") && isOpenRouterFreeModel(model);
-  const freeOnly = Boolean(target && freeOpenRouter(target));
+  const freeOpenRouter = (model: WebsiteModel) => (!model.provider || model.provider === "openrouter") && !/^(gemini|gateway|nvidia):/.test(model.id) && isOpenRouterFreeModel(model);
+  const freeOnly = policy.freeOnly === true || Boolean(target && freeOpenRouter(target));
+  if (policy.freeOnly && target && !freeOpenRouter(target)) throw new Error("Modelo selecionado indisponível na política OpenRouter gratuito.");
   const candidates = available.filter((model) => (!vision || model.inputModalities?.includes("image")) && (!freeOnly || freeOpenRouter(model)));
-
-  if (target && (!vision || target.inputModalities?.includes("image")) && !candidates.some((c) => c.id === target.id)) {
-    candidates.unshift(target);
-  }
 
   if (!candidates.length) throw new Error("READY — AWAITING CREDENTIALS: nenhum modelo compatível disponível.");
   const primary = candidates.find((model) => model.id === target?.id);
   if (mode === "manual" && !vision) {
     if (!primary) throw new Error("Modelo manual indisponível ou sem suporte a ferramentas.");
-    const fallbacks = candidates.filter((m) => m.id !== primary.id && (!primary.isFree || m.isFree));
+    const fallbacks = candidates
+      .filter((m) => m.id !== primary.id && (!primary.isFree || m.isFree || primary.provider === "gateway" || m.provider === "gateway" || m.provider === "openrouter"))
+      .sort((a, b) => modelReliabilityScore(b, primary) - modelReliabilityScore(a, primary) || a.id.localeCompare(b.id));
     return [primary, ...fallbacks].slice(0, 3);
   }
   const price = (model: WebsiteModel) => {
@@ -176,108 +208,97 @@ export interface WebsiteChatResult {
 }
 
 function responseUsage(response: OpenRouterResponse): AiUsage {
-  const count = (value?: number) => Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : 0;
-  const promptTokens = count(response.usage?.prompt_tokens);
-  const completionTokens = count(response.usage?.completion_tokens);
-  return { promptTokens, completionTokens, totalTokens: Math.max(count(response.usage?.total_tokens), promptTokens + completionTokens), attempts: response.usage?.attempts };
+  return openRouterResponseUsage(response);
 }
 
+function validateChatResponse(value: unknown, model: WebsiteModel): OpenRouterResponse {
+  const response = value as OpenRouterResponse | null;
+  const message = response?.choices?.[0]?.message;
+  const tools = message?.tool_calls;
+  if (tools !== undefined && (!Array.isArray(tools) || tools.some((tool) => {
+    if (!tool || typeof tool.id !== "string" || !tool.id.trim() || tool.type !== "function" || typeof tool.function?.name !== "string" || !tool.function.name.trim() || typeof tool.function.arguments !== "string") return true;
+    try {
+      const args: unknown = JSON.parse(tool.function.arguments);
+      return !args || typeof args !== "object" || Array.isArray(args);
+    } catch { return true; }
+  }))) throw Object.assign(new Error("Resposta estruturada inválida do provedor."), { usage: responseUsage(response ?? {}) });
+  if (!(typeof message?.content === "string" && message.content.trim()) && !tools?.length) {
+    const provider = model.provider || model.id.match(/^(openrouter|gemini|gateway|nvidia):/)?.[1] || "openrouter";
+    throw new AiEmptyResponseError(provider as "openrouter" | "gemini" | "gateway" | "nvidia", model.id, responseUsage(response ?? {}));
+  }
+  return response!;
+}
+
+async function directWebsiteChat(provider: "gemini" | "nvidia", body: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
+  const { getAiKeys } = await import("@/lib/ai-keys");
+  const keys = await getAiKeys();
+  const key = keys?.[provider];
+  if (!key) throw new Error(`API Key ${provider === "nvidia" ? "da NVIDIA NIM" : "do Gemini"} não configurada em Configurações.`);
+  signal.throwIfAborted();
+  const url = provider === "gemini" ? "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions" : "https://integrate.api.nvidia.com/v1/chat/completions";
+  const result = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
+  const json: unknown = await result.json().catch(() => null);
+  if (!result.ok) throw Object.assign(new ProviderHttpError(result.status, `${provider === "nvidia" ? "NVIDIA NIM" : "Gemini"} HTTP ${result.status}`), { usage: openRouterResponseUsage(json) });
+  return json;
+}
+
+/** Uma chamada física no máximo. Reserva, fallback e retry pertencem ao caller. */
+export async function websiteChatAttempt(model: WebsiteModel, body: Record<string, unknown>, signal: AbortSignal): Promise<WebsiteChatResult> {
+  signal.throwIfAborted();
+  if (!model || typeof model.id !== "string" || !cleanModelId(model.id).trim() || !body || typeof body !== "object" || Array.isArray(body) || !Array.isArray(body.messages) || !body.messages.length) throw new Error("Modelo ou mensagens inválidos.");
+  const prefix = model.id.match(/^(openrouter|gemini|gateway|nvidia):/)?.[1];
+  if (model.provider && prefix && model.provider !== prefix) throw new Error("Provedor do modelo incompatível.");
+  const provider = model.provider || prefix || "openrouter";
+  const modelBody: Record<string, unknown> = { ...body, model: cleanModelId(model.id), stream: false };
+  if (model.supportsTools !== true) {
+    delete modelBody.tools;
+    delete modelBody.tool_choice;
+    delete modelBody.parallel_tool_calls;
+  }
+  if (provider === "gemini" || provider === "nvidia") delete modelBody.reasoning;
+  try {
+    let raw: unknown;
+    if (provider === "gateway") {
+      const creds = await resolveGatewayCreds({ noGatewayFallback: true }, cleanModelId(model.id));
+      signal.throwIfAborted();
+      if (!creds.baseUrl) throw new Error("Gateway de assinatura indisponível: configure uma conexão em Configurações.");
+      raw = await gatewayChatWithFailover(cleanModelId(model.id), modelBody, creds, { allowEmptyContent: true, signal, maxAttempts: 1 });
+    } else if (provider === "gemini" || provider === "nvidia") {
+      raw = await directWebsiteChat(provider, modelBody, signal);
+    } else {
+      raw = await openRouterChatWithFailover(modelBody, { signal, maxAttempts: 1, allowEmptyContent: true });
+    }
+    const usage = openRouterResponseUsage(raw, provider as "openrouter" | "gemini" | "gateway" | "nvidia", cleanModelId(model.id));
+    if (signal.aborted) throw Object.assign(signal.reason instanceof Error ? signal.reason : new Error("Chamada interrompida."), { usage });
+    const response = validateChatResponse(raw, model);
+    return { model: model.id, response, usage };
+  } catch (error) {
+    const target = error instanceof Error ? error : new Error("Provedor indisponível.");
+    const reported = aiUsageFromError(error);
+    const usage: AiUsage = reported ?? openRouterResponseUsage(null);
+    const uncertain = !usage.attempts?.length && usage.totalTokens === 0 && usage.costUsd === undefined;
+    const measured = { ...usage, ...(uncertain ? { estimated: true, usageUnknown: true } : {}) };
+    throw Object.assign(target, { usage: measured.attempts?.length ? measured : { ...measured, attempts: [{ ...measured, provider: provider as "openrouter" | "gemini" | "gateway" | "nvidia", model: cleanModelId(model.id) }] } });
+  }
+}
+
+/** Wrapper legado com fallback explícito, limitado a três chamadas físicas. */
 export async function websiteChat(models: WebsiteModel[], body: Record<string, unknown>, signal: AbortSignal): Promise<WebsiteChatResult> {
-  const attemptBudget = { remaining: 3 };
   let usage: AiUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
-  let lastError: unknown = new Error("Nenhum modelo compatível disponível.");
+  let lastError: Error = new Error("Nenhum modelo compatível disponível.");
   for (const model of models.slice(0, 3)) {
     signal.throwIfAborted();
-    if (!attemptBudget.remaining) break;
     try {
-      const isReasoner = model.id.includes("reasoner") || model.id.includes("r1");
-      const isNvidiaDeepseek = model.id.startsWith("nvidia:") && model.id.toLowerCase().includes("deepseek");
-      const modelBody = { ...body };
-      if (model.supportsTools === false || isReasoner || isNvidiaDeepseek) {
-        delete modelBody.tools;
-        delete modelBody.tool_choice;
-        delete modelBody.parallel_tool_calls;
-      }
-      if (modelBody.reasoning && (model.id.startsWith("nvidia:") || model.id.startsWith("gemini:"))) {
-        delete modelBody.reasoning;
-      }
-
-      let response: OpenRouterResponse;
-      if (model.id.startsWith("gemini:")) {
-        const { getAiKeys } = await import("@/lib/ai-keys");
-        const keys = await getAiKeys();
-        const cleanModel = model.id.replace(/^gemini:/, "");
-        if (keys?.gemini) {
-          const res = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${keys.gemini}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ ...modelBody, model: cleanModel, stream: false }),
-            signal,
-          });
-          const json = await res.json().catch(() => ({}));
-          if (!res.ok) throw new Error(json?.error?.message || `Gemini HTTP ${res.status}`);
-          response = json;
-        } else {
-          response = await openRouterChatWithFailover({ ...modelBody, model: `google/${cleanModel}`, stream: false }, { signal, maxAttempts: 1, attemptBudget });
-        }
-      } else if (model.id.startsWith("gateway:")) {
-        const cleanModel = model.id.replace(/^gateway:/, "");
-        const { resolveGatewayCreds, gatewayChatWithFailover } = await import("@/lib/ai-provider");
-        const creds = await resolveGatewayCreds({}, cleanModel);
-        if (!creds.baseUrl) throw new Error("Gateway de assinatura indisponível: configure uma conexão em Configurações.");
-        response = await gatewayChatWithFailover(cleanModel, { ...modelBody, model: cleanModel, stream: false }, {
-          baseUrl: creds.baseUrl,
-          apiKey: creds.apiKey,
-          endpointId: creds.endpointId,
-        }, { allowEmptyContent: true });
-      } else if (model.id.startsWith("nvidia:")) {
-        const cleanModel = model.id.replace(/^nvidia:/, "");
-        const { getAiKeys } = await import("@/lib/ai-keys");
-        const keys = await getAiKeys();
-        if (!keys?.nvidia) throw new Error("API Key da NVIDIA NIM não configurada em Configurações.");
-        let res = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${keys.nvidia}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ ...modelBody, model: cleanModel, stream: false }),
-          signal,
-        });
-        let json = await res.json().catch(() => ({}));
-        if (!res.ok && res.status === 400 && (modelBody.tools || modelBody.tool_choice)) {
-          delete modelBody.tools;
-          delete modelBody.tool_choice;
-          delete modelBody.parallel_tool_calls;
-          res = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${keys.nvidia}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ ...modelBody, model: cleanModel, stream: false }),
-            signal,
-          });
-          json = await res.json().catch(() => ({}));
-        }
-        if (!res.ok) throw new Error(json?.error?.message || `NVIDIA NIM HTTP ${res.status}`);
-        response = json;
-      } else {
-        const cleanModel = model.id.replace(/^openrouter:/, "");
-        response = await openRouterChatWithFailover({ ...modelBody, model: cleanModel, stream: false }, { signal, maxAttempts: 3, attemptBudget });
-      }
-      return { model: model.id, response, usage: addAiUsage(usage, responseUsage(response)) };
+      const result = await websiteChatAttempt(model, body, signal);
+      return { ...result, usage: addAiUsage(usage, result.usage) };
     } catch (error) {
       const failedUsage = aiUsageFromError(error);
       if (failedUsage) usage = addAiUsage(usage, failedUsage);
-      if (signal.aborted || (error instanceof ProviderHttpError && error.status === 400)) throw Object.assign(error instanceof Error ? error : new Error("Chamada interrompida."), { usage });
-      lastError = error;
+      lastError = error instanceof Error ? error : new Error("Provedor indisponível.");
+      if (signal.aborted || (error instanceof ProviderHttpError && error.status === 400)) throw Object.assign(lastError, { usage });
     }
   }
-  throw Object.assign(lastError instanceof Error ? lastError : new Error("OpenRouter indisponível."), { usage });
+  throw Object.assign(lastError, { usage });
 }
 
 export interface ImageGenerationProvider {

@@ -1,12 +1,14 @@
+import { CHECKPOINT_RECOVERY_WARNING, loadRunCheckpoint, saveRunCheckpoint } from "./run-checkpoint";
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { AiEmptyResponseError, openRouterChatWithFailover, ProviderHttpError, type OpenRouterResponse } from "@/lib/ai-provider";
+import { AiEmptyResponseError, ProviderHttpError } from "@/lib/ai-provider";
 import { logTokenUsage } from "@/lib/token-usage";
 import { WebsiteAgentRuntime, type WebsiteAgentDependencies } from "./agent";
 import { createSiteBuildProvider, SITE_PROVIDER_NOT_CONFIGURED } from "./build-provider";
 import { createSiteDeploymentProvider, resumeSiteDeployment } from "./deployment-provider";
-import { listWebsiteModels } from "./models";
+import { listWebsiteModels, websiteChatAttempt } from "./models";
 import { parseWebsiteDesignDirection, type WebsiteDesignDirection } from "./impeccable";
 import { composeWebsitePrompt, getWebsiteSettings, resolveActiveWebsiteSkills } from "./prompts";
 import { databaseError, getFiles, getProject } from "./repository";
@@ -73,75 +75,53 @@ export function createWebsiteAgentDependencies(db: SupabaseClient, workerId: str
   };
   return {
     check, event,
+    async checkpoint(run, checkpoint) {
+      await check(run);
+      await saveRunCheckpoint(db, run, checkpoint, () => check(run));
+    },
     async chat(models, body, signal) {
       if (models.length !== 1) throw new Error("A chamada exige uma única reserva de modelo.");
-      const model = models[0].id;
-      let response: OpenRouterResponse;
-      if (model.startsWith("gemini:")) {
-        const { getAiKeys } = await import("@/lib/ai-keys");
-        const keys = await getAiKeys();
-        const cleanModel = model.replace(/^gemini:/, "");
-        if (keys?.gemini) {
-          const res = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${keys.gemini}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ ...body, model: cleanModel, stream: false }),
-            signal,
-          });
-          const json = await res.json().catch(() => ({}));
-          if (!res.ok) {
-            throw new Error(json?.error?.message || `Gemini HTTP ${res.status}`);
-          }
-          response = json;
-        } else {
-          response = await openRouterChatWithFailover({ ...body, model: `google/${cleanModel}`, stream: false }, { signal, maxAttempts: 1, attemptBudget: { remaining: 1 } });
-        }
-      } else if (model.startsWith("gateway:")) {
-        const cleanModel = model.replace(/^gateway:/, "");
-        const { resolveGatewayCreds, gatewayChatWithFailover } = await import("@/lib/ai-provider");
-        const creds = await resolveGatewayCreds({}, cleanModel);
-        if (!creds.baseUrl) {
-          throw new Error("Gateway de assinatura indisponível: configure uma conexão de gateway em Configurações.");
-        }
-        response = await gatewayChatWithFailover(cleanModel, { ...body, model: cleanModel, stream: false }, {
-          baseUrl: creds.baseUrl,
-          apiKey: creds.apiKey,
-          endpointId: creds.endpointId,
-        }, { allowEmptyContent: Boolean((body as Record<string, unknown>)?.tools) });
-      } else {
-        const cleanModel = model.replace(/^openrouter:/, "");
-        response = await openRouterChatWithFailover({ ...body, model: cleanModel, stream: false }, { signal, maxAttempts: 1, attemptBudget: { remaining: 1 }, allowEmptyContent: Boolean((body as Record<string, unknown>)?.tools) });
-      }
-      const promptTokens = response.usage?.prompt_tokens ?? 0;
-      const completionTokens = response.usage?.completion_tokens ?? 0;
-      return { model, response, usage: { promptTokens, completionTokens, totalTokens: Math.max(response.usage?.total_tokens ?? 0, promptTokens + completionTokens), attempts: response.usage?.attempts, estimated: response.usage?.attempts?.some((attempt: { estimated?: boolean }) => attempt.estimated) } };
+      signal.throwIfAborted();
+      return websiteChatAttempt(models[0], body, signal);
     },
     async load(run) {
       const { getSelectedAssets } = await import("./assets");
+      const checkpoint = await loadRunCheckpoint(db, run);
+      if (checkpoint?.progress?.diagnostics.includes(CHECKPOINT_RECOVERY_WARNING)) await event(run, { role: "system", content: CHECKPOINT_RECOVERY_WARNING });
+      const assetIds = [...new Set([...(checkpoint?.assetIds ?? []), ...run.asset_ids])];
       const [project, files, settings, skills, assets] = await Promise.all([
         getProject(run.client_id, run.project_id), getFiles(run.client_id, run.project_id),
-        getWebsiteSettings(), getEffectiveSkills(run.client_id), getSelectedAssets(run.client_id, run.project_id, run.asset_ids),
+        getWebsiteSettings(), getEffectiveSkills(run.client_id), getSelectedAssets(run.client_id, run.project_id, assetIds),
       ]);
       if (!project.current_revision_id) throw new Error("Checkpoint inicial ausente. Crie uma revisão antes da execução.");
       const { data, error } = await db.from("website_messages").select("role,content,run_id")
         .eq("client_id", run.client_id).eq("project_id", run.project_id).in("role", ["user", "assistant"])
         .order("created_at", { ascending: false }).limit(20);
       databaseError(error);
-      const effectiveFiles = Object.keys(files).length ? files : getCleanStarterFiles(project);
+      const effectiveFiles = checkpoint?.files ?? (Object.keys(files).length ? files : getCleanStarterFiles(project));
       const activeSkills = resolveActiveWebsiteSkills(project, skills, run.prompt);
-      const priorBuild = await db.from("website_builds").select("qa").eq("client_id", run.client_id).eq("project_id", run.project_id)
-        .eq("revision_id", run.base_revision_id).order("created_at", { ascending: false }).limit(1).maybeSingle();
-      databaseError(priorBuild.error);
-      let designDirection: WebsiteDesignDirection | undefined;
-      if (priorBuild.data?.qa?.design_direction) {
-        try { designDirection = parseWebsiteDesignDirection(priorBuild.data.qa.design_direction); }
-        catch { /* Legacy malformed design metadata is not an instruction source. */ }
+      // Private design direction lives in build QA. Manual editor saves create revisions without builds,
+      // so walk the revision lineage (same tenant and project only) to keep the registered identity.
+      let designDirection: WebsiteDesignDirection | undefined = checkpoint?.designDirection;
+      let revisionId: string | null = run.base_revision_id;
+      const visited = new Set<string>();
+      for (let depth = 0; revisionId && !designDirection && !visited.has(revisionId) && depth < 6; depth++) {
+        visited.add(revisionId);
+        const priorBuild = await db.from("website_builds").select("qa").eq("client_id", run.client_id).eq("project_id", run.project_id)
+          .eq("revision_id", revisionId).order("created_at", { ascending: false }).limit(1).maybeSingle();
+        databaseError(priorBuild.error);
+        if (priorBuild.data?.qa?.design_direction) {
+          try { designDirection = parseWebsiteDesignDirection(priorBuild.data.qa.design_direction); }
+          catch { /* Legacy malformed design metadata is not an instruction source. */ }
+          break;
+        }
+        const revision = await db.from("website_revisions").select("parent_id").eq("client_id", run.client_id).eq("project_id", run.project_id)
+          .eq("id", revisionId).maybeSingle();
+        databaseError(revision.error);
+        revisionId = typeof revision.data?.parent_id === "string" ? revision.data.parent_id : null;
       }
       return {
-        project, files: effectiveFiles, assets, settings, activeSkills, designDirection,
+        project, files: effectiveFiles, assets, settings, activeSkills, designDirection, pendingRequest: checkpoint?.request, pendingNotes: checkpoint?.notes, pendingProgress: checkpoint?.progress, pendingQaReport: checkpoint?.qaReport, budgetConsumed: checkpoint?.budgetConsumed,
         models: await listWebsiteModels(settings), systemPrompt: composeWebsitePrompt(project, skills, settings.creative_prompt, run.prompt, effectiveFiles, designDirection),
         history: compactHistoryMessages(data ?? [], run.id),
       };
@@ -166,22 +146,26 @@ export function createWebsiteAgentDependencies(db: SupabaseClient, workerId: str
       return reservationId;
     },
     async usage(run, usage, model, reservationId, complete) {
+      const settled = complete && usage !== null && !usage.estimated && !usage.attempts?.some((attempt) => attempt.estimated);
       const outcomes = await Promise.allSettled([
         (async () => {
           const safeUsage = usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
           const { data, error } = await db.rpc("website_settle_tokens", {
             p_client_id: run.client_id, p_project_id: run.project_id, p_run_id: run.id, p_worker_id: workerId,
-            p_reservation_id: reservationId, p_usage: safeUsage, p_model: model, p_complete: complete,
+            p_reservation_id: reservationId, p_usage: safeUsage, p_model: model, p_complete: settled,
           });
           databaseError(error);
           if (data !== reservationId) throw new Error("Contabilização de tokens não confirmada.");
         })(),
         (async () => {
-          const { error } = await db.from("website_messages").insert({ client_id: run.client_id, project_id: run.project_id, run_id: run.id, role: "system", content: JSON.stringify({ usage, model, reservation_id: reservationId, complete }) });
+          const { error } = await db.from("website_messages").insert({ client_id: run.client_id, project_id: run.project_id, run_id: run.id, role: "system", content: JSON.stringify({ usage, model, reservation_id: reservationId, complete: settled }) });
           databaseError(error);
         })(),
-        ...(usage ? (usage.attempts?.length ? usage.attempts : [{ ...usage, model, provider: (model.startsWith("gateway:") ? "gateway" : model.startsWith("gemini:") ? "gemini" : "openrouter") as any }]).map((attempt) =>
-          logTokenUsage({ source: "other", sourceId: run.id, sourceLabel: "Site Studio", clientId: run.client_id, model: attempt.model, provider: (model.startsWith("gateway:") ? "Gateway" : model.startsWith("gemini:") ? "Gemini" : "OpenRouter"), promptTokens: attempt.promptTokens, completionTokens: attempt.completionTokens, totalTokens: attempt.totalTokens, metadata: { feature: "site-studio", project_id: run.project_id, run_id: run.id, reservation_id: reservationId, estimated: attempt.estimated ?? false } })
+        ...(usage ? (usage.attempts?.length ? usage.attempts : [{ ...usage, model, provider: model.startsWith("gateway:") ? "gateway" : model.startsWith("gemini:") ? "gemini" : model.startsWith("nvidia:") ? "nvidia" : "openrouter" }]).map((attempt) =>
+          logTokenUsage({ source: "other", sourceId: run.id, sourceLabel: "Site Studio", clientId: run.client_id, model: attempt.model,
+            provider: attempt.provider === "gateway" ? "Gateway" : attempt.provider === "gemini" ? "Gemini" : attempt.provider === "nvidia" ? "NVIDIA" : "OpenRouter",
+            promptTokens: attempt.promptTokens, completionTokens: attempt.completionTokens, totalTokens: attempt.totalTokens, cachedTokens: attempt.cachedTokens,
+            metadata: { feature: "site-studio", project_id: run.project_id, run_id: run.id, reservation_id: reservationId, provider: attempt.provider, cached_tokens: attempt.cachedTokens ?? null, estimated: attempt.estimated ?? usage.estimated ?? false } })
         ) : []),
       ]);
       if (outcomes[0].status === "rejected") throw outcomes[0].reason;
@@ -194,8 +178,15 @@ export function createWebsiteAgentDependencies(db: SupabaseClient, workerId: str
       const { getReferencedAssets } = await import("./assets");
       const assets = await getReferencedAssets(run.client_id, run.project_id, input.files);
       signal.throwIfAborted();
-      await check(run);
-      const provider = Object.assign({ configured: () => Boolean(process.env.E2B_API_KEY && process.env.E2B_SITE_TEMPLATE_ID) }, createSiteBuildProvider());
+      let e2bConfigured = Boolean(process.env.E2B_API_KEY?.trim() && process.env.E2B_SITE_TEMPLATE_ID?.trim());
+      if (process.env.NODE_ENV !== "test" && !e2bConfigured) {
+        try {
+          const dotenv = await import("dotenv");
+          dotenv.config({ path: join(process.cwd(), ".env.local"), override: true });
+          e2bConfigured = Boolean(process.env.E2B_API_KEY?.trim() && process.env.E2B_SITE_TEMPLATE_ID?.trim());
+        } catch { /* ignore */ }
+      }
+      const provider = Object.assign({ configured: () => e2bConfigured }, createSiteBuildProvider());
       if (provider.configured()) {
         const { data, error } = await db.rpc("website_consume_quota", { p_client_id: run.client_id, p_metric: "builds", p_amount: 1 });
         databaseError(error);
@@ -246,6 +237,10 @@ function runFailureMessage(error: unknown): string {
     "Já existe uma execução ativa neste projeto.", "Dados inválidos.", "A concessão da execução expirou.",
     "Acesso não permitido.", "Conflito com um registro existente.", "Vínculo inválido ou registro alterado.",
     "Não foi possível persistir ou consultar os dados.", "Não foi possível carregar o projeto.", "Projeto não encontrado.",
+    "QA não aprovado. A revisão anterior foi preservada.",
+    "Execução interrompida sem progresso. Rascunho preservado; retome com outro modelo ou pedido mais específico.",
+    "Orçamento da edição atingido. Progresso preservado; validação pendente.",
+    "Orçamento da edição excedido. A revisão anterior foi preservada.",
   ].includes(message)) return message;
   return "A execução não foi concluída. Os arquivos anteriores foram preservados.";
 }

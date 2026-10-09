@@ -7,6 +7,7 @@ import { runInNewContext } from "node:vm";
 
 const scriptPath = resolve(process.cwd(), "scripts/build-setup-sql.mjs");
 const websiteSql = readFileSync(resolve(process.cwd(), "migrations/016_website_studio.sql"), "utf8");
+const completionGuardSql = readFileSync(resolve(process.cwd(), "migrations/017_website_studio_completion_guard.sql"), "utf8");
 const tempDirs: string[] = [];
 
 function makeTempProject(): string {
@@ -26,6 +27,7 @@ describe("scripts/build-setup-sql.mjs", () => {
     writeFileSync(join(cwd, "SETUP_COMPLETO.sql"), "SELECT 'RAIZ_ERRADA';\n", "utf8");
     writeFileSync(join(cwd, "migrations", "SETUP_COMPLETO.sql"), "SELECT 'CANONICA';\n", "utf8");
     writeFileSync(join(cwd, "migrations", "016_website_studio.sql"), websiteSql, "utf8");
+    writeFileSync(join(cwd, "migrations", "017_website_studio_completion_guard.sql"), completionGuardSql, "utf8");
 
     const result = spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" });
 
@@ -35,7 +37,7 @@ describe("scripts/build-setup-sql.mjs", () => {
     expect(generated).not.toContain("RAIZ_ERRADA");
     expect(generated).toContain("migrations/SETUP_COMPLETO.sql");
     const sql = runInNewContext(generated.replace("export const SETUP_SQL =", "globalThis.sql =")) as string;
-    expect(sql).toBe(`SELECT 'CANONICA';\n\n\n${websiteSql.trim()}\n`);
+    expect(sql).toBe(`SELECT 'CANONICA';\n\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n`);
     expect(sql).toContain("CREATE OR REPLACE FUNCTION public.website_complete_run");
   });
 
@@ -45,12 +47,13 @@ describe("scripts/build-setup-sql.mjs", () => {
     mkdirSync(join(cwd, "migrations"));
     writeFileSync(join(cwd, "migrations", "SETUP_COMPLETO.sql"), canonical);
     writeFileSync(join(cwd, "migrations", "016_website_studio.sql"), websiteSql);
+    writeFileSync(join(cwd, "migrations", "017_website_studio_completion_guard.sql"), completionGuardSql);
 
     expect(spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" }).status).toBe(0);
     const output = join(cwd, "src", "lib", "setup-sql.ts");
     const generated = readFileSync(output, "utf8");
     const sql = runInNewContext(generated.replace("export const SETUP_SQL =", "globalThis.sql =")) as string;
-    expect(sql).toBe(`${canonical}\n\n${websiteSql.trim()}\n`);
+    expect(sql).toBe(`${canonical}\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n`);
     expect(spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" }).status).toBe(0);
     expect(readFileSync(output, "utf8")).toBe(generated);
   });
@@ -59,6 +62,7 @@ describe("scripts/build-setup-sql.mjs", () => {
     const cwd = makeTempProject();
     mkdirSync(join(cwd, "migrations"));
     writeFileSync(join(cwd, "migrations", "016_website_studio.sql"), websiteSql);
+    writeFileSync(join(cwd, "migrations", "017_website_studio_completion_guard.sql"), completionGuardSql);
     const base = join(cwd, "migrations", "SETUP_COMPLETO.sql");
     writeFileSync(base, websiteSql);
     expect(spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" }).status).toBe(0);

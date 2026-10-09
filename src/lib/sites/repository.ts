@@ -251,7 +251,7 @@ export async function cancelRun(clientId: string, projectId: string, runId: stri
 export async function listMessages(clientId: string, projectId: string): Promise<WebsiteMessage[]> {
   await getProject(clientId, projectId);
   const { data, error } = await getSitesDb().from("website_messages").select("id,project_id,run_id,role,content,created_at")
-    .eq("client_id", clientId).eq("project_id", projectId).order("created_at", { ascending: false }).limit(200);
+    .eq("client_id", clientId).eq("project_id", projectId).not("content", "like", "[site-checkpoint:%").order("created_at", { ascending: false }).limit(200);
   databaseError(error);
   return (data ?? []).reverse() as WebsiteMessage[];
 }

@@ -13,8 +13,8 @@ export function compactWebsiteToolHistory<T extends ContextMessage>(messages: re
       const calls = (message.tool_calls as ToolCall[]).map((call) => {
         try {
           const args = JSON.parse(call.function.arguments) as Record<string, unknown>;
-          if (["read", "read_files", "search"].includes(call.function.name)) reads.set(call.id, JSON.stringify(args));
-          if (["write", "create"].includes(call.function.name) && typeof args.content === "string" && args.content.length > 2000) {
+          if (["read", "read_files", "search", "list"].includes(call.function.name)) reads.set(call.id, JSON.stringify(args));
+          if (["write", "create"].includes(call.function.name) && typeof args.content === "string" && args.content.length > 500) {
             return { ...call, function: { ...call.function, arguments: JSON.stringify({ ...args, content: "[Conteúdo anterior omitido. Use read para obter o arquivo atual.]" }) } };
           }
         } catch { /* Keep malformed calls intact for diagnosis. */ }
@@ -23,7 +23,7 @@ export function compactWebsiteToolHistory<T extends ContextMessage>(messages: re
       return { ...message, tool_calls: calls };
     }
     const source = message.tool_call_id && reads.get(message.tool_call_id);
-    if (message.role === "tool" && source && typeof message.content === "string" && message.content.length > 2000) {
+    if (message.role === "tool" && source && typeof message.content === "string" && message.content.length > 250) {
       try {
         const result: unknown = JSON.parse(message.content);
         if (result && typeof result === "object" && "error" in result) return message;

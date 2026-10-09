@@ -7,10 +7,12 @@ const state = vi.hoisted(() => ({
   queries: [] as Array<{ table: string; filters: Record<string, unknown> }>,
   rpc: vi.fn(),
   auth: vi.fn(),
+  checkpoint: vi.fn(),
   dbError: false,
 }));
 
 vi.mock("@/lib/tenant", () => ({ requireClientId: state.auth }));
+vi.mock("../run-checkpoint", () => ({ loadRunCheckpoint: state.checkpoint }));
 vi.mock("@/lib/supabase", () => ({
   get supabaseAdmin() {
     if (!state.enabled) return null;
@@ -46,6 +48,7 @@ import { createProject, getFiles, queueRun, saveRevision } from "../repository";
 import { getStarterFiles } from "../starter";
 import { POST as createRoute } from "@/app/api/sites/route";
 import { POST as runRoute } from "@/app/api/sites/[projectId]/runs/route";
+import { GET as filesRoute } from "@/app/api/sites/[projectId]/files/route";
 
 const A = "00000000-0000-0000-0000-000000000001";
 const B = "00000000-0000-0000-0000-000000000002";
@@ -131,6 +134,32 @@ describe("Sites foundation", () => {
     expect(await getFiles(A, PROJECT)).toEqual({ "src/App.tsx": "safe" });
     await expect(getFiles(B, PROJECT)).rejects.toMatchObject({ status: 404 });
     expect(state.queries.find((query) => query.table === "website_revisions")?.filters).toEqual({ client_id: A, project_id: PROJECT, id: REVISION });
+  });
+
+  it("serves confirmed draft files without private checkpoint metadata and with ETag", async () => {
+    state.rows.website_runs = [{ id: ASSET, client_id: A, project_id: PROJECT, kind: "agent", base_revision_id: REVISION }];
+    state.checkpoint.mockResolvedValue({ files: getStarterFiles(), request: "PRIVATE_REQUEST", notes: "PRIVATE_NOTES", assetIds: [], budgetConsumed: { requests: 3 }, progress: { diagnostics: ["PRIVATE_DIAGNOSTIC"] }, qaReport: { logs: "PRIVATE_QA_LOGS", visualReview: "PRIVATE_VISUAL_REVIEW" } });
+    const req = new NextRequest(`https://studio.test/api/sites/${PROJECT}/files?run_id=${ASSET}`);
+    const response = await filesRoute(req, { params: Promise.resolve({ projectId: PROJECT }) });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    expect(response.headers.get("etag")).toBeTruthy();
+    const body = await response.json();
+    expect(body).toMatchObject({ checkpoint: { run_id: ASSET, base_revision_id: REVISION, files: getStarterFiles() } });
+    expect(JSON.stringify(body)).not.toMatch(/PRIVATE_|budgetConsumed|assetIds/);
+    const unchanged = await filesRoute(new NextRequest(req.url, { headers: { "If-None-Match": response.headers.get("etag")! } }), { params: Promise.resolve({ projectId: PROJECT }) });
+    expect(unchanged.status).toBe(304);
+  });
+
+  it("rejects foreign runs and ignores drafts from stale revisions", async () => {
+    const req = new NextRequest(`https://studio.test/api/sites/${PROJECT}/files?run_id=${ASSET}`);
+    state.rows.website_runs = [{ id: ASSET, client_id: B, project_id: PROJECT, kind: "agent", base_revision_id: REVISION }];
+    expect((await filesRoute(req, { params: Promise.resolve({ projectId: PROJECT }) })).status).toBe(404);
+    expect(state.checkpoint).not.toHaveBeenCalled();
+    state.rows.website_runs = [{ id: ASSET, client_id: A, project_id: PROJECT, kind: "agent", base_revision_id: B }];
+    const stale = await filesRoute(req, { params: Promise.resolve({ projectId: PROJECT }) });
+    expect(await stale.json()).toEqual({ checkpoint: null });
+    expect(state.checkpoint).not.toHaveBeenCalled();
   });
 
   it("does not use soft deleted projects", async () => {

@@ -87,6 +87,7 @@ export const NVIDIA_BASE = "https://integrate.api.nvidia.com/v1";
 export class ProviderHttpError extends Error {
   status: number;
   usage?: AiUsage;
+  retryAfterMs?: number;
   /** Id da conexão/conta (quando aplicável) pra marcação de cooldown/morto. */
   endpointId?: string;
   constructor(status: number, message: string, endpointId?: string) {
@@ -325,6 +326,12 @@ export interface AiUsageAttempt {
   totalTokens: number;
   estimated?: boolean;
   cachedTokens?: number;
+  reasoningTokens?: number;
+  cacheWriteTokens?: number;
+  /** Ausente quando o provedor não reportou custo. Zero só se reportado. */
+  costUsd?: number;
+  /** Métricas ausentes/inválidas; não liquidar a reserva como zero comprovado. */
+  usageUnknown?: boolean;
 }
 
 export interface AiUsage {
@@ -339,6 +346,10 @@ export interface AiUsage {
    *  Presente só quando o provedor reporta >0. Usado p/ medir cache hit rate. */
   cachedTokens?: number;
   attempts?: AiUsageAttempt[];
+  reasoningTokens?: number;
+  cacheWriteTokens?: number;
+  costUsd?: number;
+  usageUnknown?: boolean;
 }
 
 function emptyUsage(): AiUsage {
@@ -346,7 +357,7 @@ function emptyUsage(): AiUsage {
 }
 
 function withUsageAttempt(usage: AiUsage, provider: AiProvider, model: string): AiUsage {
-  if (usage.attempts || usage.totalTokens <= 0) return usage;
+  if (usage.attempts) return usage;
   return {
     ...usage,
     attempts: [{
@@ -357,6 +368,10 @@ function withUsageAttempt(usage: AiUsage, provider: AiProvider, model: string): 
       totalTokens: usage.totalTokens,
       ...(usage.estimated ? { estimated: true } : {}),
       ...(usage.cachedTokens ? { cachedTokens: usage.cachedTokens } : {}),
+      ...(usage.reasoningTokens ? { reasoningTokens: usage.reasoningTokens } : {}),
+      ...(usage.cacheWriteTokens ? { cacheWriteTokens: usage.cacheWriteTokens } : {}),
+      ...(usage.costUsd !== undefined ? { costUsd: usage.costUsd } : {}),
+      ...(usage.usageUnknown ? { usageUnknown: true } : {}),
     }],
   };
 }
@@ -384,44 +399,57 @@ function geminiUsage(resp: any, model?: string): AiUsage {
   return model ? withUsageAttempt(usage, "gemini", model) : usage;
 }
 
-function openRouterUsage(json: any, provider?: AiProvider, model?: string): AiUsage {
-  const u = json?.usage || {};
-  const promptTokens = normalizeTokenCount(u.prompt_tokens);
-  const completionTokens = normalizeTokenCount(u.completion_tokens);
-  const totalTokens = usageTotal(u.total_tokens, promptTokens, completionTokens);
-  const estimated = u?.estimated === true;
+// Only responses assembled by this process may carry an accumulated attempt ledger.
+const accumulatedResponseUsage = new WeakMap<object, AiUsage>();
+
+/** Normaliza métricas sem transformar ausência em gratuidade ou gasto zero confirmado. */
+export function openRouterResponseUsage(json: unknown, provider?: AiProvider, model?: string): AiUsage {
+  const trusted = json && typeof json === "object" ? accumulatedResponseUsage.get(json) : undefined;
+  if (trusted) return provider && model ? withUsageAttempt(trusted, provider, model) : trusted;
+  const record = json && typeof json === "object" ? json as OpenRouterResponse : {};
+  const u = record.usage;
+  const validCount = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  const usageUnknown = u?.usageUnknown === true || !validCount(u?.prompt_tokens) || !validCount(u?.completion_tokens);
+  const promptTokens = normalizeTokenCount(u?.prompt_tokens);
+  const completionTokens = normalizeTokenCount(u?.completion_tokens);
   const cachedTokens = normalizeTokenCount(u?.prompt_tokens_details?.cached_tokens);
+  const cacheWriteTokens = normalizeTokenCount(u?.prompt_tokens_details?.cache_write_tokens);
+  const reasoningTokens = normalizeTokenCount(u?.completion_tokens_details?.reasoning_tokens);
   const usage: AiUsage = {
-    promptTokens,
-    completionTokens,
-    totalTokens,
-    estimated,
+    promptTokens, completionTokens, totalTokens: usageTotal(u?.total_tokens, promptTokens, completionTokens),
+    estimated: usageUnknown || u?.estimated === true,
+    ...(usageUnknown ? { usageUnknown: true } : {}),
     ...(cachedTokens > 0 ? { cachedTokens } : {}),
+    ...(cacheWriteTokens > 0 ? { cacheWriteTokens } : {}),
+    ...(reasoningTokens > 0 ? { reasoningTokens } : {}),
+    ...(typeof u?.cost === "number" && Number.isFinite(u.cost) && u.cost >= 0 ? { costUsd: u.cost } : {}),
   };
+  return provider && model ? withUsageAttempt(usage, provider, model) : usage;
+}
+
+function openRouterUsage(json: unknown, provider?: AiProvider, model?: string): AiUsage {
+  const usage = openRouterResponseUsage(json);
   return provider && model ? withUsageAttempt(usage, provider, model) : usage;
 }
 
 export function addAiUsage(left: AiUsage, right: AiUsage): AiUsage {
   const cachedTokens = (left.cachedTokens || 0) + (right.cachedTokens || 0);
-  const attempts = [...(left.attempts || []), ...(right.attempts || [])].reduce<AiUsageAttempt[]>((all, attempt) => {
-    const existing = all.find((item) => item.provider === attempt.provider && item.model === attempt.model);
-    if (!existing) {
-      all.push({ ...attempt });
-    } else {
-      existing.promptTokens += attempt.promptTokens;
-      existing.completionTokens += attempt.completionTokens;
-      existing.totalTokens += attempt.totalTokens;
-      existing.cachedTokens = (existing.cachedTokens || 0) + (attempt.cachedTokens || 0) || undefined;
-      existing.estimated = existing.estimated || attempt.estimated || undefined;
-    }
-    return all;
-  }, []);
+  const reasoningTokens = (left.reasoningTokens || 0) + (right.reasoningTokens || 0);
+  const cacheWriteTokens = (left.cacheWriteTokens || 0) + (right.cacheWriteTokens || 0);
+  const attempts = [...(left.attempts || []), ...(right.attempts || [])].map((attempt) => ({ ...attempt }));
+  const isIdentity = (usage: AiUsage) => usage.totalTokens === 0 && !usage.attempts?.length && !usage.usageUnknown && !usage.estimated && usage.costUsd === undefined;
+  const costUsd = left.costUsd !== undefined && right.costUsd !== undefined ? left.costUsd + right.costUsd
+    : isIdentity(left) ? right.costUsd : isIdentity(right) ? left.costUsd : undefined;
   return {
     promptTokens: left.promptTokens + right.promptTokens,
     completionTokens: left.completionTokens + right.completionTokens,
     totalTokens: left.totalTokens + right.totalTokens,
     ...(left.estimated || right.estimated ? { estimated: true } : {}),
+    ...(left.usageUnknown || right.usageUnknown ? { usageUnknown: true } : {}),
     ...(cachedTokens > 0 ? { cachedTokens } : {}),
+    ...(reasoningTokens > 0 ? { reasoningTokens } : {}),
+    ...(cacheWriteTokens > 0 ? { cacheWriteTokens } : {}),
+    ...(costUsd !== undefined ? { costUsd } : {}),
     ...(attempts.length > 0 ? { attempts } : {}),
   };
 }
@@ -468,7 +496,7 @@ function requireUsableOpenAIResponse(json: any, provider: AiProvider, model: str
 
 function withAccumulatedUsage(json: any, accumulated: AiUsage, provider: AiProvider, model: string): any {
   const usage = addAiUsage(accumulated, openRouterUsage(json, provider, model));
-  return {
+  const response = {
     ...json,
     usage: {
       ...(json?.usage || {}),
@@ -477,9 +505,14 @@ function withAccumulatedUsage(json: any, accumulated: AiUsage, provider: AiProvi
       total_tokens: usage.totalTokens,
       ...(usage.attempts ? { attempts: usage.attempts } : {}),
       ...(usage.estimated ? { estimated: true } : {}),
-      ...(usage.cachedTokens ? { prompt_tokens_details: { ...(json?.usage?.prompt_tokens_details || {}), cached_tokens: usage.cachedTokens } } : {}),
+      ...(usage.usageUnknown ? { usageUnknown: true } : {}),
+      cost: usage.costUsd,
+      ...(usage.cachedTokens || usage.cacheWriteTokens ? { prompt_tokens_details: { ...(json?.usage?.prompt_tokens_details || {}), ...(usage.cachedTokens ? { cached_tokens: usage.cachedTokens } : {}), ...(usage.cacheWriteTokens ? { cache_write_tokens: usage.cacheWriteTokens } : {}) } } : {}),
+      ...(usage.reasoningTokens ? { completion_tokens_details: { ...(json?.usage?.completion_tokens_details || {}), reasoning_tokens: usage.reasoningTokens } } : {}),
     },
   };
+  accumulatedResponseUsage.set(response, usage);
+  return response;
 }
 
 // =====================================================================
@@ -536,11 +569,14 @@ async function openAICompatibleChat(
     const msg = json?.error?.message || json?.error || `${label} HTTP ${res.status}`;
     // Preserva o status no erro — viabiliza o FAILOVER distinguir quota/429 de
     // 5xx de credencial morta/401. (Antes virava string e se perdia.)
-    throw new ProviderHttpError(
-      res.status,
-      typeof msg === "string" ? msg : JSON.stringify(msg),
-      endpointId,
-    );
+    const error = new ProviderHttpError(res.status, typeof msg === "string" ? msg : JSON.stringify(msg), endpointId);
+    const retryAfter = res.headers?.get?.("Retry-After");
+    if (retryAfter?.trim()) {
+      const seconds = Number(retryAfter);
+      const delay = Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : Date.parse(retryAfter) - Date.now();
+      if (Number.isFinite(delay)) error.retryAfterMs = Math.max(0, delay);
+    }
+    throw attachAiUsage(error, openRouterResponseUsage(json));
   }
   return json;
 }
@@ -552,7 +588,12 @@ async function openRouterChat(apiKey: string, body: Record<string, any>, keyId?:
 export interface OpenRouterResponse {
   model?: string;
   choices?: Array<{ finish_reason?: string | null; message?: { role?: string; content?: string | null; tool_calls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>; images?: Array<{ image_url: { url: string } }> } }>;
-  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; attempts?: AiUsageAttempt[]; cost?: number };
+  usage?: {
+    prompt_tokens?: number; completion_tokens?: number; total_tokens?: number;
+    attempts?: AiUsageAttempt[]; cost?: number; estimated?: boolean; usageUnknown?: boolean;
+    prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+    completion_tokens_details?: { reasoning_tokens?: number };
+  };
 }
 
 export interface ControlledOpenRouterOptions {
@@ -649,6 +690,8 @@ export async function openRouterChatWithFailover(
         console.warn(`[ai-provider:openrouter] ${coolLabel} retornou resposta vazia. Rotacionando para próxima chave.`);
         continue;
       }
+      const failedUsage = aiUsageFromError(err) ?? openRouterResponseUsage(null);
+      accumulatedUsage = addAiUsage(accumulatedUsage, withUsageAttempt(failedUsage, "openrouter", model));
       if (err instanceof ProviderHttpError) {
         if (err.status === 401 || err.status === 403) {
           markEndpointDead(c.id);
@@ -665,7 +708,7 @@ export async function openRouterChatWithFailover(
           console.warn(`[ai-provider:openrouter] ${coolLabel} falhou (${err.message.slice(0, 80)}). Rotacionando para próxima chave/modelo.`);
           continue;
         }
-        throw accumulatedUsage.totalTokens > 0 ? attachAiUsage(err, accumulatedUsage) : err;
+        throw accumulatedUsage.attempts?.length ? setAiUsage(err, accumulatedUsage) : err;
       }
       console.warn(`[ai-provider:openrouter] Chave ${c.label} falhou (rede/timeout). Rotacionando:`, (err as any)?.message);
       continue;
@@ -678,12 +721,15 @@ export async function openRouterChatWithFailover(
   const terminalError = lastErr instanceof Error
     ? lastErr
     : new ProviderHttpError(429, "Todas as chaves OpenRouter falharam ou estão em cooldown. Tente novamente mais tarde.");
-  throw accumulatedUsage.totalTokens > 0 ? attachAiUsage(terminalError, accumulatedUsage) : terminalError;
+  throw accumulatedUsage.attempts?.length ? setAiUsage(terminalError, accumulatedUsage) : terminalError;
 }
 
-async function gatewayChat(baseUrl: string, apiKey: string | null, body: Record<string, any>, endpointId?: string): Promise<any> {
+async function gatewayChat(baseUrl: string, apiKey: string | null, body: Record<string, any>, endpointId?: string, signal?: AbortSignal, singleAttempt = false): Promise<any> {
+  signal?.throwIfAborted();
   // Se for a rota interna do DeepSeek Web, chama o client diretamente em memória sem HTTP loopback
   if (endpointId === "ds_internal" || baseUrl.includes("deepseek-chat")) {
+    // ponytail: client interno cria sessão/PoW antes do chat; só habilitar após transporte contabilizado por envio.
+    if (singleAttempt) throw new Error("Gateway DeepSeek interno incompatível com uma única tentativa física.");
     const { chatComplete, messagesToPrompt } = await import("@/lib/deepseek-chat-client");
     const { pickToken } = await import("@/lib/deepseek-chat-manager");
     const active = pickToken();
@@ -699,6 +745,7 @@ async function gatewayChat(baseUrl: string, apiKey: string | null, body: Record<
       fingerprint: active.fingerprint,
       model,
       prompt,
+      signal,
     });
     return {
       id: `ds_${Date.now()}`,
@@ -720,7 +767,7 @@ async function gatewayChat(baseUrl: string, apiKey: string | null, body: Record<
     };
   }
 
-  return openAICompatibleChat(baseUrl, body, gatewayHeaders(apiKey), "Gateway de assinatura", endpointId);
+  return openAICompatibleChat(baseUrl, body, gatewayHeaders(apiKey), "Gateway de assinatura", endpointId, signal);
 }
 
 /** Credenciais resolvidas do gateway de assinatura. */
@@ -826,13 +873,15 @@ export async function gatewayChatWithFailover(
   model: string,
   body: Record<string, any>,
   primary: { baseUrl: string; apiKey: string | null; endpointId?: string },
-  opts?: { allowEmptyContent?: boolean },
+  opts?: { allowEmptyContent?: boolean; signal?: AbortSignal; maxAttempts?: number },
 ): Promise<any> {
+  opts?.signal?.throwIfAborted();
+  const maxAttempts = opts?.maxAttempts === undefined ? Infinity : Math.max(1, Math.min(3, Math.trunc(opts.maxAttempts) || 1));
   const { listEndpointsForModel } = await import("@/lib/gateway-model-discovery");
   const { markEndpointCooldown, markEndpointDead, isEndpointUnavailable } = await import("@/lib/gateway-cooldown");
 
   // Candidatos: primário primeiro, depois as alternativas (sem repetir).
-  const alts = await listEndpointsForModel(model);
+  const alts = maxAttempts === 1 ? [] : await listEndpointsForModel(model);
   const seen = new Set<string>();
   const candidates: { baseUrl: string; apiKey: string | null; endpointId?: string }[] = [];
   const pushUnique = (ep: { baseUrl: string; apiKey: string | null; endpointId?: string }) => {
@@ -848,19 +897,27 @@ export async function gatewayChatWithFailover(
 
   let lastErr: unknown = null;
   let accumulatedUsage = emptyUsage();
+  let attempts = 0;
   for (const c of candidates) {
+    opts?.signal?.throwIfAborted();
+    if (attempts >= maxAttempts) break;
     // Pula endpoints sabidamente indisponíveis (cooldown/morto) ANTES de chamar.
     if (c.endpointId && isEndpointUnavailable(c.endpointId)) continue;
     try {
-      const json = await gatewayChat(c.baseUrl, c.apiKey, body, c.endpointId);
+      attempts++;
+      const json = await gatewayChat(c.baseUrl, c.apiKey, body, c.endpointId, opts?.signal, maxAttempts === 1);
+      if (opts?.signal?.aborted) throw attachAiUsage(opts.signal.reason, openRouterUsage(json, "gateway", model));
       return withAccumulatedUsage(opts?.allowEmptyContent ? json : requireUsableOpenAIResponse(json, "gateway", model), accumulatedUsage, "gateway", model);
     } catch (err) {
+      if (opts?.signal?.aborted) throw attachAiUsage(err, accumulatedUsage);
       lastErr = err;
       if (err instanceof AiEmptyResponseError) {
         accumulatedUsage = addAiUsage(accumulatedUsage, err.usage);
         console.warn(`[ai-provider] Conta ${c.endpointId || c.baseUrl} retornou resposta vazia. Failover pra próxima.`);
         continue;
       }
+      const failedUsage = aiUsageFromError(err) ?? openRouterResponseUsage(null);
+      accumulatedUsage = addAiUsage(accumulatedUsage, withUsageAttempt(failedUsage, "gateway", model));
       if (err instanceof ProviderHttpError && c.endpointId) {
         // 401/403 → credencial morta: marca p/ sempre pular até restart.
         if (err.status === 401 || err.status === 403) {
@@ -876,7 +933,7 @@ export async function gatewayChatWithFailover(
         }
         // Outro 4xx (400 bad request, etc.) → erro do request; outra conta dará
         // o mesmo. Relança (não adianta trocar).
-        throw accumulatedUsage.totalTokens > 0 ? attachAiUsage(err, accumulatedUsage) : err;
+        throw accumulatedUsage.attempts?.length ? setAiUsage(err, accumulatedUsage) : err;
       }
       // Erro de rede/timeout (não ProviderHttpError) → tenta próxima conta.
       console.warn(`[ai-provider] Conta ${c.endpointId || c.baseUrl} falhou (rede/timeout). Failover:`, (err as any)?.message);
@@ -890,7 +947,7 @@ export async function gatewayChatWithFailover(
   const terminalError = lastErr instanceof Error
     ? lastErr
     : new Error("Todas as contas do gateway falharam ou estão em cooldown. Tente novamente mais tarde.");
-  throw accumulatedUsage.totalTokens > 0 ? attachAiUsage(terminalError, accumulatedUsage) : terminalError;
+  throw accumulatedUsage.attempts?.length ? setAiUsage(terminalError, accumulatedUsage) : terminalError;
 }
 
 // =====================================================================

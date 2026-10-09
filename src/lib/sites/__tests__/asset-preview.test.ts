@@ -1,5 +1,5 @@
 import { runInNewContext } from "node:vm";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SandpackProvider, useSandpack } from "@codesandbox/sandpack-react";
@@ -68,8 +68,151 @@ describe("website browser preview contract", () => {
         return { documentElement: { lang: "pt-BR" }, title: 'Ateliê "Horizonte"', head: { children: ["title"] }, body: { childNodes: ["root"] }, querySelectorAll: (selector: string) => { expect(selector).toBe("script"); return [{ remove: () => { removedScripts = true; } }]; } };
       }
     }
-    runInNewContext(code(preview, "/index.tsx"), { DOMParser, document, require: (path: string) => { expect(path).toBe("./src/main.tsx"); expect(mounted && removedScripts).toBe(true); expect(document.documentElement.lang).toBe("pt-BR"); expect(document.title).toBe('Ateliê "Horizonte"'); } });
+    runInNewContext(code(preview, "/index.tsx"), { DOMParser, document, window: { addEventListener() {}, removeEventListener() {} }, require: (path: string) => { expect(path).toBe("./src/main.tsx"); expect(mounted && removedScripts).toBe(true); expect(document.documentElement.lang).toBe("pt-BR"); expect(document.title).toBe('Ateliê "Horizonte"'); } });
     expect(parsed).toBe(html);
+  });
+
+  it("adds a trusted commit/effect probe only for an explicitly scoped candidate", () => {
+    const preview = getSitePreviewFiles(getStarterFiles(), [], undefined, { id: "candidate-1", origin: "https://operator.example.test" });
+    expect(code(preview, "/index.tsx")).toContain('require("react-dom/client")');
+    expect(code(preview, "/index.tsx")).toContain("useEffect");
+    expect(code(preview, "/index.tsx")).toContain("candidate-1");
+    expect(code(preview, "/index.tsx")).toContain("https://operator.example.test");
+    expect(code(preview, "/src/main.tsx")).toBe(getStarterFiles()["src/main.tsx"]);
+    expect(code(getSitePreviewFiles(getStarterFiles()), "/index.tsx")).toContain("const candidate = null;");
+  });
+
+  it("renders runtime error messages as text, never injected HTML", () => {
+    const preview = getSitePreviewFiles(getStarterFiles());
+    expect(code(preview, "/index.tsx")).not.toContain("innerHTML");
+    expect(code(preview, "/index.tsx")).toContain("textContent");
+  });
+
+  function runtimeHarness(failure?: unknown) {
+    const listeners = new Map<string, Set<(event: Record<string, unknown>) => void>>();
+    type Node = { tag: string; children: Node[]; style: { cssText: string; whiteSpace: string }; textContent: string; attributes: Record<string, string>; shadow?: Node; append: (...nodes: Node[]) => void; prepend: (...nodes: Node[]) => void; remove: () => void; setAttribute: (key: string, value: string) => void; attachShadow: () => Node };
+    const nodes: Node[] = [];
+    const element = (tag: string): Node => {
+      const node: Node = { tag, children: [], style: { cssText: "", whiteSpace: "" }, textContent: "", attributes: {},
+        append: (...children) => { node.children.push(...children); }, prepend: (...children) => { node.children.unshift(...children); },
+        remove: () => { for (const parent of nodes) parent.children = parent.children.filter(child => child !== node); },
+        setAttribute: (key, value) => { node.attributes[key] = value; }, attachShadow: () => { node.shadow = element("shadow"); return node.shadow; } };
+      nodes.push(node);
+      return node;
+    };
+    const root = element("root");
+    const body = Object.assign(element("body"), { replaceChildren: (...children: Node[]) => { body.children = children; } });
+    const head = element("head");
+    const sandpackStyle = element("sandpack-style");
+    head.append(sandpackStyle);
+    const document = { documentElement: { lang: "" }, title: "", head, body, createElement: element, getElementById: () => root };
+    class DOMParser {
+      parseFromString() { return { documentElement: { lang: "pt-BR" }, title: "Fixture", head: { children: [element("style")] }, body: { childNodes: [root] }, querySelectorAll: () => [] }; }
+    }
+    const window = {
+      addEventListener: (name: string, listener: (event: Record<string, unknown>) => void) => { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name)!.add(listener); },
+      removeEventListener: (name: string, listener: (event: Record<string, unknown>) => void) => { listeners.get(name)?.delete(listener); },
+    };
+    let dispose: (() => void) | undefined;
+    const require = vi.fn(() => { if (failure !== undefined) throw failure; });
+    const source = code(getSitePreviewFiles(getStarterFiles()), "/index.tsx");
+    // Only the operator bootstrap runs in the VM; generated sources are never evaluated.
+    const statusHandlers = new Set<(status: string) => void>();
+    const hot = {
+      dispose: (callback: () => void) => { dispose = callback; },
+      addStatusHandler: (callback: (status: string) => void) => { statusHandlers.add(callback); },
+      removeStatusHandler: (callback: (status: string) => void) => { statusHandlers.delete(callback); },
+    };
+    const run = () => runInNewContext(source, { DOMParser, document, window, console: { error() {} }, module: { hot }, require });
+    const emit = (name: string, event: Record<string, unknown>) => { for (const listener of listeners.get(name) ?? []) listener(event); };
+    const alerts = () => body.children.flatMap(host => host.shadow?.children ?? []).filter(node => node.attributes.role === "alert");
+    const updateStatus = (status: string) => { for (const handler of statusHandlers) handler(status); };
+    return { run, emit, alerts, body, root, head, sandpackStyle, listeners, statusHandlers, updateStatus, require, dispose: () => dispose?.() };
+  }
+
+  it("captures async errors and rejected promises as one isolated text alert outside React root", () => {
+    const runtime = runtimeHarness();
+    runtime.run();
+    expect(runtime.alerts()).toHaveLength(0);
+    runtime.emit("error", { error: new Error("React render failed") });
+    expect(runtime.alerts()).toHaveLength(1);
+    expect(runtime.alerts()[0].children[1].textContent).toBe("React render failed");
+    runtime.emit("unhandledrejection", { reason: '<img src=x onerror="attack()">' });
+    expect(runtime.alerts()).toHaveLength(1);
+    expect(runtime.alerts()[0].children[1].textContent).toBe('<img src=x onerror="attack()">');
+    expect(runtime.root.children).toEqual([]);
+  });
+
+  it("bounds errors, tolerates hostile error conversion and does not hide default browser reporting", () => {
+    const runtime = runtimeHarness();
+    runtime.run();
+    const preventDefault = vi.fn();
+    runtime.emit("error", { message: "x".repeat(2500), preventDefault });
+    expect(runtime.alerts()[0].children[1].textContent).toHaveLength(2000);
+    for (const reason of [null, undefined, "", { get message() { throw new Error("getter"); } }, { toString() { throw new Error("conversion"); } }]) {
+      runtime.emit("unhandledrejection", { reason });
+      expect(runtime.alerts()[0].children[1].textContent).toBe("Falha de execução sem detalhes disponíveis.");
+    }
+    expect(preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("keeps synchronous errors outside the React root and disposes subscriptions across bootstrap reloads", () => {
+    const runtime = runtimeHarness(new Error("sync failed"));
+    runtime.run();
+    expect(runtime.alerts()[0].children[1].textContent).toBe("sync failed");
+    const stale = [...runtime.listeners.get("error")!][0];
+    runtime.run();
+    expect(runtime.listeners.get("error")?.size).toBe(1);
+    expect(runtime.listeners.get("unhandledrejection")?.size).toBe(1);
+    runtime.dispose();
+    expect(runtime.listeners.get("error")?.size).toBe(0);
+    expect(runtime.listeners.get("unhandledrejection")?.size).toBe(0);
+    expect(runtime.alerts()).toHaveLength(0);
+    stale({ message: "stale event" });
+    expect(runtime.alerts()).toHaveLength(0);
+  });
+
+  it("clears stale diagnostics at HMR check and keeps evaluation failures through repeated apply and idle", () => {
+    const runtime = runtimeHarness();
+    runtime.run();
+    runtime.emit("error", { error: new Error("old render") });
+    runtime.updateStatus("prepare");
+    expect(runtime.alerts()).toHaveLength(1);
+    runtime.updateStatus("check");
+    expect(runtime.alerts()).toHaveLength(0);
+    expect(runtime.listeners.get("error")?.size).toBe(1);
+    expect(runtime.head.children.map(node => node.tag)).toEqual(["sandpack-style", "style"]);
+    runtime.emit("error", { error: new Error("new effect") });
+    runtime.updateStatus("apply");
+    runtime.updateStatus("apply");
+    runtime.updateStatus("idle");
+    expect(runtime.alerts()).toHaveLength(1);
+    expect(runtime.alerts()[0].children[1].textContent).toBe("new effect");
+  });
+
+  it("disposes HMR status handlers and leaves stale callbacks inert", () => {
+    const runtime = runtimeHarness();
+    runtime.run();
+    expect(runtime.statusHandlers.size).toBe(1);
+    const stale = [...runtime.statusHandlers][0];
+    runtime.run();
+    expect(runtime.statusHandlers.size).toBe(1);
+    runtime.emit("error", { error: new Error("current error") });
+    stale("check");
+    expect(runtime.alerts()).toHaveLength(1);
+    runtime.dispose();
+    expect(runtime.statusHandlers.size).toBe(0);
+    expect(runtime.alerts()).toHaveLength(0);
+  });
+
+  it("replaces owned HTML head nodes across reloads without removing Sandpack styles", () => {
+    const runtime = runtimeHarness();
+    runtime.run();
+    expect(runtime.head.children.map(node => node.tag)).toEqual(["sandpack-style", "style"]);
+    runtime.run();
+    expect(runtime.head.children.map(node => node.tag)).toEqual(["sandpack-style", "style"]);
+    runtime.dispose();
+    expect(runtime.head.children).toEqual([runtime.sandpackStyle]);
   });
 
   it.each(["invalid\0html", 42, null])("rejects invalid HTML content: %j", (html) => {

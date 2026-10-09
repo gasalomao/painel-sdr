@@ -7,6 +7,7 @@ import { getStarterFiles } from "../sites/starter";
 
 type Row = Record<string, unknown>;
 const migration = readFileSync(resolve("migrations/016_website_studio.sql"), "utf8");
+const completionGuard = readFileSync(resolve("migrations/017_website_studio_completion_guard.sql"), "utf8");
 const canonical = readFileSync(resolve("migrations/SETUP_COMPLETO.sql"), "utf8");
 const files = getStarterFiles();
 const build = {
@@ -59,6 +60,7 @@ describe("Website Studio SQL (PGLite)", () => {
       CREATE TABLE storage.objects(id uuid PRIMARY KEY DEFAULT gen_random_uuid(), bucket_id text);
       ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;`);
     await db.exec(migration);
+    await db.exec(completionGuard);
   }, 60_000);
 
   afterAll(async () => { await db?.close(); });
@@ -84,6 +86,7 @@ describe("Website Studio SQL (PGLite)", () => {
   it("reaplica a migration sem perder settings ou prompts", async () => {
     await db.exec("UPDATE website_settings SET value = value || '{\"max_sites\":12}' WHERE id = 1");
     await db.exec(migration);
+    await db.exec(completionGuard);
     const { rows } = await db.query<{ value: { max_sites: number } }>("SELECT value FROM website_settings WHERE id = 1");
     expect(rows[0].value.max_sites).toBe(12);
     const { client } = await fixture();
@@ -152,6 +155,66 @@ describe("Website Studio SQL (PGLite)", () => {
     await rpc("website_claim_run", { ...args, p_run_id: buildRun.id, p_worker_id: worker });
     expect(await rpc("website_complete_run", { ...completion, p_run_id: buildRun.id, p_files: null, p_expected_revision_id: rows[0].current_revision_id, p_build: build })).toMatchObject({ status: "completed" });
   }, 30_000);
+
+  describe("completion guard incremental", () => {
+    async function claimed(kind: "agent" | "build" = "agent") {
+      const { client, project } = await fixture(), worker = randomUUID();
+      const args = scope(client, project);
+      const run = kind === "agent"
+        ? await rpc("website_queue_run", { ...args, p_actor_id: client, p_prompt: "Editar título" })
+        : await rpc("website_queue_build", { ...args, p_actor_id: client, p_expected_revision_id: project.current_revision_id });
+      await rpc("website_claim_run", { ...args, p_run_id: run.id, p_worker_id: worker });
+      return { client, project, run, completion: { ...args, p_run_id: run.id, p_worker_id: worker, p_expected_revision_id: project.current_revision_id, p_files: kind === "agent" ? files : null, p_summary: "Rascunho não validado" } };
+    }
+
+    it.each([
+      { ...build, status: "failed", success: false, errors: ["TS2322"], qa: { passed: false, errors: ["TS2322"], warnings: [] } },
+      { ...build, success: false },
+      { ...build, qa: { ...build.qa, passed: false } },
+      { ...build, qa: { ...build.qa, errors: ["overflow"] } },
+      { ...build, qa: { ...build.qa, passed: "true" } },
+      { ...build, errors: ["build failed"] },
+      { ...build, qa: {} },
+      { ...build, screenshots: {} },
+      { ...build, artifact: {} },
+    ])("rejeita promoção antes de salvar revisão: %j", async (failedBuild) => {
+      const { project, run, completion } = await claimed();
+      await expect(rpc("website_complete_run", { ...completion, p_build: failedBuild })).rejects.toThrow("website_invalid_input");
+      expect((await db.query<Row>("SELECT current_revision_id FROM website_projects WHERE id = $1", [project.id])).rows[0].current_revision_id).toBe(project.current_revision_id);
+      expect((await db.query("SELECT id FROM website_revisions WHERE project_id = $1", [project.id])).rows).toHaveLength(1);
+      expect((await db.query("SELECT id FROM website_builds WHERE project_id = $1", [project.id])).rows).toHaveLength(0);
+      expect((await db.query<Row>("SELECT status,worker_id FROM website_runs WHERE id = $1", [run.id])).rows[0]).toMatchObject({ worker_id: completion.p_worker_id });
+    });
+
+    it("aceita rascunho explicitamente unconfigured, não QA falso ready", async () => {
+      const { project, completion } = await claimed();
+      const draft = { ...build, status: "unconfigured", success: false, artifact: {}, screenshots: {}, errors: ["READY — AWAITING CREDENTIALS"], qa: { passed: false, errors: ["READY — AWAITING CREDENTIALS"], warnings: [] } };
+      expect(await rpc("website_complete_run", { ...completion, p_build: draft })).toMatchObject({ status: "completed" });
+      const rows = (await db.query<Row>("SELECT current_revision_id FROM website_projects WHERE id = $1", [project.id])).rows;
+      expect(rows[0].current_revision_id).not.toBe(project.current_revision_id);
+    });
+
+    it("preserva relatório build-only reprovado sem promover revisão", async () => {
+      const { project, completion } = await claimed("build");
+      const report = { ...build, status: "failed", success: false, errors: ["infra"], qa: { passed: false, errors: ["infra"], warnings: [], failure_kind: "infrastructure", stage: "sandbox" } };
+      expect(await rpc("website_complete_run", { ...completion, p_build: report })).toMatchObject({ status: "completed" });
+      expect((await db.query<Row>("SELECT current_revision_id FROM website_projects WHERE id = $1", [project.id])).rows[0].current_revision_id).toBe(project.current_revision_id);
+      expect((await db.query<Row>("SELECT status,qa,revision_id FROM website_builds WHERE project_id = $1", [project.id])).rows[0]).toMatchObject({ status: "failed", revision_id: project.current_revision_id, qa: report.qa });
+    });
+
+    it("mantém CAS e fencing depois da validação", async () => {
+      const { completion } = await claimed();
+      await expect(rpc("website_complete_run", { ...completion, p_worker_id: randomUUID(), p_build: build })).rejects.toThrow("website_lease_lost");
+      await expect(rpc("website_complete_run", { ...completion, p_expected_revision_id: randomUUID(), p_build: build })).rejects.toThrow("website_lease_lost");
+    });
+
+    it("builder inclui 016 antes de 017 e replacement não é SECURITY DEFINER", async () => {
+      const generator = readFileSync(resolve("scripts/build-setup-sql.mjs"), "utf8");
+      expect(generator).toMatch(/"016_website_studio\.sql",\s*"017_website_studio_completion_guard\.sql"/);
+      const { rows } = await db.query("SELECT prosecdef,proconfig FROM pg_proc WHERE oid = 'website_complete_run(uuid,uuid,uuid,uuid,uuid,jsonb,jsonb,text,text)'::regprocedure");
+      expect(rows[0]).toMatchObject({ prosecdef: false, proconfig: ["search_path=public, pg_temp"] });
+    });
+  });
 
   it("aplica quotas sem registrar consumo rejeitado", async () => {
     const { client } = await fixture();
@@ -424,6 +487,7 @@ describe("Website Studio SQL (PGLite)", () => {
   it("nega anon/authenticated e concede somente service_role", async () => {
     await db.exec("CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role BYPASSRLS; GRANT SELECT ON clients TO service_role;");
     await db.exec(migration);
+    await db.exec(completionGuard);
     const { rows } = await db.query<{ allowed: boolean; rls: boolean }>(`SELECT
       has_table_privilege('anon','website_projects','SELECT') OR
       has_table_privilege('authenticated','website_settings','UPDATE') OR
@@ -445,6 +509,11 @@ describe("Website Studio SQL (PGLite)", () => {
       has_function_privilege('service_role','website_list_recoverable_deployments(uuid)','EXECUTE') AS service_role,
       prosecdef FROM pg_proc WHERE oid = 'website_list_recoverable_deployments(uuid)'::regprocedure`);
     expect(privileges.rows).toEqual([{ anon: false, authenticated: false, service_role: true, prosecdef: false }]);
+    const completePrivileges = await db.query(`SELECT
+      has_function_privilege('anon','website_complete_run(uuid,uuid,uuid,uuid,uuid,jsonb,jsonb,text,text)','EXECUTE') AS anon,
+      has_function_privilege('authenticated','website_complete_run(uuid,uuid,uuid,uuid,uuid,jsonb,jsonb,text,text)','EXECUTE') AS authenticated,
+      has_function_privilege('service_role','website_complete_run(uuid,uuid,uuid,uuid,uuid,jsonb,jsonb,text,text)','EXECUTE') AS service_role`);
+    expect(completePrivileges.rows).toEqual([{ anon: false, authenticated: false, service_role: true }]);
     for (const role of ["anon", "authenticated"]) {
       await db.exec(`SET ROLE ${role}`);
       try { await expect(db.query("SELECT * FROM website_list_recoverable_deployments()")).rejects.toThrow(/permission denied/i); }

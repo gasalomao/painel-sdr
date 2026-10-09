@@ -1,4 +1,5 @@
 import { WEBSITE_FIXED_FILES } from "./starter";
+import { websiteSyntaxErrors } from "./source-diagnostics";
 import type { WebsiteFiles, WebsiteQa } from "./types";
 
 export const WEBSITE_LIMITS = Object.freeze({ files: 100, fileBytes: 256_000, totalBytes: 2_000_000, toolResultBytes: 64_000 });
@@ -78,5 +79,6 @@ export function validateWebsiteContent(files: WebsiteFiles): WebsiteQa {
     if (path.endsWith(".svg") && /<script\b|\bon\w+\s*=|foreignObject/i.test(content)) errors.push(`SVG ativo não permitido: ${path}`);
     if (/lorem ipsum|placeholder\.com|example\.com/i.test(content)) warnings.push(`Revisar conteúdo provisório: ${path}`);
   }
+  if (!errors.length) errors.push(...websiteSyntaxErrors(files));
   return { passed: errors.length === 0, errors: [...new Set(errors)], warnings: [...new Set(warnings)] };
 }
