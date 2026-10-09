@@ -28,9 +28,9 @@ export async function GET(req: NextRequest) {
   // 2. Whisper dir
   const dir = process.env.WHISPER_DIR || path.join(process.cwd(), ".whisper");
   results.whisperDir = dir;
-  results.whisperDirExists = fs.existsSync(dir);
+  results.whisperDirExists = fs.existsSync(/*turbopackIgnore: true*/ dir);
 
-  if (fs.existsSync(dir)) {
+  if (fs.existsSync(/*turbopackIgnore: true*/ dir)) {
     // List all files recursively (max depth 3)
     const allFiles: string[] = [];
     const walk = (d: string, depth: number) => {

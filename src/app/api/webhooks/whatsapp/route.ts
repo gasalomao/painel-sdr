@@ -978,17 +978,17 @@ export async function POST(req: NextRequest) {
                 const fs = await import("fs");
                 const path = await import("path");
                 const dir = process.env.WHISPER_DIR || path.join(process.cwd(), ".whisper");
-                const binPathFile = path.join(dir, "bin-path.txt");
-                const binPath = fs.existsSync(binPathFile) ? fs.readFileSync(binPathFile, "utf8").trim() : "(missing)";
-                const modelFile = path.join(dir, process.env.WHISPER_MODEL || "ggml-base.bin");
+                const binPathFile = path.join(/*turbopackIgnore: true*/ dir, "bin-path.txt");
+                const binPath = fs.existsSync(/*turbopackIgnore: true*/ binPathFile) ? fs.readFileSync(binPathFile, "utf8").trim() : "(missing)";
+                const modelFile = path.join(/*turbopackIgnore: true*/ dir, process.env.WHISPER_MODEL || "ggml-base.bin");
                 whisperDiag = {
                   installed: isWhisperInstalled(),
                   status: await getWhisperStatus(),
                   binPath,
-                  binExists: fs.existsSync(binPath),
+                  binExists: fs.existsSync(/*turbopackIgnore: true*/ binPath),
                   modelExpected: modelFile,
-                  modelExists: fs.existsSync(modelFile),
-                  whisperDirExists: fs.existsSync(dir),
+                  modelExists: fs.existsSync(/*turbopackIgnore: true*/ modelFile),
+                  whisperDirExists: fs.existsSync(/*turbopackIgnore: true*/ dir),
                   cwd: process.cwd(),
                 };
               } catch (de: any) { whisperDiag = "diag-error: " + de?.message; }

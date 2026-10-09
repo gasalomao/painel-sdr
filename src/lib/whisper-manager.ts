@@ -65,7 +65,7 @@ function getModelName(): string {
   return process.env.WHISPER_MODEL || "ggml-base.bin";
 }
 function getModelPath(): string {
-  return path.join(DIR, getModelName());
+  return path.join(/*turbopackIgnore: true*/ DIR, getModelName());
 }
 function getModelUrl(): string {
   return `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${getModelName()}`;
@@ -91,7 +91,7 @@ function readText(p: string): string | null {
  */
 export function isWhisperInstalled(): boolean {
   const p = readText(BINPATH_PATH);
-  return !!(p && fs.existsSync(p) && fs.existsSync(getModelPath()));
+  return !!(p && fs.existsSync(/*turbopackIgnore: true*/ p) && fs.existsSync(/*turbopackIgnore: true*/ getModelPath()));
 }
 
 /**
@@ -105,7 +105,7 @@ export async function ensureWhisper(): Promise<{ binPath: string; modelPath: str
 
   // 1) Binário — baixa o tar.gz, extrai, acha o whisper-cli.
   let binPath = readText(BINPATH_PATH);
-  if (!binPath || !fs.existsSync(binPath)) {
+  if (!binPath || !fs.existsSync(/*turbopackIgnore: true*/ binPath)) {
     const archivePath = path.join(DIR, BIN_ASSET);
     const res = await fetch(BIN_URL, {
       headers: { "User-Agent": "painel-sdr" },
@@ -131,13 +131,13 @@ export async function ensureWhisper(): Promise<{ binPath: string; modelPath: str
   // em disco (Docker baixa 1 no build), usa o existente em vez de baixar
   // gigabytes em runtime na VPS (medium = 1.46GB + 3GB RAM — mata VPS humilde).
   const _modelPath = getModelPath();
-  if (!fs.existsSync(_modelPath)) {
+  if (!fs.existsSync(/*turbopackIgnore: true*/ _modelPath)) {
     try {
-      const local = fs.readdirSync(DIR).filter(f => /^ggml-.*\.bin$/i.test(f));
+      const local = fs.readdirSync(/*turbopackIgnore: true*/ DIR).filter(f => /^ggml-.*\.bin$/i.test(f));
       if (local.length > 0) {
         console.warn(`[whisper] modelo ${getModelName()} ausente — usando ${local[0]} já presente (sem download).`);
         process.env.WHISPER_MODEL = local[0];
-        return { binPath, modelPath: path.join(DIR, local[0]) };
+        return { binPath, modelPath: path.join(/*turbopackIgnore: true*/ DIR, local[0]) };
       }
     } catch { /* cai no download abaixo */ }
     const res = await fetch(getModelUrl(), {
@@ -271,12 +271,12 @@ async function transcribeAudioWithWhisperUnqueued(
   let modelPath = getModelPath();
 
   // Safety: se o modelo configurado não existe, procura qualquer ggml-*.bin
-  if (!fs.existsSync(modelPath)) {
+  if (!fs.existsSync(/*turbopackIgnore: true*/ modelPath)) {
     console.warn(`[whisper] modelo ${getModelName()} não encontrado em ${modelPath}`);
     try {
-      const files = fs.readdirSync(DIR).filter(f => /^ggml-.*\.bin$/i.test(f));
+      const files = fs.readdirSync(/*turbopackIgnore: true*/ DIR).filter(f => /^ggml-.*\.bin$/i.test(f));
       if (files.length > 0) {
-        modelPath = path.join(DIR, files[0]);
+        modelPath = path.join(/*turbopackIgnore: true*/ DIR, files[0]);
         console.warn(`[whisper] usando modelo alternativo: ${files[0]}`);
       } else {
         console.error(`[whisper] NENHUM modelo encontrado em ${DIR}`);
@@ -288,7 +288,7 @@ async function transcribeAudioWithWhisperUnqueued(
     }
   }
 
-  if (!binPath || !fs.existsSync(binPath)) {
+  if (!binPath || !fs.existsSync(/*turbopackIgnore: true*/ binPath)) {
     console.error(`[whisper] binário não encontrado (bin-path.txt=${binPath || "vazio"})`);
     return null;
   }
@@ -340,7 +340,7 @@ async function transcribeAudioWithWhisperUnqueued(
     //   -m modelo  -f arquivo  -l pt (português)  -t threads
     //   -otxt (saída .txt)  -np (sem progress bar colorida)  -nt (sem timestamps)
     const result = await new Promise<string | null>((resolve) => {
-      const child = spawn(binPath, [
+      const child = spawn(/*turbopackIgnore: true*/ binPath, [
         "-m", modelPath,
         "-f", wavPath,
         "-l", "pt",

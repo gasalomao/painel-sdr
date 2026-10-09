@@ -147,7 +147,7 @@ export async function backupDeepSeekData(): Promise<void> {
   const dir = deepseekBaseDir();
   for (const file of ["tokens.json", "subscriptions.json"]) {
     try {
-      const raw = fs.readFileSync(path.join(dir, file), "utf8");
+      const raw = fs.readFileSync(path.join(/*turbopackIgnore: true*/ dir, file), "utf8");
       const content = JSON.parse(raw);
       await supabaseAdmin.from("provider_credentials").upsert({
         id: `ds:${file}`,
@@ -174,9 +174,9 @@ export async function restoreDeepSeekData(): Promise<number> {
   for (const row of data) {
     const file = String(row.id).replace(/^ds:/, "");
     if (!file) continue;
-    const targetPath = path.join(dir, file);
+    const targetPath = path.join(/*turbopackIgnore: true*/ dir, file);
     // Só restaura se não existe localmente.
-    if (fs.existsSync(targetPath)) { count++; continue; }
+    if (fs.existsSync(/*turbopackIgnore: true*/ targetPath)) { count++; continue; }
     try {
       fs.writeFileSync(targetPath, JSON.stringify(row.content, null, 2), "utf8");
       count++;

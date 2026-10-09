@@ -122,7 +122,7 @@ function getManagementKey(): string | null {
 
 function getBinPath(): string | null {
   const p = readText(BINPATH_PATH);
-  return p && fs.existsSync(p) ? p : null;
+  return p && fs.existsSync(/*turbopackIgnore: true*/ p) ? p : null;
 }
 
 export function isInstalled(): boolean {
@@ -470,7 +470,7 @@ export async function installProxy(): Promise<{ version: string; binPath: string
   fs.mkdirSync(AUTH_DIR, { recursive: true });
 
   const asset = await fetchLatestAsset();
-  const archivePath = path.join(DIR, asset.name);
+  const archivePath = path.join(/*turbopackIgnore: true*/ DIR, asset.name);
   const res = await fetch(asset.url, {
     headers: { "User-Agent": "painel-sdr" },
     signal: AbortSignal.timeout(180000),

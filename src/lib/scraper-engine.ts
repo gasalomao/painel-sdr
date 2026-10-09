@@ -239,7 +239,7 @@ function findChromeOnWindows(): string | null {
     "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
   ];
   for (const p of paths) {
-    if (fs.existsSync(p)) return p;
+    if (fs.existsSync(/*turbopackIgnore: true*/ p)) return p;
   }
   return null;
 }
@@ -539,7 +539,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
           "/usr/bin/google-chrome",
         ];
         for (const p of linuxPaths) {
-          if (fs.existsSync(p)) {
+          if (fs.existsSync(/*turbopackIgnore: true*/ p)) {
             executablePath = p;
             break;
           }
