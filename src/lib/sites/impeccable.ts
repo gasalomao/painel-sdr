@@ -67,6 +67,61 @@ export function composeImpeccableGuidance(files: WebsiteFiles | undefined, promp
   ].join("\n\n");
 }
 
+/**
+ * Detecta qual referência Impeccable é mais relevante para o prompt
+ */
+function detectRelevantReference(prompt: string): string | null {
+  const routes: Array<[RegExp, string]> = [
+    [/tipograf|fonte|texto|título|heading|paragraph/i, "typeset"],
+    [/layout|espaç|margem|seção|seções|grid|coluna/i, "layout"],
+    [/cor|cores|paleta|contraste|color/i, "colorize"],
+    [/anima|movimento|transição|hover|animation/i, "animate"],
+    [/mobile|responsiv|tablet|adapt/i, "adapt"],
+    [/acessib|teclado|formulário|erro|a11y|aria/i, "harden"],
+    [/copy|conteúdo|mensagem|rótulo|texto|headline/i, "clarify"],
+    [/velocidade|performance|otimiz|speed/i, "optimize"],
+  ];
+
+  for (const [pattern, name] of routes) {
+    if (pattern.test(prompt)) return name;
+  }
+
+  return null;
+}
+
+/**
+ * Compõe guidance mínimo para modo surgical (edição pontual)
+ * Injeta craft-floor + referência relevante detectada do userMessage
+ */
+export function composeSurgicalImpeccableGuidance(prompt: string): string {
+  const relevantRef = detectRelevantReference(prompt);
+
+  const parts = [
+    `IMPECCABLE ATIVO — REFINAMENTO / PRESERVAÇÃO — fonte ${IMPECCABLE_REVISION}`,
+    `Preserve identidade, funções e acessibilidade. Referências integrais consultáveis sob demanda por read_design_reference(name, offset, limit).`,
+    ``,
+    `REFERÊNCIA OFICIAL INTEGRAL: craft-floor`,
+    impeccableReference("craft-floor"),
+    `FIM DA REFERÊNCIA craft-floor`,
+  ];
+
+  if (relevantRef) {
+    parts.push(
+      ``,
+      `REFERÊNCIA OFICIAL INTEGRAL: ${relevantRef}`,
+      impeccableReference(relevantRef),
+      `FIM DA REFERÊNCIA ${relevantRef}`,
+    );
+  }
+
+  parts.push(
+    ``,
+    `CATÁLOGO COMPLETO: ${JSON.stringify(impeccableReferenceCatalog())}`,
+  );
+
+  return parts.join("\n");
+}
+
 export const DESIGN_DIRECTION_FIELDS = ["thesis", "world", "story", "first_viewport", "signature_interaction", "typography", "palette", "layout", "imagery", "motion", "responsive", "accessibility", "copy", "constraints"] as const;
 export type WebsiteDesignDirection = { mode: "persuade" | "operate" | "read" | "experience" } & Record<typeof DESIGN_DIRECTION_FIELDS[number], string>;
 
