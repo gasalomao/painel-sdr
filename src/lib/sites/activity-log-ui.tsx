@@ -1,14 +1,15 @@
 import { activityLogger } from "./activity-logger";
 import type { ActivityEvent } from "./activity-logger";
+import { useState, useEffect, useRef } from "react";
 
 /**
  * Hook React para consumir activity logs em tempo real
  */
 export function useActivityLogs(runId?: string) {
-  const [activities, setActivities] = React.useState<ActivityEvent[]>([]);
-  const [isLive, setIsLive] = React.useState(true);
+  const [activities, setActivities] = useState<ActivityEvent[]>([]);
+  const [isLive, setIsLive] = useState(true);
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (!runId) return;
 
     // Carrega atividades existentes do servidor
@@ -49,10 +50,10 @@ export function useActivityLogs(runId?: string) {
  */
 export function ActivityLog({ runId }: { runId: string }) {
   const { activities, isLive } = useActivityLogs(runId);
-  const scrollRef = React.useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll para última atividade
-  React.useEffect(() => {
+  useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }

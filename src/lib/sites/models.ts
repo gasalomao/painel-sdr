@@ -242,6 +242,21 @@ async function directWebsiteChat(provider: "gemini" | "nvidia", body: Record<str
   return json;
 }
 
+/**
+ * Função auxiliar para retry com backoff exponencial
+ */
+async function attemptWithRetry(
+  model: WebsiteModel,
+  body: Record<string, unknown>,
+  signal: AbortSignal,
+  maxAttempts: number,
+  onRetry: (attempt: number, waitSeconds: number) => void
+): Promise<WebsiteChatResult> {
+  return websiteChatAttempt(model, body, signal, (_modelId: string, attempt: number, _max: number, waitSeconds: number) => {
+    onRetry(attempt, waitSeconds);
+  });
+}
+
 /** Uma chamada física no máximo. Reserva, fallback e retry pertencem ao caller. */
 export async function websiteChatAttempt(model: WebsiteModel, body: Record<string, unknown>, signal: AbortSignal, onRetry?: (modelId: string, attempt: number, maxAttempts: number, waitSeconds: number) => void): Promise<WebsiteChatResult> {
   signal.throwIfAborted();
