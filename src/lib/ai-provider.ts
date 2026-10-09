@@ -1089,7 +1089,7 @@ async function buildLadder(requestedRef: string, keys: LadderKeys | null): Promi
 
   // 3. Provedor NVIDIA NIM (se configurado)
   if (keys?.nvidia) {
-    push("nvidia:meta/llama-3.1-70b-instruct", true);
+    push("nvidia:meta/llama-3.2-11b-vision-instruct", true);
   }
 
   // 4. Última rede de segurança: modelo OpenRouter barato e de alta disponibilidade (gpt-4o-mini)

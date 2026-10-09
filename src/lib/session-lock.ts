@@ -13,17 +13,24 @@
 
 const locks = new Map<string, Promise<unknown>>();
 
-export async function withSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+export async function acquireSessionLock(sessionId: string): Promise<() => void> {
   const previous = locks.get(sessionId) ?? Promise.resolve();
   let release!: () => void;
   const current = new Promise<void>((resolve) => { release = resolve; });
   locks.set(sessionId, current);
   await previous;
+  return () => {
+    release();
+    if (locks.get(sessionId) === current) locks.delete(sessionId);
+  };
+}
+
+export async function withSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+  const release = await acquireSessionLock(sessionId);
   try {
     return await fn();
   } finally {
     release();
-    if (locks.get(sessionId) === current) locks.delete(sessionId);
   }
 }
 

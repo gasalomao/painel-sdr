@@ -55,6 +55,27 @@ interface MessageThreadProps {
   onToggleContactPanel?: () => void;
 }
 
+// Coleta todas as variações de JID do contato e da conversa
+function getAllConversationJids(conversation: Conversation | null, contact: Contact | null): string[] {
+  const set = new Set<string>();
+  if (conversation?.id) {
+    for (const j of getPossibleJids(conversation.id)) set.add(j);
+  }
+  if (conversation?.contact?.remote_jid) {
+    for (const j of getPossibleJids(conversation.contact.remote_jid)) set.add(j);
+  }
+  if (conversation?.contact?.phone) {
+    for (const j of getPossibleJids(conversation.contact.phone)) set.add(j);
+  }
+  if (contact?.remote_jid) {
+    for (const j of getPossibleJids(contact.remote_jid)) set.add(j);
+  }
+  if (contact?.phone) {
+    for (const j of getPossibleJids(contact.phone)) set.add(j);
+  }
+  return Array.from(set).filter(Boolean);
+}
+
 // Normaliza registros de chats_dashboard para formato Message do wacrm
 function normalizeDbMessage(raw: any): Message {
   const isFromMe =
@@ -142,6 +163,10 @@ export function MessageThread({
   const conversationId = conversation?.id; // remoteJid
   const conversationIdRef = useRef<string | null>(conversationId);
   useEffect(() => { conversationIdRef.current = conversationId; }, [conversationId]);
+  const convRef = useRef(conversation);
+  useEffect(() => { convRef.current = conversation; }, [conversation]);
+  const contactRef = useRef(contact);
+  useEffect(() => { contactRef.current = contact; }, [contact]);
   const hasUnread = (conversation?.unread_count ?? 0) > 0;
 
   // Resolve o instanceName de envio da mensagem
@@ -159,14 +184,44 @@ export function MessageThread({
 
     (async () => {
       setLoading(true);
-      const posiblesJids = getPossibleJids(conversationId);
-      const { data, error } = await supabase
+      const posiblesJids = getAllConversationJids(conversation, contact);
+      const { data: initialData, error } = await supabase
         .from("chats_dashboard")
         .select("*")
         .eq("client_id", clientId)
         .in("remote_jid", posiblesJids)
         .order("created_at", { ascending: false })
         .limit(100);
+
+      let data = initialData;
+
+      // Fallback para a tabela messages (V2) caso chats_dashboard esteja vazio
+      if ((!data || data.length === 0) && conversation?.session_id) {
+        const { data: v2Msgs } = await supabase
+          .from("messages")
+          .select("*")
+          .eq("client_id", clientId)
+          .eq("session_id", conversation.session_id)
+          .order("created_at", { ascending: false })
+          .limit(100);
+
+        if (v2Msgs && v2Msgs.length > 0) {
+          data = v2Msgs.map((raw: any) => ({
+            id: raw.id,
+            remote_jid: conversationId,
+            sender_type: raw.sender === "customer" ? "customer" : raw.sender === "ai" ? "ai" : "human",
+            content: raw.content || raw.text || "",
+            media_type: raw.media_category || raw.media_type,
+            media_url: raw.media_url,
+            mimetype: raw.mimetype,
+            file_name: raw.file_name,
+            message_id: raw.message_id,
+            status_envio: raw.delivery_status || "sent",
+            created_at: raw.created_at,
+            is_from_me: raw.sender !== "customer",
+          }));
+        }
+      }
 
       if (cancelled) return;
 
@@ -184,7 +239,7 @@ export function MessageThread({
     return () => {
       cancelled = true;
     };
-  }, [conversationId, clientId, resyncToken]);
+  }, [conversationId, clientId, resyncToken, conversation, contact]);
 
   // Polling ultra-leve em background (2.5s) para a conversa ativa.
   // Garante atualização em tempo real mesmo se o WebSocket Realtime reconectar ou atrasar.
@@ -199,7 +254,7 @@ export function MessageThread({
     const interval = setInterval(async () => {
       if (document.hidden) return;
 
-      const posiblesJids = getPossibleJids(myConversationId);
+      const posiblesJids = getAllConversationJids(convRef.current, contactRef.current);
       const { data } = await supabase
         .from("chats_dashboard")
         .select("*")

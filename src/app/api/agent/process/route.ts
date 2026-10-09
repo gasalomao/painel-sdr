@@ -71,6 +71,7 @@ export async function POST(req: NextRequest) {
   let diagnosticProvider: AiProvider = "gemini";
   let diagnosticUsage: AiUsage | null = null;
   let usageLogged = false;
+  let releaseSessionLock: (() => void) | null = null;
   // AUTH: aceita cookie de sessão (UI /agente teste) OU header de segredo interno
   // (chamado pelo webhook do whatsapp via internal fetch).
   // Chamada via cookie (UI) carrega o escopo do tenant pra validações de
@@ -304,7 +305,20 @@ export async function POST(req: NextRequest) {
 
     if (!isTestMode && bufferSeconds > 0) {
        console.log(`[BUFFER] Ativado: ${bufferSeconds}s para ${maskJid(remoteJid)} na instância ${instanceName}`);
-       const batchStartTime = new Date().toISOString();
+
+       // Localiza a última mensagem do assistente para ter a fronteira inicial precisa do lote
+       const { data: lastOutbound } = await supabase.from("chats_dashboard")
+          .select("created_at")
+          .eq("remote_jid", remoteJid)
+          .eq("instance_name", instanceName)
+          .eq("client_id", clientId)
+          .neq("sender_type", "customer")
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+       // Lote inclui tudo enviado pelo cliente desde a última resposta do assistente (ou últimos 60s)
+       const batchStartTime = lastOutbound?.created_at || new Date(Date.now() - 60000).toISOString();
        const expiresAt = new Date(Date.now() + (bufferSeconds + 10) * 1000).toISOString();
 
        // Tenta ser o "Líder" do lote
@@ -325,7 +339,7 @@ export async function POST(req: NextRequest) {
                 .maybeSingle();
              const orphan = !!stale?.expires_at && new Date(stale.expires_at as any).getTime() < Date.now();
              if (!orphan) {
-                console.log(`[BUFFER] Outro processo já é o líder para ${maskJid(remoteJid)}. Este encerra.`);
+                console.log(`[BUFFER] Outro processo já é o líder para ${maskJid(remoteJid)}. Este encerra e cede ao lote.`);
                 return NextResponse.json({ success: true, status: "batching_active" });
              }
              console.warn(`[BUFFER] Lock ÓRFÃO expirado de ${maskJid(remoteJid)} — assumindo liderança.`);
@@ -350,45 +364,50 @@ export async function POST(req: NextRequest) {
        }
 
        if (!skipBufferWait) {
-       // Eu sou o Líder (insert direto OU roubo de lock órfão)
-       {
-          console.log(`[BUFFER] LIDER: Aguardando ${bufferSeconds}s para consolidar mensagens de ${maskJid(remoteJid)}...`);
+          // Eu sou o Líder (insert direto OU roubo de lock órfão)
+          console.log(`[BUFFER] LÍDER: Aguardando ${bufferSeconds}s para consolidar mensagens de ${maskJid(remoteJid)}...`);
           await new Promise(resolve => setTimeout(resolve, bufferSeconds * 1000));
-           const { data: batchMsgs } = await supabase.from("chats_dashboard")
-              .select("content")
-              .eq("remote_jid", remoteJid)
-              .eq("instance_name", instanceName)
-              .eq("client_id", clientId)
-              .eq("sender_type", "customer")
+
+          const { data: batchMsgs } = await supabase.from("chats_dashboard")
+             .select("content")
+             .eq("remote_jid", remoteJid)
+             .eq("instance_name", instanceName)
+             .eq("client_id", clientId)
+             .eq("sender_type", "customer")
              .gte("created_at", batchStartTime)
              .order("created_at", { ascending: true });
-          if (batchMsgs && batchMsgs.length > 0) {
-              const contents = Array.from(new Set(batchMsgs.map(m => m.content).filter(Boolean)));
-              if (!contents.includes(text)) contents.unshift(text);
-              // FIX janela de perda: msg inserida DEPOIS do 1º SELECT e ANTES do
-              // delete ficava em terra-de-ninguém (excluída do lote, e o próprio
-              // dispatch dela batia no lock → nunca processada). Re-lê agora,
-              // imediatamente antes de soltar o lock.
-              const { data: lateMsgs } = await supabase.from("chats_dashboard")
-                 .select("content")
-                 .eq("remote_jid", remoteJid)
-                 .eq("instance_name", instanceName)
-                 .eq("client_id", clientId)
-                 .eq("sender_type", "customer")
-                 .gte("created_at", batchStartTime)
-                 .order("created_at", { ascending: true });
-              const allContents = Array.from(new Set([...contents, ...(lateMsgs || []).map(m => m.content).filter(Boolean)]));
-              if (allContents.length > contents.length || !allContents.includes(text)) {
-                 if (!allContents.includes(text)) allContents.unshift(text);
-                 finalProcessText = allContents.join("\n");
-                 console.log(`[BUFFER] Lote FINAL com ${allContents.length} mensagens (re-leitura pegou atrasadas).`);
-              }
-           }
 
-           await supabase.from("chat_buffers").delete().eq("remote_jid", remoteJid).eq("instance_name", instanceName);
-        }
-       } // fim if (!skipBufferWait)
-     } // fim if (bufferSeconds > 0)
+          const contents = Array.from(new Set((batchMsgs || []).map(m => m.content).filter(Boolean)));
+          if (!contents.includes(text)) contents.unshift(text);
+
+          // Re-leitura antes de soltar o lock pra não perder mensagens chegadas no finalzinho do sleep
+          const { data: lateMsgs } = await supabase.from("chats_dashboard")
+             .select("content")
+             .eq("remote_jid", remoteJid)
+             .eq("instance_name", instanceName)
+             .eq("client_id", clientId)
+             .eq("sender_type", "customer")
+             .gte("created_at", batchStartTime)
+             .order("created_at", { ascending: true });
+
+          const allContents = Array.from(new Set([...contents, ...(lateMsgs || []).map(m => m.content).filter(Boolean)]));
+          if (!allContents.includes(text)) allContents.unshift(text);
+          if (allContents.length > 0) {
+             finalProcessText = allContents.join("\n");
+             console.log(`[BUFFER] Lote FINAL consolidado com ${allContents.length} mensagens para ${maskJid(remoteJid)}:\n${finalProcessText}`);
+          }
+
+          await supabase.from("chat_buffers").delete().eq("remote_jid", remoteJid).eq("instance_name", instanceName);
+       }
+    }
+
+    // Serializa a execução da IA por sessão (anti-resposta-dupla) — adquirida apenas
+    // após o buffer para que o sleep não bloqueie a chegada de novas mensagens no lote
+    if (!isTestMode) {
+       const { acquireSessionLock } = await import("@/lib/session-lock");
+       const lockKey = sessionId || `${clientId}:${remoteJid}`;
+       releaseSessionLock = await acquireSessionLock(lockKey);
+    }
 
     // 3. Horário Comercial
     if (!isTestMode && !agentConfig.is_24h) {
@@ -541,7 +560,7 @@ export async function POST(req: NextRequest) {
         // FIX: só remove se o conteúdo BATER com a mensagem sendo processada.
         // Antes: com 2 mensagens rápidas, o run da M1 popava M2 (conteúdo
         // diferente) → M2 saía do contexto e ainda era re-anexada duplicada.
-        if (chrono.length > 0) {
+        while (chrono.length > 0) {
             const lastMsg: any = chrono[chrono.length - 1];
             const lastSender = lastMsg.sender_type || lastMsg.sender;
             const lastContent = String(lastMsg.content || "").trim();
@@ -550,9 +569,11 @@ export async function POST(req: NextRequest) {
                 lastSender === "customer" &&
                 lastContent.length > 0 &&
                 (lastContent === currentText ||
-                 (lastContent.length >= 4 && currentText.includes(lastContent)))
+                 (lastContent.length >= 2 && currentText.includes(lastContent)))
             ) {
                 chrono.pop();
+            } else {
+                break;
             }
         }
 
@@ -2612,5 +2633,7 @@ ${capturedVariablesPrompt}
       });
     } catch (_) { /* ignore logging errors */ }
     return NextResponse.json({ success: false, error: err.message });
+  } finally {
+    releaseSessionLock?.();
   }
 }

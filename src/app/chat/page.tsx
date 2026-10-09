@@ -304,6 +304,7 @@ function ChatPageContent() {
           }
           return {
             ...c,
+            last_message_text: c.last_message_text || existing.last_message_text,
             contact,
           };
         });

@@ -338,8 +338,7 @@ export async function persistOutgoingMessage(opts: {
     throw new Error(`client_id ausente para persistir mensagem da instância "${opts.instanceName}"`);
   }
 
-  // V2 messages — upsert por tenant+message_id. O conflito global deixou de
-  // existir e misturaria tenants que por acaso compartilhem o mesmo id.
+  // V2 messages — upsert por message_id (constraint existente no banco) com fallback
   if (opts.sessionId) {
     try {
       const msgPayload: Record<string, any> = {
@@ -352,12 +351,39 @@ export async function persistOutgoingMessage(opts: {
         delivery_status: "sent",
         created_at: now,
       };
-      const { error: msgErr } = await supabase.from("messages").upsert(msgPayload, { onConflict: "client_id,message_id" });
-      if (msgErr) throw msgErr;
+      let { error: msgErr } = await supabase.from("messages").upsert(msgPayload, { onConflict: "message_id" });
+      if (msgErr && (msgErr.code === "42P10" || (msgErr.message && msgErr.message.includes("ON CONFLICT")))) {
+        const retry = await supabase.from("messages").upsert(msgPayload, { onConflict: "client_id,message_id" });
+        msgErr = retry.error;
+      }
+      if (msgErr && msgErr.code === "23505") {
+        await supabase.from("messages").update(msgPayload).eq("message_id", opts.msgId);
+      } else if (msgErr) {
+        throw msgErr;
+      }
       await supabase.from("sessions").update({ last_message_at: now }).eq("id", opts.sessionId);
     } catch (e: any) {
       console.warn("[persist] messages upsert falhou:", e?.message);
     }
+  } else {
+    // Se não veio sessionId direto, atualiza a session correspondente no banco
+    try {
+      const digits = remoteJid.replace(/\D/g, "");
+      const jids = [remoteJid, `${digits}@s.whatsapp.net`, digits].filter(Boolean);
+      const { data: matchedContacts } = await supabase
+        .from("contacts")
+        .select("id")
+        .eq("client_id", resolvedClientId)
+        .or(`remote_jid.in.(${jids.map((j) => `"${j}"`).join(",")}),phone_number.in.(${jids.map((j) => `"${j}"`).join(",")})`);
+      if (matchedContacts && matchedContacts.length > 0) {
+        const cIds = matchedContacts.map((c) => c.id);
+        await supabase
+          .from("sessions")
+          .update({ last_message_at: now })
+          .eq("client_id", resolvedClientId)
+          .in("contact_id", cIds);
+      }
+    } catch { /* best-effort */ }
   }
 
   // chats_dashboard — onde o /chat lê.
@@ -372,10 +398,20 @@ export async function persistOutgoingMessage(opts: {
       status_envio: "sent",
       created_at: now,
     };
-    const { error } = await supabase
+    let { error: dashErr } = await supabase
       .from("chats_dashboard")
-      .upsert(dashPayload, { onConflict: "client_id,message_id" });
-    if (error) throw error;
+      .upsert(dashPayload, { onConflict: "message_id" });
+    if (dashErr && (dashErr.code === "42P10" || (dashErr.message && dashErr.message.includes("ON CONFLICT")))) {
+      const retry = await supabase
+        .from("chats_dashboard")
+        .upsert(dashPayload, { onConflict: "client_id,message_id" });
+      dashErr = retry.error;
+    }
+    if (dashErr && dashErr.code === "23505") {
+      await supabase.from("chats_dashboard").update(dashPayload).eq("message_id", opts.msgId);
+    } else if (dashErr) {
+      throw dashErr;
+    }
   } catch (e: any) {
     console.error("[persist] chats_dashboard error:", e.message);
   }

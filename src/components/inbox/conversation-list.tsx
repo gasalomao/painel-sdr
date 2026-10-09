@@ -204,7 +204,7 @@ export function ConversationList({
           .select("remote_jid, content, created_at, media_type, media_url")
           .eq("client_id", clientId)
           .order("created_at", { ascending: false })
-          .limit(300),
+          .limit(600),
       ]);
 
       if (cancelled) return;
@@ -218,21 +218,28 @@ export function ConversationList({
       const latestMap = new Map<string, { content: string; created_at: string }>();
       if (msgsRes.data) {
         for (const msg of msgsRes.data) {
-          if (msg.remote_jid && !latestMap.has(msg.remote_jid.replace(/\D/g, "") || msg.remote_jid)) {
-            const previewText = formatLastMessagePreview(
-              msg.content,
-              msg.media_type || (msg.media_url ? "image" : undefined)
-            );
-            latestMap.set(msg.remote_jid.replace(/\D/g, "") || msg.remote_jid, {
-              content: previewText,
-              created_at: msg.created_at
-            });
-          }
+          if (!msg.remote_jid) continue;
+          const cleanPhone = msg.remote_jid.replace(/\D/g, "");
+          const previewText = formatLastMessagePreview(
+            msg.content,
+            msg.media_type || (msg.media_url ? "image" : undefined)
+          );
+          const val = { content: previewText, created_at: msg.created_at };
+          if (!latestMap.has(msg.remote_jid)) latestMap.set(msg.remote_jid, val);
+          if (cleanPhone && !latestMap.has(cleanPhone)) latestMap.set(cleanPhone, val);
         }
       }
 
       const normalized = normalizeConversations(sessionsRes.data ?? []).map((c) => {
-        const lastMsgObj = latestMap.get(c.id.replace(/\D/g, "") || c.id);
+        const jidDigits = c.id.replace(/\D/g, "");
+        const contactPhoneDigits = c.contact?.phone?.replace(/\D/g, "");
+        const contactJidDigits = c.contact?.remote_jid?.replace(/\D/g, "");
+        const lastMsgObj =
+          (jidDigits ? latestMap.get(jidDigits) : undefined) ||
+          latestMap.get(c.id) ||
+          (contactPhoneDigits ? latestMap.get(contactPhoneDigits) : undefined) ||
+          (contactJidDigits ? latestMap.get(contactJidDigits) : undefined);
+
         const text = lastMsgObj?.content || formatLastMessagePreview(c.last_message_text) || "";
         return {
           ...c,
@@ -291,7 +298,7 @@ export function ConversationList({
           .select("remote_jid, content, created_at, media_type, media_url")
           .eq("client_id", clientId)
           .order("created_at", { ascending: false })
-          .limit(300),
+          .limit(600),
       ]);
 
       if (!sessionsRes.data) return;
@@ -299,21 +306,28 @@ export function ConversationList({
       const latestMap = new Map<string, { content: string; created_at: string }>();
       if (msgsRes.data) {
         for (const msg of msgsRes.data) {
-          if (msg.remote_jid && !latestMap.has(msg.remote_jid.replace(/\D/g, "") || msg.remote_jid)) {
-            const previewText = formatLastMessagePreview(
-              msg.content,
-              msg.media_type || (msg.media_url ? "image" : undefined)
-            );
-            latestMap.set(msg.remote_jid.replace(/\D/g, "") || msg.remote_jid, {
-              content: previewText,
-              created_at: msg.created_at,
-            });
-          }
+          if (!msg.remote_jid) continue;
+          const cleanPhone = msg.remote_jid.replace(/\D/g, "");
+          const previewText = formatLastMessagePreview(
+            msg.content,
+            msg.media_type || (msg.media_url ? "image" : undefined)
+          );
+          const val = { content: previewText, created_at: msg.created_at };
+          if (!latestMap.has(msg.remote_jid)) latestMap.set(msg.remote_jid, val);
+          if (cleanPhone && !latestMap.has(cleanPhone)) latestMap.set(cleanPhone, val);
         }
       }
 
       const normalized = normalizeConversations(sessionsRes.data).map((c) => {
-        const lastMsgObj = latestMap.get(c.id.replace(/\D/g, "") || c.id);
+        const jidDigits = c.id.replace(/\D/g, "");
+        const contactPhoneDigits = c.contact?.phone?.replace(/\D/g, "");
+        const contactJidDigits = c.contact?.remote_jid?.replace(/\D/g, "");
+        const lastMsgObj =
+          (jidDigits ? latestMap.get(jidDigits) : undefined) ||
+          latestMap.get(c.id) ||
+          (contactPhoneDigits ? latestMap.get(contactPhoneDigits) : undefined) ||
+          (contactJidDigits ? latestMap.get(contactJidDigits) : undefined);
+
         const text = lastMsgObj?.content || formatLastMessagePreview(c.last_message_text) || "";
         return {
           ...c,

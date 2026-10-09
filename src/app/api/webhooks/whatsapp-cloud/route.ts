@@ -451,9 +451,8 @@ export async function POST(req: NextRequest) {
               },
               body: JSON.stringify({ instanceName, remoteJid: m.remoteJid, text: m.text || m.caption || content, sessionId: sessionRow.id }),
             });
-            // Serializa por sessão (anti-resposta-dupla em msgs rápidas).
-            const { withSessionLock } = await import("@/lib/session-lock");
-            await withSessionLock(sessionRow.id, () => agentMod.POST(fakeReq));
+            // Invoca agent/process diretamente — serialização e buffer são gerenciados internamente
+            await agentMod.POST(fakeReq);
           } catch (e: any) {
             console.warn("[Cloud Webhook] dispatch do agente falhou:", e?.message);
             supabase.from("webhook_logs").insert({

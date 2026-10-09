@@ -1250,11 +1250,8 @@ export async function POST(req: NextRequest) {
               },
               body: JSON.stringify({ instanceName, remoteJid, text: agentText, sessionId: session.id }),
             });
-            // Next 13+ Route Handler aceita Request; o cast pra NextRequest é seguro
-            // porque agent/process não usa nada exclusivo do NextRequest extras.
-            // Serializa por sessão (anti-resposta-dupla em msgs rápidas).
-            const { withSessionLock } = await import("@/lib/session-lock");
-            await withSessionLock(session.id, () => agentMod.POST(fakeReq as any));
+            // Invoca agent/process diretamente — serialização e buffer são gerenciados internamente
+            await agentMod.POST(fakeReq as any);
             console.log("[Webhook] ✓ Agent dispatch concluído pra", maskJid(remoteJid));
           } catch (e: any) {
             console.error("[Webhook] Erro ao disparar IA:", e?.message);
