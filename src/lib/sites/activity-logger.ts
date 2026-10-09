@@ -182,22 +182,44 @@ export class ActivityLogger {
     });
   }
 
-  modelError(id: string, error: string): void {
+  modelError(id: string, error: string, retryCount?: number, maxRetries?: number): void {
     const startTime = this.startTimes.get(id);
     const duration = startTime ? Date.now() - startTime : undefined;
-    this.startTimes.delete(id);
 
+    // Não limpar startTime se ainda houver retries - mantém o tempo original
+    if (!retryCount || retryCount >= (maxRetries || 3)) {
+      this.startTimes.delete(id);
+    }
+
+    const originalEvent = this.events.find((e) => e.id === id);
+    const modelId = originalEvent?.details?.modelId;
+
+    const message = retryCount && maxRetries
+      ? `Modelo ${modelId || "IA"}: falha na consulta (tentativa ${retryCount}/${maxRetries}). ${error}`
+      : `Modelo ${modelId || "IA"}: falha na consulta. ${error}`;
+
+    this.emit({
+      id: this.createId(),
+      type: "model_error",
+      message,
+      timestamp: Date.now(),
+      details: { originalId: id, error, retryCount, maxRetries },
+      status: "error",
+      duration,
+    });
+  }
+
+  modelRetrying(id: string, attempt: number, maxAttempts: number, waitSeconds: number): void {
     const originalEvent = this.events.find((e) => e.id === id);
     const modelId = originalEvent?.details?.modelId;
 
     this.emit({
       id: this.createId(),
-      type: "model_error",
-      message: `Modelo ${modelId || "IA"}: falha na consulta. ${error}`,
+      type: "model_thinking",
+      message: `Modelo ${modelId}: aguardando ${waitSeconds}s antes da tentativa ${attempt}/${maxAttempts}...`,
       timestamp: Date.now(),
-      details: { originalId: id, error },
-      status: "error",
-      duration,
+      details: { originalId: id, attempt, maxAttempts, waitSeconds },
+      status: "pending",
     });
   }
 
@@ -423,17 +445,17 @@ export class ActivityLogger {
   private getToolCompleteMessage(toolName?: string, result?: any): string {
     switch (toolName) {
       case "read":
-        return "Leitura de arquivo concluída.";
+        return result?.path ? `Arquivo lido: ${result.path}.` : "Leitura de arquivo concluída.";
       case "read_files":
-        return "Leitura de arquivos concluída.";
+        return `Leitura de ${result?.length || 0} arquivo(s) concluída.`;
       case "write":
-        return "Arquivo salvo com sucesso.";
+        return result?.path ? `Arquivo salvo: ${result.path}.` : "Arquivo salvo com sucesso.";
       case "create":
-        return "Arquivo criado com sucesso.";
+        return result?.path ? `Arquivo criado: ${result.path}.` : "Arquivo criado com sucesso.";
       case "patch":
-        return "Arquivo editado.";
+        return result?.saved ? `Arquivo editado: ${result.saved}.` : "Arquivo editado.";
       case "delete":
-        return "Arquivo deletado.";
+        return result?.path ? `Arquivo deletado: ${result.path}.` : "Arquivo deletado.";
       case "search":
         const matches = result?.length || 0;
         return `Busca nos arquivos concluída${matches > 0 ? ` (${matches} resultado(s))` : ""}.`;
@@ -450,9 +472,14 @@ export class ActivityLogger {
       case "restore":
         return "Checkpoint restaurado.";
       case "run_validation":
-        return "Validação concluída.";
+        const validationResult = result?.passed !== undefined
+          ? result.passed
+            ? `Verificação estática aprovada; renderização ainda não verificada.`
+            : `Verificação estática reprovada: ${result.errors?.length || 0} erro(s).`
+          : "Validação concluída.";
+        return validationResult;
       case "read_design_reference":
-        return "Referência de design carregada.";
+        return result?.name ? `Referência Impeccable carregada: ${result.name}.` : "Referência de design carregada.";
       case "record_design_direction":
         return "Direção de design registrada.";
       default:

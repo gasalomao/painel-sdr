@@ -258,23 +258,29 @@ function getActivityIcon(type: string, status?: string): string {
       return "💭";
     case "validation_start":
     case "validation_complete":
-      return "✓";
+      return "🔍";
     case "build_start":
     case "build_progress":
     case "build_complete":
-      return "📦";
+      return "🔨";
     case "checkpoint_created":
       return "💾";
     case "revision_created":
-      return "📝";
+      return "✏️";
     case "thinking":
-      return "🤔";
+      return "🧠";
     case "planning":
       return "📋";
+    case "design_analysis":
+      return "🎨";
+    case "file_created":
+      return "✨";
+    case "file_updated":
+      return "💾";
     case "info":
       return "ℹ️";
     default:
-      return "⋯";
+      return "⚙️";
   }
 }
 

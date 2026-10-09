@@ -79,10 +79,10 @@ export function createWebsiteAgentDependencies(db: SupabaseClient, workerId: str
       await check(run);
       await saveRunCheckpoint(db, run, checkpoint, () => check(run));
     },
-    async chat(models, body, signal) {
+    async chat(models, body, signal, onRetry) {
       if (models.length !== 1) throw new Error("A chamada exige uma única reserva de modelo.");
       signal.throwIfAborted();
-      return websiteChatAttempt(models[0], body, signal);
+      return websiteChatAttempt(models[0], body, signal, onRetry);
     },
     async load(run) {
       const { getSelectedAssets } = await import("./assets");

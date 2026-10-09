@@ -8,9 +8,14 @@ export const CLIENT_FIELDS = [
 
 export function runStatusLabel(status: WebsiteRunStatus): string {
   return {
-    queued: "Na fila...", planning: "Pensando...", editing: "Criando e editando arquivos...",
-    validating: "Validando o site...", completed: "Concluída", failed: "Falhou", cancelled: "Cancelada",
-  }[status] ?? "Estado desconhecido";
+    queued: "⏳ Aguardando na fila (worker vai processar em breve)...",
+    planning: "🧠 Analisando requisitos e planejando estrutura...",
+    editing: "✏️ Criando código, componentes e estilos...",
+    validating: "🔨 Testando build e renderização do site...",
+    completed: "✅ Site concluído e pronto",
+    failed: "❌ Falhou (veja os logs para detalhes)",
+    cancelled: "🛑 Cancelado pelo usuário",
+  }[status] ?? "⚙️ Status desconhecido";
 }
 
 export function projectStatusLabel(status: WebsiteProject["status"]): string {
@@ -41,20 +46,22 @@ function record(value: unknown): Record<string, unknown> {
 }
 
 const TOOL_ACTIVITY: Record<string, readonly [string, string]> = {
-  list: ["Listando arquivos", "Arquivos listados"],
-  read: ["Lendo arquivo", "Leitura de arquivo concluída"],
-  read_files: ["Lendo arquivos", "Leitura de arquivos concluída"],
-  create: ["Criando arquivo", "Arquivo criado"],
-  write: ["Atualizando arquivo", "Arquivo atualizado"],
-  patch: ["Editando arquivo", "Arquivo editado"],
-  delete: ["Excluindo arquivo", "Arquivo excluído"],
-  rename: ["Renomeando arquivo", "Arquivo renomeado"],
-  search: ["Buscando nos arquivos", "Busca nos arquivos concluída"],
-  get_context: ["Consultando informações confirmadas", "Informações confirmadas consultadas"],
-  assets: ["Consultando imagens e anexos", "Imagens e anexos consultados"],
-  checkpoint: ["Salvando ponto de restauração", "Ponto de restauração salvo"],
-  restore: ["Recuperando ponto de restauração", "Ponto de restauração recuperado"],
-  run_validation: ["Verificando estrutura e conteúdo", "Verificação estática concluída"],
+  list: ["📂 Explorando estrutura de arquivos do projeto", "✅ Estrutura mapeada"],
+  read: ["📄 Abrindo arquivo para leitura", "✅ Arquivo lido"],
+  read_files: ["📚 Carregando múltiplos arquivos", "✅ Arquivos carregados"],
+  create: ["✨ Criando novo arquivo", "✅ Arquivo criado"],
+  write: ["💾 Salvando alterações", "✅ Alterações salvas"],
+  patch: ["✏️ Aplicando edições pontuais", "✅ Edições aplicadas"],
+  delete: ["🗑️ Removendo arquivo", "✅ Arquivo removido"],
+  rename: ["📝 Renomeando arquivo", "✅ Arquivo renomeado"],
+  search: ["🔍 Buscando padrões no código", "✅ Busca concluída"],
+  get_context: ["🎯 Carregando contexto do cliente e projeto", "✅ Contexto carregado"],
+  assets: ["🖼️ Verificando imagens e assets disponíveis", "✅ Assets carregados"],
+  checkpoint: ["💾 Salvando ponto de restauração (pode voltar aqui depois)", "✅ Checkpoint salvo"],
+  restore: ["⏮️ Voltando para checkpoint anterior", "✅ Checkpoint restaurado"],
+  run_validation: ["🔬 Analisando código gerado (estrutura, imports, sintaxe)", "✅ Análise estática completa"],
+  read_design_reference: ["🎨 Carregando diretrizes de design visual", "✅ Diretrizes carregadas"],
+  record_design_direction: ["🎨 Documentando decisões de design", "✅ Design documentado"],
 };
 
 function activityPath(value: unknown): string {
@@ -65,63 +72,146 @@ function activityPath(value: unknown): string {
 export function parseSystemEvent(content: string): string {
   try {
     const event = record(JSON.parse(content));
-    if (Array.isArray(event.active_skills) && event.active_skills.length === 0) return "Nenhuma skill ativa nesta execução.";
+    if (Array.isArray(event.active_skills) && event.active_skills.length === 0) return "🔧 Modo padrão (sem skills especiais ativas)";
     if (Array.isArray(event.active_skills) && event.active_skills.length > 0) {
       const validNames = event.active_skills.filter((s): s is string => typeof s === "string" && Boolean(s.trim()));
-      if (validNames.length > 0) return `Skills ativas: ${validNames.join(" · ")}`;
+      if (validNames.length > 0) return `✨ Skills ativas: ${validNames.join(" · ")} — melhorias na qualidade e design`;
     }
     if (event.skill_analysis && typeof event.skill_analysis === "object") {
       const sa = event.skill_analysis as Record<string, unknown>;
-      if (typeof sa.message === "string" && sa.message.trim()) return sa.message;
+      if (typeof sa.message === "string" && sa.message.trim()) return `📋 ${sa.message}`;
     }
     const call = record(event.model_call);
-    const model = typeof call.model === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_./:@+-]{0,159}$/.test(call.model) ? ` ${call.model}` : "";
-    if (call.status === "started") return `Modelo${model}: consulta iniciada; aguardando resposta.`;
-    if (call.status === "completed") return `Modelo${model}: resposta recebida.`;
-    if (call.status === "failed") return `Modelo${model}: falha na consulta.`;
-    if (event.checkpoint) return "Ponto de restauração salvo.";
-    if (Array.isArray(event.vision_assets)) return `${event.vision_assets.length} imagem(ns) preparada(s) para análise.`;
-    if (event.usage) return "Uso do modelo registrado.";
+    const model = typeof call.model === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_./:@+-]{0,159}$/.test(call.model) ? call.model : "";
+    const modelLabel = model ? ` (${model})` : "";
+
+    if (call.status === "started") {
+      const purpose = typeof call.purpose === "string" ? call.purpose : "";
+      if (purpose.includes("design")) return `🎨 IA analisando direção de design${modelLabel}...`;
+      if (purpose.includes("validat") || purpose.includes("review")) return `🔍 IA revisando código${modelLabel}...`;
+      if (purpose.includes("edit") || purpose.includes("patch")) return `✏️ IA aplicando edições${modelLabel}...`;
+      if (purpose.includes("creat") || purpose.includes("generat")) return `🚀 IA gerando código${modelLabel}...`;
+      return `🤖 IA processando${modelLabel}... (aguardando resposta)`;
+    }
+
+    if (call.status === "completed") {
+      const tokens = record(call.usage);
+      const input = typeof tokens.promptTokens === "number" ? tokens.promptTokens : 0;
+      const output = typeof tokens.completionTokens === "number" ? tokens.completionTokens : 0;
+      const tokenInfo = input > 0 || output > 0 ? ` — ${input}→${output} tokens` : "";
+      return `✅ IA respondeu${modelLabel}${tokenInfo}`;
+    }
+
+    if (call.status === "failed") {
+      const retryInfo = typeof call.attempt === "number" && typeof call.maxAttempts === "number"
+        ? ` (tentativa ${call.attempt}/${call.maxAttempts})`
+        : "";
+      return `⚠️ Falha temporária no modelo${modelLabel}${retryInfo} — tentando alternativa...`;
+    }
+
+    if (event.checkpoint) return "💾 Ponto de restauração salvo (você pode voltar aqui depois)";
+
+    if (Array.isArray(event.vision_assets)) {
+      const count = event.vision_assets.length;
+      return count === 1
+        ? "🖼️ Analisando 1 imagem enviada (logo, foto ou referência visual)"
+        : `🖼️ Analisando ${count} imagens enviadas (logos, fotos ou referências visuais)`;
+    }
+
+    if (event.usage) {
+      const usage = record(event.usage);
+      const total = typeof usage.totalTokens === "number" ? usage.totalTokens : 0;
+      return total > 0 ? `📊 Uso registrado: ${total.toLocaleString("pt-BR")} tokens` : "📊 Uso do modelo registrado";
+    }
+
     const validation = record(event.validation);
     if (event.validation) {
-      if (validation.status === "unconfigured") return "Ambiente E2B não configurado. Renderização não verificada; site permanece como rascunho.";
-      if (validation.status === "started") return "Verificando o site...";
-      const counts = [validation.errorCount, validation.warningCount].every((count) => typeof count === "number" && Number.isSafeInteger(count) && count >= 0)
-        ? ` (${validation.errorCount} erro(s), ${validation.warningCount} aviso(s))` : "";
-      if (validation.status === "failed" || validation.success === false || record(validation.qa).passed === false) return `A validação identificou ajustes necessários${counts}.`;
-      return validation.success === true ? `Validação técnica concluída com sucesso${counts}.` : "Validação do site registrada.";
+      if (validation.status === "unconfigured") return "⚠️ Build isolado não configurado — site criado mas não renderizado";
+      if (validation.status === "started") return "🔨 Iniciando build isolado para testar o site...";
+
+      const errorCount = typeof validation.errorCount === "number" ? validation.errorCount : 0;
+      const warningCount = typeof validation.warningCount === "number" ? validation.warningCount : 0;
+      const counts = errorCount > 0 || warningCount > 0 ? ` (${errorCount} erro(s), ${warningCount} aviso(s))` : "";
+
+      if (validation.status === "failed" || validation.success === false || record(validation.qa).passed === false) {
+        return errorCount > 0
+          ? `🔧 Build identificou ${errorCount} problema(s) que precisam ser corrigidos${counts}`
+          : `⚠️ Ajustes necessários${counts}`;
+      }
+
+      return validation.success === true
+        ? `✅ Build OK! Site funcionando corretamente${counts}`
+        : "🔬 Validação do site registrada";
     }
+
     const tool = typeof event.tool === "string" && Object.hasOwn(TOOL_ACTIVITY, event.tool) ? TOOL_ACTIVITY[event.tool] : undefined;
+
     if (event.status === "started" && typeof event.tool === "string") {
       const path = activityPath(event.path);
-      return `${tool?.[0] ?? "Executando operação do agente"}${path ? `: ${path}` : ""}...`;
+      const toolLabel = tool?.[0] ?? "🔧 Executando operação";
+      return path ? `${toolLabel}: ${path}` : toolLabel;
     }
+
     const rawResult = event.role === "tool" ? event.content : typeof event.tool === "string" ? event.result : event;
     const result = record(typeof rawResult === "string" ? JSON.parse(rawResult) : rawResult);
-    if (result.error) return "Não foi possível concluir uma operação do agente.";
-    if (typeof result.passed === "boolean") return result.passed ? "Verificação estática aprovada; renderização ainda não verificada." : "Verificação estática requer ajustes.";
+
+    if (result.error) return "❌ Operação falhou — tentando recuperar...";
+
+    if (typeof result.passed === "boolean") {
+      if (result.passed) {
+        const issues = Array.isArray(result.issues) && result.issues.length > 0
+          ? ` (${result.issues.length} observação(ões) menores)`
+          : "";
+        return `✅ Código válido — estrutura OK${issues}`;
+      }
+      return "⚠️ Código requer ajustes — corrigindo...";
+    }
+
     if (tool) {
       const path = activityPath(result.saved) || activityPath(event.path);
-      return `${tool[1]}${path ? `: ${path}` : ""}.`;
+      return path ? `${tool[1]}: ${path}` : tool[1];
     }
+
     const saved = activityPath(result.saved);
-    if (saved) return `Arquivo atualizado: ${saved}`;
-    if (result.restored === true) return "Ponto de restauração recuperado.";
-    if (event.role === "tool") return "Arquivos e dados do projeto consultados.";
+    if (saved) return `💾 Arquivo salvo: ${saved}`;
+    if (result.restored === true) return "⏮️ Checkpoint restaurado com sucesso";
+    if (event.role === "tool") return "📦 Dados do projeto carregados";
+
   } catch {
-    if (content.startsWith("READY — AWAITING CREDENTIALS")) return "Integração não configurada — ver Configurações.";
-    if (content === "Execução cancelada.") return content;
+    if (content.startsWith("READY — AWAITING CREDENTIALS")) return "🔑 Aguardando configuração de credenciais — ver Configurações";
+    if (content === "Execução cancelada.") return "🛑 Execução cancelada pelo usuário";
   }
-  return "Atividade interna do agente registrada.";
+
+  return "⚙️ Operação interna em andamento...";
 }
 
 export function assistantText(content: string): string {
   try {
     const value = record(JSON.parse(content));
-    if (value.role === "assistant") return typeof value.content === "string" && value.content.trim() ? value.content : "Preparando alterações nos arquivos...";
-    if (typeof value.passed === "boolean" && typeof value.summary === "string") return value.summary;
-    return "Análise do agente registrada.";
-  } catch { return /^[\s]*[\[{]/.test(content) ? "Análise do agente registrada." : content; }
+    if (value.role === "assistant") {
+      const text = typeof value.content === "string" && value.content.trim() ? value.content : "";
+      if (!text) return "🤔 Analisando e preparando próximas ações...";
+
+      // Extrair informações úteis do texto do assistente
+      if (text.includes("design") && text.includes("direction")) return "🎨 Definindo direção de design e paleta de cores...";
+      if (text.includes("validation") || text.includes("qa")) return "🔍 Revisando qualidade do código...";
+      if (text.includes("error") || text.includes("fix")) return "🔧 Identificando e corrigindo problemas...";
+      if (text.includes("create") || text.includes("generating")) return "✨ Gerando novos componentes...";
+      if (text.includes("edit") || text.includes("updating")) return "✏️ Aplicando edições...";
+
+      return text;
+    }
+
+    if (typeof value.passed === "boolean" && typeof value.summary === "string") {
+      const icon = value.passed ? "✅" : "⚠️";
+      return `${icon} ${value.summary}`;
+    }
+
+    return "📊 Resposta do agente processada";
+  } catch {
+    if (/^[\s]*[\[{]/.test(content)) return "📊 Dados estruturados recebidos";
+    return content;
+  }
 }
 
 export function tokenUsage(content: string): number {

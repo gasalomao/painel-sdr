@@ -243,7 +243,7 @@ async function directWebsiteChat(provider: "gemini" | "nvidia", body: Record<str
 }
 
 /** Uma chamada física no máximo. Reserva, fallback e retry pertencem ao caller. */
-export async function websiteChatAttempt(model: WebsiteModel, body: Record<string, unknown>, signal: AbortSignal): Promise<WebsiteChatResult> {
+export async function websiteChatAttempt(model: WebsiteModel, body: Record<string, unknown>, signal: AbortSignal, onRetry?: (modelId: string, attempt: number, maxAttempts: number, waitSeconds: number) => void): Promise<WebsiteChatResult> {
   signal.throwIfAborted();
   if (!model || typeof model.id !== "string" || !cleanModelId(model.id).trim() || !body || typeof body !== "object" || Array.isArray(body) || !Array.isArray(body.messages) || !body.messages.length) throw new Error("Modelo ou mensagens inválidos.");
   const prefix = model.id.match(/^(openrouter|gemini|gateway|nvidia):/)?.[1];
@@ -256,37 +256,93 @@ export async function websiteChatAttempt(model: WebsiteModel, body: Record<strin
     delete modelBody.parallel_tool_calls;
   }
   if (provider === "gemini" || provider === "nvidia") delete modelBody.reasoning;
-  try {
-    let raw: unknown;
-    if (provider === "gateway") {
-      const creds = await resolveGatewayCreds({ noGatewayFallback: true }, cleanModelId(model.id));
-      signal.throwIfAborted();
-      if (!creds.baseUrl) throw new Error("Gateway de assinatura indisponível: configure uma conexão em Configurações.");
-      raw = await gatewayChatWithFailover(cleanModelId(model.id), modelBody, creds, { allowEmptyContent: true, signal, maxAttempts: 1 });
-    } else if (provider === "gemini" || provider === "nvidia") {
-      raw = await directWebsiteChat(provider, modelBody, signal);
-    } else {
-      raw = await openRouterChatWithFailover(modelBody, { signal, maxAttempts: 1, allowEmptyContent: true });
+
+  const maxAttempts = 3;
+  let lastError: Error = new Error("Falha desconhecida.");
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    signal.throwIfAborted();
+
+    try {
+      let raw: unknown;
+      if (provider === "gateway") {
+        const creds = await resolveGatewayCreds({ noGatewayFallback: true }, cleanModelId(model.id));
+        signal.throwIfAborted();
+        if (!creds.baseUrl) throw new Error("Gateway de assinatura indisponível: configure uma conexão em Configurações.");
+        raw = await gatewayChatWithFailover(cleanModelId(model.id), modelBody, creds, { allowEmptyContent: true, signal, maxAttempts: 1 });
+      } else if (provider === "gemini" || provider === "nvidia") {
+        raw = await directWebsiteChat(provider, modelBody, signal);
+      } else {
+        raw = await openRouterChatWithFailover(modelBody, { signal, maxAttempts: 1, allowEmptyContent: true });
+      }
+      const usage = openRouterResponseUsage(raw, provider as "openrouter" | "gemini" | "gateway" | "nvidia", cleanModelId(model.id));
+      if (signal.aborted) throw Object.assign(signal.reason instanceof Error ? signal.reason : new Error("Chamada interrompida."), { usage });
+      const response = validateChatResponse(raw, model);
+      return { model: model.id, response, usage };
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("Provedor indisponível.");
+      const reported = aiUsageFromError(error);
+      const usage: AiUsage = reported ?? openRouterResponseUsage(null);
+      const uncertain = !usage.attempts?.length && usage.totalTokens === 0 && usage.costUsd === undefined;
+      const measured = { ...usage, ...(uncertain ? { estimated: true, usageUnknown: true } : {}) };
+
+      // Não retry em erros 400 (bad request) ou abort
+      if (signal.aborted || (error instanceof ProviderHttpError && error.status === 400)) {
+        throw Object.assign(lastError, { usage: measured.attempts?.length ? measured : { ...measured, attempts: [{ ...measured, provider: provider as "openrouter" | "gemini" | "gateway" | "nvidia", model: cleanModelId(model.id) }] } });
+      }
+
+      // Se não é a última tentativa, aguardar com backoff exponencial
+      if (attempt < maxAttempts) {
+        const waitSeconds = Math.min(2 ** attempt, 8); // 2s, 4s, 8s
+        onRetry?.(model.id, attempt + 1, maxAttempts, waitSeconds);
+        await new Promise(resolve => setTimeout(resolve, waitSeconds * 1000));
+      } else {
+        throw Object.assign(lastError, { usage: measured.attempts?.length ? measured : { ...measured, attempts: [{ ...measured, provider: provider as "openrouter" | "gemini" | "gateway" | "nvidia", model: cleanModelId(model.id) }] } });
+      }
     }
-    const usage = openRouterResponseUsage(raw, provider as "openrouter" | "gemini" | "gateway" | "nvidia", cleanModelId(model.id));
-    if (signal.aborted) throw Object.assign(signal.reason instanceof Error ? signal.reason : new Error("Chamada interrompida."), { usage });
-    const response = validateChatResponse(raw, model);
-    return { model: model.id, response, usage };
-  } catch (error) {
-    const target = error instanceof Error ? error : new Error("Provedor indisponível.");
-    const reported = aiUsageFromError(error);
-    const usage: AiUsage = reported ?? openRouterResponseUsage(null);
-    const uncertain = !usage.attempts?.length && usage.totalTokens === 0 && usage.costUsd === undefined;
-    const measured = { ...usage, ...(uncertain ? { estimated: true, usageUnknown: true } : {}) };
-    throw Object.assign(target, { usage: measured.attempts?.length ? measured : { ...measured, attempts: [{ ...measured, provider: provider as "openrouter" | "gemini" | "gateway" | "nvidia", model: cleanModelId(model.id) }] } });
   }
+
+  throw lastError;
 }
 
+
 /** Wrapper legado com fallback explícito, limitado a três chamadas físicas. */
-export async function websiteChat(models: WebsiteModel[], body: Record<string, unknown>, signal: AbortSignal): Promise<WebsiteChatResult> {
+export async function websiteChat(
+  models: WebsiteModel[],
+  body: Record<string, unknown>,
+  signal: AbortSignal,
+  onRetry?: (modelId: string, attempt: number, maxAttempts: number, waitSeconds: number) => void
+): Promise<WebsiteChatResult> {
   let usage: AiUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   let lastError: Error = new Error("Nenhum modelo compatível disponível.");
-  for (const model of models.slice(0, 3)) {
+
+  // Primeiro: tenta até 3x no modelo primário com retry
+  const primaryModel = models[0];
+  if (primaryModel) {
+    signal.throwIfAborted();
+    try {
+      const result = await attemptWithRetry(
+        primaryModel,
+        body,
+        signal,
+        3,
+        (attempt, waitSeconds) => {
+          onRetry?.(primaryModel.id, attempt, 3, waitSeconds);
+        }
+      );
+      return { ...result, usage: addAiUsage(usage, result.usage) };
+    } catch (error) {
+      const failedUsage = aiUsageFromError(error);
+      if (failedUsage) usage = addAiUsage(usage, failedUsage);
+      lastError = error instanceof Error ? error : new Error("Provedor indisponível.");
+      if (signal.aborted || (error instanceof ProviderHttpError && error.status === 400)) {
+        throw Object.assign(lastError, { usage });
+      }
+    }
+  }
+
+  // Segundo: fallback para outros modelos (1 tentativa cada)
+  for (const model of models.slice(1, 3)) {
     signal.throwIfAborted();
     try {
       const result = await websiteChatAttempt(model, body, signal);
