@@ -45,8 +45,8 @@ function Editor({ projectId, clientId, draftScope }: { projectId: string; client
   const [operation, setOperation] = useState("");
   const [operationError, setOperationError] = useState("");
   const [refresh, setRefresh] = useState(0);
-  const [filesDirty, setFilesDirty] = useState(() => Boolean(getSiteDraft(draftScope, "files")));
-  const [settingsDirty, setSettingsDirty] = useState(() => Boolean(getSiteDraft(draftScope, "project")));
+  const [filesDirty, setFilesDirty] = useState(false);
+  const [settingsDirty, setSettingsDirty] = useState(false);
   const [deploymentPending, setDeploymentPending] = useState(false);
   const [deploymentsReady, setDeploymentsReady] = useState(false);
   const hasDraft = filesDirty || settingsDirty;
