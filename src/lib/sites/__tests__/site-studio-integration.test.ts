@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import type { ChatMessage } from "@/types/chat";
+
+type ChatMessage = { role: "user" | "assistant" | "system"; content: string };
 
 // Mock das funções de chat
 const mockChat = vi.fn();
@@ -88,7 +89,7 @@ describe("Site Studio Integration with Agent Optimizations", () => {
 
   it("compacta histórico longo mantendo contexto", async () => {
     const longHistory: ChatMessage[] = Array.from({ length: 50 }, (_, i) => ({
-      role: (i % 2 === 0 ? "user" : "assistant") as const,
+      role: i % 2 === 0 ? "user" : "assistant",
       content: `message ${i}`
     }));
 

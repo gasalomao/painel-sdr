@@ -166,7 +166,7 @@ describe("compactAgentHistory", () => {
     // Criar mais mensagens que maxMessages para forçar compactação
     // Colocar mensagem do assistente no final (será mantida)
     const messages = Array.from({ length: 15 }, (_, i) => ({
-      role: (i === 14 ? "assistant" : "user") as const,
+      role: (i === 14 ? "assistant" : "user") as "assistant" | "user",
       content: i === 14 ? longContent : `message ${i}`
     }));
 
