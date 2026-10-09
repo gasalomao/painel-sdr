@@ -272,9 +272,10 @@ export function composeWebsitePrompt(project: WebsiteProject, skills: readonly W
     if (typeof value === "string") context[key] = value.slice(0, 2000);
   }
   const selected = resolveActiveWebsiteSkills(project, skills, userMessage);
-  // QUALITY ENFORCEMENT: Impeccable is ALWAYS active unless explicitly disabled via env var
-  // This ensures consistent anti-AI quality across all site generations
-  const forceImpeccable = process.env.FORCE_IMPECCABLE !== "false"; // default true
+  // QUALITY ENFORCEMENT: Check if Impeccable skill is active
+  // User can disable it by toggling the skill in the UI
+  // Can also be force-enabled via FORCE_IMPECCABLE=true env var for testing
+  const forceImpeccable = process.env.FORCE_IMPECCABLE === "true"; // default false, respects user choice
   const impeccable = forceImpeccable || selected.some(isImpeccableSkill);
   const existing = isExistingSiteProject(files);
   const surgical = existing && isSimpleWebsiteRequest(userMessage);
