@@ -1,13 +1,15 @@
 import { defineConfig } from "vitest/config";
 import path from "node:path";
+import react from "@vitejs/plugin-react";
 
 export default defineConfig({
+  plugins: [react()],
   resolve: {
     alias: { "@": path.resolve(__dirname, "./src") },
   },
   test: {
-    environment: "node",
-    include: ["src/**/*.test.ts"],
+    environment: "jsdom",
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
     // Suites live (live-*, *.live, *.e2e, test_*, whisper/petshop) agora se
     // AUTOPULAM via guards de env (LIVE_E2E / RUN_LIVE_TESTS / LIVE_PETSHOP /
     // E2E_*) dentro dos arquivos — npm test fica offline e verde, e a

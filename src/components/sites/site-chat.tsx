@@ -245,6 +245,7 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
 
   async function send(): Promise<void> {
     const trimmedPrompt = prompt.trim();
+    // blocked inclui hasDraft, mas permitimos digitar/anexar — só bloqueia o envio final
     if ((!trimmedPrompt && staged.length === 0 && selected.length === 0) || sending || uploading || activeRun || blocked || !onMutationStart()) return;
     setSending(true);
     try {
@@ -850,7 +851,7 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
           className="sr-only"
           accept="image/png,image/jpeg,image/webp"
           multiple
-          disabled={uploading || sending || blocked || Boolean(activeRun) || assets.length + staged.length >= 20}
+          disabled={uploading || sending || Boolean(activeRun) || assets.length + staged.length >= 20}
           onChange={(event) => {
             if (event.target.files) stageFiles(event.target.files);
             event.target.value = "";
@@ -884,12 +885,20 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
 
         {/* Bottom Toolbar */}
         <div className="flex flex-wrap items-center justify-between gap-2 px-3 pb-2.5 pt-1 border-t border-slate-800/40">
+          {blocked && !activeRun && (
+            <div className="flex items-center gap-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 px-2 py-1 mb-1 w-full">
+              <Info className="size-3.5 text-amber-400 shrink-0" />
+              <span className="text-[10px] text-amber-300 font-medium">
+                Há alterações pendentes em Arquivos ou Ajustes. Salve ou descarte antes de enviar.
+              </span>
+            </div>
+          )}
           <div className="flex items-center gap-1.5">
             {/* Attach button */}
             <button
               type="button"
               onClick={() => inputRef.current?.click()}
-              disabled={sending || uploading || blocked || Boolean(activeRun) || assets.length + staged.length >= 20}
+              disabled={sending || uploading || Boolean(activeRun) || assets.length + staged.length >= 20}
               className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium text-slate-300 hover:text-white bg-slate-800/70 hover:bg-slate-700/80 border border-slate-700/60 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shadow-2xs"
               title="Anexar imagem (PNG, JPEG ou WEBP, até 8 MB)"
             >
@@ -921,11 +930,17 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
           </div>
 
           <div className="flex items-center gap-2">
+            {blocked && !activeRun && (
+              <span className="text-[10px] text-amber-400 font-medium mr-2 hidden sm:inline">
+                💾 Há alterações pendentes
+              </span>
+            )}
             <Button
               type="submit"
               size="sm"
-              disabled={sending || uploading || blocked || Boolean(activeRun) || (!prompt.trim() && staged.length === 0 && selected.length === 0)}
+              disabled={sending || uploading || Boolean(activeRun) || blocked || (!prompt.trim() && staged.length === 0 && selected.length === 0)}
               className="rounded-full gap-1.5 font-medium px-4 h-8 cursor-pointer shadow-md"
+              title={blocked && !activeRun ? "Salve ou descarte as alterações em Arquivos e Ajustes antes de enviar" : undefined}
             >
               {sending || uploading ? (
                 <>

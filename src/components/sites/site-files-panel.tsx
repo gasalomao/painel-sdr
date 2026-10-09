@@ -9,6 +9,7 @@ import { editableFile } from "@/lib/sites/ui-helpers";
 import { useSiteDraft } from "@/lib/sites/ui";
 import type { WebsiteFiles, WebsiteRevision } from "@/lib/sites/types";
 import { apiJson, ApiError, errorMessage, jsonBody } from "./api";
+import { DownloadZipButton } from "./download-zip-button";
 
 const MAX_HISTORY = 100;
 
@@ -123,11 +124,14 @@ export function SiteFilesPanel({ draftScope, projectId, files, currentRevisionId
       </div>
     </div>
     <p className="text-xs text-muted-foreground">Arquivos .ts, .tsx, .css, .html e .json até 100 KB. Configurações técnicas são somente leitura.</p>
-    <div className="flex flex-wrap justify-end gap-2">
-      <Button variant="outline" disabled={saving || disabled || undoStack.length === 0} onClick={undo} title="Ctrl+Z"><Undo2 aria-hidden="true" />Desfazer</Button>
-      <Button variant="outline" disabled={saving || disabled || redoStack.length === 0} onClick={redo} title="Ctrl+Shift+Z"><Redo2 aria-hidden="true" />Refazer</Button>
-      <Button variant="outline" disabled={saving || disabled} onClick={() => void reload()}>Recarregar arquivos</Button>
-      <Button disabled={!draft || saving || disabled || conflict} onClick={() => void save()}><Save aria-hidden="true" />{saving ? "Salvando..." : "Salvar revisão"}</Button>
+    <div className="flex flex-wrap justify-between gap-2">
+      <DownloadZipButton files={snapshot} projectName={projectId} disabled={saving || disabled} />
+      <div className="flex flex-wrap gap-2">
+        <Button variant="outline" disabled={saving || disabled || undoStack.length === 0} onClick={undo} title="Ctrl+Z"><Undo2 aria-hidden="true" />Desfazer</Button>
+        <Button variant="outline" disabled={saving || disabled || redoStack.length === 0} onClick={redo} title="Ctrl+Shift+Z"><Redo2 aria-hidden="true" />Refazer</Button>
+        <Button variant="outline" disabled={saving || disabled} onClick={() => void reload()}>Recarregar arquivos</Button>
+        <Button disabled={!draft || saving || disabled || conflict} onClick={() => void save()}><Save aria-hidden="true" />{saving ? "Salvando..." : "Salvar revisão"}</Button>
+      </div>
     </div>
   </div>;
 }

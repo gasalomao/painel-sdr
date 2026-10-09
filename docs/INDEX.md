@@ -1,337 +1,477 @@
-# 📚 ÍNDICE MESTRE - IMPECCABLE EXCELLENCE
+# Documentação Completa — Vidrão Site Studio
 
-**Última atualização:** 09/10/2026 01:40  
-**Status:** ✅ Implementação completa e documentação consolidada
-
----
-
-## 🎯 COMEÇAR AQUI
-
-### Para Executivos / Product Managers
-1. **`FINAL_REPORT.md`** — Relatório executivo com ROI e métricas
-2. **`IMPECCABLE_EXCELLENCE_SUMMARY.md`** — Resumo técnico da implementação
-
-### Para Desenvolvedores (Implementação)
-1. **`IMPLEMENTATION_PLAN.md`** — Plano de 4 semanas com código TypeScript
-2. **`IMPECCABLE_IMPLEMENTATION_PLAN.md`** — Plano alternativo por fases
-3. **`IMPECCABLE_INTEGRATION_EXAMPLES.md`** — Código prático pronto para usar
-
-### Para QA / Design
-1. **`IMPECCABLE_FRAMEWORK_GUIDE.md`** — Guia completo do framework
-2. **`IMPECCABLE_QUICK_REFERENCE.md`** — Referência rápida de checklist
+**Última atualização:** 2026-10-09  
+**Status:** Diagnóstico completo → Pronto para implementação
 
 ---
 
-## 📖 DOCUMENTAÇÃO POR CATEGORIA
+## 📋 ÍNDICE DE DOCUMENTOS
 
-### 1️⃣ IMPLEMENTAÇÃO (O QUE FOI FEITO)
+### 1. Estado do Projeto
+**Arquivo:** [`PROJECT_STATE.md`](../PROJECT_STATE.md)  
+**Para quem:** Qualquer desenvolvedor retomando o projeto  
+**Conteúdo:**
+- Status atual (o que funciona, o que não funciona)
+- Decisões de arquitetura e por quê
+- Próximos passos obrigatórios
+- Mapa completo de arquivos
+- Comandos úteis
+- Logs e debugging
+- Autorizações e limites
 
-#### Relatórios Executivos
-- **`FINAL_REPORT.md`** (12 KB) ⭐️ COMEÇAR AQUI
-  - Status final: 42/42 testes passando
-  - Impacto: Impeccable 30% → 100%
-  - Próximos passos recomendados
-
-- **`IMPECCABLE_EXCELLENCE_SUMMARY.md`** (5 KB)
-  - Resumo técnico das 4 fases
-  - Métricas de sucesso
-  - Arquivos modificados
-
-#### Planos Detalhados
-- **`IMPLEMENTATION_PLAN.md`** (8 KB) ⭐️ REFERÊNCIA PRINCIPAL
-  - 4 fases implementadas (1.1, 1.2, 3.1, 3.2, 4.1)
-  - Código TypeScript completo
-  - Ordem de implementação
-  - Métricas de sucesso
-
-- **`IMPECCABLE_IMPLEMENTATION_PLAN.md`** (16 KB)
-  - Plano alternativo de 4 semanas
-  - Fase 1: Foundation
-  - Fase 2: Validation
-  - Fase 3: Refinement
-  - Fase 4: UI Integration
+**Quando ler:** SEMPRE - antes de qualquer trabalho no projeto
 
 ---
 
-### 2️⃣ ANÁLISE (POR QUE E COMO)
+### 2. Correção de Arquivos em Tempo Real
+**Arquivo:** [`docs/REALTIME_FILES_FIX.md`](./REALTIME_FILES_FIX.md)  
+**Para quem:** Desenvolvedor implementando a correção crítica  
+**Conteúdo:**
+- Diagnóstico completo da causa raiz
+- Fluxo atual vs fluxo corrigido
+- Solução proposta detalhada (Solução A)
+- Mudanças necessárias no código
+- Vantagens e desvantagens
+- Rollback e contingência
 
-#### Análises Profundas
-- **`IMPECCABLE_ANALYSIS.md`** (25 KB) ⭐️ ANÁLISE COMPLETA
-  - Filosofia do framework
-  - 4 camadas de validação
-  - Sistema de scoring 0-100
-  - Estratégia de integração em 3 fases
-
-- **`IMPECCABLE_DEEP_DIVE.md`** (19 KB)
-  - Mergulho profundo em conceitos
-  - Out-of-distribution craft
-  - Princípios fundamentais
-
-- **`IMPECCABLE_RELATORIO_EXECUTIVO.md`** (33 KB)
-  - Relatório completo do agente de análise
-  - 5 perguntas respondidas
-  - Roadmap de implementação
-
-#### Guias de Framework
-- **`IMPECCABLE_FRAMEWORK_GUIDE.md`** (28 KB) ⭐️ GUIA COMPLETO
-  - 24 comandos detalhados
-  - 59+ AI Slop Patterns
-  - PRODUCT.md e DESIGN.md estruturas
-  - 8 princípios de design para IA
-  - Checklist completo de qualidade
-
-- **`IMPECCABLE_QUICK_REFERENCE.md`** (8 KB) ⭐️ CONSULTA RÁPIDA
-  - Top 10 AI Tells
-  - Golden Rules
-  - Design System Template
-  - Checklists práticos
-  - Top 20 Detector Rules
-
-#### Exemplos Práticos
-- **`IMPECCABLE_INTEGRATION_EXAMPLES.md`** (29 KB) ⭐️ CÓDIGO PRÁTICO
-  - TypeScript pronto para usar
-  - Detector rules implementadas
-  - Quality scorer completo
-  - Exemplos before/after
-
-- **`IMPECCABLE_EXEMPLOS_PRATICOS.md`** (10 KB)
-  - Casos de uso reais
-  - Padrões de implementação
+**Quando ler:** Antes de implementar a correção de tempo real (tarefa prioritária)
 
 ---
 
-### 3️⃣ REFERÊNCIAS TÉCNICAS IMPECCABLE (11 arquivos)
+### 3. Guia Rápido de Implementação
+**Arquivo:** [`docs/REALTIME_FILES_QUICK_GUIDE.md`](./REALTIME_FILES_QUICK_GUIDE.md)  
+**Para quem:** Desenvolvedor executando a implementação  
+**Conteúdo:**
+- ✅ Checklist passo-a-passo (6 passos, 2-3h total)
+- ✅ Código exato para copiar/colar
+- ✅ Comandos de teste
+- ✅ Troubleshooting de problemas comuns
+- ✅ Diagrama de arquitetura visual
+- ✅ Validação e métricas de sucesso
 
-#### Comandos Principais
-- **`impeccable-SKILL.md`** (2 KB)
-  - Comandos do framework
-  - Quando usar cada um
-
-- **`impeccable-INDEX.md`** (3 KB)
-  - Índice de referências
-  - Estrutura do framework
-
-#### Fluxos de Trabalho
-- **`impeccable-new-work.md`** (61 KB) ⭐️ GUIA NOVOS TRABALHOS
-  - Fluxo completo de criação
-  - PRODUCT.md → DESIGN.md → Implementation
-  - Exemplos detalhados
-
-- **`impeccable-generate.md`** (15 KB)
-  - Processo de geração
-  - Templates e padrões
-
-- **`impeccable-init.md`** (8 KB)
-  - Inicialização de projetos
-  - Setup inicial
-
-#### Qualidade e Refinamento
-- **`impeccable-audit.md`** (12 KB) ⭐️ FRAMEWORK DE AUDITORIA
-  - 4 camadas de validação
-  - Scoring system
-  - Thresholds
-
-- **`impeccable-critique.md`** (45 KB) ⭐️ PROCESSO DE CRÍTICA UX
-  - 8 dimensões obrigatórias
-  - Guidelines de avaliação
-  - Exemplos de feedback
-
-- **`impeccable-polish.md`** (10 KB)
-  - Refinamento final
-  - Estados completos
-  - Detalhes que importam
-
-#### Fundamentos
-- **`impeccable-craft-floor.md`** (20 KB) ⭐️ CRAFT FLOOR
-  - 59+ AI Slop Patterns
-  - Anti-patterns explicados
-  - Padrões obrigatórios
-
-- **`impeccable-ANALYSIS.md`** (8 KB)
-  - Análise estrutural
-  - Decisões de design
-
-- **`impeccable-EXECUTIVE-SUMMARY.md`** (5 KB)
-  - Sumário executivo do framework
-  - Visão geral consolidada
+**Quando ler:** Durante a implementação (seguir passo-a-passo)
 
 ---
 
-### 4️⃣ ANÁLISES COMPLEMENTARES
+### 4. Design de Observabilidade
+**Arquivo:** [`docs/OBSERVABILITY_DESIGN.md`](./OBSERVABILITY_DESIGN.md)  
+**Para quem:** Desenvolvedor implementando transparência completa  
+**Conteúdo:**
+- 💭 Pensamento da IA (Chain-of-Thought)
+- 🔧 Skills e ferramentas ativas
+- 📝 Diffs de código em tempo real
+- Layout completo da UI
+- Priorização (Fase 1, 2, 3)
+- Eventos system padronizados
 
-#### Preview & Validação
-- **`SITE_PREVIEW_ANALYSIS.md`** (15 KB)
-  - Análise do sistema de preview
-  - Validação visual
-
-- **`SITE_PREVIEW_SUMMARY.md`** (8 KB)
-  - Sumário de preview
-  - Casos de uso
-
-- **`PREVIEW_VALIDATION_GUIDE.md`** (10 KB)
-  - Guia de validação
-  - Checklist de QA
-
-#### Qualidade Geral
-- **`SITE_STUDIO_QUALITY_ANALYSIS.md`** (12 KB)
-  - Análise de qualidade do Site Studio
-  - Áreas de melhoria
+**Quando ler:** Após correção de arquivos, antes de implementar observabilidade
 
 ---
 
-## 🗂️ ORGANIZAÇÃO POR CASO DE USO
+### 5. Arquitetura Técnica
+**Arquivo:** [`docs/ARCHITECTURE.md`](./ARCHITECTURE.md)  
+**Para quem:** Arquiteto ou desenvolvedor precisando entender o sistema  
+**Conteúdo:**
+- Arquitetura geral do sistema (diagramas ASCII)
+- Fluxo de dados completo (sequência)
+- Anatomia de eventos SSE
+- Modelo de dados (SQL)
+- Checkpoint structure
+- Segurança e permissões (RLS)
+- Escalabilidade e performance
+- Monitoramento
 
-### 📋 "Preciso entender o que foi feito"
-1. `FINAL_REPORT.md` (overview completo)
-2. `IMPECCABLE_EXCELLENCE_SUMMARY.md` (detalhes técnicos)
-3. `IMPLEMENTATION_PLAN.md` (cada fase explicada)
-
-### 💻 "Preciso implementar no código"
-1. `IMPECCABLE_INTEGRATION_EXAMPLES.md` (código TypeScript pronto)
-2. `IMPLEMENTATION_PLAN.md` (onde modificar cada arquivo)
-3. `IMPECCABLE_IMPLEMENTATION_PLAN.md` (plano de 4 semanas)
-
-### 📚 "Preciso entender o framework Impeccable"
-1. `IMPECCABLE_QUICK_REFERENCE.md` (overview rápido)
-2. `IMPECCABLE_FRAMEWORK_GUIDE.md` (guia completo)
-3. `impeccable-craft-floor.md` (59+ anti-patterns)
-4. `impeccable-new-work.md` (fluxo completo)
-
-### 🎨 "Preciso criar design direction"
-1. `IMPECCABLE_FRAMEWORK_GUIDE.md` → seção PRODUCT.md e DESIGN.md
-2. `impeccable-new-work.md` → exemplos práticos
-3. `IMPECCABLE_QUICK_REFERENCE.md` → design system template
-
-### ✅ "Preciso validar qualidade"
-1. `impeccable-audit.md` (framework de auditoria)
-2. `impeccable-critique.md` (8 dimensões)
-3. `IMPECCABLE_FRAMEWORK_GUIDE.md` → checklist completo
-
-### 🔧 "Preciso configurar quality checker"
-1. `IMPLEMENTATION_PLAN.md` → Fase 4.1
-2. Ver código em `src/lib/sites/quality-checker.ts`
-3. Ver testes em `src/lib/sites/__tests__/quality-checker.test.ts`
+**Quando ler:** Para entendimento profundo do sistema
 
 ---
 
-## 📊 ESTATÍSTICAS DA DOCUMENTAÇÃO
+## 🚀 INÍCIO RÁPIDO
 
-### Por Categoria
-- **Implementação:** 7 arquivos (~85 KB)
-- **Análise:** 7 arquivos (~150 KB)
-- **Referências Técnicas:** 11 arquivos (~200 KB)
-- **Complementares:** 4 arquivos (~45 KB)
+### Para Continuar o Projeto
 
-**Total:** 29 arquivos, ~480 KB de documentação
+1. **Ler estado atual (5 min):**
+   ```bash
+   cat PROJECT_STATE.md
+   # Especialmente seção 8: RESUMO EXECUTIVO
+   ```
 
-### Por Audiência
-- **Executivos:** 4 documentos (~60 KB)
-- **Desenvolvedores:** 8 documentos (~120 KB)
-- **QA/Design:** 6 documentos (~90 KB)
-- **Referência:** 11 documentos (~210 KB)
+2. **Validar ambiente (2 min):**
+   ```powershell
+   npm test                      # Deve: 1607 passar
+   npm run sites:test-preview    # Deve: 36 passar
+   npx tsc --noEmit              # Deve: zero erros
+   ```
 
-### Qualidade
-- ✅ **42/42 testes passando** (código)
-- ✅ **100% coverage** de conceitos
-- ✅ **Código TypeScript pronto** para copiar
-- ✅ **Exemplos práticos** em todos os guias
+3. **Seguir guia de implementação (2-3h):**
+   ```bash
+   cat docs/REALTIME_FILES_QUICK_GUIDE.md
+   # Seguir checklist de 6 passos
+   ```
 
----
+4. **Testar correção (30 min):**
+   - Cenário 1: Criar site novo
+   - Cenário 2: Editar site existente
+   - Cenário 3: Múltiplos arquivos
+   - Cenário 4: Erro/interrupção
 
-## 🚀 ROADMAP DE LEITURA RECOMENDADO
-
-### Dia 1: Visão Geral (30 min)
-1. `FINAL_REPORT.md` (10 min)
-2. `IMPECCABLE_QUICK_REFERENCE.md` (10 min)
-3. `IMPECCABLE_EXCELLENCE_SUMMARY.md` (10 min)
-
-### Dia 2: Análise Profunda (2h)
-1. `IMPECCABLE_ANALYSIS.md` (45 min)
-2. `IMPECCABLE_FRAMEWORK_GUIDE.md` (60 min)
-3. `impeccable-craft-floor.md` (15 min)
-
-### Dia 3: Implementação (3h)
-1. `IMPLEMENTATION_PLAN.md` (30 min)
-2. `IMPECCABLE_INTEGRATION_EXAMPLES.md` (90 min)
-3. `IMPECCABLE_IMPLEMENTATION_PLAN.md` (60 min)
-
-### Dia 4: Validação e QA (2h)
-1. `impeccable-audit.md` (45 min)
-2. `impeccable-critique.md` (60 min)
-3. Ver testes em `__tests__/quality-checker.test.ts` (15 min)
-
-### Dia 5: Prática (4h)
-1. Implementar Fase 1 do plano
-2. Rodar testes
-3. Validar primeiro site
+5. **Próximas fases:**
+   - Observabilidade completa (4-6h)
+   - Protocolo de continuidade (2-3h)
+   - Otimizações (4-8h)
 
 ---
 
-## 🎯 PRÓXIMOS PASSOS ACIONÁVEIS
+## 🎯 PROBLEMA CRÍTICO ATUAL
 
-### Curto Prazo (Esta Semana)
-1. ✅ **Ler documentação principal** (Dias 1-2)
-2. ⏳ **Aprovar plano de implementação**
-3. ⏳ **Integrar quality checker no loop** (código já pronto)
-4. ⏳ **Testar com 5 sites reais**
+### O Que Não Funciona
 
-### Médio Prazo (Próximas 2 Semanas)
-5. ⏳ **Implementar Fase 2.1** (compactação design-aware)
-6. ⏳ **Implementar Fase 2.2** (relaxar validator)
-7. ⏳ **Dashboard de métricas** (score médio, aprovação, etc)
+**Arquivos não aparecem em tempo real durante geração de código pela IA.**
 
-### Longo Prazo (Próximo Mês)
-8. ⏳ **A/B testing** (sites com vs sem Impeccable)
-9. ⏳ **Machine learning** para detectar "cara de IA"
-10. ⏳ **Feedback loop contínuo** (refinar baseado em falhas)
+**Sintomas:**
+- ❌ Árvore de arquivos só atualiza a cada 3-5 segundos (polling)
+- ❌ Editor não mostra código sendo injetado ao vivo
+- ❌ Usuário não vê progresso em tempo real
+
+**Causa Raiz:**
+- Worker salva eventos em `website_messages` mas não em `website_run_activities`
+- UI escuta `activities` via SSE, mas tool events não chegam lá
+- Checkpoint só é salvo no final, não incrementalmente
+
+**Impacto:**
+- Experiência degradada vs Lovable/Claude Code
+- Percepção de "travamento" durante geração
+- Difícil debugar quando algo falha
 
 ---
 
-## 📞 SUPORTE
+## ✅ SOLUÇÃO PROPOSTA
 
-### Documentação Principal
-- **Overview:** `FINAL_REPORT.md`
-- **Técnico:** `IMPLEMENTATION_PLAN.md`
-- **Framework:** `IMPECCABLE_FRAMEWORK_GUIDE.md`
-- **Referência:** `IMPECCABLE_QUICK_REFERENCE.md`
+### Resumo Executivo
 
-### Código
-- **Quality Checker:** `src/lib/sites/quality-checker.ts`
-- **Testes:** `src/lib/sites/__tests__/quality-checker.test.ts`
-- **Prompts:** `src/lib/sites/prompts.ts`
-- **Impeccable:** `src/lib/sites/impeccable.ts`
+**Abordagem:** Reutilizar sistema SSE existente (já testado e funcionando)
 
-### Comandos Úteis
-```bash
-# Rodar todos os testes
-npm test
+**Mudanças necessárias:**
+1. Worker emite `website_run_activities` para cada tool call (15 linhas)
+2. UI escuta SSE e busca checkpoint atualizado (30 linhas)
+3. Agent salva checkpoint após write/create/patch (10 linhas)
 
-# Quality checker apenas
-npm test -- src/lib/sites/__tests__/quality-checker.test.ts
+**Esforço:** 2-3 horas implementação + 30 min testes
 
-# Com coverage
-npm test -- --coverage
+**Resultado esperado:**
+- ✅ Latência <500ms (vs 3-5s antes)
+- ✅ Arquivos aparecem em tempo real
+- ✅ Experiência no nível Lovable/Claude Code
 
-# Dev mode
-npm run dev
+**Riscos:** Baixo - não requer nova infraestrutura
+
+---
+
+## 📊 ESTADO DOS TESTES
+
+### Cobertura Atual
+
+```
+Testes Unitários:  1607 passando (84% coverage)
+Testes Browser:    36 passando (Playwright)
+TypeScript:        Zero erros (strict mode)
+Lint:              Limpo (warnings OK)
+```
+
+### Cobertura Detalhada
+
+```
+src/lib/sites/:
+  Linhas:       84.00%
+  Statements:   84.00%
+  Branches:     85.19%
+  Funções:      89.13%
+```
+
+**Nota:** Componentes React, páginas Next.js e API routes NÃO estão incluídos nessa cobertura. Foco está na lógica de negócio (lib/sites).
+
+---
+
+## 🗺️ MAPA DO PROJETO
+
+### Estrutura Principal
+
+```
+painel-sdr-main/
+├── PROJECT_STATE.md              ← Estado completo do projeto
+├── docs/
+│   ├── REALTIME_FILES_FIX.md     ← Análise técnica da correção
+│   ├── REALTIME_FILES_QUICK_GUIDE.md ← Guia passo-a-passo
+│   ├── OBSERVABILITY_DESIGN.md   ← Design de transparência
+│   ├── ARCHITECTURE.md           ← Diagramas e arquitetura
+│   └── INDEX.md                  ← Este arquivo
+├── src/
+│   ├── lib/sites/                ← Core do Site Studio
+│   │   ├── agent.ts              ← Runtime do agente IA
+│   │   ├── tools.ts              ← Ferramentas (read/write/patch)
+│   │   ├── worker.ts             ← Worker BullMQ
+│   │   ├── run-checkpoint.ts     ← Serialização de estado
+│   │   └── repository.ts         ← Acesso ao DB
+│   ├── app/api/sites/            ← API routes Next.js
+│   │   ├── [projectId]/
+│   │   │   ├── messages/         ← GET histórico chat
+│   │   │   ├── files/            ← GET checkpoint, PUT edição
+│   │   │   └── runs/             ← POST nova run
+│   │   └── runs/[runId]/
+│   │       └── activities/       ← SSE stream de eventos
+│   └── components/sites/         ← UI React
+│       ├── site-chat.tsx         ← Chat interface
+│       ├── site-files-panel.tsx  ← Árvore de arquivos
+│       └── site-preview.tsx      ← Preview iframe
+├── scripts/
+│   ├── site-preview.browser.ts   ← Testes Playwright (36)
+│   └── test-site-creation.ts     ← Teste criação completa
+└── migrations/
+    └── 016_website_studio.sql    ← Schema do Site Studio
+```
+
+### Arquivos Críticos
+
+| Arquivo | Responsabilidade | Modificar para correção? |
+|---------|------------------|--------------------------|
+| `src/lib/sites/worker.ts` | Worker BullMQ, emite eventos | ✅ SIM (linha 71) |
+| `src/lib/sites/agent.ts` | Runtime IA, executa tools | ✅ SIM (checkpoint incremental) |
+| `src/components/sites/site-files-panel.tsx` | Árvore de arquivos UI | ✅ SIM (escutar SSE) |
+| `src/app/api/sites/runs/[runId]/activities/route.ts` | SSE endpoint | ❌ Não (já funciona) |
+| `src/lib/sites/tools.ts` | Implementação de ferramentas | ❌ Não |
+| `src/lib/sites/repository.ts` | Queries SQL | ❌ Não |
+
+---
+
+## 🔑 CONCEITOS-CHAVE
+
+### Checkpoint
+Estado completo do workspace IA (arquivos + progresso + orçamento). Salvo incrementalmente para permitir recuperação após falhas ou troca de modelos.
+
+### Activity
+Evento em tempo real (tool call, thinking, validation). Inserido em `website_run_activities` e transmitido via SSE para a UI.
+
+### SSE (Server-Sent Events)
+Protocolo HTTP para push unidirecional servidor → cliente. Usado para transmitir activities em tempo real. Reconecta automaticamente.
+
+### Tool Call
+Quando IA chama uma ferramenta (write, create, patch, etc). Cada call gera 2 activities: "started" e "completed" (ou "error").
+
+### RLS (Row Level Security)
+Política PostgreSQL que filtra automaticamente queries por `client_id = user.id`. Garante isolamento multi-tenant.
+
+### Worker
+Processo BullMQ que executa runs de IA em background. Isolado do servidor Next.js. Comunica via DB (events + checkpoint).
+
+---
+
+## ⚠️ LIMITAÇÕES CONHECIDAS
+
+### Infraestrutura
+- ❌ E2B quota: 0/3 usados (build isolado não configurado em prod)
+- ❌ Preview: CRA bootstrap (não Nodebox/Vite ainda)
+- ❌ 9 vulnerabilidades npm audit não resolvidas
+
+### Modelos IA
+- ✅ Cohere/north-mini-code:free - APROVADO (edição)
+- ❌ NVIDIA Nemotron - NÃO APROVADO (3 falhas)
+- ⚠️ Outros modelos gratuitos - não testados ainda
+
+### Features Pendentes
+- 🔲 Thinking panel (Chain-of-Thought visual)
+- 🔲 Skills badge (indicador visual)
+- 🔲 Code diff viewer (Monaco side-by-side)
+- 🔲 Continuidade entre modelos (protocolo)
+- 🔲 Edições cirúrgicas otimizadas (diff editing)
+
+---
+
+## 🛠️ COMANDOS ÚTEIS
+
+### Desenvolvimento
+```powershell
+npm run dev                       # Next.js dev server
+npm run sites:worker              # Worker BullMQ isolado
+```
+
+### Testes
+```powershell
+npm test                          # Todos (1607 unit)
+npm run sites:test-preview        # Browser (36 Playwright)
+npx tsc --noEmit --incremental false  # TypeCheck
+npm run lint                      # ESLint (pode falhar em worktrees)
+git diff --check                  # Whitespace check
+```
+
+### Build
+```powershell
+npm run build                     # Build SQL + Next.js
+```
+
+### Debug
+```powershell
+# Monitorar SSE
+curl -N "http://localhost:3000/api/sites/runs/<runId>/activities?stream=true"
+
+# Ver checkpoint
+curl "http://localhost:3000/api/sites/<projectId>/files?run_id=<runId>"
+
+# Logs do worker
+npm run sites:worker | grep "file_"
 ```
 
 ---
 
-## ✨ CONCLUSÃO
+## 📞 SUPORTE E RECURSOS
 
-**Status:** 🟢 PRONTO PARA PRODUÇÃO
+### Documentação Oficial
+- **Next.js 16:** `node_modules/next/dist/docs/` (breaking changes!)
+- **Supabase:** https://supabase.com/docs
+- **BullMQ:** https://docs.bullmq.io/
+- **Playwright:** https://playwright.dev/
 
-- ✅ **Implementação completa** (4 fases)
-- ✅ **42/42 testes passando**
-- ✅ **29 documentos** (~480 KB)
-- ✅ **Código TypeScript pronto** para usar
-- ✅ **Commits:** 77f17ef + c0e8e31
+### Troubleshooting
+1. **Testes falhando:** Ver `docs/REALTIME_FILES_QUICK_GUIDE.md` seção Troubleshooting
+2. **SSE não conecta:** Verificar auth + Supabase Realtime habilitado
+3. **Worker não processa:** Verificar Redis (ou degradation mode ativado)
+4. **Build falha:** Verificar TypeScript errors primeiro
 
-**Próxima ação:** Ler `FINAL_REPORT.md` e aprovar integração do quality checker.
+### Git
+- **Branch:** `main` (trabalho em andamento, não commitar sem aprovação)
+- **Diffs:** Extensos, intencionais (progresso salvo localmente)
+- **Worktrees:** Não usar - implementação deve ser na árvore original
 
 ---
 
-**Última atualização:** 09/10/2026 01:40  
-**Desenvolvido por:** Claude Code  
-**Versão:** 1.0.0
+## 🎯 PRÓXIMOS MARCOS
+
+### Marco 1: Arquivos em Tempo Real ✅ (Documentado)
+- ✅ Diagnóstico completo
+- ✅ Solução desenhada
+- ✅ Guia de implementação
+- 🔲 Implementação (2-3h)
+- 🔲 Validação (30min)
+
+### Marco 2: Observabilidade Completa 🔲
+- 🔲 Thinking panel
+- 🔲 Skills badge
+- 🔲 Code diff viewer
+- 🔲 Timeline visual
+
+### Marco 3: Continuidade Entre Modelos 🔲
+- 🔲 Protocolo de handoff
+- 🔲 Auto-retomada
+- 🔲 Testes com modelos gratuitos
+
+### Marco 4: Otimizações 🔲
+- 🔲 Checkpoint diff
+- 🔲 WebSocket bidirecional
+- 🔲 Edições cirúrgicas
+- 🔲 CDN para assets
+
+---
+
+## 📈 MÉTRICAS DE SUCESSO
+
+### Antes (Atual)
+- 🐌 Latência: 3-5 segundos
+- 📊 Transparência: 0% (caixa preta)
+- 🔍 Debug: Difícil
+- 😕 Satisfação: Baixa
+
+### Depois (Meta - Marco 1)
+- ⚡ Latência: <500ms
+- 📊 Transparência: 50% (arquivos visíveis)
+- 🔍 Debug: Fácil (logs estruturados)
+- 😊 Satisfação: Média
+
+### Depois (Meta - Marco 2)
+- ⚡ Latência: <500ms
+- 📊 Transparência: 100% (thinking + diffs + skills)
+- 🔍 Debug: Trivial (timeline visual)
+- 😍 Satisfação: Alta
+
+---
+
+## 🔐 SEGURANÇA
+
+### Já Implementado
+- ✅ RLS em todas as tabelas
+- ✅ JWT auth via Supabase
+- ✅ Worker isolado (não acessa cross-tenant)
+- ✅ Preview isolado (origin diferente + shadow DOM)
+- ✅ Validação de input em tools
+- ✅ Secrets via env vars (não commitados)
+
+### Verificar Antes de Publicar
+- [ ] Audit vulnerabilities resolvidas
+- [ ] HTTPS em produção
+- [ ] Rate limiting em APIs
+- [ ] CORS configurado corretamente
+- [ ] Logs não contêm secrets
+- [ ] Realtime auth testada
+
+---
+
+## 📝 CONVENÇÕES DE CÓDIGO
+
+### TypeScript
+- Tipos explícitos em funções exportadas
+- Sem `any` (usar `unknown` e narrow)
+- Validação Zod para input externo
+- Imutabilidade (criar novo objeto, não mutar)
+
+### React
+- Server Components por padrão
+- `"use client"` só onde necessário
+- Props com interface nomeada
+- Sem `React.FC`
+
+### Português
+- Textos de UI em português
+- Mensagens de erro em português
+- Logs internos em inglês (opcional)
+
+---
+
+## ✨ CRÉDITOS
+
+**Inspiração:**
+- Lovable (https://lovable.ai)
+- Claude Code (Anthropic)
+- Cursor (https://cursor.sh)
+
+**Stack:**
+- Next.js 16 (Vercel)
+- Supabase (PostgreSQL + Realtime)
+- BullMQ (Taskforce.sh)
+- OpenRouter (IA)
+
+**Projeto:** Vidrão Site Studio  
+**Status:** Em desenvolvimento ativo  
+**Última atualização:** 2026-10-09
+
+---
+
+## 🚀 COMEÇAR AGORA
+
+```powershell
+# 1. Validar ambiente
+npm test
+npm run sites:test-preview
+
+# 2. Ler estado
+cat PROJECT_STATE.md
+
+# 3. Implementar correção
+cat docs/REALTIME_FILES_QUICK_GUIDE.md
+# Seguir checklist de 6 passos
+
+# 4. Testar
+npm run dev
+npm run sites:worker
+# Criar site, ver arquivos em tempo real
+
+# 5. Celebrar 🎉
+```
+
+**Boa sorte!** 🚀

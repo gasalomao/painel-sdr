@@ -83,6 +83,14 @@ export function parseSystemEvent(content: string): string {
     }
     const call = record(event.model_call);
     const model = typeof call.model === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_./:@+-]{0,159}$/.test(call.model) ? call.model : "";
+
+    // Rejeita model_call se o modelo for inválido ou status não for reconhecido
+    if (event.model_call && typeof event.model_call === "object") {
+      if (!model || !["started", "completed", "failed"].includes(String(call.status))) {
+        return "⚙️ Operação interna em andamento...";
+      }
+    }
+
     const modelLabel = model ? ` (${model})` : "";
 
     if (call.status === "started") {
@@ -136,7 +144,7 @@ export function parseSystemEvent(content: string): string {
       if (validation.status === "failed" || validation.success === false || record(validation.qa).passed === false) {
         return errorCount > 0
           ? `🔧 Build identificou ${errorCount} problema(s) que precisam ser corrigidos${counts}`
-          : `⚠️ Ajustes necessários${counts}`;
+          : `⚠️ A validação identificou ajustes necessários.`;
       }
 
       return validation.success === true

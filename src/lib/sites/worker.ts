@@ -70,8 +70,43 @@ export function createWebsiteAgentDependencies(db: SupabaseClient, workerId: str
   };
   const event: WebsiteAgentDependencies["event"] = async (run, message) => {
     await check(run);
+
+    // Salvar em messages (histórico)
     const { error } = await db.from("website_messages").insert({ client_id: run.client_id, project_id: run.project_id, run_id: run.id, ...message });
     databaseError(error);
+
+    // ✅ NOVO: Emitir activity para eventos de tool
+    if (message.role === "system") {
+      try {
+        const content = JSON.parse(String(message.content));
+
+        if (content.tool && ["write", "create", "patch", "delete", "rename"].includes(content.tool)) {
+          const activityType = `file_${content.tool}`;
+          const activityMessage = content.path ? `${content.tool}: ${content.path}` : content.tool;
+
+          const { error: actError } = await db.from("website_run_activities").insert({
+            run_id: run.id,
+            type: activityType,
+            message: activityMessage,
+            status: content.status || "completed",
+            details: content,
+            duration_ms: content.duration || null,
+            created_at: new Date().toISOString()
+          });
+
+          if (actError) {
+            console.error("[worker] Failed to insert activity:", {
+              run_id: run.id,
+              tool: content.tool,
+              path: content.path,
+              error: actError.message
+            });
+          }
+        }
+      } catch {
+        // Não é JSON ou não tem tool, ignorar silenciosamente
+      }
+    }
   };
   return {
     check, event,

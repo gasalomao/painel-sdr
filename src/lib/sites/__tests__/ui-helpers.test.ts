@@ -31,13 +31,13 @@ describe("ui-helpers", () => {
   afterEach(() => vi.useRealTimers());
 
   it("rotula os estados conforme o contrato visual", () => {
-    expect(runStatusLabel("queued")).toBe("Na fila...");
-    expect(runStatusLabel("planning")).toBe("Pensando...");
-    expect(runStatusLabel("editing")).toBe("Criando e editando arquivos...");
-    expect(runStatusLabel("validating")).toBe("Validando o site...");
-    expect(runStatusLabel("completed")).toBe("Concluída");
-    expect(runStatusLabel("failed")).toBe("Falhou");
-    expect(runStatusLabel("cancelled")).toBe("Cancelada");
+    expect(runStatusLabel("queued")).toBe("⏳ Aguardando na fila (worker vai processar em breve)...");
+    expect(runStatusLabel("planning")).toBe("🧠 Analisando requisitos e planejando estrutura...");
+    expect(runStatusLabel("editing")).toBe("✏️ Criando código, componentes e estilos...");
+    expect(runStatusLabel("validating")).toBe("🔨 Testando build e renderização do site...");
+    expect(runStatusLabel("completed")).toBe("✅ Site concluído e pronto");
+    expect(runStatusLabel("failed")).toBe("❌ Falhou (veja os logs para detalhes)");
+    expect(runStatusLabel("cancelled")).toBe("🛑 Cancelado pelo usuário");
     expect(projectStatusLabel("draft")).toBe("Rascunho");
     expect(projectStatusLabel("published")).toBe("Publicado");
     expect(projectStatusLabel("archived")).toBe("Arquivado");
@@ -57,84 +57,84 @@ describe("ui-helpers", () => {
   });
 
   it("resume os eventos reais sem exibir instruções, logs ou erros técnicos", () => {
-    expect(parseSystemEvent(JSON.stringify({ checkpoint: "initial", revision_id: "rev-1", files: ["src/App.tsx"] }))).toBe("Ponto de restauração salvo.");
-    expect(parseSystemEvent(JSON.stringify({ active_skills: ["Anti-AI", "Design Profissional"] }))).toBe("Skills ativas: Anti-AI · Design Profissional");
-    expect(parseSystemEvent(JSON.stringify({ vision_assets: ["a", "b"] }))).toBe("2 imagem(ns) preparada(s) para análise.");
-    expect(parseSystemEvent(JSON.stringify({ validation: { success: true, qa: { passed: true } } }))).toBe("Validação técnica concluída com sucesso.");
-    expect(parseSystemEvent(JSON.stringify({ validation: { success: true, qa: { passed: false } } }))).toBe("A validação identificou ajustes necessários.");
-    expect(parseSystemEvent(JSON.stringify({ usage: { totalTokens: 15 } }))).toBe("Uso do modelo registrado.");
-    expect(parseSystemEvent(JSON.stringify({ role: "tool", content: JSON.stringify({ saved: "src/App.tsx" }) }))).toBe("Arquivo atualizado: src/App.tsx");
+    expect(parseSystemEvent(JSON.stringify({ checkpoint: "initial", revision_id: "rev-1", files: ["src/App.tsx"] }))).toBe("💾 Ponto de restauração salvo (você pode voltar aqui depois)");
+    expect(parseSystemEvent(JSON.stringify({ active_skills: ["Anti-AI", "Design Profissional"] }))).toBe("✨ Skills ativas: Anti-AI · Design Profissional — melhorias na qualidade e design");
+    expect(parseSystemEvent(JSON.stringify({ vision_assets: ["a", "b"] }))).toBe("🖼️ Analisando 2 imagens enviadas (logos, fotos ou referências visuais)");
+    expect(parseSystemEvent(JSON.stringify({ validation: { success: true, qa: { passed: true } } }))).toBe("✅ Build OK! Site funcionando corretamente");
+    expect(parseSystemEvent(JSON.stringify({ validation: { success: true, qa: { passed: false } } }))).toBe("⚠️ A validação identificou ajustes necessários.");
+    expect(parseSystemEvent(JSON.stringify({ usage: { totalTokens: 15 } }))).toBe("📊 Uso registrado: 15 tokens");
+    expect(parseSystemEvent(JSON.stringify({ role: "tool", content: JSON.stringify({ saved: "src/App.tsx" }) }))).toBe("💾 Arquivo salvo: src/App.tsx");
     expect(parseSystemEvent(JSON.stringify({ role: "tool", content: JSON.stringify({ error: "stacktrace privado" }) }))).not.toContain("stacktrace");
     for (const value of ["REGRAS IMUTÁVEIS DO SITE STUDIO", "{JSON incompleto", "[\"segredo\"]", "null"]) {
-      expect(parseSystemEvent(value)).toBe("Atividade interna do agente registrada.");
+      expect(parseSystemEvent(value)).toBe("⚙️ Operação interna em andamento...");
     }
-    expect(parseSystemEvent("Execução cancelada.")).toBe("Execução cancelada.");
-    expect(parseSystemEvent("READY — AWAITING CREDENTIALS")).toContain("Integração não configurada");
+    expect(parseSystemEvent("Execução cancelada.")).toBe("🛑 Execução cancelada pelo usuário");
+    expect(parseSystemEvent("READY — AWAITING CREDENTIALS")).toBe("🔑 Aguardando configuração de credenciais — ver Configurações");
   });
 
   it.each([
-    ["started", "consulta iniciada; aguardando resposta"],
-    ["completed", "resposta recebida"],
-    ["failed", "falha na consulta"],
+    ["started", "🤖 IA processando (gateway:provider/model)... (aguardando resposta)"],
+    ["completed", "✅ IA respondeu (gateway:provider/model)"],
+    ["failed", "⚠️ Falha temporária no modelo (gateway:provider/model) — tentando alternativa..."],
   ])("mostra modelo e estado da consulta %s sem expor o pedido", (status, label) => {
     expect(parseSystemEvent(JSON.stringify({
       model_call: { model: "gateway:provider/model", status }, prompt: "pedido privado", arguments: "segredo",
-    }))).toBe(`Modelo gateway:provider/model: ${label}.`);
+    }))).toBe(label);
   });
 
   it.each([
-    ["list", "Listando arquivos", "Arquivos listados"],
-    ["read", "Lendo arquivo", "Leitura de arquivo concluída"],
-    ["read_files", "Lendo arquivos", "Leitura de arquivos concluída"],
-    ["create", "Criando arquivo", "Arquivo criado"],
-    ["write", "Atualizando arquivo", "Arquivo atualizado"],
-    ["patch", "Editando arquivo", "Arquivo editado"],
-    ["delete", "Excluindo arquivo", "Arquivo excluído"],
-    ["rename", "Renomeando arquivo", "Arquivo renomeado"],
-    ["search", "Buscando nos arquivos", "Busca nos arquivos concluída"],
-    ["get_context", "Consultando informações confirmadas", "Informações confirmadas consultadas"],
-    ["assets", "Consultando imagens e anexos", "Imagens e anexos consultados"],
-    ["checkpoint", "Salvando ponto de restauração", "Ponto de restauração salvo"],
-    ["restore", "Recuperando ponto de restauração", "Ponto de restauração recuperado"],
-    ["run_validation", "Verificando estrutura e conteúdo", "Verificação estática concluída"],
+    ["list", "📂 Explorando estrutura de arquivos do projeto", "✅ Estrutura mapeada"],
+    ["read", "📄 Abrindo arquivo para leitura", "✅ Arquivo lido"],
+    ["read_files", "📚 Carregando múltiplos arquivos", "✅ Arquivos carregados"],
+    ["create", "✨ Criando novo arquivo", "✅ Arquivo criado"],
+    ["write", "💾 Salvando alterações", "✅ Alterações salvas"],
+    ["patch", "✏️ Aplicando edições pontuais", "✅ Edições aplicadas"],
+    ["delete", "🗑️ Removendo arquivo", "✅ Arquivo removido"],
+    ["rename", "📝 Renomeando arquivo", "✅ Arquivo renomeado"],
+    ["search", "🔍 Buscando padrões no código", "✅ Busca concluída"],
+    ["get_context", "🎯 Carregando contexto do cliente e projeto", "✅ Contexto carregado"],
+    ["assets", "🖼️ Verificando imagens e assets disponíveis", "✅ Assets carregados"],
+    ["checkpoint", "💾 Salvando ponto de restauração (pode voltar aqui depois)", "✅ Checkpoint salvo"],
+    ["restore", "⏮️ Voltando para checkpoint anterior", "✅ Checkpoint restaurado"],
+    ["run_validation", "🔬 Analisando código gerado (estrutura, imports, sintaxe)", "✅ Análise estática completa"],
   ])("traduz início e término da ferramenta %s", (tool, started, completed) => {
-    expect(parseSystemEvent(JSON.stringify({ tool, status: "started", path: "src/App.tsx", arguments: { content: "fonte privada" } }))).toBe(`${started}: src/App.tsx...`);
-    expect(parseSystemEvent(JSON.stringify({ tool, result: JSON.stringify({ saved: "src/App.tsx", content: "fonte privada" }) }))).toBe(`${completed}: src/App.tsx.`);
-    expect(parseSystemEvent(JSON.stringify({ tool, result: {} }))).toBe(`${completed}.`);
+    expect(parseSystemEvent(JSON.stringify({ tool, status: "started", path: "src/App.tsx", arguments: { content: "fonte privada" } }))).toBe(`${started}: src/App.tsx`);
+    expect(parseSystemEvent(JSON.stringify({ tool, result: JSON.stringify({ saved: "src/App.tsx", content: "fonte privada" }) }))).toBe(`${completed}: src/App.tsx`);
+    expect(parseSystemEvent(JSON.stringify({ tool, result: {} }))).toBe(completed);
   });
 
   it("resume resultados serializados e objetos, falhas e verificação estática", () => {
-    expect(parseSystemEvent(JSON.stringify({ tool: "write", result: { saved: "public/style.css" } }))).toBe("Arquivo atualizado: public/style.css.");
-    expect(parseSystemEvent(JSON.stringify({ tool: "read", result: '{"read":128}' }))).toBe("Leitura de arquivo concluída.");
-    expect(parseSystemEvent(JSON.stringify({ tool: "patch", result: '{"error":"segredo"}' }))).toBe("Não foi possível concluir uma operação do agente.");
-    expect(parseSystemEvent(JSON.stringify({ tool: "run_validation", result: { passed: true } }))).toBe("Verificação estática aprovada; renderização ainda não verificada.");
-    expect(parseSystemEvent(JSON.stringify({ tool: "run_validation", result: '{"passed":false,"errors":["fonte privada"]}' }))).toBe("Verificação estática requer ajustes.");
+    expect(parseSystemEvent(JSON.stringify({ tool: "write", result: { saved: "public/style.css" } }))).toBe("✅ Alterações salvas: public/style.css");
+    expect(parseSystemEvent(JSON.stringify({ tool: "read", result: '{"read":128}' }))).toBe("✅ Arquivo lido");
+    expect(parseSystemEvent(JSON.stringify({ tool: "patch", result: '{"error":"segredo"}' }))).toBe("❌ Operação falhou — tentando recuperar...");
+    expect(parseSystemEvent(JSON.stringify({ tool: "run_validation", result: { passed: true } }))).toBe("✅ Código válido — estrutura OK");
+    expect(parseSystemEvent(JSON.stringify({ tool: "run_validation", result: '{"passed":false,"errors":["fonte privada"]}' }))).toBe("⚠️ Código requer ajustes — corrigindo...");
   });
 
   it("não confunde validação técnica com renderização nem aprova integração ausente", () => {
-    expect(parseSystemEvent(JSON.stringify({ validation: { status: "started" } }))).toBe("Verificando o site...");
-    expect(parseSystemEvent(JSON.stringify({ validation: { status: "unconfigured", success: true, qa: { passed: true }, logs: "E2B_API_KEY=segredo" } }))).toBe("Ambiente E2B não configurado. Renderização não verificada; site permanece como rascunho.");
-    expect(parseSystemEvent(JSON.stringify({ validation: { status: "ready", success: true, errorCount: 0, warningCount: 2, qa: { passed: true } } }))).toBe("Validação técnica concluída com sucesso (0 erro(s), 2 aviso(s)).");
-    expect(parseSystemEvent(JSON.stringify({ validation: { status: "failed", success: true, qa: { passed: true } } }))).toBe("A validação identificou ajustes necessários.");
-    expect(parseSystemEvent(JSON.stringify({ validation: {} }))).toBe("Validação do site registrada.");
+    expect(parseSystemEvent(JSON.stringify({ validation: { status: "started" } }))).toBe("🔨 Iniciando build isolado para testar o site...");
+    expect(parseSystemEvent(JSON.stringify({ validation: { status: "unconfigured", success: true, qa: { passed: true }, logs: "E2B_API_KEY=segredo" } }))).toBe("⚠️ Build isolado não configurado — site criado mas não renderizado");
+    expect(parseSystemEvent(JSON.stringify({ validation: { status: "ready", success: true, errorCount: 0, warningCount: 2, qa: { passed: true } } }))).toBe("✅ Build OK! Site funcionando corretamente (0 erro(s), 2 aviso(s))");
+    expect(parseSystemEvent(JSON.stringify({ validation: { status: "failed", success: true, qa: { passed: true } } }))).toBe("⚠️ A validação identificou ajustes necessários.");
+    expect(parseSystemEvent(JSON.stringify({ validation: {} }))).toBe("🔬 Validação do site registrada");
   });
 
   it("oculta caminhos, modelos e ferramentas inesperados sem ecoar dados privados", () => {
     for (const path of ["src/../../.env", "src//App.tsx", "src/.env", "src/App.tsx?token=segredo", "src/App.tsx\nsegredo", "src/" + "a".repeat(181)]) {
-      expect(parseSystemEvent(JSON.stringify({ tool: "read", status: "started", path }))).toBe("Lendo arquivo...");
-      expect(parseSystemEvent(JSON.stringify({ saved: path }))).toBe("Atividade interna do agente registrada.");
+      expect(parseSystemEvent(JSON.stringify({ tool: "read", status: "started", path }))).toBe("📄 Abrindo arquivo para leitura");
+      expect(parseSystemEvent(JSON.stringify({ saved: path }))).toBe("⚙️ Operação interna em andamento...");
     }
-    expect(parseSystemEvent(JSON.stringify({ tool: "segredo", status: "started", arguments: "pedido privado" }))).toBe("Executando operação do agente...");
-    expect(parseSystemEvent(JSON.stringify({ tool: "segredo", result: "conteúdo privado" }))).toBe("Atividade interna do agente registrada.");
-    expect(parseSystemEvent(JSON.stringify({ model_call: { model: "modelo\nsegredo", status: "started" } }))).toBe("Modelo: consulta iniciada; aguardando resposta.");
-    expect(parseSystemEvent(JSON.stringify({ model_call: { model: "provider/model", status: "pedido privado" } }))).toBe("Atividade interna do agente registrada.");
+    expect(parseSystemEvent(JSON.stringify({ tool: "segredo", status: "started", arguments: "pedido privado" }))).toBe("🔧 Executando operação");
+    expect(parseSystemEvent(JSON.stringify({ tool: "segredo", result: "conteúdo privado" }))).toBe("⚙️ Operação interna em andamento...");
+    expect(parseSystemEvent(JSON.stringify({ model_call: { model: "modelo\nsegredo", status: "started" } }))).toBe("⚙️ Operação interna em andamento...");
+    expect(parseSystemEvent(JSON.stringify({ model_call: { model: "provider/model", status: "pedido privado" } }))).toBe("⚙️ Operação interna em andamento...");
   });
 
   it("extrai apenas texto visível de envelopes do assistente", () => {
     expect(assistantText("Título atualizado.")).toBe("Título atualizado.");
     expect(assistantText(JSON.stringify({ role: "assistant", content: "Atualizado.", tool_calls: ["interno"] }))).toBe("Atualizado.");
-    expect(assistantText(JSON.stringify({ role: "assistant", content: null, tool_calls: ["interno"] }))).toBe("Preparando alterações nos arquivos...");
-    expect(assistantText(JSON.stringify({ passed: true, summary: "Visual aprovado." }))).toBe("Visual aprovado.");
+    expect(assistantText(JSON.stringify({ role: "assistant", content: null, tool_calls: ["interno"] }))).toBe("🤔 Analisando e preparando próximas ações...");
+    expect(assistantText(JSON.stringify({ passed: true, summary: "Visual aprovado." }))).toBe("✅ Visual aprovado.");
     expect(assistantText("{\"role\":\"assistant\"")).not.toContain("role");
   });
 
@@ -399,5 +399,5 @@ describe("ui-helpers", () => {
 });
 
 it("reports disabled skills without claiming Impeccable applied", () => {
-  expect(parseSystemEvent(JSON.stringify({ active_skills: [] }))).toBe("Nenhuma skill ativa nesta execução.");
+  expect(parseSystemEvent(JSON.stringify({ active_skills: [] }))).toBe("🔧 Modo padrão (sem skills especiais ativas)");
 });
