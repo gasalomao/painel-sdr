@@ -202,20 +202,22 @@ describe("POST /api/agent/process", () => {
       ai_responded: false,
       suppressed: "tool_loop_exhausted",
     });
-    expect(sendToolResults).toHaveBeenCalledTimes(5);
+    // OTIMIZAÇÃO: MAX_TOOL_ROUNDS reduzido de 5 para 3 (velocidade + economia)
+    expect(sendToolResults).toHaveBeenCalledTimes(3);
     expect(webhookEvents()).toContain("AGENT_TOOL_LOOP_EXHAUSTED");
     expect(webhookEvents()).not.toContain("AGENT_EMPTY_OUTPUT");
     expect(webhookEvents()).not.toContain("AGENT_SEND_SUCCESS");
     expect(state.sendMessage).not.toHaveBeenCalled();
     expect(state.sendMedia).not.toHaveBeenCalled();
     expect(state.logTokenUsage).toHaveBeenCalledTimes(1);
+    // OTIMIZAÇÃO: Com 3 rounds em vez de 5, tokens reduzem proporcionalmente
     expect(state.logTokenUsage).toHaveBeenCalledWith(expect.objectContaining({
-      promptTokens: 60,
-      completionTokens: 12,
-      totalTokens: 72,
+      promptTokens: 40,
+      completionTokens: 8,
+      totalTokens: 48,
     }));
     expect(state.writes.find((write) => write.payload.event === "AGENT_TOOL_LOOP_EXHAUSTED")?.payload).toMatchObject({
-      payload: { tool_iterations: 5, pending_tool_calls: 1 },
+      payload: { tool_iterations: 3, pending_tool_calls: 1 },
     });
   });
 
