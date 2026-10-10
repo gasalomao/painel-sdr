@@ -482,10 +482,11 @@ export function prependAiErrorUsage(error: unknown, priorUsage: AiUsage): Error 
 
 function requireUsableOpenAIResponse(json: any, provider: AiProvider, model: string): any {
   const message = json?.choices?.[0]?.message || {};
-  const reasoning = String(message.reasoning_content || message.reasoning || message.thought || "").trim();
-  if (!message.content && reasoning) {
-    message.content = reasoning;
-  }
+  // SECURITY FIX: NUNCA vazar reasoning/thinking interno pro content final.
+  // reasoning_content/reasoning/thought são PENSAMENTO INTERNO do modelo — não
+  // podem ir pro usuário (expõe regras do sistema, vazamento de prompt, resposta
+  // em inglês quando deveria ser português). Se o modelo só retornou thinking sem
+  // content real, é resposta VAZIA (AiEmptyResponseError) — nunca substituir.
   const hasText = String(message.content || "").trim().length > 0;
   const hasTools = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
   if (!hasText && !hasTools) {
