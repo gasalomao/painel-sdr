@@ -183,8 +183,6 @@ export default function KanbanBoard({ leads, columns, onLeadClick, formatPhone, 
     await supabase.from("leads_extraidos").update({ status: newStatus }).eq("id", leadId);
   }, [localCols, localLeads, onLeadsUpdated]);
 
-  const displayLeads = activeId ? localLeads : leads;
-
   return (
     <div className="flex-1 w-full overflow-x-auto custom-scrollbar pb-8 cursor-default kanban-scroll-container mobile-safe-bottom">
       <DndContext
@@ -197,12 +195,12 @@ export default function KanbanBoard({ leads, columns, onLeadClick, formatPhone, 
           {localCols.map((col) => (
             <SortableContext
               key={col.uuid || col.id || col.label}
-              items={displayLeads.filter((l) => (l.status || "novo") === col.id).map((l) => l.id)}
+              items={localLeads.filter((l) => (l.status || "novo") === col.id).map((l) => l.id)}
               strategy={verticalListSortingStrategy}
             >
               <KanbanColumn
                 column={col}
-                leads={displayLeads.filter((l) => (l.status || "novo") === col.id)}
+                leads={localLeads.filter((l) => (l.status || "novo") === col.id)}
                 onLeadClick={onLeadClick}
                 formatPhone={formatPhone}
                 onRename={(label: string) => persistColumn(col.uuid, { label })}
@@ -223,7 +221,7 @@ export default function KanbanBoard({ leads, columns, onLeadClick, formatPhone, 
         </div>
         <DragOverlay>
           {activeId ? (
-            <KanbanCard lead={displayLeads.find((l) => l.id === activeId)} isOverlay formatPhone={formatPhone} />
+            <KanbanCard lead={localLeads.find((l) => l.id === activeId)} isOverlay formatPhone={formatPhone} />
           ) : null}
         </DragOverlay>
       </DndContext>
