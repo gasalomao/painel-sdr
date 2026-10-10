@@ -23,7 +23,8 @@ import {
   PanelRightOpen,
   PanelRightClose,
   Bot,
-  ChevronDown
+  ChevronDown,
+  MapPin
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -53,6 +54,7 @@ interface MessageThreadProps {
   activeInstance?: string;
   contactPanelOpen?: boolean;
   onToggleContactPanel?: () => void;
+  lead?: { maps_url?: string; lat?: number; lng?: number; endereco?: string } | null;
 }
 
 // Coleta todas as variações de JID do contato e da conversa
@@ -141,6 +143,7 @@ export function MessageThread({
   activeInstance = "__all__",
   contactPanelOpen = true,
   onToggleContactPanel,
+  lead,
 }: MessageThreadProps) {
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
@@ -597,9 +600,24 @@ export function MessageThread({
           </div>
 
           <div className="min-w-0 flex-1">
-            <h2 className="truncate text-sm font-semibold text-foreground">
-              {displayName}
-            </h2>
+            <div className="flex items-center gap-2">
+              <h2 className="truncate text-sm font-semibold text-foreground">
+                {displayName}
+              </h2>
+              {/* Ícone discreto do Google Maps (se o lead tiver localização) */}
+              {lead?.maps_url && (
+                <a
+                  href={lead.maps_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  className="inline-flex items-center justify-center h-5 w-5 rounded-md bg-blue-500/10 text-blue-500 hover:bg-blue-500/20 hover:text-blue-600 transition-colors shrink-0"
+                  title={lead.endereco || "Ver no Google Maps"}
+                >
+                  <MapPin className="h-3 w-3" />
+                </a>
+              )}
+            </div>
             <p className="text-[10px] text-muted-foreground truncate font-mono">
               Conexão: {conversation.last_instance || "Padrão"}
             </p>

@@ -35,6 +35,7 @@ function ChatPageContent() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversation, setActiveConversation] = useState<Conversation | null>(null);
   const [activeContact, setActiveContact] = useState<Contact | null>(null);
+  const [activeLead, setActiveLead] = useState<{ maps_url?: string; lat?: number; lng?: number; endereco?: string } | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [resyncToken, setResyncToken] = useState(0);
 
@@ -382,10 +383,50 @@ function ChatPageContent() {
   const handleCloseConversation = useCallback(() => {
     setActiveConversation(null);
     setActiveContact(null);
+    setActiveLead(null);
     setMessages([]);
     autoSelectedForDeepLinkRef.current = null;
     router.replace("/chat", { scroll: false });
   }, [router]);
+
+  // Busca dados do lead quando o contato ativo mudar
+  useEffect(() => {
+    if (!activeContact || !clientId) {
+      setActiveLead(null);
+      return;
+    }
+
+    async function fetchLead() {
+      try {
+        // Busca lead por lead_id ou por telefone
+        let query = supabase
+          .from("leads_extraidos")
+          .select("maps_url, lat, lng, endereco")
+          .eq("client_id", clientId);
+
+        const rawContact = activeContact as any;
+        if (rawContact.lead_id) {
+          query = query.eq("id", rawContact.lead_id);
+        } else {
+          const phoneClean = activeContact.phone ? activeContact.phone.replace(/\D/g, "") : "";
+          if (phoneClean) {
+            query = query.eq("telefone", phoneClean);
+          } else {
+            setActiveLead(null);
+            return;
+          }
+        }
+
+        const { data } = await query.maybeSingle();
+        setActiveLead(data);
+      } catch (err) {
+        console.error("Erro ao buscar lead:", err);
+        setActiveLead(null);
+      }
+    }
+
+    fetchLead();
+  }, [activeContact, clientId]);
 
   const handleMessagesLoaded = useCallback((loaded: Message[]) => {
     setMessages((prev) => {
@@ -674,6 +715,7 @@ function ChatPageContent() {
             activeInstance={activeInstance}
             contactPanelOpen={contactPanelOpen}
             onToggleContactPanel={handleToggleContactPanel}
+            lead={activeLead}
           />
         </div>
 
