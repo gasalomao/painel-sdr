@@ -678,9 +678,18 @@ export default function FollowUpPage() {
               Reengajamento automático de leads em follow-up. IA lê a conversa e escreve a próxima mensagem.
             </p>
           </div>
-          <Button onClick={() => { resetForm(); setShowForm(true); }} className="gap-2 glow-primary">
-            <Plus className="w-4 h-4" /> Nova Campanha
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              onClick={() => window.location.href = '/follow-up-control'}
+              variant="outline"
+              className="gap-2"
+            >
+              <Bot className="w-4 h-4" /> Controle Sarah
+            </Button>
+            <Button onClick={() => { resetForm(); setShowForm(true); }} className="gap-2 glow-primary">
+              <Plus className="w-4 h-4" /> Nova Campanha
+            </Button>
+          </div>
         </div>
 
         {msg && (

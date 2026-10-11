@@ -455,14 +455,14 @@ export function addAiUsage(left: AiUsage, right: AiUsage): AiUsage {
 }
 
 function attachAiUsage(error: unknown, usage: AiUsage): Error {
-  const target = error instanceof Error ? error : new Error(String(error));
+  const target = error instanceof Error || error instanceof DOMException ? error : new Error(String(error));
   const current = (target as Error & { usage?: AiUsage }).usage;
   (target as Error & { usage?: AiUsage }).usage = current ? addAiUsage(usage, current) : usage;
   return target;
 }
 
 function setAiUsage(error: unknown, usage: AiUsage): Error {
-  const target = error instanceof Error ? error : new Error(String(error));
+  const target = error instanceof Error || error instanceof DOMException ? error : new Error(String(error));
   (target as Error & { usage?: AiUsage }).usage = usage;
   return target;
 }

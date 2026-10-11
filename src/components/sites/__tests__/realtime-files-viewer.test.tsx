@@ -1,5 +1,7 @@
-import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import { act, cleanup, render, screen } from "@testing-library/react";
+import { waitFor } from "@testing-library/react";
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 import { RealtimeFilesViewer } from "../realtime-files-viewer";
 import type { WebsiteFiles } from "@/lib/sites/types";
 
@@ -9,6 +11,18 @@ describe("RealtimeFilesViewer", () => {
     "src/main.tsx": "import React from 'react';\nimport ReactDOM from 'react-dom/client';",
     "index.html": "<!DOCTYPE html><html><body><div id='root'></div></body></html>",
   };
+
+  it("expira destaque após cinco segundos e limpa timers ao desmontar", () => {
+    vi.useFakeTimers();
+    const { unmount } = render(<RealtimeFilesViewer files={{ "src/App.tsx": "new" }} previousFiles={{}} />);
+    act(() => { vi.advanceTimersByTime(20); });
+    const file = screen.getByRole("button", { name: /App.tsx/ });
+    expect(file.className).toContain("animate-pulse");
+    act(() => { vi.advanceTimersByTime(5001); });
+    expect(file.className).not.toContain("animate-pulse");
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
 
   it("renderiza lista de arquivos", () => {
     const { container } = render(<RealtimeFilesViewer files={mockFiles} />);
@@ -24,7 +38,7 @@ describe("RealtimeFilesViewer", () => {
     expect(container.textContent).toContain("3 arquivos");
   });
 
-  it("detecta arquivos novos", () => {
+  it("detecta arquivos novos", async () => {
     const previous: WebsiteFiles = {
       "src/App.tsx": "old content",
     };
@@ -36,7 +50,7 @@ describe("RealtimeFilesViewer", () => {
 
     const { container } = render(<RealtimeFilesViewer files={current} previousFiles={previous} />);
 
-    expect(container.textContent).toContain("Novo");
+    await waitFor(() => expect(container.textContent).toContain("Novo"));
   });
 
   it("mostra status de geração quando isGenerating=true", () => {

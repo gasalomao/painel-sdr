@@ -227,8 +227,8 @@ describe("repeated inspection guard", () => {
     deps.checkpoint = vi.fn(async () => undefined);
     vi.mocked(deps.chat).mockResolvedValue({ model: models[0].id, usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }, response: { choices: [{ message: { tool_calls: [{ id: "read", type: "function", function: { name: "read", arguments: JSON.stringify({ path: "src/App.tsx", start_line: 1, end_line: 5 }) } }] } }] } });
     await expect(new WebsiteAgentRuntime(deps).run(run, new AbortController().signal)).rejects.toThrow("sem progresso");
-    expect(deps.chat).toHaveBeenCalledTimes(6);
-    expect(JSON.stringify(vi.mocked(deps.chat).mock.calls[3][1])).toContain("Leitura repetida");
+    expect(deps.chat).toHaveBeenCalledTimes(3);
+    expect(JSON.stringify(vi.mocked(deps.chat).mock.calls[2][1])).toContain("Leitura repetida");
     expect(deps.checkpoint).toHaveBeenLastCalledWith(run, expect.objectContaining({ files: getStarterFiles(project) }));
     expect(deps.complete).not.toHaveBeenCalled();
     expect(deps.build).not.toHaveBeenCalled();

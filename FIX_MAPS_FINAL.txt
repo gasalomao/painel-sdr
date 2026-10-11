@@ -1,0 +1,49 @@
+// FIX DO ÍCONE GOOGLE MAPS
+// Cole este código substituindo a função fetchLead em src/app/chat/page.tsx
+
+// Linha ~393-443, substitua todo o useEffect por este:
+
+useEffect(() => {
+  if (!activeContact || !clientId) {
+    setActiveLead(null);
+    return;
+  }
+
+  async function fetchLead() {
+    try {
+      const phoneClean = activeContact.phone ? activeContact.phone.replace(/\D/g, "") : "";
+
+      if (!phoneClean || phoneClean.length < 8) {
+        setActiveLead(null);
+        return;
+      }
+
+      // Busca todos os leads do cliente e filtra por telefone
+      const { data: allLeads, error } = await supabase
+        .from("leads_extraidos")
+        .select("maps_url, lat, lng, endereco, telefone, remoteJid, nome_negocio")
+        .eq("client_id", clientId);
+
+      if (error) {
+        console.error('[Maps] Erro:', error);
+        setActiveLead(null);
+        return;
+      }
+
+      // Compara últimos 8 dígitos do telefone (mais confiável)
+      const last8 = phoneClean.slice(-8);
+      const leadData = allLeads?.find(lead => {
+        const leadPhone = lead.telefone ? lead.telefone.replace(/\D/g, "") : "";
+        return leadPhone.includes(last8);
+      }) || null;
+
+      console.log('[Maps] Resultado:', leadData?.nome_negocio, leadData?.maps_url ? '✅' : '❌');
+      setActiveLead(leadData);
+    } catch (err) {
+      console.error('[Maps] Erro:', err);
+      setActiveLead(null);
+    }
+  }
+
+  fetchLead();
+}, [activeContact, clientId]);

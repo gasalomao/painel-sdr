@@ -34,14 +34,47 @@ export function ActivityLog({ runId, className = "" }: ActivityLogProps) {
   // Carrega atividades e conecta ao stream
   React.useEffect(() => {
     if (!runId) return;
-
-    loadActivities();
-    connectStream();
-
-    return () => {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
+    const controller = new AbortController();
+    async function loadActivities() {
+      try {
+        const response = await fetch(`/api/sites/runs/${runId}/activities`, { signal: controller.signal });
+        if (!response.ok) throw new Error("Falha ao carregar atividades.");
+        const data = await response.json();
+        if (!controller.signal.aborted) setActivities(data.activities || []);
+      } catch (error) {
+        if (!controller.signal.aborted) console.error("Failed to load activities:", error);
+      } finally {
+        if (!controller.signal.aborted) setIsLoading(false);
       }
+    }
+    function connectStream() {
+      try {
+        const eventSource = new EventSource(`/api/sites/runs/${runId}/activities?stream=true`);
+        eventSource.onmessage = (event) => {
+          if (controller.signal.aborted) return;
+          try {
+            const activity: ActivityEvent = JSON.parse(event.data);
+            setActivities(prev => prev.some(item => item.id === activity.id) ? prev : [...prev, activity]);
+          } catch (error) {
+            console.error("Invalid activity event:", error);
+            setIsLive(false);
+          }
+        };
+        eventSource.onerror = () => {
+          if (!controller.signal.aborted) setIsLive(false);
+          eventSource.close();
+        };
+        eventSourceRef.current = eventSource;
+      } catch (error) {
+        console.error("Failed to connect stream:", error);
+        setIsLive(false);
+      }
+    }
+    void loadActivities();
+    connectStream();
+    return () => {
+      controller.abort();
+      eventSourceRef.current?.close();
     };
   }, [runId]);
 
@@ -51,53 +84,9 @@ export function ActivityLog({ runId, className = "" }: ActivityLogProps) {
       const shouldScroll =
         scrollRef.current.scrollHeight - scrollRef.current.scrollTop <=
         scrollRef.current.clientHeight + 100;
-
-      if (shouldScroll) {
-        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-      }
+      if (shouldScroll) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [activities]);
-
-  async function loadActivities() {
-    try {
-      const response = await fetch(`/api/sites/runs/${runId}/activities`);
-      const data = await response.json();
-      setActivities(data.activities || []);
-      setIsLoading(false);
-    } catch (error) {
-      console.error("Failed to load activities:", error);
-      setIsLoading(false);
-    }
-  }
-
-  function connectStream() {
-    try {
-      const eventSource = new EventSource(
-        `/api/sites/runs/${runId}/activities?stream=true`
-      );
-
-      eventSource.onmessage = (event) => {
-        const activity: ActivityEvent = JSON.parse(event.data);
-        setActivities((prev) => {
-          // Evita duplicatas
-          if (prev.some((a) => a.id === activity.id)) {
-            return prev;
-          }
-          return [...prev, activity];
-        });
-      };
-
-      eventSource.onerror = () => {
-        setIsLive(false);
-        eventSource.close();
-      };
-
-      eventSourceRef.current = eventSource;
-    } catch (error) {
-      console.error("Failed to connect stream:", error);
-      setIsLive(false);
-    }
-  }
 
   if (isLoading) {
     return (

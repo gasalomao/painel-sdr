@@ -43,8 +43,9 @@ export async function POST(
     return NextResponse.json({ error: "Run não encontrado" }, { status: 404 });
   }
 
-  // @ts-ignore - Supabase types
-  if (run.website_projects.client_id !== user.id) {
+  const projects = run.website_projects as { client_id: string } | { client_id: string }[];
+  const project = Array.isArray(projects) ? projects[0] : projects;
+  if (project?.client_id !== user.id) {
     return NextResponse.json({ error: "Não autorizado" }, { status: 403 });
   }
 
@@ -102,8 +103,9 @@ export async function GET(
     return NextResponse.json({ error: "Run não encontrado" }, { status: 404 });
   }
 
-  // @ts-ignore - Supabase types
-  if (run.website_projects.client_id !== user.id) {
+  const projects = run.website_projects as { client_id: string } | { client_id: string }[];
+  const project = Array.isArray(projects) ? projects[0] : projects;
+  if (project?.client_id !== user.id) {
     return NextResponse.json({ error: "Não autorizado" }, { status: 403 });
   }
 

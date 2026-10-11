@@ -13,6 +13,7 @@ interface FileChange {
   content: string;
   timestamp: number;
   isNew: boolean;
+  isRecent: boolean;
 }
 
 /**
@@ -37,7 +38,7 @@ export function RealtimeFilesViewer({
   // Detecta mudanças nos arquivos
   const filesList = useMemo(() => {
     const prev = previousFiles ?? {};
-    const detected: FileChange[] = [];
+    const detected: Omit<FileChange, "timestamp">[] = [];
 
     for (const [path, content] of Object.entries(files)) {
       const isNew = !prev[path];
@@ -47,7 +48,7 @@ export function RealtimeFilesViewer({
         detected.push({
           path,
           content,
-          timestamp: Date.now(),
+          isRecent: true,
           isNew,
         });
       }
@@ -58,32 +59,32 @@ export function RealtimeFilesViewer({
 
   // Atualiza lista de mudanças com animação
   useEffect(() => {
-    if (filesList.length > 0) {
-      setChanges((prev) => {
-        const newChanges = [...prev];
-        for (const file of filesList) {
-          const existingIndex = newChanges.findIndex((c) => c.path === file.path);
-          if (existingIndex >= 0) {
-            newChanges[existingIndex] = file;
-          } else {
-            newChanges.push(file);
-          }
-        }
-        // Mantém apenas últimas 50 mudanças
-        return newChanges.slice(-50);
-      });
-    }
+    if (!filesList.length) return;
+    const frame = requestAnimationFrame(() => {
+      const timestamp = Date.now();
+      const changedPaths = new Set(filesList.map(file => file.path));
+      setChanges(prev => [
+        ...prev.filter(change => !changedPaths.has(change.path)),
+        ...filesList.map(file => ({ ...file, timestamp })),
+      ].slice(-50));
+    });
+    return () => cancelAnimationFrame(frame);
   }, [filesList]);
 
-  // Auto-seleciona arquivo mais recente se estiver gerando
   useEffect(() => {
-    if (isGenerating && filesList.length > 0 && !selectedFile) {
-      setSelectedFile(filesList[filesList.length - 1].path);
-    }
-  }, [isGenerating, filesList, selectedFile]);
+    const recent = changes.filter(change => change.isRecent);
+    if (!recent.length) return;
+    const nextExpiry = Math.min(...recent.map(change => change.timestamp + 5000));
+    const timeout = setTimeout(() => {
+      const now = Date.now();
+      setChanges(prev => prev.map(change => change.isRecent && now - change.timestamp >= 5000 ? { ...change, isRecent: false } : change));
+    }, Math.max(0, nextExpiry - Date.now()));
+    return () => clearTimeout(timeout);
+  }, [changes]);
 
+  const activeFile = selectedFile ?? (isGenerating ? filesList.at(-1)?.path ?? null : null);
   const allFiles = Object.keys(files).sort();
-  const currentFile = selectedFile && files[selectedFile] ? { path: selectedFile, content: files[selectedFile] } : null;
+  const currentFile = activeFile && files[activeFile] ? { path: activeFile, content: files[activeFile] } : null;
 
   function toggleExpanded(path: string): void {
     setExpandedFiles((prev) => {
@@ -117,8 +118,8 @@ export function RealtimeFilesViewer({
           <div className="space-y-1">
             {allFiles.map((path) => {
               const change = changes.find((c) => c.path === path);
-              const isRecent = change && Date.now() - change.timestamp < 5000;
-              const isActive = selectedFile === path;
+              const isRecent = change?.isRecent;
+              const isActive = activeFile === path;
 
               return (
                 <button

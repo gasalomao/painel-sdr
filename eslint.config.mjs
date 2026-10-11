@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    ".claude/**",
+    "temp_wacrm/**",
+    "scratch/**",
     // Assets vendor minificados e scripts one-off CommonJS não são fonte:
     "public/**",
     "scripts/recover-sdr-chats.js",

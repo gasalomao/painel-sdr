@@ -272,52 +272,29 @@ export async function websiteChatAttempt(model: WebsiteModel, body: Record<strin
   }
   if (provider === "gemini" || provider === "nvidia") delete modelBody.reasoning;
 
-  const maxAttempts = 3;
-  let lastError: Error = new Error("Falha desconhecida.");
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    signal.throwIfAborted();
-
-    try {
-      let raw: unknown;
-      if (provider === "gateway") {
-        const creds = await resolveGatewayCreds({ noGatewayFallback: true }, cleanModelId(model.id));
-        signal.throwIfAborted();
-        if (!creds.baseUrl) throw new Error("Gateway de assinatura indisponível: configure uma conexão em Configurações.");
-        raw = await gatewayChatWithFailover(cleanModelId(model.id), modelBody, creds, { allowEmptyContent: true, signal, maxAttempts: 1 });
-      } else if (provider === "gemini" || provider === "nvidia") {
-        raw = await directWebsiteChat(provider, modelBody, signal);
-      } else {
-        raw = await openRouterChatWithFailover(modelBody, { signal, maxAttempts: 1, allowEmptyContent: true });
-      }
-      const usage = openRouterResponseUsage(raw, provider as "openrouter" | "gemini" | "gateway" | "nvidia", cleanModelId(model.id));
-      if (signal.aborted) throw Object.assign(signal.reason instanceof Error ? signal.reason : new Error("Chamada interrompida."), { usage });
-      const response = validateChatResponse(raw, model);
-      return { model: model.id, response, usage };
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error("Provedor indisponível.");
-      const reported = aiUsageFromError(error);
-      const usage: AiUsage = reported ?? openRouterResponseUsage(null);
-      const uncertain = !usage.attempts?.length && usage.totalTokens === 0 && usage.costUsd === undefined;
-      const measured = { ...usage, ...(uncertain ? { estimated: true, usageUnknown: true } : {}) };
-
-      // Não retry em erros 400 (bad request) ou abort
-      if (signal.aborted || (error instanceof ProviderHttpError && error.status === 400)) {
-        throw Object.assign(lastError, { usage: measured.attempts?.length ? measured : { ...measured, attempts: [{ ...measured, provider: provider as "openrouter" | "gemini" | "gateway" | "nvidia", model: cleanModelId(model.id) }] } });
-      }
-
-      // Se não é a última tentativa, aguardar com backoff exponencial
-      if (attempt < maxAttempts) {
-        const waitSeconds = Math.min(2 ** attempt, 8); // 2s, 4s, 8s
-        onRetry?.(model.id, attempt + 1, maxAttempts, waitSeconds);
-        await new Promise(resolve => setTimeout(resolve, waitSeconds * 1000));
-      } else {
-        throw Object.assign(lastError, { usage: measured.attempts?.length ? measured : { ...measured, attempts: [{ ...measured, provider: provider as "openrouter" | "gemini" | "gateway" | "nvidia", model: cleanModelId(model.id) }] } });
-      }
+  try {
+    let raw: unknown;
+    if (provider === "gateway") {
+      const creds = await resolveGatewayCreds({ noGatewayFallback: true }, cleanModelId(model.id));
+      signal.throwIfAborted();
+      if (!creds.baseUrl) throw new Error("Gateway de assinatura indisponível: configure uma conexão em Configurações.");
+      raw = await gatewayChatWithFailover(cleanModelId(model.id), modelBody, creds, { allowEmptyContent: true, signal, maxAttempts: 1 });
+    } else if (provider === "gemini" || provider === "nvidia") {
+      raw = await directWebsiteChat(provider, modelBody, signal);
+    } else {
+      raw = await openRouterChatWithFailover(modelBody, { signal, maxAttempts: 1, allowEmptyContent: true });
     }
+    const usage = openRouterResponseUsage(raw, provider as "openrouter" | "gemini" | "gateway" | "nvidia", cleanModelId(model.id));
+    if (signal.aborted) throw Object.assign(signal.reason instanceof Error || signal.reason instanceof DOMException ? signal.reason : new Error("Chamada interrompida."), { usage });
+    const response = validateChatResponse(raw, model);
+    return { model: model.id, response, usage };
+  } catch (error) {
+    const failure = error instanceof Error || error instanceof DOMException ? error : new Error("Provedor indisponível.");
+    const usage: AiUsage = aiUsageFromError(error) ?? openRouterResponseUsage(null);
+    const uncertain = !usage.attempts?.length && usage.totalTokens === 0 && usage.costUsd === undefined;
+    const measured = { ...usage, ...(uncertain ? { estimated: true, usageUnknown: true } : {}) };
+    throw Object.assign(failure, { usage: measured.attempts?.length ? measured : { ...measured, attempts: [{ ...measured, provider: provider as "openrouter" | "gemini" | "gateway" | "nvidia", model: cleanModelId(model.id) }] } });
   }
-
-  throw lastError;
 }
 
 

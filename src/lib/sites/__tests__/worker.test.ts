@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { DESIGN_DIRECTION_FIELDS } from "../impeccable";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -50,14 +51,15 @@ vi.mock("../deployment-provider", () => ({
   createSiteDeploymentProvider: () => ({ configured: () => state.configured() }),
   resumeSiteDeployment: (...args: unknown[]) => state.resume(...args),
 }));
-vi.mock("node:timers/promises", () => ({
-  setTimeout: (ms: number, value: unknown, { signal }: { signal: AbortSignal }) => new Promise((resolve, reject) => {
+vi.mock("node:timers/promises", () => {
+  const delay = (ms: number, value: unknown, { signal }: { signal: AbortSignal }) => new Promise((resolve, reject) => {
     const abort = () => { clearTimeout(timer); reject(signal.reason); };
     const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(value); }, ms);
     if (signal.aborted) abort();
     else signal.addEventListener("abort", abort, { once: true });
-  }),
-}));
+  });
+  return { setTimeout: delay, default: { setTimeout: delay } };
+});
 
 function fakeClient(): SupabaseClient {
   return {
@@ -417,7 +419,7 @@ describe("website worker", () => {
     const expected = { model: model.id, response: chatResult("feito"), usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 } };
     state.attempt.mockResolvedValue(expected);
     await expect(deps.chat([model], { messages: [] }, signal)).resolves.toEqual(expected);
-    expect(state.attempt).toHaveBeenCalledWith(model, { messages: [] }, signal);
+    expect(state.attempt).toHaveBeenCalledWith(model, { messages: [] }, signal, undefined);
     expect(state.chat).not.toHaveBeenCalled();
   });
 

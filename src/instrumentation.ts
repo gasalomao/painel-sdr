@@ -6,6 +6,8 @@ declare global {
   var automationTickerId: NodeJS.Timeout | undefined;
   var campaignTickerId: NodeJS.Timeout | undefined;
   var appointmentTickerId: NodeJS.Timeout | undefined;
+  var agentFollowupTickerId: NodeJS.Timeout | undefined;
+  var backupTickerId: NodeJS.Timeout | undefined;
   // Flags in-flight pra impedir overlap quando um tick demora mais que o intervalo
   var organizerTicking: boolean | undefined;
   var automationTicking: boolean | undefined;
@@ -13,6 +15,8 @@ declare global {
   var followupTicking: boolean | undefined;
   var appointmentTicking: boolean | undefined;
   var appointmentTickN: number | undefined;
+  var agentFollowupTicking: boolean | undefined;
+  var backupTicking: boolean | undefined;
   var sitesWorkerStarted: boolean | undefined;
 }
 
@@ -162,6 +166,30 @@ export async function register() {
   // respeita janela de horário, ritmo e só manda quem tem
   // next_send_at <= agora.
   // ============================================================
+
+  // ============================================================
+  // AGENT FOLLOW-UPS: a cada 2 min, processa follow-ups agendados
+  // de todos os agentes (multi-agente, multi-tenant).
+  // Verifica se lead respondeu, envia mensagem e agenda próximo.
+  // ============================================================
+  console.log("[AGENT FOLLOWUP] Iniciando ticker (120s).");
+  if (globalThis.agentFollowupTickerId) clearInterval(globalThis.agentFollowupTickerId);
+  if (process.env.AGENT_FOLLOWUP_WORKER_ENABLED === "true") globalThis.agentFollowupTickerId = setInterval(async () => {
+    if (globalThis.agentFollowupTicking) {
+      console.log("[AGENT FOLLOWUP] tick anterior em andamento, pulando.");
+      return;
+    }
+    globalThis.agentFollowupTicking = true;
+    try {
+      const { runFollowUpWorker } = await import("@/workers/agent-followup-worker");
+      await runFollowUpWorker();
+    } catch (e) {
+      console.error("[AGENT FOLLOWUP] tick falhou:", (e as Error).message);
+    } finally {
+      globalThis.agentFollowupTicking = false;
+    }
+  }, 1000 * 120); // 2 minutos
+
   // ============================================================
   // AUTOMAÇÃO: orquestrador scrape → disparo → follow-up.
   // Ticker leve a cada 60s — só consulta automations(status=running)
@@ -294,6 +322,28 @@ export async function register() {
       globalThis.appointmentTicking = false;
     }
   }, 1000 * 60); // 1 min
+
+  // ============================================================
+  // BACKUP AUTOMÁTICO — Google Drive
+  // ============================================================
+  // Agenda persistida; opt-in evita exportação automática durante setup/build.
+  if (globalThis.backupTickerId) clearInterval(globalThis.backupTickerId);
+  if (process.env.BACKUP_WORKER_ENABLED === "true") {
+    const tickBackup = async () => {
+      if (globalThis.backupTicking) return;
+      globalThis.backupTicking = true;
+      try {
+        const { runBackupWorker } = await import("@/workers/backup-worker");
+        await runBackupWorker();
+      } catch {
+        console.error("[BACKUP] Não foi possível iniciar o worker.");
+      } finally {
+        globalThis.backupTicking = false;
+      }
+    };
+    void tickBackup();
+    globalThis.backupTickerId = setInterval(() => { void tickBackup(); }, 60_000);
+  }
 
   // ============================================================
   // SITE STUDIO — Worker de criação e edição de sites por IA

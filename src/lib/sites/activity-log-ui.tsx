@@ -12,15 +12,35 @@ export function useActivityLogs(runId?: string) {
   useEffect(() => {
     if (!runId) return;
 
+    const controller = new AbortController();
+    async function loadActivities() {
+      try {
+        const response = await fetch(`/api/sites/runs/${runId}/activities`, { signal: controller.signal });
+        if (!response.ok) throw new Error("Falha ao carregar atividades.");
+        const data = await response.json();
+        if (!controller.signal.aborted) setActivities(data.activities || []);
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.error("Falha ao carregar atividades:", error);
+          setIsLive(false);
+        }
+      }
+    }
     // Carrega atividades existentes do servidor
-    loadActivities(runId);
+    void loadActivities();
 
     // Conecta ao EventSource para receber eventos em tempo real
-    const eventSource = new EventSource(`/api/sites/runs/${runId}/activities`);
+    const eventSource = new EventSource(`/api/sites/runs/${runId}/activities?stream=true`);
 
     eventSource.onmessage = (event) => {
-      const activity: ActivityEvent = JSON.parse(event.data);
-      setActivities((prev) => [...prev, activity]);
+      if (controller.signal.aborted) return;
+      try {
+        const activity: ActivityEvent = JSON.parse(event.data);
+        setActivities((prev) => [...prev, activity]);
+      } catch (error) {
+        console.error("Evento de atividade inválido:", error);
+        setIsLive(false);
+      }
     };
 
     eventSource.onerror = () => {
@@ -29,15 +49,10 @@ export function useActivityLogs(runId?: string) {
     };
 
     return () => {
+      controller.abort();
       eventSource.close();
     };
   }, [runId]);
-
-  async function loadActivities(runId: string) {
-    const response = await fetch(`/api/sites/runs/${runId}/activities`);
-    const data = await response.json();
-    setActivities(data.activities || []);
-  }
 
   return {
     activities,

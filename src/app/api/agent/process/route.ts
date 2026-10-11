@@ -2196,6 +2196,7 @@ ${capturedVariablesPrompt}
         });
     }
 
+    const initialFollowupSentAt = new Date().toISOString();
     let lastSendResult: any = null;
     let anySendError: string | null = null;
 
@@ -2597,6 +2598,31 @@ ${capturedVariablesPrompt}
          : { remote_jid: maskJid(remoteJid), text_length: finalAnswer.length, chunks: messageChunks.length },
        created_at: new Date().toISOString()
     }).then(() => {}, () => {});
+
+    // ============================================================
+    // FOLLOW-UP AUTOMÁTICO: Agenda follow-ups se:
+    // 1. Mensagem enviada com sucesso (não é teste, não tem erro)
+    // 2. Agente tem follow-ups habilitados
+    // 3. Ainda não existe follow-up ativo para este lead
+    // ============================================================
+    if (process.env.AGENT_FOLLOWUP_WORKER_ENABLED === "true" && !isTestMode && !anySendError && sessionId && clientId) {
+      try {
+        const followUpConfig = agentConfig?.options?.follow_up;
+
+        if (followUpConfig?.enabled) {
+          const { data, error } = await supabase.rpc("enqueue_agent_followup", {
+            p_client: clientId, p_agent: agentId, p_session: sessionId,
+            p_jid: remoteJid, p_instance: instanceName, p_initial_sent_at: initialFollowupSentAt,
+            p_contact: contactRow?.id || null, p_lead: leadRow?.id || null,
+          });
+          if (error || !data) throw new Error("Agendamento de follow-up não confirmado.");
+          console.info("[AGENT] Sequência de follow-up persistida ou já existente.");
+        }
+      } catch {
+        // Erro no follow-up não deve quebrar a resposta principal
+        console.error("[AGENT] Follow-up não agendado. Verifique configuração e migration 021.");
+      }
+    }
 
     return NextResponse.json({ success: true, ai_responded: true, sendResult: lastSendResult, sendError: anySendError, testStateUpdate });
 

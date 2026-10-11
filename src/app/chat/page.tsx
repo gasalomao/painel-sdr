@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { Suspense, useEffect, useState, useRef, useCallback } from "react";
 import { Header } from "@/components/layout/header";
@@ -24,7 +24,7 @@ function ChatPageContent() {
 
   const { clientId, loading: sessionLoading } = useClientSession();
 
-  // Estados de conexão/instâncias e Agentes de IA
+  // Estados de conexÃ£o/instÃ¢ncias e Agentes de IA
   const [instances, setInstances] = useState<any[]>([]);
   const [activeInstance, setActiveInstance] = useState<string>("__all__");
   const [aiAgents, setAiAgents] = useState<{ id: number | string; name: string }[]>([]);
@@ -39,7 +39,7 @@ function ChatPageContent() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [resyncToken, setResyncToken] = useState(0);
 
-  // Configurações do layout desktop/mobile
+  // ConfiguraÃ§Ãµes do layout desktop/mobile
   const [contactPanelOpen, setContactPanelOpen] = useState(true);
 
   const handleToggleContactPanel = useCallback(() => {
@@ -53,9 +53,9 @@ function ChatPageContent() {
     activeConvRef.current = activeConversation;
   }, [activeConversation]);
 
-  // 1. Carrega as instâncias (channel_connections) e Agentes de IA (agent_settings) do SDR
-  // Roda uma ÚNICA vez por clientId — agentes/instâncias raramente mudam durante
-  // a sessão. O botão manual de refresh (resyncToken) dispara só o reload de
+  // 1. Carrega as instÃ¢ncias (channel_connections) e Agentes de IA (agent_settings) do SDR
+  // Roda uma ÃšNICA vez por clientId â€” agentes/instÃ¢ncias raramente mudam durante
+  // a sessÃ£o. O botÃ£o manual de refresh (resyncToken) dispara sÃ³ o reload de
   // conversas/mensagens, evitando travamento do chat a cada troca de aba.
   const instancesLoadedRef = useRef(false);
   useEffect(() => {
@@ -64,7 +64,7 @@ function ChatPageContent() {
     instancesLoadedRef.current = true;
     
     async function loadChannelConnectionsAndAgents() {
-      // Busca conexões do WhatsApp no Painel-SDR
+      // Busca conexÃµes do WhatsApp no Painel-SDR
       const { data: conns } = await supabase
         .from("channel_connections")
         .select("*")
@@ -74,9 +74,9 @@ function ChatPageContent() {
       if (conns) {
         setInstances(conns);
 
-        // Auto-rebind de conversas salvas por número de telefone (phone:NUMERO).
-        // Disparado uma única vez quando as conexões carregam — antes rodava a
-        // cada resyncToken (3-4x por minuto quando o usuário troca de aba).
+        // Auto-rebind de conversas salvas por nÃºmero de telefone (phone:NUMERO).
+        // Disparado uma Ãºnica vez quando as conexÃµes carregam â€” antes rodava a
+        // cada resyncToken (3-4x por minuto quando o usuÃ¡rio troca de aba).
         for (const inst of conns) {
           const rawPhone = inst.phone_number || inst.owner_phone || inst.instance_name;
           const cleanPhone = rawPhone ? String(rawPhone).replace(/\D/g, "") : "";
@@ -87,7 +87,7 @@ function ChatPageContent() {
                 .update({ instance_name: inst.instance_name })
                 .eq("client_id", clientId)
                 .eq("instance_name", `phone:${cleanPhone}`);
-            } catch { /* não-fatal — auto-rebind é best-effort */ }
+            } catch { /* nÃ£o-fatal â€” auto-rebind Ã© best-effort */ }
           }
         }
 
@@ -111,8 +111,8 @@ function ChatPageContent() {
   }, [clientId]);
 
   // 2. Realtime Event Handlers
-  // Observação: o hook use-realtime.ts já normaliza o sender_type pra
-  // "bot" | "customer" | "agent". Não duplicar a lógica aqui.
+  // ObservaÃ§Ã£o: o hook use-realtime.ts jÃ¡ normaliza o sender_type pra
+  // "bot" | "customer" | "agent". NÃ£o duplicar a lÃ³gica aqui.
   const handleMessageEvent = useCallback(
     (event: any) => {
       const msg = event.new;
@@ -128,13 +128,13 @@ function ChatPageContent() {
         : "customer";
 
       if (event.eventType === "INSERT") {
-        // FIX multi-tenant: RLS desligada → realtime entrega INSERTs de TODOS
+        // FIX multi-tenant: RLS desligada â†’ realtime entrega INSERTs de TODOS
         // os clientes. Sem esse guard, mensagem de outro SaaS (mesmo telefone)
         // aparecia ao vivo dentro da thread deste operador.
         if ((msg as any).client_id && clientId && (msg as any).client_id !== clientId) return;
         if (currentActive && isSameJid(msg.remote_jid, currentActive.id)) {
           setMessages((prev) => {
-            // Deduplicação: otimista + webhook podem chegar na mesma msg.
+            // DeduplicaÃ§Ã£o: otimista + webhook podem chegar na mesma msg.
             if (prev.some((m) =>
               m.id === String(msg.id) ||
               (m.message_id && msg.message_id && m.message_id === msg.message_id)
@@ -153,7 +153,7 @@ function ChatPageContent() {
           });
         }
 
-        // Atualiza a última mensagem da conversa no card lateral E reordena
+        // Atualiza a Ãºltima mensagem da conversa no card lateral E reordena
         // a lista (igual WhatsApp: conversa com nova mensagem sobe pro topo).
         setConversations((prev) =>
           sortConversationsByLastMessage(
@@ -174,7 +174,7 @@ function ChatPageContent() {
           )
         );
       } else if (event.eventType === "UPDATE") {
-        // Update de status (sent → delivered → read) ou enriquecimento de mídia.
+        // Update de status (sent â†’ delivered â†’ read) ou enriquecimento de mÃ­dia.
         if (currentActive && isSameJid(msg.remote_jid, currentActive.id)) {
           setMessages((prev) =>
             prev.map((m) => {
@@ -243,11 +243,11 @@ function ChatPageContent() {
     enabled: !!clientId,
   });
 
-  // ANTES: visibilitychange disparava resyncToken a cada foco na aba → recarregava
-  // TODAS as queries (instances, agents, sessions, msgs) → chat piscava / travava.
-  // AGORA: debounce de 800ms + só dispara se a aba ficou fora por >30s.
-  // Realtime (Supabase) já entrega novidades instantaneamente — refresh manual
-  // via botão continua disponível para o usuário.
+  // ANTES: visibilitychange disparava resyncToken a cada foco na aba â†’ recarregava
+  // TODAS as queries (instances, agents, sessions, msgs) â†’ chat piscava / travava.
+  // AGORA: debounce de 800ms + sÃ³ dispara se a aba ficou fora por >30s.
+  // Realtime (Supabase) jÃ¡ entrega novidades instantaneamente â€” refresh manual
+  // via botÃ£o continua disponÃ­vel para o usuÃ¡rio.
   const lastBlurRef = useRef<number | null>(null);
   useEffect(() => {
     const handleVisibility = () => {
@@ -256,13 +256,13 @@ function ChatPageContent() {
         lastBlurRef.current = now;
         return;
       }
-      // Visível de novo: só refresh se ficou fora por >30s (evita microflickers
-      // quando o usuário só dá alt-tab rapidamente).
+      // VisÃ­vel de novo: sÃ³ refresh se ficou fora por >30s (evita microflickers
+      // quando o usuÃ¡rio sÃ³ dÃ¡ alt-tab rapidamente).
       const wasAway = lastBlurRef.current && now - lastBlurRef.current > 30_000;
       lastBlurRef.current = null;
       if (!wasAway) return;
 
-      // Debounce: se o usuário trocar de aba rapidamente, só dispara 1x.
+      // Debounce: se o usuÃ¡rio trocar de aba rapidamente, sÃ³ dispara 1x.
       if (visibilityDebounceRef.current) clearTimeout(visibilityDebounceRef.current);
       visibilityDebounceRef.current = setTimeout(() => {
         setResyncToken((n) => n + 1);
@@ -323,7 +323,7 @@ function ChatPageContent() {
           setActiveContact(match.contact ?? null);
           setMessages([]);
         } else {
-          // Lead sem conversa prévia: cria uma conversa transitória local.
+          // Lead sem conversa prÃ©via: cria uma conversa transitÃ³ria local.
           // Mensagens carregam por JID; o primeiro envio via /api/send-message
           // persiste contato + session no banco (find-or-create).
           const digits = deepLinkConvId.replace(/\D/g, "");
@@ -398,29 +398,36 @@ function ChatPageContent() {
 
     async function fetchLead() {
       try {
-        // Busca lead por lead_id ou por telefone
-        let query = supabase
-          .from("leads_extraidos")
-          .select("maps_url, lat, lng, endereco")
-          .eq("client_id", clientId);
+        const phoneClean = activeContact?.phone ? activeContact.phone.replace(/\D/g, "") : "";
 
-        const rawContact = activeContact as any;
-        if (rawContact.lead_id) {
-          query = query.eq("id", rawContact.lead_id);
-        } else {
-          const phoneClean = activeContact.phone ? activeContact.phone.replace(/\D/g, "") : "";
-          if (phoneClean) {
-            query = query.eq("telefone", phoneClean);
-          } else {
-            setActiveLead(null);
-            return;
-          }
+        if (!phoneClean || phoneClean.length < 8) {
+          setActiveLead(null);
+          return;
         }
 
-        const { data } = await query.maybeSingle();
-        setActiveLead(data);
+        // Busca todos os leads do cliente
+        const { data: allLeads, error } = await supabase
+          .from("leads_extraidos")
+          .select("maps_url, lat, lng, endereco, telefone, remoteJid, nome_negocio")
+          .eq("client_id", clientId);
+
+        if (error) {
+          console.error('[Maps] Erro:', error);
+          setActiveLead(null);
+          return;
+        }
+
+        // Compara últimos 8 dígitos do telefone
+        const last8 = phoneClean.slice(-8);
+        const leadData = allLeads?.find(lead => {
+          const leadPhone = lead.telefone ? lead.telefone.replace(/\D/g, "") : "";
+          return leadPhone.includes(last8);
+        }) || null;
+
+        console.log('[Maps] Resultado:', leadData?.nome_negocio, leadData?.maps_url ? '✅ HAS MAPS' : '❌ NO MAPS');
+        setActiveLead(leadData);
       } catch (err) {
-        console.error("Erro ao buscar lead:", err);
+        console.error('[Maps] Erro:', err);
         setActiveLead(null);
       }
     }
@@ -431,9 +438,9 @@ function ChatPageContent() {
   const handleMessagesLoaded = useCallback((loaded: Message[]) => {
     setMessages((prev) => {
       if (prev.length === 0) return loaded;
-      // Preserva a identidade dos objetos que não mudaram — evita re-render
+      // Preserva a identidade dos objetos que nÃ£o mudaram â€” evita re-render
       // (e "pisca") de todos os bubbles quando um resync/poll recarrega o
-      // histórico com dados idênticos.
+      // histÃ³rico com dados idÃªnticos.
       const prevById = new Map(prev.map((m) => [m.id, m]));
       return loaded.map((m) => {
         const old = prevById.get(m.id);
@@ -457,7 +464,7 @@ function ChatPageContent() {
       return [...prev, msg];
     });
 
-    // Atualiza o texto da última mensagem no card do contato E reordena
+    // Atualiza o texto da Ãºltima mensagem no card do contato E reordena
     // a lista (conversa que recebeu mensagem do agente sobe pro topo).
     setConversations((prev) =>
       sortConversationsByLastMessage(
@@ -492,7 +499,7 @@ function ChatPageContent() {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error || `HTTP ${res.status}`);
       }
-      // Atualiza última mensagem da conversa na sidebar
+      // Atualiza Ãºltima mensagem da conversa na sidebar
       setConversations((prev) =>
         prev.map((c) =>
           c.id === activeConversation?.id
@@ -507,7 +514,7 @@ function ChatPageContent() {
     } catch (err) {
       console.error("[chat] delete message error:", err);
       alert("Falha ao deletar mensagem: " + (err as Error).message);
-      // Revert: força reload das mensagens
+      // Revert: forÃ§a reload das mensagens
       setResyncToken((t) => t + 1);
     }
   }, [activeConversation]);
@@ -550,7 +557,7 @@ function ChatPageContent() {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error || `HTTP ${res.status}`);
       }
-      toast.success("Conversa excluída com sucesso!");
+      toast.success("Conversa excluÃ­da com sucesso!");
     } catch (err: any) {
       console.error("[chat] delete conversation error:", err);
       toast.error("Falha ao apagar conversa: " + err.message);
@@ -605,22 +612,22 @@ function ChatPageContent() {
     <div className="flex h-screen flex-col overflow-hidden bg-background">
       <Header />
 
-      {/* Seletor Global de Instâncias e Agentes de IA no Topo do Chat */}
+      {/* Seletor Global de InstÃ¢ncias e Agentes de IA no Topo do Chat */}
       <div className="flex items-center justify-between border-b border-border bg-card px-4 py-2 shrink-0 flex-wrap gap-3">
         <div className="flex items-center gap-4 flex-wrap">
-          {/* Filtro de Conexão WhatsApp */}
+          {/* Filtro de ConexÃ£o WhatsApp */}
           <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
             <Layers className="h-4 w-4 text-primary shrink-0" />
-            <span>Conexão WhatsApp:</span>
+            <span>ConexÃ£o WhatsApp:</span>
             <select
               value={activeInstance}
               onChange={(e) => setActiveInstance(e.target.value)}
               className="text-xs bg-muted border border-border/80 rounded-md px-2 py-1 outline-none text-foreground cursor-pointer focus:border-primary/50"
             >
-              <option value="__all__">Todas as conexões</option>
+              <option value="__all__">Todas as conexÃµes</option>
               {instances.map((inst) => (
                 <option key={inst.id} value={inst.instance_name}>
-                  {inst.instance_name} {inst.status === "open" || inst.status === "CONNECTED" || inst.status === "connected" ? "🟢" : "🔴"}
+                  {inst.instance_name} {inst.status === "open" || inst.status === "CONNECTED" || inst.status === "connected" ? "ðŸŸ¢" : "ðŸ”´"}
                 </option>
               ))}
             </select>
@@ -645,7 +652,7 @@ function ChatPageContent() {
           </div>
         </div>
 
-        {/* Status de Conexão Geral */}
+        {/* Status de ConexÃ£o Geral */}
         <div className="flex items-center gap-2">
           {whatsappConnected ? (
             <div className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
@@ -669,7 +676,7 @@ function ChatPageContent() {
         </div>
       </div>
 
-      {/* Área Principal de Layout Grid Inbox */}
+      {/* Ãrea Principal de Layout Grid Inbox */}
       <div className="flex flex-1 overflow-hidden relative">
         {/* Painel Esquerdo: Lista de Conversas */}
         <div

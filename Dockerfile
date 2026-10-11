@@ -55,6 +55,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
     tar \
+    postgresql-client \
     ca-certificates \
     fonts-freefont-otf \
     fonts-noto-color-emoji \

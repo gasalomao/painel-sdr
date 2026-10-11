@@ -4,9 +4,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const lookup = vi.hoisted(() => vi.fn());
 const request = vi.hoisted(() => vi.fn());
-vi.mock("node:dns/promises", () => ({ lookup }));
-vi.mock("node:http", () => ({ request }));
-vi.mock("node:https", () => ({ request }));
+vi.mock("node:dns/promises", () => ({ lookup, default: { lookup } }));
+vi.mock("node:http", () => ({ request, default: { request } }));
+vi.mock("node:https", () => ({ request, default: { request } }));
 
 import { assertPublicHttpUrl, assertPublicHttpUrlResolved, fetchPublicHttpUrl } from "../safe-url";
 

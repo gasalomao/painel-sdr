@@ -8,6 +8,7 @@ import { runInNewContext } from "node:vm";
 const scriptPath = resolve(process.cwd(), "scripts/build-setup-sql.mjs");
 const websiteSql = readFileSync(resolve(process.cwd(), "migrations/016_website_studio.sql"), "utf8");
 const completionGuardSql = readFileSync(resolve(process.cwd(), "migrations/017_website_studio_completion_guard.sql"), "utf8");
+const impeccableSql = readFileSync(resolve(process.cwd(), "migrations/018_enable_impeccable_skill.sql"), "utf8");
 const tempDirs: string[] = [];
 
 function makeTempProject(): string {
@@ -28,6 +29,7 @@ describe("scripts/build-setup-sql.mjs", () => {
     writeFileSync(join(cwd, "migrations", "SETUP_COMPLETO.sql"), "SELECT 'CANONICA';\n", "utf8");
     writeFileSync(join(cwd, "migrations", "016_website_studio.sql"), websiteSql, "utf8");
     writeFileSync(join(cwd, "migrations", "017_website_studio_completion_guard.sql"), completionGuardSql, "utf8");
+    writeFileSync(join(cwd, "migrations", "018_enable_impeccable_skill.sql"), impeccableSql, "utf8");
 
     const result = spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" });
 
@@ -37,7 +39,7 @@ describe("scripts/build-setup-sql.mjs", () => {
     expect(generated).not.toContain("RAIZ_ERRADA");
     expect(generated).toContain("migrations/SETUP_COMPLETO.sql");
     const sql = runInNewContext(generated.replace("export const SETUP_SQL =", "globalThis.sql =")) as string;
-    expect(sql).toBe(`SELECT 'CANONICA';\n\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n`);
+    expect(sql).toBe(`SELECT 'CANONICA';\n\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n\n\n${impeccableSql.trim()}\n`);
     expect(sql).toContain("CREATE OR REPLACE FUNCTION public.website_complete_run");
   });
 
@@ -48,12 +50,13 @@ describe("scripts/build-setup-sql.mjs", () => {
     writeFileSync(join(cwd, "migrations", "SETUP_COMPLETO.sql"), canonical);
     writeFileSync(join(cwd, "migrations", "016_website_studio.sql"), websiteSql);
     writeFileSync(join(cwd, "migrations", "017_website_studio_completion_guard.sql"), completionGuardSql);
+    writeFileSync(join(cwd, "migrations", "018_enable_impeccable_skill.sql"), impeccableSql);
 
     expect(spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" }).status).toBe(0);
     const output = join(cwd, "src", "lib", "setup-sql.ts");
     const generated = readFileSync(output, "utf8");
     const sql = runInNewContext(generated.replace("export const SETUP_SQL =", "globalThis.sql =")) as string;
-    expect(sql).toBe(`${canonical}\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n`);
+    expect(sql).toBe(`${canonical}\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n\n\n${impeccableSql.trim()}\n`);
     expect(spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" }).status).toBe(0);
     expect(readFileSync(output, "utf8")).toBe(generated);
   });
@@ -63,6 +66,7 @@ describe("scripts/build-setup-sql.mjs", () => {
     mkdirSync(join(cwd, "migrations"));
     writeFileSync(join(cwd, "migrations", "016_website_studio.sql"), websiteSql);
     writeFileSync(join(cwd, "migrations", "017_website_studio_completion_guard.sql"), completionGuardSql);
+    writeFileSync(join(cwd, "migrations", "018_enable_impeccable_skill.sql"), impeccableSql);
     const base = join(cwd, "migrations", "SETUP_COMPLETO.sql");
     writeFileSync(base, websiteSql);
     expect(spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" }).status).toBe(0);
@@ -84,6 +88,23 @@ describe("scripts/build-setup-sql.mjs", () => {
     const result = spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" });
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("016_website_studio.sql não encontrado");
+    expect(readFileSync(output, "utf8")).toBe("ANTIGO");
+  });
+
+  it("aborta sem a migration 018 e preserva a saída existente", () => {
+    const cwd = makeTempProject();
+    mkdirSync(join(cwd, "migrations"));
+    mkdirSync(join(cwd, "src", "lib"), { recursive: true });
+    writeFileSync(join(cwd, "migrations", "SETUP_COMPLETO.sql"), "SELECT 1;");
+    writeFileSync(join(cwd, "migrations", "016_website_studio.sql"), websiteSql);
+    writeFileSync(join(cwd, "migrations", "017_website_studio_completion_guard.sql"), completionGuardSql);
+    const output = join(cwd, "src", "lib", "setup-sql.ts");
+    writeFileSync(output, "ANTIGO");
+
+    const result = spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("018_enable_impeccable_skill.sql não encontrado");
     expect(readFileSync(output, "utf8")).toBe("ANTIGO");
   });
 

@@ -5,7 +5,7 @@ import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Settings2, Key, Save, CheckCircle2, XCircle, Loader2, Info, Database, Copy, ExternalLink, Check, Server, Plug, RefreshCw, Bot, Trash2, Plus, ChevronDown, ChevronRight, Zap, MoveUp, MoveDown, Play, Cpu } from "lucide-react";
+import { Settings2, Key, Save, CheckCircle2, XCircle, Loader2, Info, Database, Copy, ExternalLink, Check, Server, Plug, RefreshCw, Bot, Trash2, Plus, ChevronDown, ChevronRight, Zap, MoveUp, MoveDown, Play, Cpu, HardDrive } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ModelOptions } from "@/components/ai-module-shared";
 import { AiCombosManager } from "@/components/ai-combos-manager";
@@ -127,7 +127,7 @@ export default function ConfiguracoesPage() {
   const dsLastClipRef = useRef<string>("");
 
   // Layout tabs and collapsible cards open states
-  const [activeTab, setActiveTab] = useState<"ai_keys" | "gateway" | "whatsapp" | "models">("ai_keys");
+  const [activeTab, setActiveTab] = useState<"ai_keys" | "gateway" | "whatsapp" | "models" | "backup">("ai_keys");
   const [openGemini, setOpenGemini] = useState(true);
   const [openOpenRouter, setOpenOpenRouter] = useState(false);
   const [openDatabase, setOpenDatabase] = useState(false);
@@ -1673,6 +1673,17 @@ export default function ConfiguracoesPage() {
                 )}
               >
                 <Bot className="w-3.5 h-3.5" /> Modelos Ativos
+              </button>
+              <button
+                onClick={() => setActiveTab("backup")}
+                className={cn(
+                  "flex-1 min-w-[140px] flex items-center justify-center gap-2 py-3 px-4 rounded-xl text-xs font-black uppercase tracking-wider transition-all duration-300",
+                  activeTab === "backup"
+                    ? "bg-gradient-to-r from-orange-600/30 to-red-600/30 text-orange-200 border border-orange-500/30 shadow-[0_0_15px_rgba(249,115,22,0.15)]"
+                    : "text-muted-foreground hover:text-white hover:bg-white/5"
+                )}
+              >
+                <HardDrive className="w-3.5 h-3.5" /> Backup
               </button>
             </div>
 
@@ -3580,6 +3591,70 @@ export default function ConfiguracoesPage() {
 
                 {/* Modelo de Embeddings */}
                 <EmbeddingModelSettings />
+              </div>
+            )}
+
+            {activeTab === "backup" && (
+              <div className="space-y-4 sm:space-y-6 animate-in fade-in duration-200">
+                <Card className="border-orange-500/20 bg-gradient-to-br from-orange-500/5 to-red-500/5 overflow-hidden">
+                  <CardHeader>
+                    <CardTitle className="text-sm font-black uppercase tracking-widest flex items-center gap-2">
+                      <HardDrive className="w-4 h-4 text-orange-400" /> Sistema de Backup Automático
+                    </CardTitle>
+                    <p className="text-[10px] text-muted-foreground font-medium">
+                      Backup completo do banco Supabase para Google Drive
+                    </p>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="rounded-lg bg-orange-500/10 border border-orange-500/20 p-4">
+                      <h3 className="text-xs font-bold text-orange-300 mb-2 flex items-center gap-2">
+                        <Database className="w-3.5 h-3.5" /> O que faz?
+                      </h3>
+                      <ul className="text-[11px] text-muted-foreground space-y-1.5">
+                        <li>✅ Backup automático agendado (configurável por horas)</li>
+                        <li>✅ Backup manual sob demanda</li>
+                        <li>✅ Organização automática em pastas (ano/mês)</li>
+                        <li>✅ Compressão Gzip (~80% economia de espaço)</li>
+                        <li>✅ Rotação automática (apaga backups antigos)</li>
+                        <li>✅ Restauração completa do banco</li>
+                        <li>✅ Histórico completo de backups</li>
+                      </ul>
+                    </div>
+
+                    <div className="flex flex-col gap-3">
+                      <Button
+                        onClick={() => window.location.href = '/admin/backup'}
+                        className="w-full bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-500 hover:to-red-500 text-white font-bold"
+                      >
+                        <HardDrive className="w-4 h-4 mr-2" />
+                        Acessar Painel de Backup
+                      </Button>
+
+                      <div className="text-[10px] text-muted-foreground text-center">
+                        Configure backups automáticos, conecte Google Drive e gerencie restaurações
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg bg-blue-500/10 border border-blue-500/20 p-3">
+                      <h3 className="text-xs font-bold text-blue-300 mb-2">📋 Requisitos</h3>
+                      <ul className="text-[10px] text-muted-foreground space-y-1">
+                        <li>• Conta Google (para Google Drive)</li>
+                        <li>• Credenciais OAuth2 configuradas</li>
+                        <li>• PostgreSQL client tools (pg_dump/psql)</li>
+                      </ul>
+                    </div>
+
+                    <div className="rounded-lg bg-amber-500/10 border border-amber-500/20 p-3">
+                      <h3 className="text-xs font-bold text-amber-300 mb-2">⚡ Como Funciona</h3>
+                      <p className="text-[10px] text-muted-foreground leading-relaxed">
+                        Worker automático roda a cada 1 hora verificando se precisa fazer backup.
+                        Quando o intervalo configurado é atingido, executa pg_dump do banco completo,
+                        comprime com Gzip e faz upload para o Google Drive organizando em pastas por
+                        ano/mês. Backups antigos são deletados automaticamente conforme retenção configurada.
+                      </p>
+                    </div>
+                  </CardContent>
+                </Card>
               </div>
             )}
           </div>
