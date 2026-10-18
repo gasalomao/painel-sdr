@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { isInstanceOwnedByClient, requireClientId } from "@/lib/tenant";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
+import { parseMinReviews } from "@/lib/scraper-review-count";
 
 export const dynamic = "force-dynamic";
 
@@ -46,6 +47,17 @@ export async function POST(req: NextRequest) {
     if (!ctx.ok) return ctx.response;
 
     const body = await req.json();
+    if (body.scrape_filters !== undefined) {
+      if (!body.scrape_filters || typeof body.scrape_filters !== "object" || Array.isArray(body.scrape_filters)) {
+        return NextResponse.json({ success: false, error: "scrape_filters deve ser um objeto." }, { status: 400 });
+      }
+      if (parseMinReviews(body.scrape_filters.minReviews) === null) {
+        return NextResponse.json({ success: false, error: "minReviews deve ser um inteiro entre 0 e 2147483647." }, { status: 400 });
+      }
+      if (body.scrape_filters.filterWithInstagram !== undefined && typeof body.scrape_filters.filterWithInstagram !== "boolean") {
+        return NextResponse.json({ success: false, error: "filterWithInstagram deve ser um booleano." }, { status: 400 });
+      }
+    }
     // SaaS guard: cliente não escolhe modelo. Sobrescreve dispatch_ai_model
     // e followup_ai_model do body pelo client.default_ai_model. Admin livre.
     await enforceClientDefaultModel(body, ctx, ["dispatch_ai_model", "followup_ai_model"]);

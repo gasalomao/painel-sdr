@@ -17,6 +17,8 @@ import { summarizeReviewsForLead } from "@/lib/reviews-ai";
 import { extractLocation } from "@/lib/lead-intelligence";
 import { getNeighboringCities, isValidCityName, extractUFFromText, ufFromCep, computeExpansionCandidates, proximitySearchTerm, normRegionName } from "@/lib/geo-regions";
 import { fetchPublicHttpUrl } from "@/lib/safe-url";
+import { extractGoogleReviewCount, parseGoogleReviewCount, parseMinReviews, reviewCountFilterReason } from "@/lib/scraper-review-count";
+import { normalizeInstagramProfile } from "@/lib/scraper-instagram";
 import os from "os";
 import fs from "fs";
 import path from "path";
@@ -120,6 +122,10 @@ export interface ScraperSettings {
   filterDuplicates?: boolean;
   filterLandlines?: boolean;
   filterWithWebsite?: boolean;
+  /** Exige link de perfil do Instagram identificado no painel do negócio. */
+  filterWithInstagram?: boolean;
+  /** Total mínimo de pessoas que avaliaram, independente da nota/comentários. 0 desativa. */
+  minReviews?: number;
   captureAllReviews?: boolean;
   /** Limite máximo de leads a captar antes de parar. Quando atingido, o scraper
    *  sai do loop limpo, fecha o navegador, e o worker detecta o cap no próximo
@@ -277,6 +283,8 @@ export function evaluateLeadFilters(
   websiteStr: string,
   settings: ScraperSettings,
   existingLeads: Lead[],
+  reviewCount = "",
+  instagram = "",
 ): { pass: boolean; reason: string } {
   if (settings.filterEmpty && cleanPhone === "") return { pass: false, reason: "Sem telefone" };
   if (settings.filterDuplicates && cleanPhone !== "" && existingLeads.find((l) => l.phones.replace(/\D/g, "") === cleanPhone)) {
@@ -284,6 +292,9 @@ export function evaluateLeadFilters(
   }
   if (settings.filterLandlines && cleanPhone !== "" && isLandline(cleanPhone)) return { pass: false, reason: "Telefone fixo" };
   if (settings.filterWithWebsite && websiteStr) return { pass: false, reason: "Com site" };
+  const reviewReason = reviewCountFilterReason(reviewCount, settings.minReviews);
+  if (reviewReason) return { pass: false, reason: reviewReason };
+  if (settings.filterWithInstagram && !normalizeInstagramProfile(instagram)) return { pass: false, reason: "Sem Instagram" };
   return { pass: true, reason: "" };
 }
 
@@ -410,7 +421,7 @@ async function saveLeadAndSync(lead: Lead, settings: ScraperSettings, run: RunCo
       ramo_negocio: lead.categories,
       endereco: lead.fullAddress,
       avaliacao: lead.averageRating ? Number(lead.averageRating) || null : null,
-      reviews: lead.reviewCount ? Number(String(lead.reviewCount).replace(/\D/g, "")) || null : null,
+      reviews: parseGoogleReviewCount(lead.reviewCount),
       website: lead.website,
       instagram: lead.instagram,
       facebook: lead.facebook,
@@ -741,19 +752,9 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
             const address = spans.find((s) => s.includes(",") || s.includes("Av.") || s.includes("Rua")) || spans[spans.length - 1] || "";
             const textC = item.textContent || "";
 
-            // ---- Rating/reviews: multi-strategy (praticamente todos os cards
-            // de Maps têm rating — regex antiga `(\d[.,]\d)\s*\(([\d.,k]+)\)`
-            // perdia ~30% por exigir 1 casa decimal exata, colar parênteses
-            // e não tolerar separador middot `·`. Agora tentamos:
-            //   1) aria-label direto (role="img" com nota)
-            //   2) regex expandida aceita `·`, 1-2 casas, k/K/m/M
-            //   3) número isolado `4.8` seguido de parênteses solto
-            //   4) fallback `X.Y estrelas` no textContent
-            // Review count usa janela separada (não exige vínculo posicional
-            // ao rating) — pega primeiro `(...)` ou `X avaliações`.
-            // -----------------------------------------------------------
+            // Nota média por ARIA/texto. O total é extraído separadamente no
+            // Node, mesmo quando o ARIA da nota não inclui a quantidade.
             let rating = "";
-            let reviews = "";
 
             // (1) aria-label: "Avaliação 4.8 de 5", "4.8 stars", "Rated 4.8"
             const ariaEl = item.querySelector('[role="img"][aria-label], [aria-label*="estrela" i], [aria-label*="star" i], [aria-label*="avalia" i], [aria-label*="rated" i]') as HTMLElement | null;
@@ -762,32 +763,24 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
               const rm = aria.match(/(\d(?:[.,]\d{1,2})?)\s*(?:de\s*5\s*)?(?:estrela|star)/i)
                       || aria.match(/(?:avalia(?:ç|c)(?:ã|a)o|rated|rating|nota)\s*[:\s]*(\d(?:[.,]\d{1,2})?)/i);
               if (rm) rating = (rm[1] || rm[2] || "").replace(",", ".");
-              const rcm = aria.match(/([\d.,]+[kKmM]?)\s*(?:avaliaç|review)/i);
-              if (rcm) reviews = rcm[1];
             }
 
             // (2) regex expandida sobre textContent
             if (!rating) {
               const rMatch = textC.match(/(\d(?:[.,]\d{1,2})?)\s*(?:·|\s)*\(([\d.,]+[kKmM]?)\)/i);
-              if (rMatch) { rating = rMatch[1].replace(",", "."); reviews = rMatch[2]; }
+              if (rMatch) rating = rMatch[1].replace(",", ".");
             }
             // (3) nota isolada seguida de parênteses em qualquer posição
             if (!rating) {
               const rMatch2 = textC.match(/(\d\.\d{1,2}|\d,\d{1,2})\s*[\(]?\s*(\d[\d.,]*[kKmM]?)\s*[\)]?/);
               if (rMatch2 && parseFloat(rMatch2[1].replace(",", ".")) <= 5) {
                 rating = rMatch2[1].replace(",", ".");
-                if (rMatch2[2] && /\d/.test(rMatch2[2])) reviews = rMatch2[2];
               }
             }
             // (4) fallback `4.8 estrelas` solto
             if (!rating) {
               const rMatch3 = textC.match(/(\d(?:[.,]\d{1,2})?)\s*(?:estrela|star)/i);
               if (rMatch3) rating = rMatch3[1].replace(",", ".");
-            }
-            // review count isolado: "1.234 avaliações" / "1.2k reviews"
-            if (!reviews) {
-              const rcMatch = textC.match(/([\d.,]+[kKmM]?)\s*(?:avaliaç|review)/i);
-              if (rcMatch) reviews = rcMatch[1];
             }
 
             // Site do card (botão "Site" do resultado) — permite descartar
@@ -799,12 +792,18 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
               fullAddress: address,
               categories: category || "Comércio",
               averageRating: rating,
-              reviewCount: reviews,
+              reviewCount: "",
+              reviewCountSources: [
+                ...Array.from(item.querySelectorAll('.UY7F9')).map(el => el.textContent || ""),
+                ...Array.from(item.querySelectorAll('[role="img"][aria-label]')).map(el => el.getAttribute("aria-label") || ""),
+                textC,
+              ],
               website: websiteEl?.href || "",
             };
           }, lead.name);
 
           if (!cardData) continue;
+          cardData.reviewCount = extractGoogleReviewCount(cardData.reviewCountSources);
 
           // Colhe a cidade do endereço ANTES de qualquer descarte — até os
           // descartados alimentam o mapa de cidades vizinhas pra expansão.
@@ -819,6 +818,12 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
           // painel de detalhes (pula navegação + reviews + filtros).
           if (settings.filterWithWebsite && cardData.website) {
             sendRunLog(run, `🚫 Descartado (Com site): ${lead.name}`, "warning");
+            continue;
+          }
+
+          const cardReviewReason = reviewCountFilterReason(cardData.reviewCount, settings.minReviews, true);
+          if (cardReviewReason) {
+            sendRunLog(run, `🚫 Descartado (${cardReviewReason}): ${lead.name}`, "warning");
             continue;
           }
 
@@ -892,6 +897,19 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 let instagram = "";
                 let facebook = "";
                 const redesAdicionais: Record<string, string> = {};
+                const detailPanel = document.querySelector('h1')?.closest('[role="main"]') || document.querySelector('[role="main"]');
+                const unrelatedContent = '[data-review-id], .jftiEf, [role="article"], [jslog*="review"], [role="feed"], .Nv2PK';
+                const businessName = detailPanel?.querySelector('h1')?.textContent?.trim() || "";
+                // Apenas contatos atribuídos ao negócio, não links de perguntas/recomendações.
+                // O Maps expõe a região "Informações de <negócio>" com telefone/endereço.
+                const contactRegions = Array.from(detailPanel?.querySelectorAll('[role="region"]') || [])
+                  .filter(region => businessName && region.getAttribute('aria-label')?.includes(businessName)
+                    && region.querySelector('[data-item-id="address"], [data-item-id^="phone:"]')
+                    && !region.closest(unrelatedContent));
+                const instagramLinks = Array.from(detailPanel?.querySelectorAll<HTMLAnchorElement>('a[href]') || [])
+                  .filter(a => !a.closest(unrelatedContent)
+                    && (a.getAttribute('data-item-id') === 'authority' || contactRegions.some(region => region.contains(a))))
+                  .map(a => a.href);
 
                 // ---- Redes sociais e contatos (varredura de TODOS os links) ----
                 const siteEls = Array.from(document.querySelectorAll('a[data-item-id="authority"], a[data-tooltip*="site" i], a[aria-label*="website" i], a[href^="http"]'));
@@ -1263,7 +1281,6 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 // `.F6sie`/`.MW4l2` nem sempre tem — multi-strategy igual ao
                 // card. Praticamente todo negócio tem rating no painel detalhe.
                 let ratingAggregate: string = "";
-                let reviewCountAggregate: string = "";
                 const rEl = document.querySelector(
                   '[role="img"][aria-label], [aria-label*="estrela" i], [aria-label*="star" i], [aria-label*="avalia" i], [aria-label*="rated" i], .F6sie, .MW4l2, .fontDisplayLarge'
                 );
@@ -1272,8 +1289,6 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                   const m1 = aria.match(/(\d(?:[.,]\d{1,2})?)\s*(?:de\s*5\s*)?(?:estrela|star)/i)
                           || aria.match(/(?:avalia(?:ç|c)(?:ã|a)o|rated|rating|nota)\s*[:\s]*(\d(?:[.,]\d{1,2})?)/i);
                   if (m1) ratingAggregate = (m1[1] || m1[2] || "").replace(",", ".");
-                  const m2 = aria.match(/(\d[\d.,]*[kKmM]?)\s*(?:avaliaç|review)/i);
-                  if (m2) reviewCountAggregate = m2[1];
                 }
                 // textContent do próprio elemento rating (caso ária vazia)
                 if (!ratingAggregate && rEl) {
@@ -1287,10 +1302,21 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                               || bodyTxt.match(/(\d(?:[.,]\d{1,2})?)\s*(?:estrela|star)/i);
                   if (bMatch) ratingAggregate = bMatch[1].replace(",", ".");
                 }
-                if (!reviewCountAggregate) {
-                  const bMatch = bodyTxt.match(/([\d.,]+[kKmM]?)\s*(?:avaliaç|review)/i)
-                              || bodyTxt.match(/[\(]\s*([\d.,]+[kKmM]?)\s*[\)]/);
-                  if (bMatch) reviewCountAggregate = bMatch[1];
+                // Só fontes do resumo agregado; avaliações individuais trazem
+                // totais do perfil do autor, que NÃO pertencem ao negócio.
+                const reviewCountSources: string[] = [];
+                // Somente resumo/controle agregado do negócio atual, nunca
+                // barras por estrela, tópicos, autores ou outros resultados.
+                for (const summary of Array.from(detailPanel?.querySelectorAll('.F7nice, button[jsaction*="moreReviews"]') || [])) {
+                  if (summary.closest('[data-review-id], .jftiEf, [role="article"], [jslog*="review"], [role="feed"], .Nv2PK')) continue;
+                  reviewCountSources.push(
+                    summary.getAttribute("aria-label") || "",
+                    ...Array.from(summary.querySelectorAll('[aria-label]')).map(el => el.getAttribute("aria-label") || ""),
+                  );
+                  // Não concatena a nota inteira com o total: "5" + "123 reviews"
+                  // viraria "5 123 reviews", um falso total de 5.123 votos.
+                  const texts = document.createTreeWalker(summary, NodeFilter.SHOW_TEXT);
+                  while (texts.nextNode()) reviewCountSources.push(texts.currentNode.textContent || "");
                 }
 
                 // ---- Distribuição de estrelas (5★, 4★, 3★, 2★, 1★) ----
@@ -1355,7 +1381,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 }
 
                 return {
-                  phone, website, instagram, facebook,
+                  phone, website, instagram, facebook, instagramLinks,
                   mapsUrl,
                   priceRange,
                   openNow,
@@ -1365,7 +1391,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                   businessDetails,
                   reviews: reviewsInitial,
                   ratingAggregate,
-                  reviewCountAggregate,
+                  reviewCountSources,
                   distribuicaoEstrelas: Object.keys(distribuicaoEstrelas).length > 0 ? distribuicaoEstrelas : undefined,
                   cep,
                   plusCode,
@@ -1388,7 +1414,9 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
               if (mainExtracted) {
                 phoneStr = mainExtracted.phone;
                 websiteStr = mainExtracted.website;
-                instagramStr = mainExtracted.instagram;
+                instagramStr = settings.filterWithInstagram
+                  ? mainExtracted.instagramLinks.map(normalizeInstagramProfile).find(Boolean) || ""
+                  : mainExtracted.instagram;
                 facebookStr = mainExtracted.facebook;
                 if (Array.isArray(mainExtracted.reviews) && mainExtracted.reviews.length > 0) reviewsDetalhes = mainExtracted.reviews;
                 if (mainExtracted.businessDetails && Object.keys(mainExtracted.businessDetails).length > 0) businessDetails = mainExtracted.businessDetails;
@@ -1401,7 +1429,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 // fallback: se o scraper principal (cardData) não tiver pego
                 // rating/reviews, usa o que veio do painel de detalhe.
                 if (!cardData.averageRating && mainExtracted.ratingAggregate) cardData.averageRating = mainExtracted.ratingAggregate;
-                if (!cardData.reviewCount && mainExtracted.reviewCountAggregate) cardData.reviewCount = mainExtracted.reviewCountAggregate;
+                cardData.reviewCount = extractGoogleReviewCount(mainExtracted.reviewCountSources, cardData.reviewCount);
                 if (mainExtracted.plusCode) plusCode = mainExtracted.plusCode;
                 if (mainExtracted.lat) lat = mainExtracted.lat;
                 if (mainExtracted.lng) lng = mainExtracted.lng;
@@ -1437,7 +1465,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
               // conhecidos). Descarta ANTES da captura profunda de reviews:
               // não gastamos 10-30s de scroll em lead que será descartado.
               // ============================================================
-              const earlyCheck = evaluateLeadFilters(phoneStr.replace(/\D/g, ""), websiteStr, settings, leadsStore);
+              const earlyCheck = evaluateLeadFilters(phoneStr.replace(/\D/g, ""), websiteStr, settings, leadsStore, cardData.reviewCount, instagramStr);
               if (!earlyCheck.pass) {
                 discardedByFilters = earlyCheck.reason;
                 sendRunLog(run, `🚫 Descartado (${earlyCheck.reason}): ${lead.name}`, "warning");
@@ -1689,10 +1717,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                       // ("1.234", "2,5k") e mostra capturadas vs esperadas —
                       // se ficar muito abaixo, dá pra ver NO LOG que a
                       // rolagem parou cedo.
-                      const rawCount = String(cardData.reviewCount || "");
-                      let expected = parseInt(rawCount.replace(/\D/g, ""), 10) || 0;
-                      const kMatch = rawCount.match(/([\d.,]+)\s*[kK]/);
-                      if (!expected && kMatch) expected = Math.round(parseFloat(kMatch[1].replace(",", ".")) * 1000);
+                      const expected = parseGoogleReviewCount(cardData.reviewCount) || 0;
                       sendRunLog(run,
                         `📝 ${reviewsDetalhes.length} avaliações capturadas${expected > 0 ? ` (de ~${expected} no Google)` : ""}: ${cardData.name}`,
                         "success",
@@ -1717,7 +1742,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
           // já saiu — não repete.
           const finalCheck = discardedByFilters
             ? { pass: false, reason: discardedByFilters }
-            : evaluateLeadFilters(cleanPhone, websiteStr, settings, leadsStore);
+            : evaluateLeadFilters(cleanPhone, websiteStr, settings, leadsStore, cardData.reviewCount, instagramStr);
 
           if (finalCheck.pass) {
             const jid = formatJid(phoneStr);
@@ -1749,9 +1774,6 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                     .filter((n: number) => !isNaN(n) && n > 0);
                   if (rates.length > 0) cardData.averageRating = (rates.reduce((a: number, b: number) => a + b, 0) / rates.length).toFixed(1);
                 }
-              }
-              if (!cardData.reviewCount && reviewsDetalhes.length > 0) {
-                cardData.reviewCount = String(reviewsDetalhes.length);
               }
               const finalLead: Lead = {
                 name: cardData.name,
@@ -2021,6 +2043,10 @@ export interface StartOpts {
   filterDuplicates?: boolean;
   filterLandlines?: boolean;
   filterWithWebsite?: boolean;
+  /** Exige link de perfil do Instagram identificado no painel do negócio. */
+  filterWithInstagram?: boolean;
+  /** Total mínimo de pessoas que avaliaram, independente da nota/comentários. 0 desativa. */
+  minReviews?: number;
   captureAllReviews?: boolean;
   /** Limite de leads — quando atingido o scraper sai limpo. */
   maxLeads?: number;
@@ -2044,6 +2070,11 @@ export function startScraperRun(opts: StartOpts): { ok: boolean; error?: string;
   if (!clientId) return { ok: false, error: "client_id é obrigatório." };
   if (!opts.niches?.length || !opts.regions?.length) {
     return { ok: false, error: "Forneça pelo menos 1 nicho e 1 região." };
+  }
+  const minReviews = parseMinReviews(opts.minReviews);
+  if (minReviews === null) return { ok: false, error: "Mínimo de avaliações deve ser um inteiro entre 0 e 2147483647." };
+  if (opts.filterWithInstagram !== undefined && typeof opts.filterWithInstagram !== "boolean") {
+    return { ok: false, error: "Somente com Instagram deve ser um booleano." };
   }
   if (activeRun) {
     if (!hasRunAccess(clientId, automationId)) {
@@ -2084,6 +2115,8 @@ export function startScraperRun(opts: StartOpts): { ok: boolean; error?: string;
     filterDuplicates: opts.filterDuplicates,
     filterLandlines: opts.filterLandlines,
     filterWithWebsite: opts.filterWithWebsite,
+    filterWithInstagram: opts.filterWithInstagram ?? false,
+    minReviews,
     captureAllReviews: opts.captureAllReviews,
     maxLeads: opts.maxLeads,
     reviews_ai: opts.reviews_ai,

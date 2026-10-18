@@ -65,6 +65,21 @@ describe("SEC-H8 scraper tenant isolation", () => {
     expect(getStatus(null).isScraping).toBe(false);
   });
 
+  it("rejeita mínimo inválido também nas chamadas diretas da automação", () => {
+    for (const minReviews of [-1, 1.5, NaN, Infinity, 2147483648]) {
+      expect(startScraperRun({ niches: ["padaria"], regions: ["Vitória"], client_id: tenantA, minReviews })).toMatchObject({ ok: false });
+    }
+    expect(getStatus(tenantA).isScraping).toBe(false);
+  });
+
+  it.each([null, "true", "false", 0, 1, [], {}])("rejeita filtro Instagram inválido na entrada direta: %j", (filterWithInstagram) => {
+    expect(startScraperRun({
+      niches: ["padaria"], regions: ["Vitória"], client_id: tenantA,
+      filterWithInstagram: filterWithInstagram as unknown as boolean,
+    })).toEqual({ ok: false, error: "Somente com Instagram deve ser um booleano." });
+    expect(getStatus(tenantA).isScraping).toBe(false);
+  });
+
   it("impede automações do mesmo tenant de assumir ou controlar o mesmo run", () => {
     const first = startScraperRun({
       niches: ["padaria"],

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { isInstanceOwnedByClient, requireClientId } from "@/lib/tenant";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
+import { parseMinReviews } from "@/lib/scraper-review-count";
 
 export const dynamic = "force-dynamic";
 
@@ -64,6 +65,17 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   const { id } = await ctx.params;
   try {
     const body = await req.json();
+    if (body.scrape_filters !== undefined) {
+      if (!body.scrape_filters || typeof body.scrape_filters !== "object" || Array.isArray(body.scrape_filters)) {
+        return NextResponse.json({ success: false, error: "scrape_filters deve ser um objeto." }, { status: 400 });
+      }
+      if (parseMinReviews(body.scrape_filters.minReviews) === null) {
+        return NextResponse.json({ success: false, error: "minReviews deve ser um inteiro entre 0 e 2147483647." }, { status: 400 });
+      }
+      if (body.scrape_filters.filterWithInstagram !== undefined && typeof body.scrape_filters.filterWithInstagram !== "boolean") {
+        return NextResponse.json({ success: false, error: "filterWithInstagram deve ser um booleano." }, { status: 400 });
+      }
+    }
     // SaaS guard: cliente comum não escolhe modelo no PATCH.
     await enforceClientDefaultModel(body, tenant, ["dispatch_ai_model", "followup_ai_model"]);
     let ownerQuery = supabase.from("automations").select("client_id").eq("id", id);
@@ -85,19 +97,20 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     // _scrapeStartedAt, _lastProgressAt, _baselineCount). O formulário só manda
     // a config — sobrescrever direto APAGA os marcadores, e aí o disparo não
     // sabe quais leads são desta captação (já causou "disparar pro CRM
-    // inteiro"). Preserva qualquer chave que comece com "_".
+    // inteiro"). Preserva marcadores e campos de configuração não enviados.
     if ("scrape_filters" in update) {
-      const { data: cur } = await supabase
+      const { data: cur, error: filtersError } = await supabase
         .from("automations")
         .select("scrape_filters")
         .eq("id", id)
         .eq("client_id", owner.client_id)
         .maybeSingle();
-      const markers: Record<string, any> = {};
+      if (filtersError) throw filtersError;
+      const markers: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(cur?.scrape_filters || {})) {
         if (k.startsWith("_")) markers[k] = v;
       }
-      update.scrape_filters = { ...(update.scrape_filters || {}), ...markers };
+      update.scrape_filters = { ...(cur?.scrape_filters || {}), ...update.scrape_filters, ...markers };
     }
 
     const { error } = await supabase

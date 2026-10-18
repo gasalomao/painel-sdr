@@ -92,6 +92,57 @@ describe("/api/scraper tenant scope", () => {
     expect(mocks.startScraperRun.mock.calls[0][0]).not.toHaveProperty("automation_id");
   });
 
+  it.each([undefined, 0, 25, 2147483647])("encaminha minReviews=%s sem ativar comentários/IA", async (minReviews) => {
+    const response = await POST(request({ action: "start", minReviews }) as never);
+
+    expect(response.status).toBe(200);
+    expect(mocks.startScraperRun).toHaveBeenCalledWith(expect.objectContaining({
+      minReviews: minReviews ?? 0,
+      client_id: tenantId,
+      captureAllReviews: false,
+    }));
+    expect(mocks.startScraperRun.mock.calls[0][0].reviews_ai).toBeUndefined();
+  });
+
+  it.each([-1, 1.5, 2147483648, "25", "", null, true, [], {}].map(minReviews => ({ minReviews })))("rejeita minReviews inválido: $minReviews", async ({ minReviews }) => {
+    const response = await POST(request({ action: "start", minReviews }) as never);
+
+    expect(response.status).toBe(400);
+    expect(mocks.startScraperRun).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, false, true])("encaminha filterWithInstagram=%s sem alterar os demais filtros", async (filterWithInstagram) => {
+    const response = await POST(request({
+      action: "start", filterWithInstagram, minReviews: 100,
+      filterEmpty: true, filterDuplicates: true, filterLandlines: true, filterWithWebsite: true,
+    }) as never);
+
+    expect(response.status).toBe(200);
+    expect(mocks.startScraperRun).toHaveBeenCalledWith(expect.objectContaining({
+      filterWithInstagram: filterWithInstagram ?? false,
+      minReviews: 100,
+      filterEmpty: true, filterDuplicates: true, filterLandlines: true, filterWithWebsite: true,
+      captureAllReviews: false, client_id: tenantId,
+    }));
+    expect(mocks.startScraperRun.mock.calls[0][0].reviews_ai).toBeUndefined();
+  });
+
+  it.each([null, 0, 1, "true", "false", "", [], {}].map(filterWithInstagram => ({ filterWithInstagram })))
+    ("rejeita filterWithInstagram inválido: $filterWithInstagram", async ({ filterWithInstagram }) => {
+      const response = await POST(request({ action: "start", filterWithInstagram }) as never);
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "filterWithInstagram deve ser um booleano." });
+      expect(mocks.startScraperRun).not.toHaveBeenCalled();
+    });
+
+  it("não valida filtros em ações sem captura", async () => {
+    const response = await POST(request({ action: "get_leads", minReviews: -1, filterWithInstagram: "true" }) as never);
+
+    expect(response.status).toBe(200);
+    expect(mocks.getLeads).toHaveBeenCalledWith(tenantId);
+  });
+
   it("escopa leitura e controle ao tenant autenticado", async () => {
     await POST(request({ action: "get_leads" }) as never);
     await POST(request({ action: "stop" }) as never);

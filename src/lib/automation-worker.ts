@@ -185,6 +185,8 @@ async function startScrapingPhase(a: AutomationRow): Promise<void> {
       filterDuplicates: filters.filterDuplicates !== false,
       filterLandlines: filters.filterLandlines === true,
       filterWithWebsite: filters.filterWithWebsite === true,
+      filterWithInstagram: filters.filterWithInstagram === undefined ? false : filters.filterWithInstagram,
+      minReviews: filters.minReviews === undefined ? 0 : filters.minReviews,
       captureAllReviews: filters.captureAllReviews === true,
       webhookEnabled: false,
       maxLeads: Number(a.scrape_max_leads) || 200,  // ← respeita o limite configurado
@@ -232,10 +234,8 @@ async function startScrapingPhase(a: AutomationRow): Promise<void> {
 }
 
 /**
- * Verifica se o scrape terminou. Heurística:
- *   - Atingiu scrape_max_leads → done
- *   - Sem leads novos há ≥120s desde a última vez que detectamos progresso → done
- *   - Passaram >15min totais de scrape → done (timeout duro)
+ * Verifica se o scrape terminou pelo marcador da engine ou scrape_max_leads.
+ * Sem engine ativa, preserva os fallbacks de ociosidade e tempo sem leads.
  */
 type ScrapeCheck = {
   done: boolean;
@@ -285,7 +285,13 @@ async function checkScrapingDone(a: AutomationRow): Promise<ScrapeCheck> {
     return { ...base, done: true, doneReason: `limite de ${hardCap} leads atingido` };
   }
 
-  // Timeout duro: 15min sem nada — escapa de scraper travado.
+  // Poucos aprovados (ou nenhum) não significam fim com filtros restritivos.
+  // Só usa heurísticas sem engine ativa; marcador real e limite acima prevalecem.
+  if (getScraperStatus(clientId, a.id).isScraping) {
+    return { ...base, done: false, doneReason: null };
+  }
+
+  // Timeout de fallback: sem engine ativa e 15min sem nenhum lead.
   if (Date.now() - scrapeStartedAtMs > 15 * 60_000 && scrapedNow === 0) {
     return { ...base, done: true, doneReason: "timeout de 15min sem captar nenhum lead" };
   }
@@ -858,6 +864,8 @@ async function topUpInvalidLeads(
     filterDuplicates: filters.filterDuplicates !== false,
     filterLandlines: filters.filterLandlines === true,
     filterWithWebsite: filters.filterWithWebsite === true,
+    filterWithInstagram: filters.filterWithInstagram === undefined ? false : filters.filterWithInstagram,
+    minReviews: filters.minReviews === undefined ? 0 : filters.minReviews,
     captureAllReviews: filters.captureAllReviews === true,
     webhookEnabled: false,
     maxLeads: deficit,

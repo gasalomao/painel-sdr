@@ -22,6 +22,7 @@ import {
 import { renderTemplate, type TemplateContext } from "@/lib/template-vars";
 import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
+import { parseMinReviews } from "@/lib/scraper-review-count";
 import { AutomationLogs } from "../automacao/AutomationLogs";
 
 type Lead = {
@@ -92,6 +93,9 @@ Por conta disso, já deixei montado um modelo de site pronto pra vocês verem co
 Você prefere que eu te mande o link aqui por mensagem ou prefere marcar uma reunião rápida para te mostrar como ficou? Qual você prefere? (É totalmente sem compromisso).`;
 
 const VENDEDOR_DEFAULT = "Salomão";
+const MIN_REVIEWS_HELP = "Quantidade de pessoas que deram estrelas, com ou sem comentário. Não filtra pela nota. 0 = sem mínimo.";
+const MIN_REVIEWS_ERROR = "Informe um inteiro entre 0 e 2147483647.";
+const INSTAGRAM_FILTER_HELP = "Exige perfil informado no Google Maps; não busca no site.";
 
 const HAS_WEBSITE_LABELS: Record<string, string> = {
   only_empty: "Sem site",
@@ -181,6 +185,9 @@ export default function ProspeccaoSitesPage() {
   const [filterLandlines, setFilterLandlines] = useState(false);
   const [captureAllReviews, setCaptureAllReviews] = useState(false);
   const [filterWithWebsite, setFilterWithWebsite] = useState(false);
+  const [filterWithInstagram, setFilterWithInstagram] = useState(false);
+  const [minReviews, setMinReviews] = useState("0");
+  const [minReviewsError, setMinReviewsError] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -203,7 +210,7 @@ export default function ProspeccaoSitesPage() {
           setIsPaused(!!d.isPaused);
           setScraperLeadsCount(d.leadCount ?? 0);
         } else if (d.event === "leads_update" || d.event === "new_lead") {
-          setScraperLeadsCount(d.leadCount ?? (d.leads?.length ?? 0));
+          setScraperLeadsCount(d.leadCount ?? d.count ?? (d.leads?.length ?? 0));
         }
       } catch { /* ignore */ }
     };
@@ -219,6 +226,9 @@ export default function ProspeccaoSitesPage() {
   useEffect(() => { logsEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [logs]);
 
   const handleStart = async () => {
+    const minimum = parseMinReviews(minReviews.trim() === "" ? null : Number(minReviews));
+    setMinReviewsError(minimum === null);
+    if (minimum === null) return;
     const nicheList = niches.split("\n").map((n) => n.trim()).filter(Boolean);
     const regionList = regions.split("\n").map((r) => r.trim()).filter(Boolean);
     if (!nicheList.length || !regionList.length) {
@@ -239,6 +249,8 @@ export default function ProspeccaoSitesPage() {
           filterDuplicates,
           filterLandlines,
           filterWithWebsite,
+          filterWithInstagram,
+          minReviews: minimum,
           captureAllReviews,
           reviews_ai: reviewsAiEnabled
             ? { enabled: true, model: reviewsAiModel || null, prompt: reviewsAiPrompt || null }
@@ -507,6 +519,9 @@ export default function ProspeccaoSitesPage() {
   const [autoFilterDuplicates, setAutoFilterDuplicates] = useState(true);
   const [autoFilterLandlines, setAutoFilterLandlines] = useState(false);
   const [autoFilterWithWebsite, setAutoFilterWithWebsite] = useState(true);
+  const [autoFilterWithInstagram, setAutoFilterWithInstagram] = useState(false);
+  const [autoMinReviews, setAutoMinReviews] = useState("0");
+  const [autoMinReviewsError, setAutoMinReviewsError] = useState(false);
   const [autoSteps, setAutoSteps] = useState<{ day_offset: number; template: string }[]>([
     { day_offset: 2, template: "Olá {{nome_empresa}}, tudo bem? Ainda tem interesse em ter um site profissional para sua empresa {{ramo}}?" },
   ]);
@@ -585,6 +600,9 @@ export default function ProspeccaoSitesPage() {
   }, []);
 
   const createAutomation = async () => {
+    const minimum = parseMinReviews(autoMinReviews.trim() === "" ? null : Number(autoMinReviews));
+    setAutoMinReviewsError(minimum === null);
+    if (minimum === null) return;
     const nichesArr = autoNiches.split("\n").map(s => s.trim()).filter(Boolean);
     const regionsArr = autoRegions.split("\n").map(s => s.trim()).filter(Boolean);
     if (!autoName.trim() || !autoInstance || !autoTemplate.trim() || nichesArr.length === 0 || regionsArr.length === 0) {
@@ -611,6 +629,8 @@ export default function ProspeccaoSitesPage() {
             filterDuplicates: autoFilterDuplicates,
             filterLandlines: autoFilterLandlines,
             filterWithWebsite: autoFilterWithWebsite,
+            filterWithInstagram: autoFilterWithInstagram,
+            minReviews: minimum,
             captureAllReviews: autoCaptureAllReviews || autoReviewsAi,
             reviews_ai: autoReviewsAi
               ? { enabled: true, model: autoReviewsAiModel || null, prompt: autoReviewsAiPrompt || null }
@@ -992,6 +1012,27 @@ export default function ProspeccaoSitesPage() {
                     </div>
                   </div>
                   <p className="text-[11px] text-white/50">Quando ativado, carrega e salva todos os comentários e avaliações disponíveis no Google Maps. A captação pode levar mais tempo.</p>
+
+                  <div className="space-y-1">
+                    <label htmlFor="ps-min-reviews" className="text-xs text-white/60">Mínimo de avaliações no Google</label>
+                    <Input id="ps-min-reviews" type="number" min={0} step={1} max={2147483647}
+                      value={minReviews} onChange={(e) => { setMinReviews(e.target.value); setMinReviewsError(false); }}
+                      aria-invalid={minReviewsError}
+                      aria-describedby={`ps-min-reviews-help${minReviewsError ? " ps-min-reviews-error" : ""}`} />
+                    <p id="ps-min-reviews-help" className="text-[11px] text-white/50">{MIN_REVIEWS_HELP}</p>
+                    {minReviewsError && <p id="ps-min-reviews-error" role="alert" className="text-xs text-red-400">{MIN_REVIEWS_ERROR}</p>}
+                  </div>
+
+                  <div className="space-y-1">
+                    <label htmlFor="ps-filter-with-instagram" className="flex items-center justify-between gap-2 p-2 rounded-lg hover:bg-white/5 cursor-pointer">
+                      <span className="text-sm text-white/90 select-none flex-1">Somente com Instagram</span>
+                      <input id="ps-filter-with-instagram" type="checkbox" checked={filterWithInstagram}
+                        onChange={(e) => setFilterWithInstagram(e.target.checked)}
+                        aria-describedby="ps-filter-with-instagram-help"
+                        className="w-4 h-4 accent-primary cursor-pointer" />
+                    </label>
+                    <p id="ps-filter-with-instagram-help" className="text-[11px] text-white/50">{INSTAGRAM_FILTER_HELP}</p>
+                  </div>
 
                   {/* Resumo de avaliações com IA (reviews-ai) */}
                   <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-3 space-y-2">
@@ -1882,6 +1923,27 @@ export default function ProspeccaoSitesPage() {
                     </div>
                   </div>
                   <p className="text-[11px] text-white/50">Configurações de filtragem que serão aplicadas durante a fase de captação de leads desta automação.</p>
+
+                  <div className="space-y-1">
+                    <label htmlFor="auto-min-reviews" className="text-xs text-white/60">Mínimo de avaliações no Google</label>
+                    <Input id="auto-min-reviews" type="number" min={0} step={1} max={2147483647}
+                      value={autoMinReviews} onChange={(e) => { setAutoMinReviews(e.target.value); setAutoMinReviewsError(false); }}
+                      aria-invalid={autoMinReviewsError}
+                      aria-describedby={`auto-min-reviews-help${autoMinReviewsError ? " auto-min-reviews-error" : ""}`} />
+                    <p id="auto-min-reviews-help" className="text-[11px] text-white/50">{MIN_REVIEWS_HELP}</p>
+                    {autoMinReviewsError && <p id="auto-min-reviews-error" role="alert" className="text-xs text-red-400">{MIN_REVIEWS_ERROR}</p>}
+                  </div>
+
+                  <div className="space-y-1">
+                    <label htmlFor="auto-filter-with-instagram" className="flex items-center justify-between gap-2 p-2 rounded-lg hover:bg-white/5 cursor-pointer">
+                      <span className="text-sm text-white/90 select-none flex-1">Somente com Instagram</span>
+                      <input id="auto-filter-with-instagram" type="checkbox" checked={autoFilterWithInstagram}
+                        onChange={(e) => setAutoFilterWithInstagram(e.target.checked)}
+                        aria-describedby="auto-filter-with-instagram-help"
+                        className="w-4 h-4 accent-primary cursor-pointer" />
+                    </label>
+                    <p id="auto-filter-with-instagram-help" className="text-[11px] text-white/50">{INSTAGRAM_FILTER_HELP}</p>
+                  </div>
 
                   {[
                     { label: "Remover leads sem telefone", value: autoFilterEmpty, set: setAutoFilterEmpty },

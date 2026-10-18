@@ -50,6 +50,32 @@ describe("evaluateLeadFilters", () => {
     expect(evaluateLeadFilters("5511999998888", "https://exemplo.com", settings, []).reason).toBe("Com site");
   });
 
+  it("filtra pelo total inclusivo antes das reviews profundas, não pela nota", () => {
+    const filtered = { minReviews: 100 };
+    expect(evaluateLeadFilters("5511999998888", "", filtered, [], "99").pass).toBe(false);
+    expect(evaluateLeadFilters("5511999998888", "", filtered, [], "100").pass).toBe(true);
+    expect(evaluateLeadFilters("5511999998888", "", filtered, [], "").pass).toBe(false);
+    expect(evaluateLeadFilters("5511999998888", "", {}, [], "").pass).toBe(true);
+  });
+
+  it("exige perfil confirmado somente com o filtro Instagram ativo", () => {
+    const filtered = { filterWithInstagram: true };
+    expect(evaluateLeadFilters("5511999998888", "", filtered, [], "", "")).toEqual({ pass: false, reason: "Sem Instagram" });
+    expect(evaluateLeadFilters("5511999998888", "", filtered, [], "", "https://instagram.com/loja/").pass).toBe(true);
+    expect(evaluateLeadFilters("5511999998888", "", filtered, [], "", "https://fakeinstagram.com/loja/").pass).toBe(false);
+    expect(evaluateLeadFilters("5511999998888", "", {}, [], "", "").pass).toBe(true);
+    expect(evaluateLeadFilters("5511999998888", "", { filterWithInstagram: false }, [], "", "").pass).toBe(true);
+  });
+
+  it("combina Instagram, mínimo de avaliações e filtros anteriores sem alterar precedência", () => {
+    const filtered = { ...settings, minReviews: 100, filterWithInstagram: true };
+    expect(evaluateLeadFilters("", "", filtered, [], "100", "").reason).toBe("Sem telefone");
+    expect(evaluateLeadFilters("5511999998888", "https://site.com", filtered, [], "100", "https://instagram.com/loja/").reason).toBe("Com site");
+    expect(evaluateLeadFilters("5511999998888", "", filtered, [], "99", "https://instagram.com/loja/").pass).toBe(false);
+    expect(evaluateLeadFilters("5511999998888", "", filtered, [], "100", "").reason).toBe("Sem Instagram");
+    expect(evaluateLeadFilters("5511999998888", "", filtered, [], "100", "https://instagram.com/loja/").pass).toBe(true);
+  });
+
   it("respeita flags desligadas", () => {
     const off = { filterEmpty: false, filterDuplicates: false, filterLandlines: false, filterWithWebsite: false };
     expect(evaluateLeadFilters("", "site.com", off, []).pass).toBe(true);
