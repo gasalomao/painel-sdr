@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
+import { BRAND } from "@/lib/brand";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger, SheetClose } from "@/components/ui/sheet";
 import { Separator } from "@/components/ui/separator";
@@ -148,8 +149,8 @@ function SidebarContent({ collapsed, onToggle, onNavigate }: { collapsed: boolea
       <div className="p-4 flex items-center gap-3">
         <div className="w-10 h-10 rounded-xl bg-primary/10 ring-1 ring-primary/25 flex items-center justify-center shrink-0 overflow-hidden p-1">
           <Image
-            src="https://i.ibb.co/5W2qgpmH/BG-MINHA-LOGO-1.png"
-            alt="Salomão AI"
+            src={BRAND.logoUrl}
+            alt={BRAND.name}
             width={40}
             height={40}
             className="object-contain drop-shadow-[0_0_10px_rgba(132,204,22,0.25)]"
@@ -393,8 +394,8 @@ function MobileBottomNav() {
         <SheetContent side="bottom" className="glass border-t border-white/10 rounded-t-3xl p-0 max-h-[70vh]">
           <div className="p-4 pb-2 flex items-center justify-between border-b border-white/5">
             <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-lg bg-primary/20 flex items-center justify-center">
-                <Bot className="w-4 h-4 text-primary" />
+              <div className="w-8 h-8 rounded-lg bg-primary/20 flex items-center justify-center shrink-0">
+                <Image src={BRAND.logoUrl} alt={BRAND.name} width={32} height={32} unoptimized className="object-contain" />
               </div>
               <h3 className="text-sm font-bold text-white">Menu completo</h3>
             </div>

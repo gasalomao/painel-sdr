@@ -213,6 +213,12 @@ Quase sempre é uma das envs faltando:
 - A rota `/api/agent/process` bloqueia esses rótulos antes de retornar texto no sandbox ou enviar pelo WhatsApp. O sandbox mostra um diagnóstico; os logs registram `AGENT_SAFETY_CLASSIFICATION`, sem salvar o texto descartado.
 - Esse bloqueio cobre os formatos testados, não garante que qualquer resposta inadequada seja detectada. A correção só chega ao Easypanel após publicar esta versão e fazer um novo deploy.
 
+### Aba do navegador mostra ícone preto ou a logo não aparece
+- O favicon preto padrão foi substituído pela logo oficial verde/cyan em `src/app/favicon.ico`, `icon.png` e `apple-icon.png`. O Next.js gera as tags e as URLs versionadas dos ícones PNG automaticamente.
+- Login e navegação usam `public/brand/salomao-ai.png`, incluído no Docker; não dependem mais do CDN externo. O cabeçalho mobile e o menu completo também exibem a marca.
+- Confirme que o novo deploy terminou. Abra `/brand/salomao-ai.png` e `/favicon.ico` no domínio publicado: ambos devem retornar imagem, sem redirecionar ao login.
+- Se só uma aba antiga continuar preta, feche e reabra a aba ou teste em janela anônima. Atalhos já instalados no celular podem precisar ser recriados para atualizar o ícone salvo.
+
 ### Realtime (chat ao vivo) não atualiza
 - Confere que rodou a `PARTE 14 — REALTIME` do `SETUP_COMPLETO.sql`.
 - Em Supabase: Database → Replication → `supabase_realtime` deve listar as tabelas.

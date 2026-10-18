@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
@@ -9,6 +10,7 @@ import {
 } from "lucide-react";
 import { NgrokQuickConnect } from "@/components/ngrok-quick-connect";
 import { cn } from "@/lib/utils";
+import { BRAND } from "@/lib/brand";
 
 const pageTitles: Record<string, { title: string; description: string; icon: React.ElementType }> = {
   "/": { title: "Dashboard", description: "Visão geral da operação", icon: LayoutDashboard },
@@ -121,7 +123,8 @@ export function Header() {
         <div className="flex items-center justify-between gap-2 md:gap-3">
           <div className="flex items-center gap-2 md:gap-3 min-w-0">
             <div className="w-8 h-8 md:w-9 md:h-9 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
-              <Icon className="w-4 h-4 md:w-[18px] md:h-[18px] text-primary" />
+              <Image src={BRAND.logoUrl} alt={BRAND.name} width={36} height={36} unoptimized className="object-contain lg:hidden" />
+              <Icon className="hidden lg:block w-[18px] h-[18px] text-primary" />
             </div>
             <div className="min-w-0">
               <h1 className="text-sm md:text-base font-semibold text-foreground truncate">{page.title}</h1>

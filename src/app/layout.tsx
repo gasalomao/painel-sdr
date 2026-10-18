@@ -14,7 +14,7 @@ const inter = Inter({
 export const metadata: Metadata = {
   title: "Salomão AI",
   description: "Plataforma de IA conversacional — agentes WhatsApp, automações, follow-ups e base de conhecimento.",
-  icons: { icon: "https://i.ibb.co/5W2qgpmH/BG-MINHA-LOGO-1.png" },
+  // favicon.ico, icon.png e apple-icon.png são publicados pelo Next.js.
 };
 
 export const viewport = {

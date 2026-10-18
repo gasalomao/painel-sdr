@@ -16,8 +16,7 @@ import { BRAND } from "@/lib/brand";
  *     Em mobile colapsa pra coluna única.
  *   • Paleta alinhada com a logo (verde-lima → cyan/azul). NÃO usa roxo,
  *     que apagaria o gradiente verde-azul da logo.
- *   • Logo carregada de /public/logo.png — fallback pra placeholder caso
- *     o arquivo ainda não tenha sido colocado.
+ *   • Logo oficial local em public/brand, compartilhada com a navegação.
  *   • Removida toda referência a "SDR" / "Painel SDR" — agora é só
  *     "Salomão AI".
  */

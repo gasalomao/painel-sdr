@@ -1,13 +1,12 @@
 /**
  * Brand assets centralizados — única fonte de verdade pra logo/cores da marca.
- * Trocar URL aqui propaga pro app inteiro (login, sidebar, favicon, emails, etc).
+ * Login e navegação usam logoUrl; ícones de aba e celular ficam em src/app.
  */
 
 export const BRAND = {
   name: "Salomão AI",
-  // Logo hospedada em CDN público (i.ibb.co — autorizado em next.config.ts).
-  // Trocar aqui se mudar a hospedagem.
-  logoUrl: "https://i.ibb.co/5W2qgpmH/BG-MINHA-LOGO-1.png",
+  // Original oficial incluído no deploy, sem depender de hospedagem externa.
+  logoUrl: "/brand/salomao-ai.png",
   // Cores da marca (alinhadas ao login redesign — emerald → cyan).
   // Use direto em estilos quando precisar (className TW continua funcionando).
   colors: {
