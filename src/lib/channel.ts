@@ -380,12 +380,30 @@ export async function getStatus(instanceName: string): Promise<ConnectionStatus>
   return res;
 }
 
-export async function fetchProfilePicture(remoteJid: string, instanceName: string): Promise<string | null> {
+export async function fetchProfilePicture(
+  remoteJid: string,
+  instanceName: string,
+  clientId?: string
+): Promise<string | null> {
   const ch = await resolveChannel(instanceName);
   if (ch.provider === "whatsapp_cloud") {
     return null;
   }
 
+  if (clientId && ch.client_id && ch.client_id !== clientId) {
+    const { PhotoError } = await import("@/lib/whatsapp-photos");
+    throw new PhotoError("Conexão não pertence a este cliente.", 404);
+  }
+
+  // Strict mode: se clientId for passado, nunca faz fallback cruzado
+  if (clientId) {
+    if (ch.provider === "evolution_go") {
+      return evolutionGo.fetchProfilePicture(remoteJid, instanceName);
+    }
+    return evolutionV2.fetchProfilePicture(remoteJid, instanceName);
+  }
+
+  // Modo compatibilidade para chamadas legadas
   const { primary, fallback } = await getProvider(instanceName);
   const pic = await primary.fetchProfilePicture(remoteJid, instanceName);
   if (pic) return pic;
@@ -393,6 +411,100 @@ export async function fetchProfilePicture(remoteJid: string, instanceName: strin
     return fallback.fetchProfilePicture(remoteJid, instanceName);
   }
   return null;
+}
+
+async function tryBulkContactsV2(instanceName: string): Promise<Array<{ remoteJid: string; profilePicUrl: string | null }> | null> {
+  const { getEvolutionConfig } = await import("@/lib/evolution");
+  const cfg = await getEvolutionConfig({ resolve: false });
+  if (!cfg?.url) return null;
+
+  try {
+    const res = await fetch(
+      `${cfg.url.replace(/\/+$/, "")}/chat/findContacts/${instanceName}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: cfg.apiKey,
+        },
+        body: JSON.stringify({ take: 500, skip: 0 }),
+        signal: AbortSignal.timeout(15000),
+      }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    const list = Array.isArray(data) ? data : data?.data || [];
+    const contacts: Array<{ remoteJid: string; profilePicUrl: string | null }> = [];
+    for (const c of list) {
+      const jid = c.id || (c.number ? `${c.number.replace(/\D/g, "")}@s.whatsapp.net` : null);
+      if (jid) {
+        contacts.push({
+          remoteJid: jid,
+          profilePicUrl: c.profilePictureUrl || null,
+        });
+      }
+    }
+    return contacts;
+  } catch (e: any) {
+    console.warn(`[bulkSync] findContacts failed:`, e?.message);
+    return null;
+  }
+}
+
+async function tryBulkContactsGo(instanceName: string): Promise<Array<{ remoteJid: string; profilePicUrl: string | null }> | null> {
+  const { data: settings } = await supabase
+    .from("app_settings")
+    .select("key, value")
+    .in("key", ["evolution_go_url", "evolution_go_key"]);
+  let goUrl = process.env.EVOLUTION_GO_URL || "";
+  let goKey = process.env.EVOLUTION_GO_KEY || "";
+  for (const r of settings || []) {
+    if (r.key === "evolution_go_url" && r.value) goUrl = r.value;
+    if (r.key === "evolution_go_key" && r.value) goKey = r.value;
+  }
+  if (!goUrl) return null;
+
+  const { data: connData } = await supabase
+    .from("channel_connections")
+    .select("provider_config")
+    .eq("instance_name", instanceName)
+    .maybeSingle();
+
+  const token = connData?.provider_config?.evo_go_token;
+  if (!token || !token.trim() || token === goKey) {
+    console.warn(`[bulkSync] GO instância "${instanceName}" sem evo_go_token dedicado ou usando chave global.`);
+    return null;
+  }
+
+  try {
+    const res = await fetch(`${goUrl.replace(/\/+$/, "")}/message/contacts`, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: goKey,
+        token,
+      },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const list = Array.isArray(data) ? data : data?.contacts || data?.data || [];
+    const contacts: Array<{ remoteJid: string; profilePicUrl: string | null }> = [];
+    for (const c of list) {
+      const jid = c.id || (c.number ? `${c.number.replace(/\D/g, "")}@s.whatsapp.net` : null);
+      if (jid) {
+        const pic = c.pictureUrl || c.profilePictureUrl || c.url || null;
+        contacts.push({
+          remoteJid: jid,
+          profilePicUrl: pic && typeof pic === "string" && pic.startsWith("http") ? pic : null,
+        });
+      }
+    }
+    return contacts;
+  } catch (e: any) {
+    console.warn(`[bulkSync] GO contacts failed:`, e?.message);
+    return null;
+  }
 }
 
 /**
@@ -407,48 +519,61 @@ export async function fetchProfilePicture(remoteJid: string, instanceName: strin
  *
  * Retorna o número de contatos atualizados.
  */
-export async function bulkSyncProfilePics(instanceName: string): Promise<number> {
+export async function bulkSyncProfilePics(instanceName: string, targetClientId?: string): Promise<number> {
   const ch = await resolveChannel(instanceName);
   if (ch.provider === "whatsapp_cloud") return 0;
-  if (!ch.client_id) {
+  if (targetClientId && ch.client_id && ch.client_id !== targetClientId) {
+    console.warn(`[bulkSync] instância "${instanceName}" pertence a outro cliente (${ch.client_id} != ${targetClientId}).`);
+    return 0;
+  }
+
+  const clientId = targetClientId || ch.client_id;
+  if (!clientId) {
     console.error(`[bulkSync] instância "${instanceName}" sem client_id — abortando para não misturar tenants.`);
     return 0;
   }
 
-  const { primary, fallback } = await getProvider(instanceName);
-
-  // Tentativa 1: provider primário
   let contacts: Array<{ remoteJid: string; profilePicUrl: string | null }> | null = null;
 
-  try {
-    contacts = await tryBulkContacts(primary, instanceName);
-  } catch (e: any) {
-    console.warn(`[bulkSync] primary failed:`, e?.message);
-  }
-
-  // Tentativa 2: fallback
-  if (!contacts && fallback) {
+  // Strict provider: nunca faz fallback cruzado entre provedores na busca de fotos
+  if (ch.provider === "evolution_go") {
+    contacts = await tryBulkContactsGo(instanceName);
+  } else if (ch.provider === "evolution" || ch.provider === "evolution_v2") {
+    contacts = await tryBulkContactsV2(instanceName);
+  } else {
+    const { primary, fallback } = await getProvider(instanceName);
     try {
-      contacts = await tryBulkContacts(fallback, instanceName);
-    } catch (e: any) {
-      console.warn(`[bulkSync] fallback failed:`, e?.message);
+      contacts = await tryBulkContacts(primary, instanceName);
+    } catch {
+      if (fallback) {
+        try {
+          contacts = await tryBulkContacts(fallback, instanceName);
+        } catch {}
+      }
     }
   }
 
   if (!contacts || contacts.length === 0) return 0;
 
+  const { safePhotoUrl, getPhotoJid } = await import("@/lib/whatsapp-photo-utils");
+
   // Atualiza o banco em paralelo por chunks de 25 com Promise.all
   let updated = 0;
   const now = new Date().toISOString();
   const validUpdates = contacts
-    .filter((c) => c.profilePicUrl && c.profilePicUrl.startsWith("http"))
-    .map((c) => ({
-      client_id: ch.client_id,
-      remote_jid: c.remoteJid,
-      phone_number: c.remoteJid.replace(/@.*$/, "").replace(/\D/g, ""),
-      profile_pic_url: c.profilePicUrl,
-      profile_pic_fetched_at: now,
-    }));
+    .map((c) => {
+      const validJid = getPhotoJid(c.remoteJid);
+      const safe = safePhotoUrl(c.profilePicUrl);
+      if (!validJid || !safe) return null;
+      return {
+        client_id: clientId,
+        remote_jid: validJid,
+        phone_number: validJid.replace(/@.*$/, "").replace(/\D/g, ""),
+        profile_pic_url: safe,
+        profile_pic_fetched_at: now,
+      };
+    })
+    .filter((u): u is NonNullable<typeof u> => u !== null);
 
   const CHUNK = 25;
   for (let i = 0; i < validUpdates.length; i += CHUNK) {
@@ -459,7 +584,7 @@ export async function bulkSyncProfilePics(instanceName: string): Promise<number>
           .from("contacts")
           .upsert(
             {
-              client_id: ch.client_id,
+              client_id: clientId,
               remote_jid: u.remote_jid,
               phone_number: u.phone_number,
               profile_pic_url: u.profile_pic_url,
@@ -478,106 +603,17 @@ export async function bulkSyncProfilePics(instanceName: string): Promise<number>
 }
 
 /**
- * Chama o endpoint de contatos do provider para buscar fotos em bulk.
- * Cada provider tem seu formato de resposta.
+ * Fallback para provedores genéricos
  */
 async function tryBulkContacts(
   provider: WhatsAppProvider,
   instanceName: string
 ): Promise<Array<{ remoteJid: string; profilePicUrl: string | null }> | null> {
-  // Evolution API (v2 / Node.js): POST /chat/findContacts/{instance}
   if (provider.name === "evolution" || provider.name === "evolution_v2") {
-    const { getEvolutionConfig } = await import("@/lib/evolution");
-    const cfg = (await getEvolutionConfig()) || ({} as any);
-    if (!cfg?.url) return null;
-
-    const contacts: Array<{ remoteJid: string; profilePicUrl: string | null }> = [];
-    try {
-      const res = await fetch(
-        `${cfg.url.replace(/\/+$/, "")}/chat/findContacts/${instanceName}`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            apikey: cfg.apiKey,
-          },
-          body: JSON.stringify({ take: 500, skip: 0 }),
-          signal: AbortSignal.timeout(30000),
-        }
-      );
-      if (!res.ok) return null;
-      const data = await res.json();
-      const list = Array.isArray(data) ? data : data?.data || [];
-      for (const c of list) {
-        const jid = c.id || (c.number ? `${c.number.replace(/\D/g, "")}@s.whatsapp.net` : null);
-        if (jid) {
-          contacts.push({
-            remoteJid: jid,
-            profilePicUrl: c.profilePictureUrl || null,
-          });
-        }
-      }
-    } catch (e: any) {
-      console.warn(`[bulkSync] findContacts failed:`, e?.message);
-      return null;
-    }
-    return contacts;
+    return tryBulkContactsV2(instanceName);
   }
-
-  // Evolution GO: GET /message/contacts
   if (provider.name === "evolution_go") {
-    try {
-      // Lê a config do Evolution GO diretamente do app_settings.
-      const { data: settings } = await supabase
-        .from("app_settings")
-        .select("key, value")
-        .in("key", ["evolution_go_url", "evolution_go_key"]);
-      let goUrl = "";
-      let goKey = "";
-      for (const r of settings || []) {
-        if (r.key === "evolution_go_url" && r.value) goUrl = r.value;
-        if (r.key === "evolution_go_key" && r.value) goKey = r.value;
-      }
-      if (!goUrl) return null;
-
-      // Resolve token da instância.
-      const { data: connData } = await supabase
-        .from("channel_connections")
-        .select("provider_config")
-        .eq("instance_name", instanceName)
-        .maybeSingle();
-      const token = connData?.provider_config?.evo_go_token || goKey;
-
-      const res = await fetch(`${goUrl.replace(/\/+$/, "")}/message/contacts`, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          apikey: goKey,
-          token,
-        },
-        signal: AbortSignal.timeout(30000),
-      });
-      if (!res.ok) return null;
-      const data = await res.json();
-      const list = Array.isArray(data) ? data : data?.contacts || data?.data || [];
-      const contacts: Array<{ remoteJid: string; profilePicUrl: string | null }> = [];
-      for (const c of list) {
-        const jid = c.id || (c.number ? `${c.number.replace(/\D/g, "")}@s.whatsapp.net` : null);
-        if (jid) {
-          // O GO pode retornar pictureUrl, avatar (base64), ou url.
-          const pic = c.pictureUrl || c.profilePictureUrl || c.url || null;
-          contacts.push({
-            remoteJid: jid,
-            profilePicUrl: pic && typeof pic === "string" && pic.startsWith("http") ? pic : null,
-          });
-        }
-      }
-      return contacts;
-    } catch (e: any) {
-      console.warn(`[bulkSync] GO contacts failed:`, e?.message);
-      return null;
-    }
+    return tryBulkContactsGo(instanceName);
   }
-
   return null;
 }

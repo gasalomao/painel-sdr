@@ -2,9 +2,10 @@
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import {
-  DndContext, closestCenter, KeyboardSensor, PointerSensor, TouchSensor,
-  useSensor, useSensors, DragOverlay,
-  type DragStartEvent, type DragEndEvent,
+  DndContext, KeyboardSensor, MouseSensor, TouchSensor,
+  useSensor, useSensors, DragOverlay, useDroppable,
+  pointerWithin, rectIntersection,
+  type DragStartEvent, type DragEndEvent, type CollisionDetection,
 } from "@dnd-kit/core";
 import {
   SortableContext, sortableKeyboardCoordinates,
@@ -16,6 +17,8 @@ import { Badge } from "@/components/ui/badge";
 import { Phone, Clock, Star, Plus, MoreVertical, Pencil, Trash2, MapPin } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/lib/supabase";
+import { useClientSession } from "@/lib/use-session";
+import { LeadAvatar } from "@/components/leads/lead-avatar";
 
 export interface KanbanColumnDef {
   id: string;          // status_key (estável p/ drag)
@@ -46,6 +49,8 @@ interface Lead {
   created_at: string;
   primeiro_contato_source: string | null;
   primeiro_contato_at: string | null;
+  profilePicUrl?: string | null;
+  profile_pic_url?: string | null;
 }
 
 function mapsUrlFor(lead: Pick<Lead, "maps_url" | "nome_negocio" | "endereco">): string {
@@ -70,16 +75,36 @@ const COLOR_PRESETS = [
 ];
 
 export default function KanbanBoard({ leads, columns, onLeadClick, formatPhone, onLeadsUpdated, onColumnsChange }: KanbanBoardProps) {
+  const { clientId } = useClientSession();
   const [activeId, setActiveId] = useState<number | null>(null);
   const [localLeads, setLocalLeads] = useState<Lead[]>(leads);
   const [localCols, setLocalCols] = useState<KanbanColumnDef[]>(columns);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const pendingLeadsRef = useRef<Set<number>>(new Set());
+  const leadsRef = useRef<Lead[]>(leads);
+  leadsRef.current = localLeads;
 
-  useEffect(() => setLocalLeads(leads), [leads]);
+  useEffect(() => {
+    setLocalLeads((prev) => {
+      if (pendingLeadsRef.current.size === 0) return leads;
+      return leads.map((incoming) => {
+        const pendingLead = prev.find((p) => p.id === incoming.id);
+        return pendingLeadsRef.current.has(incoming.id) && pendingLead
+          ? { ...incoming, status: pendingLead.status }
+          : incoming;
+      });
+    });
+  }, [leads]);
   useEffect(() => setLocalCols(columns), [columns]);
 
+  // O ponteiro define a coluna; teclado usa a interseção do cartão. Fora do quadro não há destino.
+  const collisionDetectionStrategy: CollisionDetection = useCallback((args) => (
+    args.pointerCoordinates ? pointerWithin(args) : rectIntersection(args)
+  ), []);
+
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
-    useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 8 } }),
+    useSensor(MouseSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
 
@@ -157,41 +182,88 @@ export default function KanbanBoard({ leads, columns, onLeadClick, formatPhone, 
   const handleDragEnd = useCallback(async (event: DragEndEvent) => {
     const { active, over } = event;
     setActiveId(null);
-    if (!over) return;
+    if (!over || !clientId) return;
 
-    const leadId = active.id as number;
+    const leadId = Number(active.id);
+    if (!leadId || pendingLeadsRef.current.has(leadId)) return;
+
     const overId = String(over.id);
 
     let newStatus: string | null = null;
     const colById = localCols.find((c) => c.id === overId);
-    if (colById) newStatus = colById.id;
-    else {
-      const overLead = localLeads.find((l) => String(l.id) === overId);
+    if (colById) {
+      newStatus = colById.id;
+    } else {
+      const overLead = leadsRef.current.find((l) => String(l.id) === overId);
       if (overLead) newStatus = overLead.status || "novo";
     }
     if (!newStatus) return;
 
-    const current = localLeads.find((l) => l.id === leadId)?.status || "novo";
+    const currentLead = leadsRef.current.find((l) => l.id === leadId);
+    const current = currentLead?.status || "novo";
     if (newStatus === current) return;
 
-    const updated = localLeads.map((l) =>
+    pendingLeadsRef.current.add(leadId);
+
+    const updated = leadsRef.current.map((l) =>
       l.id === leadId ? { ...l, status: newStatus! } : l
     );
+    leadsRef.current = updated;
     setLocalLeads(updated);
     onLeadsUpdated?.(updated);
+    setErrorMessage(null);
 
-    await supabase.from("leads_extraidos").update({ status: newStatus }).eq("id", leadId);
-  }, [localCols, localLeads, onLeadsUpdated]);
+    try {
+      const { data, error } = await supabase
+        .from("leads_extraidos")
+        .update({ status: newStatus })
+        .eq("id", leadId)
+        .eq("client_id", clientId)
+        .select("id")
+        .maybeSingle();
+
+      if (error || !data) {
+        throw new Error(error?.message || "Registro não encontrado");
+      }
+    } catch {
+      const reverted = leadsRef.current.map((l) =>
+        l.id === leadId ? { ...l, status: current } : l
+      );
+      leadsRef.current = reverted;
+      setLocalLeads(reverted);
+      onLeadsUpdated?.(reverted);
+      setErrorMessage("Não foi possível salvar o status do lead. Tente novamente.");
+    } finally {
+      pendingLeadsRef.current.delete(leadId);
+    }
+  }, [clientId, localCols, onLeadsUpdated]);
 
   return (
     <div className="flex-1 w-full overflow-x-auto custom-scrollbar pb-8 cursor-default kanban-scroll-container mobile-safe-bottom">
+      {errorMessage && (
+        <div
+          role="alert"
+          className="fixed bottom-4 right-4 z-50 flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2.5 text-xs font-semibold text-white shadow-lg shadow-red-900/40"
+        >
+          <span>{errorMessage}</span>
+          <button
+            type="button"
+            onClick={() => setErrorMessage(null)}
+            className="ml-2 rounded p-0.5 hover:bg-white/20"
+            aria-label="Fechar"
+          >
+            ×
+          </button>
+        </div>
+      )}
       <DndContext
         sensors={sensors}
-        collisionDetection={closestCenter}
+        collisionDetection={collisionDetectionStrategy}
         onDragStart={(e: DragStartEvent) => setActiveId(e.active.id as number)}
         onDragEnd={handleDragEnd}
+        onDragCancel={() => setActiveId(null)}
       >
-        <div className="flex gap-3 sm:gap-4 min-w-max p-2 h-full min-h-[calc(100vh-250px)] items-start">
+        <div className="flex gap-3 sm:gap-4 min-w-max p-2 h-full min-h-[calc(100vh-250px)] items-stretch">
           {localCols.map((col) => (
             <SortableContext
               key={col.uuid || col.id || col.label}
@@ -213,13 +285,13 @@ export default function KanbanBoard({ leads, columns, onLeadClick, formatPhone, 
           {/* Add coluna */}
           <button
             onClick={addColumn}
-            className="w-[280px] sm:w-[300px] shrink-0 rounded-2xl border-2 border-dashed border-white/10 text-white/40 hover:text-white/80 hover:border-white/30 transition-all duration-200 py-4 flex items-center justify-center gap-2 text-xs font-bold uppercase tracking-widest backdrop-blur-sm"
+            className="w-[280px] sm:w-[300px] shrink-0 rounded-2xl border-2 border-dashed border-white/10 text-white/40 hover:text-white/80 hover:border-white/30 transition-all duration-200 py-4 flex items-center justify-center gap-2 text-xs font-bold uppercase tracking-widest backdrop-blur-sm self-start"
             title="Adicionar coluna"
           >
             <Plus className="w-4 h-4" /> Nova Coluna
           </button>
         </div>
-        <DragOverlay>
+        <DragOverlay dropAnimation={{ duration: 150, easing: "cubic-bezier(0.18, 0.67, 0.6, 1.22)" }}>
           {activeId ? (
             <KanbanCard lead={localLeads.find((l) => l.id === activeId)} isOverlay formatPhone={formatPhone} />
           ) : null}
@@ -232,6 +304,7 @@ export default function KanbanBoard({ leads, columns, onLeadClick, formatPhone, 
 // --- Kanban Sub-components ---
 
 function KanbanColumn({ column, leads, onLeadClick, formatPhone, onRename, onDelete, onColorChange }: any) {
+  const { setNodeRef, isOver } = useDroppable({ id: column.id });
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(column.label);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -277,7 +350,13 @@ function KanbanColumn({ column, leads, onLeadClick, formatPhone, onRename, onDel
   const dotStyle = isHex ? { backgroundColor: column.color } : undefined;
 
   return (
-    <div className="w-[280px] sm:w-[300px] flex flex-col gap-3 shrink-0">
+    <div
+      ref={setNodeRef}
+      className={cn(
+        "w-[280px] sm:w-[300px] flex flex-col gap-3 shrink-0 self-stretch min-h-[calc(100vh-270px)] rounded-2xl p-1.5 transition-all duration-150",
+        isOver && "bg-white/[0.04] ring-2 ring-primary/40 shadow-lg shadow-primary/10"
+      )}
+    >
       {/* Header coluna */}
       <div
         className={cn(
@@ -369,10 +448,22 @@ function KanbanColumn({ column, leads, onLeadClick, formatPhone, onRename, onDel
       </div>
 
       {/* Lista de cards */}
-      <div className="flex-1 space-y-2.5 p-1 min-h-[200px] overflow-y-auto custom-scrollbar pr-1 max-h-[calc(100vh-290px)] rounded-lg">
+      <div
+        className={cn(
+          "flex-1 flex flex-col space-y-2.5 p-1 min-h-[220px] overflow-y-auto custom-scrollbar pr-1 max-h-[calc(100vh-290px)] rounded-xl transition-colors",
+          isOver && "bg-primary/5"
+        )}
+      >
         {leads.length === 0 ? (
-          <div className="h-32 rounded-xl border border-dashed border-white/10 flex items-center justify-center text-[10px] text-white/30 uppercase tracking-wider">
-            Vazio — arraste aqui
+          <div
+            className={cn(
+              "flex-1 min-h-[180px] rounded-xl border border-dashed flex flex-col items-center justify-center text-xs uppercase tracking-wider text-center p-4 transition-all duration-150",
+              isOver
+                ? "border-primary/60 bg-primary/10 text-primary-200 font-bold"
+                : "border-white/10 text-white/30"
+            )}
+          >
+            <span>Vazio — arraste aqui</span>
           </div>
         ) : (
           leads.map((lead: any) => (
@@ -395,40 +486,40 @@ function KanbanCard({ lead, onClick, isOverlay, formatPhone }: any) {
     transform: CSS.Translate.toString(transform),
     transition,
     zIndex: isDragging || isOverlay ? 50 : 1,
-    opacity: isDragging ? 0.6 : 1,
+    opacity: isDragging ? 0.4 : 1,
   };
 
   const isOverdue = lead.next_follow_up && new Date(lead.next_follow_up) < new Date();
-  const initials = (lead.nome_negocio || "UD").substring(0, 2).toUpperCase();
+  const avatarUrl = lead.profilePicUrl || lead.profile_pic_url || null;
 
   return (
     <Card
       ref={setNodeRef}
       style={style}
       className={cn(
-        "group border-white/5 bg-white/[0.04] backdrop-blur-xl transition-all duration-300 rounded-xl overflow-hidden",
-        isOverlay && "scale-[1.03] shadow-2xl shadow-primary/20 rotate-1 border-primary/40 ring-1 ring-primary/30 z-[100]",
-        !isOverlay && "hover:bg-white/10 hover:border-white/20 hover:shadow-xl hover:-translate-y-0.5"
+        "group shrink-0 border-white/5 bg-white/[0.04] backdrop-blur-xl transition-all duration-200 rounded-xl overflow-hidden cursor-grab active:cursor-grabbing select-none",
+        isOverlay && "scale-[1.03] shadow-2xl shadow-primary/30 rotate-1 border-primary/50 ring-2 ring-primary/40 z-[100] cursor-grabbing",
+        !isOverlay && "hover:bg-white/10 hover:border-white/20 hover:shadow-xl hover:-translate-y-0.5",
+        isDragging && "opacity-40 border-dashed border-white/30"
       )}
       onClick={onClick}
+      {...attributes}
+      {...listeners}
     >
       {/* Drag handle mobile */}
       <div
-        {...attributes}
-        {...listeners}
-        className="flex items-center justify-center h-5 cursor-grab active:cursor-grabbing bg-white/[0.03] border-b border-white/5 md:hidden"
-        onClick={(e) => e.stopPropagation()}
+        className="flex items-center justify-center h-4 cursor-grab active:cursor-grabbing bg-white/[0.02] border-b border-white/5 md:hidden"
       >
         <div className="w-8 h-1 rounded-full bg-white/20" />
       </div>
-      <CardContent
-        className="p-3"
-        {...(typeof window !== "undefined" && window.matchMedia("(min-width:768px)").matches ? { ...attributes, ...listeners, style: { cursor: "grab" } } : {})}
-      >
+      <CardContent className="p-3">
         <div className="flex gap-2.5">
-          <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-primary/20 to-purple-500/20 flex items-center justify-center shrink-0 border border-white/10 group-hover:border-primary/50 transition-colors">
-            <span className="text-[11px] font-black text-white/90">{initials}</span>
-          </div>
+          <LeadAvatar
+            url={avatarUrl}
+            name={lead.nome_negocio}
+            className="w-9 h-9 rounded-lg bg-gradient-to-br from-primary/20 to-purple-500/20 border border-white/10 group-hover:border-primary/50 transition-colors shrink-0"
+            fallbackClassName="text-[11px] font-black text-white/90 bg-transparent"
+          />
 
           <div className="flex-1 min-w-0">
             <p className="text-[12px] font-bold leading-tight group-hover:text-primary-300 transition-colors line-clamp-2 text-white pb-0.5">
@@ -477,6 +568,10 @@ function KanbanCard({ lead, onClick, isOverlay, formatPhone }: any) {
             target="_blank"
             rel="noopener noreferrer"
             onClick={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+            onTouchStart={(e) => e.stopPropagation()}
+            onKeyDown={(e) => e.stopPropagation()}
             className="inline-flex items-center gap-1 text-[9px] font-bold text-rose-300/80 hover:text-rose-200 hover:bg-rose-500/10 px-1.5 py-0.5 rounded-md transition-colors"
             title="Ver no Google Maps"
           >

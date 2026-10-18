@@ -21,6 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { DashboardCalendarWidget } from "@/components/dashboard-calendar-widget";
+import { DashboardRemindersWidget } from "@/components/dashboard-reminders-widget";
 import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
 
@@ -286,6 +287,7 @@ export default function DashboardPage() {
           </Card>
 
           <div className="space-y-6">
+            <DashboardRemindersWidget />
             {hasFeature("calendario") && <DashboardCalendarWidget />}
             <Card className="border-white/[0.08] bg-card/80 py-0 shadow-none">
               <CardContent className="p-5">
@@ -312,7 +314,7 @@ export default function DashboardPage() {
               <div className="px-5 py-12 text-center"><p className="font-medium">Nenhum lead cadastrado</p><p className="mt-1 text-sm text-muted-foreground">Capte pelo Maps ou adicione um contato manualmente.</p></div>
             ) : (
               <div className="divide-y divide-white/[0.06]">
-                {recentLeads.map((lead) => <Link key={lead.id} href="/leads" className="flex items-center gap-3 px-5 py-3.5 transition-colors hover:bg-white/[0.03] sm:px-6"><div className="flex size-9 shrink-0 items-center justify-center rounded-full bg-primary/10 text-sm font-semibold text-primary">{(lead.nome_negocio || "?")[0].toUpperCase()}</div><div className="min-w-0 flex-1"><p className="truncate font-medium">{lead.nome_negocio || "Sem nome"}</p><p className="mt-0.5 truncate text-xs text-muted-foreground">{lead.ramo_negocio || "Sem categoria"}</p></div><Badge variant="secondary" className="hidden border-0 bg-white/[0.05] text-muted-foreground sm:inline-flex">{new Date(lead.created_at).toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })}</Badge><ChevronRight className="size-4 text-muted-foreground" /></Link>)}
+                {recentLeads.map((lead) => <Link key={lead.id} href={`/leads?openLeadId=${lead.id}`} className="flex items-center gap-3 px-5 py-3.5 transition-colors hover:bg-white/[0.03] sm:px-6"><div className="flex size-9 shrink-0 items-center justify-center rounded-full bg-primary/10 text-sm font-semibold text-primary">{(lead.nome_negocio || "?")[0].toUpperCase()}</div><div className="min-w-0 flex-1"><p className="truncate font-medium">{lead.nome_negocio || "Sem nome"}</p><p className="mt-0.5 truncate text-xs text-muted-foreground">{lead.ramo_negocio || "Sem categoria"}</p></div><Badge variant="secondary" className="hidden border-0 bg-white/[0.05] text-muted-foreground sm:inline-flex">{new Date(lead.created_at).toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })}</Badge><ChevronRight className="size-4 text-muted-foreground" /></Link>)}
               </div>
             )}
           </CardContent>

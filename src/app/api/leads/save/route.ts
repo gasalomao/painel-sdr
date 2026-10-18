@@ -124,6 +124,7 @@ export async function POST(req: NextRequest) {
         const { data: ct } = await supabase
           .from("contacts")
           .select("push_name")
+          .eq("client_id", session.clientId)
           .eq("remote_jid", remoteJid)
           .maybeSingle();
         const phone = String(remoteJid).replace(/@.*$/, "").replace(/\D/g, "");

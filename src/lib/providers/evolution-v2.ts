@@ -80,10 +80,6 @@ export const evolutionV2: WhatsAppProvider = {
   },
 
   async fetchProfilePicture(remoteJid: string, instanceName: string): Promise<string | null> {
-    try {
-      return await evolution.fetchProfilePicture(remoteJid, instanceName);
-    } catch {
-      return null;
-    }
+    return evolution.fetchProfilePicture(remoteJid, instanceName);
   },
 };

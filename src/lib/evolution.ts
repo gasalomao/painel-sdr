@@ -378,20 +378,25 @@ export const evolution = {
    * Retornamos null nesses casos.
    */
   async fetchProfilePicture(number: string, instance?: string): Promise<string | null> {
-    instance = await resolveInstance(instance).catch(() => "");
-    if (!instance) return null;
+    if (!instance || !instance.trim()) {
+      throw new Error("Instância obrigatória para buscar foto de perfil na Evolution v2.");
+    }
+    const resolvedInstance = instance.trim();
     if (!number.includes("@s.whatsapp.net") && !number.includes("@g.us")) {
       number = number.replace(/\D/g, "") + "@s.whatsapp.net";
     }
     try {
-      const res = await evoFetch(`/chat/fetchProfilePictureUrl/${instance}`, "POST", { number });
-      const url = res?.profilePictureUrl || res?.data?.profilePictureUrl || null;
+      const res = await evoFetch(`/chat/fetchProfilePictureUrl/${resolvedInstance}`, "POST", { number }, 5000);
+      const url = res?.profilePictureUrl ?? res?.data?.profilePictureUrl ?? null;
       return typeof url === "string" && url.startsWith("http") ? url : null;
     } catch (err: any) {
-      // 400/404 = sem foto/privacidade. Não loga como erro real.
-      if (/40[04]|not found|no profile/i.test(err?.message || "")) return null;
-      console.warn(`[Evolution] fetchProfilePicture(${number}):`, err?.message);
-      return null;
+      const msg = String(err?.message || "");
+      if (/40[04]|not found|no profile|não encontrado|cannot find/i.test(msg)) {
+        if (!/401|403|unauthorized|forbidden|offline/i.test(msg)) {
+          return null;
+        }
+      }
+      throw err;
     }
   },
 

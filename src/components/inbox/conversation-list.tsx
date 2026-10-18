@@ -475,6 +475,7 @@ export function ConversationList({
         body: JSON.stringify({ instance: targetInstance }),
       });
       const dataBulk = await resBulk.json().catch(() => ({}));
+      if (!resBulk.ok || !dataBulk.success) throw new Error(dataBulk.error || "Falha ao sincronizar fotos da conexão.");
 
       // 2. Força re-hidratação de todas as conversas visíveis (com force: true)
       const allJids = conversations.map((c) => c.id).filter(Boolean) as string[];
@@ -486,6 +487,7 @@ export function ConversationList({
         });
         if (resAvatars.ok) {
           const dataAvatars = await resAvatars.json();
+          if (dataAvatars?.failed > 0) throw new Error("Algumas fotos não puderam ser atualizadas. As fotos anteriores foram preservadas.");
           if (dataAvatars?.avatars) {
             const updates = Object.entries(dataAvatars.avatars).filter(([, url]) => !!url);
             const avatarMap = new Map<string, string>();

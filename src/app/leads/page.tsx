@@ -6,7 +6,6 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Separator } from "@/components/ui/separator";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
@@ -15,13 +14,18 @@ import {
   Dialog, DialogContent, DialogTitle,
 } from "@/components/ui/dialog";
 import {
-    Search, Download, ChevronLeft, ChevronRight, Phone, Building2,
-    Calendar, ExternalLink, Globe, Star, MessageSquare, LayoutGrid, List,
-    Clock, Trash2, Filter, Bot, X, CheckSquare, Loader2, UserPlus,
-    MapPin, Send, CheckCircle2,
+    Search, Download, ChevronLeft, ChevronRight, Phone,
+    ExternalLink, Star, LayoutGrid, List,
+    Trash2, Filter, Bot, X, CheckSquare, Loader2, UserPlus,
+    MapPin, Send, CheckCircle2, RotateCw,
 } from "lucide-react";
+import { toast } from "sonner";
+import { LeadDrawer } from "@/components/leads/lead-drawer";
 import { AddLeadDialog } from "@/components/add-lead-dialog";
+import { LeadAvatar } from "@/components/leads/lead-avatar";
+import { syncLeadPhotosSequentially, type SyncProgressState } from "@/lib/lead-photo-sync";
 import { supabase } from "@/lib/supabase";
+import { normalizeJid } from "@/lib/jid-utils";
 import dynamic from "next/dynamic";
 
 const KanbanBoard = dynamic(
@@ -65,6 +69,9 @@ interface Lead {
   maps_url: string;
   status: string; // 'novo', 'interessado', 'follow-up', 'agendado', 'fechado', 'sem_interesse', 'descartado'
   next_follow_up: string | null;
+  lembrete_texto?: string | null;
+  observacoes?: string | null;
+  profilePicUrl?: string | null;
   justificativa_ia: string | null;
   resumo_ia: string | null;
   ia_last_analyzed_at: string | null;
@@ -108,6 +115,129 @@ export default function LeadsPage() {
   const [viewMode, setViewMode] = useState<"list" | "kanban">("list");
   const [disparoFilter, setDisparoFilter] = useState<"all" | "pending" | "sent">("all");
   const [disparoJids, setDisparoJids] = useState<Set<string>>(new Set());
+  const [syncProgress, setSyncProgress] = useState<SyncProgressState | null>(null);
+  const syncAbortRef = useRef<AbortController | null>(null);
+  const syncCancelRef = useRef<{ current: boolean }>({ current: false });
+  const fetchGenerationRef = useRef<number>(0);
+
+  // Cancela sincronização e descarta fetch pendente ao desmontar ou trocar tenant
+  useEffect(() => {
+    return () => {
+      fetchGenerationRef.current++;
+      if (syncAbortRef.current) {
+        syncAbortRef.current.abort();
+      }
+      syncCancelRef.current.current = true;
+    };
+  }, [clientId]);
+
+  // Escuta parâmetro de URL openLeadId (ex: vindo da Dashboard)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const openLeadId = params.get("openLeadId");
+    if (openLeadId && clientId) {
+      fetch(`/api/leads/${openLeadId}/crm`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (data?.lead) {
+            setSelectedLead({
+              ...data.lead,
+              profilePicUrl: data.profilePicUrl,
+            });
+          }
+        })
+        .catch(() => {});
+    }
+  }, [clientId]);
+
+  const handleSyncPhotos = async () => {
+    if (syncProgress?.inFlight) return;
+    syncCancelRef.current = { current: false };
+    const controller = new AbortController();
+    syncAbortRef.current = controller;
+
+    setSyncProgress({
+      processed: 0,
+      total: 0,
+      updated: 0,
+      noPhoto: 0,
+      skipped: 0,
+      failed: 0,
+      avatars: {},
+      inFlight: true,
+      cancelled: false,
+      error: null,
+    });
+
+    const applyAvatars = (newAvatars: Record<string, string | null>) => {
+      setLeads((prev) =>
+        prev.map((lead) => {
+          const jid = lead.remoteJid || normalizeJid(lead.telefone);
+          if (jid && jid in newAvatars) {
+            const freshUrl = newAvatars[jid];
+            if (freshUrl !== undefined && freshUrl !== lead.profilePicUrl) {
+              return { ...lead, profilePicUrl: freshUrl };
+            }
+          }
+          return lead;
+        })
+      );
+      setSelectedLead((prev) => {
+        if (!prev) return null;
+        const jid = prev.remoteJid || normalizeJid(prev.telefone);
+        if (jid && jid in newAvatars) {
+          const freshUrl = newAvatars[jid];
+          if (freshUrl !== undefined && freshUrl !== prev.profilePicUrl) {
+            return { ...prev, profilePicUrl: freshUrl };
+          }
+        }
+        return prev;
+      });
+    };
+
+    try {
+      const finalState = await syncLeadPhotosSequentially(
+        {
+          signal: controller.signal,
+          onProgress: (state) => setSyncProgress(state),
+          onBatchAvatars: (batchAvatars) => applyAvatars(batchAvatars),
+        },
+        syncCancelRef.current
+      );
+
+      setSyncProgress(finalState);
+
+      if (finalState.cancelled) {
+        toast.info(
+          `Sincronização interrompida: ${finalState.updated} fotos atualizadas (${finalState.processed}/${finalState.total || finalState.processed} processados).`
+        );
+      } else if (finalState.failed > 0) {
+        toast.warning(
+          `Sincronização concluída com avisos: ${finalState.updated} atualizadas, ${finalState.noPhoto} sem foto, ${finalState.failed} falhas.`
+        );
+      } else {
+        toast.success(
+          finalState.updated > 0
+            ? `${finalState.updated} fotos atualizadas com sucesso (${finalState.processed}/${finalState.total || finalState.processed} leads processados).`
+            : "Sincronização concluída. Fotos já estão atualizadas."
+        );
+      }
+    } catch (err: unknown) {
+      if (!controller.signal.aborted) {
+        const msg = err instanceof Error ? err.message : "Erro na sincronização de fotos";
+        toast.error(msg);
+        setSyncProgress((prev) => (prev ? { ...prev, inFlight: false, error: msg } : null));
+      }
+    } finally {
+      syncAbortRef.current = null;
+    }
+  };
+
+  const handleCancelSync = () => {
+    syncCancelRef.current.current = true;
+    setSyncProgress((prev) => (prev ? { ...prev, cancelled: true } : null));
+  };
 
   // Colunas do Kanban — fonte única é a tabela kanban_columns (editável no
   // Organizador). Começa com o fallback hardcoded e troca pelo que vier da API
@@ -191,6 +321,7 @@ export default function LeadsPage() {
 
   const fetchLeads = useCallback(async () => {
     if (!clientId) return;
+    const currentFetchId = ++fetchGenerationRef.current;
     setLoading(true);
     try {
       // Fetch sent disparo JIDs for badge accuracy (once per fetch cycle)
@@ -199,6 +330,7 @@ export default function LeadsPage() {
         .select("remote_jid")
         .eq("status", "sent")
         .eq("client_id", clientId);
+      if (currentFetchId !== fetchGenerationRef.current) return;
       if (sentTargets) {
         setDisparoJids(new Set(sentTargets.map((t: any) => t.remote_jid)));
       }
@@ -237,7 +369,58 @@ export default function LeadsPage() {
       }
 
       const { data, count } = await query;
-      setLeads(data || []);
+      if (currentFetchId !== fetchGenerationRef.current) return;
+      const fetchedList = (data || []) as Lead[];
+
+      // Garante remoteJid normalizado para todos os leads (inclusive os extraídos sem conversa prévia)
+      fetchedList.forEach((l) => {
+        l.remoteJid = l.remoteJid || normalizeJid(l.telefone) || "";
+      });
+
+      // Hidratação das fotos em cache (chunks de até 200 JIDs, sem chamadas ao provedor na visualização)
+      if (fetchedList.length > 0) {
+        const jids = Array.from(new Set(fetchedList.map((l) => l.remoteJid).filter(Boolean)));
+        if (jids.length > 0) {
+          const CHUNK_SIZE = 200;
+          const chunks: string[][] = [];
+          for (let i = 0; i < jids.length; i += CHUNK_SIZE) {
+            chunks.push(jids.slice(i, i + CHUNK_SIZE));
+          }
+          try {
+            const avatarResponses = await Promise.all(
+              chunks.map((chunk) =>
+                fetch("/api/contacts/avatars", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ jids: chunk, cachedOnly: true }),
+                })
+                  .then((r) => (r.ok ? r.json() : null))
+                  .catch(() => null)
+              )
+            );
+
+            if (currentFetchId === fetchGenerationRef.current) {
+              const cachedMap: Record<string, string | null> = {};
+              for (const res of avatarResponses) {
+                if (res?.avatars) {
+                  Object.assign(cachedMap, res.avatars);
+                }
+              }
+
+              fetchedList.forEach((l) => {
+                if (l.remoteJid && cachedMap[l.remoteJid]) {
+                  l.profilePicUrl = cachedMap[l.remoteJid];
+                }
+              });
+            }
+          } catch {
+            // Ignora falhas de avatar para não prejudicar listagem
+          }
+        }
+      }
+
+      if (currentFetchId !== fetchGenerationRef.current) return;
+      setLeads(fetchedList);
       setTotal(count || 0);
 
       // Extract unique categories for filter
@@ -246,9 +429,13 @@ export default function LeadsPage() {
           setCategories(prev => Array.from(new Set([...prev, ...uniqueCats])));
       }
     } catch (err) {
-      console.error("Erro ao carregar leads:", err);
+      if (currentFetchId === fetchGenerationRef.current) {
+        console.error("Erro ao carregar leads:", err);
+      }
     } finally {
-      setLoading(false);
+      if (currentFetchId === fetchGenerationRef.current) {
+        setLoading(false);
+      }
     }
   }, [page, search, viewMode, categoryFilter, clientId, disparoFilter]);
 
@@ -355,17 +542,6 @@ export default function LeadsPage() {
     setLeads(updatedLeads);
   }, []);
 
-  const handleUpdateFollowUp = async (leadId: number, date: string) => {
-    const { error } = await supabase.from("leads_extraidos").update({ 
-        next_follow_up: date,
-        status: "follow-up" 
-    }).eq("id", leadId);
-    if (!error) {
-        setLeads(prev => prev.map(l => l.id === leadId ? { ...l, next_follow_up: date, status: "follow-up" } : l));
-        if (selectedLead?.id === leadId) setSelectedLead({ ...selectedLead, next_follow_up: date, status: "follow-up" });
-    }
-  };
-
   return (
     <div className="flex flex-col h-[100dvh] bg-background overflow-hidden" style={{backgroundImage: "radial-gradient(ellipse at 50% -20%, rgba(120,119,198,0.1), transparent 80%)"}}>
       <Header />
@@ -451,6 +627,25 @@ export default function LeadsPage() {
             <Badge variant="secondary" className="px-3 py-1 bg-white/5 border-white/10 font-mono">
                 {total.toLocaleString("pt-BR")} Leads
             </Badge>
+
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleSyncPhotos}
+              disabled={syncProgress?.inFlight}
+              className="gap-2 shadow-sm rounded-xl border-white/10 bg-white/5 hover:bg-white/10 shrink-0 text-xs text-zinc-200"
+              title="Sincronizar fotos de todos os leads cadastrados (independente de filtros)"
+              aria-label="Sincronizar fotos de todos os leads"
+            >
+              {syncProgress?.inFlight ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+              ) : (
+                <RotateCw className="w-3.5 h-3.5 text-emerald-400" />
+              )}
+              <span className="hidden sm:inline">
+                {syncProgress?.inFlight ? "Sincronizando..." : "Sincronizar Fotos"}
+              </span>
+            </Button>
             
             <Button variant="outline" size="sm" onClick={exportXLSX} className="gap-2 shadow-sm rounded-xl border-white/10 bg-white/5 hover:bg-white/10 shrink-0">
               <Download className="w-3.5 h-3.5" />
@@ -463,6 +658,58 @@ export default function LeadsPage() {
             </Button>
           </div>
         </div>
+
+        {syncProgress && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="flex flex-wrap items-center justify-between gap-3 p-3 px-4 rounded-2xl border border-emerald-500/30 bg-emerald-950/20 text-xs text-emerald-200 animate-in fade-in slide-in-from-top-1"
+          >
+            <div className="flex items-center gap-2">
+              {syncProgress.inFlight ? (
+                <Loader2 className="w-4 h-4 animate-spin text-emerald-400 shrink-0" />
+              ) : syncProgress.error ? (
+                <X className="w-4 h-4 text-red-400 shrink-0" />
+              ) : (
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              )}
+              <span className="font-medium">
+                {syncProgress.inFlight
+                  ? `Sincronizando todos os leads (${syncProgress.processed}/${syncProgress.total || syncProgress.processed}): ${syncProgress.updated} atualizadas, ${syncProgress.noPhoto} sem foto, ${syncProgress.skipped} ignoradas${syncProgress.failed > 0 ? `, ${syncProgress.failed} falhas` : ""}`
+                  : syncProgress.cancelled
+                  ? `Sincronização interrompida: ${syncProgress.updated} atualizadas (${syncProgress.processed}/${syncProgress.total || syncProgress.processed} processados)`
+                  : syncProgress.error
+                  ? `Erro na sincronização: ${syncProgress.error} (${syncProgress.updated} fotos atualizadas antes da falha)`
+                  : `Sincronização concluída: ${syncProgress.updated} fotos atualizadas, ${syncProgress.noPhoto} sem foto de ${syncProgress.total || syncProgress.processed} leads processados.`}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {syncProgress.inFlight && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-3 text-xs text-zinc-300 hover:text-white hover:bg-white/10"
+                  onClick={handleCancelSync}
+                  disabled={syncProgress.cancelled}
+                >
+                  {syncProgress.cancelled ? "Interrompendo..." : "Cancelar"}
+                </Button>
+              )}
+              {!syncProgress.inFlight && (
+                <button
+                  type="button"
+                  onClick={() => setSyncProgress(null)}
+                  className="text-zinc-400 hover:text-zinc-200 p-1"
+                  aria-label="Fechar status de sincronização"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         <AddLeadDialog
           open={addLeadOpen}
@@ -590,15 +837,25 @@ export default function LeadsPage() {
                               />
                           </TableCell>
                           <TableCell className="py-4">
-                              <div className="font-bold text-white/90 max-w-[250px] truncate flex items-center gap-2">
-                                {lead.nome_negocio || "—"}
-                                {(lead.primeiro_contato_source === "disparo" || disparoJids.has(lead.remoteJid)) && (
-                                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-cyan-500/15 text-cyan-300 text-[9px] font-bold border border-cyan-500/25 whitespace-nowrap" title={lead.primeiro_contato_at ? `Disparado em ${new Date(lead.primeiro_contato_at).toLocaleDateString("pt-BR")}` : "Lead já recebeu disparo"}>
-                                    <Send className="w-2.5 h-2.5" /> Disparado
-                                  </span>
-                                )}
+                              <div className="flex items-center gap-3">
+                                <LeadAvatar
+                                  url={lead.profilePicUrl}
+                                  name={lead.nome_negocio}
+                                  className="w-8 h-8 rounded-lg bg-zinc-800 border border-zinc-700 text-xs font-bold text-zinc-300"
+                                  fallbackClassName="text-xs font-bold bg-zinc-800 text-zinc-300"
+                                />
+                                <div className="min-w-0">
+                                  <div className="font-bold text-white/90 max-w-[220px] truncate flex items-center gap-2">
+                                    {lead.nome_negocio || "—"}
+                                    {(lead.primeiro_contato_source === "disparo" || disparoJids.has(lead.remoteJid)) && (
+                                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-cyan-500/15 text-cyan-300 text-[9px] font-bold border border-cyan-500/25 whitespace-nowrap" title={lead.primeiro_contato_at ? `Disparado em ${new Date(lead.primeiro_contato_at).toLocaleDateString("pt-BR")}` : "Lead já recebeu disparo"}>
+                                        <Send className="w-2.5 h-2.5" /> Disparado
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="text-[10px] text-muted-foreground mt-0.5 uppercase tracking-wider">{lead.status || "NOVO"}</div>
+                                </div>
                               </div>
-                              <div className="text-[10px] text-muted-foreground mt-0.5 uppercase tracking-wider">{lead.status || "NOVO"}</div>
                           </TableCell>
                           <TableCell className="py-4">
                               <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-green-500/10 text-green-400 font-mono text-xs border border-green-500/20">
@@ -664,9 +921,12 @@ export default function LeadsPage() {
                       onClick={() => setSelectedLead(lead)}
                       className="w-full text-left flex items-center gap-3 p-3 active:bg-white/5 transition-colors"
                     >
-                      <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary/20 to-purple-500/20 border border-white/10 flex items-center justify-center text-primary font-black text-sm shrink-0">
-                        {(lead.nome_negocio || "?")[0].toUpperCase()}
-                      </div>
+                      <LeadAvatar
+                        url={lead.profilePicUrl}
+                        name={lead.nome_negocio}
+                        className="w-10 h-10 rounded-xl bg-zinc-800 border border-zinc-700 text-sm font-black text-primary"
+                        fallbackClassName="text-sm font-black bg-zinc-800 text-primary"
+                      />
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-1.5">
                           <p className="font-bold text-sm truncate">{lead.nome_negocio || "—"}</p>
@@ -781,177 +1041,38 @@ export default function LeadsPage() {
           </DialogContent>
       </Dialog>
 
-      {/* Lead Detail Dialog */}
-      <Dialog open={!!selectedLead && !showConfirmDelete} onOpenChange={() => setSelectedLead(null)}>
-        {/* max-h e flex-col com header fixo + body com scroll interno: o briefing
-            do Lead Intelligence pode ser longo e antes ficava cortado. */}
-        <DialogContent className="glass-card border-white/20 max-w-xl w-[95vw] p-0 max-h-[90vh] overflow-hidden shadow-[0_0_50px_rgba(0,0,0,0.5)] outline-none flex flex-col">
-          <div className="relative bg-gradient-to-r from-primary/20 via-purple-500/10 to-transparent p-6 sm:p-8 border-b border-white/10 shrink-0">
-                <div className="absolute top-4 right-4 flex items-center gap-2">
-                    <Button variant="ghost" size="icon" className="w-8 h-8 hover:bg-red-500/20 text-red-400" onClick={() => { setLeadToDelete(selectedLead); setShowConfirmDelete(true); }}>
-                        <Trash2 className="w-4 h-4" />
-                    </Button>
-                </div>
-                <div className="flex items-center gap-5 mt-2">
-                    <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary to-purple-600 flex items-center justify-center text-white shadow-xl shadow-primary/20 shrink-0">
-                        {selectedLead?.nome_negocio ? (
-                            <span className="text-2xl font-black tracking-tighter">{selectedLead.nome_negocio.substring(0, 2).toUpperCase()}</span>
-                        ) : (
-                            <Building2 className="w-8 h-8" />
-                        )}
-                    </div>
-                    <div className="min-w-0 pr-6">
-                        <DialogTitle className="text-xl sm:text-2xl font-black text-white drop-shadow-sm leading-tight">{selectedLead?.nome_negocio || "Sem nome"}</DialogTitle>
-                        <Badge className="mt-2 bg-primary/20 text-primary-300 border border-primary/30 text-[10px] px-2 py-0.5 whitespace-normal">{selectedLead?.ramo_negocio || "Setor não informado"}</Badge>
-                    </div>
-                </div>
-          </div>
-          
-          <div className="p-6 space-y-6 overflow-y-auto custom-scrollbar flex-1 min-h-0">
-            <div className="grid grid-cols-2 gap-4">
-                <div className="p-4 rounded-2xl bg-white/5 border border-white/10 hover:border-white/20 transition-colors">
-                    <p className="text-[10px] font-black tracking-widest text-muted-foreground uppercase mb-2">WhatsApp</p>
-                    <div className="flex items-center gap-2">
-                        <Phone className="w-4 h-4 text-green-400" />
-                        <span className="text-sm font-mono font-bold text-white/90">{selectedLead ? (selectedLead.telefone || formatPhone(selectedLead.remoteJid)) : "—"}</span>
-                    </div>
-                </div>
-                <div className="p-4 rounded-2xl bg-white/5 border border-white/10 hover:border-white/20 transition-colors">
-                    <p className="text-[10px] font-black tracking-widest text-muted-foreground uppercase mb-2">Avaliação Google</p>
-                    <div className="flex items-center gap-2">
-                        <Star className="w-4 h-4 text-amber-400 fill-amber-400 drop-shadow-sm" />
-                        <span className="text-sm font-bold text-white/90">{selectedLead?.rating || "—"} <span className="text-muted-foreground font-normal text-xs ml-1">({selectedLead?.reviews} av)</span></span>
-                    </div>
-                </div>
-            </div>
-
-            {/* Disparo Status Badge */}
-            {selectedLead && (selectedLead.primeiro_contato_source === "disparo" || disparoJids.has(selectedLead.remoteJid)) ? (
-              <div className="p-3 rounded-2xl bg-cyan-500/10 border border-cyan-500/20 flex items-center gap-3">
-                <div className="w-9 h-9 rounded-xl bg-cyan-500/20 flex items-center justify-center shrink-0">
-                  <CheckCircle2 className="w-5 h-5 text-cyan-300" />
-                </div>
-                <div>
-                  <p className="text-xs font-black text-cyan-200">Disparo já enviado</p>
-                  <p className="text-[10px] text-cyan-300/70">
-                    {selectedLead.primeiro_contato_at
-                      ? `Enviado em ${new Date(selectedLead.primeiro_contato_at).toLocaleString("pt-BR")}`
-                      : "Este lead já recebeu uma mensagem de disparo."}
-                  </p>
-                </div>
-              </div>
-            ) : (
-              selectedLead && (
-              <div className="p-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center gap-3">
-                <div className="w-9 h-9 rounded-xl bg-emerald-500/20 flex items-center justify-center shrink-0">
-                  <Send className="w-5 h-5 text-emerald-300" />
-                </div>
-                <div>
-                  <p className="text-xs font-black text-emerald-200">Pronto para disparo</p>
-                  <p className="text-[10px] text-emerald-300/70">Este lead ainda não recebeu nenhuma mensagem de disparo.</p>
-                </div>
-              </div>
-              )
-            )}
-
-            <div className="space-y-4">
-                <div className="p-4 rounded-2xl bg-primary/10 border border-primary/20 relative overflow-hidden group">
-                    <div className="absolute inset-0 bg-gradient-to-r from-primary/0 via-primary/5 to-transparent -translate-x-full group-hover:translate-x-full duration-1000 transition-transform"></div>
-                    <p className="text-[10px] font-black text-primary uppercase mb-3 flex items-center gap-2 relative z-10">
-                        <Clock className="w-3.5 h-3.5" /> Agendar Retorno (Follow-up)
-                    </p>
-                    <div className="flex gap-2 relative z-10">
-                        <Input 
-                            type="datetime-local" 
-                            className="bg-black/50 border-white/10 text-xs h-10 rounded-xl focus:ring-primary/40"
-                            value={selectedLead?.next_follow_up || ""}
-                            onChange={(e) => selectedLead && handleUpdateFollowUp(selectedLead.id, e.target.value)}
-                        />
-                    </div>
-                </div>
-                
-                {(selectedLead?.justificativa_ia || selectedLead?.resumo_ia) && (
-                   <div className="space-y-3 animate-in fade-in slide-in-from-top-1">
-                      {selectedLead?.justificativa_ia && (
-                          <div className="p-4 rounded-2xl bg-purple-500/10 border border-purple-500/20">
-                              <p className="text-[10px] font-black text-purple-400 uppercase mb-2 flex items-center gap-2">
-                                  <Bot className="w-3.5 h-3.5" /> Motivo IA
-                              </p>
-                              <p className="text-xs text-purple-200/90 italic leading-relaxed">
-                                  &quot;{selectedLead.justificativa_ia}&quot;
-                              </p>
-                          </div>
-                      )}
-                      {selectedLead?.resumo_ia && (
-                          <div className="p-4 rounded-2xl bg-indigo-500/10 border border-indigo-500/20">
-                              <p className="text-[10px] font-black text-indigo-300 uppercase mb-2 flex items-center gap-2">
-                                  <MessageSquare className="w-3.5 h-3.5" /> Resumo da conversa
-                              </p>
-                              <p className="text-xs text-indigo-100/90 leading-relaxed">
-                                  {selectedLead.resumo_ia}
-                              </p>
-                          </div>
-                      )}
-                      {selectedLead?.ia_last_analyzed_at && (
-                          <p className="text-[10px] text-muted-foreground text-right font-mono">
-                              Analisado em {new Date(selectedLead.ia_last_analyzed_at).toLocaleString("pt-BR")}
-                          </p>
-                      )}
-                   </div>
-                )}
-
-                {/* Lead Intelligence — briefing IA. Renderizado se já existe;
-                    botão "Analisar com IA" se ainda não foi gerado. */}
-                <LeadIntelligenceSection
-                  lead={selectedLead}
-                  onUpdated={(updated) => setSelectedLead({ ...selectedLead, ...updated })}
-                />
-
-                <div className="flex mt-6 gap-3">
-                    <Button
-                        className="flex-1 gap-2 glow-primary h-12 rounded-xl font-bold bg-primary hover:bg-primary/90 text-primary-foreground transition-all duration-300 hover:scale-[1.02]"
-                        onClick={() => {
-                            const num = selectedLead?.remoteJid?.replace("@s.whatsapp.net", "") || selectedLead?.telefone?.replace(/\D/g, "");
-                            window.open(`https://wa.me/${num}`, "_blank");
-                        }}
-                    >
-                        <ExternalLink className="w-4 h-4" />
-                        Chamar Direto
-                    </Button>
-                    <Button
-                        variant="secondary"
-                        className="flex-1 gap-2 h-12 rounded-xl font-bold bg-white/10 hover:bg-white/20 text-white transition-all duration-300 hover:scale-[1.02]"
-                        onClick={() => {
-                            if (selectedLead) {
-                                const params = new URLSearchParams({
-                                  c: selectedLead.remoteJid,
-                                  n: selectedLead.nome_negocio || "",
-                                });
-                                if ((selectedLead as any).instance_name) {
-                                  params.set("i", (selectedLead as any).instance_name);
-                                }
-                                window.location.href = `/chat?${params.toString()}`;
-                            }
-                        }}
-                    >
-                        <MessageSquare className="w-4 h-4 text-purple-300" />
-                        Chat Interno
-                    </Button>
-                    {selectedLead && (
-                        <Button
-                            variant="secondary"
-                            className="gap-2 h-12 rounded-xl font-bold bg-white/10 hover:bg-white/20 text-white transition-all duration-300 hover:scale-[1.02]"
-                            onClick={() => window.open(mapsUrlFor(selectedLead), "_blank")}
-                            title="Ver no Google Maps"
-                        >
-                            <MapPin className="w-4 h-4 text-rose-400" />
-                        </Button>
-                    )}
-                </div>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
+      {/* Ficha CRM do Lead (Drawer Lateral) */}
+      <LeadDrawer
+        lead={selectedLead as any}
+        open={!!selectedLead && !showConfirmDelete}
+        onOpenChange={(open) => {
+          if (!open) setSelectedLead(null);
+        }}
+        onLeadUpdated={(updated) => {
+          setLeads((prev) =>
+            prev.map((l) =>
+              l.id === Number(updated.id) ? ({ ...l, ...updated, id: l.id } as Lead) : l
+            )
+          );
+          setSelectedLead((prev) =>
+            prev?.id === Number(updated.id) ? ({ ...prev, ...updated, id: prev.id } as Lead) : prev
+          );
+        }}
+        onDelete={(l) => {
+          setLeadToDelete(l as any);
+          setShowConfirmDelete(true);
+        }}
+        extraContent={
+          selectedLead ? (
+            <LeadIntelligenceSection
+              lead={selectedLead}
+              onUpdated={(updated) =>
+                setSelectedLead({ ...selectedLead, ...updated })
+              }
+            />
+          ) : null
+        }
+      />
     </div>
   );
 }// =====================================================================

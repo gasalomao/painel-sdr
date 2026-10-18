@@ -747,7 +747,7 @@ export default function WhatsAppPage() {
         body: JSON.stringify({ instance: instanceName }),
       });
       const data = await res.json();
-      if (data.success) {
+      if (res.ok && data.success) {
         setToast({
           kind: "ok",
           text: data.updated > 0 ? `✓ ${data.updated} fotos de perfil atualizadas!` : "✓ Fotos sincronizadas com o WhatsApp!",

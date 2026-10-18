@@ -19,37 +19,42 @@
 import type { WhatsAppProvider, SendResult, MediaData, ConnectionStatus, QRCodeResult } from "./types";
 
 // Config — lida do DB (app_settings) ou env. Igual ao pattern do evolution.ts.
-let GO_URL = process.env.EVOLUTION_GO_URL || "";
-let GO_KEY = process.env.EVOLUTION_GO_KEY || "";
+let GO_URL = "";
+let GO_KEY = "";
 let _cfgLoadedAt = 0;
 const CFG_TTL = 30_000;
 
 async function loadConfig(): Promise<void> {
-  if (GO_URL && GO_KEY && Date.now() - _cfgLoadedAt < CFG_TTL) return;
+  if (_cfgLoadedAt && Date.now() - _cfgLoadedAt < CFG_TTL) return;
   try {
     const { supabaseAdmin } = await import("@/lib/supabase_admin");
-    if (!supabaseAdmin) return;
-    const { data } = await supabaseAdmin
-      .from("app_settings")
-      .select("key, value")
-      .in("key", ["evolution_go_url", "evolution_go_key"]);
-    if (data) {
+    let dbUrl = "";
+    let dbKey = "";
+    if (supabaseAdmin) {
+      const res = await supabaseAdmin
+        .from("app_settings")
+        .select("key, value")
+        .in("key", ["evolution_go_url", "evolution_go_key"]);
+      const data = Array.isArray(res?.data) ? res.data : [];
       for (const row of data) {
-        if (row.key === "evolution_go_url" && row.value) GO_URL = row.value;
-        if (row.key === "evolution_go_key" && row.value) GO_KEY = row.value;
+        if (row.key === "evolution_go_url" && row.value) dbUrl = row.value;
+        if (row.key === "evolution_go_key" && row.value) dbKey = row.value;
       }
     }
-    // Fallback env se DB não tem.
-    if (!GO_URL) GO_URL = process.env.EVOLUTION_GO_URL || "";
-    if (!GO_KEY) GO_KEY = process.env.EVOLUTION_GO_KEY || "";
+    GO_URL = dbUrl || process.env.EVOLUTION_GO_URL || "";
+    GO_KEY = dbKey || process.env.EVOLUTION_GO_KEY || "";
     _cfgLoadedAt = Date.now();
   } catch {
-    // sem DB — usa env
+    GO_URL = process.env.EVOLUTION_GO_URL || "";
+    GO_KEY = process.env.EVOLUTION_GO_KEY || "";
+    _cfgLoadedAt = Date.now();
   }
 }
 
 export function invalidateEvolutionGoCache(): void {
   _cfgLoadedAt = 0;
+  GO_URL = "";
+  GO_KEY = "";
 }
 
 /**
@@ -266,20 +271,46 @@ export const evolutionGo: WhatsAppProvider = {
   },
 
   async fetchProfilePicture(remoteJid: string, instanceName: string): Promise<string | null> {
+    await loadConfig();
+    const globalKey = GO_KEY || process.env.EVOLUTION_GO_KEY || "";
+
+    const { supabaseAdmin } = await import("@/lib/supabase_admin");
+    let instanceToken = "";
+    if (supabaseAdmin) {
+      const { data } = await supabaseAdmin
+        .from("channel_connections")
+        .select("provider_config")
+        .eq("instance_name", instanceName)
+        .maybeSingle();
+      instanceToken = (data as any)?.provider_config?.evo_go_token || "";
+    }
+
+    if (!instanceToken || !instanceToken.trim() || (globalKey && instanceToken === globalKey)) {
+      throw new Error(`Evolution GO requer evo_go_token exclusivo da instância "${instanceName}" (token global não permitido para fotos).`);
+    }
+
+    const cleanNumber = formatNumberForGo(remoteJid);
+    if (!cleanNumber) return null;
+
     try {
-      const token = await resolveInstanceToken(instanceName);
-      // Sanitiza o JID: remove prefixo phone:, sufixos @s.whatsapp.net, etc.
-      // Aceita JID de grupo (@g.us) intacto.
-      const cleanNumber = formatNumberForGo(remoteJid);
-      if (!cleanNumber) return null;
-      const res = await goFetch("/message/avatar", {
-        instance: instanceName,
-        number: cleanNumber,
-      }, token);
-      // O GO pode retornar URL ou base64. Tenta todos os campos possíveis.
+      const res = await goFetch(
+        "/message/avatar",
+        {
+          instance: instanceName,
+          number: cleanNumber,
+        },
+        instanceToken,
+        5000
+      );
       return res?.pictureUrl || res?.url || res?.avatar || null;
-    } catch {
-      return null;
+    } catch (err: any) {
+      const msg = String(err?.message || "");
+      if (/404|not found|no profile|não encontrado|contact not found/i.test(msg)) {
+        if (!/401|403|unauthorized|forbidden|offline/i.test(msg)) {
+          return null;
+        }
+      }
+      throw err;
     }
   },
 };
