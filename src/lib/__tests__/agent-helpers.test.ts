@@ -112,6 +112,24 @@ describe("resolveAgentOutput", () => {
     expect(resolveAgentOutput("```\n{{nome}}\n```", 0)).toEqual({ send: false, suppressed: "empty_output" });
   });
 
+  test.each([
+    "User Safety: safe\nResponse Safety: safe",
+    "User Safety: unsafe\nResponse Safety: safe",
+    "**User Safety:** safe\n**Response Safety:** safe",
+    "__User Safety:__ safe\n__Response Safety:__ safe",
+    '{"user_safety":"safe","response_safety":"safe"}',
+    "Olá!\nUser Safety: safe\nResponse Safety: safe",
+  ])("bloqueia classificação técnica em vez de enviar ao cliente: %s", (text) => {
+    expect(resolveAgentOutput(text, 0)).toEqual({ send: false, suppressed: "safety_classification" });
+  });
+
+  test.each([
+    "A segurança do seu site é importante. Posso te mostrar a proposta?",
+    "O campo `User Safety: safe` significa que a entrada foi avaliada como segura.",
+  ])("preserva conversa normal sobre segurança: %s", (text) => {
+    expect(resolveAgentOutput(text, 0)).toEqual({ send: true, text });
+  });
+
   test("suprime resposta enquanto houver ferramenta pendente", () => {
     expect(resolveAgentOutput("texto parcial", 1)).toEqual({ send: false, suppressed: "tool_loop_exhausted" });
   });
@@ -121,6 +139,7 @@ describe("sandboxSuppressionMessage", () => {
   test("transforma supressão em diagnóstico fora do histórico do agente", () => {
     expect(sandboxSuppressionMessage("empty_output")).toBe("Resposta vazia suprimida. Nenhuma mensagem foi enviada.");
     expect(sandboxSuppressionMessage("tool_loop_exhausted")).toBe("Limite de ferramentas atingido. Nenhuma mensagem foi enviada.");
+    expect(sandboxSuppressionMessage("safety_classification")).toBe("O modelo retornou uma classificação de segurança, não uma resposta de conversa. Nenhuma mensagem foi enviada. Verifique o modelo configurado; se estiver usando seleção automática, teste um modelo de chat específico.");
     expect(sandboxSuppressionMessage("unknown")).toBeNull();
   });
 });

@@ -85,10 +85,18 @@ export async function POST(req: NextRequest) {
 
   try {
     const payloadBody = await req.json();
-    const defaultInstance = (await getEvolutionConfig()).instance;
     const { remoteJid, isStatusUpdate, instanceName: reqInstanceName, text, isTestMode = false, testHistory = [], sessionId, testState, testLeadData, forceActive = false } = payloadBody;
+    if (typeof isTestMode !== "boolean") {
+      return NextResponse.json({ success: false, error: "isTestMode deve ser booleano." }, { status: 400 });
+    }
+    const isUiSandbox = isTestMode && tenantCtx !== null;
+    const selectedAgentId = Number(req.headers.get("x-test-agent-id"));
+    if (isUiSandbox && (!Number.isSafeInteger(selectedAgentId) || selectedAgentId <= 0)) {
+      return NextResponse.json({ success: false, error: "Selecione um agente válido para testar." }, { status: 400 });
+    }
     diagnosticIsTestMode = isTestMode;
-    let instanceName = reqInstanceName || defaultInstance;
+    // Sandbox da UI não depende de conexão WhatsApp nem da instância global.
+    let instanceName = reqInstanceName || (isUiSandbox ? "sandbox" : (await getEvolutionConfig()).instance);
     diagnosticInstanceName = instanceName;
     diagnosticRemoteJid = typeof remoteJid === "string" ? remoteJid : null;
 
@@ -126,7 +134,9 @@ export async function POST(req: NextRequest) {
     // (Lead e contato mudaram pro 2º Promise.all — precisam do client_id do
     // channel pra ficarem escopados no tenant. Mesmo paralelismo de antes.)
     const [channelRes, orgRes] = await Promise.all([
-       supabase.from("channel_connections").select("agent_id, client_id").eq("instance_name", instanceName).maybeSingle(),
+       isUiSandbox && !reqInstanceName
+         ? Promise.resolve({ data: null })
+         : supabase.from("channel_connections").select("agent_id, client_id").eq("instance_name", instanceName).maybeSingle(),
        // Chaves de IA via cache (30s) — era um select(*) a cada mensagem recebida.
        getAiKeys().catch(() => null),
     ]);
@@ -139,13 +149,6 @@ export async function POST(req: NextRequest) {
       console.warn(`[AGENT] Instância "${instanceName}" não pertence ao cliente da sessão — bloqueado.`);
       return NextResponse.json({ success: false, error: "Instância não vinculada a este cliente." }, { status: 403 });
     }
-    supabase.from("webhook_logs").insert({
-      instance_name: instanceName,
-      client_id: channel?.client_id || null,
-      event: "AGENT_PROCESS_START",
-      payload: { remote_jid: maskJid(remoteJid), text_length: String(text).length, isTestMode },
-      created_at: new Date().toISOString(),
-    }).then(() => {}, () => {});
     // Shape compatível com a leitura antiga de ai_organizer_config (só estas
     // 2 chaves são usadas no pipeline).
     const orgConfig = orgRes
@@ -154,18 +157,34 @@ export async function POST(req: NextRequest) {
     let leadRow: any = null;
     let contactRow: any = null;
 
-    // 2. Determinar AgentID e Buscar Dados do Agente em Paralelo
-    // SECURITY: header x-test-agent-id só é aceito em dev/test OU com
-    // X-Internal-Secret válido. Em prod sem secret, ignorar p/ evitar que
-    // caller externo force prompt/regras de outro agente.
+    // Sandbox aceita seleção da UI em produção, mas autoriza pelo tenant do cookie.
+    // Fora dele, override continua restrito a dev/test ou segredo interno válido.
     const isInternalOrDev = process.env.NODE_ENV !== "production" || hasInternalSecret(req);
-    const testAgentHeader = isInternalOrDev ? Number(req.headers.get("x-test-agent-id")) : 0;
-    const agentId = (testAgentHeader && !isNaN(testAgentHeader) ? testAgentHeader : null) || channel?.agent_id || 1;
+    const testAgentHeader = isUiSandbox || isInternalOrDev ? selectedAgentId : 0;
+    const agentId = (Number.isSafeInteger(testAgentHeader) && testAgentHeader > 0 ? testAgentHeader : null) || channel?.agent_id || 1;
     diagnosticAgentId = agentId;
-    // Multi-tenant: identifica o cliente pelo client_id da channel_connection.
-    // Toda token usage / message gravada nessa request fica vinculada a este cliente.
-    const clientId: string = (channel as any)?.client_id || "00000000-0000-0000-0000-000000000001";
+    const clientId: string = isUiSandbox && tenantCtx
+      ? tenantCtx.clientId
+      : channel?.client_id || "00000000-0000-0000-0000-000000000001";
     diagnosticClientId = clientId;
+
+    // Autoriza o agente antes de ler etapas/conhecimento. Nunca usa fallback no sandbox.
+    const sandboxAgentRes = isUiSandbox
+      ? await supabase.from("agent_settings").select("*").eq("id", agentId).eq("client_id", clientId).maybeSingle()
+      : null;
+    if (sandboxAgentRes?.error) {
+      return NextResponse.json({ success: false, error: "Não foi possível carregar o agente. Tente novamente." }, { status: 500 });
+    }
+    if (isUiSandbox && (!sandboxAgentRes?.data || sandboxAgentRes.data.client_id !== clientId)) {
+      return NextResponse.json({ success: false, error: "Agente não encontrado neste cliente." }, { status: 403 });
+    }
+    supabase.from("webhook_logs").insert({
+      instance_name: instanceName,
+      client_id: clientId,
+      event: "AGENT_PROCESS_START",
+      payload: { remote_jid: maskJid(remoteJid), text_length: String(text).length, isTestMode },
+      created_at: new Date().toISOString(),
+    }).then(() => {}, () => {});
 
     // Buscar histórico — SEMPRE via chats_dashboard por remote_jid, ignorando
     // instance_name (mas DENTRO do tenant). Cobre dois cenários:
@@ -187,7 +206,7 @@ export async function POST(req: NextRequest) {
        : Promise.resolve({ data: [] });
 
     const [agentRes, stagesRes, histRes, kbRes, leadRes, contactRes] = await Promise.all([
-       supabase.from("agent_settings").select("*").eq("id", agentId).single(),
+       sandboxAgentRes || supabase.from("agent_settings").select("*").eq("id", agentId).single(),
        supabase.from("agent_stages").select("*").eq("agent_id", agentId).order("order_index"),
        historyQuery,
         // SEC-H4: títulos vão pro prompt — só do tenant (legado client_id NULL continua visível)
@@ -2150,7 +2169,7 @@ ${capturedVariablesPrompt}
       await supabase.from("webhook_logs").insert({
         instance_name: instanceName,
         client_id: clientId,
-        event: "AGENT_EMPTY_OUTPUT",
+        event: outputDecision.suppressed === "safety_classification" ? "AGENT_SAFETY_CLASSIFICATION" : "AGENT_EMPTY_OUTPUT",
         payload: {
           agent_id: agentId,
           remote_jid: maskJid(remoteJid),

@@ -33,17 +33,22 @@ export function sanitizeAgentAnswer(text: string): string {
 
 export type AgentOutputDecision =
   | { send: true; text: string }
-  | { send: false; suppressed: "empty_output" | "tool_loop_exhausted" };
+  | { send: false; suppressed: "empty_output" | "tool_loop_exhausted" | "safety_classification" };
 
 export function resolveAgentOutput(text: string, pendingToolCalls: number): AgentOutputDecision {
   if (pendingToolCalls > 0) return { send: false, suppressed: "tool_loop_exhausted" };
   const sanitized = sanitizeAgentAnswer(text);
+  // ponytail: bloqueia rótulos conhecidos de moderadores; novas saídas técnicas exigem novos casos de teste.
+  if (/(?:^|[\r\n{,])[\t "'`*_#>\-]*(?:user|response)[\t _]+safety["'`*_\t ]*:[\t "'`*_]*(?:safe|unsafe)\b/i.test(sanitized)) {
+    return { send: false, suppressed: "safety_classification" };
+  }
   return sanitized ? { send: true, text: sanitized } : { send: false, suppressed: "empty_output" };
 }
 
 export function sandboxSuppressionMessage(suppressed: unknown): string | null {
   if (suppressed === "empty_output") return "Resposta vazia suprimida. Nenhuma mensagem foi enviada.";
   if (suppressed === "tool_loop_exhausted") return "Limite de ferramentas atingido. Nenhuma mensagem foi enviada.";
+  if (suppressed === "safety_classification") return "O modelo retornou uma classificação de segurança, não uma resposta de conversa. Nenhuma mensagem foi enviada. Verifique o modelo configurado; se estiver usando seleção automática, teste um modelo de chat específico.";
   return null;
 }
 

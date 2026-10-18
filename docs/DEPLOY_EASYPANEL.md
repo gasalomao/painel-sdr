@@ -201,6 +201,18 @@ Quase sempre é uma das envs faltando:
 - O `NEXT_PUBLIC_APP_URL` está correto?
 - Rode **Sincronizar Webhook** na tela do Agente IA.
 
+### Teste do agente funciona no localhost, mas retorna `Agente não encontrado neste cliente.`
+- A versão anterior ignorava `x-test-agent-id` no navegador em produção e usava o agente do canal padrão ou o agente `1`. Isso podia selecionar um agente de outro cliente.
+- O sandbox agora usa o agente selecionado, exige ID válido e valida sua posse pelo cliente da sessão antes de carregar etapas/conhecimento. Não precisa de conexão WhatsApp nem herda a instância global; uma instância informada explicitamente continua sujeita à validação de posse.
+- O processamento real continua usando o agente vinculado ao canal. O header do navegador não substitui essa seleção fora do modo teste.
+- Faça um novo deploy desta versão, recarregue `/agente` e selecione a Sarah do cliente correto. Não altere `NODE_ENV`, não exponha o segredo interno e não remova as verificações de cliente para contornar o erro.
+
+### Sarah retorna `User Safety: safe / Response Safety: safe`
+- Isso é uma classificação técnica, não uma resposta comercial. Trocar o prompt não garante a correção.
+- `openrouter/free` escolhe automaticamente um modelo gratuito por chamada. Para atendimento previsível, selecione um modelo de chat específico disponível na sua conta.
+- A rota `/api/agent/process` bloqueia esses rótulos antes de retornar texto no sandbox ou enviar pelo WhatsApp. O sandbox mostra um diagnóstico; os logs registram `AGENT_SAFETY_CLASSIFICATION`, sem salvar o texto descartado.
+- Esse bloqueio cobre os formatos testados, não garante que qualquer resposta inadequada seja detectada. A correção só chega ao Easypanel após publicar esta versão e fazer um novo deploy.
+
 ### Realtime (chat ao vivo) não atualiza
 - Confere que rodou a `PARTE 14 — REALTIME` do `SETUP_COMPLETO.sql`.
 - Em Supabase: Database → Replication → `supabase_realtime` deve listar as tabelas.
