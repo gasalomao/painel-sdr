@@ -46,25 +46,40 @@ export async function POST(req: NextRequest) {
     const ctx = await requireClientId(req);
     if (!ctx.ok) return ctx.response;
 
-    const body = await req.json();
+    const input: unknown = await req.json();
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      return NextResponse.json({ success: false, error: "O corpo deve ser um objeto." }, { status: 400 });
+    }
+    const body = input as Record<string, unknown>;
+    // Mesmo limite do formulário de automações.
+    if (body.scrape_max_leads !== undefined && (
+      typeof body.scrape_max_leads !== "number" || !Number.isInteger(body.scrape_max_leads) ||
+      body.scrape_max_leads < 1 || body.scrape_max_leads > 5000
+    )) {
+      return NextResponse.json({ success: false, error: "scrape_max_leads deve ser um inteiro entre 1 e 5000." }, { status: 400 });
+    }
     if (body.scrape_filters !== undefined) {
       if (!body.scrape_filters || typeof body.scrape_filters !== "object" || Array.isArray(body.scrape_filters)) {
         return NextResponse.json({ success: false, error: "scrape_filters deve ser um objeto." }, { status: 400 });
       }
-      if (parseMinReviews(body.scrape_filters.minReviews) === null) {
+      const filters = body.scrape_filters as Record<string, unknown>;
+      if (Object.entries(filters).some(([key, value]) => key.startsWith("_") && !(key === "_source" && value === "prospeccao-sites"))) {
+        return NextResponse.json({ success: false, error: "scrape_filters contém marcadores reservados ao servidor." }, { status: 400 });
+      }
+      if (parseMinReviews(filters.minReviews) === null) {
         return NextResponse.json({ success: false, error: "minReviews deve ser um inteiro entre 0 e 2147483647." }, { status: 400 });
       }
-      if (body.scrape_filters.filterWithInstagram !== undefined && typeof body.scrape_filters.filterWithInstagram !== "boolean") {
+      if (filters.filterWithInstagram !== undefined && typeof filters.filterWithInstagram !== "boolean") {
         return NextResponse.json({ success: false, error: "filterWithInstagram deve ser um booleano." }, { status: 400 });
       }
     }
     // SaaS guard: cliente não escolhe modelo. Sobrescreve dispatch_ai_model
     // e followup_ai_model do body pelo client.default_ai_model. Admin livre.
     await enforceClientDefaultModel(body, ctx, ["dispatch_ai_model", "followup_ai_model"]);
-    if (!body?.name?.trim()) {
+    if (typeof body.name !== "string" || !body.name.trim()) {
       return NextResponse.json({ success: false, error: "name é obrigatório" }, { status: 400 });
     }
-    if (!body?.instance_name?.trim()) {
+    if (typeof body.instance_name !== "string" || !body.instance_name.trim()) {
       return NextResponse.json({ success: false, error: "instance_name é obrigatório" }, { status: 400 });
     }
     if (!(await isInstanceOwnedByClient(String(body.instance_name), ctx.clientId))) {

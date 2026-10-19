@@ -1,0 +1,48 @@
+brazil-municipalities.json — source, format and attribution
+
+Source: https://github.com/kelvins/municipios-brasileiros
+Pinned commit: 503e2f70bbf1b4b7ec0b1f68b09086ccc38fe861 (2025-12-10)
+Retrieved: 2026-10-19
+Municipalities: https://raw.githubusercontent.com/kelvins/municipios-brasileiros/503e2f70bbf1b4b7ec0b1f68b09086ccc38fe861/json/municipios.json
+States: https://raw.githubusercontent.com/kelvins/municipios-brasileiros/503e2f70bbf1b4b7ec0b1f68b09086ccc38fe861/json/estados.json
+License: https://raw.githubusercontent.com/kelvins/municipios-brasileiros/503e2f70bbf1b4b7ec0b1f68b09086ccc38fe861/LICENSE
+
+Format: UTF-8 JSON array of [name, uf, latitude, longitude] tuples.
+Transformation: preserve source municipality order, names and coordinate precision;
+join municipios.codigo_uf to estados.codigo_uf for the two-letter UF; omit all
+other fields. No coordinates are inferred and no municipalities are dropped.
+All data is bundled locally; use requires no network provider or API key.
+
+Count: 5,571 municipalities across 27 UFs.
+The upstream README still says 5,570. This pinned commit adds Boa Esperança do
+Norte/MT (IBGE 5101837), so the actual source contains 5,571 unique rows.
+This is a community-maintained dataset, not an official IBGE publication;
+coordinates are municipality reference points, not borders or road distances.
+Updates must explicitly pin a new source commit and revalidate the local tests.
+
+SHA-256 of brazil-municipalities.json (including its final LF):
+57df91e121759f504ae232698dd306eafaf73f1222be4368afb552a66b9da0fb
+
+Original license follows verbatim:
+
+MIT License
+
+Copyright (c) 2016 Kelvin S. do Prado
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

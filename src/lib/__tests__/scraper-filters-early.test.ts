@@ -94,4 +94,10 @@ describe("placeUrlKey", () => {
     const b = "https://www.google.com/maps/place/B/@-23.5,-46.6,17z/data=!1m1!bbb";
     expect(placeUrlKey(a)).not.toBe(placeUrlKey(b));
   });
+
+  it("ignora parâmetros de tracking como ?entry=ttu, ?entry=ts, ?authuser=0 mantendo a mesma chave", () => {
+    const a = "https://www.google.com/maps/place/Empresa/@-23.55,-46.63,17z/data=!1m1!123abc?entry=ttu&hl=pt-BR";
+    const b = "https://www.google.com/maps/place/Empresa/@-23.55,-46.63,17z/data=!1m1!123abc?entry=ts&authuser=0";
+    expect(placeUrlKey(a)).toBe(placeUrlKey(b));
+  });
 });

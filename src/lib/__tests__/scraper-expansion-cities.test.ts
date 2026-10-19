@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { extractLocation } from "@/lib/lead-intelligence";
 import { getNeighboringCities, isValidCityName, extractUFFromText, ufFromCep, computeExpansionCandidates, proximitySearchTerm } from "@/lib/geo-regions";
 
-describe("geo-regions & extractLocation — Expansão inteligente para todo o Brasil", () => {
+describe("geo-regions & extractLocation — Expansão municipal offline no Brasil", () => {
   it("extractUFFromText identifica corretamente as siglas de estado", () => {
     expect(extractUFFromText("Belo Horizonte - MG")).toBe("MG");
     expect(extractUFFromText("São Paulo - SP")).toBe("SP");
@@ -27,7 +27,7 @@ describe("geo-regions & extractLocation — Expansão inteligente para todo o Br
     expect(bhFull).toContain("Contagem - MG");
   });
 
-  it("Capitais de todas as regiões brasileiras têm vizinhas metropolitanas mapeadas", () => {
+  it("capitais resolvidas têm municípios próximos do mesmo UF, com DF isolado", () => {
     // Sudeste
     expect(getNeighboringCities("São Paulo")).toContain("Guarulhos - SP");
     expect(getNeighboringCities("Rio de Janeiro")).toContain("Niterói - RJ");
@@ -39,8 +39,9 @@ describe("geo-regions & extractLocation — Expansão inteligente para todo o Br
     expect(getNeighboringCities("Porto Alegre")).toContain("Canoas - RS");
     expect(getNeighboringCities("Florianópolis")).toContain("São José - SC");
 
+    // O DF não tem outro município; bairros/regiões administrativas não viram cidades.
+    expect(getNeighboringCities("Brasília")).toEqual([]);
     // Centro-Oeste
-    expect(getNeighboringCities("Brasília")).toContain("Taguatinga - DF");
     expect(getNeighboringCities("Goiânia")).toContain("Aparecida de Goiânia - GO");
     expect(getNeighboringCities("Cuiabá")).toContain("Várzea Grande - MT");
 
@@ -51,7 +52,9 @@ describe("geo-regions & extractLocation — Expansão inteligente para todo o Br
 
     // Norte
     expect(getNeighboringCities("Manaus")).toContain("Iranduba - AM");
-    expect(getNeighboringCities("Belém")).toContain("Ananindeua - PA");
+    // Belém também existe em AL e PB: a capital precisa de UF explícito.
+    expect(getNeighboringCities("Belém - PA")).toContain("Ananindeua - PA");
+    expect(getNeighboringCities("Belém")).toEqual([]);
   });
 
   it("isValidCityName rejeita nomes de ruas, avenidas e logradouros", () => {
@@ -137,48 +140,47 @@ describe("geo-regions & extractLocation — Expansão inteligente para todo o Br
     expect(out.some(c => c.includes("Manaus"))).toBe(false);
   });
 
-  it("computeExpansionCandidates: cidade do interior NÃO mapeada expande por cidades colhidas no mesmo estado", () => {
-    // Paracatu não está no dicionário — a garantia vem da colheita de endereços.
+  it("computeExpansionCandidates: município interiorano expande por coordenadas no próprio estado", () => {
+    // Paracatu não existia no dicionário legado; a base local cobre o município.
     const out = computeExpansionCandidates({
       regions: ["Paracatu - MG"],
       cityCounts: new Map([
-        ["João Pinheiro - MG", 6],   // colhida do painel de detalhes
-        ["Unaí - MG", 4],
+        ["João Pinheiro - MG", 4],   // colhida do painel de detalhes
+        ["Unaí - MG", 60],
         ["Cristalina - GO", 9],      // outro estado — rejeitada mesmo colhendo mais
         ["· Rod. BR-040", 7],        // rua com prefixo — rejeitada
       ]),
       alreadySearched: new Set(["paracatu - mg"]),
-      limit: 5,
+      limit: 20,
     });
     expect(out).toContain("João Pinheiro - MG");
     expect(out).toContain("Unaí - MG");
     expect(out.some(c => c.includes("GO"))).toBe(false);
     expect(out.some(c => c.includes("Rod"))).toBe(false);
-    // Ordem: colhidas por frequência denominada
+    // Frequência não prova proximidade: a ordem agora usa as coordenadas municipais.
     expect(out.indexOf("João Pinheiro - MG")).toBeLessThan(out.indexOf("Unaí - MG"));
   });
 
-  it("computeExpansionCandidates: cidade sem UF no nome do lead ganha sufixo do estado de origem", () => {
+  it("computeExpansionCandidates: evidência sem UF não duplica os municípios da base", () => {
     const out = computeExpansionCandidates({
       regions: ["Sobral"],
       cityCounts: new Map([["Forquilha", 5], ["Massapê", 3]]),
       alreadySearched: new Set(["sobral"]),
       limit: 5,
     });
-    // Sobral está mapeada (Forquilha - CE, Massapê - CE)
     expect(out).toContain("Forquilha - CE");
     expect(out).toContain("Massapê - CE");
+    expect(new Set(out).size).toBe(out.length);
   });
 
-  it("computeExpansionCandidates: região sem UF e sem dicionário aceita candidatos colhidos com qualquer UF conhecido", () => {
+  it("computeExpansionCandidates: região desconhecida não inventa estado a partir dos resultados", () => {
     const out = computeExpansionCandidates({
-      regions: ["Xique-Xique"],
+      regions: ["Cidade não identificada"],
       cityCounts: new Map([["Barra - BA", 4], ["Petrolândia - PE", 2]]),
-      alreadySearched: new Set(["xique-xique"]),
+      alreadySearched: new Set(["cidade não identificada"]),
       limit: 5,
     });
-    expect(out).toContain("Barra - BA");
-    expect(out).toContain("Petrolândia - PE");
+    expect(out).toEqual([]);
   });
 
   it("computeExpansionCandidates: não repete cidade já buscada e respeita o limite", () => {

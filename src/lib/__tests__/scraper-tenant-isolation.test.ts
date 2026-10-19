@@ -9,6 +9,8 @@ vi.mock("@/lib/supabase", () => ({
   supabaseAdmin: { from: (...args: unknown[]) => mocks.from(...args) },
 }));
 
+vi.mock("@/lib/supabase_admin", () => ({ supabaseAdmin: { from: (...args: unknown[]) => mocks.from(...args) } }));
+
 vi.mock("puppeteer-extra", () => ({
   default: {
     use: vi.fn(),
@@ -105,7 +107,7 @@ describe("SEC-H8 scraper tenant isolation", () => {
     expect(getStatus(tenantA, "automation-A").isScraping).toBe(true);
   });
 
-  it("libera o singleton antes de aguardar o pós-processamento da automação", async () => {
+  it("mantém singleton ocupado enquanto aguarda checkpoint protegido da automação", async () => {
     let releaseUpdate = (): void => {};
     const pendingUpdate = new Promise<void>((resolve) => { releaseUpdate = resolve; });
     mocks.from.mockImplementation((table: string) => {
@@ -121,13 +123,15 @@ describe("SEC-H8 scraper tenant isolation", () => {
       regions: ["Vitória"],
       client_id: tenantA,
       automation_id: "automation-A",
+      captureAttemptId: "attempt-a",
     });
     expect(first.ok).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(getStatus(tenantA, "automation-A").isScraping).toBe(true);
+    expect(startScraperRun({ niches: ["clínica"], regions: ["Serra"], client_id: tenantB })).toMatchObject({ ok: false, busy: true });
+    releaseUpdate();
     await vi.waitFor(() => expect(getStatus(tenantA, "automation-A").isScraping).toBe(false));
-
-    const second = startScraperRun({ niches: ["clínica"], regions: ["Serra"], client_id: tenantB });
-    expect(second.ok).toBe(true);
-    releaseUpdate?.();
+    expect(startScraperRun({ niches: ["clínica"], regions: ["Serra"], client_id: tenantB }).ok).toBe(true);
   });
 
   it("impede restart e stop do run ativo por outro tenant", () => {

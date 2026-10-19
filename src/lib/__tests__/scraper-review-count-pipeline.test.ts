@@ -1,5 +1,6 @@
 // @vitest-environment node
 /** Offline integration: real Chromium DOM/evaluate; fixture-only navigation, no Google/API/DB. */
+import { execSync } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
 import puppeteer, { type Browser, type BrowserContext } from "puppeteer-core";
@@ -22,6 +23,10 @@ vi.mock("@/lib/supabase_admin", () => ({ supabaseAdmin: { from: mocks.from } }))
 vi.mock("@/lib/evolution", () => ({ getEvolutionConfig: mocks.evolution }));
 vi.mock("@/lib/reviews-ai", () => ({ summarizeReviewsForLead: mocks.summarize }));
 vi.mock("@/lib/safe-url", () => ({ fetchPublicHttpUrl: mocks.fetch }));
+vi.mock("@/lib/scraper-search-memory", () => ({
+  makeSearchKey: (niche: string, region: string) => `${niche}:${region}`,
+  loadExhaustedSearches: async () => new Set<string>(), markSearchExhausted: async () => true,
+}));
 
 import {
   getLeads, getStatus, startScraperRun, stopScraper, type StartOpts,
@@ -130,29 +135,33 @@ describe.sequential.skipIf(!browserPath)("scraper review-count pipeline (Chromiu
   }, 30000);
   afterAll(async () => {
     if (!browser) return;
-    const closingAt = performance.now();
     const child = browser.process();
-    let phase = "process exit";
-    const exited = child && child.exitCode === null && child.signalCode === null
-      ? once(child, "exit") : Promise.resolve();
-    // Shutdown gracioso libera LevelDB antes da remoção do perfil (EBUSY no Windows).
-    // ponytail: fallback após 2s só para esta árvore; close() nunca é abandonado.
-    const forceStop = setTimeout(() => {
-      if (child?.exitCode === null && child.signalCode === null) browserLifetime.abort();
-    }, 2000);
-    const diagnostic = setTimeout(() => console.error(
-      `[offline browser cleanup] waiting for ${phase}; pid=${child?.pid}; elapsed=${Math.round(performance.now() - closingAt)}ms`,
-    ), 8000);
+    const gracefulClose = browser.close().catch(() => {});
+    const exitedPromise = child && child.exitCode === null && child.signalCode === null
+      ? once(child, "exit").catch(() => {}) : Promise.resolve();
+
+    // Se o encerramento gracioso travar ou demorar mais de 3s (comum no Windows sob alta concorrência),
+    // encerra a árvore de processos diretamente sem prender o teardown do Vitest.
+    const hardKill = setTimeout(() => {
+      try { browserLifetime.abort(); } catch {}
+      if (child && child.exitCode === null && child.signalCode === null) {
+        if (process.platform === "win32") {
+          try { execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: "ignore" }); } catch {}
+        }
+        try { child.kill("SIGKILL"); } catch {}
+      }
+    }, 3000);
+
     try {
-      await Promise.all([
-        browser.close(),
-        exited.then(() => { clearTimeout(forceStop); phase = "profile cleanup"; }),
+      await Promise.race([
+        Promise.all([gracefulClose, exitedPromise]),
+        new Promise((resolve) => setTimeout(resolve, 6000)),
       ]);
     } finally {
-      clearTimeout(forceStop);
-      clearTimeout(diagnostic);
+      clearTimeout(hardKill);
+      try { browser.disconnect(); } catch {}
     }
-  });
+  }, 30000);
 
   beforeEach(async () => {
     startedAt = performance.now();
@@ -172,7 +181,8 @@ describe.sequential.skipIf(!browserPath)("scraper review-count pipeline (Chromiu
     mocks.from.mockImplementation((table: string) => {
       if (!["leads_extraidos", "contacts"].includes(table)) throw new Error(`Unexpected table: ${table}`);
       const query = {
-        select: vi.fn(() => query), eq: vi.fn(() => query),
+        select: vi.fn(() => query), eq: vi.fn(() => query), ilike: vi.fn(() => query), limit: vi.fn(() => query),
+        range: vi.fn(async () => ({ data: [], error: null })),
         insert: vi.fn((payload: unknown) => { mocks.insert(payload); return query; }),
         maybeSingle: vi.fn(async () => ({ data: null, error: null })),
         single: vi.fn(async () => ({ data: { id: mocks.insert.mock.calls.length }, error: null })),

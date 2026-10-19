@@ -127,6 +127,10 @@ export default function AutomacaoPage() {
   // O array final só é calculado no momento de salvar.
   const [nichesText, setNichesText] = useState("");
   const [regionsText, setRegionsText] = useState("");
+  const editingAutomation = automations.find(a => a.id === editingId);
+  const captureLocked = !!editingAutomation && (
+    editingAutomation.scraped_count > 0 || editingAutomation.scrape_filters?._captureSessionId != null
+  );
 
   function blankAutomation(): Partial<Automation> {
     return {
@@ -234,7 +238,7 @@ export default function AutomacaoPage() {
         // pré-seleciona modelo de reviews-ai se vier vazio do formulário
         setFormData(prev => {
           const cur = prev.scrape_filters?.reviews_ai as any;
-          if (cur && !cur.model && merged.length) {
+          if (cur && !cur.model && merged.length && !prev.scraped_count && prev.scrape_filters?._captureSessionId == null) {
             return { ...prev, scrape_filters: { ...prev.scrape_filters, reviews_ai: { ...cur, model: merged[0].id } } };
           }
           return prev;
@@ -282,13 +286,15 @@ export default function AutomacaoPage() {
     setEditingId(a.id);
     setFormData({
       ...a,
-      // garante objetos editáveis e chaves novas (reviews-ai) presentes
-      scrape_filters: {
-        filterEmpty: true, filterDuplicates: true, filterLandlines: true,
-        ...(a.scrape_filters || {}),
-        captureAllReviews: a.scrape_filters?.captureAllReviews ?? false,
-        reviews_ai: { enabled: false, model: null, prompt: null, ...(a.scrape_filters?.reviews_ai || {}) },
-      },
+      // Não injeta defaults na configuração congelada de uma captura iniciada.
+      scrape_filters: a.scraped_count > 0 || a.scrape_filters?._captureSessionId != null
+        ? { ...a.scrape_filters }
+        : {
+          filterEmpty: true, filterDuplicates: true, filterLandlines: true,
+          ...(a.scrape_filters || {}),
+          captureAllReviews: a.scrape_filters?.captureAllReviews ?? false,
+          reviews_ai: { enabled: false, model: null, prompt: null, ...(a.scrape_filters?.reviews_ai || {}) },
+        },
       followup_steps: Array.isArray(a.followup_steps) ? a.followup_steps : [],
     });
     setNichesText((a.niches || []).join("\n"));
@@ -316,7 +322,11 @@ export default function AutomacaoPage() {
       // Normaliza os textareas só na hora de salvar (preserva digitação).
       const niches  = nichesText.split("\n").map(s => s.trim()).filter(Boolean);
       const regions = regionsText.split("\n").map(s => s.trim()).filter(Boolean);
-      const payload = { ...formData, niches, regions };
+      // Checkpoints pertencem ao servidor; a API preserva os marcadores existentes.
+      const scrape_filters = Object.fromEntries(Object.entries(formData.scrape_filters || {}).filter(
+        ([key, value]) => !key.startsWith("_") || (key === "_source" && value === "prospeccao-sites"),
+      ));
+      const payload = { ...formData, niches, regions, scrape_filters };
 
       const url = editingId ? `/api/automations/${editingId}` : "/api/automations";
       const method = editingId ? "PATCH" : "POST";
@@ -450,12 +460,12 @@ export default function AutomacaoPage() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-5">
-              {editingId && automations.find(a => a.id === editingId)?.status === "running" && (
+              {editingAutomation?.status === "running" && (
                 <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-[11px] text-amber-200 flex items-start gap-2">
                   <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
                   <div>
                     <p className="font-bold mb-0.5">⚠ Esta automação está rodando.</p>
-                    <p className="opacity-90">Alterações em template de disparo, IA e steps de follow-up valem a partir do próximo envio. Mudar nicho/região não afeta os clientes já captados.</p>
+                    <p className="opacity-90">Pause a automação antes de editar e salvar a configuração.</p>
                   </div>
                 </div>
               )}
@@ -489,7 +499,7 @@ export default function AutomacaoPage() {
               </div>
 
               {/* Captação */}
-              <div className="rounded-xl border border-blue-500/20 bg-blue-500/5 p-4 space-y-3">
+              <fieldset disabled={captureLocked} aria-label="Captação Google Maps" className="rounded-xl border border-blue-500/20 bg-blue-500/5 p-4 space-y-3 disabled:opacity-60">
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <p className="text-[11px] font-black uppercase tracking-widest text-blue-300 flex items-center gap-2">
                     <span className="text-[9px] font-mono bg-blue-500/20 text-blue-200 px-1.5 py-0.5 rounded">PASSO 1</span>
@@ -497,6 +507,7 @@ export default function AutomacaoPage() {
                   </p>
                   <p className="text-[10px] text-blue-200/60 italic">Define DE ONDE vem o cliente</p>
                 </div>
+                {captureLocked && <p className="text-[11px] text-blue-200">A captura já foi iniciada. Crie outra automação para mudar nichos, regiões, filtros ou meta.</p>}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div>
                     <label className="text-[10px] uppercase font-bold text-muted-foreground">Nichos (1 por linha — pode ter espaço)</label>
@@ -595,7 +606,7 @@ export default function AutomacaoPage() {
                     </div>
                   )}
                 </div>
-              </div>
+              </fieldset>
 
               {/* Lead Intelligence — entre captação e disparo. Análise IA de
                   cada lead colhido (site, busca web, Maps). O briefing é
@@ -976,11 +987,11 @@ export default function AutomacaoPage() {
 
               <div className="flex flex-col sm:flex-row gap-2 sm:justify-end">
                 <Button onClick={closeForm} variant="ghost" disabled={creating} className="w-full sm:w-auto">Cancelar</Button>
-                <Button onClick={() => saveAutomation(false)} disabled={creating} className="gap-2 bg-white/5 border border-white/10 hover:bg-white/10 text-white font-bold text-xs uppercase tracking-widest w-full sm:w-auto">
+                <Button onClick={() => saveAutomation(false)} disabled={creating || editingAutomation?.status === "running"} className="gap-2 bg-white/5 border border-white/10 hover:bg-white/10 text-white font-bold text-xs uppercase tracking-widest w-full sm:w-auto">
                   {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                   Salvar Rascunho
                 </Button>
-                <Button onClick={() => saveAutomation(true)} disabled={creating} className="gap-2 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-white font-black text-xs uppercase tracking-widest w-full sm:w-auto">
+                <Button onClick={() => saveAutomation(true)} disabled={creating || editingAutomation?.status === "running"} className="gap-2 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-white font-black text-xs uppercase tracking-widest w-full sm:w-auto">
                   {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
                   {editingId ? "Salvar e Iniciar" : "Salvar e Iniciar"}
                 </Button>

@@ -16,13 +16,14 @@
  *   - lib/followup-worker   (ticker + IA por step)
  */
 
+import { randomUUID } from "node:crypto";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
+import { readCaptureIds, readRejectedCaptureIds, updateAutomationCapture, type AutomationCaptureRow } from "@/lib/automation-capture";
 import { startCampaign, pauseCampaign } from "@/lib/campaign-worker";
 import { enrollLeads } from "@/lib/followup-worker";
 import { startScraperRun, stopScraper, getStatus as getScraperStatus } from "@/lib/scraper-engine";
-import { requireAutomationClientId as requireClientId, resolveCapturedLeadScope } from "@/lib/automation-lead-scope";
+import { requireAutomationClientId as requireClientId } from "@/lib/automation-lead-scope";
 import { summarizeReviewsForLead } from "@/lib/reviews-ai";
-import { evolution } from "@/lib/evolution";
 import * as channel from "@/lib/channel";
 
 type AutomationRow = any;
@@ -108,210 +109,189 @@ async function markError(id: string, msg: string) {
   console.error(`[AUTOMATION ${id}] ERRO:`, msg);
   const clientId = await resolveAutomationClientId(id);
   await log(id, "error", "error", msg);
-  let query = supabase
-    .from("automations")
-    .update({
-      status: "error",
-      phase: "error",
-      last_error: String(msg).slice(0, 500),
-      last_error_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", id);
-  query = clientId ? query.eq("client_id", clientId) : query.is("client_id", null);
-  await query;
+  if (!clientId) return;
+  await updateAutomationCapture(clientId, id, current => current.status !== "running" ? null : ({
+    status: "error",
+    phase: "error",
+    last_error: String(msg).slice(0, 500),
+    last_error_at: new Date().toISOString(),
+    scrape_filters: {
+      ...current.scrape_filters,
+      _resumePhase: current.phase === "error" ? current.scrape_filters._resumePhase : current.phase,
+      _captureAttemptId: null,
+      _captureLeaseUntil: null,
+    },
+  }));
 }
 
-/**
- * FASE 1 — Scrape. Chama o endpoint /api/scraper em modo "save" + filtros.
- * O scraper é fire-and-forget (volta OK rapidamente). Acompanhamos pelo
- * crescimento de scraped_count: quando para de subir por 60s, consideramos
- * concluído e avançamos pra phase=dispatching.
- */
-async function startScrapingPhase(a: AutomationRow): Promise<void> {
-  const niches  = Array.isArray(a.niches)  ? a.niches  : [];
-  const regions = Array.isArray(a.regions) ? a.regions : [];
-  if (niches.length === 0 || regions.length === 0) {
-    return markError(a.id, "Niches e regiões são obrigatórios pra fase de scraping.");
-  }
+function captureGoal(a: AutomationRow): number {
+  const goal = Number(a.scrape_max_leads || 200);
+  if (!Number.isSafeInteger(goal) || goal <= 0) throw new Error("Meta de captação inválida.");
+  return goal;
+}
 
-  const filters = a.scrape_filters || {};
+function validCaptureIds(filters: unknown): number[] {
+  const rejected = new Set(readRejectedCaptureIds(filters));
+  return readCaptureIds(filters).filter(id => !rejected.has(id));
+}
+
+function hasCaptureLease(filters: Record<string, unknown>): boolean {
+  return typeof filters._captureAttemptId === "string" &&
+    Date.parse(String(filters._captureLeaseUntil || "")) > Date.now();
+}
+
+/** Recupera apenas INSERTs desta sessão; nunca infere propriedade por faixa do CRM. */
+async function reconcileCapture(a: AutomationRow): Promise<AutomationCaptureRow | null> {
   const clientId = requireAutomationClientId(a);
+  const session = a.scrape_filters?._captureSessionId;
+  const recovered: number[] = [];
+  if (typeof session === "string") {
+    // ponytail: recuperação limitada à meta; paginação por ID evita o teto de 1000 do PostgREST.
+    let cursor = 0;
+    const maximum = captureGoal(a);
+    const known = readCaptureIds(a.scrape_filters);
+    const knownSet = new Set(known);
+    while (recovered.length < maximum) {
+      const size = Math.min(500, maximum - recovered.length);
+      const query = supabase.from("leads_extraidos").select("id")
+        .eq("client_id", clientId)
+        .eq("business_details->_automationCapture->>automationId", a.id)
+        .eq("business_details->_automationCapture->>sessionId", session);
+      const { data, error } = await query.gt("id", cursor).order("id", { ascending: true }).limit(size);
+      if (error) throw new Error(`Falha recuperando vínculo da captura: ${error.message}`);
+      const ids = (data || []).map(row => Number(row.id)).filter(id => Number.isSafeInteger(id) && id > cursor);
+      for (const id of ids) {
+        if (!knownSet.has(id)) recovered.push(id);
+        if (recovered.length >= maximum) break;
+      }
+      if (ids.length < size) break;
+      cursor = ids[ids.length - 1];
+    }
+  }
+  const candidateIds = [...new Set([...readCaptureIds(a.scrape_filters), ...recovered])];
+  const persisted = await selectCapturedLeads({ ...a, scrape_filters: { ...a.scrape_filters, _capturedLeadIds: candidateIds } });
+  const valid = new Set(persisted.map(lead => lead.id));
+  const invalid = candidateIds.filter(id => !valid.has(id));
+  return updateAutomationCapture(clientId, a.id, current => {
+    if (current.status !== a.status || current.phase !== a.phase || current.scrape_filters._captureSessionId !== session) return null;
+    const filters = current.scrape_filters;
+    const captured = [...new Set([...readCaptureIds(filters), ...recovered])];
+    if (current.scraped_count > captured.length) {
+      throw new Error("Progresso legado sem vínculo confiável dos leads. Contagem preservada; revise a propriedade antes de retomar.");
+    }
+    const nextFilters = { ...filters, _capturedLeadIds: captured,
+      _rejectedLeadIds: [...new Set([...readRejectedCaptureIds(filters), ...invalid])] };
+    return { scrape_filters: nextFilters, scraped_count: validCaptureIds(nextFilters).length };
+  });
+}
 
-  // Conta leads ANTES (filtrando por tenant) pra detectar incremento depois.
-  // SEM filtro por client_id era cross-tenant: outro cliente scrapeando inflava
-  // o "scrapedNow" e podia disparar campanha pra leads alheios.
-  const { count: before } = await supabase
-    .from("leads_extraidos")
-    .select("*", { count: "exact", head: true })
-    .eq("client_id", clientId);
+async function scheduleCaptureRetry(a: AutomationRow, reason: string): Promise<void> {
+  const row = await updateAutomationCapture(requireAutomationClientId(a), a.id, current => {
+    const filters = current.scrape_filters;
+    if (current.status !== "running" || current.phase !== "scraping" || filters._captureSessionId !== a.scrape_filters?._captureSessionId ||
+      filters._captureAttemptId !== a.scrape_filters?._captureAttemptId || hasCaptureLease(filters) || filters._captureRetryAt) return null;
+    const failures = Math.min(20, Math.max(0, Number(filters._captureFailures) || 0) + 1);
+    return {
+      last_error: reason,
+      last_error_at: new Date().toISOString(),
+      scrape_filters: {
+        ...filters, _captureAttemptId: null, _captureLeaseUntil: null,
+        _captureFailures: failures,
+        _captureRetryAt: new Date(Date.now() + Math.min(5 * 60_000, 30_000 * 2 ** (failures - 1))).toISOString(),
+      },
+    };
+  });
+  if (row) await log(a.id, "scrape", "warning", `${reason} Progresso preservado: ${row.scraped_count}/${captureGoal(a)}. Nova tentativa agendada.`);
+}
 
-  // Marca d'água: maior `id` existente AGORA na tabela (global, não por
-  // tenant — id é sequência única). Todo lead que o scraper inserir terá
-  // id MAIOR que isto. É o que startDispatchPhase usa pra selecionar SÓ os
-  // leads desta captação. Antes usava-se _baselineCount (uma contagem) como
-  // se fosse id — bug que fazia o disparo pegar o CRM inteiro.
-  const { data: maxRow } = await supabase
-    .from("leads_extraidos")
-    .select("id")
-    .eq("client_id", clientId)
-    .order("id", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  const baselineMaxId = Number(maxRow?.id) || 0;
-
-  await supabase.from("automations").update({
-    phase: "scraping",
-    scraped_count: 0,
-    last_error: null,
-    last_error_at: null,
-    updated_at: new Date().toISOString(),
-  }).eq("id", a.id).eq("client_id", clientId);
-
-  await log(a.id, "state", "info",
-    `🚀 Automação iniciada. Captando leads em ${niches.length} nicho(s) × ${regions.length} região(ões). Limite: ${a.scrape_max_leads}.`,
-    { metadata: { niches, regions, max: a.scrape_max_leads } }
-  );
-
-  // Chama a engine DIRETO em memória — mesma engine que o /captador usa
-  // (lib/scraper-engine). Sem HTTP, sem self-call, sem rede. Se /captador
-  // funciona, isso aqui funciona — é literalmente a mesma função.
+/** Checkpoint e lease são confirmados ANTES de iniciar qualquer navegador. */
+async function startScrapingPhase(a: AutomationRow): Promise<void> {
+  const niches = Array.isArray(a.niches) ? a.niches : [];
+  const regions = Array.isArray(a.regions) ? a.regions : [];
+  if (!niches.length || !regions.length) return markError(a.id, "Niches e regiões são obrigatórios pra fase de scraping.");
+  const clientId = requireAutomationClientId(a);
+  if (getScraperStatus(clientId, a.id).isScraping) return;
+  const reconciled = await reconcileCapture(a);
+  if (!reconciled) return;
+  const attempt = randomUUID();
+  const now = new Date().toISOString();
+  const row = await updateAutomationCapture(clientId, a.id, current => {
+    const filters = current.scrape_filters;
+    if (current.status !== "running" || !["idle", "scraping"].includes(current.phase) ||
+      filters._captureSessionId !== reconciled.scrape_filters._captureSessionId || filters._captureAttemptId !== reconciled.scrape_filters._captureAttemptId ||
+      hasCaptureLease(filters) || Date.parse(String(filters._captureRetryAt || "")) > Date.now() || validCaptureIds(filters).length >= captureGoal(current)) return null;
+    return {
+      phase: "scraping", last_error: null, last_error_at: null,
+      scrape_filters: {
+        ...filters,
+        _captureSessionId: filters._captureSessionId || randomUUID(),
+        _capturedLeadIds: readCaptureIds(filters), _rejectedLeadIds: readRejectedCaptureIds(filters),
+        _captureAttemptId: attempt, _captureRetryAt: null,
+        _captureHeartbeatAt: now, _captureLeaseUntil: new Date(Date.now() + 120_000).toISOString(),
+        _scrapeStartedAt: filters._scrapeStartedAt || current.started_at || now,
+        _lastProgressAt: filters._lastProgressAt || now, _scrapeFinishedAt: null,
+      },
+    };
+  });
+  if (!row) return;
+  const filters = row.scrape_filters;
+  // Não permite um start ultrapassado (por pausa/retomada concorrente) abrir o navegador.
+  const current = await updateAutomationCapture(clientId, a.id, latest =>
+    latest.status === "running" && latest.phase === "scraping" && latest.scrape_filters._captureAttemptId === attempt ? {} : null);
+  if (!current) return;
   try {
     const r = startScraperRun({
-      niches,
-      regions,
-      mode: "batch",
+      niches, regions, mode: "batch",
       filterEmpty: filters.filterEmpty !== false,
       filterDuplicates: filters.filterDuplicates !== false,
       filterLandlines: filters.filterLandlines === true,
       filterWithWebsite: filters.filterWithWebsite === true,
-      filterWithInstagram: filters.filterWithInstagram === undefined ? false : filters.filterWithInstagram,
-      minReviews: filters.minReviews === undefined ? 0 : filters.minReviews,
+      filterWithInstagram: (filters.filterWithInstagram === undefined ? false : filters.filterWithInstagram) as boolean,
+      minReviews: (filters.minReviews === undefined ? 0 : filters.minReviews) as number,
       captureAllReviews: filters.captureAllReviews === true,
       webhookEnabled: false,
-      maxLeads: Number(a.scrape_max_leads) || 200,  // ← respeita o limite configurado
-      automation_id: a.id,
-      client_id: clientId,
-      forceRestart: true,
+      maxLeads: captureGoal(row) - validCaptureIds(filters).length,
+      automation_id: a.id, client_id: clientId, captureAttemptId: attempt,
+      forceRestart: false, topup: readRejectedCaptureIds(filters).length > 0,
     });
-    if (!r.ok && r.busy) {
-      await supabase.from("automations").update({
-        phase: "idle",
-        updated_at: new Date().toISOString(),
-      }).eq("id", a.id).eq("client_id", clientId);
-      await log(a.id, "scrape", "info", "⏳ Scraper ocupado por outra captura. Nova tentativa no próximo ciclo.");
+    if (!r.ok || r.alreadyRunning) {
+      const released = await updateAutomationCapture(clientId, a.id, latest => latest.status === "running" &&
+        latest.scrape_filters._captureAttemptId === attempt ? { scrape_filters: { ...latest.scrape_filters, _captureLeaseUntil: null } } : null);
+      if (!released) return;
+      if (!r.ok && !r.busy) return markError(a.id, `Scraper rejeitou: ${r.error}`);
+      await scheduleCaptureRetry(released, r.error || "Scraper ocupado por outra captura.");
       return;
     }
-    if (!r.ok) {
-      return markError(a.id, `Scraper rejeitou: ${r.error}`);
-    }
-    if (r.alreadyRunning) {
-      await log(a.id, "scrape", "warning",
-        "⏳ Scraper já estava rodando (aba /captador aberta?). Os leads que ele captar a partir de agora vão aparecer aqui.",
-      );
-    } else {
-      await log(a.id, "scrape", "info",
-        `🤖 Scraper disparado: ${niches.length} × ${regions.length} = ${niches.length * regions.length} busca(s) no Google Maps.`,
-        { metadata: { niches, regions } }
-      );
-    }
-  } catch (err: any) {
-    return markError(a.id, `Falha ao chamar engine do scraper: ${err?.message || String(err)}`);
+    await log(a.id, "scrape", "info", `Captação iniciada: ${row.scraped_count}/${captureGoal(row)}. Buscando somente o restante.`);
+  } catch (error) {
+    const released = await updateAutomationCapture(clientId, a.id, latest => latest.status === "running" &&
+      latest.scrape_filters._captureAttemptId === attempt ? { scrape_filters: { ...latest.scrape_filters, _captureLeaseUntil: null } } : null);
+    if (released) await scheduleCaptureRetry(released, `Falha temporária no scraper: ${error instanceof Error ? error.message : String(error)}`);
   }
-
-  // Marca o snapshot inicial pro tick comparar depois.
-  const nowIso = new Date().toISOString();
-  await supabase.from("automations").update({
-    scrape_filters: {
-      ...filters,
-      _baselineCount: before || 0,
-      _baselineMaxId: baselineMaxId,
-      _scrapeStartedAt: nowIso,
-      _lastProgressAt: nowIso,
-    },
-    updated_at: nowIso,
-  }).eq("id", a.id).eq("client_id", clientId);
 }
 
-/**
- * Verifica se o scrape terminou pelo marcador da engine ou scrape_max_leads.
- * Sem engine ativa, preserva os fallbacks de ociosidade e tempo sem leads.
- */
 type ScrapeCheck = {
   done: boolean;
   scrapedNow: number;
   progressed: boolean;
-  /** segundos desde a última vez que um lead novo foi detectado */
   idleSeconds: number;
-  /** segundos totais desde que o scrape começou */
   elapsedSeconds: number;
-  /** motivo da conclusão (só quando done=true) — vai pro log */
   doneReason: string | null;
 };
 
 async function checkScrapingDone(a: AutomationRow): Promise<ScrapeCheck> {
-  const clientId = requireAutomationClientId(a);
-  const baseline = (a.scrape_filters?._baselineCount as number) || 0;
-  const scrapeStartedAtMs = a.scrape_filters?._scrapeStartedAt
-    ? new Date(a.scrape_filters._scrapeStartedAt).getTime()
-    : Date.now();
-  const lastProgressAtMs = a.scrape_filters?._lastProgressAt
-    ? new Date(a.scrape_filters._lastProgressAt).getTime()
-    : scrapeStartedAtMs;
-
-  // Mesmo filtro de tenant do startScrapingPhase — count cross-tenant inflava o resultado
-  const { count: now } = await supabase
-    .from("leads_extraidos")
-    .select("*", { count: "exact", head: true })
-    .eq("client_id", clientId);
-  const scrapedNow = Math.max(0, (now || 0) - baseline);
-
-  const idleSeconds = Math.round((Date.now() - lastProgressAtMs) / 1000);
-  const elapsedSeconds = Math.round((Date.now() - scrapeStartedAtMs) / 1000);
-  const lastCount = a.scraped_count || 0;
-  const progressed = scrapedNow > lastCount;
-  const base = { scrapedNow, progressed, idleSeconds, elapsedSeconds };
-
-  // O scraper-engine sinaliza `_scrapeFinishedAt` quando termina a captação
-  // de verdade. Confiar nisso é melhor que adivinhar pela heurística de
-  // 120s ocioso — conclui na hora e não depende do ticker.
-  if (a.scrape_filters?._scrapeFinishedAt) {
-    return { ...base, done: true, doneReason: "scraper finalizou a captação" };
-  }
-
-  // Atingiu o limite máximo: termina já.
-  const hardCap = Number(a.scrape_max_leads || 200);
-  if (scrapedNow >= hardCap) {
-    return { ...base, done: true, doneReason: `limite de ${hardCap} leads atingido` };
-  }
-
-  // Poucos aprovados (ou nenhum) não significam fim com filtros restritivos.
-  // Só usa heurísticas sem engine ativa; marcador real e limite acima prevalecem.
-  if (getScraperStatus(clientId, a.id).isScraping) {
-    return { ...base, done: false, doneReason: null };
-  }
-
-  // Timeout de fallback: sem engine ativa e 15min sem nenhum lead.
-  if (Date.now() - scrapeStartedAtMs > 15 * 60_000 && scrapedNow === 0) {
-    return { ...base, done: true, doneReason: "timeout de 15min sem captar nenhum lead" };
-  }
-
-  // X sem progresso = scraper terminou (ou travou). Note: usamos
-  // _lastProgressAt salvo separado de updated_at, porque updated_at é bumpado
-  // a cada tick e mascarava esse timer. Com captureAllReviews, carregar TODAS
-  // as reviews de 1 negócio leva minutos sem salvar lead novo — o timer de
-  // 120s cortava a captação no meio (leads perdidos). Sobe pra 6min.
-  const idleLimitMs = a.scrape_filters?.captureAllReviews ? 360_000 : 120_000;
-  if (!progressed && Date.now() - lastProgressAtMs > idleLimitMs && scrapedNow > 0) {
-    return { ...base, done: true, doneReason: `${idleSeconds}s sem leads novos — scraper concluído` };
-  }
-  // Se ainda nem captou 1 lead após 5min, também encerra (scraper provavelmente
-  // não conseguiu nem abrir o Maps).
-  if (scrapedNow === 0 && Date.now() - scrapeStartedAtMs > 5 * 60_000) {
-    return { ...base, done: true, doneReason: "5min sem captar nenhum lead — scraper não respondeu" };
-  }
-
-  return { ...base, done: false, doneReason: null };
+  const filters = a.scrape_filters || {};
+  const started = Date.parse(String(filters._scrapeStartedAt || a.started_at || "")) || Date.now();
+  const lastProgress = Date.parse(String(filters._lastProgressAt || "")) || started;
+  const leads = await selectCapturedLeads(a);
+  const scrapedNow = Math.min(captureGoal(a), leads.length);
+  const done = scrapedNow === captureGoal(a);
+  return {
+    done, scrapedNow, progressed: scrapedNow > (a.scraped_count || 0),
+    idleSeconds: Math.max(0, Math.round((Date.now() - lastProgress) / 1000)),
+    elapsedSeconds: Math.max(0, Math.round((Date.now() - started) / 1000)),
+    doneReason: done ? `limite de ${captureGoal(a)} leads atingido` : null,
+  };
 }
 
 /**
@@ -323,6 +303,7 @@ async function startDispatchPhase(
   doneInfo?: { reason: string | null; scrapedNow: number }
 ): Promise<void> {
   const clientId = requireAutomationClientId(a);
+  if (a.status !== "running" || (await checkScrapingDone(a)).scrapedNow !== captureGoal(a)) return;
   // GUARDA DE IDEMPOTÊNCIA: se já existe campanha pra esta automação,
   // NÃO cria outra. Antes, race condition entre 2 ticks ou re-clicks fazia
   // 2 campanhas pros mesmos leads → mesmo número recebia 2x → ban no zap.
@@ -332,17 +313,15 @@ async function startDispatchPhase(
   }
 
   // Trava atômica via UPDATE condicional. Só prossegue se ESTE chamador
-  // conseguiu mudar phase=scraping → phase=dispatching primeiro. Se outro
-  // tick chegou antes, ele já mudou pra "dispatching" e este UPDATE retorna 0 rows.
-  const { data: claimed, error: claimErr } = await supabase
-    .from("automations")
-    .update({ phase: "dispatching", updated_at: new Date().toISOString() })
-    .eq("id", a.id)
-    .eq("client_id", clientId)
-    .eq("phase", "scraping")  // <-- só se ainda estiver scraping
-    .select("id")
-    .maybeSingle();
-  if (claimErr) return markError(a.id, `Falha claim de fase: ${claimErr.message}`);
+  // conseguiu mudar phase=scraping → phase=dispatching primeiro (ou retomar um dispatching sem campanha).
+  const claimed = await updateAutomationCapture(clientId, a.id, current =>
+    current.status === "running" &&
+    (current.phase === "scraping" || (current.phase === "dispatching" && !current.campaign_id)) &&
+    !current.campaign_id &&
+    current.scrape_filters._captureSessionId === a.scrape_filters?._captureSessionId &&
+    validCaptureIds(current.scrape_filters).length >= captureGoal(current)
+      ? { phase: "dispatching", scrape_filters: { ...current.scrape_filters, _captureAttemptId: null, _captureLeaseUntil: null } }
+      : null);
   if (!claimed) {
     console.log(`[AUTOMATION ${a.id}] outro tick já avançou pra dispatching — pulando.`);
     return;
@@ -356,24 +335,10 @@ async function startDispatchPhase(
 
   if (!a.dispatch_template?.trim()) return markError(a.id, "Template de disparo vazio.");
 
-  // IDENTIFICAÇÃO DOS LEADS DESTA CAPTAÇÃO — lógica pura, testada em
-  // automation-lead-scope.test.ts. Resolve a marca d'água `_baselineMaxId`;
-  // se os marcadores se perderam, aborta com erro claro em vez de disparar
-  // pro CRM inteiro.
-  const scope = resolveCapturedLeadScope(a.scrape_filters, a.started_at);
-  if (!scope.ok) return markError(a.id, scope.reason);
-
-  let leads = await selectCapturedLeads(a, scope);
-
-  if (leads.length === 0) {
-    // Nada pra disparar → conclui.
-    await log(a.id, "state", "warning", "Nenhum lead colhido. Automação encerrada sem disparar.");
-    await supabase.from("automations").update({
-      phase: "done",
-      status: "done",
-      last_error: "Nenhum lead colhido — automação encerrada sem disparar.",
-      updated_at: new Date().toISOString(),
-    }).eq("id", a.id).eq("client_id", clientId);
+  a = claimed;
+  let leads = (await selectCapturedLeads(a)).slice(0, captureGoal(a));
+  if (leads.length !== captureGoal(a)) {
+    await topUpInvalidLeads(a, leads);
     return;
   }
   await log(a.id, "scrape", "success",
@@ -484,7 +449,7 @@ async function startDispatchPhase(
   // ───────── VALIDAÇÃO WHATSAPP + REPOSIÇÃO DOS INVÁLIDOS ─────────
   const validated = await canonicalizeAndFilterLeads(a, leads);
   leads = validated.leads;
-  await topUpInvalidLeads(a, scope, leads, validated.removed);
+  if (await topUpInvalidLeads(a, leads)) return;
 
   // ───────── LEAD INTELLIGENCE (opcional, antes do disparo) ─────────
   // Fluxo certo da automação: extrair → analisar (se ligado) → disparar.
@@ -588,6 +553,11 @@ async function startDispatchPhase(
   // 1) cria campaigns. Marca `automation_id` pra que o /disparo não exiba
   // essa campanha (ela vive só dentro do card da automação). Se a coluna
   // não existir (DB antigo), tenta sem ela e segue.
+  const ready = await updateAutomationCapture(clientId, a.id, current =>
+    current.status === "running" && current.phase === "dispatching" && !current.campaign_id &&
+    current.scrape_filters._captureSessionId === a.scrape_filters?._captureSessionId &&
+    validCaptureIds(current.scrape_filters).length >= captureGoal(current) ? {} : null);
+  if (!ready || leads.length !== captureGoal(a)) return;
   const campInsert: any = {
     client_id: clientId,
     name: `[Auto] ${a.name}`,
@@ -640,15 +610,12 @@ async function startDispatchPhase(
   if (tErr) return markError(a.id, `Falha criando targets: ${tErr.message}`);
 
   // 3) start
-  await supabase.from("automations").update({
-    phase: "dispatching",
-    campaign_id: camp.id,
-    scraped_count: leads.length,
-    updated_at: new Date().toISOString(),
-  }).eq("id", a.id).eq("client_id", clientId);
-
-  const r = await startCampaign(camp.id);
-  if (!r.ok) return markError(a.id, `Falha startando campanha: ${r.error}`);
+  const linked = await updateAutomationCapture(clientId, a.id, current =>
+    current.phase === "dispatching" && !current.campaign_id &&
+    current.scrape_filters._captureSessionId === a.scrape_filters?._captureSessionId
+      ? { campaign_id: camp.id, scraped_count: leads.length } : null);
+  if (!linked || linked.status !== "running") return;
+  await resumeDispatchCampaign(linked);
   console.log(`[AUTOMATION ${a.id}] Campanha ${camp.id} disparada com ${leads.length} leads.`);
   await log(a.id, "dispatch", "info",
     `📨 Disparo iniciado. ${leads.length} lead(s) na fila. Intervalo ${a.dispatch_min_interval}-${a.dispatch_max_interval}s, janela ${a.allowed_start_hour}h-${a.allowed_end_hour}h.${a.dispatch_personalize ? " IA reescrevendo cada mensagem." : ""}`,
@@ -656,34 +623,24 @@ async function startDispatchPhase(
   );
 }
 
-/**
- * Seleciona do CRM SÓ os leads colhidos durante esta automação (escopo por
- * _baselineMaxId/startedAt + tenant). Deduplica por remoteJid.
- */
-async function selectCapturedLeads(
-  a: AutomationRow,
-  scope: { baselineMaxId: number | null; startedAt: string | null },
-): Promise<{ id: any; remoteJid: string; nome_negocio: string | null; ramo_negocio: string | null }[]> {
+type CapturedLead = { id: number; remoteJid: string; nome_negocio: string | null; ramo_negocio: string | null };
+
+/** Só IDs persistidos desta captura, sempre no tenant; nunca uma faixa temporal do CRM. */
+async function selectCapturedLeads(a: AutomationRow): Promise<CapturedLead[]> {
   const clientId = requireAutomationClientId(a);
-  let leadsQuery = supabase
-    .from("leads_extraidos")
-    .select("id, remoteJid, nome_negocio, ramo_negocio")
-    .eq("client_id", clientId)
-    .not("remoteJid", "is", null);
-  if (scope.baselineMaxId !== null) leadsQuery = leadsQuery.gt("id", scope.baselineMaxId);
-  if (scope.startedAt) leadsQuery = leadsQuery.gte("created_at", scope.startedAt);
-  const { data: rawLeads, error } = await leadsQuery;
-  if (error) throw new Error(`Falha lendo leads colhidos: ${error.message}`);
-  const seenJids = new Set<string>();
-  const leads = (rawLeads || []).filter((l: any) => {
-    if (!l.remoteJid || seenJids.has(l.remoteJid)) return false;
-    seenJids.add(l.remoteJid);
-    return true;
-  });
-  if (rawLeads && rawLeads.length !== leads.length) {
-    await log(a.id, "scrape", "warning",
-      `🔁 Deduplicados ${rawLeads.length - leads.length} lead(s) repetidos antes de criar campanha (não vão receber duplicado).`,
-    );
+  const ids = validCaptureIds(a.scrape_filters);
+  const leads: CapturedLead[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < ids.length; i += 500) {
+    const { data, error } = await supabase.from("leads_extraidos")
+      .select("id, remoteJid, nome_negocio, ramo_negocio, status")
+      .eq("client_id", clientId).in("id", ids.slice(i, i + 500)).not("remoteJid", "is", null);
+    if (error) throw new Error(`Falha lendo leads colhidos: ${error.message}`);
+    for (const lead of data || []) {
+      if (!lead.remoteJid || lead.status === "invalid_number" || seen.has(lead.remoteJid)) continue;
+      seen.add(lead.remoteJid);
+      leads.push(lead as CapturedLead);
+    }
   }
   return leads;
 }
@@ -695,226 +652,101 @@ async function selectCapturedLeads(
  */
 async function canonicalizeAndFilterLeads(
   a: AutomationRow,
-  leads: { id: any; remoteJid: string; nome_negocio: string | null; ramo_negocio: string | null }[],
-): Promise<{ leads: typeof leads; removed: number }> {
+  leads: CapturedLead[],
+): Promise<{ leads: CapturedLead[]; removed: number }> {
   const clientId = requireAutomationClientId(a);
-  // ───────── UNIFICAÇÃO PRECOCE DE JID CANÔNICO (WhatsApp) ─────────
-  // Scraper extrai telefones e gera JIDs brutos (que no Brasil podem vir com
-  // o nono dígito a mais). A Evolution API resolve o JID canônico real do
-  // WhatsApp (sem o nono dígito para contas antigas). Unificar precocemente
-  // garante que o "Lead Intelligence" já grave a análise sob o JID canônico real,
-  // impedindo gastos duplicados redundantes na IA, e que os targets da campanha
-  // já nasçam perfeitos para que o /chat vincule nome e briefing no primeiro instante.
-  const phoneNumbers = leads.map(l => l.remoteJid.replace(/@.*$/, "").replace(/\D/g, "")).filter(Boolean);
-  if (phoneNumbers.length > 0) {
-    await log(a.id, "scrape", "info", `🔍 Validando e unificando JIDs canônicos de ${leads.length} lead(s) via Evolution API...`);
-    try {
-      const checkResult = await channel.checkWhatsAppNumbersDetailed(phoneNumbers, a.instance_name);
-      
-      // Iremos processar cada lead e atualizar sua referência
-      for (const lead of leads) {
-        const phone = lead.remoteJid.replace(/@.*$/, "").replace(/\D/g, "");
-        const entry = checkResult[phone] || Object.values(checkResult).find((v: any) => v.jid && v.jid.includes(phone)) || null;
-        
-        if (entry && entry.jid) {
-          const sendJid = entry.jid;
-          if (sendJid !== lead.remoteJid) {
-            console.log(`[AUTOMATION ${a.id}] JID divergente na automação. Original: ${lead.remoteJid} · Canônico: ${sendJid}. Unificando precocemente...`);
-            
-            // 1. Tentar atualizar a tabela leads_extraidos de forma resiliente para o JID canônico
-            try {
-              const { error: updErr } = await supabase
-                .from("leads_extraidos")
-                .update({ remoteJid: sendJid })
-                .eq("id", lead.id)
-                .eq("client_id", clientId);
-
-              if (updErr) {
-                // Se der erro 23505 (unique remoteJid colision), faz o merge do CRM e deleta a duplicada
-                if (updErr.code === "23505" || updErr.message?.includes("unique")) {
-                  console.log(`[AUTOMATION ${a.id}] JID canônico ${sendJid} já existe em leads_extraidos. Iniciando merge precoce de inteligência e dados.`);
-                  const { data: oldLead } = await supabase
-                    .from("leads_extraidos")
-                    .select("*")
-                    .eq("id", lead.id)
-                    .eq("client_id", clientId)
-                    .maybeSingle();
-
-                  if (oldLead) {
-                    const mergePayload: Record<string, any> = {};
-                    const fieldsToMerge = [
-                      "nome_negocio", "ramo_negocio", "categoria", "endereco", "website",
-                      "instagram", "facebook", "avaliacao", "reviews", "status",
-                      "intelligence", "intelligence_at", "icp_score", "lead_type",
-                      "justificativa_ia", "resumo_ia", "ia_last_analyzed_at"
-                    ];
-
-                    for (const field of fieldsToMerge) {
-                      if (oldLead[field] !== undefined && oldLead[field] !== null) {
-                        mergePayload[field] = oldLead[field];
-                      }
-                    }
-
-                    // Atualiza o registro canônico que já existia com os dados do lead capturado
-                    await supabase
-                      .from("leads_extraidos")
-                      .update(mergePayload)
-                      .eq("remoteJid", sendJid)
-                      .eq("client_id", clientId);
-
-                    // Deleta o lead capturado antigo duplicado
-                    await supabase
-                      .from("leads_extraidos")
-                      .delete()
-                      .eq("id", oldLead.id)
-                      .eq("client_id", clientId);
-
-                    // Busca o ID do lead canônico correspondente para atualizar a lista em memória
-                    const { data: canonicalLead } = await supabase
-                      .from("leads_extraidos")
-                      .select("id")
-                      .eq("remoteJid", sendJid)
-                      .eq("client_id", clientId)
-                      .maybeSingle();
-
-                    if (canonicalLead) {
-                      lead.id = canonicalLead.id;
-                    }
-                    console.log(`[AUTOMATION ${a.id}] Merge precoce concluído para JID ${sendJid}.`);
-                  }
-                } else {
-                  throw updErr;
-                }
-              }
-            } catch (err) {
-              console.error(`[AUTOMATION ${a.id}] Erro na unificação precoce de leads_extraidos:`, err);
-            }
-
-            lead.remoteJid = sendJid;
-          }
-        }
-      }
-
-      // Filtra leads que existem no WhatsApp (se entry.exists === false, nós removemos da lista)
-      const initialCount = leads.length;
-      const validLeads = [];
-      for (const lead of leads) {
-        const phone = lead.remoteJid.replace(/@.*$/, "").replace(/\D/g, "");
-        const entry = checkResult[phone] || Object.values(checkResult).find((v: any) => v.jid && v.jid.includes(phone)) || null;
-        
-        if (entry && entry.exists === false) {
-          // Atualiza status do lead no banco para que o CRM saiba que o número é inválido
-          await supabase
-            .from("leads_extraidos")
-            .update({ status: "invalid_number" })
-            .eq("id", lead.id)
-            .eq("client_id", clientId);
-          continue;
-        }
-        validLeads.push(lead);
-      }
-
-      if (validLeads.length !== initialCount) {
-        await log(a.id, "scrape", "warning", `⊘ Removidos ${initialCount - validLeads.length} lead(s) com números inválidos/sem WhatsApp antes do Lead Intelligence e envio.`);
-      }
-      return { leads: validLeads, removed: initialCount - validLeads.length };
-
-    } catch (err: any) {
-      await log(a.id, "scrape", "warning", `⚠️ Falha durante a validação precoce de JIDs: ${err?.message || err}. Prosseguindo com leads originais.`);
-      return { leads, removed: 0 };
-    }
-  }
-  return { leads, removed: 0 };
-}
-
-/**
- * REPOSIÇÃO (top-up): a validação de WhatsApp remove números inválidos DEPOIS
- * da captação — sem isto a automação disparava pro objetivo menos os inválidos
- * (40 captados − 6 inválidos = 34 enviados com objetivo 45). Aqui a gente
- * re-captura a diferença antes de criar a campanha. Máx. 2 rodadas pra não
- * loopar infinito em região com muitos números mortos.
- */
-async function topUpInvalidLeads(
-  a: AutomationRow,
-  scope: { baselineMaxId: number | null; startedAt: string | null },
-  leads: { id: any; remoteJid: string; nome_negocio: string | null; ramo_negocio: string | null }[],
-  removedCount: number,
-): Promise<void> {
-  const objetivo = Number(a.scrape_max_leads) || 0;
-  if (objetivo <= 0 || leads.length >= objetivo || removedCount <= 0) return;
-
-  const filters = a.scrape_filters || {};
-  const clientId = requireAutomationClientId(a);
-  const roundsDone = Number(filters._topupRounds) || 0;
-  if (roundsDone >= 2) {
-    await log(a.id, "scrape", "warning",
-      `♻️ Ainda faltam ${objetivo - leads.length} lead(s) pro objetivo, mas o limite de 2 reposições foi atingido. Seguindo com ${leads.length}.`);
-    return;
-  }
-
-  const deficit = objetivo - leads.length;
-  await log(a.id, "scrape", "info",
-    `♻️ Reposição: ${removedCount} inválido(s) removido(s) → ${leads.length}/${objetivo} leads. Capturando até ${deficit} lead(s) adicional(is)...`);
-
-  const r = startScraperRun({
-    niches: Array.isArray(a.niches) ? a.niches : [],
-    regions: Array.isArray(a.regions) ? a.regions : [],
-    mode: "batch",
-    filterEmpty: filters.filterEmpty !== false,
-    filterDuplicates: filters.filterDuplicates !== false,
-    filterLandlines: filters.filterLandlines === true,
-    filterWithWebsite: filters.filterWithWebsite === true,
-    filterWithInstagram: filters.filterWithInstagram === undefined ? false : filters.filterWithInstagram,
-    minReviews: filters.minReviews === undefined ? 0 : filters.minReviews,
-    captureAllReviews: filters.captureAllReviews === true,
-    webhookEnabled: false,
-    maxLeads: deficit,
-    automation_id: a.id,
-    client_id: clientId,
-    forceRestart: false,
-    topup: true,
-  });
-  if (!r.ok) {
-    await log(a.id, "scrape", "warning", `♻️ Reposição não iniciou (${r.error || "scraper ocupado"}). Seguindo com ${leads.length} lead(s).`);
-    return;
-  }
-
-  // Espera o run de reposição terminar (poll 5s, teto 20min — captação de
-  // poucos leads leva poucos minutos; se estourar, segue com o que tem).
-  const deadline = Date.now() + 20 * 60 * 1000;
-  while (getScraperStatus(clientId, a.id).isScraping && Date.now() < deadline) {
-    await new Promise(res => setTimeout(res, 5000));
-  }
-  if (getScraperStatus(clientId, a.id).isScraping) {
-    await log(a.id, "scrape", "warning",
-      `♻️ Reposição demorou mais que 20min — seguindo com ${leads.length} lead(s) válidos. Os extras ficam no CRM pra próxima.`);
-    return;
-  }
-
-  // Re-seleciona o escopo inteiro e valida SÓ os leads novos.
-  const fresh = await selectCapturedLeads(a, scope);
-  const known = new Set(leads.map(l => String(l.id)));
-  const novos = fresh.filter(l => !known.has(String(l.id)));
-  if (novos.length === 0) {
-    await log(a.id, "scrape", "info", `♻️ Reposição não achou leads novos (região esgotada). Seguindo com ${leads.length}.`);
-  } else {
-    await log(a.id, "scrape", "info", `♻️ Validando ${novos.length} lead(s) novo(s) da reposição...`);
-    const validNovos = await canonicalizeAndFilterLeads(a, novos);
-    leads.push(...validNovos.leads);
-    await log(a.id, "scrape", "success",
-      `♻️ Reposição: +${validNovos.leads.length} lead(s) válido(s) → ${leads.length}/${objetivo}.`);
-  }
-
-  // Persiste a rodada pra um restart da automação não re-repor sem parar.
+  const phoneOf = (jid: string): string => jid.replace(/@.*$/, "").replace(/\D/g, "");
+  let checks: Awaited<ReturnType<typeof channel.checkWhatsAppNumbersDetailed>> = {};
   try {
-    const { data: row } = await supabase.from("automations").select("scrape_filters").eq("id", a.id).eq("client_id", clientId).maybeSingle();
-    await supabase.from("automations").update({
-      scrape_filters: { ...((row?.scrape_filters as any) || {}), _topupRounds: roundsDone + 1 },
-      updated_at: new Date().toISOString(),
-    }).eq("id", a.id).eq("client_id", clientId);
-  } catch { /* best-effort */ }
+    checks = await channel.checkWhatsAppNumbersDetailed(leads.map(lead => phoneOf(lead.remoteJid)), a.instance_name);
+  } catch (err) {
+    console.warn(`[AUTOMATION ${a.id}] Validação WhatsApp temporariamente indisponível (${(err as Error).message}). Prosseguindo com os números capturados.`);
+  }
+  const valid: CapturedLead[] = [];
+  const seen = new Set<string>();
+  for (const lead of leads) {
+    const entry = checks[phoneOf(lead.remoteJid)];
+    if (entry?.exists === false) {
+      const { error } = await supabase.from("leads_extraidos").update({ status: "invalid_number" })
+        .eq("id", lead.id).eq("client_id", clientId);
+      if (error) throw new Error(`Falha persistindo número inválido: ${error.message}`);
+      continue;
+    }
+    const jid = entry?.jid || lead.remoteJid;
+    if (seen.has(jid)) continue;
+    if (jid !== lead.remoteJid) {
+      const { error } = await supabase.from("leads_extraidos").update({ remoteJid: jid })
+        .eq("id", lead.id).eq("client_id", clientId);
+      // Colisão com lead pré-existente não transfere sua propriedade para esta captura.
+      if (error?.code === "23505") continue;
+      if (error) throw new Error(`Falha persistindo JID canônico: ${error.message}`);
+    }
+    seen.add(jid);
+    valid.push({ ...lead, remoteJid: jid });
+  }
+  return { leads: valid, removed: leads.length - valid.length };
 }
 
+/** Reposição persistida para o próximo tick; nunca bloqueia o scheduler esperando navegador. */
+async function topUpInvalidLeads(a: AutomationRow, leads: CapturedLead[]): Promise<boolean> {
+  if (leads.length === captureGoal(a)) return false;
+  const valid = new Set(leads.map(lead => lead.id));
+  const row = await updateAutomationCapture(requireAutomationClientId(a), a.id, current => {
+    if (current.status !== "running" || current.phase !== "dispatching" || current.campaign_id ||
+      current.scrape_filters._captureSessionId !== a.scrape_filters?._captureSessionId) return null;
+    const rejected = [...new Set([...readRejectedCaptureIds(current.scrape_filters), ...readCaptureIds(current.scrape_filters).filter(id => !valid.has(id))])];
+    return {
+      phase: "scraping", scraped_count: leads.length,
+      last_error: "Reposição pendente: leads inválidos ou repetidos não contam para a meta.",
+      scrape_filters: {
+        ...current.scrape_filters, _rejectedLeadIds: rejected,
+        _captureAttemptId: null, _captureLeaseUntil: null,
+        _captureRetryAt: new Date(Date.now() + 30_000).toISOString(),
+      },
+    };
+  });
+  if (row) await log(a.id, "scrape", "warning", `Reposição agendada: ${leads.length}/${captureGoal(a)} válidos. Nenhum disparo iniciado.`);
+  return true;
+}
+
+
+/** startCampaign reseta enviados quando não há pending: nunca chamar sem auditar a fila. */
+async function resumeDispatchCampaign(a: AutomationRow): Promise<void> {
+  if (!a.campaign_id || a.status !== "running") return;
+  const clientId = requireAutomationClientId(a);
+  const { data: campaign, error } = await supabase.from("campaigns").select("status")
+    .eq("id", a.campaign_id).eq("client_id", clientId).maybeSingle();
+  if (error) throw new Error(`Falha lendo campanha: ${error.message}`);
+  if (!campaign || !["paused", "draft"].includes(campaign.status)) return;
+  const count = async (status: string): Promise<number> => {
+    const result = await supabase.from("campaign_targets").select("*", { count: "exact", head: true })
+      .eq("campaign_id", a.campaign_id).eq("client_id", clientId).eq("status", status);
+    if (result.error) throw new Error(`Falha lendo fila da campanha: ${result.error.message}`);
+    return result.count || 0;
+  };
+  const [pending, processing] = await Promise.all([count("pending"), count("processing")]);
+  if (processing) throw new Error("Campanha com envio em processing ambíguo. Revise o WhatsApp antes de retomar para evitar duplicidade.");
+  if (!pending) return;
+  const capturedLeads = await selectCapturedLeads(a);
+  const allowedJids = new Set(capturedLeads.map(lead => lead.remoteJid));
+  const { data: targetRows, error: targetsError } = await supabase.from("campaign_targets")
+    .select("remote_jid").eq("campaign_id", a.campaign_id).eq("client_id", clientId);
+  if (targetsError) throw new Error(`Falha validando alvos da campanha: ${targetsError.message}`);
+  if ((targetRows || []).some(target => !allowedJids.has(target.remote_jid))) {
+    throw new Error("Campanha contém destinatários fora do escopo confirmado da captura. Revise a propriedade antes de retomar.");
+  }
+  const current = await updateAutomationCapture(clientId, a.id, row => {
+    if (row.status !== "running" || row.phase !== "dispatching" || row.campaign_id !== a.campaign_id) return null;
+    if (row.scraped_count !== captureGoal(row)) throw new Error("Disparo abaixo da meta ou com contagem divergente. Campanha e progresso preservados; revise antes de retomar.");
+    return {};
+  });
+  if (!current) return;
+  const result = await startCampaign(a.campaign_id);
+  if (!result.ok) throw new Error(`Falha startando campanha: ${result.error}`);
+  // Se a pausa venceu durante startCampaign, não deixa o timer recém-criado ativo.
+  const after = await updateAutomationCapture(clientId, a.id, row => row.status === "running" && row.campaign_id === a.campaign_id ? {} : null);
+  if (!after) await pauseCampaign(a.campaign_id);
+}
 
 async function checkDispatchDone(a: AutomationRow): Promise<{
   done: boolean;
@@ -944,20 +776,40 @@ async function checkDispatchDone(a: AutomationRow): Promise<{
       .eq("status", st);
     return count || 0;
   };
-  const [sent, failed, pending] = await Promise.all([
+  const [sent, failed, pending, processing] = await Promise.all([
     countBy("sent"),
     countBy("failed"),
     countBy("pending"),
+    countBy("processing"),
   ]);
 
   return {
-    done: status === "done",
+    done: status === "done" && processing === 0,
     status,
     sent,
     failed,
     pending,
     total: sent + failed + pending,
   };
+}
+
+async function resumeFollowupCampaign(a: AutomationRow): Promise<void> {
+  if (!a.followup_campaign_id || a.status !== "running") return;
+  const clientId = requireAutomationClientId(a);
+  const active = await updateAutomationCapture(clientId, a.id, row =>
+    row.status === "running" && row.phase === "following" && row.followup_campaign_id === a.followup_campaign_id ? {} : null);
+  if (!active) return;
+  const { error } = await supabase.from("followup_campaigns")
+    .update({ status: "active", updated_at: new Date().toISOString() })
+    .eq("id", a.followup_campaign_id).eq("client_id", clientId).eq("status", "paused");
+  if (error) throw new Error(`Falha retomando follow-up: ${error.message}`);
+  const after = await updateAutomationCapture(clientId, a.id, row =>
+    row.status === "running" && row.phase === "following" && row.followup_campaign_id === a.followup_campaign_id ? {} : null);
+  if (!after) {
+    const paused = await supabase.from("followup_campaigns").update({ status: "paused", updated_at: new Date().toISOString() })
+      .eq("id", a.followup_campaign_id).eq("client_id", clientId).eq("status", "active");
+    if (paused.error) throw new Error(`Falha preservando pausa do follow-up: ${paused.error.message}`);
+  }
 }
 
 /**
@@ -971,14 +823,9 @@ async function startFollowupPhase(a: AutomationRow): Promise<void> {
     return;
   }
   // Trava atômica: só prossegue se conseguiu mudar phase=dispatching → following.
-  const { data: claimed } = await supabase
-    .from("automations")
-    .update({ phase: "following", updated_at: new Date().toISOString() })
-    .eq("id", a.id)
-    .eq("client_id", clientId)
-    .eq("phase", "dispatching")
-    .select("id")
-    .maybeSingle();
+  const claimed = await updateAutomationCapture(clientId, a.id, row =>
+    row.status === "running" && row.phase === "dispatching" && row.campaign_id === a.campaign_id && !row.followup_campaign_id
+      ? { phase: "following" } : null);
   if (!claimed) {
     console.log(`[AUTOMATION ${a.id}] outro tick já avançou pra following — pulando.`);
     return;
@@ -994,28 +841,24 @@ async function startFollowupPhase(a: AutomationRow): Promise<void> {
         ? "✓ Sem follow-up configurado. Automação concluída."
         : "✓ Follow-up desativado. Automação concluída.",
     );
-    await supabase.from("automations").update({
-      phase: "done",
-      status: "done",
-      updated_at: new Date().toISOString(),
-    }).eq("id", a.id).eq("client_id", clientId);
+    await updateAutomationCapture(clientId, a.id, row =>
+      row.status === "running" && row.phase === "following" && row.campaign_id === a.campaign_id
+        ? { phase: "done", status: "done" } : null);
     return;
   }
 
   // Pega leads que JÁ foram disparados com sucesso.
-  const { data: targets } = await supabase
+  const { data: targets, error: targetsError } = await supabase
     .from("campaign_targets")
     .select("remote_jid")
     .eq("campaign_id", a.campaign_id)
     .eq("client_id", clientId)
     .eq("status", "sent");
+  if (targetsError) throw new Error(`Falha lendo destinatários do follow-up: ${targetsError.message}`);
   if (!targets || targets.length === 0) {
-    await supabase.from("automations").update({
-      phase: "done",
-      status: "done",
-      last_error: "Nenhum lead foi disparado com sucesso — pulando follow-up.",
-      updated_at: new Date().toISOString(),
-    }).eq("id", a.id).eq("client_id", clientId);
+    await updateAutomationCapture(clientId, a.id, row =>
+      row.status === "running" && row.phase === "following" && row.campaign_id === a.campaign_id
+        ? { phase: "done", status: "done", last_error: "Nenhum lead foi disparado com sucesso — pulando follow-up." } : null);
     return;
   }
 
@@ -1041,28 +884,32 @@ async function startFollowupPhase(a: AutomationRow): Promise<void> {
       allowed_start_hour: a.allowed_start_hour,
       allowed_end_hour: a.allowed_end_hour,
       auto_execute: true,
-      status: "active",
+      status: "paused",
     })
     .select("id")
     .single();
   if (fcErr || !fcamp?.id) return markError(a.id, `Falha criando follow-up: ${fcErr?.message}`);
 
-  // 2) busca leadIds (precisa de id pra enrollLeads)
-  const remoteJids = targets.map((t: any) => t.remote_jid).filter(Boolean);
-  const { data: leadRows } = await supabase
-    .from("leads_extraidos")
-    .select("id")
-    .eq("client_id", clientId)
-    .in("remoteJid", remoteJids);
-  const leadIds = (leadRows || []).map((l: any) => l.id);
+  // 2) Enrola enquanto a campanha está pausada; ativação somente após checkpoint.
+  const remoteJids = targets.map(t => t.remote_jid).filter(Boolean);
+  const leadIds: number[] = [];
+  for (let offset = 0; offset < remoteJids.length; offset += 100) {
+    const chunk = remoteJids.slice(offset, offset + 100);
+    const { data: leadRows, error: leadsError } = await supabase
+      .from("leads_extraidos")
+      .select("id")
+      .eq("client_id", clientId)
+      .in("remoteJid", chunk);
+    if (leadsError) throw new Error(`Falha lendo leads do follow-up: ${leadsError.message}`);
+    leadIds.push(...(leadRows || []).map(l => Number(l.id)));
+  }
   const r = await enrollLeads({ campaignId: fcamp.id, leadIds, clientId });
   if (!r.ok) return markError(a.id, `Falha enrolando follow-up: ${r.error}`);
-
-  await supabase.from("automations").update({
-    phase: "following",
-    followup_campaign_id: fcamp.id,
-    updated_at: new Date().toISOString(),
-  }).eq("id", a.id).eq("client_id", clientId);
+  const linked = await updateAutomationCapture(clientId, a.id, row =>
+    row.phase === "following" && row.campaign_id === a.campaign_id && !row.followup_campaign_id
+      ? { followup_campaign_id: fcamp.id } : null);
+  if (!linked) return;
+  await resumeFollowupCampaign(linked);
   console.log(`[AUTOMATION ${a.id}] Follow-up ${fcamp.id} ativo com ${r.enrolled} leads.`);
   await log(a.id, "dispatch", "success",
     `✓ Disparo concluído. ${targets.length} lead(s) entregue(s).`,
@@ -1081,12 +928,13 @@ async function startFollowupPhase(a: AutomationRow): Promise<void> {
 async function checkFollowupDone(a: AutomationRow): Promise<{ done: boolean; active: number }> {
   if (!a.followup_campaign_id) return { done: false, active: 0 };
   const clientId = requireAutomationClientId(a);
-  const { count: ativos } = await supabase
+  const { count: ativos, error } = await supabase
     .from("followup_targets")
     .select("*", { count: "exact", head: true })
     .eq("followup_campaign_id", a.followup_campaign_id)
     .eq("client_id", clientId)
-    .in("status", ["pending", "waiting"]);
+    .in("status", ["pending", "waiting", "processing"]);
+  if (error) throw new Error(`Falha lendo progresso do follow-up: ${error.message}`);
   return { done: (ativos || 0) === 0, active: ativos || 0 };
 }
 
@@ -1098,6 +946,7 @@ async function tickOne(a: AutomationRow) {
 
   try {
     const clientId = requireAutomationClientId(a);
+    automationTenantCache.set(a.id, clientId);
     if (a.phase === "idle") {
       // GUARDA: 2 ticks concorrentes (imediato + 60s) podem ler phase=idle
       // juntos e disparar o scraper 2×. O Set segura o segundo até o
@@ -1114,40 +963,43 @@ async function tickOne(a: AutomationRow) {
     }
 
     if (a.phase === "scraping") {
-      const r = await checkScrapingDone(a);
-      // Atualiza contador. Se houve progresso, marca _lastProgressAt no
-      // scrape_filters pra a próxima checagem comparar com o tempo certo.
-      const nextFilters = { ...(a.scrape_filters || {}) };
-      if (r.progressed) {
-        nextFilters._lastProgressAt = new Date().toISOString();
-        await log(a.id, "scrape", "info",
-          `📥 ${r.scrapedNow} lead(s) captado(s) até agora · ${r.elapsedSeconds}s de captação.`,
-          { metadata: { count: r.scrapedNow, elapsedSeconds: r.elapsedSeconds } });
-      } else if (!r.done) {
-        // Heartbeat — o scraper continua, mas neste tick não veio lead novo.
-        // É O log que faltava: mostra a automação VIVA e o tempo ocioso
-        // subindo quando o scraper trava de verdade.
-        await log(a.id, "scrape", "info",
-          `⏳ Captação em andamento — ${r.scrapedNow} lead(s) até agora · ${r.idleSeconds}s sem novidade · ${r.elapsedSeconds}s no total.`,
-          { metadata: { scrapedNow: r.scrapedNow, idleSeconds: r.idleSeconds, elapsedSeconds: r.elapsedSeconds } });
-      }
-      await supabase.from("automations").update({
-        scraped_count: r.scrapedNow,
-        scrape_filters: nextFilters,
-        updated_at: new Date().toISOString(),
-      }).eq("id", a.id).eq("client_id", clientId);
+      const reconciled = await reconcileCapture(a);
+      if (!reconciled) return;
+      const r = await checkScrapingDone(reconciled);
+      const checkpoint = await updateAutomationCapture(clientId, a.id, current => {
+        if (current.status !== "running" || current.phase !== "scraping" ||
+          current.scrape_filters._captureSessionId !== reconciled.scrape_filters._captureSessionId) return null;
+        // Não grava contagem de um snapshot anterior sobre INSERT recém-confirmado.
+        if (JSON.stringify(readCaptureIds(current.scrape_filters)) !== JSON.stringify(readCaptureIds(reconciled.scrape_filters))) return null;
+        return {
+          scraped_count: r.scrapedNow,
+          scrape_filters: { ...current.scrape_filters, ...(r.progressed ? { _lastProgressAt: new Date().toISOString(), _captureFailures: 0 } : {}) },
+        };
+      });
+      if (!checkpoint) return;
       if (r.done) {
-        // O log de transição vive DENTRO do startDispatchPhase, só pra quem
-        // ganha a trava atômica — senão 2 ticks concorrentes duplicam a linha.
-        await startDispatchPhase(
-          { ...a, scraped_count: r.scrapedNow, scrape_filters: nextFilters },
-          { reason: r.doneReason, scrapedNow: r.scrapedNow },
-        );
+        try { await startDispatchPhase(checkpoint, { reason: r.doneReason, scrapedNow: r.scrapedNow }); }
+        catch (error) { await markError(a.id, error instanceof Error ? error.message : String(error)); }
+        return;
+      }
+      const filters = checkpoint.scrape_filters;
+      const localActive = getScraperStatus(clientId, a.id).isScraping;
+      if (hasCaptureLease(filters) || (localActive && !filters._scrapeFinishedAt)) return;
+      if (!filters._captureRetryAt) {
+        await scheduleCaptureRetry(checkpoint, "Tentativa encerrada ou indisponível abaixo da meta.");
+      } else if (Date.parse(String(filters._captureRetryAt)) <= Date.now() && !localActive && !scrapeStartInFlight.has(a.id)) {
+        scrapeStartInFlight.add(a.id);
+        try { await startScrapingPhase(checkpoint); } finally { scrapeStartInFlight.delete(a.id); }
       }
       return;
     }
 
     if (a.phase === "dispatching") {
+      if (!a.campaign_id) {
+        await startDispatchPhase(a);
+        return;
+      }
+      await resumeDispatchCampaign(a);
       const d = await checkDispatchDone(a);
       if (d.done) {
         lastProgressLog.delete(a.id);
@@ -1177,12 +1029,10 @@ async function tickOne(a: AutomationRow) {
       const f = await checkFollowupDone(a);
       if (f.done) {
         lastProgressLog.delete(a.id);
-        await supabase.from("automations").update({
-          phase: "done",
-          status: "done",
-          updated_at: new Date().toISOString(),
-        }).eq("id", a.id).eq("client_id", clientId);
-        await log(a.id, "state", "success", "🏁 Automação concluída. Todos os leads foram processados.");
+        const completed = await updateAutomationCapture(clientId, a.id, row =>
+          row.status === "running" && row.phase === "following" && row.followup_campaign_id === a.followup_campaign_id
+            ? { phase: "done", status: "done" } : null);
+        if (completed) await log(a.id, "state", "success", "🏁 Automação concluída. Todos os leads foram processados.");
       } else {
         // Heartbeat de follow-up — só grava quando o nº de leads ativos muda.
         const prev = lastProgressLog.get(a.id);
@@ -1205,8 +1055,15 @@ async function tickOne(a: AutomationRow) {
       await log(a.id, "state", "warning",
         `⚠️ Automação em fase desconhecida ("${a.phase}"). Clique em Iniciar pra recomeçar.`);
     }
-  } catch (e: any) {
-    await markError(a.id, e?.message || String(e));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    try {
+      if (["idle", "scraping"].includes(a.phase) && !/Progresso legado|Meta de captação inválida/.test(message)) {
+        await scheduleCaptureRetry(a, `Falha temporária de captação: ${message}`);
+      } else {
+        await markError(a.id, message);
+      }
+    } catch (persistError) { console.error(`[AUTOMATION ${a.id}] falha preservando estado:`, persistError); }
   }
 }
 
@@ -1234,15 +1091,10 @@ export async function tickAllAutomations(): Promise<number> {
   }
 }
 
-/** Liga uma automação. SEMPRE reseta pra idle e re-tick — clicar Iniciar
- *  significa "rode agora", mesmo se o status já estava como running de uma
- *  tentativa anterior travada (que era o motivo de "nada acontecer"). */
+/** Retoma o checkpoint existente; reiniciar não significa apagar progresso nem reenviar. */
 export async function startAutomation(id: string, clientIdInput: string): Promise<{ ok: boolean; error?: string; phase?: string }> {
   const clientId = requireClientId(clientIdInput);
-  // GUARDA anti-duplo-clique: se um Iniciar desta automação aconteceu há
-  // menos de 8s, ignora. O primeiro click já está processando (reset +
-  // tick + scraper); um segundo click nesse intervalo só criaria corrida
-  // e scraper duplicado. Restart deliberado continua funcionando (>8s).
+  // Debounce local complementa o CAS persistido; pausa limpa a trava para permitir retomada imediata.
   const last = lastStartAt.get(id) || 0;
   if (Date.now() - last < 8000) {
     return { ok: false, error: "Automação já foi iniciada há poucos segundos — aguarde ela arrancar antes de clicar de novo." };
@@ -1269,109 +1121,106 @@ export async function startAutomation(id: string, clientIdInput: string): Promis
   if (!a.instance_name) return fail("Selecione uma instância WhatsApp.");
   if (!a.dispatch_template?.trim()) return fail("Template de disparo está vazio.");
 
-  // CANCELA campanha + follow-up anteriores ANTES de resetar. Se uma
-  // campanha velha estiver rodando (timer ativo), ela continuaria mandando
-  // mensagens enquanto a nova arranca → leads recebem duplicado. Solução:
-  // pause da velha primeiro.
-  if (a.campaign_id) {
-    try {
-      await pauseCampaign(a.campaign_id);
-      // Marca status="cancelled" pra ela não retomar em recoverRunningCampaigns.
-       await supabase.from("campaigns")
-         .update({ status: "cancelled", finished_at: new Date().toISOString() })
-         .eq("id", a.campaign_id)
-         .eq("client_id", clientId);
-    } catch (e) {
-      console.warn(`[AUTOMATION] cancelamento de campanha antiga falhou: ${(e as Error).message}`);
-    }
-  }
-  if (a.followup_campaign_id) {
-    try {
-       await supabase.from("followup_campaigns")
-         .update({ status: "cancelled", updated_at: new Date().toISOString() })
-         .eq("id", a.followup_campaign_id)
-         .eq("client_id", clientId);
-    } catch {}
-  }
-
-  // Reset COMPLETO em todos os casos. Sem early-return: clicar Iniciar = recomeçar.
-  // Limpa também os _baselineCount/_scrapeStartedAt/_lastProgressAt antigos pra
-  // a heurística de progresso começar do zero.
-  const cleanFilters = { ...(a.scrape_filters || {}) };
-  delete cleanFilters._baselineCount;
-  delete cleanFilters._baselineMaxId;
-  delete cleanFilters._scrapeStartedAt;
-  delete cleanFilters._lastProgressAt;
-  delete cleanFilters._scrapeFinishedAt;
-
-  const { error: updErr } = await supabase.from("automations").update({
-    status: "running",
-    phase: "idle",
-    started_at: new Date().toISOString(),
-    last_error: null,
-    last_error_at: null,
-    campaign_id: null,
-    followup_campaign_id: null,
-    scraped_count: 0,
-    scrape_filters: cleanFilters,
-    updated_at: new Date().toISOString(),
-  }).eq("id", id).eq("client_id", clientId);
-  if (updErr) return fail("Erro interno ao iniciar automação: " + updErr.message);
-
-  // Tick síncrono imediato — garante que phase muda pra "scraping" e o
-  // scraper é disparado antes da resposta voltar pro frontend.
   try {
-    await tickAllAutomations();
-  } catch (e) {
-    console.warn("[AUTOMATION] tick imediato falhou:", (e as Error).message);
+    const dispatchPhase = a.followup_campaign_id ? "following" : a.campaign_id ? "dispatching" : null;
+    if (a.status === "done" && dispatchPhase) return { ok: true, phase: "done" };
+    const checkpoint = await reconcileCapture(a);
+    if (!checkpoint) return fail("Estado alterado durante a retomada. Atualize e tente novamente.");
+    const resumed = await updateAutomationCapture(clientId, id, current => {
+      if (current.status !== checkpoint.status || current.phase !== checkpoint.phase) return null;
+      const filters = current.scrape_filters;
+      const phase = current.followup_campaign_id ? "following" : current.campaign_id ? "dispatching"
+        : ["dispatching", "following"].includes(current.phase) ? current.phase
+        : typeof filters._resumePhase === "string" && ["dispatching", "following"].includes(filters._resumePhase) ? filters._resumePhase
+        : "scraping";
+      if (phase === "following" && !current.followup_campaign_id) {
+        throw new Error("Follow-up interrompido sem vínculo de campanha. Revise a campanha antes de retomar para evitar duplicidade.");
+      }
+      return {
+        status: "running", phase,
+        started_at: current.started_at || new Date().toISOString(),
+        last_error: null, last_error_at: null,
+        scrape_filters: {
+          ...filters, _resumePhase: phase,
+          ...(phase === "scraping" ? {
+            _captureSessionId: filters._captureSessionId || randomUUID(),
+            _capturedLeadIds: readCaptureIds(filters), _rejectedLeadIds: readRejectedCaptureIds(filters),
+          } : {}),
+        },
+      };
+    });
+    if (!resumed) return fail("Estado alterado durante a retomada. Atualize e tente novamente.");
+    if (resumed.phase === "dispatching") {
+      await resumeDispatchCampaign(resumed);
+    } else if (resumed.phase === "following" && resumed.followup_campaign_id) {
+      await resumeFollowupCampaign(resumed);
+    } else {
+      const filters = resumed.scrape_filters;
+      if (validCaptureIds(filters).length >= captureGoal(resumed)) {
+        await tickOne(resumed);
+      } else if (!hasCaptureLease(filters) && !Date.parse(String(filters._captureRetryAt || "")) && !getScraperStatus(clientId, id).isScraping) {
+        await startScrapingPhase(resumed);
+      } else {
+        await tickOne(resumed);
+      }
+    }
+    const { data: after, error } = await supabase.from("automations").select("phase, status, last_error")
+      .eq("id", id).eq("client_id", clientId).maybeSingle();
+    if (error) throw new Error(error.message);
+    if (after?.status === "error") return fail(after.last_error || "Falha ao iniciar automação.");
+    return { ok: true, phase: after?.phase };
+  } catch (error) {
+    return fail(error instanceof Error ? error.message : String(error));
   }
-
-  // Lê o estado atualizado pra retornar pra UI.
-  const { data: after } = await supabase.from("automations").select("phase, last_error").eq("id", id).eq("client_id", clientId).maybeSingle();
-  if (after?.last_error) return { ok: false, error: after.last_error };
-  return { ok: true, phase: after?.phase };
 }
 
-/**
- * Pausa GLOBAL: para todas as etapas que estiverem ativas pra esta automação.
- *  - Scraper (engine in-memory): chama stopScraper() se a automação estiver
- *    atrelada ao scraper atualmente rodando.
- *  - Campanha de disparo: status → paused (campaign-worker respeita).
- *  - Follow-up: status → paused (ticker pula campanhas paused).
- *  - Linha da automação: phase=paused, status=paused.
- *
- * Quando o usuário clicar Iniciar de novo, startAutomation faz reset duro
- * (phase=idle, campaign_id=null, etc.) e recomeça do zero.
- */
-export async function pauseAutomation(id: string, clientIdInput: string): Promise<{ ok: boolean; stopped: { scraper: boolean; campaign: boolean; followup: boolean } }> {
+/** Pausa durável primeiro; callbacks antigos perdem seu token antes de fechar o navegador. */
+export async function pauseAutomation(id: string, clientIdInput: string): Promise<{ ok: boolean; error?: string; stopped: { scraper: boolean; campaign: boolean; followup: boolean } }> {
   const clientId = requireClientId(clientIdInput);
-  const { data: a } = await supabase.from("automations").select("*").eq("id", id).eq("client_id", clientId).maybeSingle();
-  if (!a) return { ok: false as any, stopped: { scraper: false, campaign: false, followup: false } };
-  automationTenantCache.set(id, clientId);
-
   const stopped = { scraper: false, campaign: false, followup: false };
+  let a: AutomationCaptureRow | null;
+  try {
+    a = await updateAutomationCapture(clientId, id, current => ({
+      status: "paused",
+      scrape_filters: {
+        ...current.scrape_filters,
+        _resumePhase: ["paused", "error"].includes(current.phase) ? current.scrape_filters._resumePhase || "scraping" : current.phase,
+        _captureAttemptId: null, _captureRetryAt: null, _captureLeaseUntil: null,
+      },
+    }));
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error), stopped };
+  }
+  if (!a) return { ok: false, error: "Automação não encontrada.", stopped };
+  automationTenantCache.set(id, clientId);
+  lastStartAt.delete(id);
+  let pauseError: string | undefined;
 
-  // 1) Scraper — só para se a automação ATUAL estiver atrelada (scraper tem
-  //    estado in-memory, e pode estar servindo /captador também). Heurística:
-  //    se a fase é "scraping" + scraper rodando, esta é nossa.
+  // 1) Para somente o proprietário exato, mesmo que a fase tenha avançado.
   try {
     const sc = getScraperStatus(clientId, id);
-    if (sc.isScraping && sc.automationId === id && a.phase === "scraping") {
-      stopScraper(clientId, id);
-      stopped.scraper = true;
+    if (sc.isScraping && sc.automationId === id) {
+      stopped.scraper = stopScraper(clientId, id);
       await log(id, "scrape", "warning", "⏸ Scraper parado pelo usuário.");
     }
   } catch (e) {
+    pauseError = `Falha parando scraper: ${(e as Error).message}`;
     console.warn("[AUTOMATION] erro parando scraper:", (e as Error).message);
   }
 
   // 2) Campanha de disparo — pausa a campaign-worker.
   if (a.campaign_id) {
     try {
-      await pauseCampaign(a.campaign_id);
-      stopped.campaign = true;
-      await log(id, "dispatch", "warning", "⏸ Disparo pausado pelo usuário.");
+      const { data: campaign, error } = await supabase.from("campaigns").select("status")
+        .eq("id", a.campaign_id).eq("client_id", clientId).maybeSingle();
+      if (error) throw new Error(error.message);
+      if (campaign && !["done", "cancelled"].includes(campaign.status)) {
+        await pauseCampaign(a.campaign_id);
+        stopped.campaign = true;
+        await log(id, "dispatch", "warning", "⏸ Disparo pausado pelo usuário.");
+      }
     } catch (e) {
+      pauseError = `Falha pausando campanha: ${(e as Error).message}`;
       console.warn("[AUTOMATION] erro pausando campanha:", (e as Error).message);
     }
   }
@@ -1380,24 +1229,19 @@ export async function pauseAutomation(id: string, clientIdInput: string): Promis
   //    em followup-worker filtra por status="active", então paused = parado.
   if (a.followup_campaign_id) {
     try {
-      await supabase
+      const { error } = await supabase
         .from("followup_campaigns")
         .update({ status: "paused", updated_at: new Date().toISOString() })
         .eq("id", a.followup_campaign_id)
         .eq("client_id", clientId);
+      if (error) throw new Error(error.message);
       stopped.followup = true;
       await log(id, "followup", "warning", "⏸ Follow-up pausado pelo usuário.");
     } catch (e) {
+      pauseError = `Falha pausando follow-up: ${(e as Error).message}`;
       console.warn("[AUTOMATION] erro pausando follow-up:", (e as Error).message);
     }
   }
-
-  // 4) Marca a automação em si.
-  await supabase
-    .from("automations")
-    .update({ status: "paused", phase: "paused", updated_at: new Date().toISOString() })
-    .eq("id", id)
-    .eq("client_id", clientId);
   await log(id, "state", "warning",
     `⏸ Automação pausada. Etapas paradas: ${[
       stopped.scraper && "scraper",
@@ -1406,5 +1250,5 @@ export async function pauseAutomation(id: string, clientIdInput: string): Promis
     ].filter(Boolean).join(", ") || "nenhuma (nada estava rodando)"}.`,
   );
 
-  return { ok: true, stopped };
+  return { ok: !pauseError, ...(pauseError ? { error: pauseError } : {}), stopped };
 }

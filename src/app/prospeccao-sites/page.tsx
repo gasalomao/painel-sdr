@@ -490,6 +490,8 @@ export default function ProspeccaoSitesPage() {
   };
   type AutoLog = { id: number; kind: string; level: string; message: string; created_at: string };
   const [automations, setAutomations] = useState<AutomationRow[]>([]);
+  const [pendingAutoActions, setPendingAutoActions] = useState<Set<string>>(new Set());
+  const pendingAutoActionsRef = useRef(new Set<string>());
   const [autoLogs, setAutoLogs] = useState<Record<string, AutoLog[]>>({});
   const [expandedAuto, setExpandedAuto] = useState<string | null>(null);
   const [autoName, setAutoName] = useState("");
@@ -587,6 +589,12 @@ export default function ProspeccaoSitesPage() {
 
   useEffect(() => { loadAutomations(); }, [loadAutomations]);
 
+  useEffect(() => {
+    if (tab !== "automacao") return;
+    const timer = setInterval(loadAutomations, 3000);
+    return () => clearInterval(timer);
+  }, [tab, loadAutomations]);
+
   const loadAutoLogs = useCallback(async (id: string) => {
     try {
       const { data } = await supabase
@@ -664,15 +672,26 @@ export default function ProspeccaoSitesPage() {
   };
 
   const autoAction = async (id: string, action: "start" | "pause" | "delete") => {
+    if (pendingAutoActionsRef.current.has(id)) return;
+    if (action === "delete" && !confirm("Deletar esta automação?")) return;
+    pendingAutoActionsRef.current.add(id);
+    setPendingAutoActions(new Set(pendingAutoActionsRef.current));
     try {
-      if (action === "delete") {
-        if (!confirm("Deletar esta automação?")) return;
-        await fetch(`/api/automations/${id}`, { method: "DELETE" });
-      } else {
-        await fetch(`/api/automations/${id}/${action}`, { method: "POST" });
+      const response = action === "delete"
+        ? await fetch(`/api/automations/${id}`, { method: "DELETE" })
+        : await fetch(`/api/automations/${id}/${action}`, { method: "POST" });
+      const result: { success?: boolean; ok?: boolean; error?: unknown } | null = await response.json().catch(() => null);
+      const succeeded = action === "delete" ? result?.success : result?.ok;
+      if (!response.ok || succeeded !== true || result?.ok === false || result?.success === false) {
+        throw new Error(typeof result?.error === "string" && result.error ? result.error : "Não foi possível atualizar a automação.");
       }
-      loadAutomations();
-    } catch (e: any) { alert("Erro: " + e.message); }
+      await loadAutomations();
+    } catch (e: unknown) {
+      alert("Erro: " + (e instanceof Error ? e.message : "Não foi possível atualizar a automação."));
+    } finally {
+      pendingAutoActionsRef.current.delete(id);
+      setPendingAutoActions(new Set(pendingAutoActionsRef.current));
+    }
   };
 
   async function loadTargets(campaignId: string) {
@@ -2286,8 +2305,11 @@ export default function ProspeccaoSitesPage() {
               <div className="space-y-2">
                 {automations.map((a) => {
                   const phaseLabels: Record<string, string> = {
-                    idle: "Aguardando", scraping: "Captando", dispatching: "Disparando",
-                    following: "Follow-up", done: "Concluída", error: "Erro",
+                    idle: "Aguardando", scraping: "Captando", campaigning: "Disparando", dispatching: "Disparando",
+                    following: "Follow-up", paused: "Pausada", done: "Concluída", error: "Erro",
+                  };
+                  const statusLabels: Record<string, string> = {
+                    draft: "Rascunho", running: "Em execução", paused: "Pausada", error: "Erro", done: "Concluída",
                   };
                   const statusColor =
                     a.status === "running" ? "text-green-400 bg-green-500/10 border-green-500/30" :
@@ -2299,7 +2321,7 @@ export default function ProspeccaoSitesPage() {
                     <Card key={a.id} className="border-white/10 bg-white/[0.02]">
                       <CardContent className="p-3 space-y-2">
                         <div className="flex items-center justify-between gap-2 flex-wrap">
-                          <div className="min-w-0 flex-1">
+                          <div className="min-w-0 flex-1 basis-full sm:basis-0">
                             <p className="text-sm font-bold text-white truncate">{a.name}</p>
                             <p className="text-[10px] text-white/40">
                               {(a.niches || []).join(", ") || "—"} · {(a.regions || []).join(", ") || "—"} · {a.instance_name}
@@ -2307,22 +2329,20 @@ export default function ProspeccaoSitesPage() {
                           </div>
                           <div className="flex items-center gap-2 shrink-0">
                             <span className={cn("text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-md border", statusColor)}>
-                              {a.status} · {phaseLabels[a.phase] || a.phase}
+                              {statusLabels[a.status] || a.status} · {phaseLabels[a.phase] || a.phase}
                             </span>
-                            {a.scraped_count > 0 && (
-                              <Badge className="bg-white/10 text-white/60">{a.scraped_count} leads</Badge>
-                            )}
+                            <Badge className="bg-white/10 text-white/60">{a.scraped_count ?? 0}/{a.scrape_max_leads} leads</Badge>
                           </div>
                         </div>
 
                         <div className="flex items-center gap-1.5 flex-wrap">
                           {(a.status === "draft" || a.status === "paused" || a.status === "error" || a.status === "done") && (
-                            <Button size="sm" onClick={() => autoAction(a.id, "start")} className="h-7 text-[10px]">
-                              <Play className="w-3 h-3 mr-1" /> {a.status === "paused" ? "Retomar" : "Iniciar"}
+                            <Button size="sm" onClick={() => autoAction(a.id, "start")} disabled={pendingAutoActions.has(a.id)} className="h-7 text-[10px]">
+                              <Play className="w-3 h-3 mr-1" /> {a.status === "paused" || a.status === "error" || (a.status === "done" && (a.scraped_count ?? 0) < a.scrape_max_leads) ? "Retomar" : "Iniciar"}
                             </Button>
                           )}
                           {a.status === "running" && (
-                            <Button size="sm" variant="outline" onClick={() => autoAction(a.id, "pause")} className="h-7 text-[10px]">
+                            <Button size="sm" variant="outline" onClick={() => autoAction(a.id, "pause")} disabled={pendingAutoActions.has(a.id)} className="h-7 text-[10px]">
                               <Pause className="w-3 h-3 mr-1" /> Pausar
                             </Button>
                           )}
@@ -2337,7 +2357,7 @@ export default function ProspeccaoSitesPage() {
                             <Terminal className="w-3 h-3 mr-1" />
                             {expandedAuto === a.id ? "Ocultar logs" : "Ver logs"}
                           </Button>
-                          <Button size="sm" variant="ghost" onClick={() => autoAction(a.id, "delete")} className="h-7 text-[10px] text-red-400 hover:bg-red-500/10">
+                          <Button size="sm" variant="ghost" onClick={() => autoAction(a.id, "delete")} disabled={pendingAutoActions.has(a.id)} aria-label={`Deletar automação ${a.name}`} className="h-7 text-[10px] text-red-400 hover:bg-red-500/10">
                             <Trash2 className="w-3 h-3" />
                           </Button>
                         </div>
