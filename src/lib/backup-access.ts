@@ -17,7 +17,7 @@ export async function requireBackupAdmin(req: NextRequest): Promise<TenantContex
       return { ok: false, response: NextResponse.json({ success: false, error: "Origem da solicitação inválida." }, { status: 403 }) };
     }
   }
-  if (req.method === "POST" || req.nextUrl.pathname.endsWith("/diagnostics") || req.nextUrl.pathname.endsWith("/auth")) {
+  if (req.method === "POST" || req.nextUrl.pathname.endsWith("/auth")) {
     const key = `${ctx.clientId}:${req.nextUrl.pathname}`;
     const now = Date.now();
     if ((recentActions.get(key) || 0) > now - 5000) {

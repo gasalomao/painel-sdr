@@ -36,6 +36,15 @@ Baixe pacote no Drive, extraia em pasta nova/vazia. Nunca execute scripts de den
 `node scripts/restore-backup.mjs <pasta-extraída>` valida hashes e mostra instruções; NÃO conecta nem restaura automaticamente. Não se cola tar/custom dump no SQL Editor.
 Prepare Supabase separado compatível, revise roles ausentes/extensões/configurações. pg_restore deve usar exit-on-error e transação, mantendo permissões/ownership. Objetos gerenciados do Supabase podem exigir procedimento específico. Só declarar recuperável depois de comparação real de dados, tabelas, sequences, RLS, ACLs, functions e login no destino descartável.
 
+## Diagnósticos registrados (correção de 19/10/2026)
+- `/admin/backup` mostra carregamento, resultado e erros junto ao botão de teste. Diagnósticos têm histórico separado do histórico de arquivos, limitado aos 20 registros mais recentes na consulta.
+- `GET /api/backup/diagnostics` apenas consulta registros; `POST` registra uma tentativa antes das verificações e salva checks sanitizados. Uma falha de ferramenta/conexão é um diagnóstico concluído com falhas, não um backup enviado.
+- Aplicar **somente com autorização** `migrations/022_backup_diagnostics.sql`, além das migrations de backup já necessárias. A nova tabela não altera dados de negócio, não agenda cópias e fica restrita a `service_role` via RLS. Se faltar a tabela/permissão, a tela orienta o ajuste e não executa ferramentas sem histórico.
+- Verifica `pg_dump`, `pg_dumpall`, `pg_restore`, `psql`, `tar`, compatibilidade com a versão do servidor, formato de `DATABASE_URL` e presença das configurações OAuth/chave/worker. Não descriptografa tokens nem chama o Google; não prova que o banco selecionado seja o correto.
+- Versões de ferramentas têm prazo de 5 segundos e consulta read-only ao PostgreSQL de 20 segundos; a interface limita sua espera a 90 segundos. Interrupção pode deixar teste sem conclusão registrada. Recarregar a página consulta o registro; nunca assume aprovação.
+- A última execução de backup, inclusive falha e eventos persistidos, reaparece ao reabrir a página. A mensagem de falha não depende da disponibilidade do progresso e não some ao atualizar; eventos terminais são lidos em todas as páginas. A consulta do histórico não bloqueia o teste manual por rate limit.
+- Roteiro e testes em `docs/BACKUP_DIAGNOSTICS.md`. Mudanças locais não equivalem a deploy ou configuração real no EasyPanel.
+
 ## Segurança e pendências
 Credenciais expostas na conversa/guias/logs anteriores devem ser rotacionadas; não trocar todas as chaves Supabase unilateralmente porque isso afeta tokens/dados cifrados.
 Migration real, env secreto, acesso Easypanel/SSH, rede PostgreSQL, teste de upload e restauração NÃO executados. Validação do fluxo integral, limites adicionais de rate limit, SSE/resumable upload e crash-recovery completo continuam pendentes antes de produção. Os módulos de autorização/configuração/subprocesso foram testados offline; isso não autoriza operação no banco real. Não afirmar pronto sem esses gates.

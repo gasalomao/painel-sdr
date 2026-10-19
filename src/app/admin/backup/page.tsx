@@ -1,11 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useState } from "react";
 import { Database, HardDrive, Loader2 } from "lucide-react";
 import { useClientSession } from "@/lib/use-session";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { BackupDiagnosticsPanel } from "@/components/backup-diagnostics-panel";
 
 interface Config {
   enabled: boolean; interval_hours: number; retention_days: number; connected: boolean;
@@ -15,7 +16,7 @@ interface Config {
 interface Run { id: string; status: string; stage: string; error_message: string | null; heartbeat_at?: string }
 interface Event { id: number; message: string; level: string; created_at: string }
 interface History { id: number; drive_file_id: string; drive_file_name: string; file_size_bytes: number; status: string; created_at: string }
-interface Payload { success: boolean; error?: string; config?: Config; activeRun?: Run; workerEnabled?: boolean; backups?: History[]; runId?: string; run?: Run; events?: Event[]; authUrl?: string; message?: string; tools?: { name: string; version: string }[]; serverVersion?: string }
+interface Payload { success: boolean; error?: string; config?: Config; activeRun?: Run; latestRun?: Run; workerEnabled?: boolean; backups?: History[]; runId?: string; run?: Run; events?: Event[]; authUrl?: string }
 
 async function request(path: string, options?: RequestInit): Promise<Payload> {
   const response = await fetch(path, { cache: "no-store", ...options });
@@ -37,7 +38,6 @@ export default function BackupAdminPage() {
   const [isBusy, setIsBusy] = useState(false);
   const [workerEnabled, setWorkerEnabled] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [diagnostic, setDiagnostic] = useState<string | null>(null);
 
   const reload = useCallback(async (signal?: AbortSignal, resetDraft = false) => {
     const [settings, items] = await Promise.all([request("/api/backup/config", { signal }), request("/api/backup/history", { signal })]);
@@ -48,7 +48,7 @@ export default function BackupAdminPage() {
     }
     setWorkerEnabled(Boolean(settings.workerEnabled));
     setHistory(items.backups || []);
-    if (settings.activeRun) setRun(settings.activeRun);
+    setRun(settings.activeRun || settings.latestRun || null);
   }, []);
 
   useEffect(() => {
@@ -63,8 +63,10 @@ export default function BackupAdminPage() {
 
   const active = run?.status === "queued" || run?.status === "running";
   const runId = run?.id;
+  const isRunActive = useEffectEvent(() => active);
   useEffect(() => {
-    if (!runId || !active || !isAdmin) return;
+    if (!runId || !isAdmin) return;
+    setEvents([]);
     const controller = new AbortController();
     let cursor = 0;
     let timer: ReturnType<typeof setTimeout>;
@@ -79,19 +81,20 @@ export default function BackupAdminPage() {
         }
         if (data.run) setRun(data.run);
         if (data.run?.status === "success" || data.run?.status === "failed") {
-          if (data.run.error_message) setError(data.run.error_message);
+          if (incoming.length === 200) { await poll(); return; }
           await reload(controller.signal);
           return;
         }
       } catch (e) {
         if (controller.signal.aborted) return;
         setError(e instanceof Error ? e.message : "Não foi possível atualizar o progresso.");
+        if (!isRunActive()) return;
       }
       if (!controller.signal.aborted) timer = setTimeout(() => { void poll(); }, 2000);
     };
     void poll();
     return () => { controller.abort(); clearTimeout(timer); };
-  }, [runId, active, isAdmin, reload]);
+  }, [runId, isAdmin, reload]);
 
   const action = async (task: () => Promise<void>) => {
     setIsBusy(true); setError(null);
@@ -142,12 +145,9 @@ export default function BackupAdminPage() {
           </section>
           <section className={section} aria-labelledby="progress-heading">
             <h2 id="progress-heading" className="text-lg font-semibold">Execução e progresso real</h2>
-            <Button variant="outline" disabled={isBusy || active} onClick={() => void action(async () => {
-              setDiagnostic(null);
-              const data = await request("/api/backup/diagnostics");
-              setDiagnostic(`${data.tools?.map(tool => tool.version).join(" · ")} · Servidor: ${data.serverVersion}. ${data.message}`);
-            })}>Testar ferramentas e conexão remota</Button>
-            {diagnostic && <p role="status" className="text-sm text-emerald-400 break-words">{diagnostic}</p>}
+            <BackupDiagnosticsPanel disabled={isBusy || active} />
+            {run?.error_message && <p role="alert" className="break-words text-sm text-red-300">{run.error_message}</p>}
+            {error && error !== run?.error_message && <p role="alert" className="break-words text-sm text-red-300">{error}</p>}
             <Button disabled={isBusy || active || !workerEnabled || !config?.connected} onClick={() => void action(async () => {
               const data = await request("/api/backup/create", { method: "POST" });
               if (!data.runId) throw new Error("Servidor não confirmou o agendamento.");

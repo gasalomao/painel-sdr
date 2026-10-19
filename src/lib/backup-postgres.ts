@@ -40,14 +40,24 @@ export function postgresEnvironment(urlString: string): NodeJS.ProcessEnv {
   };
 }
 
-export async function runBackupTool(command: string, args: string[], env: NodeJS.ProcessEnv, log?: BackupLog): Promise<string> {
+export async function runBackupTool(command: string, args: string[], env: NodeJS.ProcessEnv, log?: BackupLog, timeoutMs = 3_600_000): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { env, shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     let errorText = "";
     let stopped = false;
     let events = Promise.resolve();
-    const timeout = setTimeout(() => { stopped = true; child.kill(); }, 60 * 60 * 1000);
+    const timeoutMessage = timeoutMs === 3_600_000
+      ? "Exportação excedeu o prazo de uma hora; nenhum backup foi confirmado."
+      : "Ferramenta de diagnóstico excedeu o prazo de execução.";
+    const timeout = setTimeout(() => {
+      stopped = true;
+      if (timeoutMs === 3_600_000) child.kill();
+      else {
+        child.kill("SIGKILL");
+        reject(new BackupError(timeoutMessage));
+      }
+    }, timeoutMs);
     child.stdout.on("data", (chunk: Buffer) => { output = (output + chunk.toString()).slice(-2_000_000); });
     child.stderr.on("data", (chunk: Buffer) => {
       const text = chunk.toString();
@@ -60,7 +70,7 @@ export async function runBackupTool(command: string, args: string[], env: NodeJS
     child.on("error", () => { clearTimeout(timeout); reject(new BackupError("Não foi possível executar a ferramenta PostgreSQL. Verifique POSTGRES_BIN_DIR.")); });
     child.on("close", (code) => {
       clearTimeout(timeout);
-      if (stopped) return reject(new BackupError("Exportação excedeu o prazo de uma hora; nenhum backup foi confirmado."));
+      if (stopped) return reject(new BackupError(timeoutMessage));
       if (code !== 0) {
         const reason = /password authentication failed/.test(errorText) ? "Senha do PostgreSQL remoto rejeitada (não é a senha do painel)."
           : /could not translate host name|could not connect|connection.*failed|Connection refused|timeout expired/.test(errorText) ? "PostgreSQL remoto inacessível. Confirme a rede privada, host e porta; domínio HTTPS do Supabase não garante acesso ao banco."

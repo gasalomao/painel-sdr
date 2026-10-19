@@ -69,6 +69,28 @@ describe("PostgreSQL offline tools", () => {
     await expect(result).rejects.toThrow("log offline");
     expect(vi.getTimerCount()).toBe(0);
   });
+  it("keeps the default backup timeout waiting for process shutdown", async () => {
+    const child = childProcess();
+    const result = runBackupTool("pg_dump", [], {});
+    const settled = vi.fn();
+    void result.then(settled, settled);
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(child.kill).toHaveBeenCalledOnce();
+    expect(settled).not.toHaveBeenCalled();
+    child.emit("close", 0);
+    await expect(result).rejects.toThrow("uma hora");
+  });
+  it("supports a short diagnostic timeout without waiting for a close event", async () => {
+    const child = childProcess();
+    const result = runBackupTool("psql", [], {}, undefined, 20_000);
+    const rejection = expect(result).rejects.toThrow("prazo");
+    vi.advanceTimersByTime(19_999);
+    expect(child.kill).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(child.kill).toHaveBeenCalledOnce();
+    await rejection;
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it("verifies digest and rejects empty or unreadable exported files", async () => {
     tools.read.mockImplementation(() => Readable.from([Buffer.from("abc")]));
     expect(await fileDigest("fixture")).toBe(createHash("sha256").update("abc").digest("hex"));

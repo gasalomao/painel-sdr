@@ -3611,13 +3611,12 @@ export default function ConfiguracoesPage() {
                         <Database className="w-3.5 h-3.5" /> O que faz?
                       </h3>
                       <ul className="text-[11px] text-muted-foreground space-y-1.5">
-                        <li>✅ Backup automático agendado (configurável por horas)</li>
-                        <li>✅ Backup manual sob demanda</li>
-                        <li>✅ Organização automática em pastas (ano/mês)</li>
-                        <li>✅ Compressão Gzip (~80% economia de espaço)</li>
-                        <li>✅ Rotação automática (apaga backups antigos)</li>
-                        <li>✅ Restauração completa do banco</li>
-                        <li>✅ Histórico completo de backups</li>
+                        <li>Backup agendado ou manual, com worker habilitado no servidor</li>
+                        <li>Pacotes do banco organizados por ano/mês/dia no Google Drive</li>
+                        <li>Compressão Gzip; economia varia conforme os dados</li>
+                        <li>Retenção após confirmação de uma nova cópia enviada</li>
+                        <li>Históricos separados de diagnósticos e arquivos enviados</li>
+                        <li>Recuperação deve ser testada em outro Supabase; não inclui arquivos do Storage</li>
                       </ul>
                     </div>
 
@@ -3631,7 +3630,7 @@ export default function ConfiguracoesPage() {
                       </Button>
 
                       <div className="text-[10px] text-muted-foreground text-center">
-                        Configure backups automáticos, conecte Google Drive e gerencie restaurações
+                        Confira os diagnósticos, conecte Google Drive e acompanhe as cópias enviadas
                       </div>
                     </div>
 
@@ -3647,10 +3646,10 @@ export default function ConfiguracoesPage() {
                     <div className="rounded-lg bg-amber-500/10 border border-amber-500/20 p-3">
                       <h3 className="text-xs font-bold text-amber-300 mb-2">⚡ Como Funciona</h3>
                       <p className="text-[10px] text-muted-foreground leading-relaxed">
-                        Worker automático roda a cada 1 hora verificando se precisa fazer backup.
-                        Quando o intervalo configurado é atingido, executa pg_dump do banco completo,
-                        comprime com Gzip e faz upload para o Google Drive organizando em pastas por
-                        ano/mês. Backups antigos são deletados automaticamente conforme retenção configurada.
+                        Com o worker habilitado, o SDR verifica a fila a cada minuto enquanto o servidor está em execução.
+                        O backup exporta o banco configurado, valida o pacote e confere tamanho e checksum após o envio.
+                        A retenção pode excluir permanentemente cópias antigas do sistema depois de uma nova cópia confirmada.
+                        Diagnósticos não criam backups; restauração sobre o banco atual está bloqueada.
                       </p>
                     </div>
                   </CardContent>

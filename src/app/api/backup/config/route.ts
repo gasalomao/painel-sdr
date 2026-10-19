@@ -7,9 +7,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   if (!ctx.ok) return ctx.response;
   try {
     const config = await loadBackupConfig(ctx.clientId);
-    const { data, error } = await backupDatabase().from("backup_runs").select("id,status,stage,error_message").eq("client_id", ctx.clientId).in("status", ["queued", "running"]).limit(1);
-    if (error) return NextResponse.json({ success: false, error: "Atualização do backup pendente: migration 020_backup_security_runs.sql." }, { status: 503 });
-    return NextResponse.json({ success: true, config: publicBackupConfig(config), activeRun: data?.[0] || null, workerEnabled: process.env.BACKUP_WORKER_ENABLED === "true" }, { headers: { "Cache-Control": "no-store" } });
+    const db = backupDatabase();
+    const columns = "id,status,stage,error_message,heartbeat_at,created_at";
+    const [active, latest] = await Promise.all([
+      db.from("backup_runs").select(columns).eq("client_id", ctx.clientId).in("status", ["queued", "running"]).limit(1),
+      db.from("backup_runs").select(columns).eq("client_id", ctx.clientId).order("created_at", { ascending: false }).limit(1),
+    ]);
+    if (active.error || latest.error) return NextResponse.json({ success: false, error: "Atualização do backup pendente: migration 020_backup_security_runs.sql." }, { status: 503 });
+    return NextResponse.json({ success: true, config: publicBackupConfig(config), activeRun: active.data?.[0] || null, latestRun: latest.data?.[0] || null, workerEnabled: process.env.BACKUP_WORKER_ENABLED === "true" }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) { return NextResponse.json({ success: false, error: safeBackupError(error) }, { status: 500 }); }
 }
 

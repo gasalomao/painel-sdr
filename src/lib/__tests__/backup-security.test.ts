@@ -40,8 +40,14 @@ describe("backup administrative boundary", () => {
     vi.stubEnv("NEXT_PUBLIC_APP_URL", "");
     expect((await requireBackupAdmin(request("history", "PATCH", "https://app.example.test"))).ok).toBe(true);
   });
+  it("consultar histórico não consome limite nem bloqueia o teste manual", async () => {
+    auth.tenant.mockResolvedValue({ ok: true, isAdmin: true, impersonating: false, clientId: "history-reader" });
+    expect((await requireBackupAdmin(request("diagnostics"))).ok).toBe(true);
+    expect((await requireBackupAdmin(request("diagnostics"))).ok).toBe(true);
+    expect((await requireBackupAdmin(request("diagnostics", "POST", "https://app.example.test"))).ok).toBe(true);
+  });
   it("throttles protected operations and expires local entries", async () => {
-    const req = request("diagnostics");
+    const req = request("diagnostics", "POST", "https://app.example.test");
     expect((await requireBackupAdmin(req)).ok).toBe(true);
     const blocked = await requireBackupAdmin(req);
     if (blocked.ok) throw new Error("Repeated action incorrectly authorized");
