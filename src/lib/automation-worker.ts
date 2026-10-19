@@ -253,6 +253,15 @@ async function startScrapingPhase(a: AutomationRow): Promise<void> {
       maxLeads: captureGoal(row) - validCaptureIds(filters).length,
       automation_id: a.id, client_id: clientId, captureAttemptId: attempt,
       forceRestart: false, topup: readRejectedCaptureIds(filters).length > 0,
+      onComplete: (res) => {
+        if (!res.goalReached && process.env.NODE_ENV !== "test") {
+          setTimeout(() => {
+            void tickAllAutomations().catch(err => {
+              console.warn("[AUTOMATION-WORKER] tick pós-scraper falhou:", err);
+            });
+          }, 6000);
+        }
+      },
     });
     if (!r.ok || r.alreadyRunning) {
       const released = await updateAutomationCapture(clientId, a.id, latest => latest.status === "running" &&

@@ -140,6 +140,8 @@ export interface ScraperSettings {
   reviews_ai?: { enabled?: boolean; model?: string; prompt?: string | null };
   /** Run de REPOSIÇÃO (automation-worker): usa o mesmo checkpoint, excluindo IDs rejeitados da meta. */
   topup?: boolean;
+  /** Callback opcional chamado no encerramento do run (sucesso ou déficit) */
+  onComplete?: (result: { goalReached: boolean; totalLeads: number; error?: string }) => void;
 }
 
 type CaptureSearchCursor = { key: string; seenURLs: string[] };
@@ -470,8 +472,18 @@ async function checkpointCapture(run: RunContext, savedLeadId?: number, searchCu
         ...(savedLeadId ? { _lastProgressAt: new Date(now).toISOString() } : {}),
         ...(searchCursor ? { _captureSearchCursor: searchCursor } : {}) },
     };
-  }).catch((error: unknown) => { run.checkpointFailed = true; throw error; });
-  if (!row) { run.keepRunning = false; return false; }
+  }).catch((error: unknown) => {
+    if (savedLeadId) {
+      run.checkpointFailed = true;
+      throw error;
+    }
+    console.warn("[SCRAPER-ENGINE] falha no checkpoint intermediário:", (error as Error).message);
+    return null;
+  });
+  if (!row) {
+    if (savedLeadId) { run.keepRunning = false; return false; }
+    return true;
+  }
   run.captureSessionId = String(row.scrape_filters._captureSessionId);
   run.captureCount = captureCount(row);
   run.captureGoal = Number(row.scrape_max_leads) || 0;
@@ -793,6 +805,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
       const searchKey = makeSearchKey(search.niche, search.proximity ? `perto de ${search.region}` : search.region, effectiveFilters);
       const searchTerm = search.proximity ? proximitySearchTerm(search.niche, search.region) : `${search.niche} ${search.region}`;
       if (!exhaustedSearches.has(searchKey)) {
+      try {
       if (queriesExecuted >= queryBudget) break;
       if (Date.now() >= attemptDeadline) throw new Error("Tempo máximo desta tentativa atingido; progresso preservado para retomar.");
       queriesExecuted++;
@@ -933,10 +946,16 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
       const processedPlaceKeys = processedByNiche.get(search.niche) || new Set<string>();
       processedByNiche.set(search.niche, processedPlaceKeys);
       const seenURLs = new Set(run.searchCursor?.key === searchKey ? run.searchCursor.seenURLs : []);
-      const saveSearchCursor = async (): Promise<void> => {
-        if (!run.automationId) return;
-        if (seenURLs.size > 2000) throw new Error("Limite de progresso desta busca atingido; refine a região antes de retomar.");
-        await checkpointCapture(run, undefined, { key: searchKey, seenURLs: [...seenURLs] });
+      let lastCursorSave = 0;
+      let unsavedSeenCount = 0;
+      const saveSearchCursor = async (force = false): Promise<void> => {
+        if (!run.automationId || !run.captureAttemptId || !run.keepRunning || activeRun !== run) return;
+        const now = Date.now();
+        if (!force && unsavedSeenCount < 5 && now - lastCursorSave < 10000) return;
+        lastCursorSave = now;
+        unsavedSeenCount = 0;
+        const capped = Array.from(seenURLs).slice(-300);
+        await checkpointCapture(run, undefined, { key: searchKey, seenURLs: capped });
       };
       const extractedPlaces = new Set<string>();
       let scrolling = hasFeed || !!singlePlaceLead;
@@ -985,7 +1004,11 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
 
           if (placeKey && processedPlaceKeys.has(placeKey)) continue;
           if (placeKey) processedPlaceKeys.add(placeKey);
-          const markCandidateSeen = async (): Promise<void> => { seenURLs.add(placeKey); await saveSearchCursor(); };
+          const markCandidateSeen = async (): Promise<void> => {
+            seenURLs.add(placeKey);
+            unsavedSeenCount++;
+            await saveSearchCursor(false);
+          };
 
           const cardData = lead.cardData || await page.evaluate((leadName: string) => {
             const items = Array.from(document.querySelectorAll(".Nv2PK"));
@@ -2135,9 +2158,16 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
       }
 
       if (explicitlyExhausted && run.keepRunning && isCurrentRun() && !transientDetailError && !run.checkpointFailed) {
+        await saveSearchCursor(true);
         if (!await checkpointCapture(run)) break;
         await markSearchExhausted(run.clientId, search.niche, search.proximity ? `perto de ${search.region}` : search.region, effectiveFilters, "exhausted");
         exhaustedSearches.add(searchKey);
+      }
+      } catch (searchError) {
+        if (!run.keepRunning || !isCurrentRun()) break;
+        const msg = (searchError as Error).message || String(searchError);
+        if (msg.includes("Tempo máximo desta tentativa") || msg.includes("Target closed") || msg.includes("Session closed") || run.checkpointFailed) throw searchError;
+        sendRunLog(run, `⚠️ Busca "${searchTerm}" com instabilidade: ${msg}. Continuando para próximas regiões...`, "warning");
       }
       }
 
@@ -2243,8 +2273,10 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
           const goal = Number(current.scrape_max_leads) || 0;
           const reached = run.keepRunning && !scraperError && !run.checkpointFailed && !transientDetailError && goal > 0 && total >= goal;
           const outcome = scraperError || transientDetailError ? "error" : !run.keepRunning ? "stopped" : reached ? "goal_reached" : "exhausted";
-          const failures = reached ? 0 : (Number(current.scrape_filters._captureFailures) || 0) + 1;
-          const retryAt = new Date(now + Math.min(15 * 60_000, 30_000 * 2 ** Math.min(failures - 1, 5))).toISOString();
+          const madeProgress = leadsStore.length > 0;
+          const failures = reached || madeProgress ? 0 : (Number(current.scrape_filters._captureFailures) || 0) + 1;
+          const retryDelay = madeProgress ? 5_000 : Math.min(15 * 60_000, 15_000 * 2 ** Math.min(failures - 1, 5));
+          const retryAt = new Date(now + retryDelay).toISOString();
           return {
             scraped_count: total,
             ...(scraperError ? { last_error: `Scraper falhou: ${scraperError}`.slice(0, 500), last_error_at: new Date(now).toISOString() } : {}),
@@ -2272,6 +2304,18 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
     sendRunLog(run, `   ${leadsStore.length} lead(s) novo(s) confirmado(s)`, leadsStore.length > 0 ? "success" : "info");
     if (crmSkipped > 0) sendRunLog(run, `   ⏭️ ${crmSkipped} lead(s) pulado(s) (já no CRM)`, "info");
     sendRunLog(run, `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, "info");
+
+    if (settings.onComplete) {
+      try {
+        settings.onComplete({
+          goalReached: completed,
+          totalLeads: leadsStore.length,
+          error: scraperError || undefined,
+        });
+      } catch (err) {
+        console.warn("[SCRAPER-ENGINE] onComplete falhou:", err);
+      }
+    }
 
     // O scheduler decide retry/disparo usando o checkpoint persistido; o engine não dispara mensagens.
   }
@@ -2307,6 +2351,8 @@ export interface StartOpts {
   topup?: boolean;
   /** Se true, reseta qualquer captura travada anterior e força o início limpo. */
   forceRestart?: boolean;
+  /** Callback opcional no término do run (sucesso, stop ou erro) */
+  onComplete?: (result: { goalReached: boolean; totalLeads: number; error?: string }) => void;
 }
 
 /**
@@ -2385,6 +2431,7 @@ export function startScraperRun(opts: StartOpts): { ok: boolean; error?: string;
     maxLeads: opts.maxLeads,
     reviews_ai: opts.reviews_ai,
     topup: opts.topup,
+    onComplete: opts.onComplete,
   }, run);
   return { ok: true };
 }

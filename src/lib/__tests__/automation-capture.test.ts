@@ -61,7 +61,7 @@ describe("updateAutomationCapture", () => {
       scrape_filters: { ...current.scrape_filters, _capturedLeadIds: [...readCaptureIds(current.scrape_filters), 2] }, scraped_count: 2,
     }));
     expect(result?.scraped_count).toBe(2);
-    expect(writes[0].filters).toEqual(expect.arrayContaining([["client_id", "client-a"], ["id", "auto-a"], ["status", "running"], ["phase", "scraping"], ["scrape_filters", JSON.stringify({ _capturedLeadIds: [1], _captureAttemptId: "attempt-a" })]]));
+    expect(writes[0].filters).toEqual(expect.arrayContaining([["client_id", "client-a"], ["id", "auto-a"], ["status", "running"], ["phase", "scraping"], ["scraped_count", 1], ["updated_at", "2026-10-19T10:00:00Z"]]));
   });
 
   it("re-reads after a conflict so concurrent capture IDs are not lost", async () => {

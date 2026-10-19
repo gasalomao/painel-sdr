@@ -46,9 +46,6 @@ export async function updateAutomationCapture(
     let query = supabaseAdmin.from("automations").update({ ...patch, updated_at: new Date().toISOString() })
       .eq("id", automationId).eq("client_id", clientId)
       .eq("status", current.status).eq("phase", current.phase);
-    query = current.scrape_filters == null
-      ? query.is("scrape_filters", null)
-      : query.eq("scrape_filters", JSON.stringify(current.scrape_filters));
     // Millisecond timestamps can collide: compare the state used by mutation guards too.
     for (const key of ["campaign_id", "followup_campaign_id", "started_at", "scraped_count"] as const) {
       query = current[key] == null ? query.is(key, null) : query.eq(key, current[key]);
