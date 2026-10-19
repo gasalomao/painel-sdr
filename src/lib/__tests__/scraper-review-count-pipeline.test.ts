@@ -264,7 +264,7 @@ describe.sequential.skipIf(!browserPath)("scraper review-count pipeline (Chromiu
   async function run(options: Partial<StartOpts> = {}): Promise<void> {
     expect(startScraperRun({
       niches: ["comércio"], regions: ["Offline"], client_id: clientId,
-      minReviews: 100, maxLeads: 2, filterEmpty: true,
+      minReviews: 100, filterEmpty: true,
       reviews_ai: { enabled: true, model: "offline-model" }, ...options,
     })).toEqual({ ok: true });
     try {
@@ -316,7 +316,7 @@ describe.sequential.skipIf(!browserPath)("scraper review-count pipeline (Chromiu
       { id: "encoded-dot", cardCount: 100, instagramLinks: ["https://instagram.com/loja%2Eexemplo/"] },
       { id: "encoded-letter", cardCount: 100, instagramLinks: ["https://instagram.com/%6Coja/"] },
     ];
-    await run({ filterWithInstagram: true });
+    await run({ filterWithInstagram: true, maxLeads: 2 });
     expect(getLeads(clientId).leads.map(lead => [lead.name, lead.instagram])).toEqual([
       ["encoded-dot", "https://www.instagram.com/loja.exemplo/"], ["encoded-letter", "https://www.instagram.com/loja/"],
     ]);
@@ -390,7 +390,7 @@ describe.sequential.skipIf(!browserPath)("scraper review-count pipeline (Chromiu
       { id: "qualified-200", cardCount: 200, detailCount: 200, stars: "4,9" },
       { id: "after-cap", cardCount: 999, detailCount: 999 },
     ];
-    await run();
+    await run({ maxLeads: 2 });
 
     const { leads, count } = getLeads(clientId);
     expect(count).toBe(2);

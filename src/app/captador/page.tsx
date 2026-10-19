@@ -228,13 +228,18 @@ export default function CaptadorPage() {
   }
 
   async function handleClear() {
-    await fetch("/api/scraper", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "clear" }),
-    });
-    setLeads([]);
-    addLog("Leads limpos.", "info");
+    try {
+      const res = await fetch("/api/scraper", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "clear" }),
+      });
+      if (!res.ok) { addLog("Não foi possível limpar. Aguarde o encerramento da captura e tente novamente.", "error"); return; }
+      setLeads([]);
+      addLog("Leads limpos.", "info");
+    } catch {
+      addLog("Falha de conexão ao limpar leads. A lista foi preservada.", "error");
+    }
   }
 
   async function handleSendBatch() {
@@ -552,7 +557,7 @@ export default function CaptadorPage() {
                   <Button variant="outline" size="sm" className="gap-2 text-xs" onClick={handleExport} disabled={leads.length === 0}>
                     <Download className="w-3" /> Exportar
                   </Button>
-                  <Button variant="ghost" size="sm" className="gap-2 text-xs text-red-400" onClick={handleClear} disabled={leads.length === 0}>
+                  <Button variant="ghost" size="sm" className="gap-2 text-xs text-red-400" onClick={handleClear} disabled={isRunning || leads.length === 0}>
                     <Trash2 className="w-3" /> Limpar
                   </Button>
                 </div>

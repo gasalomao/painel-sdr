@@ -1,11 +1,11 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ from: vi.fn(), launch: vi.fn(), fetch: vi.fn(), loadMemory: vi.fn(), markMemory: vi.fn(), expand: vi.fn() }));
+const mocks = vi.hoisted(() => ({ from: vi.fn(), launch: vi.fn(), fetch: vi.fn(), loadMemory: vi.fn(), markMemory: vi.fn(), expand: vi.fn(), summarize: vi.fn() }));
 vi.mock("@/lib/supabase", () => ({ supabase: { from: mocks.from }, supabaseAdmin: { from: mocks.from } }));
 vi.mock("@/lib/supabase_admin", () => ({ supabaseAdmin: { from: mocks.from } }));
 vi.mock("@/lib/evolution", () => ({ getEvolutionConfig: async () => ({ instance: "offline" }) }));
-vi.mock("@/lib/reviews-ai", () => ({ summarizeReviewsForLead: vi.fn() }));
+vi.mock("@/lib/reviews-ai", () => ({ summarizeReviewsForLead: mocks.summarize }));
 vi.mock("@/lib/safe-url", () => ({ fetchPublicHttpUrl: mocks.fetch }));
 vi.mock("puppeteer-extra", () => ({ default: { use: vi.fn(), launch: mocks.launch } }));
 vi.mock("puppeteer-extra-plugin-stealth", () => ({ default: vi.fn(() => ({})) }));
@@ -17,7 +17,7 @@ vi.mock("@/lib/geo-regions", async importOriginal => ({
   ...await importOriginal<typeof import("@/lib/geo-regions")>(), computeExpansionCandidates: mocks.expand,
 }));
 
-import { attachSseClient, checkCrmDuplicate, detachSseClient, getLeads, getStatus, startScraperRun, stopScraper, type StartOpts } from "../scraper-engine";
+import { attachSseClient, checkCrmDuplicate, detachSseClient, getLeads, getStatus, clearLeads, pauseScraper, resumeScraper, startScraperRun, stopScraper, type StartOpts } from "../scraper-engine";
 
 type Row = Record<string, unknown>;
 const clientId = "capture-offline";
@@ -33,6 +33,7 @@ let afterInsert: (() => void) | undefined;
 let closeBrowser: () => Promise<void>;
 let failNavigation: boolean;
 let noFeed: boolean;
+let explicitEmpty: boolean;
 let searchTerms: string[];
 let detailVisits: string[];
 let rejectWithWebsite: boolean;
@@ -74,7 +75,7 @@ function query(table: string) {
       for (const row of rows) Object.assign(row, payload);
       if (table === "automations") writes.push(`checkpoint:${rows[0]?.scraped_count}`);
     }
-    return { data: rows, error: null };
+    return { data: structuredClone(rows), error: null };
   };
   const q = {
     select: vi.fn(() => q),
@@ -104,12 +105,13 @@ beforeEach(() => {
   mocks.markMemory.mockReset().mockResolvedValue(true);
   mocks.expand.mockReset().mockReturnValue([]);
   insertError = false; checkpointError = false; duplicateError = false; failNavigation = false; noFeed = false;
-  singlePlaceMock = null;
+  singlePlaceMock = null; explicitEmpty = true;
   afterInsert = undefined;
   closeBrowser = async () => {};
   mocks.from.mockReset().mockImplementation(query);
   mocks.launch.mockReset();
   mocks.fetch.mockReset();
+  mocks.summarize.mockReset().mockResolvedValue({ cached: false });
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -132,7 +134,7 @@ beforeEach(() => {
         if (source.includes("const items = Array.from(document.querySelectorAll(\".Nv2PK\"))")) return places.map(name => ({ name, url: `https://www.google.com/maps/place/${name}` }));
         if (source.includes("const redesAdicionais")) return { phone: `(11) 99999-${String(places.indexOf(detailName)).padStart(4, "0")}`, website: rejectWithWebsite ? "https://offline.test" : "", instagram: "", facebook: "", instagramLinks: [], reviews: Array.from({ length: 50 }, () => ({ texto: "offline" })), businessDetails: { about: "Preservar detalhes" }, reviewCountSources: ["100 avaliações"], placeId: "", mapsUrl: "" };
         if (source.includes("Você chegou ao final")) return true;
-        if (/nenhum resultado|no results/i.test(source)) return noFeed;
+        if (/nenhum resultado|no results/i.test(source)) return noFeed && explicitEmpty;
         return undefined;
       },
     }; },
@@ -153,6 +155,23 @@ async function run(opts: Partial<StartOpts> = {}): Promise<void> {
 const autoOpts = { automation_id: automationId, captureAttemptId: "attempt-a" };
 
 describe("validação antes de qualquer efeito", () => {
+  it.each([null, "dentista", [], [null], [1], [""], ["   "], ["válido", " "]])("rejeita nichos/regiões inválidos %j antes de assumir a sessão", input => {
+    for (const key of ["niches", "regions"] as const) {
+      expect(startScraperRun({ niches: ["dentista"], regions: ["Offline"], client_id: clientId, maxLeads: 1, [key]: input } as unknown as StartOpts))
+        .toMatchObject({ ok: false });
+    }
+    expect(getStatus(clientId).isScraping).toBe(false);
+    expect(mocks.launch).not.toHaveBeenCalled();
+    expect(mocks.from).not.toHaveBeenCalled();
+  });
+
+  it.each([-1, 1.5, Infinity, NaN, "20", null, 5001])("rejeita meta inválida %s sem iniciar sessão", maxLeads => {
+    expect(startScraperRun({ niches: ["dentista"], regions: ["Offline"], client_id: clientId, maxLeads } as unknown as StartOpts))
+      .toMatchObject({ ok: false });
+    expect(mocks.launch).not.toHaveBeenCalled();
+    expect(mocks.from).not.toHaveBeenCalled();
+  });
+
   it.each(["filterEmpty", "filterDuplicates", "filterLandlines", "filterWithWebsite", "filterWithInstagram"])("rejeita %s malformado sem DB/navegador", flag => {
     for (const invalid of ["false", "true", 0, 1, null, [], {}]) {
       expect(startScraperRun({ niches: ["dentista"], regions: ["Offline"], client_id: clientId, [flag]: invalid } as unknown as StartOpts).ok).toBe(false);
@@ -167,7 +186,7 @@ describe("validação antes de qualquer efeito", () => {
 describe("captura confirma persistência antes de contar", () => {
   it("não conta nem transmite um INSERT que falhou", async () => {
     insertError = true;
-    await run({ webhookEnabled: true, mode: "batch", webhookUrl: "https://offline.test" });
+    await run({ webhookEnabled: true, mode: "batch", webhookUrl: "https://offline.test", maxLeads: undefined });
     expect(getLeads(clientId).count).toBe(0);
     expect(events.filter(event => event.event === "new_lead")).toEqual([]);
     expect(mocks.fetch).not.toHaveBeenCalled();
@@ -217,6 +236,35 @@ describe("captura confirma persistência antes de contar", () => {
     expect(automation()).toMatchObject({ status: "running", phase: "scraping", scraped_count: 14 });
     expect(filters()._scrapeFinishedAt).toBeFalsy();
     expect(filters()).toMatchObject({ _captureAttemptId: null, _captureLastOutcome: "exhausted", _captureRetryAt: expect.any(String) });
+  });
+
+  it.each(["token", "erro"])("checkpoint pré-INSERT com %s inválido não salva nem emite evento ou webhook", async failure => {
+    seed(13, 20);
+    let interrupted = false;
+    mocks.from.mockImplementation((table: string) => {
+      if (!interrupted && table === "automations" && detailVisits.length > 0) {
+        interrupted = true;
+        if (failure === "token") filters()._captureAttemptId = "outra-tentativa";
+        else throw new Error("checkpoint temporariamente indisponível");
+      }
+      return query(table);
+    });
+    await run({ ...autoOpts, webhookEnabled: true, mode: "realtime", webhookUrl: "https://offline.test" });
+    expect(interrupted).toBe(true);
+    expect(tables.leads_extraidos).toHaveLength(13);
+    expect(events.filter(event => event.event === "new_lead")).toEqual([]);
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(filters()._scrapeFinishedAt).toBeFalsy();
+  });
+
+  it("token invalidado antes da tentativa impede navegador e INSERT sem marcador válido", async () => {
+    seed(13, 20);
+    filters()._captureAttemptId = "outra-tentativa";
+    await run(autoOpts);
+    expect(mocks.launch).not.toHaveBeenCalled();
+    expect(tables.leads_extraidos).toHaveLength(13);
+    expect(automation().scraped_count).toBe(13);
+    expect(filters()._captureAttemptId).toBe("outra-tentativa");
   });
 
   it("meta já confirmada não abre navegador nem coleta excedente", async () => {
@@ -302,27 +350,27 @@ describe("captura confirma persistência antes de contar", () => {
 
 describe("descoberta recuperável e memória por nicho", () => {
   it("expande mesmo quando a região original não tem feed e confirma vazio explícito", async () => {
-    noFeed = true;
+    seed(0, 2); noFeed = true;
     mocks.expand.mockImplementation(({ alreadySearched }: { alreadySearched: Set<string> }) => alreadySearched.has("vizinha sp") ? [] : ["Vizinha - SP"]);
-    await run({ mode: "batch", maxLeads: 2 });
+    await run({ ...autoOpts, mode: "batch", maxLeads: 2 });
     expect(searchTerms).toContain("dentista Vizinha - SP");
     expect(mocks.markMemory).toHaveBeenCalledWith(clientId, "dentista", "Offline", expect.any(Object), "exhausted");
     expect(mocks.expand.mock.calls.every(([options]) => JSON.stringify(options.regions) === '["Offline"]')).toBe(true);
   });
 
   it("pula buscas esgotadas sem pular expansão e mantém cada nicho independente", async () => {
-    noFeed = true;
+    seed(0, 2); noFeed = true;
     mocks.loadMemory.mockResolvedValue(new Set(["dentista:Offline"]));
     mocks.expand.mockImplementation(({ alreadySearched }: { alreadySearched: Set<string> }) => alreadySearched.has("vizinha sp") ? [] : ["Vizinha - SP"]);
-    await run({ niches: ["dentista", "ortodontista"], mode: "batch", maxLeads: 2 });
+    await run({ ...autoOpts, niches: ["dentista", "ortodontista"], mode: "batch", maxLeads: 2 });
     expect(searchTerms).not.toContain("dentista Offline");
     expect(searchTerms).toEqual(expect.arrayContaining(["ortodontista Offline", "dentista Vizinha - SP", "ortodontista Vizinha - SP"]));
   });
 
   it("limita cada tentativa a 20 consultas sem teto global de cidades", async () => {
-    noFeed = true;
+    seed(0, 2); noFeed = true;
     mocks.expand.mockImplementation(({ alreadySearched }: { alreadySearched: Set<string> }) => [`Vizinha ${alreadySearched.size} - SP`]);
-    await run({ mode: "batch", maxLeads: 2 });
+    await run({ ...autoOpts, mode: "batch", maxLeads: 2 });
     expect(searchTerms).toHaveLength(20);
     expect(mocks.markMemory).toHaveBeenCalledTimes(20);
   });
@@ -359,6 +407,14 @@ describe("descoberta recuperável e memória por nicho", () => {
     expect(filters()._captureLastOutcome).not.toBe("error");
   });
 
+  it("feed indisponível sem vazio explícito não consome região na memória", async () => {
+    noFeed = true; explicitEmpty = false; seed(0, 5);
+    await run({ ...autoOpts, maxLeads: 5 });
+    expect(mocks.markMemory).not.toHaveBeenCalled();
+    expect(filters()._scrapeFinishedAt).toBeFalsy();
+    expect(filters()._captureRetryAt).toEqual(expect.any(String));
+  });
+
   it("falha da memória não é substituída por histórico vazio", async () => {
     seed(13, 20);
     mocks.loadMemory.mockRejectedValue(new Error("memória indisponível"));
@@ -372,7 +428,7 @@ describe("descoberta recuperável e memória por nicho", () => {
     seed(13, 20); rejectWithWebsite = true;
     places = ["descartado", "descartado-novo"];
     filters()._captureSearchCursor = { key: "dentista:Offline", seenURLs: ["https://www.google.com/maps/place/descartado"] };
-    await run({ ...autoOpts, maxLeads: 7, filterWithWebsite: true });
+    await run({ ...autoOpts, maxLeads: undefined, filterWithWebsite: true });
     expect(detailVisits).toEqual(["descartado-novo"]);
     expect((filters()._captureSearchCursor as Row).seenURLs).toHaveLength(2);
     expect(automation().scraped_count).toBe(13);
@@ -392,6 +448,203 @@ describe("descoberta recuperável e memória por nicho", () => {
     await run({ mode: "batch", webhookEnabled: true, webhookUrl: "https://offline.test" });
     expect(getLeads(clientId).count).toBe(0);
     expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("paridade de recuperação nas capturas manuais", () => {
+  it("pausa no último lead impede lote e conclusão até retomar", async () => {
+    const completed = vi.fn();
+    mocks.summarize.mockImplementation(async () => {
+      expect(pauseScraper(clientId)).toBe(true);
+      return { cached: false };
+    });
+    expect(startScraperRun({ niches: ["dentista"], regions: ["Offline"], client_id: clientId, maxLeads: 1,
+      reviews_ai: { enabled: true, model: "offline" }, mode: "batch", webhookEnabled: true,
+      webhookUrl: "https://offline.test", onComplete: completed })).toEqual({ ok: true });
+    await vi.waitFor(() => expect(mocks.summarize).toHaveBeenCalledOnce());
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(getStatus(clientId)).toMatchObject({ isScraping: true, isPaused: true, leadCount: 1 });
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(completed).not.toHaveBeenCalled();
+    expect(resumeScraper(clientId)).toBe(true);
+    await vi.waitFor(() => expect(completed).toHaveBeenCalledOnce());
+    expect(mocks.fetch).toHaveBeenCalledOnce();
+    expect(completed).toHaveBeenCalledWith(expect.objectContaining({ goalReached: true, totalLeads: 1 }));
+  });
+
+  it("limpar durante captura é rejeitado sem perder contagem nem exceder a meta", async () => {
+    const cleared = vi.fn(() => clearLeads(clientId));
+    const completed = vi.fn();
+    places = ["primeiro", "segundo"];
+    afterInsert = () => { if (tables.leads_extraidos.length === 2) cleared(); };
+    await run({ maxLeads: 2, onComplete: completed, mode: "batch", webhookEnabled: true, webhookUrl: "https://offline.test" });
+    expect(cleared).toHaveReturnedWith(false);
+    expect(tables.leads_extraidos).toHaveLength(2);
+    expect(getLeads(clientId).count).toBe(2);
+    expect(completed).toHaveBeenCalledWith(expect.objectContaining({ totalLeads: 2, goalReached: true }));
+    expect(JSON.parse(mocks.fetch.mock.calls[0][1].body)).toHaveLength(2);
+    expect(clearLeads(clientId)).toBe(true);
+    expect(getLeads(clientId).count).toBe(0);
+  });
+
+  it("orçamento sem limite não anuncia esgotamento nem envia lote parcial", async () => {
+    const completed = vi.fn();
+    await run({ regions: Array.from({ length: 21 }, (_, i) => `Região ${i}`), maxLeads: undefined,
+      mode: "batch", webhookEnabled: true, webhookUrl: "https://offline.test", onComplete: completed });
+    expect(searchTerms).toHaveLength(20);
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(completed).toHaveBeenCalledWith(expect.objectContaining({ goalReached: false, error: expect.stringContaining("consultas") }));
+    expect(events.some(event => event.event === "log" && String(event.message).includes("Captação concluída"))).toBe(false);
+  });
+
+  it.each(["batch", "realtime"])("expande até a meta sem depender do modo %s de webhook", async mode => {
+    mocks.expand.mockImplementation(({ alreadySearched }: { alreadySearched: Set<string> }) => alreadySearched.has("vizinha sp") ? [] : ["Vizinha - SP"]);
+    const completed = vi.fn();
+    afterInsert = () => { places = ["novo", "novo-vizinha"]; };
+    await run({ mode, maxLeads: 2, onComplete: completed });
+    expect(searchTerms).toContain("dentista Vizinha - SP");
+    expect(getLeads(clientId).count).toBe(2);
+    expect(tables.leads_extraidos).toHaveLength(2);
+    expect(completed).toHaveBeenCalledWith(expect.objectContaining({ goalReached: true, totalLeads: 2 }));
+  });
+
+  it("retenta INSERT transitório reprocessando candidato e envia um único lote exato", async () => {
+    const launch = mocks.launch.getMockImplementation()!;
+    const completed = vi.fn();
+    mocks.launch.mockImplementation(async (...args) => {
+      insertError = mocks.launch.mock.calls.length === 1;
+      return launch(...args);
+    });
+    await run({ maxLeads: 1, mode: "batch", webhookEnabled: true, webhookUrl: "https://offline.test", onComplete: completed });
+    expect(mocks.launch).toHaveBeenCalledTimes(2);
+    expect(detailVisits).toEqual(["novo", "novo"]);
+    expect(tables.leads_extraidos).toHaveLength(1);
+    expect(getLeads(clientId).count).toBe(1);
+    expect(mocks.fetch).toHaveBeenCalledOnce();
+    expect(completed).toHaveBeenCalledOnce();
+    expect(completed).toHaveBeenCalledWith(expect.objectContaining({ goalReached: true, totalLeads: 1 }));
+  });
+
+  it("retenta após falha do navegador preservando leads e emite um único webhook batch", async () => {
+    const completed = vi.fn();
+    const launch = mocks.launch.getMockImplementation()!;
+    mocks.launch.mockImplementation(async (...args) => {
+      places = mocks.launch.mock.calls.length === 1 ? ["primeiro"] : ["primeiro", "segundo"];
+      failNavigation = false;
+      return launch(...args);
+    });
+    afterInsert = () => { failNavigation = tables.leads_extraidos.length === 1; };
+    await run({ mode: "batch", maxLeads: 2, onComplete: completed, webhookEnabled: true, webhookUrl: "https://offline.test" });
+    expect(mocks.launch).toHaveBeenCalledTimes(2);
+    expect(getLeads(clientId).count).toBe(2);
+    expect(tables.leads_extraidos.map(row => row.nome_negocio)).toEqual(["primeiro", "segundo"]);
+    expect(mocks.fetch).toHaveBeenCalledOnce();
+    expect(JSON.parse(mocks.fetch.mock.calls[0][1].body)).toHaveLength(2);
+    expect(completed).toHaveBeenCalledOnce();
+    expect(completed).toHaveBeenCalledWith(expect.objectContaining({ goalReached: true, totalLeads: 2 }));
+  });
+
+  it("Parar durante a espera cancela retomada sem enviar lote ou sinalizar sucesso", async () => {
+    const completed = vi.fn();
+    const sleepTimer = globalThis.setTimeout;
+    let stopDuringWait = false;
+    vi.spyOn(globalThis, "setTimeout").mockImplementation(((callback, delay, ...args) => {
+      if (delay === 1000 && /at sleep \([^\n]*scraper-engine\.ts:/.test(new Error().stack || "")) {
+        stopDuringWait = stopScraper(clientId);
+      }
+      return sleepTimer(callback, delay, ...args);
+    }) as typeof setTimeout);
+    await run({ mode: "batch", maxLeads: 2, onComplete: completed, webhookEnabled: true, webhookUrl: "https://offline.test" });
+    expect(stopDuringWait).toBe(true);
+    expect(mocks.launch).toHaveBeenCalledOnce();
+    expect(getLeads(clientId).count).toBe(1);
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(completed).toHaveBeenCalledWith(expect.objectContaining({ goalReached: false }));
+  });
+
+  it("pausa durante retry mantém sessão ocupada e só reabre navegador após retomar", async () => {
+    let release = (): void => {};
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    const close = vi.fn().mockImplementationOnce(() => waiting).mockResolvedValue(undefined);
+    closeBrowser = close;
+    mocks.expand.mockImplementation(({ alreadySearched }: { alreadySearched: Set<string> }) =>
+      mocks.launch.mock.calls.length > 1 && !alreadySearched.has("vizinha sp") ? ["Vizinha - SP"] : []);
+    expect(startScraperRun({ niches: ["dentista"], regions: ["Offline"], client_id: clientId, maxLeads: 2 })).toEqual({ ok: true });
+    try {
+      await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+      expect(pauseScraper(clientId)).toBe(true);
+    } finally {
+      release();
+    }
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(getStatus(clientId)).toMatchObject({ isScraping: true, isPaused: true, leadCount: 1 });
+    expect(startScraperRun({ niches: ["dentista"], regions: ["Offline"], client_id: "outro" })).toMatchObject({ busy: true });
+    expect(mocks.launch).toHaveBeenCalledOnce();
+    places = ["novo", "segundo"];
+    expect(resumeScraper(clientId)).toBe(true);
+    await vi.waitFor(() => expect(getStatus(clientId).isScraping).toBe(false));
+    expect(getLeads(clientId).count).toBe(2);
+  });
+
+  it("forceRestart durante fechamento de tentativa manual não finaliza a sessão nova", async () => {
+    let release = (): void => {};
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    const close = vi.fn().mockImplementationOnce(() => waiting).mockResolvedValue(undefined);
+    closeBrowser = close;
+    const oldCompleted = vi.fn();
+    const newCompleted = vi.fn();
+    expect(startScraperRun({ niches: ["dentista"], regions: ["Offline"], client_id: clientId, maxLeads: 2,
+      onComplete: oldCompleted })).toEqual({ ok: true });
+    try {
+      await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+      places = ["novo", "substituto"];
+      expect(startScraperRun({ niches: ["dentista"], regions: ["Outra região"], client_id: clientId, maxLeads: 1,
+        forceRestart: true, onComplete: newCompleted })).toEqual({ ok: true });
+      await vi.waitFor(() => expect(newCompleted).toHaveBeenCalledOnce());
+    } finally {
+      release();
+    }
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(oldCompleted).not.toHaveBeenCalled();
+    expect(mocks.launch).toHaveBeenCalledTimes(2);
+    expect(getStatus(clientId)).toMatchObject({ isScraping: false, leadCount: 1 });
+    expect(getLeads(clientId).leads.map(lead => lead.name)).toEqual(["substituto"]);
+  });
+
+  it("forceRestart durante espera substitui a sessão sem callback antigo nem terceira tentativa", async () => {
+    const oldCompleted = vi.fn();
+    const newCompleted = vi.fn();
+    const sleepTimer = globalThis.setTimeout;
+    let restarted = false;
+    vi.spyOn(globalThis, "setTimeout").mockImplementation(((callback, delay, ...args) => {
+      if (!restarted && delay === 1000 && /at sleep \([^\n]*scraper-engine\.ts:/.test(new Error().stack || "")) {
+        restarted = true;
+        places = ["novo", "substituto"];
+        expect(startScraperRun({ niches: ["dentista"], regions: ["Outra região"], client_id: clientId, maxLeads: 1,
+          forceRestart: true, onComplete: newCompleted })).toEqual({ ok: true });
+      }
+      return sleepTimer(callback, delay, ...args);
+    }) as typeof setTimeout);
+    await run({ mode: "batch", maxLeads: 2, onComplete: oldCompleted });
+    expect(restarted).toBe(true);
+    expect(oldCompleted).not.toHaveBeenCalled();
+    expect(newCompleted).toHaveBeenCalledOnce();
+    expect(mocks.launch).toHaveBeenCalledTimes(2);
+    expect(getLeads(clientId).leads.map(lead => lead.name)).toEqual(["substituto"]);
+  });
+
+  it("sem limite ativo encerra esgotamento sem expandir nem repetir e não mascara erros", async () => {
+    const completed = vi.fn();
+    await run({ mode: "batch", maxLeads: undefined, onComplete: completed });
+    expect(mocks.launch).toHaveBeenCalledOnce();
+    expect(mocks.expand).not.toHaveBeenCalled();
+    expect(completed).toHaveBeenCalledWith(expect.objectContaining({ goalReached: false, totalLeads: 1 }));
+  });
+
+  it("falha sem limite não emite Captação concluída", async () => {
+    failNavigation = true;
+    await run({ maxLeads: undefined });
+    expect(events.some(event => event.event === "log" && String(event.message).includes("Captação concluída"))).toBe(false);
   });
 });
 

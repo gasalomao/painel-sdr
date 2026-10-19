@@ -455,7 +455,10 @@ function captureCount(row: AutomationCaptureRow): number {
 
 async function checkpointCapture(run: RunContext, savedLeadId?: number, searchCursor?: CaptureSearchCursor): Promise<boolean> {
   if (!run.keepRunning || activeRun !== run) return false;
-  if (!run.automationId) return true;
+  if (!run.automationId) {
+    if (searchCursor) run.searchCursor = searchCursor;
+    return true;
+  }
   if (!run.captureAttemptId) { run.keepRunning = false; return false; }
   const now = Date.now();
   const row = await updateAutomationCapture(run.clientId, run.automationId, current => {
@@ -473,17 +476,10 @@ async function checkpointCapture(run: RunContext, savedLeadId?: number, searchCu
         ...(searchCursor ? { _captureSearchCursor: searchCursor } : {}) },
     };
   }).catch((error: unknown) => {
-    if (savedLeadId) {
-      run.checkpointFailed = true;
-      throw error;
-    }
-    console.warn("[SCRAPER-ENGINE] falha no checkpoint intermediário:", (error as Error).message);
-    return null;
+    if (savedLeadId) run.checkpointFailed = true;
+    throw error;
   });
-  if (!row) {
-    if (savedLeadId) { run.keepRunning = false; return false; }
-    return true;
-  }
+  if (!row) { run.keepRunning = false; return false; }
   run.captureSessionId = String(row.scrape_filters._captureSessionId);
   run.captureCount = captureCount(row);
   run.captureGoal = Number(row.scrape_max_leads) || 0;
@@ -648,9 +644,15 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
   broadcastToClient(run.clientId, { event: "status", isScraping: true, isPaused: false, leadCount: 0 });
   sendRunLog(run, "Iniciando o Robô do lado do Servidor...", "info");
 
+  let crmSkipped = 0;
+  let manualFailures = 0;
+  const manualGoal = Number(settings.maxLeads) || 0;
+  // ponytail: sessão manual vive neste processo; retomada após restart usa a automação persistida.
+  while (isCurrentRun()) {
+  const initialLeadCount = leadsStore.length;
+  let retryDelay = 0;
   let scraperError: string | null = null;
-  let crmSkipped = 0; // contador de leads pulados por já estarem no CRM (escopo do finally)
-
+  let searchFailed = false;
   let browser;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let heartbeatPending: Promise<void> | undefined;
@@ -806,7 +808,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
       const searchTerm = search.proximity ? proximitySearchTerm(search.niche, search.region) : `${search.niche} ${search.region}`;
       if (!exhaustedSearches.has(searchKey)) {
       try {
-      if (queriesExecuted >= queryBudget) break;
+      if (queriesExecuted >= queryBudget) throw new Error("Orçamento de consultas desta tentativa atingido; fila ainda pendente.");
       if (Date.now() >= attemptDeadline) throw new Error("Tempo máximo desta tentativa atingido; progresso preservado para retomar.");
       queriesExecuted++;
       if (!await checkpointCapture(run)) break;
@@ -935,8 +937,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
         } else {
           explicitlyExhausted = await page.evaluate(() => /nenhum resultado|não foi possível encontrar|no results found/i.test(document.body.innerText));
           if (!explicitlyExhausted) {
-            sendRunLog(run, `Nenhum resultado utilizável para "${searchTerm}". Avançando busca.`, "warning");
-            explicitlyExhausted = true;
+            throw new Error(`Resultados indisponíveis para "${searchTerm}"; busca preservada para retentar.`);
           } else {
             sendRunLog(run, `Nenhum resultado para "${searchTerm}". Verificando expansão.`, "warning");
           }
@@ -949,7 +950,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
       let lastCursorSave = 0;
       let unsavedSeenCount = 0;
       const saveSearchCursor = async (force = false): Promise<void> => {
-        if (!run.automationId || !run.captureAttemptId || !run.keepRunning || activeRun !== run) return;
+        if (!run.keepRunning || activeRun !== run) return;
         const now = Date.now();
         if (!force && unsavedSeenCount < 5 && now - lastCursorSave < 10000) return;
         lastCursorSave = now;
@@ -1007,6 +1008,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
           const markCandidateSeen = async (): Promise<void> => {
             seenURLs.add(placeKey);
             unsavedSeenCount++;
+            if (!run.automationId) run.searchCursor = { key: searchKey, seenURLs: [...seenURLs].slice(-300) };
             await saveSearchCursor(false);
           };
 
@@ -2166,7 +2168,8 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
       } catch (searchError) {
         if (!run.keepRunning || !isCurrentRun()) break;
         const msg = (searchError as Error).message || String(searchError);
-        if (msg.includes("Tempo máximo desta tentativa") || msg.includes("Target closed") || msg.includes("Session closed") || run.checkpointFailed) throw searchError;
+        searchFailed = true;
+        if (msg.includes("Tempo máximo desta tentativa") || msg.includes("Orçamento de consultas") || msg.includes("Target closed") || msg.includes("Session closed") || run.checkpointFailed) throw searchError;
         sendRunLog(run, `⚠️ Busca "${searchTerm}" com instabilidade: ${msg}. Continuando para próximas regiões...`, "warning");
       }
       }
@@ -2182,7 +2185,6 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
       //     {região}") alimenta a camada 2, então expande em seguida.
       if (
         i === queue.length - 1 &&
-        settings.mode === "batch" &&
         maxLeads > 0 &&
         leadsStore.length < maxLeads &&
         run.keepRunning &&
@@ -2233,8 +2235,10 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
 
     if (isCurrentRun()) sendRunLog(run, `Fila processada. Total confirmado nesta tentativa: ${leadsStore.length} leads`, "info");
 
-    // Webhook só do run manual atual que terminou sem stop/erro. Automação dispara pelo worker.
-    if (!run.automationId && run.keepRunning && settings.webhookEnabled && settings.mode === "batch" && settings.webhookUrl && leadsStore.length > 0 && isCurrentRun()) {
+    while (run.isPaused && run.keepRunning && isCurrentRun()) await sleep(1000);
+    // Lote manual só no encerramento confirmado da sessão; tentativas não reenviam os mesmos leads.
+    if (!run.automationId && run.keepRunning &&
+      (reachedLimit() || maxLeads <= 0 && !searchFailed && !transientDetailError) && settings.webhookEnabled && settings.mode === "batch" && settings.webhookUrl && leadsStore.length > 0 && isCurrentRun()) {
       sendRunLog(run, "Enviando em massa para n8n...", "info");
       try {
         const payload = leadsStore.map((lead) => formatLeadForN8n(lead, { niche: run.niche, region: run.region }));
@@ -2252,10 +2256,13 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
     scraperError = (err as Error).message || String(err);
     sendRunLog(run, `❌ Erro no scraper: ${scraperError}`, "error");
   } finally {
-    run.isStopping = true;
+    while (run.isPaused && run.keepRunning && isCurrentRun()) await sleep(1000);
+    const retryManual = !run.automationId && manualGoal > leadsStore.length && run.keepRunning && isCurrentRun();
+    if (!retryManual) run.isStopping = true;
     if (heartbeat) clearInterval(heartbeat);
     if (heartbeatPending) await heartbeatPending;
     if (browser) await browser.close().catch(() => {});
+    while (run.isPaused && run.keepRunning && isCurrentRun()) await sleep(1000);
     // Run SUBSTITUÍDO por forceRestart: só fecha o próprio browser e sai.
     // Resetar isScraping/marcar automação em erro aqui matava o run novo
     // (bug: restart deixava o run antigo "concluir" com 0 leads por cima
@@ -2291,6 +2298,11 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
         console.warn("[SCRAPER-ENGINE] falha finalizando checkpoint:", (error as Error).message);
       }
     }
+    if (retryManual && run.keepRunning) {
+      manualFailures = leadsStore.length > initialLeadCount ? 0 : manualFailures + 1;
+      retryDelay = manualFailures === 0 ? 5_000 : Math.min(15 * 60_000, 15_000 * 2 ** Math.min(manualFailures - 1, 6));
+      sendRunLog(run, `Captura em ${leadsStore.length}/${manualGoal}. Nova tentativa em ${retryDelay / 1000}s; progresso e filtros preservados.`, "warning");
+    } else {
     run.isScraping = false;
     run.isStopping = false;
     run.isPaused = false;
@@ -2299,7 +2311,10 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
       broadcastToClient(run.clientId, { event: "status", isScraping: false, isPaused: false, leadCount: leadsStore.length });
     }
     sendRunLog(run, `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, "info");
-    const completed = !scraperError && run.keepRunning && (!run.automationId || run.captureGoal > 0 && run.captureCount >= run.captureGoal);
+    const goalReached = run.automationId ? run.captureGoal > 0 && run.captureCount >= run.captureGoal
+      : manualGoal > 0 && leadsStore.length >= manualGoal;
+    const completed = !scraperError && !run.checkpointFailed && run.keepRunning &&
+      (goalReached || !run.automationId && manualGoal <= 0 && !searchFailed && !transientDetailError);
     sendRunLog(run, completed ? "🏁 Captação concluída" : "Captação encerrada sem concluir a meta; progresso preservado.", completed ? "success" : "warning");
     sendRunLog(run, `   ${leadsStore.length} lead(s) novo(s) confirmado(s)`, leadsStore.length > 0 ? "success" : "info");
     if (crmSkipped > 0) sendRunLog(run, `   ⏭️ ${crmSkipped} lead(s) pulado(s) (já no CRM)`, "info");
@@ -2308,7 +2323,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
     if (settings.onComplete) {
       try {
         settings.onComplete({
-          goalReached: completed,
+          goalReached: completed && goalReached,
           totalLeads: leadsStore.length,
           error: scraperError || undefined,
         });
@@ -2318,6 +2333,15 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
     }
 
     // O scheduler decide retry/disparo usando o checkpoint persistido; o engine não dispara mensagens.
+    }
+  }
+  if (!retryDelay) break;
+  // Espera em fatias permite Parar, Pausar e forceRestart antes de abrir outro navegador.
+  for (let remaining = retryDelay; remaining > 0 && run.keepRunning && isCurrentRun(); remaining -= 1000) {
+    while (run.isPaused && run.keepRunning && isCurrentRun()) await sleep(1000);
+    if (run.keepRunning && isCurrentRun()) await sleep(1000);
+  }
+  while (run.isPaused && run.keepRunning && isCurrentRun()) await sleep(1000);
   }
 }
 
@@ -2364,8 +2388,12 @@ export function startScraperRun(opts: StartOpts): { ok: boolean; error?: string;
   const clientId = normalizeClientId(opts.client_id);
   const automationId = opts.automation_id || null;
   if (!clientId) return { ok: false, error: "client_id é obrigatório." };
-  if (!opts.niches?.length || !opts.regions?.length) {
-    return { ok: false, error: "Forneça pelo menos 1 nicho e 1 região." };
+  if (![opts.niches, opts.regions].every(values => Array.isArray(values) && values.length > 0 &&
+    values.every(value => typeof value === "string" && value.trim().length > 0))) {
+    return { ok: false, error: "Forneça nichos e regiões como listas de textos não vazios." };
+  }
+  if (opts.maxLeads !== undefined && (typeof opts.maxLeads !== "number" || !Number.isInteger(opts.maxLeads) || opts.maxLeads < 0 || opts.maxLeads > 5000)) {
+    return { ok: false, error: "Limite de leads deve ser um inteiro entre 0 e 5000 (0 desativa)." };
   }
   const minReviews = parseMinReviews(opts.minReviews);
   if (minReviews === null) return { ok: false, error: "Mínimo de avaliações deve ser um inteiro entre 0 e 2147483647." };
@@ -2466,7 +2494,7 @@ export function resumeScraper(clientId: string | null, automationId: string | nu
 export function clearLeads(clientId: string | null, automationId: string | null = null): boolean {
   const normalized = normalizeClientId(clientId);
   if (!normalized) return false;
-  if (activeRun?.clientId === normalized && activeRun.automationId !== automationId) return false;
+  if (activeRun?.clientId === normalized) return false;
   const leads = leadsByOwner.get(ownerKey(normalized, automationId)) || [];
   leads.length = 0;
   leadsByOwner.set(ownerKey(normalized, automationId), leads);

@@ -12,6 +12,17 @@ Critérios de aceite:
 6. Erros de persistência não podem virar sucesso ou fazer o lead contar antes da gravação confirmada. Capturas concorrentes e callbacks antigos não podem sequestrar o estado de outra execução.
 7. Exibir progresso atual/meta e falhas de start/pause na interface, atualizando sem exigir F5.
 
+### Paridade de captura — pedido de 19/10/2026
+- Prospecção Sites, Captador Maps e Automação reutilizam o motor de captura; modo de webhook não deve decidir expansão geográfica ou recuperação.
+- Com limite ativo, captura manual também mantém a sessão, os leads confirmados e os filtros entre tentativas com espera progressiva, até a meta ou comando Parar. Pausa e substituição da sessão prevalecem durante a espera.
+- Sem limite ativo, esgotamento confirmado encerra normalmente; erro não pode ser anunciado como captura concluída. Não ativar automaticamente o limite exibido em um campo desmarcado.
+- Tentativas intermediárias não zeram contagem, não emitem conclusão/sucesso falso, não reenviam webhook batch nem chamam onComplete. Webhook batch e callback ocorrem uma vez no encerramento da sessão, respeitando Parar.
+- Validar offline falha temporária, progresso parcial, expansão em batch/realtime, parada/pausa durante retry, isolamento entre clientes e meta sem excedente. Captura manual continua em memória enquanto o processo vive; retomada após reinício segue exclusiva da automação persistida.
+
+Plano: testes de regressão no motor existente; recuperação manual no mesmo motor, sem duplicação nas telas; suíte de captura/automação, suíte geral, TypeScript, lint e build. Sem novas dependências, migração remota, commit/push ou captura real nesta alteração.
+
+Validação local desta paridade: 2.732 testes aprovados em 148 arquivos, 31 testes live ignorados; mais 4 testes de UI de limpeza executados separadamente. Os 61 testes de resiliência cobrem expansão batch/realtime, recuperação com progresso parcial, lote único, pausa inclusive no último lead, parada, substituição durante espera/fechamento, checkpoint pré-INSERT invalidado/indisponível, recuperação do INSERT e ausência de feed sem esgotamento explícito. A revisão independente confirmou o fechamento dos quatro achados e aprovou 106 testes focados. TypeScript e build passaram; lint sem erros, com 1.714 avisos. Sem homologação em produção nesta etapa.
+
 ## Estrutura e estilo
 Next.js 16.3 / React 19 / TypeScript / Supabase / Puppeteer stealth / Vitest já instalados. Código em `src/lib/scraper-engine.ts`, `src/lib/geo-regions.ts`, `src/lib/automation-worker.ts`, APIs existentes e `src/app/prospeccao-sites/page.tsx`. Testes em `src/lib/__tests__`. Reutilizar persistência existente quando suficiente; nenhuma dependência nova.
 
@@ -35,7 +46,7 @@ Comandos: `npm test -- --maxWorkers=1 --minWorkers=1`; `npx --no-install tsc --n
 - Meta atingida: não coletar excedente, não iniciar dois disparos, não reenviar aos mesmos alvos na retomada.
 
 ## Decisões de implementação
-- Checkpoint em `automations.scrape_filters`, com IDs de leads confirmados, sessão/tentativa, lease/heartbeat, fase de retomada e horário de retry. Atualizações comparadas com o snapshot atual (JSONB/status/fase/timestamp) e repetidas de forma limitada em caso de concorrência.
+- Checkpoint em `automations.scrape_filters`, com IDs de leads confirmados, sessão/tentativa, lease/heartbeat, fase de retomada e horário de retry. Atualizações comparam status/fase/contadores/vínculos e `updated_at`, com novas leituras em conflitos; o JSON completo fica no corpo, nunca no filtro da URL. Estado invalidado ou progresso não confirmado impede novas inserções até a próxima tentativa segura.
 - Marcador de sessão em `leads_extraidos.business_details._automationCapture`, na mesma inserção do lead, permite reconciliar queda entre inserção e checkpoint. Não inferir propriedade por crescimento da tabela ou data de inserção.
 - Automações antigas sem vínculo comprovável não podem recuperar automaticamente os 13 apenas pela contagem: preservar o valor e informar necessidade de revisão, sem anexar leads arbitrários do CRM.
 - Municípios/coordenadas locais de fonte versionada e licença MIT, sem API geográfica em tempo de execução. Expansão por distância em linha reta à origem resolvida, mantendo o estado e sem afrouxar os filtros. Isso não representa distância de estrada nem garante estoque de empresas.
