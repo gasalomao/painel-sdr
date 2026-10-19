@@ -193,4 +193,20 @@ describe("geo-regions & extractLocation — Expansão municipal offline no Brasi
     expect(out).not.toContain("Guarulhos - SP");
     expect(out.length).toBeLessThanOrEqual(2);
   });
+
+  it("computeExpansionCandidates: estado por extenso expande ancorado pela capital", () => {
+    const out = computeExpansionCandidates({
+      regions: ["Minas Gerais"],
+      cityCounts: new Map(),
+      alreadySearched: new Set(),
+      limit: 5,
+    });
+    expect(out.length).toBe(5);
+    for (const city of out) {
+      expect(city).toMatch(/- MG$/);
+    }
+    // Proximidade da capital Belo Horizonte
+    expect(out).toContain("Nova Lima - MG");
+    expect(out).toContain("Sabará - MG");
+  });
 });

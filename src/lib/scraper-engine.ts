@@ -722,6 +722,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
         "--password-store=basic",
         "--use-mock-keychain",
         "--window-size=1280,800",
+        "--lang=pt-BR,pt",
       ],
     };
 
@@ -729,6 +730,16 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
     await page.setExtraHTTPHeaders({ "Accept-Language": "pt-BR,pt;q=0.9" });
+    try {
+      if (typeof page.setCookie === "function") {
+        await page.setCookie(
+          { name: "SOCS", value: "CAISNQgDEitnd3NfMjAyNDA2MTAtMF9SQzJfZXVyb3BlX3N0YXR1c19jYTFfMjAyNDA2MTAuMV9wMBoCcHQgAQ", domain: ".google.com", path: "/" },
+          { name: "SOCS", value: "CAISNQgDEitnd3NfMjAyNDA2MTAtMF9SQzJfZXVyb3BlX3N0YXR1c19jYTFfMjAyNDA2MTAuMV9wMBoCcHQgAQ", domain: ".google.com.br", path: "/" },
+          { name: "CONSENT", value: "PENDING+999", domain: ".google.com", path: "/" },
+          { name: "CONSENT", value: "PENDING+999", domain: ".google.com.br", path: "/" },
+        );
+      }
+    } catch {}
 
     const effectiveFilters = {
       filterEmpty: settings.filterEmpty === true, filterDuplicates: run.automationId ? true : settings.filterDuplicates === true,
@@ -800,11 +811,13 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
         const hasConsent = await page.evaluate(() => {
           const isConsentUrl = window.location.href.includes("consent.google.com");
           if (isConsentUrl) return true;
-          const text = document.body.innerText.toLowerCase();
+          const text = (document.body?.innerText || "").toLowerCase();
           return text.includes("antes de continuar para o google") ||
                  text.includes("before you continue to google") ||
                  text.includes("antes de continuar para o youtube") ||
-                 text.includes("antes de continuar");
+                 text.includes("antes de continuar") ||
+                 text.includes("bevor sie zu google weitergehen") ||
+                 text.includes("avant de continuer");
         });
 
         if (hasConsent) {
@@ -819,7 +832,10 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                      text.includes('i agree') ||
                      text.includes('agree') ||
                      text.includes('aceitar') ||
-                     text.includes('aceito');
+                     text.includes('aceito') ||
+                     text.includes('alle akzeptieren') ||
+                     text.includes('tout accepter') ||
+                     text.includes('aceptar todo');
             });
             if (acceptButton) {
               (acceptButton as HTMLButtonElement).click();
@@ -830,8 +846,17 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
               }
             }
           });
-          // Wait for redirect/modal to dismiss and load Google Maps search results
-          await sleep(5000);
+          // Espera navegação pós-consentimento se houve redirecionamento
+          await Promise.race([
+            page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 8000 }).catch(() => {}),
+            sleep(4000),
+          ]);
+          if (page.url().includes("consent.google.com")) {
+            await page.goto(`https://www.google.com/maps/search/${encodedSearch}?hl=pt-BR`, {
+              waitUntil: "domcontentloaded",
+              timeout: 30000,
+            }).catch(() => {});
+          }
         }
       } catch (e) {
         console.warn("[SCRAPER] Falha ao tentar aceitar consentimento do Google:", e);
@@ -840,14 +865,69 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
 
       let hasFeed = true;
       let explicitlyExhausted = false;
+      let singlePlaceLead: { name: string; url: string; cardData: any } | null = null;
       try {
         await page.waitForSelector('[role="feed"]', { timeout: 15000 });
       } catch (error) {
         if ((error as Error).name !== "TimeoutError") throw error;
         hasFeed = false;
-        explicitlyExhausted = await page.evaluate(() => /nenhum resultado|não foi possível encontrar|no results found/i.test(document.body.innerText));
-        if (!explicitlyExhausted) throw new Error(`Lista de resultados indisponível para "${searchTerm}"; busca recuperável.`);
-        sendRunLog(run, `Nenhum resultado para "${searchTerm}". Verificando expansão.`, "warning");
+
+        singlePlaceLead = await page.evaluate(() => {
+          const isPlaceUrl = window.location.href.includes("/maps/place/");
+          const h1 = document.querySelector('h1.DUwDvf') || document.querySelector('h1');
+          const hasAction = !!document.querySelector('button[data-item-id="address"]') || !!document.querySelector('button[data-item-id*="phone"]');
+          if (!isPlaceUrl && !hasAction) return null;
+
+          const name = h1?.textContent?.trim() || "";
+          if (!name) return null;
+
+          const addressBtn = document.querySelector('button[data-item-id="address"]');
+          const address = addressBtn ? addressBtn.textContent?.trim().replace(/^[\s]+/, "") : "";
+
+          const phoneBtn = document.querySelector('button[data-item-id*="phone"]');
+          const phone = phoneBtn ? phoneBtn.textContent?.trim().replace(/^[\s]+/, "") : "";
+
+          const siteBtn = document.querySelector('a[data-item-id="authority"]') as HTMLAnchorElement | null;
+          const website = siteBtn && !siteBtn.href.includes("google.com") ? siteBtn.href : "";
+
+          const ratingEl = document.querySelector('div.F7nice span[aria-hidden="true"]');
+          const rating = ratingEl ? ratingEl.textContent?.trim().replace(",", ".") : "";
+
+          const reviewsEl = document.querySelector('div.F7nice span[aria-label*="avalia"]');
+          const reviewText = reviewsEl ? reviewsEl.getAttribute("aria-label") || "" : "";
+          const rm = reviewText.match(/(\d[\d.,]*)/);
+          const reviewCount = rm ? parseInt(rm[1].replace(/\D/g, ""), 10) : undefined;
+
+          const catBtn = document.querySelector('button[jsaction*="category"]');
+          const category = catBtn ? catBtn.textContent?.trim() : "";
+
+          return {
+            name,
+            url: window.location.href,
+            cardData: {
+              name,
+              fullAddress: address,
+              categories: category ? [category] : [],
+              phone,
+              website,
+              averageRating: rating,
+              reviewCount,
+              reviewCountSources: [reviewText],
+            },
+          };
+        });
+
+        if (singlePlaceLead) {
+          sendRunLog(run, `📍 Estabelecimento único localizado: "${singlePlaceLead.name}". Coletando dados...`, "info");
+        } else {
+          explicitlyExhausted = await page.evaluate(() => /nenhum resultado|não foi possível encontrar|no results found/i.test(document.body.innerText));
+          if (!explicitlyExhausted) {
+            sendRunLog(run, `Nenhum resultado utilizável para "${searchTerm}". Avançando busca.`, "warning");
+            explicitlyExhausted = true;
+          } else {
+            sendRunLog(run, `Nenhum resultado para "${searchTerm}". Verificando expansão.`, "warning");
+          }
+        }
       }
 
       const processedPlaceKeys = processedByNiche.get(search.niche) || new Set<string>();
@@ -859,31 +939,39 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
         await checkpointCapture(run, undefined, { key: searchKey, seenURLs: [...seenURLs] });
       };
       const extractedPlaces = new Set<string>();
-      let scrolling = hasFeed;
+      let scrolling = hasFeed || !!singlePlaceLead;
       let emptyScrolls = 0;
       let previousCardsInDom = 0;
-      sendRunLog(run, "Rolando para capturar cartões...", "info");
+      if (hasFeed) sendRunLog(run, "Rolando para capturar cartões...", "info");
 
       while (scrolling && run.keepRunning && isCurrentRun()) {
         if (Date.now() >= attemptDeadline) throw new Error("Tempo máximo desta tentativa atingido; progresso preservado para retomar.");
         const previousExtractedSize = extractedPlaces.size;
-        await page.evaluate(() => {
-          const feed = document.querySelector('[role="feed"]');
-          if (feed) feed.scrollBy(0, 1000);
-        });
-        await sleep(2000);
 
-        const newLeads = await page.evaluate(() => {
-          const items = Array.from(document.querySelectorAll(".Nv2PK"));
-          return items.map((item) => {
-            const nameEl = item.querySelector(".qBF1Pd");
-            const urlEl = item.querySelector("a");
-            return {
-              name: nameEl ? nameEl.textContent?.trim() || "" : "",
-              url: urlEl ? urlEl.getAttribute("href") || "" : "",
-            };
-          }).filter((l) => l.name && l.url);
-        });
+        let newLeads: { name: string; url: string; cardData?: any }[] = [];
+        if (hasFeed) {
+          await page.evaluate(() => {
+            const feed = document.querySelector('[role="feed"]');
+            if (feed) feed.scrollBy(0, 1000);
+          });
+          await sleep(2000);
+
+          newLeads = await page.evaluate(() => {
+            const items = Array.from(document.querySelectorAll(".Nv2PK"));
+            return items.map((item) => {
+              const nameEl = item.querySelector(".qBF1Pd");
+              const urlEl = item.querySelector("a");
+              return {
+                name: nameEl ? nameEl.textContent?.trim() || "" : "",
+                url: urlEl ? urlEl.getAttribute("href") || "" : "",
+              };
+            }).filter((l) => l.name && l.url);
+          });
+        } else if (singlePlaceLead) {
+          newLeads = [singlePlaceLead];
+          scrolling = false;
+          explicitlyExhausted = true;
+        }
 
         for (const lead of newLeads) {
           if (!run.keepRunning || !isCurrentRun()) break;
@@ -899,7 +987,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
           if (placeKey) processedPlaceKeys.add(placeKey);
           const markCandidateSeen = async (): Promise<void> => { seenURLs.add(placeKey); await saveSearchCursor(); };
 
-          const cardData = await page.evaluate((leadName: string) => {
+          const cardData = lead.cardData || await page.evaluate((leadName: string) => {
             const items = Array.from(document.querySelectorAll(".Nv2PK"));
             const item = items.find((el) => el.querySelector(".qBF1Pd")?.textContent?.trim() === leadName);
             if (!item) return null;
@@ -1021,6 +1109,14 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
           try {
             if (lead.url && browser) {
               detailsPage = await browser.newPage();
+              try {
+                if (typeof detailsPage.setCookie === "function") {
+                  await detailsPage.setCookie(
+                    { name: "SOCS", value: "CAISNQgDEitnd3NfMjAyNDA2MTAtMF9SQzJfZXVyb3BlX3N0YXR1c19jYTFfMjAyNDA2MTAuMV9wMBoCcHQgAQ", domain: ".google.com", path: "/" },
+                    { name: "SOCS", value: "CAISNQgDEitnd3NfMjAyNDA2MTAtMF9SQzJfZXVyb3BlX3N0YXR1c19jYTFfMjAyNDA2MTAuMV9wMBoCcHQgAQ", domain: ".google.com.br", path: "/" },
+                  );
+                }
+              } catch {}
               await detailsPage.setRequestInterception(true);
               detailsPage.on("request", (req: { resourceType: () => string; abort: () => void; continue: () => void }) => {
                 if (["image", "stylesheet", "font"].includes(req.resourceType())) req.abort();
@@ -2019,20 +2115,22 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
           await markCandidateSeen();
         }
 
-        const isEnd = await page.evaluate(() => {
-          const feed = document.querySelector('[role="feed"]');
-          if (!feed) return false;
-          return feed.textContent?.includes("Você chegou ao final") || feed.textContent?.includes("final da lista") || false;
-        });
-        if (isEnd) {
-          explicitlyExhausted = true;
-          scrolling = false;
-          sendRunLog(run, `Fim dos resultados para "${searchTerm}". Total: ${extractedPlaces.size}`, "info");
-        } else {
-          const madeProgress = extractedPlaces.size > previousExtractedSize || newLeads.length > previousCardsInDom;
-          emptyScrolls = madeProgress ? 0 : emptyScrolls + 1;
-          previousCardsInDom = newLeads.length;
-          if (emptyScrolls >= 10) throw new Error(`Resultados sem progresso para "${searchTerm}"; retomar após espera.`);
+        if (hasFeed) {
+          const isEnd = await page.evaluate(() => {
+            const feed = document.querySelector('[role="feed"]');
+            if (!feed) return false;
+            return feed.textContent?.includes("Você chegou ao final") || feed.textContent?.includes("final da lista") || false;
+          });
+          if (isEnd) {
+            explicitlyExhausted = true;
+            scrolling = false;
+            sendRunLog(run, `Fim dos resultados para "${searchTerm}". Total: ${extractedPlaces.size}`, "info");
+          } else {
+            const madeProgress = extractedPlaces.size > previousExtractedSize || newLeads.length > previousCardsInDom;
+            emptyScrolls = madeProgress ? 0 : emptyScrolls + 1;
+            previousCardsInDom = newLeads.length;
+            if (emptyScrolls >= 10) throw new Error(`Resultados sem progresso para "${searchTerm}"; retomar após espera.`);
+          }
         }
       }
 

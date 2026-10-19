@@ -41,6 +41,15 @@ const STATE_NAMES: Record<string, string> = Object.assign(Object.create(null), {
   "rio grande do sul": "RS", "rondonia": "RO", "roraima": "RR", "santa catarina": "SC",
   "sao paulo": "SP", "sergipe": "SE", "tocantins": "TO",
 });
+export const STATE_CAPITALS: Record<string, string> = Object.assign(Object.create(null), {
+  AC: "Rio Branco", AL: "Maceió", AP: "Macapá", AM: "Manaus",
+  BA: "Salvador", CE: "Fortaleza", DF: "Brasília", ES: "Vitória",
+  GO: "Goiânia", MA: "São Luís", MT: "Cuiabá", MS: "Campo Grande",
+  MG: "Belo Horizonte", PA: "Belém", PB: "João Pessoa", PR: "Curitiba",
+  PE: "Recife", PI: "Teresina", RJ: "Rio de Janeiro", RN: "Natal",
+  RS: "Porto Alegre", RO: "Porto Velho", RR: "Boa Vista", SC: "Florianópolis",
+  SP: "São Paulo", SE: "Aracaju", TO: "Palmas",
+});
 const STATE_SUFFIX = new RegExp(`^(.+) (${[
   ...Object.keys(STATE_NAMES), ...BRAZIL_UFS.map(uf => uf.toLowerCase()),
 ].sort((a, b) => b.length - a.length).join("|")})$`);
@@ -174,7 +183,16 @@ export function computeExpansionCandidates(opts: {
   if (!Number.isFinite(limit) || limit < 1) return [];
   const origins = new Map<string, Municipality>();
   for (const region of regions) {
-    const city = resolveMunicipality(region);
+    let city = resolveMunicipality(region);
+    if (!city) {
+      const clean = normalizeKey(region);
+      const isExplicitState = STATE_NAMES[clean] || BRAZIL_UFS.some(u => u.toLowerCase() === clean);
+      if (isExplicitState) {
+        const uf = STATE_NAMES[clean] || clean.toUpperCase();
+        const cap = STATE_CAPITALS[uf];
+        if (cap) city = resolveMunicipality(`${cap} ${uf}`);
+      }
+    }
     if (city) origins.set(cityKey(city), city);
   }
   if (!origins.size) return [];

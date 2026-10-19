@@ -37,6 +37,7 @@ let searchTerms: string[];
 let detailVisits: string[];
 let rejectWithWebsite: boolean;
 let detailError: boolean;
+let singlePlaceMock: any;
 const controller = { enqueue: (chunk: Uint8Array) => {
   const event = JSON.parse(new TextDecoder().decode(chunk).replace(/^data: /, "").trim()) as Row;
   events.push(event);
@@ -103,6 +104,7 @@ beforeEach(() => {
   mocks.markMemory.mockReset().mockResolvedValue(true);
   mocks.expand.mockReset().mockReturnValue([]);
   insertError = false; checkpointError = false; duplicateError = false; failNavigation = false; noFeed = false;
+  singlePlaceMock = null;
   afterInsert = undefined;
   closeBrowser = async () => {};
   mocks.from.mockReset().mockImplementation(query);
@@ -125,6 +127,7 @@ beforeEach(() => {
       evaluate: async (fn: (...args: never[]) => unknown, arg?: string) => {
         const source = fn.toString();
         if (source.includes("isConsentUrl")) return false;
+        if (source.includes("isPlaceUrl")) return singlePlaceMock;
         if (source.includes("const leadName") || typeof arg === "string" && places.includes(arg)) return { name: arg, fullAddress: "Rua Offline, 1", categories: "Dentista", averageRating: "4.9", reviewCount: "100", reviewCountSources: ["100 avaliações"], website: "" };
         if (source.includes("const items = Array.from(document.querySelectorAll(\".Nv2PK\"))")) return places.map(name => ({ name, url: `https://www.google.com/maps/place/${name}` }));
         if (source.includes("const redesAdicionais")) return { phone: `(11) 99999-${String(places.indexOf(detailName)).padStart(4, "0")}`, website: rejectWithWebsite ? "https://offline.test" : "", instagram: "", facebook: "", instagramLinks: [], reviews: Array.from({ length: 50 }, () => ({ texto: "offline" })), businessDetails: { about: "Preservar detalhes" }, reviewCountSources: ["100 avaliações"], placeId: "", mapsUrl: "" };
@@ -322,6 +325,38 @@ describe("descoberta recuperável e memória por nicho", () => {
     await run({ mode: "batch", maxLeads: 2 });
     expect(searchTerms).toHaveLength(20);
     expect(mocks.markMemory).toHaveBeenCalledTimes(20);
+  });
+
+  it("captura estabelecimento único diretamente quando o Google Maps não renderiza feed", async () => {
+    noFeed = true;
+    singlePlaceMock = {
+      name: "Vidraçaria Única",
+      url: "https://www.google.com/maps/place/Vidra%C3%A7aria+%C3%9Anica",
+      cardData: {
+        name: "Vidraçaria Única",
+        fullAddress: "R. Principal, 100 - Centro, Sete Lagoas - MG, 35700-000",
+        categories: ["Vidraçaria"],
+        phone: "(31) 3771-0000",
+        website: "",
+        averageRating: "4.8",
+        reviewCount: 50,
+        reviewCountSources: ["50 avaliações"],
+      },
+    };
+    places = ["Vidraçaria Única"];
+    await run({ niches: ["vidraçaria"], regions: ["Minas Gerais"], mode: "batch", maxLeads: 1 });
+    expect(tables.leads_extraidos).toHaveLength(1);
+    expect(tables.leads_extraidos[0].nome_negocio).toBe("Vidraçaria Única");
+  });
+
+  it("recupera sem falhar quando lista de resultados estiver indisponível e avança expansão", async () => {
+    noFeed = true;
+    singlePlaceMock = null;
+    seed(0, 5);
+    mocks.expand.mockImplementation(({ alreadySearched }: { alreadySearched: Set<string> }) => alreadySearched.has("vizinha sp") ? [] : ["Vizinha - SP"]);
+    await run({ ...autoOpts, mode: "batch", maxLeads: 2 });
+    expect(searchTerms).toContain("dentista Vizinha - SP");
+    expect(filters()._captureLastOutcome).not.toBe("error");
   });
 
   it("falha da memória não é substituída por histórico vazio", async () => {
