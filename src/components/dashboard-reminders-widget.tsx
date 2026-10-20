@@ -205,14 +205,14 @@ function TaskList(): React.JSX.Element {
   const oldReminders = [...legacy.overdue, ...legacy.upcomingToday];
 
   return (
-    <Card className="glass-card border-none overflow-hidden">
-      <CardContent className="p-4 sm:p-6 space-y-4">
+    <Card className="overflow-hidden border border-border bg-card py-0 shadow-none ring-0">
+      <CardContent className="space-y-5 p-4 sm:p-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <CheckCircle2 className="size-5 text-cyan-300" aria-hidden="true" />
-            <div><h2 className="text-sm font-bold">Tarefas e lembretes</h2><p className="text-xs text-muted-foreground">Seu próximo passo, no horário certo.</p></div>
+            <CheckCircle2 className="size-5 shrink-0 text-primary" aria-hidden="true" />
+            <div><h2 className="text-base font-semibold">Tarefas e lembretes</h2><p className="mt-1 text-xs leading-relaxed text-muted-foreground">Seu próximo passo, no horário certo.</p></div>
           </div>
-          <Button ref={newButton} size="sm" disabled={setup !== "ready" || busy || !!editor} onClick={() => { setEditor({ task: null }); setActionError(""); }}>
+          <Button ref={newButton} size="sm" variant="outline" className="min-h-11 gap-1.5 px-3" disabled={setup !== "ready" || busy || !!editor} onClick={() => { setEditor({ task: null }); setActionError(""); }}>
             <Plus className="size-4" aria-hidden="true" /> Nova tarefa
           </Button>
         </div>
@@ -227,23 +227,23 @@ function TaskList(): React.JSX.Element {
         }} />}
 
         {setup !== "missing" && <>
-          <div className="grid grid-cols-3 gap-2 text-center">
+          <div className="grid grid-cols-3 divide-x divide-border border-y border-border py-4 text-center">
             {[
               { label: "Atrasadas", count: data.counts.overdue, color: "text-rose-300" },
               { label: "Em até 30 min", count: data.counts.dueSoon, color: "text-amber-300" },
               { label: "De 30 min a 24h", count: data.counts.upcoming, color: "text-cyan-300" },
-            ].map(c => <div key={c.label} className="rounded-lg border border-border p-2"><p className={cn("text-lg font-bold tabular-nums", c.color)}>{loading || loadError ? "—" : c.count}</p><p className="text-xs text-muted-foreground">{c.label}</p></div>)}
+            ].map(c => <div key={c.label} className="px-1"><p className={cn("text-2xl font-semibold tabular-nums", c.color)}>{loading || loadError ? "—" : c.count}</p><p className="mt-1 text-xs leading-relaxed text-muted-foreground">{c.label}</p></div>)}
           </div>
           <div className="flex flex-wrap gap-1" role="group" aria-label="Filtrar tarefas">
-            <Button size="sm" variant={status === "pending" ? "secondary" : "ghost"} aria-pressed={status === "pending"} disabled={busy || !!editor} onClick={() => changeStatus("pending")}>Pendentes ({data.counts.pending})</Button>
-            <Button size="sm" variant={status === "completed" ? "secondary" : "ghost"} aria-pressed={status === "completed"} disabled={busy || !!editor} onClick={() => changeStatus("completed")}>Concluídas ({data.counts.completed})</Button>
+            <Button size="sm" className="min-h-11 px-3" variant={status === "pending" ? "secondary" : "ghost"} aria-pressed={status === "pending"} disabled={busy || !!editor} onClick={() => changeStatus("pending")}>Pendentes ({data.counts.pending})</Button>
+            <Button size="sm" className="min-h-11 px-3" variant={status === "completed" ? "secondary" : "ghost"} aria-pressed={status === "completed"} disabled={busy || !!editor} onClick={() => changeStatus("completed")}>Concluídas ({data.counts.completed})</Button>
           </div>
           {loading ? <p role="status" className="text-sm text-muted-foreground py-3">Carregando tarefas…</p> : !loadError && data.tasks.length === 0 ? <p className="text-sm text-muted-foreground py-3">{status === "pending" ? "Nenhuma tarefa pendente. Adicione o que precisa fazer." : "As tarefas que você concluir ficam aqui."}</p> : null}
           {Array.from(groups, ([group, tasks]) => <section key={group} aria-label={group} className="space-y-2">
             <h3 className="text-xs font-semibold text-muted-foreground">{group}</h3>
             <ul className="space-y-2">{tasks.map(task => {
               const state = deadline(task.due_at, now);
-              return <li key={task.id} className={cn("flex items-start gap-2 rounded-lg border p-2 text-foreground", task.completed_at ? "border-border" : state.color)}>
+              return <li key={task.id} className={cn("flex items-start gap-2 rounded-lg border p-3", task.completed_at ? "border-border" : state.color)}>
                 <label className="flex size-11 shrink-0 cursor-pointer items-center justify-center">
                   <input type="checkbox" checked={!!task.completed_at} disabled={busy || loading || !!editor} onChange={() => { void mutate(`/api/tasks/${task.id}`, "PATCH", { completed: !task.completed_at }, task.completed_at ? "Tarefa reaberta." : "Tarefa concluída."); }} aria-label={`${task.completed_at ? "Reabrir" : "Concluir"}: ${task.text}`} className="size-5 accent-cyan-500 focus-visible:outline-2 focus-visible:outline-ring" />
                 </label>
@@ -251,7 +251,7 @@ function TaskList(): React.JSX.Element {
                   <p className={cn("text-sm whitespace-pre-wrap break-words text-foreground", task.completed_at && "line-through text-muted-foreground")}>{task.text}</p>
                   {task.lead_id && <Link className="text-xs text-cyan-300 hover:underline break-words" href={`/leads?openLeadId=${task.lead_id}`}>{task.lead_name || `Lead #${task.lead_id}`}</Link>}
                   <p className="text-xs text-muted-foreground"><Clock className="inline size-3 mr-1" aria-hidden="true" /><time dateTime={task.due_at}>{fmtTime(task.due_at)}</time></p>
-                  <p className={cn("text-[11px] font-semibold", task.completed_at ? "text-emerald-300" : state.color)}>{task.completed_at ? `CONCLUÍDA EM ${fmtTime(task.completed_at)}` : state.label}</p>
+                  <p className={cn("text-[11px] font-medium", task.completed_at ? "text-emerald-300" : state.color.split(" ")[0])}>{task.completed_at ? `CONCLUÍDA EM ${fmtTime(task.completed_at)}` : state.label}</p>
                 </div>
                 <Button variant="ghost" size="icon" className="size-11 shrink-0" disabled={busy || !!editor} aria-label={`Editar: ${task.text}`} onClick={() => { setEditor({ task }); setActionError(""); }}><Pencil className="size-4" aria-hidden="true" /></Button>
               </li>;
@@ -277,7 +277,7 @@ function TaskList(): React.JSX.Element {
             </li>;
           })}</ul>
         </section>}
-        <p className="text-xs text-muted-foreground">Destaque 30 minutos antes do prazo. Atualização a cada 30s com esta aba visível. Sem alertas com o painel fechado.</p>
+        <p className="border-t border-border pt-4 text-xs leading-relaxed text-muted-foreground">Destaque 30 minutos antes do prazo. Atualização a cada 30s com esta aba visível. Sem alertas com o painel fechado.</p>
       </CardContent>
     </Card>
   );

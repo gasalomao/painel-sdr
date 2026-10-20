@@ -1,0 +1,60 @@
+.dashboard {
+  /* ponytail: tema válido só nesta superfície; migrar os tokens globais em uma revisão própria. */
+  --color-background: #101411;
+  --color-foreground: #edf2ee;
+  --color-card: #181d19;
+  --color-card-foreground: #edf2ee;
+  --color-popover: #181d19;
+  --color-popover-foreground: #edf2ee;
+  --color-primary: #6ee7b7;
+  --color-primary-foreground: #10251b;
+  --color-secondary: #262e28;
+  --color-secondary-foreground: #edf2ee;
+  --color-muted: #222a24;
+  --color-muted-foreground: #a5b1a8;
+  --color-accent: #262e28;
+  --color-accent-foreground: #edf2ee;
+  --color-destructive: #fda4af;
+  --color-border: #303a32;
+  --color-input: #3b483e;
+  --color-ring: #6ee7b7;
+  color-scheme: dark;
+  background: var(--color-background);
+  color: var(--color-foreground);
+  caret-color: var(--color-primary);
+}
+
+/* As utilities mantêm suas bordas sem o hsl(var()) legado fora das layers. */
+.dashboard * {
+  border-color: revert-layer;
+}
+
+.dashboard ::selection {
+  background: #6ee7b733;
+  color: var(--color-foreground);
+}
+
+.dashboard > header {
+  background: var(--color-background);
+}
+
+.content {
+  padding-bottom: calc(6rem + env(safe-area-inset-bottom, 0px));
+}
+
+.dashboard a:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: -2px;
+}
+
+:global(body):has(.dashboard) :global(.mobile-bottom-nav) {
+  height: calc(4rem + env(safe-area-inset-bottom, 0px));
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  background: #101411;
+}
+
+@media (min-width: 1024px) {
+  .content {
+    padding-bottom: 2rem;
+  }
+}

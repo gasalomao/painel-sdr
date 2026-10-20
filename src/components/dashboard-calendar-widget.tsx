@@ -17,7 +17,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { CalendarDays, ChevronRight, Loader2, Sparkles } from "lucide-react";
+import { CalendarDays, ChevronRight, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useClientSession } from "@/lib/use-session";
 import { supabase } from "@/lib/supabase";
@@ -46,7 +46,7 @@ function fmtDay(iso: string) {
   return new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "short" });
 }
 
-export function DashboardCalendarWidget() {
+export function DashboardCalendarWidget(): React.JSX.Element | null {
   const { session, loading: sessionLoading } = useClientSession();
   const [appts, setAppts] = useState<Appointment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -107,46 +107,39 @@ export function DashboardCalendarWidget() {
   const today = startOfDay(new Date()).getTime();
 
   return (
-    <Card className="glass-card border-none hover-float transition-all duration-500 overflow-hidden">
-      <CardContent className="p-5 sm:p-6 space-y-4">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="w-10 h-10 rounded-xl bg-emerald-500/15 ring-1 ring-emerald-500/20 flex items-center justify-center shrink-0">
-              <CalendarDays className="w-5 h-5 text-emerald-300" />
-            </div>
-            <div className="min-w-0">
-              <h3 className="text-sm font-black tracking-tight">Próximos agendamentos</h3>
-              <p className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">
-                30 dias adiante
-              </p>
-            </div>
+    <Card className="overflow-hidden border border-border bg-card py-0 shadow-none ring-0">
+      <CardContent className="space-y-4 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+          <div className="min-w-0">
+            <h2 className="text-base font-semibold">Próximos agendamentos</h2>
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">30 dias adiante</p>
           </div>
           <Link
             href="/calendario"
-            className="text-[10px] font-bold uppercase tracking-wider text-emerald-300 hover:text-emerald-200 flex items-center gap-1 shrink-0"
+            className="flex min-h-11 shrink-0 items-center gap-1 text-xs font-medium text-primary underline-offset-4 hover:underline"
           >
-            Ver tudo <ChevronRight className="w-3 h-3" />
+            Ver tudo <ChevronRight className="size-3.5" aria-hidden="true" />
           </Link>
         </div>
 
         {/* Stats — 3 contadores */}
-        <div className="grid grid-cols-3 gap-2">
-          <Stat label="Hoje" value={stats.hoje} accent="primary" />
-          <Stat label="7 dias" value={stats.semana} accent="emerald" />
-          <Stat label="30 dias" value={stats.mes} accent="cyan" />
+        <div className="grid grid-cols-3 divide-x divide-border border-y border-border py-3">
+          <Stat label="Hoje" value={stats.hoje} loading={loading} />
+          <Stat label="7 dias" value={stats.semana} loading={loading} />
+          <Stat label="30 dias" value={stats.mes} loading={loading} />
         </div>
 
         {/* Lista dos 5 próximos */}
         {loading ? (
-          <div className="flex items-center justify-center py-6 text-muted-foreground gap-2">
-            <Loader2 className="w-4 h-4 animate-spin" />
+          <div role="status" className="flex items-center justify-center gap-2 py-6 text-muted-foreground">
+            <Loader2 className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
             <span className="text-xs">Carregando…</span>
           </div>
         ) : appts.length === 0 ? (
-          <div className="text-center py-6 px-4 border border-dashed border-white/10 rounded-xl">
-            <Sparkles className="w-6 h-6 mx-auto mb-2 text-muted-foreground/40" />
-            <p className="text-xs text-muted-foreground">Nenhum agendamento nos próximos 30 dias.</p>
-            <p className="text-[10px] text-muted-foreground/60 mt-1">A IA agendará automaticamente quando o lead pedir.</p>
+          <div className="px-2 py-5 text-center">
+            <CalendarDays className="mx-auto mb-3 size-6 text-muted-foreground" aria-hidden="true" />
+            <p className="text-sm text-muted-foreground">Nenhum agendamento nos próximos 30 dias.</p>
+            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">A IA agendará automaticamente quando o lead pedir.</p>
           </div>
         ) : (
           <ul className="space-y-2">
@@ -170,18 +163,18 @@ export function DashboardCalendarWidget() {
                     daysAhead === 0 && "bg-primary/[0.05] border-primary/20"
                   )}
                 >
-                  <div className="flex flex-col items-center w-12 shrink-0 text-xs font-mono">
-                    <span className="text-[10px] text-muted-foreground uppercase">{fmtDay(a.start_at)}</span>
-                    <span className="font-bold text-foreground">{fmtTime(a.start_at)}</span>
+                  <div className="flex w-14 shrink-0 flex-col items-center gap-1 text-xs tabular-nums">
+                    <span className="text-xs text-muted-foreground">{fmtDay(a.start_at)}</span>
+                    <span className="font-semibold text-foreground">{fmtTime(a.start_at)}</span>
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-semibold truncate">{a.title}</p>
                     {a.service_name && (
-                      <p className="text-[10px] text-muted-foreground truncate">{a.service_name}</p>
+                      <p className="mt-1 truncate text-xs text-muted-foreground">{a.service_name}</p>
                     )}
                   </div>
                   {badge && (
-                    <Badge className={cn("text-[9px] font-bold border-0 shrink-0 mt-0.5", badge.color)}>
+                    <Badge className={cn("mt-0.5 shrink-0 border-0 text-[11px] font-medium", badge.color)}>
                       {badge.label}
                     </Badge>
                   )}
@@ -195,16 +188,11 @@ export function DashboardCalendarWidget() {
   );
 }
 
-function Stat({ label, value, accent }: { label: string; value: number; accent: "primary" | "emerald" | "cyan" }) {
-  const colors = {
-    primary: "bg-primary/10 text-primary ring-1 ring-primary/20",
-    emerald: "bg-emerald-500/10 text-emerald-300 ring-1 ring-emerald-500/20",
-    cyan: "bg-cyan-500/10 text-cyan-300 ring-1 ring-cyan-500/20",
-  };
+function Stat({ label, value, loading }: { label: string; value: number; loading: boolean }): React.JSX.Element {
   return (
-    <div className={cn("rounded-xl px-3 py-2 text-center", colors[accent])}>
-      <p className="text-[9px] uppercase font-bold tracking-widest opacity-80">{label}</p>
-      <p className="text-xl font-black tracking-tight mt-0.5">{value}</p>
+    <div className="px-2 text-center">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="mt-1 text-xl font-semibold tabular-nums">{loading ? "—" : value}</p>
     </div>
   );
 }
