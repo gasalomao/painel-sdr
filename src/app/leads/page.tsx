@@ -3,7 +3,6 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { Header } from "@/components/layout/header";
 import { Card, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -53,6 +52,7 @@ function KanbanSkeleton() {
 }
 import { cn } from "@/lib/utils";
 import { useClientSession } from "@/lib/use-session";
+import styles from "./leads.module.css";
 
 interface Lead {
   id: number;
@@ -537,49 +537,77 @@ export default function LeadsPage() {
       }
   };
   const totalPages = Math.ceil(total / PAGE_SIZE);
+  const hasFilters = search !== "" || categoryFilter !== "all" || disparoFilter !== "all";
+  const clearFilters = () => {
+    setSearch("");
+    setCategoryFilter("all");
+    setDisparoFilter("all");
+    setPage(0);
+  };
+  const statusLabel = (status: string | null | undefined): string => {
+    const key = status || "novo";
+    const label = columns.find((column) => column.id === key)?.label || KANBAN_COLUMNS.find((column) => column.id === key)?.label || key.replace(/_/g, " ");
+    return label.replace(/\s*✅/g, "");
+  };
 
   const handleKanbanLeadsUpdated = useCallback((updatedLeads: Lead[]) => {
     setLeads(updatedLeads);
   }, []);
 
   return (
-    <div className="flex flex-col h-[100dvh] bg-background overflow-hidden" style={{backgroundImage: "radial-gradient(ellipse at 50% -20%, rgba(120,119,198,0.1), transparent 80%)"}}>
+    <div className={cn(styles.crm, "flex h-[100dvh] min-w-0 flex-col overflow-hidden")}>
       <Header />
-      <div className="flex-1 p-3 sm:p-6 space-y-4 sm:space-y-6 mobile-safe-bottom overflow-y-auto custom-scrollbar">
+      <div className={cn(styles.content, "flex-1 min-h-0 overflow-y-auto")}>
+        <div className={styles.heading}>
+          <div>
+            <h2>Clientes</h2>
+            <p>Seus contatos, suas oportunidades e o próximo passo.</p>
+          </div>
+          <Button onClick={() => setAddLeadOpen(true)} className={styles.primaryAction}>
+            <UserPlus className="size-4" /> Adicionar Cliente
+          </Button>
+        </div>
         {/* Toolbar */}
-        <div className="flex flex-col gap-3 sm:gap-4 glass-card p-3 sm:p-4 rounded-2xl border-white/10">
-          
-          <div className="flex flex-col sm:flex-row gap-3 w-full xl:w-auto flex-1">
-              <div className="relative w-full sm:w-80">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+        <section className={styles.toolbar} aria-label="Filtros e visualização dos clientes">
+          <div className={styles.searchRow}>
+              <div className={styles.search}>
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
                 <Input
-                  placeholder="Buscar por nome, telefone..."
+                  type="search"
+                  aria-label="Buscar clientes"
+                  placeholder="Buscar nome ou telefone"
                   value={search}
                   onChange={(e) => { setSearch(e.target.value); setPage(0); }}
-                  className="pl-9 bg-white/5 border-white/10 rounded-xl"
+                  className={styles.searchInput}
                 />
               </div>
               
               <Select value={categoryFilter} onValueChange={(val) => setCategoryFilter(val as string || "all")}>
-                  <SelectTrigger className="w-full sm:w-[220px] bg-white/5 border-white/10 rounded-xl text-xs">
-                      <Filter className="w-4 h-4 mr-2 text-muted-foreground" />
-                      <SelectValue placeholder="Categoria" />
+                  <SelectTrigger className={styles.categoryFilter} aria-label="Filtrar por categoria">
+                      <Filter className="size-4 text-muted-foreground" />
+                      <SelectValue>{categoryFilter === "all" ? "Todas as categorias" : categoryFilter}</SelectValue>
                   </SelectTrigger>
-                  <SelectContent className="glass-card">
+                  <SelectContent className="border-[#3b483e] bg-[#181d19] text-[#edf2ee]">
                       <SelectItem value="all">Todas as Categorias</SelectItem>
                       {categories.map(c => (
                           <SelectItem key={c} value={c}>{c}</SelectItem>
                       ))}
                   </SelectContent>
               </Select>
+              {hasFilters && (
+                <Button variant="ghost" onClick={clearFilters} className={styles.clearFilters}>
+                  <X className="size-3.5" /> Limpar filtros
+                </Button>
+              )}
           </div>
 
-          <div className="flex items-center gap-2 w-full overflow-x-auto">
-            <div className="flex bg-white/5 p-1 rounded-xl border border-white/10 mr-2">
+          <div className={styles.viewRow}>
+            <div className={styles.segmented} role="group" aria-label="Visualização dos clientes">
                 <Button 
                     variant={viewMode === "list" ? "secondary" : "ghost"} 
                     size="sm" 
-                    className={cn("h-8 px-4 gap-2 text-xs rounded-lg transition-all", viewMode === "list" && "bg-primary text-primary-foreground shadow-md")}
+                    className={styles.viewButton}
+                    aria-pressed={viewMode === "list"}
                     onClick={() => setViewMode("list")}
                 >
                     <List className="w-3.5 h-3.5" /> Lista
@@ -587,7 +615,8 @@ export default function LeadsPage() {
                 <Button 
                     variant={viewMode === "kanban" ? "secondary" : "ghost"} 
                     size="sm" 
-                    className={cn("h-8 px-4 gap-2 text-xs rounded-lg transition-all", viewMode === "kanban" && "bg-primary text-primary-foreground shadow-md")}
+                    className={styles.viewButton}
+                    aria-pressed={viewMode === "kanban"}
                     onClick={() => setViewMode("kanban")}
                 >
                     <LayoutGrid className="w-3.5 h-3.5" /> Kanban
@@ -596,11 +625,12 @@ export default function LeadsPage() {
             
             {/* Disparo Status Segmented Control */}
             {viewMode === "list" && (
-            <div className="flex bg-white/5 p-1 rounded-xl border border-white/10 mr-2">
+            <div className={styles.disparoFilters} role="group" aria-label="Filtrar por disparo">
                 <Button 
                     variant="ghost" 
                     size="sm" 
-                    className={cn("h-8 px-3 gap-1.5 text-xs rounded-lg transition-all", disparoFilter === "all" && "bg-white/15 text-white shadow-md")}
+                    className={styles.filterButton}
+                    aria-pressed={disparoFilter === "all"}
                     onClick={() => { setDisparoFilter("all"); setPage(0); }}
                 >
                     Todos
@@ -608,7 +638,8 @@ export default function LeadsPage() {
                 <Button 
                     variant="ghost" 
                     size="sm" 
-                    className={cn("h-8 px-3 gap-1.5 text-xs rounded-lg transition-all", disparoFilter === "pending" && "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shadow-md")}
+                    className={styles.filterButton}
+                    aria-pressed={disparoFilter === "pending"}
                     onClick={() => { setDisparoFilter("pending"); setPage(0); }}
                 >
                     <Send className="w-3 h-3" /> Pendentes
@@ -616,7 +647,8 @@ export default function LeadsPage() {
                 <Button 
                     variant="ghost" 
                     size="sm" 
-                    className={cn("h-8 px-3 gap-1.5 text-xs rounded-lg transition-all", disparoFilter === "sent" && "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 shadow-md")}
+                    className={styles.filterButton}
+                    aria-pressed={disparoFilter === "sent"}
                     onClick={() => { setDisparoFilter("sent"); setPage(0); }}
                 >
                     <CheckCircle2 className="w-3 h-3" /> Disparados
@@ -624,16 +656,15 @@ export default function LeadsPage() {
             </div>
             )}
             
-            <Badge variant="secondary" className="px-3 py-1 bg-white/5 border-white/10 font-mono">
-                {total.toLocaleString("pt-BR")} Leads
-            </Badge>
+            <span className={styles.total}>{loading ? "Carregando..." : `${total.toLocaleString("pt-BR")} ${total === 1 ? "contato" : "contatos"}`}</span>
 
+            <div className={styles.maintenance}>
             <Button
               variant="outline"
               size="sm"
               onClick={handleSyncPhotos}
               disabled={syncProgress?.inFlight}
-              className="gap-2 shadow-sm rounded-xl border-white/10 bg-white/5 hover:bg-white/10 shrink-0 text-xs text-zinc-200"
+              className={styles.secondaryAction}
               title="Sincronizar fotos de todos os leads cadastrados (independente de filtros)"
               aria-label="Sincronizar fotos de todos os leads"
             >
@@ -642,22 +673,15 @@ export default function LeadsPage() {
               ) : (
                 <RotateCw className="w-3.5 h-3.5 text-emerald-400" />
               )}
-              <span className="hidden sm:inline">
-                {syncProgress?.inFlight ? "Sincronizando..." : "Sincronizar Fotos"}
-              </span>
+              <span>{syncProgress?.inFlight ? "Sincronizando..." : "Sincronizar fotos"}</span>
             </Button>
             
-            <Button variant="outline" size="sm" onClick={exportXLSX} className="gap-2 shadow-sm rounded-xl border-white/10 bg-white/5 hover:bg-white/10 shrink-0">
-              <Download className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Exportar</span>
+            <Button variant="outline" size="sm" onClick={exportXLSX} className={styles.secondaryAction} aria-label="Exportar clientes para Excel">
+              <Download className="size-3.5" /> Exportar
             </Button>
-
-            <Button size="sm" onClick={() => setAddLeadOpen(true)} className="gap-2 shadow-sm rounded-xl shrink-0">
-              <UserPlus className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Adicionar Cliente</span>
-            </Button>
+            </div>
           </div>
-        </div>
+        </section>
 
         {syncProgress && (
           <div
@@ -714,7 +738,7 @@ export default function LeadsPage() {
         <AddLeadDialog
           open={addLeadOpen}
           onOpenChange={setAddLeadOpen}
-          onCreated={() => { setPage(0); /* recarrega lista */ }}
+          onCreated={() => { if (page === 0) void fetchLeads(); else setPage(0); }}
         />
 
         {viewMode === "list" && selectedCount > 0 && (
@@ -768,11 +792,15 @@ export default function LeadsPage() {
         )}
 
         {viewMode === "list" ? (
-          <Card className="border-white/10 bg-black/40 backdrop-blur-xl shadow-2xl rounded-2xl overflow-hidden">
+          <Card className={styles.listPanel}>
             <CardContent className="p-0">
+              <div className={styles.listHeading}>
+                <div><h3>Seus contatos</h3><p>Selecione um cliente para abrir a ficha completa.</p></div>
+                <span className={styles.resultCount}>{loading ? "Atualizando" : `${leads.length} nesta página`}</span>
+              </div>
               {/* Desktop Table */}
-              <div className="overflow-x-auto min-h-[300px] sm:min-h-[500px] hidden sm:block">
-                <Table>
+              <div className={styles.desktopTable} aria-busy={loading}>
+                <Table className={styles.table} aria-label="Clientes cadastrados">
                   <TableHeader>
                     <TableRow className="border-white/10 hover:bg-transparent bg-white/5">
                       <TableHead className="w-[44px] py-5 pl-6 pr-0">
@@ -786,11 +814,11 @@ export default function LeadsPage() {
                           disabled={loading || leads.length === 0}
                         />
                       </TableHead>
-                      <TableHead className="text-[10px] uppercase font-black tracking-wider text-muted-foreground py-5">Lead</TableHead>
+                      <TableHead className="text-[10px] uppercase font-black tracking-wider text-muted-foreground py-5">Cliente / Etapa</TableHead>
                       <TableHead className="text-[10px] uppercase font-black tracking-wider text-muted-foreground py-5">Contato</TableHead>
                       <TableHead className="text-[10px] uppercase font-black tracking-wider text-muted-foreground py-5">Categoria</TableHead>
                       <TableHead className="text-[10px] uppercase font-black tracking-wider text-muted-foreground py-5">Reputação</TableHead>
-                      <TableHead className="text-[10px] uppercase font-black tracking-wider text-muted-foreground py-5">Data</TableHead>
+                      <TableHead className={cn(styles.dateColumn, "text-muted-foreground")}>Cadastro</TableHead>
                       <TableHead className="text-[10px] uppercase font-black tracking-wider text-muted-foreground py-5 text-right pr-6">Ações</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -810,9 +838,11 @@ export default function LeadsPage() {
                     ) : leads.length === 0 ? (
                       <TableRow>
                         <TableCell colSpan={7} className="text-center py-32 text-muted-foreground">
-                          <div className="flex flex-col items-center gap-3">
-                              <Search className="w-12 h-12 opacity-10" />
-                              <p className="text-sm font-medium">Nenhum resultado encontrado nesta visão.</p>
+                          <div className={styles.empty}>
+                            <Search className="size-8" />
+                            <h3>{hasFilters ? "Nenhum cliente encontrado" : "Sua carteira começa aqui"}</h3>
+                            <p>{hasFilters ? "Tente outro nome, telefone ou categoria." : "Adicione um cliente para acompanhar suas oportunidades."}</p>
+                            <Button variant="outline" onClick={hasFilters ? clearFilters : () => setAddLeadOpen(true)}>{hasFilters ? "Remover filtros" : "Adicionar primeiro cliente"}</Button>
                           </div>
                         </TableCell>
                       </TableRow>
@@ -845,28 +875,28 @@ export default function LeadsPage() {
                                   fallbackClassName="text-xs font-bold bg-zinc-800 text-zinc-300"
                                 />
                                 <div className="min-w-0">
-                                  <div className="font-bold text-white/90 max-w-[220px] truncate flex items-center gap-2">
-                                    {lead.nome_negocio || "—"}
+                                  <div className={styles.identity}>
+                                    <button type="button" className={styles.clientName} aria-label={`Abrir ficha de ${lead.nome_negocio || "cliente"}`} title={lead.nome_negocio} onClick={(event) => { event.stopPropagation(); setSelectedLead(lead); }}>{lead.nome_negocio || "Sem nome"}</button>
                                     {(lead.primeiro_contato_source === "disparo" || disparoJids.has(lead.remoteJid)) && (
                                       <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-cyan-500/15 text-cyan-300 text-[9px] font-bold border border-cyan-500/25 whitespace-nowrap" title={lead.primeiro_contato_at ? `Disparado em ${new Date(lead.primeiro_contato_at).toLocaleDateString("pt-BR")}` : "Lead já recebeu disparo"}>
                                         <Send className="w-2.5 h-2.5" /> Disparado
                                       </span>
                                     )}
                                   </div>
-                                  <div className="text-[10px] text-muted-foreground mt-0.5 uppercase tracking-wider">{lead.status || "NOVO"}</div>
+                                  <div className={styles.stage} data-status={lead.status || "novo"}>{statusLabel(lead.status)}</div>
                                 </div>
                               </div>
                           </TableCell>
                           <TableCell className="py-4">
-                              <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-green-500/10 text-green-400 font-mono text-xs border border-green-500/20">
+                              <div className={styles.phone}>
                                   <Phone className="w-3 h-3" />
                                   {lead.telefone || formatPhone(lead.remoteJid)}
                               </div>
                           </TableCell>
                           <TableCell className="py-4">
-                            <Badge variant="secondary" className="bg-white/5 hover:bg-white/10 text-[10px] text-white/70 font-medium py-1">
-                                {lead.ramo_negocio || "—"}
-                            </Badge>
+                            <span className={styles.category}>
+                                {lead.ramo_negocio || "Sem categoria"}
+                            </span>
                           </TableCell>
                           <TableCell className="py-4">
                               <div className="flex items-center gap-1.5">
@@ -878,18 +908,18 @@ export default function LeadsPage() {
                                   ) : <span className="text-muted-foreground text-xs">—</span>}
                               </div>
                           </TableCell>
-                          <TableCell className="text-[11px] text-muted-foreground py-4 tabular-nums">
+                          <TableCell className={cn(styles.dateColumn, "text-xs text-muted-foreground tabular-nums")}>
                             {new Date(lead.created_at).toLocaleDateString("pt-BR")}
                           </TableCell>
                           <TableCell className="text-right py-4 pr-6">
-                              <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                                  <Button size="icon" variant="ghost" className="h-8 w-8 hover:bg-white/10" onClick={(e) => { e.stopPropagation(); setSelectedLead(lead); }} title="Detalhes">
+                              <div className={styles.rowActions}>
+                                  <Button size="icon" variant="ghost" className={styles.rowAction} aria-label={`Ver detalhes de ${lead.nome_negocio || "cliente"}`} onClick={(e) => { e.stopPropagation(); setSelectedLead(lead); }} title="Abrir ficha">
                                       <ExternalLink className="w-3.5 h-3.5 text-blue-400" />
                                   </Button>
-                                  <Button size="icon" variant="ghost" className="h-8 w-8 hover:bg-rose-500/15" onClick={(e) => { e.stopPropagation(); window.open(mapsUrlFor(lead), "_blank"); }} title="Ver no Maps">
+                                  <Button size="icon" variant="ghost" className={styles.rowAction} aria-label={`Ver ${lead.nome_negocio || "cliente"} no Maps`} onClick={(e) => { e.stopPropagation(); window.open(mapsUrlFor(lead), "_blank", "noopener,noreferrer"); }} title="Ver no Maps">
                                       <MapPin className="w-3.5 h-3.5 text-rose-400" />
                                   </Button>
-                                  <Button size="icon" variant="ghost" className="h-8 w-8 hover:bg-red-500/20" onClick={(e) => {
+                                  <Button size="icon" variant="ghost" className={cn(styles.rowAction, styles.deleteAction)} aria-label={`Excluir ${lead.nome_negocio || "cliente"}`} title="Excluir cliente" onClick={(e) => {
                                       e.stopPropagation();
                                       setLeadToDelete(lead);
                                       setShowConfirmDelete(true);
@@ -906,20 +936,24 @@ export default function LeadsPage() {
               </div>
 
               {/* Mobile Card List */}
-              <div className="sm:hidden divide-y divide-white/5">
+              <div className={styles.mobileList} aria-busy={loading}>
                 {loading ? (
                   [...Array(6)].map((_, i) => <div key={i} className="h-20 animate-pulse bg-white/5" />)
                 ) : leads.length === 0 ? (
-                  <div className="py-16 text-center text-muted-foreground">
-                    <Search className="w-10 h-10 mx-auto opacity-10 mb-3" />
-                    <p className="text-sm">Nenhum lead encontrado</p>
+                  <div className={styles.empty}>
+                    <Search className="size-8" />
+                    <h3>{hasFilters ? "Nenhum cliente encontrado" : "Sua carteira começa aqui"}</h3>
+                    <p>{hasFilters ? "Tente outro nome, telefone ou categoria." : "Adicione seu primeiro cliente para começar."}</p>
+                    <Button variant="outline" onClick={hasFilters ? clearFilters : () => setAddLeadOpen(true)}>{hasFilters ? "Remover filtros" : "Adicionar primeiro cliente"}</Button>
                   </div>
                 ) : (
                   leads.map((lead) => (
                     <button
                       key={lead.id}
+                      type="button"
+                      aria-label={`Abrir ficha de ${lead.nome_negocio || "cliente"}`}
                       onClick={() => setSelectedLead(lead)}
-                      className="w-full text-left flex items-center gap-3 p-3 active:bg-white/5 transition-colors"
+                      className={styles.mobileContact}
                     >
                       <LeadAvatar
                         url={lead.profilePicUrl}
@@ -934,27 +968,27 @@ export default function LeadsPage() {
                             <Send className="w-3 h-3 text-cyan-400 shrink-0" />
                           )}
                         </div>
-                        <div className="flex items-center gap-2 mt-0.5">
-                          <span className="text-[10px] text-muted-foreground">{lead.ramo_negocio || "Geral"}</span>
+                        <div className="flex flex-wrap items-center gap-2 mt-1">
+                          <span className="text-xs text-muted-foreground">{lead.ramo_negocio || "Sem categoria"}</span>
                           {lead.rating && (
                             <span className="flex items-center gap-0.5 text-[10px] text-amber-400">
                               <Star className="w-2.5 h-2.5 fill-amber-400" />{lead.rating}
                             </span>
                           )}
                         </div>
+                        <div className={styles.mobilePhone}><Phone className="size-3" />{lead.telefone || formatPhone(lead.remoteJid)}</div>
+                        <div className={styles.stage} data-status={lead.status || "novo"}>{statusLabel(lead.status)}</div>
                       </div>
-                      <div className="shrink-0 text-right">
-                        <Badge variant="secondary" className="text-[9px] bg-white/5 border-white/10">{lead.status || "novo"}</Badge>
-                      </div>
+                      <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
                     </button>
                   ))
                 )}
               </div>
 
               {totalPages > 1 && (
-                <div className="flex items-center justify-between px-3 sm:px-6 py-3 sm:py-4 border-t border-white/5 bg-black/20 backdrop-blur-md">
-                  <span className="text-[10px] sm:text-xs text-muted-foreground font-medium">
-                    {page + 1}/{totalPages}
+                <div className={styles.pagination} aria-label="Paginação dos clientes">
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    Página {page + 1} de {totalPages}
                   </span>
                   <div className="flex gap-2">
                     <Button variant="outline" size="sm" className="h-8 px-3 text-xs bg-white/5 border-white/10" disabled={page === 0} onClick={() => setPage(page - 1)}>
@@ -1022,7 +1056,7 @@ export default function LeadsPage() {
                   <div className="w-16 h-16 rounded-full bg-red-500/20 flex items-center justify-center">
                       <Trash2 className="w-8 h-8 text-red-500" />
                   </div>
-                  <DialogTitle className="text-xl font-black text-white">Purgar Lead Definitivamente?</DialogTitle>
+                  <DialogTitle className="text-xl font-semibold text-white">Excluir cliente?</DialogTitle>
                   <p className="text-sm text-neutral-300">
                       Você está prestes a excluir <strong className="text-white">&quot;{leadToDelete?.nome_negocio || "este lead"}&quot;</strong>.
                       <br/>Escolha abaixo o quão profunda será esta exclusão.
