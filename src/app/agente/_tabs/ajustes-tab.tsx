@@ -184,6 +184,7 @@ function TranscriptionModelPicker({ agentId }: { agentId: number | null }) {
       {/* Catálogo disponível */}
       <div className="space-y-2">
         <Input
+          aria-label="Buscar modelo de transcrição"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Buscar modelo..."
@@ -246,7 +247,7 @@ export function AjustesTab({
   saving: boolean;
 }) {
   return (
-    <section className="border border-white/[0.08] bg-card/80 rounded-xl shadow-none space-y-6 p-6">
+    <section aria-label="Ajustes de atendimento" className="min-w-0 border border-white/10 bg-card rounded-2xl space-y-6 p-4 sm:p-6">
       <header className="flex items-center gap-3 border-b border-white/[0.06] pb-4">
         <div className="p-2.5 rounded-xl bg-primary/15 text-primary shrink-0">
           <Clock className="w-5 h-5" />
@@ -281,7 +282,7 @@ export function AjustesTab({
       {/* Tabela de horários */}
       {!is24h && (
         <div className="space-y-2 border border-white/[0.06] rounded-xl overflow-hidden">
-          <div className="grid grid-cols-12 gap-4 px-4 py-3 items-center border-b border-white/[0.06] bg-white/[0.02]">
+          <div className="hidden sm:grid grid-cols-12 gap-4 px-4 py-3 items-center border-b border-white/[0.06] bg-white/[0.02]">
             <div className="col-span-4 text-xs font-medium uppercase tracking-wide text-muted-foreground">Dia</div>
             <div className="col-span-8 grid grid-cols-[auto_1fr_1fr] gap-3 items-center">
               <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground w-16">Ativo</span>
@@ -292,10 +293,10 @@ export function AjustesTab({
           {schedules.map((row, idx) => (
             <div
               key={row.day}
-              className="grid grid-cols-12 gap-4 px-4 py-3 items-center border-b border-white/[0.04] last:border-0"
+              className="grid grid-cols-1 sm:grid-cols-12 gap-3 sm:gap-4 px-3 sm:px-4 py-4 items-center border-b border-white/[0.06] last:border-0"
             >
-              <div className="col-span-4 text-sm font-medium text-foreground/90">{row.day}</div>
-              <div className="col-span-8 grid grid-cols-[auto_1fr_1fr] gap-3 items-center">
+              <div className="sm:col-span-4 text-sm font-medium text-foreground/90">{row.day}</div>
+              <div className="sm:col-span-8 grid grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)] gap-3 items-center">
                 <Toggle
                   checked={row.active}
                   onCheckedChange={(next) => {
@@ -309,8 +310,9 @@ export function AjustesTab({
                 />
                 <Input
                   type="time"
+                  aria-label={`Início do atendimento de ${row.day}`}
                   disabled={!row.active}
-                  className="bg-white/[0.02] border-white/[0.08] h-9 text-sm rounded-lg disabled:opacity-40"
+                  className="min-w-0 w-full bg-white/[0.02] border-white/[0.08] h-11 text-base sm:text-sm rounded-lg disabled:opacity-40"
                   value={row.start}
                   onChange={(e) => {
                     const ns = [...schedules];
@@ -320,8 +322,9 @@ export function AjustesTab({
                 />
                 <Input
                   type="time"
+                  aria-label={`Fim do atendimento de ${row.day}`}
                   disabled={!row.active}
-                  className="bg-white/[0.02] border-white/[0.08] h-9 text-sm rounded-lg disabled:opacity-40"
+                  className="min-w-0 w-full bg-white/[0.02] border-white/[0.08] h-11 text-base sm:text-sm rounded-lg disabled:opacity-40"
                   value={row.end}
                   onChange={(e) => {
                     const ns = [...schedules];
@@ -337,8 +340,8 @@ export function AjustesTab({
 
       {/* Mensagem de ausência */}
       <div className="space-y-2">
-        <div className="flex items-baseline justify-between">
-          <label className="text-sm font-medium text-foreground">Mensagem de ausência</label>
+        <div className="flex flex-wrap gap-2 items-baseline justify-between">
+          <label htmlFor="agent-away-message" className="text-sm font-medium text-foreground">Mensagem de ausência</label>
           {is24h && (
             <span className="text-xs text-muted-foreground">Não é usada no modo 24h</span>
           )}
@@ -349,6 +352,7 @@ export function AjustesTab({
             : "Enviada automaticamente quando alguém manda mensagem fora dos horários ativos acima."}
         </p>
         <Textarea
+          id="agent-away-message"
           value={awayMessage}
           onChange={(e) => setAwayMessage(e.target.value)}
           placeholder="Ex: Olá! No momento estamos fora do horário de atendimento. Retornamos amanhã às 08:00."

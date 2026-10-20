@@ -1,0 +1,89 @@
+.agent {
+  /* ponytail: tokens válidos só nesta rota; tema global fica para revisão própria. */
+  --color-background: #101411;
+  --color-foreground: #edf2ee;
+  --color-card: #181d19;
+  --color-card-foreground: #edf2ee;
+  --color-popover: #181d19;
+  --color-popover-foreground: #edf2ee;
+  --color-primary: #6ee7b7;
+  --color-primary-foreground: #10251b;
+  --color-secondary: #262e28;
+  --color-secondary-foreground: #edf2ee;
+  --color-muted: #222a24;
+  --color-muted-foreground: #a5b1a8;
+  --color-accent: #262e28;
+  --color-accent-foreground: #edf2ee;
+  --color-destructive: #fda4af;
+  --color-border: #303a32;
+  --color-input: #3b483e;
+  --color-ring: #6ee7b7;
+  color-scheme: dark;
+  color: var(--color-foreground);
+  background: var(--color-background);
+  caret-color: var(--color-primary);
+}
+
+.agent * { border-color: revert-layer; }
+.agent ::selection { background: #6ee7b733; color: var(--color-foreground); }
+.agent > header { background: var(--color-background); }
+.agent :is(button, a, input, textarea, select, summary):focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: 3px;
+}
+.agent :is(input, textarea, select) { min-width: 0; max-width: 100%; }
+.agent :is(input, textarea)::placeholder { color: var(--color-muted-foreground); }
+.agent select option { background: var(--color-popover); color: var(--color-foreground); }
+.agent :is(p, code) { overflow-wrap: anywhere; }
+
+.content { padding-bottom: calc(6rem + env(safe-area-inset-bottom, 0px)); }
+
+.info :is([class~="text-[9px]"], [class~="text-[10px]"], [class~="text-[11px]"]) {
+  font-size: 0.75rem;
+  line-height: 1.6;
+}
+.info label { text-transform: none; letter-spacing: normal; }
+.info > section > div { min-width: 0; }
+.agent [data-agent-simulation] :is(input, textarea, select) { min-height: 2.75rem; font-size: 0.875rem; }
+.agent [data-agent-simulation] :is(label, [class~="text-[9px]"], [class~="text-[10px]"]) { font-size: 0.75rem; letter-spacing: normal; }
+.agent [data-agent-simulation] label { text-transform: none; }
+
+.saveBar {
+  position: sticky;
+  bottom: calc(4.75rem + env(safe-area-inset-bottom, 0px));
+  z-index: 20;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.875rem;
+  background: var(--color-card);
+  box-shadow: 0 8px 24px #0004;
+}
+
+:global(body):has(.agent) :global(.mobile-bottom-nav) {
+  height: calc(4rem + env(safe-area-inset-bottom, 0px));
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  background: #101411;
+}
+
+@media (max-width: 639px) {
+  .info :is(input:not([type="checkbox"]):not([type="file"]), textarea, select),
+  .agent [data-agent-simulation] :is(input, textarea, select) { font-size: 1rem; }
+  .info [class~="justify-between"] { flex-wrap: wrap; row-gap: 0.75rem; }
+  .info [class~="p-6"] { padding: 1rem; }
+  .info [class~="font-mono"] { overflow-wrap: anywhere; }
+  .agent button[role="switch"]::after { content: ""; position: absolute; inset: -0.75rem -0.25rem; }
+}
+
+@media (min-width: 1024px) {
+  .content { padding-bottom: 2rem; }
+  .saveBar { bottom: 1rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent *, .agent *::before, .agent *::after { transition: none; animation: none; scroll-behavior: auto; }
+}

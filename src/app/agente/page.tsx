@@ -17,6 +17,7 @@ import { supabase } from "@/lib/supabase";
 import { renderTemplate } from "@/lib/template-vars";
 import { sandboxSuppressionMessage } from "@/lib/agent-format";
 import { cn } from "@/lib/utils";
+import styles from "./agente.module.css";
 import { useClientSession } from "@/lib/use-session";
 import { Activity, FlaskConical, Info, ListTree, Settings, type LucideIcon } from "lucide-react";
 import type { GroupableModel } from "@/lib/model-grouping";
@@ -1087,10 +1088,10 @@ export default function AgentePage() {
      RENDER
   ==================================================================== */
   return (
-    <div className="flex flex-col h-[100dvh] max-h-[100dvh] bg-background overflow-hidden selection:bg-primary/30 text-white">
+    <div className={cn(styles.agent, "flex flex-col h-[100dvh] max-h-[100dvh] overflow-hidden")}>
       <Header />
 
-      <main className="flex-1 overflow-y-auto w-full">
+      <main className="flex-1 min-h-0 overflow-y-auto w-full" aria-label="Configuração do agente IA">
         <AgentSwitcher
           activeAgentId={activeAgentId}
           agentsList={agentsList}
@@ -1100,11 +1101,11 @@ export default function AgentePage() {
           clientId={clientId}
         />
 
-        <div className="max-w-6xl mx-auto p-3 sm:p-8 space-y-6 sm:space-y-8 mobile-safe-bottom">
+        <div className={cn(styles.content, "max-w-6xl mx-auto px-4 py-6 sm:px-8 sm:py-8 space-y-6")}>
           {/* Tabs nav */}
           <TabsNav active={activeTab} onChange={setActiveTab} showAdvanced={advancedMode} onToggleAdvanced={toggleAdvancedMode} />
 
-          <div className="space-y-12 pb-8 mobile-safe-bottom">
+          <div className="min-w-0 space-y-8 pb-4">
             {activeTab === "info" && (
               <InfoTab
                 nomeAgente={nomeAgente} setNomeAgente={setNomeAgente}
@@ -1270,8 +1271,8 @@ function TabsNav({ active, onChange, showAdvanced, onToggleAdvanced }: {
   showAdvanced: boolean;
   onToggleAdvanced: () => void;
 }) {
-  const tabs: Array<{ id: Tab; icon: LucideIcon; label: string; shortLabel?: string; advancedOnly?: boolean }> = [
-    { id: "info",    icon: Info,         label: "Informações", shortLabel: "Info" },
+  const tabs: Array<{ id: Tab; icon: LucideIcon; label: string; advancedOnly?: boolean }> = [
+    { id: "info",    icon: Info,         label: "Informações" },
     { id: "ajustes", icon: Settings,     label: "Ajustes" },
     { id: "etapas",  icon: ListTree,     label: "Etapas", advancedOnly: true },
     { id: "testes",  icon: FlaskConical, label: "Testes" },
@@ -1280,47 +1281,49 @@ function TabsNav({ active, onChange, showAdvanced, onToggleAdvanced }: {
   const visible = tabs.filter((t) => !t.advancedOnly || showAdvanced);
 
   return (
-    <div className="flex items-stretch border-b border-white/[0.06] mobile-tabs-scroll pb-px">
-      <div className="flex gap-1 overflow-x-auto flex-1 min-w-0">
+    <nav aria-label="Abas de configuração do agente" className="space-y-3">
+      <div className="flex items-start sm:items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold tracking-tight">Configure seu agente</h2>
+          <p className="text-sm text-muted-foreground mt-1 hidden sm:block">Defina o atendimento, ajuste os horários e teste as respostas.</p>
+        </div>
+        <button
+          type="button"
+          onClick={onToggleAdvanced}
+          aria-pressed={showAdvanced}
+          title={showAdvanced ? "Ocultar abas avançadas (Etapas e Logs)" : "Mostrar abas avançadas (Etapas e Logs)"}
+          className={cn(
+            "inline-flex shrink-0 min-h-11 items-center gap-2 px-3 rounded-lg text-xs font-medium border transition-colors",
+            showAdvanced ? "bg-primary/10 border-primary/30 text-primary" : "border-white/10 text-muted-foreground hover:text-foreground hover:bg-white/5"
+          )}
+        >
+          <Settings className="w-3.5 h-3.5" aria-hidden="true" />
+          {showAdvanced ? "Ocultar avançado" : "Avançado"}
+        </button>
+      </div>
+      <div className="flex gap-1 overflow-x-auto min-w-0 border-b border-white/10 pb-px">
         {visible.map((t) => {
           const Icon = t.icon;
           const isActive = active === t.id;
           return (
             <button
               key={t.id}
+              type="button"
+              aria-current={isActive ? "page" : undefined}
               onClick={() => onChange(t.id)}
               className={cn(
-                "flex items-center gap-2 px-4 py-2.5 text-sm font-medium rounded-t-lg whitespace-nowrap transition-colors border-b-2 -mb-px",
+                "flex min-h-12 shrink-0 items-center gap-2 px-3 sm:px-4 py-2.5 text-sm font-medium rounded-t-lg whitespace-nowrap transition-colors border-b-2 -mb-px",
                 isActive
-                  ? "border-primary text-foreground"
+                  ? "border-primary bg-primary/5 text-primary"
                   : "border-transparent text-muted-foreground hover:text-foreground hover:bg-white/[0.03]"
               )}
             >
-              <Icon className="w-4 h-4" />
-              {t.shortLabel ? (
-                <>
-                  <span className="hidden sm:inline">{t.label}</span>
-                  <span className="sm:hidden">{t.shortLabel}</span>
-                </>
-              ) : (
-                <span>{t.label}</span>
-              )}
+              <Icon className="w-4 h-4" aria-hidden="true" />
+              <span>{t.label}</span>
             </button>
           );
         })}
       </div>
-      <button
-        onClick={onToggleAdvanced}
-        title={showAdvanced ? "Ocultar abas avançadas (Etapas e Logs)" : "Mostrar abas avançadas (Etapas e Logs)"}
-        className={cn(
-          "shrink-0 self-center ml-2 px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-widest border transition-colors cursor-pointer",
-          showAdvanced
-            ? "bg-primary/15 border-primary/40 text-primary"
-            : "bg-white/[0.03] border-white/10 text-muted-foreground hover:text-foreground hover:bg-white/[0.06]"
-        )}
-      >
-        {showAdvanced ? "− Avançado" : "Avançado"}
-      </button>
-    </div>
+    </nav>
   );
 }

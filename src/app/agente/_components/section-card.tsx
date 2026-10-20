@@ -47,6 +47,7 @@ export interface SectionCardProps {
   /** Conteúdo da seção. */
   children: ReactNode;
   className?: string;
+  id?: string;
 }
 
 export function SectionCard({
@@ -59,38 +60,41 @@ export function SectionCard({
   step,
   children,
   className,
+  id,
 }: SectionCardProps) {
   const c = ACCENT_CLASSES[accent];
 
   return (
     <section
+      id={id}
+      aria-label={title}
       className={cn(
-        "bg-card/40 border border-white/5 rounded-2xl p-5 space-y-4 backdrop-blur-sm",
+        "min-w-0 scroll-mt-6 bg-card border border-white/10 rounded-2xl p-4 sm:p-6 space-y-5",
         className
       )}
     >
-      <header className="flex items-start gap-3">
+      <header className="flex flex-wrap items-start gap-3">
         {step !== undefined && (
-          <div className="shrink-0 w-8 h-8 rounded-full bg-primary text-primary-foreground font-bold text-sm flex items-center justify-center ring-2 ring-primary/30">
+          <div className="shrink-0 w-8 h-8 rounded-lg bg-primary/10 text-primary font-semibold text-sm flex items-center justify-center" aria-label={`Passo ${step}`}>
             {step}
           </div>
         )}
-        <div className={cn("shrink-0 p-2.5 rounded-xl ring-1", c.bg, c.ring)}>
-          <Icon className={cn("w-5 h-5", c.text)} />
+        <div className={cn("shrink-0 p-2 rounded-lg", c.bg, step !== undefined && "hidden sm:block")}>
+          <Icon className={cn("w-4 h-4", c.text)} aria-hidden="true" />
         </div>
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-[10rem]">
           <h3 className="font-bold text-base text-foreground">{title}</h3>
           {description && (
-            <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{description}</p>
+            <p className="text-sm text-muted-foreground mt-1 leading-relaxed">{description}</p>
           )}
         </div>
-        {rightAction && <div className="shrink-0">{rightAction}</div>}
+        {rightAction && <div className="shrink-0 ml-auto max-w-full">{rightAction}</div>}
       </header>
 
       {hint && (
-        <div className="flex items-start gap-2.5 p-3 bg-blue-500/5 border border-blue-500/15 rounded-xl">
-          <Info className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
-          <div className="text-[11px] leading-relaxed text-blue-100/80">{hint}</div>
+        <div className="flex items-start gap-2.5 py-1">
+          <Info className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5" aria-hidden="true" />
+          <div className="text-xs leading-relaxed text-muted-foreground max-w-prose">{hint}</div>
         </div>
       )}
 

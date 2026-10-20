@@ -2,7 +2,7 @@
 
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/lib/supabase";
-import { Plus, Trash2 } from "lucide-react";
+import { Bot, Plus, Trash2 } from "lucide-react";
 
 type AgentRow = { id: number; name: string };
 
@@ -23,7 +23,7 @@ export function AgentSwitcher({
 }) {
   const handleCreate = async () => {
     const randomId = Math.floor(Math.random() * 90000) + 1000;
-    const insertPayload: any = { id: randomId, name: "Novo Agente" };
+    const insertPayload: { id: number; name: string; client_id?: string } = { id: randomId, name: "Novo Agente" };
     if (clientId) insertPayload.client_id = clientId;
     
     const { data } = await supabase.from("agent_settings").insert(insertPayload).select();
@@ -52,16 +52,21 @@ export function AgentSwitcher({
   };
 
   return (
-    <div className="bg-gradient-to-r from-purple-800 via-primary/80 to-blue-900 border-b border-white/10 px-3 sm:px-8 py-2 sm:py-3 flex items-center justify-between gap-2 shadow-lg shadow-primary/5">
-      <div className="flex bg-black/40 border border-white/20 p-1 rounded-xl">
+    <div className="border-b border-white/10 bg-card/60">
+      <div className="max-w-6xl mx-auto px-4 sm:px-8 py-4 flex flex-wrap items-end justify-between gap-3">
+      <div className="flex-1 min-w-0 basis-32 max-w-md space-y-1.5">
+        <label htmlFor="active-agent" className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+          <Bot className="w-4 h-4 text-primary" aria-hidden="true" /> Agente selecionado
+        </label>
         <select
+          id="active-agent"
           value={activeAgentId}
           onChange={(e) => {
             const id = Number(e.target.value);
             setActiveAgentId(id);
             loadAgent(id);
           }}
-          className="bg-transparent text-white font-bold text-xs uppercase tracking-widest pl-3 pr-8 focus:outline-none"
+          className="w-full min-w-0 h-11 rounded-lg border border-white/15 bg-background text-foreground text-sm font-medium pl-3 pr-8"
         >
           {agentsList.map((a) => (
             <option key={a.id} value={a.id} className="bg-neutral-900">
@@ -74,7 +79,7 @@ export function AgentSwitcher({
         <Button
           onClick={handleCreate}
           variant="secondary"
-          className="h-8 rounded-lg text-xs font-bold gap-2 px-4 shadow-sm hover:scale-105 transition-transform bg-white/10 text-white border border-white/20 hover:bg-white/20"
+          className="h-11 rounded-lg text-sm font-medium gap-2 px-4 bg-white/5 text-foreground border border-white/10 hover:bg-white/10"
         >
           <Plus className="w-3 h-3" /> Criar Novo
         </Button>
@@ -82,10 +87,13 @@ export function AgentSwitcher({
           onClick={handleDelete}
           variant="ghost"
           size="icon"
-          className="h-8 w-8 text-red-500 hover:text-red-400 hover:bg-red-500/20 rounded-lg"
+          aria-label="Excluir agente selecionado"
+          title="Excluir agente selecionado"
+          className="h-11 w-11 text-muted-foreground hover:text-red-300 hover:bg-red-500/10 rounded-lg"
         >
           <Trash2 className="w-4 h-4" />
         </Button>
+      </div>
       </div>
     </div>
   );

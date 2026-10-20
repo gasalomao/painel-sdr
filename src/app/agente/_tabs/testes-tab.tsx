@@ -139,8 +139,12 @@ export function TestesTab(props: {
 
   return (
     <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm text-muted-foreground">Confira as respostas com uma conversa de teste antes de atender.</p>
+        <a href="#agente-chat-teste" className="inline-flex items-center min-h-11 text-sm font-medium text-primary underline underline-offset-4">Ir para a conversa de teste</a>
+      </div>
       {/* ============= SIMULAÇÃO DE LEAD / DISPARO ============= */}
-      <section className="border border-white/[0.08] bg-card/80 rounded-xl shadow-none p-6 space-y-4">
+      <section data-agent-simulation className="min-w-0 border border-white/10 bg-card rounded-2xl p-4 sm:p-6 space-y-4">
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div className="flex items-start gap-3">
             <div className="p-2.5 rounded-xl bg-cyan-500/15 text-cyan-300 shrink-0">
@@ -306,16 +310,16 @@ export function TestesTab(props: {
       </section>
 
       {/* ============= CHAT + TIMELINE ============= */}
-      <div className="flex flex-col md:flex-row gap-4 h-[560px]">
+      <div id="agente-chat-teste" className="scroll-mt-6 flex flex-col lg:flex-row gap-4 lg:h-[600px]">
         {/* Chat */}
-        <div className="flex-1 border border-white/[0.08] bg-card/80 rounded-xl shadow-none overflow-hidden flex flex-col">
+        <div className="min-w-0 h-[520px] lg:h-auto lg:flex-1 border border-white/10 bg-card rounded-2xl overflow-hidden flex flex-col">
           <div className="px-4 py-3 flex items-center justify-between border-b border-white/[0.06] bg-white/[0.02]">
-            <div className="flex items-center gap-2.5">
+            <div className="flex items-center gap-2.5 min-w-0">
               <div className="p-1.5 rounded-lg bg-primary/15 text-primary">
                 <Bot className="w-4 h-4" />
               </div>
-              <div>
-                <h4 className="text-sm font-medium text-foreground">{props.nomeAgente || "Agente"} (Sandbox)</h4>
+              <div className="min-w-0">
+                <h4 className="text-sm font-medium text-foreground break-words">{props.nomeAgente || "Agente"} (Sandbox)</h4>
                 <p className="text-[11px] text-muted-foreground">
                   Modelo: <span className="text-foreground/70 font-mono">{props.targetModel || "—"}</span>
                   {" · "}
@@ -332,12 +336,13 @@ export function TestesTab(props: {
               size="icon"
               className="text-muted-foreground hover:text-foreground"
               title="Limpar conversa de teste"
+              aria-label="Limpar conversa de teste"
             >
               <Trash2 className="w-4 h-4" />
             </Button>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          <div role="log" aria-label="Conversa de teste" className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
             {props.testMessages.length === 0 && (
               <div className="h-full flex items-center justify-center">
                 <p className="text-xs text-muted-foreground text-center">
@@ -365,7 +370,7 @@ export function TestesTab(props: {
                 <div key={i} className={cn("flex", msg.role === "user" ? "justify-end" : "justify-start")}>
                   <div
                     className={cn(
-                      "max-w-[85%] text-sm p-3 rounded-2xl whitespace-pre-wrap",
+                      "max-w-[85%] break-words [overflow-wrap:anywhere] text-sm p-3 rounded-2xl whitespace-pre-wrap",
                       msg.role === "user"
                         ? "bg-[#005c4b] text-white rounded-br-md"
                         : msg.isError
@@ -390,16 +395,17 @@ export function TestesTab(props: {
               value={props.testInput}
               onChange={(e) => props.setTestInput(e.target.value)}
               placeholder="Digite uma mensagem..."
-              className="bg-white/[0.02] border-white/[0.08] text-foreground h-10 flex-1 rounded-lg"
+              aria-label="Mensagem para testar o agente"
+              className="min-w-0 bg-white/[0.02] border-white/[0.08] text-foreground h-11 text-base sm:text-sm flex-1 rounded-lg"
             />
-            <Button type="submit" disabled={props.testLoading} className="h-10 w-10 p-0 rounded-lg shrink-0">
+            <Button type="submit" aria-label="Enviar mensagem de teste" disabled={props.testLoading} className="h-11 w-11 p-0 rounded-lg shrink-0">
               <Send className="w-4 h-4" />
             </Button>
           </form>
         </div>
 
         {/* Timeline sidebar */}
-        <div className="w-full md:w-72 border border-white/[0.08] bg-card/80 rounded-xl shadow-none flex flex-col p-5 overflow-hidden">
+        <div className="min-w-0 w-full lg:w-72 lg:shrink-0 border border-white/10 bg-card rounded-2xl flex flex-col p-5 overflow-hidden">
           <div className="flex items-center justify-between pb-3">
             <h4 className="text-sm font-medium text-foreground">Progresso</h4>
             <span className="text-xs font-mono text-blue-300 bg-blue-500/15 px-2 py-0.5 rounded-md">

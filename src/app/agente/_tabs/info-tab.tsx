@@ -1,12 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { Children, cloneElement, isValidElement, useId, useState, type ReactElement } from "react";
+import styles from "../agente.module.css";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { Book, Check, Info, Pencil, Plus, Settings, Trash2, Wrench, X, Image as ImageIcon, Upload, Loader2, Sparkles, Bot, MessageSquare, SlidersHorizontal, CalendarDays, FileText } from "lucide-react";
+import { Book, Check, Info, Pencil, Plus, Settings, Trash2, Wrench, X, Image as ImageIcon, Upload, Loader2, Sparkles, Bot, MessageSquare, SlidersHorizontal, CalendarDays, FileText, ChevronDown, ArrowDown } from "lucide-react";
 import { SaveButton } from "../_components/save-button";
 import { SectionCard } from "../_components/section-card";
 import { EmptyState } from "../_components/empty-state";
@@ -434,25 +435,29 @@ function ProductCatalogBuilder({
  */
 function AdvancedSection({ children, label = "Opções avançadas" }: { children: React.ReactNode; label?: string }) {
   const [open, setOpen] = useState(false);
+  const contentId = useId();
   return (
     <div className="rounded-xl border border-white/10 bg-white/[0.02] overflow-hidden">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center justify-between px-4 py-3 hover:bg-white/[0.03] transition cursor-pointer"
+        aria-expanded={open}
+        aria-controls={contentId}
+        className="w-full min-h-12 flex items-center justify-between gap-3 text-left px-4 py-3 hover:bg-white/[0.03] transition-colors cursor-pointer"
       >
-        <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground flex items-center gap-2">
-          <Settings className="w-3.5 h-3.5" /> {label}
+        <span className="text-sm font-medium text-foreground flex items-center gap-2">
+          <Settings className="w-4 h-4 shrink-0 text-muted-foreground" aria-hidden="true" /> {label}
         </span>
-        <span className={cn("text-[10px] text-muted-foreground transition-transform inline-block", open && "rotate-90")}>▶</span>
+        <ChevronDown className={cn("w-4 h-4 shrink-0 text-muted-foreground transition-transform", open && "rotate-180")} aria-hidden="true" />
       </button>
-      {open && <div className="px-4 pb-4 pt-1 space-y-4 border-t border-white/5">{children}</div>}
+      <div id={contentId} hidden={!open} className="px-4 pb-4 pt-4 space-y-4 border-t border-white/5">{open && children}</div>
     </div>
   );
 }
 
 export function InfoTab(p: InfoTabProps) {
   const [uploadingImg, setUploadingImg] = useState(false);
+  const { savingConfig } = p;
   // Preset de identidade aplicado por último (só pra destaque visual dos cards)
   const [activePreset, setActivePreset] = useState<string | null>(null);
 
@@ -472,9 +477,25 @@ export function InfoTab(p: InfoTabProps) {
   };
 
   return (
-    <div className="space-y-6">
+    <div className={cn(styles.info, "space-y-6")}>
+      <aside aria-label="Guia de configuração" className="border-b border-white/10 pb-5 space-y-3">
+        <p className="text-sm leading-relaxed text-muted-foreground max-w-prose">
+          Comece pela identidade e pelo WhatsApp. Depois, adicione o conhecimento e as instruções. Use a aba <strong className="text-foreground font-medium">Testes</strong> para conferir as respostas.
+        </p>
+        <nav aria-label="Seções da configuração" className="flex flex-wrap gap-x-4 gap-y-1">
+          {[
+            ["identidade", "Identidade"], ["whatsapp", "WhatsApp"], ["conversa", "Conversa"],
+            ["agenda", "Agenda"], ["conhecimento", "Conhecimento"], ["instrucoes", "Instruções"],
+          ].map(([id, label]) => (
+            <a key={id} href={`#agente-${id}`} className="inline-flex min-h-10 items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-primary">
+              {label}<ArrowDown className="w-3 h-3" aria-hidden="true" />
+            </a>
+          ))}
+        </nav>
+      </aside>
       {/* ========= PASSO 1: QUEM É SUA IA ========= */}
       <SectionCard
+        id="agente-identidade"
         step={1}
         icon={Bot}
         title="Quem é sua IA?"
@@ -482,8 +503,8 @@ export function InfoTab(p: InfoTabProps) {
         hint="Comece aqui! Escolha um nome amigável — é assim que a IA vai se apresentar aos seus clientes no WhatsApp."
         accent="primary"
         rightAction={
-          <div className="flex items-center gap-2 shrink-0">
-            <span className={cn("text-[10px] font-semibold", p.isActiveAgente ? "text-green-400" : "text-red-400")}>
+          <div className="flex items-center gap-3 shrink-0 rounded-lg bg-background px-3 py-2">
+            <span className={cn("text-xs font-medium", p.isActiveAgente ? "text-primary" : "text-red-300")}>
               {p.isActiveAgente ? "ATIVO" : "DESLIGADO"}
             </span>
             <Toggle
@@ -497,9 +518,9 @@ export function InfoTab(p: InfoTabProps) {
         }
       >
 
-        <div className="space-y-3">
+        <div className="space-y-5">
           <Field label="Nome do Agente" copy={p.nomeAgente}>
-            <Input value={p.nomeAgente} onChange={(e) => p.setNomeAgente(e.target.value)} className="bg-white/5 border-white/10 h-12 rounded-xl text-sm" />
+            <Input value={p.nomeAgente} onChange={(e) => p.setNomeAgente(e.target.value)} placeholder="Ex.: Clara, assistente de atendimento" className="bg-white/5 border-white/10 h-12 rounded-xl text-sm" />
           </Field>
 
           {/* Presets de identidade — 1 clique preenche Função/Personalidade/Tom */}
@@ -511,6 +532,7 @@ export function InfoTab(p: InfoTabProps) {
                   key={preset.id}
                   type="button"
                   onClick={() => applyIdentityPreset(preset)}
+                  aria-pressed={activePreset === preset.id}
                   title={preset.hint}
                   className={cn(
                     "text-left rounded-xl border p-3 transition-all cursor-pointer",
@@ -528,8 +550,9 @@ export function InfoTab(p: InfoTabProps) {
 
           {p.isAdmin ? (
             <div className="space-y-2">
-              <label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Modelo de IA (Gemini ou OpenRouter)</label>
+              <label htmlFor="agent-model" className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Modelo de IA (Gemini ou OpenRouter)</label>
               <select
+                id="agent-model"
                 value={p.targetModel}
                 onChange={(e) => p.setTargetModel(e.target.value)}
                 className="w-full bg-white/5 border-white/10 text-white h-12 rounded-xl text-sm px-3 focus:outline-none"
@@ -575,6 +598,7 @@ export function InfoTab(p: InfoTabProps) {
 
       {/* ========= PASSO 2: CONECTAR NO WHATSAPP ========= */}
       <SectionCard
+        id="agente-whatsapp"
         step={2}
         icon={MessageSquare}
         title="Conectar no WhatsApp"
@@ -586,7 +610,7 @@ export function InfoTab(p: InfoTabProps) {
         <div className="space-y-3">
           <div className="space-y-2">
             <div className="flex items-center justify-between gap-2">
-              <label className="text-[11px] font-semibold uppercase tracking-wider text-primary">Instância WhatsApp Vinculada</label>
+              <label htmlFor="agent-whatsapp" className="text-[11px] font-semibold uppercase tracking-wider text-primary">Instância WhatsApp Vinculada</label>
               {p.savingVinculo ? (
                 <span className="text-[10px] font-semibold uppercase tracking-wider text-yellow-400 flex items-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-yellow-400 animate-pulse" /> Salvando…
@@ -598,6 +622,7 @@ export function InfoTab(p: InfoTabProps) {
               ) : null}
             </div>
             <select
+              id="agent-whatsapp"
               value={p.allInstances.includes(p.vinculoInstance) ? p.vinculoInstance : ""}
               onChange={(e) => {
                 const v = e.target.value;
@@ -661,6 +686,7 @@ export function InfoTab(p: InfoTabProps) {
 
       {/* ========= PASSO 3: COMO A IA CONVERSA (avançado) ========= */}
       <SectionCard
+        id="agente-conversa"
         step={3}
         icon={SlidersHorizontal}
         title="Como a IA conversa"
@@ -742,6 +768,7 @@ export function InfoTab(p: InfoTabProps) {
 
       {/* ========= PASSO 4: AGENDA E REUNIÕES ========= */}
       <SectionCard
+        id="agente-agenda"
         step={4}
         icon={CalendarDays}
         title="Agenda e Reuniões"
@@ -1229,6 +1256,7 @@ export function InfoTab(p: InfoTabProps) {
 
       {/* ========= PASSO 5: BASE DE CONHECIMENTO ========= */}
       <SectionCard
+        id="agente-conhecimento"
         step={5}
         icon={Book}
         title="Base de Conhecimento"
@@ -1432,6 +1460,7 @@ export function InfoTab(p: InfoTabProps) {
 
       {/* ========= PASSO 6: INSTRUÇÕES DA IA ========= */}
       <SectionCard
+        id="agente-instrucoes"
         step={6}
         icon={FileText}
         title="Instruções da IA"
@@ -1555,8 +1584,9 @@ export function InfoTab(p: InfoTabProps) {
       </SectionCard>
 
       {/* ===== STICKY SAVE BAR ===== */}
-      <div className="sticky bottom-0 z-20 bg-card/80 backdrop-blur-md border border-white/10 rounded-2xl p-4 shadow-lg">
-        <SaveButton label="Salvar Tudo" onSave={saveAll} />
+      <div className={styles.saveBar}>
+        <p className="hidden sm:block text-xs text-muted-foreground">Ao terminar, salve as configurações deste agente.</p>
+        <SaveButton label="Salvar Tudo" onSave={saveAll} disabled={savingConfig} width="auto" className="w-full sm:w-auto normal-case tracking-normal text-sm font-semibold" />
       </div>
     </div>
   );
@@ -1565,13 +1595,15 @@ export function InfoTab(p: InfoTabProps) {
 /* ========= Helpers internos ========= */
 
 function Field({ label, copy, copyLabel, children }: { label: string; copy?: string; copyLabel?: string; children: React.ReactNode }) {
+  const id = useId();
+  const control = Children.only(children);
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2">
-        <label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</label>
+        <label htmlFor={id} className="text-sm font-medium text-foreground">{label}</label>
         {copy !== undefined && <CopyButton text={copy} label={copyLabel} />}
       </div>
-      {children}
+      {isValidElement(control) ? cloneElement(control as ReactElement<{ id?: string }>, { id }) : control}
     </div>
   );
 }
