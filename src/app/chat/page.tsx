@@ -14,6 +14,7 @@ import { cn } from "@/lib/utils";
 import { Wifi, WifiOff, RefreshCw, Layers, Bot } from "lucide-react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { toast } from "sonner";
+import styles from "@/components/inbox/inbox.module.css";
 
 function ChatPageContent() {
   const router = useRouter();
@@ -599,7 +600,7 @@ function ChatPageContent() {
 
   if (sessionLoading) {
     return (
-      <div className="flex h-screen items-center justify-center bg-background">
+      <div className={cn(styles.surface, "flex h-full items-center justify-center bg-background")}>
         <div className="flex flex-col items-center gap-2">
           <RefreshCw className="h-8 w-8 animate-spin text-primary" />
           <p className="text-sm text-muted-foreground font-medium">Carregando painel de conversas...</p>
@@ -609,40 +610,38 @@ function ChatPageContent() {
   }
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-background">
+    <div className={cn(styles.surface, styles.page, "flex flex-col overflow-hidden")}>
       <Header />
 
       {/* Seletor Global de InstÃ¢ncias e Agentes de IA no Topo do Chat */}
-      <div className="flex items-center justify-between border-b border-border bg-card px-4 py-2 shrink-0 flex-wrap gap-3">
-        <div className="flex items-center gap-4 flex-wrap">
-          {/* Filtro de ConexÃ£o WhatsApp */}
-          <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
-            <Layers className="h-4 w-4 text-primary shrink-0" />
-            <span>ConexÃ£o WhatsApp:</span>
+      <div className={styles.toolbar}>
+        <div className={styles.filters}>
+          <div className={styles.filter}>
+            <Layers className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <label htmlFor="chat-connection">Conexão WhatsApp</label>
             <select
+              id="chat-connection"
               value={activeInstance}
               onChange={(e) => setActiveInstance(e.target.value)}
-              className="text-xs bg-muted border border-border/80 rounded-md px-2 py-1 outline-none text-foreground cursor-pointer focus:border-primary/50"
             >
-              <option value="__all__">Todas as conexÃµes</option>
+              <option value="__all__">Todas as conexões</option>
               {instances.map((inst) => (
                 <option key={inst.id} value={inst.instance_name}>
-                  {inst.instance_name} {inst.status === "open" || inst.status === "CONNECTED" || inst.status === "connected" ? "ðŸŸ¢" : "ðŸ”´"}
+                  {inst.instance_name} — {inst.status === "open" || inst.status === "CONNECTED" || inst.status === "connected" ? "Conectado" : "Desconectado"}
                 </option>
               ))}
             </select>
           </div>
 
-          {/* Filtro por Agente de IA */}
-          <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
-            <Bot className="h-4 w-4 text-primary shrink-0" />
-            <span>Agente de IA:</span>
+          <div className={styles.filter}>
+            <Bot className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <label htmlFor="chat-agent">Agente de IA</label>
             <select
+              id="chat-agent"
               value={activeAgentId}
               onChange={(e) => setActiveAgentId(e.target.value)}
-              className="text-xs bg-muted border border-border/80 rounded-md px-2 py-1 outline-none text-foreground cursor-pointer focus:border-primary/50"
             >
-              <option value="__all__">Todos os Agentes de IA</option>
+              <option value="__all__">Todos os agentes</option>
               {aiAgents.map((ag) => (
                 <option key={ag.id} value={String(ag.id)}>
                   {ag.name}
@@ -653,14 +652,14 @@ function ChatPageContent() {
         </div>
 
         {/* Status de ConexÃ£o Geral */}
-        <div className="flex items-center gap-2">
+        <div className={styles.health}>
           {whatsappConnected ? (
-            <div className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+            <div className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-xs font-medium text-emerald-300">
               <Wifi className="h-3 w-3" />
-              WhatsApp Conectado
+              WhatsApp conectado
             </div>
           ) : (
-            <div className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+            <div className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2.5 py-0.5 text-xs font-medium text-amber-300">
               <WifiOff className="h-3 w-3" />
               WhatsApp Desconectado
             </div>
@@ -668,7 +667,8 @@ function ChatPageContent() {
           
           <button
             onClick={() => setResyncToken((n) => n + 1)}
-            className="inline-flex items-center justify-center h-7 w-7 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground cursor-pointer"
+            className={styles.iconButton}
+            aria-label="Sincronizar conversas"
             title="Sincronizar conversas"
           >
             <RefreshCw className="h-3.5 w-3.5" />
@@ -681,7 +681,7 @@ function ChatPageContent() {
         {/* Painel Esquerdo: Lista de Conversas */}
         <div
           className={cn(
-            "h-full flex-1 lg:flex-none border-r border-border",
+            "h-full min-w-0 flex-1 lg:flex-none",
             hasActiveConv ? "hidden lg:flex" : "flex"
           )}
         >
@@ -728,7 +728,7 @@ function ChatPageContent() {
 
         {/* Painel Direito: Detalhes CRM do Contato */}
         {contactPanelOpen && activeConversation && (
-          <div className="hidden lg:block h-full">
+          <div className="hidden lg:block h-full shrink-0">
             <ContactSidebar
               contact={activeContact}
               clientId={clientId}
@@ -747,7 +747,7 @@ export default function ChatPage() {
   return (
     <Suspense
       fallback={
-        <div className="flex h-screen items-center justify-center bg-background">
+        <div className={cn(styles.surface, "flex h-full items-center justify-center bg-background")}>
           <div className="flex flex-col items-center gap-2">
             <RefreshCw className="h-8 w-8 animate-spin text-primary" />
             <p className="text-sm text-muted-foreground font-medium">Carregando bate-papo...</p>

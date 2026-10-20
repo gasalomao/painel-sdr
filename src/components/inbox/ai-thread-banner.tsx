@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Sparkles, Hand, Play, Loader2, Timer, ChevronDown, Clock, Bot, UserCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
+import styles from "./inbox.module.css";
 import { toast } from "sonner";
 import {
   DropdownMenu,
@@ -221,37 +222,38 @@ export function AiThreadBanner({
   return (
     <div
       className={cn(
-        "flex items-center justify-between border-b px-4 py-2.5 text-xs transition-all shrink-0 shadow-sm",
+        styles.banner,
+        "flex items-center justify-between border-b text-xs shrink-0",
         isPaused
-          ? "border-amber-500/30 bg-gradient-to-r from-amber-500/15 via-amber-500/10 to-amber-500/5 text-amber-900 dark:text-amber-200"
-          : "border-emerald-500/30 bg-gradient-to-r from-emerald-500/15 via-emerald-500/10 to-emerald-500/5 text-emerald-900 dark:text-emerald-200"
+          ? "border-amber-500/20 bg-amber-500/5 text-amber-200"
+          : "border-emerald-500/20 bg-emerald-500/5 text-emerald-200"
       )}
     >
       <div className="flex items-center gap-3 min-w-0 flex-1">
         {/* Badge do Atendimento */}
         <div
           className={cn(
-            "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-bold tracking-wide shrink-0 shadow-sm uppercase",
+            "flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium shrink-0",
             isPaused
-              ? "bg-amber-600 text-white"
-              : "bg-emerald-600 text-white"
+              ? "bg-amber-500/10 text-amber-200"
+              : "bg-emerald-500/10 text-emerald-200"
           )}
         >
           {isPaused ? (
             <>
               <UserCheck className="h-3.5 w-3.5" />
-              <span>ATENDIMENTO HUMANO</span>
+              <span>Atendimento humano</span>
             </>
           ) : (
             <>
-              <Bot className="h-3.5 w-3.5 animate-pulse" />
-              <span>ATENDIMENTO IA</span>
+              <Bot className="h-3.5 w-3.5" />
+              <span>Atendimento IA</span>
             </>
           )}
         </div>
 
         {/* Texto descritivo e Tempo Restante */}
-        <div className="flex items-center gap-2 min-w-0 flex-1 truncate">
+        <div className={cn(styles.bannerDescription, "flex items-center gap-2 min-w-0 flex-1 truncate")}>
           {isPaused ? (
             countdown ? (
               <div className="flex items-center gap-1.5 font-medium truncate">
@@ -280,7 +282,7 @@ export function AiThreadBanner({
           <button
             onClick={handleResumeAi}
             disabled={busy}
-            className="inline-flex items-center justify-center gap-1.5 h-7 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-3 transition-colors cursor-pointer text-xs shadow-sm disabled:opacity-50"
+            className="inline-flex items-center justify-center gap-1.5 min-h-8 rounded-md border border-emerald-500/25 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-200 font-medium px-3 transition-colors cursor-pointer text-xs disabled:opacity-50"
           >
             {busy ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -293,7 +295,7 @@ export function AiThreadBanner({
           <DropdownMenu>
             <DropdownMenuTrigger
               disabled={busy}
-              className="inline-flex items-center justify-center gap-1.5 h-7 rounded-md bg-amber-600 hover:bg-amber-700 text-white font-semibold px-3 transition-colors cursor-pointer text-xs shadow-sm disabled:opacity-50 outline-none"
+              className="inline-flex items-center justify-center gap-1.5 min-h-8 rounded-md border border-amber-500/25 bg-amber-500/10 hover:bg-amber-500/20 text-amber-200 font-medium px-3 transition-colors cursor-pointer text-xs disabled:opacity-50 outline-none"
             >
               {busy ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -303,7 +305,7 @@ export function AiThreadBanner({
               Silenciar Robô (Pausar IA)
               <ChevronDown className="h-3.5 w-3.5 opacity-80" />
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" side="bottom" className="w-60 border-border bg-popover text-popover-foreground shadow-lg">
+            <DropdownMenuContent align="end" side="bottom" className={cn(styles.portal, "w-60 border-border bg-popover text-popover-foreground shadow-lg")}>
               <div className="px-2 py-1.5 text-[11px] font-semibold text-muted-foreground">
                 Selecione a duração da pausa humana:
               </div>

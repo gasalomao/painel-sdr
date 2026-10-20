@@ -18,6 +18,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { toast } from "sonner";
+import styles from "./inbox.module.css";
 
 interface ContactSidebarProps {
   contact: Contact | null;
@@ -360,9 +361,12 @@ export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpda
   const initials = displayName.charAt(0).toUpperCase();
 
   return (
-    <div className="flex h-full w-72 flex-col border-l border-border bg-card shrink-0">
-      <ScrollArea className="flex-1">
-        <div className="p-4 space-y-5">
+    <div id="chat-contact-details" className={`${styles.contact} flex h-full flex-col border-l border-border bg-card shrink-0`}>
+      <div className="border-b border-border px-4 py-4">
+        <h2 className="text-sm font-semibold text-foreground">Detalhes do contato</h2>
+      </div>
+      <ScrollArea className="min-h-0 flex-1">
+        <div className={`${styles.contactBody} space-y-5`}>
           {/* Informações Básicas */}
           <div className="flex flex-col items-center text-center">
             <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted text-lg font-semibold text-foreground relative">
@@ -376,7 +380,7 @@ export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpda
                 initials
               )}
             </div>
-            <h3 className="mt-3 text-sm font-semibold text-foreground">
+            <h3 className="mt-3 max-w-full break-words text-base font-semibold text-foreground">
               {displayName}
             </h3>
             {contact.company && (
@@ -415,13 +419,14 @@ export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpda
 
           {/* Seção de Atribuição de Agente de IA */}
           <div>
-            <div className="flex items-center gap-2 px-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            <div className={styles.contactHeading}>
               <Bot className="h-3.5 w-3.5 text-primary" />
               Agente de IA Atribuído
             </div>
             
             <div className="mt-2.5">
               <select
+                aria-label="Agente de IA atribuído"
                 value={assignedAgentId}
                 disabled={updatingAgent}
                 onChange={(e) => handleChangeAiAgent(e.target.value)}
@@ -441,7 +446,7 @@ export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpda
 
           {/* Seção do Kanban (Leads CRM) */}
           <div>
-            <div className="flex items-center gap-2 px-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            <div className={styles.contactHeading}>
               <DollarSign className="h-3.5 w-3.5" />
               Oportunidade CRM (Kanban)
             </div>
@@ -459,10 +464,11 @@ export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpda
                   </div>
 
                   <div className="space-y-1">
-                    <label className="text-[10px] uppercase font-bold text-muted-foreground block">
+                    <label htmlFor="chat-lead-stage" className="text-xs font-medium text-muted-foreground block">
                       Estágio no Funil
                     </label>
                     <select
+                      id="chat-lead-stage"
                       value={lead.status}
                       disabled={updatingLead}
                       onChange={(e) => handleUpdateLeadStage(e.target.value)}
@@ -496,7 +502,7 @@ export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpda
 
           {/* Seção de Tags */}
           <div>
-            <div className="flex items-center gap-2 px-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            <div className={styles.contactHeading}>
               <TagIcon className="h-3.5 w-3.5" />
               Tags do Contato
             </div>
@@ -507,11 +513,13 @@ export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpda
                 value={newTag}
                 onChange={(e) => setNewTag(e.target.value)}
                 placeholder="Nova tag..."
+                aria-label="Nova tag do contato"
                 disabled={addingTag}
                 className="flex-1 rounded-md border border-border/80 bg-muted px-2.5 py-1 text-xs text-foreground placeholder-muted-foreground outline-none focus:border-primary/50"
               />
               <Button
                 type="submit"
+                aria-label="Adicionar tag"
                 size="sm"
                 className="h-auto bg-primary px-2.5 hover:bg-primary/90 shrink-0 cursor-pointer"
                 disabled={!newTag.trim() || addingTag}
@@ -533,6 +541,7 @@ export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpda
                     <button
                       type="button"
                       onClick={() => handleRemoveTag(tag.name)}
+                      aria-label={`Remover tag ${tag.name}`}
                       className="text-primary hover:text-red-500 transition-colors cursor-pointer"
                     >
                       <X className="h-3 w-3" />
@@ -547,13 +556,14 @@ export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpda
 
           {/* Seção de Anotações */}
           <div>
-            <div className="flex items-center gap-2 px-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            <div className={styles.contactHeading}>
               <StickyNote className="h-3.5 w-3.5" />
               Anotações do Contato
             </div>
             
             <div className="mt-3 space-y-2">
               <textarea
+                aria-label="Anotações do contato"
                 value={noteText}
                 onChange={(e) => setNoteText(e.target.value)}
                 placeholder="Escreva anotações importantes sobre as negociações com este lead..."

@@ -33,6 +33,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { extractProviderFromMime } from "@/lib/transcription-label";
+import styles from "./inbox.module.css";
 
 interface MessageThreadProps {
   conversation: Conversation | null;
@@ -556,12 +557,12 @@ export function MessageThread({
 
   if (!conversation) {
     return (
-      <div className="flex h-full w-full flex-col items-center justify-center bg-card p-8 text-center">
-        <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted text-muted-foreground mb-4 border border-border">
-          <Bot className="h-8 w-8 text-primary" />
+      <div className={cn(styles.empty, "flex h-full w-full flex-col items-center justify-center p-8 text-center")}>
+        <div className={cn(styles.emptyIcon, "flex items-center justify-center rounded-2xl")}>
+          <Bot className="h-8 w-8" aria-hidden="true" />
         </div>
-        <h3 className="text-lg font-semibold text-foreground">Nenhuma conversa selecionada</h3>
-        <p className="text-xs text-muted-foreground mt-1 max-w-sm">
+        <h2 className="text-xl font-semibold text-foreground">Nenhuma conversa selecionada</h2>
+        <p className="mt-3 max-w-sm text-sm leading-relaxed text-muted-foreground">
           Selecione um contato na lista à esquerda para visualizar o histórico de mensagens, controlar o robô de IA e gerenciar oportunidades.
         </p>
       </div>
@@ -574,13 +575,14 @@ export function MessageThread({
   return (
     <div className="flex h-full w-full flex-col bg-background min-w-0">
       {/* Cabeçalho do Chat */}
-      <div className="flex h-14 items-center justify-between border-b border-border bg-card px-4 shrink-0">
+      <div className={cn(styles.threadHeader, "flex items-center justify-between border-b border-border bg-card shrink-0")}>
         <div className="flex items-center gap-3 min-w-0">
           {onBack && (
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8 lg:hidden text-muted-foreground"
+              className="h-10 w-10 lg:hidden text-muted-foreground shrink-0"
+              aria-label="Voltar para conversas"
               onClick={onBack}
             >
               <ArrowLeft className="h-4 w-4" />
@@ -618,7 +620,7 @@ export function MessageThread({
                 </a>
               )}
             </div>
-            <p className="text-[10px] text-muted-foreground truncate font-mono">
+            <p className="mt-0.5 text-xs text-muted-foreground truncate">
               Conexão: {conversation.last_instance || "Padrão"}
             </p>
           </div>
@@ -627,7 +629,7 @@ export function MessageThread({
         {/* Menu de Ações e Troca de Status */}
         <div className="flex items-center gap-1.5 shrink-0">
           <DropdownMenu>
-            <DropdownMenuTrigger className="inline-flex items-center justify-center h-8 px-2.5 gap-1.5 text-xs font-medium rounded-md bg-muted text-foreground hover:bg-muted/80 transition-colors outline-none cursor-pointer">
+            <DropdownMenuTrigger className="inline-flex items-center justify-center min-h-9 px-2.5 gap-1.5 text-xs font-medium rounded-lg border border-border bg-muted text-foreground hover:bg-muted/80 transition-colors outline-none cursor-pointer">
               {conversation.status === "open" ? (
                 <>
                   <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
@@ -646,7 +648,7 @@ export function MessageThread({
               )}
             </DropdownMenuTrigger>
 
-            <DropdownMenuContent align="end" className="border-border bg-popover">
+            <DropdownMenuContent align="end" className={cn(styles.portal, "border-border bg-popover")}>
               <DropdownMenuItem
                 onClick={() => handleUpdateStatus("open")}
                 className="text-xs text-popover-foreground cursor-pointer"
@@ -692,9 +694,12 @@ export function MessageThread({
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8 text-muted-foreground hover:text-foreground hidden lg:flex"
+              className="h-9 w-9 text-muted-foreground hover:text-foreground hidden lg:flex"
               onClick={onToggleContactPanel}
-              title={contactPanelOpen ? "Ocultar Painel Lateral" : "Exibir Painel Lateral"}
+              aria-label={contactPanelOpen ? "Ocultar detalhes do contato" : "Exibir detalhes do contato"}
+              aria-expanded={contactPanelOpen}
+              aria-controls="chat-contact-details"
+              title={contactPanelOpen ? "Ocultar detalhes do contato" : "Exibir detalhes do contato"}
             >
               {contactPanelOpen ? (
                 <PanelRightClose className="h-4 w-4" />
@@ -722,8 +727,8 @@ export function MessageThread({
       />
 
       {/* Área de Histórico das Mensagens */}
-      <div className="flex-1 overflow-hidden relative bg-muted/20">
-        <ScrollArea ref={scrollAreaRef} className="h-full p-4">
+      <div className={cn(styles.history, "flex-1 overflow-hidden relative")}>
+        <ScrollArea ref={scrollAreaRef} className={cn(styles.historyScroll, "h-full")}>
           {loading && messages.length === 0 ? (
             <div className="flex items-center justify-center py-12">
               <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
@@ -731,7 +736,7 @@ export function MessageThread({
           ) : messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 text-center">
               <p className="text-xs text-muted-foreground">Nenhuma mensagem neste chat.</p>
-              <p className="text-[11px] text-muted-foreground/70 mt-1">Envie uma mensagem abaixo para iniciar a conversa.</p>
+              <p className="text-xs text-muted-foreground mt-2">Envie uma mensagem abaixo para iniciar a conversa.</p>
             </div>
           ) : (
             <div className="flex flex-col space-y-3 max-w-4xl mx-auto w-full">
@@ -754,7 +759,8 @@ export function MessageThread({
               setUserIsScrolledUp(false);
               scrollToBottom("smooth");
             }}
-            className="absolute bottom-4 right-6 flex h-9 w-9 items-center justify-center rounded-full bg-card/90 text-foreground border border-border shadow-lg backdrop-blur hover:bg-card transition-all duration-200 hover:scale-105 cursor-pointer z-10"
+            className="absolute bottom-4 right-6 flex h-10 w-10 items-center justify-center rounded-full bg-card text-foreground border border-border shadow-lg hover:bg-muted transition-colors cursor-pointer z-10"
+            aria-label="Ir para a mensagem mais recente"
             title="Ir para a mensagem mais recente"
           >
             <ChevronDown className="h-4 w-4 text-primary" />

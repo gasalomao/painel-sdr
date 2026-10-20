@@ -11,7 +11,8 @@ import {
 } from "@/lib/inbox/conversations";
 import { cn } from "@/lib/utils";
 import type { Conversation, ConversationStatus, Tag } from "@/types";
-import { Search, ChevronDown, X, RefreshCw, Trash2, MoreVertical } from "lucide-react";
+import { Search, ChevronDown, X, RefreshCw, Trash2, MoreVertical, Bot, UserRound, MessageSquare } from "lucide-react";
+import styles from "./inbox.module.css";
 import { formatDistanceToNow } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { Input } from "@/components/ui/input";
@@ -532,20 +533,28 @@ export function ConversationList({
   const activeFilter = FILTER_OPTIONS.find((o) => o.value === filter);
 
   return (
-    <div className="flex h-full w-full flex-col border-r border-border bg-card lg:w-80 shrink-0">
+    <div className={cn(styles.list, "flex h-full flex-col border-r border-border bg-card shrink-0")}>
+      <div className={styles.listHeader}>
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-base font-semibold text-foreground">Conversas</h2>
+          <span className="rounded-md bg-muted px-2 py-0.5 text-xs tabular-nums text-muted-foreground" aria-label={`${filtered.length} conversas visíveis`}>{filtered.length}</span>
+        </div>
+        <p className="mt-1 text-xs text-muted-foreground">Seus atendimentos em um só lugar.</p>
+      </div>
       {/* Pesquisa + Filtros */}
-      <div className="space-y-2 border-b border-border p-3">
+      <div className="space-y-3 border-b border-border px-4 pb-3">
         <div className="relative">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             value={search}
             onChange={handleSearchChange}
             placeholder="Buscar contatos ou mensagens..."
-            className="border-border bg-muted pl-9 text-sm text-foreground placeholder-muted-foreground focus:border-primary/50"
+            aria-label="Buscar contatos ou mensagens"
+            className="h-10 border-input bg-background pl-9 text-sm text-foreground placeholder-muted-foreground focus:border-primary/50"
           />
         </div>
 
-        <div className="flex flex-wrap items-center gap-1">
+        <div className={styles.listTools}>
           <DropdownMenu>
             <DropdownMenuTrigger className="inline-flex items-center justify-center h-7 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground rounded-md hover:bg-muted outline-none">
                 {activeFilter?.label ?? "Todos"}
@@ -553,7 +562,7 @@ export function ConversationList({
             </DropdownMenuTrigger>
             <DropdownMenuContent
               align="start"
-              className="border-border bg-popover"
+              className={cn(styles.portal, "border-border bg-popover")}
             >
               {FILTER_OPTIONS.map((opt) => (
                 <DropdownMenuItem
@@ -592,7 +601,7 @@ export function ConversationList({
               </DropdownMenuTrigger>
               <DropdownMenuContent
                 align="start"
-                className="max-h-64 w-56 border-border bg-popover"
+                className={cn(styles.portal, "max-h-64 w-56 border-border bg-popover")}
               >
                 {tags.map((t) => (
                   <DropdownMenuCheckboxItem
@@ -629,7 +638,7 @@ export function ConversationList({
               </DropdownMenuTrigger>
               <DropdownMenuContent
                 align="start"
-                className="max-h-64 w-56 border-border bg-popover"
+                className={cn(styles.portal, "max-h-64 w-56 border-border bg-popover")}
               >
                 <DropdownMenuItem
                   onClick={() => setSelectedCompany(null)}
@@ -715,12 +724,14 @@ export function ConversationList({
       {/* Lista de conversas */}
       <ScrollArea className="min-h-0 flex-1">
         {loading && conversations.length === 0 ? (
-          <div className="flex items-center justify-center py-12">
+          <div className="flex items-center justify-center py-12" role="status" aria-label="Carregando conversas">
             <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
           </div>
         ) : filtered.length === 0 ? (
-          <div className="px-4 py-12 text-center">
-            <p className="text-sm text-muted-foreground">Nenhuma conversa encontrada.</p>
+          <div className="px-6 py-12 text-center">
+            <MessageSquare className="mx-auto mb-3 h-6 w-6 text-muted-foreground" aria-hidden="true" />
+            <p className="text-sm font-medium text-foreground">Nenhuma conversa encontrada.</p>
+            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">As conversas recebidas aparecerão aqui. Se estiver buscando, confira os termos e filtros.</p>
           </div>
         ) : (
           <div className="flex flex-col">
@@ -744,7 +755,7 @@ export function ConversationList({
           if (!open && !isDeleting) setDeletingConversation(null);
         }}
       >
-        <DialogContent className="sm:max-w-md border-border bg-card shadow-2xl rounded-2xl p-6 z-50">
+        <DialogContent className={cn(styles.portal, "sm:max-w-md border-border bg-card shadow-2xl rounded-2xl p-6 z-50")}>
           <DialogHeader className="flex flex-col items-center text-center gap-3">
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-destructive/15 text-destructive border border-destructive/20">
               <Trash2 className="h-6 w-6 text-destructive" />
@@ -841,6 +852,7 @@ function ConversationItem({
     <div
       role="button"
       tabIndex={0}
+      aria-current={isActive ? "true" : undefined}
       onClick={handleClick}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
@@ -849,12 +861,13 @@ function ConversationItem({
         }
       }}
       className={cn(
-        "group flex w-full items-start gap-3 px-3 py-3 text-left transition-colors hover:bg-muted/50 border-b border-border/40 cursor-pointer relative",
-        isActive && "border-l-4 border-primary bg-muted/70"
+        styles.conversation,
+        "group flex w-full items-start gap-3 text-left hover:bg-muted/50 cursor-pointer relative",
+        isActive && styles.conversationActive
       )}
     >
       {/* Avatar */}
-      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-muted text-sm font-medium text-foreground relative overflow-hidden">
+      <div className={cn(styles.conversationAvatar, "flex shrink-0 items-center justify-center rounded-full text-sm font-medium relative")}>
         {contact?.avatar_url && !imgError ? (
           <img
             src={contact.avatar_url}
@@ -873,24 +886,25 @@ function ConversationItem({
           )}
           title={isHumanTakeover ? "Atendimento Humano (IA Silenciada)" : "Atendimento IA (Robô Ativo)"}
         >
-          {isHumanTakeover ? "👤" : "🤖"}
+          {isHumanTakeover ? <UserRound className="h-2.5 w-2.5" aria-hidden="true" /> : <Bot className="h-2.5 w-2.5" aria-hidden="true" />}
         </span>
       </div>
 
       {/* Detalhes */}
       <div className="min-w-0 flex-1">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-1.5 min-w-0 truncate">
-            <span className="truncate text-sm font-medium text-foreground">
+        <div className={cn(styles.conversationIdentity, "flex items-center justify-between gap-2")}>
+          <div className={cn(styles.conversationName, "flex items-center gap-1.5 min-w-0 truncate")}>
+            <span className="min-w-0 truncate text-sm font-medium text-foreground">
               {displayName}
             </span>
             {/* Tag visual de status */}
             <span
               className={cn(
-                "px-1.5 py-0.2 rounded text-[9px] font-bold uppercase tracking-wider shrink-0",
+                styles.conversationBadge,
+                "px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0",
                 isHumanTakeover
-                  ? "bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30"
-                  : "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30"
+                  ? "bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                  : "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
               )}
             >
               {isHumanTakeover ? "Humano" : "IA"}
@@ -898,11 +912,11 @@ function ConversationItem({
           </div>
 
           {/* Horário / 3 Pontos no estilo WhatsApp Web */}
-          <div className="relative shrink-0 flex items-center justify-end min-h-5 min-w-[45px]">
+          <div className={cn(styles.conversationTime, "relative shrink-0 flex items-center justify-end min-h-5 min-w-[45px]")}>
             <span
               className={cn(
-                "text-[10px] text-muted-foreground transition-opacity duration-150 select-none",
-                menuOpen ? "opacity-0" : "group-hover:opacity-0"
+                "text-[11px] text-muted-foreground transition-opacity duration-150 select-none tabular-nums",
+                menuOpen ? "opacity-0" : "group-hover:opacity-0 group-focus-within:opacity-0"
               )}
             >
               {timeAgo}
@@ -914,13 +928,13 @@ function ConversationItem({
                   onClick={(e: React.MouseEvent) => e.stopPropagation()}
                   className={cn(
                     "absolute right-0 p-1 rounded-full text-muted-foreground hover:text-foreground hover:bg-muted transition-all cursor-pointer outline-none border border-transparent hover:border-border/50",
-                    menuOpen ? "opacity-100 bg-muted border-border/50" : "opacity-0 group-hover:opacity-100"
+                    menuOpen ? "opacity-100 bg-muted border-border/50" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100"
                   )}
                   aria-label="Mais opções"
                 >
                   <MoreVertical className="h-4 w-4" />
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-44 border-border/80 bg-popover shadow-xl rounded-xl p-1 z-50">
+                <DropdownMenuContent align="end" className={cn(styles.portal, "w-44 border-border/80 bg-popover shadow-xl rounded-xl p-1 z-50")}>
                   <DropdownMenuItem
                     onClick={(e: React.MouseEvent) => {
                       e.stopPropagation();

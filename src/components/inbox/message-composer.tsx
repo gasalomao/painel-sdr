@@ -1,5 +1,7 @@
 "use client";
 
+import styles from "./inbox.module.css";
+
 import {
   useState,
   useRef,
@@ -348,7 +350,7 @@ export function MessageComposer({
     const isImg = draft.kind === "image";
 
     return (
-      <div className="flex flex-col gap-2 bg-muted p-3 border-t border-border">
+      <div className={`${styles.composer} flex flex-col gap-3 bg-card p-4 border-t border-border`}>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-sm text-foreground">
             {isImg && <ImageIcon className="h-4 w-4 text-primary shrink-0" />}
@@ -362,7 +364,8 @@ export function MessageComposer({
             size="sm"
             variant="ghost"
             onClick={discardDraft}
-            className="h-7 w-7 p-0 rounded-full hover:bg-background/80"
+            aria-label="Descartar anexo"
+            className="h-9 w-9 p-0 rounded-lg hover:bg-background/80"
           >
             <X className="h-4 w-4 text-muted-foreground" />
           </Button>
@@ -409,6 +412,7 @@ export function MessageComposer({
               value={draft.caption}
               onChange={(e) => setCaption(e.target.value)}
               placeholder="Adicionar legenda..."
+              aria-label="Legenda do anexo"
               className="flex-1 rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground placeholder-muted-foreground outline-none focus:border-primary/50"
             />
           </div>
@@ -419,7 +423,7 @@ export function MessageComposer({
             size="sm"
             onClick={sendDraft}
             disabled={busy}
-            className="bg-primary hover:bg-primary/95 text-white gap-1"
+            className="bg-primary hover:bg-primary/95 text-primary-foreground gap-1"
           >
             {busy ? (
               <Loader2 className="h-3 w-3 animate-spin" />
@@ -436,7 +440,7 @@ export function MessageComposer({
   // Se estiver gravando áudio
   if (recording) {
     return (
-      <div className="flex items-center justify-between bg-red-500/10 border-t border-red-500/20 px-4 py-3 text-red-500">
+      <div className={`${styles.composer} flex items-center justify-between bg-red-500/10 border-t border-red-500/20 px-4 py-3 text-red-300`}>
         <div className="flex items-center gap-3">
           <span className="flex h-2.5 w-2.5 rounded-full bg-red-600 animate-ping shrink-0" />
           <span className="text-sm font-medium">Gravando Áudio...</span>
@@ -460,7 +464,7 @@ export function MessageComposer({
 
   // Interface padrão do compositor
   return (
-    <div className="flex flex-col border-t border-border bg-card">
+    <div className={`${styles.composer} flex flex-col border-t border-border bg-card`}>
       {replyTo && (
         <ReplyQuote
           authorLabel={replyTo.authorLabel}
@@ -469,11 +473,12 @@ export function MessageComposer({
         />
       )}
 
-      <div className="flex items-end gap-2 p-3">
+      <div className={`${styles.composerRow} flex items-end`}>
         {/* Dropdown Anexar */}
         <DropdownMenu>
           <DropdownMenuTrigger
             disabled={inputsDisabled}
+            aria-label="Anexar arquivo"
             className="h-9 w-9 rounded-full text-muted-foreground hover:text-foreground shrink-0 outline-none hover:bg-muted flex items-center justify-center cursor-pointer disabled:opacity-50"
           >
             <Paperclip className="h-4 w-4" />
@@ -481,7 +486,7 @@ export function MessageComposer({
           <DropdownMenuContent
             align="start"
             side="top"
-            className="border-border bg-popover"
+            className={`${styles.portal} border-border bg-popover`}
           >
             <DropdownMenuItem className="cursor-pointer gap-2" onClick={() => triggerFilePicker("image")}>
               <ImageIcon className="h-4 w-4 text-primary" />
@@ -500,6 +505,7 @@ export function MessageComposer({
 
         <textarea
           ref={textareaRef}
+          aria-label="Mensagem"
           value={text}
           onChange={handleTextChange}
           onKeyDown={handleKeyDown}
@@ -518,8 +524,9 @@ export function MessageComposer({
           <Button
             onClick={handleSend}
             disabled={inputsDisabled}
+            aria-label="Enviar mensagem"
             size="icon"
-            className="h-9 w-9 rounded-full bg-primary hover:bg-primary/95 text-white shrink-0 cursor-pointer"
+            className="h-9 w-9 rounded-full bg-primary hover:bg-primary/95 text-primary-foreground shrink-0 cursor-pointer"
           >
             {sending ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -534,7 +541,8 @@ export function MessageComposer({
             size="icon"
             variant="ghost"
             className="h-9 w-9 rounded-full text-muted-foreground hover:text-foreground shrink-0 cursor-pointer hover:bg-muted"
-            title="Gravar Áudio"
+            title="Gravar áudio"
+            aria-label="Gravar áudio"
           >
             <Mic className="h-4 w-4" />
           </Button>

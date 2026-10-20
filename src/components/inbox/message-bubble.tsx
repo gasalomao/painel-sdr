@@ -1,5 +1,7 @@
 "use client";
 
+import styles from "./inbox.module.css";
+
 import { useState, useMemo } from "react";
 import { cn } from "@/lib/utils";
 import type { Message, MessageReaction } from "@/types";
@@ -158,7 +160,7 @@ function MessageContent({ message }: { message: Message }) {
             <MediaUnavailable label="Áudio" />
           )}
           {message.content_text && (
-            <div className="text-[11px] italic opacity-85 border-l-2 border-primary/50 pl-2.5 py-0.5 whitespace-pre-wrap break-words bg-black/10 rounded-r-md">
+            <div className="text-[11px] italic opacity-85 border-l border-primary/50 pl-2.5 py-0.5 whitespace-pre-wrap break-words bg-black/10 rounded-r-md">
               {message.content_text}
             </div>
           )}
@@ -286,10 +288,9 @@ export function MessageBubble({
 
       <div
         className={cn(
-          "relative rounded-2xl px-3.5 py-2 shadow-sm border border-border/40",
-          isAgent
-            ? "rounded-br-none bg-primary text-primary-foreground border-transparent"
-            : "rounded-bl-none bg-card text-foreground",
+          styles.bubble,
+          "relative border border-border/60",
+          isAgent ? styles.outgoing : "bg-card text-foreground",
         )}
       >
         {reply && (
@@ -304,7 +305,7 @@ export function MessageBubble({
         
         <div
           className={cn(
-            "mt-1 flex items-center gap-1.5 justify-end text-[9px]",
+            "mt-2 flex items-center gap-1.5 justify-end text-[11px] tabular-nums",
             isAgent ? "text-primary-foreground/75" : "text-muted-foreground"
           )}
         >
