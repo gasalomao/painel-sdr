@@ -9,18 +9,21 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
   Smartphone, QrCode, RefreshCw, Plus, Bot, Trash2, Link2, Loader2,
-  Wifi, WifiOff, Hash, Eye, User, Globe, CheckCircle2, XCircle, Copy, Sparkles, Stethoscope,
+  WifiOff, User, CheckCircle2, XCircle, Copy, Sparkles, Stethoscope,
   Shield, ShieldCheck, ShieldOff, X, ChevronDown, Settings2,
 } from "lucide-react";
-import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import styles from "./whatsapp.module.css";
 import { cn } from "@/lib/utils";
 import { useClientSession } from "@/lib/use-session";
 
 const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string }> = {
-  open: { label: "Online", color: "text-green-400", bg: "bg-green-500/10 border-green-500/20" },
-  close: { label: "Offline", color: "text-red-400", bg: "bg-red-500/10 border-red-500/20" },
+  open: { label: "Conectado", color: "text-green-400", bg: "bg-green-500/10 border-green-500/20" },
+  close: { label: "Desconectado", color: "text-red-400", bg: "bg-red-500/10 border-red-500/20" },
   connecting: { label: "Conectando", color: "text-yellow-400", bg: "bg-yellow-500/10 border-yellow-500/20" },
   disconnected: { label: "Desconectado", color: "text-orange-400", bg: "bg-orange-500/10 border-orange-500/20" },
+  error: { label: "Falha na consulta", color: "text-orange-400", bg: "bg-orange-500/10 border-orange-500/20" },
+  unknown: { label: "Não verificado", color: "text-orange-400", bg: "bg-orange-500/10 border-orange-500/20" },
 };
 
 type InstanceData = {
@@ -762,78 +765,42 @@ export default function WhatsAppPage() {
     }
   };
 
-  return (
-    <div className="flex flex-col h-[100dvh] max-h-[100dvh] bg-background selection:bg-primary/30">
-      <Header />
-      <div className="flex-1 p-3 sm:p-6 md:p-10 space-y-4 sm:space-y-8 overflow-y-auto w-full max-w-7xl mx-auto mobile-safe-bottom">
+  const qrConnections = connections.filter(c => !c.provider || c.provider === "evolution" || c.provider === "evolution_go");
+  const onlineCount = qrConnections.filter(c => statusMap[c.instance_name]?.state === "open").length;
 
-        {/* Hero — guia rápido pra cliente leigo entender em 3s o que fazer.
-            Mostra só quando NÃO tem nenhuma conexão (caso contrário, polui
-            quem já está usando). */}
-        {connections.length === 0 && (
-          <Card className="border-primary/20 bg-gradient-to-br from-primary/[0.06] to-emerald-500/[0.04] glass-card overflow-hidden">
-            <CardContent className="p-6 sm:p-8">
-              <div className="flex items-start gap-4">
-                <div className="w-12 h-12 rounded-2xl bg-primary/15 ring-1 ring-primary/30 flex items-center justify-center shrink-0">
-                  <Smartphone className="w-6 h-6 text-primary" />
-                </div>
-                <div className="flex-1 min-w-0 space-y-3">
-                  <div>
-                    <h2 className="text-lg sm:text-xl font-black tracking-tight text-white">Conecte seu WhatsApp em 2 passos</h2>
-                    <p className="text-xs sm:text-sm text-muted-foreground mt-1">
-                      Sua IA vai atender automaticamente todas as mensagens que chegarem nesse número.
-                    </p>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                    <div className="p-3 rounded-xl bg-white/[0.02] border border-white/5 flex items-start gap-3">
-                      <div className="w-7 h-7 rounded-lg bg-primary/15 ring-1 ring-primary/25 text-primary text-[11px] font-mono font-bold flex items-center justify-center shrink-0 mt-0.5">1</div>
-                      <div>
-                        <p className="text-xs font-bold text-white">Crie uma instância</p>
-                        <p className="text-[11px] text-muted-foreground leading-snug">Digite um nome (ex: <code className="text-primary">comercial</code>) e clica em <strong>Nova instância</strong> abaixo.</p>
-                      </div>
-                    </div>
-                    <div className="p-3 rounded-xl bg-white/[0.02] border border-white/5 flex items-start gap-3">
-                      <div className="w-7 h-7 rounded-lg bg-emerald-500/15 ring-1 ring-emerald-500/25 text-emerald-300 text-[11px] font-mono font-bold flex items-center justify-center shrink-0 mt-0.5">2</div>
-                      <div>
-                        <p className="text-xs font-bold text-white">Escaneie o QR</p>
-                        <p className="text-[11px] text-muted-foreground leading-snug">Abra o WhatsApp → Aparelhos conectados → Conectar aparelho. Pronto, a IA assume.</p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        )}
+  const advancedSettings = (
+    <div className={styles.integrations}>
 
         {/* Painel Ngrok / URL Pública — ACCORDION fechado por default.
             Configuração avançada, raramente mexida. Cliente leigo nunca
             precisa abrir. Quando aberto, mostra o editor completo. */}
-        <Card className="border-white/10 bg-black/20 overflow-hidden">
+        <Card className={styles.tunnelPanel}>
           <button
             type="button"
             onClick={() => setNgrokExpanded(v => !v)}
-            className="w-full flex items-center gap-3 p-4 hover:bg-white/[0.02] transition-colors text-left"
+            className={styles.tunnelToggle}
+            aria-expanded={ngrokExpanded}
+            aria-controls="tunnel-settings"
           >
             <div className="w-9 h-9 rounded-xl bg-purple-500/10 ring-1 ring-purple-500/20 flex items-center justify-center text-purple-300 shrink-0">
               <Settings2 className="w-4 h-4" />
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-xs font-black tracking-widest uppercase text-white">Configuração avançada (Ngrok / Túnel)</p>
+              <p className={styles.panelTitle}>URL pública e webhooks</p>
               {publicUrl ? (
                 <p className="text-[11px] text-muted-foreground truncate flex items-center gap-1.5 mt-0.5">
                   <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
                   Túnel configurado: <code className="font-mono text-white/80">{publicUrl.replace(/^https?:\/\//, "")}</code>
                 </p>
               ) : (
-                <p className="text-[11px] text-amber-300/80 mt-0.5">⚠ Túnel não configurado — webhooks só funcionam com URL pública</p>
+                <p className="text-xs text-amber-200 mt-1">Confira a URL pública para receber mensagens.</p>
               )}
             </div>
             <ChevronDown className={cn("w-4 h-4 text-muted-foreground transition-transform shrink-0", ngrokExpanded && "rotate-180")} />
           </button>
 
           {ngrokExpanded && (
-            <div className="border-t border-white/5 p-5 space-y-5 animate-in fade-in slide-in-from-top-1 duration-200">
+            <div id="tunnel-settings" className={styles.tunnelBody}>
               <p className="text-[11px] text-muted-foreground leading-relaxed">
                 A URL pública é onde a Evolution envia os webhooks (mensagens chegando). Em produção
                 (Easypanel/VPS) já vem configurada. Em dev, use ngrok ou similar.
@@ -841,8 +808,8 @@ export default function WhatsAppPage() {
 
               <div className="flex flex-col md:flex-row gap-3">
                 <div className="flex-1 space-y-1.5">
-                  <label className="text-[10px] font-black text-purple-300 uppercase tracking-widest ml-1">URL Base do Túnel</label>
-                  <Input
+                  <label htmlFor="tunnel-url" className="text-[10px] font-black text-purple-300 uppercase tracking-widest ml-1">URL Base do Túnel</label>
+                  <Input id="tunnel-url"
                     value={ngrokInput}
                     onChange={e => setNgrokInput(e.target.value)}
                     placeholder="https://sua-url-aqui.easypanel.host"
@@ -880,7 +847,7 @@ export default function WhatsAppPage() {
                       <p className="text-[9px] text-purple-300 uppercase font-black tracking-[0.2em] mb-0.5">URL Pública</p>
                       <code className="text-xs text-white/90 font-mono truncate block">{publicUrl}</code>
                     </div>
-                    <Button size="icon" variant="ghost" className="h-8 w-8 text-muted-foreground hover:text-white rounded-lg"
+                    <Button size="icon" variant="ghost" aria-label="Copiar URL pública" className="h-8 w-8 text-muted-foreground hover:text-white rounded-lg"
                       onClick={() => { navigator.clipboard.writeText(publicUrl); alert("URL copiada!"); }}>
                       <Copy className="w-3.5 h-3.5" />
                     </Button>
@@ -890,7 +857,7 @@ export default function WhatsAppPage() {
                       <p className="text-[9px] text-blue-300 uppercase font-black tracking-[0.2em] mb-0.5">Webhook Padrão</p>
                       <code className="text-xs text-blue-200/80 font-mono truncate block">{publicUrl}/api/webhooks/whatsapp</code>
                     </div>
-                    <Button size="icon" variant="ghost" className="h-8 w-8 text-blue-400 hover:bg-blue-400/10 rounded-lg"
+                    <Button size="icon" variant="ghost" aria-label="Copiar URL do webhook" className="h-8 w-8 text-blue-400 hover:bg-blue-400/10 rounded-lg"
                       onClick={() => { navigator.clipboard.writeText(`${publicUrl}/api/webhooks/whatsapp`); alert("Webhook copiado!"); }}>
                       <Copy className="w-3.5 h-3.5" />
                     </Button>
@@ -932,7 +899,7 @@ export default function WhatsAppPage() {
         {/* ========================================================== */}
         {/* WHATSAPP CLOUD API (oficial Meta)                            */}
         {/* ========================================================== */}
-        <Card className="border-emerald-500/20 bg-gradient-to-br from-emerald-500/10 to-teal-500/5 shadow-2xl glass-card overflow-hidden">
+        <Card className={styles.cloudPanel}>
           <CardHeader className="border-b border-white/5 pb-4">
             <div className="flex items-start justify-between gap-3">
               <div className="flex items-center gap-3">
@@ -940,15 +907,15 @@ export default function WhatsAppPage() {
                   <ShieldCheck className="w-5 h-5" />
                 </div>
                 <div>
-                  <CardTitle className="text-base font-black text-white uppercase tracking-tighter">WhatsApp Oficial (Meta Cloud API)</CardTitle>
-                  <CardDescription className="text-[10px] text-muted-foreground font-medium uppercase tracking-widest">
-                    Conexão sem QR · Token permanente · Sem risco de ban · Templates HSM
+                  <CardTitle className={styles.panelTitle}>WhatsApp Oficial · Meta Cloud API</CardTitle>
+                  <CardDescription className={styles.panelDescription}>
+                    Conecte pela API da Meta, sem escanear QR Code.
                   </CardDescription>
                 </div>
               </div>
               <Button
                 onClick={() => openCloudDialog()}
-                className="h-10 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 border border-emerald-500/30 gap-2 font-black text-xs px-4"
+                className={styles.secondaryAction}
               >
                 <Plus className="w-4 h-4" /> Nova conexão Cloud
               </Button>
@@ -960,7 +927,7 @@ export default function WhatsAppPage() {
                 Use o WhatsApp Business Cloud quando precisar de conexão estável (sem QR), templates aprovados, ou disparo em volume.
                 Você precisa de: <strong className="text-emerald-300">Phone Number ID</strong>, <strong className="text-emerald-300">Access Token</strong> (System User permanente) e um <strong className="text-emerald-300">Verify Token</strong> qualquer.
                 <div className="mt-2 text-[11px] text-emerald-200/70">
-                  Webhook URL para colar no Meta → <code className="text-emerald-200">{publicUrl ? `${publicUrl}/api/webhooks/whatsapp-cloud` : "<defina a URL pública acima>/api/webhooks/whatsapp-cloud"}</code>
+                  Webhook URL para colar no Meta → <code className="text-emerald-200">{publicUrl ? `${publicUrl}/api/webhooks/whatsapp-cloud` : "<defina a URL pública nas configurações>/api/webhooks/whatsapp-cloud"}</code>
                 </div>
               </div>
             ) : (
@@ -981,62 +948,56 @@ export default function WhatsAppPage() {
           </CardContent>
         </Card>
 
-        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-end gap-4">
-           <div className="min-w-0">
-             <h2 className="text-2xl sm:text-3xl font-black text-white tracking-tight">Suas conexões de WhatsApp</h2>
-             <p className="text-xs sm:text-sm text-muted-foreground mt-1 max-w-2xl">
-               Cada instância é um número de WhatsApp. Crie uma nova, escaneie o QR — a IA passa a atender automaticamente.
-             </p>
-           </div>
+    </div>
+  );
 
-           <div className="w-full lg:w-auto">
-              <label className="text-[10px] font-black text-muted-foreground uppercase tracking-widest mb-1.5 block">
-                Criar nova instância
-              </label>
-              <div className="flex bg-white/5 border border-white/10 p-1.5 rounded-2xl items-center gap-1.5 ring-1 ring-primary/10">
-                <Input
-                  value={novaInstancia}
-                  onChange={e => setNovaInstancia(e.target.value)}
-                  placeholder="ex: comercial, suporte, vendas..."
-                  className="bg-black/50 border-white/10 h-10 w-full lg:w-52 text-sm"
-                />
-                <Button onClick={handleCreate} className="h-10 glow-primary gap-2 font-bold text-xs uppercase tracking-wider shrink-0">
-                   <Plus className="w-4 h-4" /> Criar
-                </Button>
-              </div>
-           </div>
+  return (
+    <div className={cn(styles.page, "flex flex-col h-[100dvh] max-h-[100dvh]")}>
+      <Header />
+      <div className={styles.content}>
+        <div className={styles.heading}>
+          <div>
+            <h2>Suas conexões de WhatsApp</h2>
+            <p>Conecte seus números e escolha o agente responsável por cada atendimento.</p>
+          </div>
+          <Button variant="outline" onClick={() => loadData()} disabled={loading} className={styles.secondaryAction}>
+            <RefreshCw className={cn("w-4 h-4", loading && "animate-spin")} aria-hidden="true" />
+            {loading ? "Atualizando…" : "Atualizar"}
+          </Button>
         </div>
 
-        {/* Banner: explicar o auto-sync de webhook */}
-        {connections.length > 0 && (
-          <div className="mb-6 rounded-2xl border border-emerald-500/20 bg-emerald-500/5 p-4 flex items-start gap-3">
-            <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 shrink-0">
-              <Sparkles className="w-4 h-4 text-emerald-300" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-bold text-white">Webhook sincroniza sozinho ao escanear o QR ✨</p>
-              <p className="text-[11px] text-muted-foreground mt-1 leading-relaxed">
-                Assim que a instância ficar <span className="text-emerald-300 font-bold">&quot;open&quot;</span> (depois do QR), o sistema configura o webhook automaticamente
-                — URL pública + os 5 eventos certos + Base64 ON. Você não precisa entrar no painel da Evolution.
-                O botão <strong className="text-purple-300">&quot;Sincronizar webhook&quot;</strong> em cada card é só pra <em>forçar</em> uma re-sincronização manual.
-              </p>
-            </div>
+        <section className={styles.setup} aria-labelledby="new-connection-title">
+          <div className={styles.setupIntro}>
+            <h3 id="new-connection-title">Conecte um número</h3>
+            <p>Dê um nome à conexão. Depois, escaneie o QR Code com o WhatsApp do celular.</p>
           </div>
-        )}
+          <form className={styles.createForm} onSubmit={e => { e.preventDefault(); handleCreate(); }}>
+            <label htmlFor="connection-name">Nome da conexão</label>
+            <div className={styles.createRow}>
+              <Input id="connection-name" value={novaInstancia} onChange={e => setNovaInstancia(e.target.value)}
+                placeholder="Ex.: comercial" aria-describedby="connection-name-help" className={styles.field} />
+              <Button type="submit" className={styles.primaryAction}><Plus className="w-4 h-4" aria-hidden="true" /> Criar conexão</Button>
+            </div>
+            <p id="connection-name-help">Use um nome sem espaços para identificar este número.</p>
+          </form>
+        </section>
+
+        <div className={styles.listHeading}>
+          <h3>Conexões por QR Code <span>{qrConnections.length}</span></h3>
+          <p role="status">{loading ? "Consultando conexões…" : `${onlineCount} ${onlineCount === 1 ? "conectada" : "conectadas"} de ${qrConnections.length}`} · atualização automática</p>
+        </div>
 
         {loading ? (
-           <div className="flex justify-center p-12 text-muted-foreground">Carregando conexoes...</div>
-        ) : connections.filter(c => !c.provider || c.provider === "evolution" || c.provider === "evolution_go").length === 0 ? (
-          <Card className="col-span-2 border-dashed border-2 border-white/10 bg-transparent">
-            <CardContent className="p-12 text-center">
-              <Smartphone className="w-12 h-12 text-muted-foreground/30 mx-auto mb-4" />
-              <p className="text-muted-foreground font-medium">Nenhuma instancia cadastrada</p>
-              <p className="text-sm text-muted-foreground/60 mt-1">Crie uma nova instancia para comecar.</p>
-            </CardContent>
-          </Card>
+          <div className={styles.empty} role="status"><Loader2 className="w-5 h-5 animate-spin" aria-hidden="true" /> Carregando conexões…</div>
+        ) : qrConnections.length === 0 ? (
+          <div className={styles.empty}>
+            <QrCode className="w-8 h-8" aria-hidden="true" />
+            <h3>Seu primeiro número começa aqui</h3>
+            <p>Crie uma conexão acima para gerar o QR Code. No celular, abra o WhatsApp e acesse <strong>Aparelhos conectados</strong>.</p>
+          </div>
         ) : (
-           <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-             {connections.filter(c => !c.provider || c.provider === "evolution" || c.provider === "evolution_go").map(conn => {
+           <div className={styles.connectionGrid}>
+             {qrConnections.map(conn => {
                 let connState = (statusMap[conn.instance_name]?.state || "close").toLowerCase();
                 if (connState === "connected") connState = "open";
                 if (connState === "disconnected") connState = "close";
@@ -1053,186 +1014,103 @@ export default function WhatsAppPage() {
                 const isOnline = connState === "open";
 
                 return (
-                 <Card key={conn.id} className="border-white/10 bg-white/5 shadow-xl glass-card overflow-hidden">
-                   <CardHeader className="border-b border-white/5 bg-black/20 pb-4">
-                     <div className="flex items-center justify-between">
-                       <div className="flex items-center gap-3">
-                         <div className={cn("w-10 h-10 rounded-xl flex items-center justify-center shadow-inner", isOnline ? "bg-green-500/20 text-green-400" : "bg-white/10 text-muted-foreground")}>
-                            <Smartphone className="w-5 h-5" />
-                         </div>
-                         <div>
-                            <CardTitle className="text-sm font-bold text-white flex items-center gap-2">
-                               {conn.instance_name.includes("_") ? conn.instance_name.split("_").slice(1).join("_") : conn.instance_name}
-                               <Badge variant="outline" className={cn("text-[9px] uppercase tracking-wider", isOnline ? "border-green-500/30 text-green-400" : "border-white/10 text-muted-foreground")}>
-                                  {statusCfg.label}
-                               </Badge>
-                            </CardTitle>
-                            {owner && <p className="text-[10px] text-muted-foreground mt-0.5 font-mono">{owner.replace("@s.whatsapp.net", "")}</p>}
-                            {profileName && <p className="text-[10px] text-white/60">{profileName}</p>}
-                         </div>
+                 <Card key={conn.id} className={styles.connection}>
+                   <CardHeader className={styles.connectionHeader}>
+                     <div className={styles.identity}>
+                       <Smartphone className="w-5 h-5" aria-hidden="true" />
+                       <div>
+                         <CardTitle className={styles.connectionName}>
+                           {conn.instance_name.includes("_") ? conn.instance_name.split("_").slice(1).join("_") : conn.instance_name}
+                         </CardTitle>
+                         <p>{owner?.replace("@s.whatsapp.net", "") || (isOnline ? "Número não informado" : "Nenhum número conectado")}</p>
+                         {profileName && <p>{profileName}</p>}
                        </div>
-
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          onClick={() => handleDelete(conn.instance_name)}
-                          className="text-red-500 hover:bg-red-500/10 hover:text-red-400"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </Button>
                      </div>
+                     <span className={styles.status} data-state={connState}>{statusCfg.label}</span>
                    </CardHeader>
-                   <CardContent className="p-6 space-y-4">
-
-                     {/* Agente Operando */}
-                     <div className="flex items-center justify-between p-4 bg-black/40 rounded-2xl border border-white/5">
-                        <div className="flex items-center gap-3">
-                           <Bot className="w-5 h-5 text-primary" />
-                           <div className="flex flex-col">
-                              <span className="text-xs font-bold text-white/80">Agente Operando</span>
-                              <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-widest">Responsavel por responder</span>
-                           </div>
-                        </div>
-                        <select
-                           value={conn.agent_id || 1}
-                           onChange={e => updateAgentMapping(conn.instance_name, e.target.value)}
-                           className="bg-white/10 text-white text-xs font-bold px-3 py-2 border-none rounded-xl focus:ring-1 focus:ring-primary outline-none"
-                        >
-                           {agents.map(a => <option key={a.id} value={a.id} className="bg-neutral-900">{a.name}</option>)}
-                        </select>
+                   <CardContent className={styles.connectionBody}>
+                     <div className={styles.agentField}>
+                       <label htmlFor={`agent-${conn.id}`}><Bot className="w-4 h-4" aria-hidden="true" /> Agente responsável</label>
+                       <select id={`agent-${conn.id}`} value={conn.agent_id || 1}
+                         onChange={e => updateAgentMapping(conn.instance_name, e.target.value)} className={styles.field}>
+                         {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                       </select>
                      </div>
-
-                     {/* Acoes de conexao */}
-                     <div className="flex flex-col gap-2">
-                        {!isOnline && (
-                          <Button onClick={() => handleConnect(conn.instance_name)} disabled={isLoadingQR} className="w-full bg-primary/20 hover:bg-primary/30 text-primary border border-primary/30 gap-2 h-11 rounded-xl font-bold">
-                            {isLoadingQR ? <Loader2 className="w-4 h-4 animate-spin" /> : <QrCode className="w-4 h-4" />}
-                            {hasQR ? "Gerar QR Novamente" : "Gerar QR Code"}
-                          </Button>
-                        )}
-
-                        {!isOnline && (connState === "close" || connState === "disconnected") && (
-                          <Button onClick={() => handleRestart(conn.instance_name)} disabled={isLoadingRestart} variant="outline" className="w-full bg-orange-500/10 hover:bg-orange-500/20 text-orange-400 border border-orange-500/20 gap-2 h-10 rounded-xl font-bold text-xs">
-                            <RefreshCw className="w-4 h-4" /> Reiniciar Instancia
-                          </Button>
-                        )}
-
-                        {isOnline && (
-                          <div className="text-center bg-green-500/10 border border-green-500/20 text-green-400 p-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2">
-                             <User className="w-4 h-4" /> Conectado ({owner?.replace("@s.whatsapp.net", "") || "N/A"})
-                          </div>
-                        )}
-
-                        <div className="flex gap-2">
-                          <Button onClick={() => checkStatus(conn.instance_name)} variant="ghost" className="flex-1 h-9 rounded-xl text-xs font-bold text-muted-foreground hover:text-white gap-2">
-                            <RefreshCw className="w-3 h-3" /> Status
-                          </Button>
-                          <Button
-                            onClick={() => handleSyncPhotos(conn.instance_name)}
-                            variant="ghost"
-                            disabled={actionLoading[`${conn.instance_name}_sync_photos`]}
-                            className="flex-1 h-9 rounded-xl text-xs font-bold text-blue-400 hover:text-blue-300 hover:bg-blue-500/10 gap-2"
-                          >
-                            <RefreshCw className={cn("w-3 h-3", actionLoading[`${conn.instance_name}_sync_photos`] && "animate-spin")} />
-                            {actionLoading[`${conn.instance_name}_sync_photos`] ? "Sincronizando..." : "Sincronizar Fotos"}
-                          </Button>
-                        </div>
-                     </div>
-
-                     {/* QR Code */}
-                     {hasQR && !isOnline && (
-                        <div className="flex flex-col items-center bg-black/40 p-4 rounded-2xl border border-white/5 space-y-3">
-                          <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">Escaneie o QR Code</div>
-                          <div className="bg-white p-3 rounded-xl">
-                             {qrCodes[conn.instance_name]?.startsWith("data:image") ? (
-                               <img
-                                 src={qrCodes[conn.instance_name]}
-                                 className="w-40 h-40"
-                                 alt="QR Code para conectar"
-                               />
-                             ) : (
-                               <img
-                                 src={`https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent(qrCodes[conn.instance_name])}`}
-                                 className="w-40 h-40"
-                                 alt="QR Code para conectar"
-                               />
-                             )}
-                          </div>
-                          <p className="text-[10px] text-yellow-500/70 text-center">
-                            Abra o WhatsApp no celular → Aparelhos conectados → Conectar com QR Code
-                          </p>
-                        </div>
-                     )}
-
-                     {/* Botoes secundarios */}
-                     <div className="flex gap-2">
-                        <Button onClick={() => handleLogout(conn.instance_name)} variant="outline" disabled={actionLoading[conn.instance_name]} className="flex-1 h-10 rounded-xl text-xs font-bold text-red-400 border-red-500/20 hover:bg-red-500/10 gap-2">
-                          <WifiOff className="w-3 h-3" /> Desconectar
-                        </Button>
-                        <Button
-                          onClick={() => handleRegisterWebhook(conn.instance_name)}
-                          disabled={actionLoading[`${conn.instance_name}_webhook`]}
-                          className="flex-1 h-10 rounded-xl text-xs font-bold text-purple-400 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/20 gap-2"
-                          title="Re-registra o webhook na Evolution API (URL + 5 eventos + Base64). Acontece automático ao escanear o QR — esse botão é pra forçar."
-                        >
-                          {actionLoading[`${conn.instance_name}_webhook`] ? <Loader2 className="w-3 h-3 animate-spin" /> : <Link2 className="w-3 h-3" />}
-                          Sincronizar webhook
-                        </Button>
-                     </div>
-                     <Button
-                        onClick={() => handleDiagnose(conn.instance_name)}
-                        disabled={actionLoading[`${conn.instance_name}_diagnose`]}
-                        className="w-full h-10 rounded-xl text-xs font-bold text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/20 gap-2"
-                        title="Descobre por que as mensagens do cliente não aparecem no chat"
-                     >
-                        {actionLoading[`${conn.instance_name}_diagnose`] ? <Loader2 className="w-3 h-3 animate-spin" /> : <Stethoscope className="w-3 h-3" />}
-                        Diagnosticar webhook
-                     </Button>
-
-                     {/* Proxy anti-ban — por instância */}
-                     {(() => {
-                       const proxy = proxyMap[conn.instance_name];
-                       const hasProxy = !!proxy?.enabled && !!proxy?.host;
-                       return (
-                         <Button
-                           onClick={() => openProxyDialog(conn.instance_name)}
-                           className={cn(
-                             "w-full h-10 rounded-xl text-xs font-bold gap-2 border",
-                             hasProxy
-                               ? "text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border-emerald-500/20"
-                               : "text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border-amber-500/20"
-                           )}
-                           title={hasProxy ? `Sair via ${proxy?.host}:${proxy?.port}` : "Adicionar proxy pra evitar ban"}
-                         >
-                           {hasProxy
-                             ? <><ShieldCheck className="w-3.5 h-3.5" /> Proxy ativo · {proxy?.host}:{proxy?.port}</>
-                             : <><Shield className="w-3.5 h-3.5" /> Adicionar proxy (anti-ban)</>}
+                     {isOnline ? (
+                       <div className={styles.connectedState} role="status"><CheckCircle2 className="w-5 h-5" aria-hidden="true" /><div><strong>WhatsApp conectado</strong><p>Conexão estabelecida com este número.</p></div></div>
+                     ) : (
+                       <div className={styles.connectAction}>
+                         <p>{hasQR ? "Escaneie o código abaixo para concluir." : "Conecte o celular para começar a receber mensagens."}</p>
+                         <Button onClick={() => handleConnect(conn.instance_name)} disabled={isLoadingQR} className={styles.primaryAction}>
+                           {isLoadingQR ? <Loader2 className="w-4 h-4 animate-spin" /> : <QrCode className="w-4 h-4" />}
+                           {isLoadingQR ? "Gerando QR Code…" : hasQR ? "Gerar novo QR Code" : "Conectar com QR Code"}
                          </Button>
-                       );
-                     })()}
-
+                       </div>
+                     )}
+                     {hasQR && !isOnline && (
+                       <div className={styles.qrPanel}>
+                         <strong>Escaneie com o WhatsApp do celular</strong>
+                         <div className={styles.qrImage}>
+                           <img src={qrCodes[conn.instance_name]?.startsWith("data:image") ? qrCodes[conn.instance_name] : `https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent(qrCodes[conn.instance_name])}`}
+                             width={200} height={200} alt={`QR Code para conectar ${conn.instance_name}`} />
+                         </div>
+                         <p>Abra <strong>Aparelhos conectados</strong> no WhatsApp e toque em <strong>Conectar aparelho</strong>.</p>
+                       </div>
+                     )}
+                     <Button onClick={() => checkStatus(conn.instance_name)} variant="ghost" className={styles.statusAction}>
+                       <RefreshCw className="w-4 h-4" aria-hidden="true" /> Verificar conexão
+                     </Button>
                    </CardContent>
+                   <details className={styles.maintenance}>
+                     <summary><Settings2 className="w-4 h-4" aria-hidden="true" /> Gerenciar conexão <ChevronDown className="w-4 h-4" aria-hidden="true" /></summary>
+                     <div className={styles.maintenanceActions}>
+                       <Button onClick={() => handleSyncPhotos(conn.instance_name)} variant="outline" disabled={actionLoading[`${conn.instance_name}_sync_photos`]} className={styles.secondaryAction}>
+                         <User className="w-4 h-4" aria-hidden="true" /> {actionLoading[`${conn.instance_name}_sync_photos`] ? "Sincronizando…" : "Sincronizar fotos"}
+                       </Button>
+                       <Button onClick={() => handleRegisterWebhook(conn.instance_name)} disabled={actionLoading[`${conn.instance_name}_webhook`]} variant="outline" className={styles.secondaryAction}>
+                         {actionLoading[`${conn.instance_name}_webhook`] ? <Loader2 className="w-4 h-4 animate-spin" /> : <Link2 className="w-4 h-4" />} Sincronizar webhook
+                       </Button>
+                       <Button onClick={() => handleDiagnose(conn.instance_name)} disabled={actionLoading[`${conn.instance_name}_diagnose`]} variant="outline" className={styles.secondaryAction}>
+                         {actionLoading[`${conn.instance_name}_diagnose`] ? <Loader2 className="w-4 h-4 animate-spin" /> : <Stethoscope className="w-4 h-4" />} Diagnosticar webhook
+                       </Button>
+                       <Button onClick={() => openProxyDialog(conn.instance_name)} variant="outline" className={styles.secondaryAction}>
+                         <Shield className="w-4 h-4" aria-hidden="true" /> {proxyMap[conn.instance_name]?.enabled && proxyMap[conn.instance_name]?.host ? "Proxy ativo · Configurar" : "Configurar proxy"}
+                       </Button>
+                       {!isOnline && (connState === "close" || connState === "disconnected") && (
+                         <Button onClick={() => handleRestart(conn.instance_name)} disabled={isLoadingRestart} variant="outline" className={styles.secondaryAction}>
+                           <RefreshCw className={cn("w-4 h-4", isLoadingRestart && "animate-spin")} aria-hidden="true" /> Reiniciar instância
+                         </Button>
+                       )}
+                       <Button onClick={() => handleLogout(conn.instance_name)} variant="outline" disabled={actionLoading[conn.instance_name]} className={styles.dangerAction}>
+                         <WifiOff className="w-4 h-4" aria-hidden="true" /> Desconectar
+                       </Button>
+                       <Button onClick={() => handleDelete(conn.instance_name)} variant="ghost" disabled={actionLoading[conn.instance_name]} className={styles.dangerAction}>
+                         <Trash2 className="w-4 h-4" aria-hidden="true" /> Excluir conexão
+                       </Button>
+                     </div>
+                   </details>
                  </Card>
                 );
              })}
            </div>
         )}
+
+        <p className={styles.syncNote}><CheckCircle2 className="w-4 h-4" aria-hidden="true" /> Ao conectar pelo QR Code, a sincronização das mensagens é configurada automaticamente.</p>
+        <section className={styles.advancedSection} aria-labelledby="integrations-title">
+          <div className={styles.sectionHeading}>
+            <h3 id="integrations-title">Outras formas de conectar e configurações</h3>
+            <p>API oficial da Meta e ajustes técnicos. Sua conexão por QR Code continua acima.</p>
+          </div>
+          {advancedSettings}
+        </section>
       </div>
 
       {/* Toast de auto-sync de webhook */}
       {toast && (
-        <div className={cn(
-          "fixed bottom-20 lg:bottom-6 right-3 sm:right-6 z-50 max-w-sm rounded-xl px-4 py-3 shadow-2xl border backdrop-blur-md",
-          "animate-in slide-in-from-bottom-2 fade-in duration-300",
-          toast.kind === "ok"
-            ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-100"
-            : "bg-red-500/15 border-red-500/40 text-red-100"
-        )}>
-          <div className="flex items-start gap-2">
-            {toast.kind === "ok" ? <CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0" /> : <XCircle className="w-4 h-4 mt-0.5 shrink-0" />}
-            <p className="text-xs font-bold leading-relaxed">{toast.text}</p>
-            <button onClick={() => setToast(null)} className="text-white/50 hover:text-white shrink-0"><X className="w-3.5 h-3.5" /></button>
-          </div>
+        <div className={styles.toast} data-kind={toast.kind} role={toast.kind === "err" ? "alert" : "status"}>
+          {toast.kind === "ok" ? <CheckCircle2 className="w-4 h-4" aria-hidden="true" /> : <XCircle className="w-4 h-4" aria-hidden="true" />}
+          <p>{toast.text}</p>
+          <button type="button" onClick={() => setToast(null)} aria-label="Fechar aviso"><X className="w-4 h-4" aria-hidden="true" /></button>
         </div>
       )}
 
@@ -1240,26 +1118,19 @@ export default function WhatsAppPage() {
       {/* MODAL: WhatsApp Cloud API (Meta oficial)                     */}
       {/* ========================================================== */}
       <Dialog open={cloudOpen !== null} onOpenChange={(o) => !o && !cloudSaving && setCloudOpen(null)}>
-        <DialogContent className="glass-card border-white/20 max-w-2xl p-0 overflow-hidden">
-          <div className="p-5 border-b border-white/10 bg-gradient-to-r from-emerald-500/10 to-teal-500/5 flex items-start gap-3">
-            <div className="p-2 rounded-xl bg-emerald-500/15 border border-emerald-500/30">
-              <ShieldCheck className="w-5 h-5 text-emerald-300" />
-            </div>
+        <DialogContent className={styles.dialog}>
+          <div className={styles.dialogHeader}>
+            <ShieldCheck className="w-5 h-5" aria-hidden="true" />
             <div className="flex-1 min-w-0">
-              <DialogTitle className="text-base font-black text-white">
-                {cloudOpen ? "Editar conexão Cloud" : "Nova conexão WhatsApp Cloud"}
-              </DialogTitle>
-              <p className="text-[11px] text-muted-foreground mt-1 leading-relaxed">
-                Estes dados vêm do <strong>Meta for Developers</strong> → seu App → WhatsApp → API Setup.
-                O Access Token recomendado é de <strong className="text-emerald-300">System User</strong> (permanente).
-              </p>
+              <DialogTitle>{cloudOpen ? "Editar conexão Cloud" : "Nova conexão WhatsApp Cloud"}</DialogTitle>
+              <DialogDescription>Encontre as credenciais em Meta for Developers, no seu app, em WhatsApp e API Setup. Use o Access Token de System User para uma conexão permanente.</DialogDescription>
             </div>
           </div>
 
-          <div className="p-5 space-y-3 max-h-[70vh] overflow-y-auto">
+          <div className={styles.dialogBody}>
             <div>
-              <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Nome da conexão (instance_name)</label>
-              <Input
+              <label htmlFor="cloud-name" className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Nome da conexão (instance_name)</label>
+              <Input id="cloud-name"
                 value={cloudForm.instance_name}
                 onChange={e => setCloudForm({ ...cloudForm, instance_name: e.target.value })}
                 placeholder="ex: cloud_principal (sem espaços)"
@@ -1269,10 +1140,10 @@ export default function WhatsAppPage() {
               <p className="text-[10px] text-muted-foreground/60 mt-1">Usado internamente pra rotear mensagens. Não pode mudar depois.</p>
             </div>
 
-            <div className="grid grid-cols-2 gap-2">
+            <div className={styles.formGrid}>
               <div>
-                <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Phone Number ID *</label>
-                <Input
+                <label htmlFor="cloud-phone" className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Phone Number ID *</label>
+                <Input id="cloud-phone"
                   value={cloudForm.phone_number_id}
                   onChange={e => setCloudForm({ ...cloudForm, phone_number_id: e.target.value })}
                   placeholder="123456789012345"
@@ -1280,8 +1151,8 @@ export default function WhatsAppPage() {
                 />
               </div>
               <div>
-                <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">WhatsApp Business Account ID</label>
-                <Input
+                <label htmlFor="cloud-business" className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">WhatsApp Business Account ID</label>
+                <Input id="cloud-business"
                   value={cloudForm.business_account_id}
                   onChange={e => setCloudForm({ ...cloudForm, business_account_id: e.target.value })}
                   placeholder="opcional"
@@ -1291,8 +1162,8 @@ export default function WhatsAppPage() {
             </div>
 
             <div>
-              <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Access Token *</label>
-              <Input
+              <label htmlFor="cloud-access" className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Access Token *</label>
+              <Input id="cloud-access"
                 value={cloudForm.access_token}
                 onChange={e => setCloudForm({ ...cloudForm, access_token: e.target.value })}
                 placeholder="EAAG..."
@@ -1304,10 +1175,10 @@ export default function WhatsAppPage() {
               </p>
             </div>
 
-            <div className="grid grid-cols-2 gap-2">
+            <div className={styles.formGrid}>
               <div>
-                <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Verify Token (webhook)</label>
-                <Input
+                <label htmlFor="cloud-verify" className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Verify Token (webhook)</label>
+                <Input id="cloud-verify"
                   value={cloudForm.verify_token}
                   onChange={e => setCloudForm({ ...cloudForm, verify_token: e.target.value })}
                   placeholder="qualquer-string-secreta"
@@ -1315,8 +1186,8 @@ export default function WhatsAppPage() {
                 />
               </div>
               <div>
-                <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">App Secret (opcional)</label>
-                <Input
+                <label htmlFor="cloud-secret" className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">App Secret (opcional)</label>
+                <Input id="cloud-secret"
                   value={cloudForm.app_secret}
                   onChange={e => setCloudForm({ ...cloudForm, app_secret: e.target.value })}
                   placeholder="pra validar X-Hub-Signature"
@@ -1326,10 +1197,10 @@ export default function WhatsAppPage() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-2">
+            <div className={styles.formGrid}>
               <div>
-                <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Graph API Version</label>
-                <Input
+                <label htmlFor="cloud-version" className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Graph API Version</label>
+                <Input id="cloud-version"
                   value={cloudForm.graph_version}
                   onChange={e => setCloudForm({ ...cloudForm, graph_version: e.target.value })}
                   placeholder="v21.0"
@@ -1337,8 +1208,8 @@ export default function WhatsAppPage() {
                 />
               </div>
               <div>
-                <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Agente operando</label>
-                <select
+                <label htmlFor="cloud-agent" className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Agente operando</label>
+                <select id="cloud-agent"
                   value={cloudForm.agent_id}
                   onChange={e => setCloudForm({ ...cloudForm, agent_id: Number(e.target.value) })}
                   className="w-full mt-1 bg-black/40 border border-white/10 text-white h-10 rounded-md text-xs px-2"
@@ -1360,7 +1231,7 @@ export default function WhatsAppPage() {
             </div>
 
             {cloudMsg && (
-              <div className={cn(
+              <div role="status" className={cn(
                 "p-3 rounded-xl border text-[11px] flex items-start gap-2",
                 cloudMsg.kind === "ok"
                   ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-200"
@@ -1371,7 +1242,7 @@ export default function WhatsAppPage() {
               </div>
             )}
 
-            <div className="flex flex-wrap gap-2 pt-2 border-t border-white/5">
+            <div className={styles.formActions}>
               <Button onClick={saveCloud} disabled={cloudSaving} className="flex-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 gap-2">
                 {cloudSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
                 Salvar
@@ -1397,23 +1268,16 @@ export default function WhatsAppPage() {
       {/* MODAL: Configurar Proxy (anti-ban) por instância             */}
       {/* ========================================================== */}
       <Dialog open={!!proxyOpen} onOpenChange={(o) => !o && !proxySaving && setProxyOpen(null)}>
-        <DialogContent className="glass-card border-white/20 max-w-lg p-0 overflow-hidden">
-          <div className="p-5 border-b border-white/10 bg-gradient-to-r from-emerald-500/10 to-amber-500/5 flex items-start gap-3">
-            <div className="p-2 rounded-xl bg-emerald-500/15 border border-emerald-500/30">
-              <Shield className="w-5 h-5 text-emerald-300" />
-            </div>
+        <DialogContent className={styles.dialog}>
+          <div className={styles.dialogHeader}>
+            <Shield className="w-5 h-5" aria-hidden="true" />
             <div className="flex-1 min-w-0">
-              <DialogTitle className="text-base font-black text-white flex items-center gap-2">
-                Proxy da instância <span className="font-mono text-emerald-300 text-sm">{proxyOpen}</span>
-              </DialogTitle>
-              <p className="text-[11px] text-muted-foreground mt-1 leading-relaxed">
-                Configurar um proxy faz o WhatsApp dessa instância sair pela internet por um IP diferente do servidor.
-                Reduz risco de ban quando você roda <strong>várias contas</strong> no mesmo VPS.
-              </p>
+              <DialogTitle>Configurar proxy · {proxyOpen}</DialogTitle>
+              <DialogDescription>Configuração técnica opcional. Altera o endereço IP usado por esta conexão, sem mudar as demais.</DialogDescription>
             </div>
           </div>
 
-          <div className="p-5 space-y-4">
+          <div className={styles.dialogBody}>
             {proxyMap[proxyOpen || ""]?.enabled && proxyMap[proxyOpen || ""]?.host && (
               <div className="p-3 rounded-xl bg-emerald-500/5 border border-emerald-500/20 text-[11px] text-emerald-200 flex items-start gap-2">
                 <ShieldCheck className="w-3.5 h-3.5 mt-0.5 shrink-0" />
@@ -1426,10 +1290,10 @@ export default function WhatsAppPage() {
               </div>
             )}
 
-            <div className="grid grid-cols-3 gap-2">
+            <div className={styles.formGrid}>
               <div>
-                <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Protocolo</label>
-                <select
+                <label htmlFor="proxy-protocol" className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Protocolo</label>
+                <select id="proxy-protocol"
                   value={proxyForm.protocol || "http"}
                   onChange={e => setProxyForm({ ...proxyForm, protocol: e.target.value as any })}
                   className="w-full mt-1 bg-black/40 border border-white/10 text-white h-10 rounded-xl text-xs px-2"
@@ -1441,25 +1305,19 @@ export default function WhatsAppPage() {
                 </select>
               </div>
               <div className="col-span-1">
-                <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Porta</label>
-                <Input
+                <label htmlFor="proxy-port" className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Porta</label>
+                <Input id="proxy-port"
                   value={proxyForm.port || ""}
                   onChange={e => setProxyForm({ ...proxyForm, port: e.target.value })}
                   placeholder="3128"
                   className="bg-black/40 border-white/10 mt-1 h-10 font-mono text-xs"
                 />
               </div>
-              <div className="col-span-1">
-                <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">&nbsp;</label>
-                <div className="h-10 mt-1 flex items-center text-[10px] text-muted-foreground italic">
-                  ex: 80, 443, 1080
-                </div>
-              </div>
             </div>
 
             <div>
-              <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Host</label>
-              <Input
+              <label htmlFor="proxy-host" className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Host</label>
+              <Input id="proxy-host"
                 value={proxyForm.host || ""}
                 onChange={e => setProxyForm({ ...proxyForm, host: e.target.value })}
                 placeholder="proxy.exemplo.com  ou  189.50.10.20"
@@ -1467,22 +1325,22 @@ export default function WhatsAppPage() {
               />
             </div>
 
-            <div className="grid grid-cols-2 gap-2">
+            <div className={styles.formGrid}>
               <div>
-                <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">
+                <label htmlFor="proxy-username" className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">
                   Usuário <span className="opacity-50">(opcional)</span>
                 </label>
-                <Input
+                <Input id="proxy-username"
                   value={proxyForm.username || ""}
                   onChange={e => setProxyForm({ ...proxyForm, username: e.target.value })}
                   className="bg-black/40 border-white/10 mt-1 h-10 font-mono text-xs"
                 />
               </div>
               <div>
-                <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">
+                <label htmlFor="proxy-password" className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">
                   Senha <span className="opacity-50">(opcional)</span>
                 </label>
-                <Input
+                <Input id="proxy-password"
                   type="password"
                   value={proxyForm.password || ""}
                   onChange={e => setProxyForm({ ...proxyForm, password: e.target.value })}
@@ -1492,7 +1350,7 @@ export default function WhatsAppPage() {
             </div>
 
             {proxyMsg && (
-              <div className={cn(
+              <div role="status" className={cn(
                 "p-3 rounded-xl border text-[11px] flex items-start gap-2",
                 proxyMsg.type === "ok"
                   ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-200"
@@ -1514,7 +1372,7 @@ export default function WhatsAppPage() {
               <p>• Depois de aplicar, a Evolution testa o proxy automaticamente. Se a conexão cair, o proxy está bloqueado.</p>
             </div>
 
-            <div className="flex flex-wrap gap-2 pt-2 border-t border-white/5">
+            <div className={styles.formActions}>
               <Button
                 onClick={saveProxy}
                 disabled={proxySaving}
