@@ -62,6 +62,26 @@ describe("mínimo de avaliações na Prospecção Sites", () => {
     vi.unstubAllGlobals();
   });
 
+  it("identifica a etapa e associa os campos e filtros aos seus rótulos", async () => {
+    render(<ProspeccaoSitesPage />);
+    expect(screen.getByRole("navigation", { name: "Etapas da prospecção" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Captura", exact: true })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("textbox", { name: "Nichos (1 por linha)" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Regiões (1 por linha)" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Remover telefones duplicados" }));
+    expect(screen.getByRole("checkbox", { name: "Remover telefones duplicados" })).not.toBeChecked();
+  });
+
+  it("mantém o filtro de disparo acionável pelo botão inteiro", async () => {
+    render(<ProspeccaoSitesPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Leads", exact: true }));
+    const pending = screen.getByRole("button", { name: "Pendentes", exact: true });
+    fireEvent.click(pending);
+    expect(pending).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Disparados", exact: true }));
+    expect(pending).toHaveAttribute("aria-pressed", "false");
+  });
+
   it("atualiza o contador com count do evento SSE new_lead do engine", async () => {
     render(<ProspeccaoSitesPage />);
 

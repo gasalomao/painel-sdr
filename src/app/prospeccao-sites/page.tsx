@@ -24,6 +24,7 @@ import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
 import { parseMinReviews } from "@/lib/scraper-review-count";
 import { AutomationLogs } from "../automacao/AutomationLogs";
+import styles from "./prospeccao-sites.module.css";
 
 type Lead = {
   id: number;
@@ -81,6 +82,15 @@ const TABS = [
   { key: "automacao", label: "Automação", icon: Zap },
 ] as const;
 type TabKey = typeof TABS[number]["key"];
+
+const TAB_CONTEXT: Record<TabKey, { title: string; description: string }> = {
+  captura: { title: "Encontre sua próxima oportunidade", description: "Defina os negócios e as regiões. Depois, selecione as empresas e prepare sua abordagem." },
+  leads: { title: "Escolha quem você quer abordar", description: "Filtre as empresas capturadas e selecione os leads para revisar a mensagem antes do envio." },
+  revisao: { title: "Uma abordagem com contexto", description: "Ajuste a mensagem-base e confira como ela ficará para cada empresa selecionada." },
+  disparo: { title: "Prepare sua campanha", description: "Escolha o WhatsApp, os intervalos e o horário de envio. A campanha será criada antes de iniciar." },
+  historico: { title: "Acompanhe suas campanhas", description: "Consulte o progresso, as mensagens e os registros de execução em um só lugar." },
+  automacao: { title: "Organize a prospecção automática", description: "Configure a captura, a primeira mensagem e os retornos. Você controla quando a automação começa." },
+};
 
 const DEFAULT_TEMPLATE = `{{saudacao}}! Tudo bem? Aqui é a Sarah, da Salomão AI.
 
@@ -968,20 +978,32 @@ export default function ProspeccaoSitesPage() {
   }, [rankedLeads]);
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden">
+    <div className={cn(styles.workspace, "h-full flex flex-col overflow-hidden")}>
       <Header />
-      <div className="flex-1 overflow-y-auto overflow-x-hidden">
-        <div className="px-3 sm:px-6 py-4 max-w-[1600px] mx-auto w-full">
+      <div className={cn(styles.scrollArea, "flex-1 min-h-0 overflow-y-auto")}>
+        <div className={styles.content}>
+        <div className={styles.pageHeading}>
+          <div>
+            <h2>{TAB_CONTEXT[tab].title}</h2>
+            <p>{TAB_CONTEXT[tab].description}</p>
+          </div>
+          <div className={styles.sessionStatus} aria-live="polite">
+            {isRunning ? (
+              <span className={styles.captureStatus}><span className={styles.statusDot} />{isPaused ? "Captura pausada" : "Captura em andamento"}</span>
+            ) : <span><Globe className="size-4" /> Prospecção de sites</span>}
+            {selected.size > 0 && <span>{selected.size} lead{selected.size > 1 ? "s" : ""} selecionado{selected.size > 1 ? "s" : ""}</span>}
+          </div>
+        </div>
         {/* Tabs */}
-        <div className="flex gap-1 border-b border-white/10 mb-4 overflow-x-auto sticky top-0 bg-background/95 backdrop-blur z-20 -mx-3 sm:-mx-6 px-3 sm:px-6 py-2">
+        <nav aria-label="Etapas da prospecção" className={styles.tabs}>
           {TABS.map((t) => (
             <button
               key={t.key}
+              type="button"
               onClick={() => setTab(t.key)}
-              className={cn(
-                "px-4 py-2 text-xs font-bold uppercase tracking-wider border-b-2 transition-colors whitespace-nowrap",
-                tab === t.key ? "border-primary text-primary" : "border-transparent text-white/50 hover:text-white"
-              )}
+              aria-pressed={tab === t.key}
+              aria-controls="prospeccao-panel"
+              className={styles.tab}
             >
               <t.icon className="w-3.5 h-3.5 inline mr-1.5" />
               {t.label}
@@ -995,42 +1017,37 @@ export default function ProspeccaoSitesPage() {
               )}
             </button>
           ))}
-        </div>
+        </nav>
 
+        <section id="prospeccao-panel" aria-label={TABS.find((t) => t.key === tab)?.label} className={styles.panel}>
         {/* TAB CAPTURA */}
         {tab === "captura" && (
-          <div className="space-y-3 max-w-3xl">
+          <div className={styles.captureLayout}>
             <Card className="border-white/10 bg-white/[0.02]">
               <CardContent className="p-4 space-y-3">
-                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-white/70">
-                  <Rocket className="w-4 h-4" /> Captura automática (reusa Captador Maps)
-                </div>
-                <div className="text-xs text-white/50">
-                  A captura roda o mesmo engine do Captador Maps e popula a coluna <code className="bg-black/40 px-1 rounded">website</code> em leads.
-                  Depois de pronta, vá pra aba Leads — o filtro &quot;sem site&quot; já vem ativo.
+                <div className={styles.sectionHeading}>
+                  <h3><MapPin className="size-4" /> Capturar empresas no Google Maps</h3>
+                  <p>Informe um nicho e uma região por linha. Os resultados ficam disponíveis na aba Leads.</p>
                 </div>
 
-                <div>
-                  <label className="text-xs text-white/60">Nichos (1 por linha)</label>
-                  <Textarea value={niches} onChange={(e) => setNiches(e.target.value)} rows={3} placeholder={"pizzaria\ndentista\nacademia"} />
-                </div>
-                <div>
-                  <label className="text-xs text-white/60">Regiões (1 por linha)</label>
-                  <Textarea value={regions} onChange={(e) => setRegions(e.target.value)} rows={3} placeholder={"São Paulo SP\nCentro, Belo Horizonte MG"} />
+                <div className={styles.fieldGrid}>
+                  <div>
+                    <label htmlFor="ps-niches">Nichos (1 por linha)</label>
+                    <Textarea id="ps-niches" value={niches} onChange={(e) => setNiches(e.target.value)} rows={3} placeholder={"pizzaria\ndentista\nacademia"} />
+                  </div>
+                  <div>
+                    <label htmlFor="ps-regions">Regiões (1 por linha)</label>
+                    <Textarea id="ps-regions" value={regions} onChange={(e) => setRegions(e.target.value)} rows={3} placeholder={"São Paulo SP\nCentro, Belo Horizonte MG"} />
+                  </div>
                 </div>
 
-                <div className="space-y-3 rounded-lg border border-white/10 p-3 bg-white/[0.02]">
-                  <div className="flex items-center justify-between gap-3">
+                <div className={styles.filterSection}>
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
                     <div className="flex items-center gap-1.5">
                       <Filter className="w-3 h-3 text-white/60" />
                       <label className="text-xs font-semibold text-white/60 uppercase tracking-wider">Filtros Automáticos</label>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <label htmlFor="ps-capture-all-reviews" className="text-xs text-white/60 cursor-pointer">Capturar todas as avaliações</label>
-                      <Switch id="ps-capture-all-reviews" checked={captureAllReviews} onCheckedChange={setCaptureAllReviews} />
-                    </div>
                   </div>
-                  <p className="text-[11px] text-white/50">Quando ativado, carrega e salva todos os comentários e avaliações disponíveis no Google Maps. A captação pode levar mais tempo.</p>
 
                   <div className="space-y-1">
                     <label htmlFor="ps-min-reviews" className="text-xs text-white/60">Mínimo de avaliações no Google</label>
@@ -1053,20 +1070,27 @@ export default function ProspeccaoSitesPage() {
                     <p id="ps-filter-with-instagram-help" className="text-[11px] text-white/50">{INSTAGRAM_FILTER_HELP}</p>
                   </div>
 
+                  <details className={styles.advancedOptions}>
+                    <summary><Bot className="size-4" /> Avaliações completas e análise com IA <ChevronRight className="size-4" /></summary>
+                    <div className="flex items-center justify-between gap-3">
+                      <label htmlFor="ps-capture-all-reviews">Capturar todas as avaliações</label>
+                      <Switch id="ps-capture-all-reviews" checked={captureAllReviews} onCheckedChange={setCaptureAllReviews} />
+                    </div>
+                    <p>Salva os comentários disponíveis no Google Maps. Esta opção pode aumentar o tempo de captura.</p>
                   {/* Resumo de avaliações com IA (reviews-ai) */}
-                  <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-3 space-y-2">
+                  <div className={styles.optionSection}>
                     <div className="flex items-center justify-between gap-2">
                       <label htmlFor="ps-reviews-ai" className="text-xs font-semibold text-white/70 cursor-pointer">Resumir avaliações com IA</label>
                       <Switch id="ps-reviews-ai" checked={reviewsAiEnabled} onCheckedChange={(v) => { setReviewsAiEnabled(v); if (v) setCaptureAllReviews(true); }} />
                     </div>
                     <p className="text-[11px] text-white/50">
-                      Liga &quot;Capturar todas as avaliações&quot; automaticamente. Cada lead capturado é resumido NA HORA pela IA com o prompt abaixo (todos os comentários vão junto). O resumo fica em <code className="bg-black/40 px-1 rounded">{"{{resumo_avaliacoes}}"}</code> nos disparos.
+                      Ativa a captura de comentários e gera um resumo por lead. Use <code>{"{{resumo_avaliacoes}}"}</code> para incluir o resultado na mensagem.
                     </p>
                     {reviewsAiEnabled && (
                       <>
                         <div>
                           <label className="text-xs text-white/60">Modelo de IA</label>
-                          <select value={reviewsAiModel} onChange={(e) => setReviewsAiModel(e.target.value)} className="w-full mt-1 px-3 py-2 rounded-lg bg-black/40 border border-white/10 text-sm">
+                          <select aria-label="Modelo de IA para avaliações" value={reviewsAiModel} onChange={(e) => setReviewsAiModel(e.target.value)} className="w-full mt-1 px-3 py-2 rounded-lg bg-black/40 border border-white/10 text-sm">
                             {loadingAiModels && <option value="">Carregando…</option>}
                             {!loadingAiModels && aiModels.length === 0 && <option value="">(sem modelos — admin precisa configurar API key)</option>}
                             <ModelOptions models={aiModels as any} />
@@ -1074,7 +1098,7 @@ export default function ProspeccaoSitesPage() {
                         </div>
                         <div>
                           <label className="text-xs text-white/60">Prompt (vazio = padrão: ELOGIOS / RECLAMAÇÕES / GANCHO / NOTA GERAL)</label>
-                          <Textarea value={reviewsAiPrompt} onChange={(e) => setReviewsAiPrompt(e.target.value)} rows={3}
+                          <Textarea aria-label="Instruções para resumir avaliações" value={reviewsAiPrompt} onChange={(e) => setReviewsAiPrompt(e.target.value)} rows={3}
                             placeholder="Ex: Resuma em tom de vendas, focando dores que um site profissional resolveria…"
                             className="bg-black/40 border-white/10 font-mono text-xs" />
                         </div>
@@ -1084,6 +1108,7 @@ export default function ProspeccaoSitesPage() {
                       </>
                     )}
                   </div>
+                  </details>
 
                   {[
                     { label: "Remover leads sem telefone", value: filterEmpty, set: setFilterEmpty },
@@ -1091,31 +1116,22 @@ export default function ProspeccaoSitesPage() {
                     { label: "Remover telefones fixos", value: filterLandlines, set: setFilterLandlines },
                     { label: "Capturar somente leads sem site", value: filterWithWebsite, set: setFilterWithWebsite },
                   ].map((f) => (
-                    <div
-                      key={f.label}
-                      className="flex items-center justify-between p-2 rounded-lg hover:bg-white/5 cursor-pointer"
-                      onClick={() => f.set(!f.value)}
-                    >
-                      <span className="text-sm text-white/90 select-none flex-1">{f.label}</span>
-                      <input
-                        type="checkbox"
-                        checked={f.value}
-                        onChange={(e) => f.set(e.target.checked)}
-                        onClick={(e) => e.stopPropagation()}
-                        className="w-4 h-4 accent-primary cursor-pointer"
-                      />
-                    </div>
+                    <label key={f.label} className={styles.checkboxRow}>
+                      <span>{f.label}</span>
+                      <input type="checkbox" checked={f.value} onChange={(e) => f.set(e.target.checked)} />
+                    </label>
                   ))}
                 </div>
 
-                <div className="flex items-center gap-3">
-                  <label className="text-xs text-white/60 flex items-center gap-2">
+                <div className={styles.captureLimit}>
+                  <label className="flex items-center gap-2">
                     <Switch checked={maxLeads > 0} onCheckedChange={(v) => setMaxLeads(v ? 50 : 0)} />
                     Limite de leads
                   </label>
                   {maxLeads > 0 && (
-                    <Input type="number" value={maxLeads} onChange={(e) => setMaxLeads(Number(e.target.value))} className="w-24" min={1} max={500} />
+                    <Input aria-label="Quantidade máxima de leads" type="number" value={maxLeads} onChange={(e) => setMaxLeads(Number(e.target.value))} className="w-24" min={1} max={500} />
                   )}
+                  <span>{maxLeads > 0 ? "A captura para ao atingir o limite." : "Sem limite definido."}</span>
                 </div>
 
                 <div className="flex gap-2 pt-2">
@@ -1136,6 +1152,18 @@ export default function ProspeccaoSitesPage() {
                 </div>
               </CardContent>
             </Card>
+
+            <aside className={styles.captureGuide} aria-label="Como funciona a prospecção">
+              <h3>Da busca à conversa</h3>
+              <p>Comece pela captura. Você revisa os leads e a mensagem antes de criar uma campanha.</p>
+              <ol>
+                <li><Search className="size-4" /><div><strong>Encontre as empresas</strong><span>Combine nichos e regiões para definir sua busca.</span></div></li>
+                <li><CheckCircle2 className="size-4" /><div><strong>Selecione e revise</strong><span>Na aba Leads, o filtro sem site já vem selecionado.</span></div></li>
+                <li><Send className="size-4" /><div><strong>Prepare a abordagem</strong><span>Confira as mensagens e configure seu WhatsApp.</span></div></li>
+              </ol>
+              <div className={styles.guideNote}><Filter className="size-4" /><p>Quer excluir sites já na captura? Ative <strong>Capturar somente leads sem site</strong> nos filtros.</p></div>
+              <Button variant="outline" onClick={() => setTab("leads")} className="w-full">Ver leads disponíveis <ChevronRight className="size-4" /></Button>
+            </aside>
 
             {/* Resultado do resumo de avaliações com IA */}
             {reviewsAiResults && (
@@ -1193,24 +1221,14 @@ export default function ProspeccaoSitesPage() {
         {/* TAB LEADS */}
         {tab === "leads" && (
           <div className="space-y-3">
-            {/* Stats row */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              <Card className="border-white/10 bg-white/[0.02]"><CardContent className="p-3">
-                <div className="text-xs text-white/50">Sem site</div>
-                <div className="text-2xl font-bold text-red-400">{stats.withoutW}</div>
-              </CardContent></Card>
-              <Card className="border-white/10 bg-white/[0.02]"><CardContent className="p-3">
-                <div className="text-xs text-white/50">Com site</div>
-                <div className="text-2xl font-bold text-green-400">{stats.withW}</div>
-              </CardContent></Card>
-              <Card className="border-white/10 bg-white/[0.02]"><CardContent className="p-3">
-                <div className="text-xs text-white/50">Rating médio</div>
-                <div className="text-2xl font-bold text-amber-400">{stats.avgRating} ★</div>
-              </CardContent></Card>
-              <Card className="border-white/10 bg-white/[0.02]"><CardContent className="p-3">
-                <div className="text-xs text-white/50">Total reviews</div>
-                <div className="text-2xl font-bold text-blue-400">{stats.totalReviews.toLocaleString("pt-BR")}</div>
-              </CardContent></Card>
+            <div className={styles.leadSummary}>
+              <span>Na página atual</span>
+              <dl>
+                <div><dt>Sem site</dt><dd>{stats.withoutW}</dd></div>
+                <div><dt>Com site</dt><dd>{stats.withW}</dd></div>
+                <div><dt>Nota média</dt><dd>{stats.avgRating}</dd></div>
+                <div><dt>Avaliações</dt><dd>{stats.totalReviews.toLocaleString("pt-BR")}</dd></div>
+              </dl>
             </div>
 
             {/* Filters */}
@@ -1219,34 +1237,36 @@ export default function ProspeccaoSitesPage() {
                 <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-white/50">
                   <Filter className="w-3.5 h-3.5" /> Filtros
                 </div>
-                <div className="flex flex-wrap gap-2 items-center">
-                  <Input placeholder="Ramo (pizzaria)" value={ramoFilter} onChange={(e) => setRamoFilter(e.target.value)} className="w-40" />
-                  <Input placeholder="Região" value={regionFilter} onChange={(e) => setRegionFilter(e.target.value)} className="w-40" />
-                  <Input placeholder="Nota mín (0-5)" type="number" step="0.1" min="0" max="5" value={ratingMin} onChange={(e) => setRatingMin(e.target.value)} className="w-28" />
-                  <Input placeholder="Avaliações mín" type="number" min="0" value={reviewsMin} onChange={(e) => setReviewsMin(e.target.value)} className="w-32" />
-                  <Select value={hasWebsite} onValueChange={(v: string | null) => setHasWebsite((v as any) || "only_empty")}>
-                    <SelectTrigger className="w-40"><SelectValue placeholder="Presença site">{HAS_WEBSITE_LABELS[hasWebsite] || "Presença site"}</SelectValue></SelectTrigger>
+                <div className={styles.leadFilters}>
+                  <label>Ramo<Input aria-label="Filtrar por ramo" placeholder="Ex.: pizzaria" value={ramoFilter} onChange={(e) => setRamoFilter(e.target.value)} /></label>
+                  <label>Região<Input aria-label="Filtrar por região" placeholder="Cidade ou bairro" value={regionFilter} onChange={(e) => setRegionFilter(e.target.value)} /></label>
+                  <label>Nota mínima<Input aria-label="Nota mínima" placeholder="0 a 5" type="number" step="0.1" min="0" max="5" value={ratingMin} onChange={(e) => setRatingMin(e.target.value)} /></label>
+                  <label>Avaliações mínimas<Input aria-label="Mínimo de avaliações dos leads" placeholder="Sem mínimo" type="number" min="0" value={reviewsMin} onChange={(e) => setReviewsMin(e.target.value)} /></label>
+                  <div className={styles.selectField}><span>Presença de site</span><Select value={hasWebsite} onValueChange={(v: string | null) => setHasWebsite((v as any) || "only_empty")}>
+                    <SelectTrigger aria-label="Presença de site" className="w-40"><SelectValue placeholder="Presença site">{HAS_WEBSITE_LABELS[hasWebsite] || "Presença site"}</SelectValue></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="only_empty">Sem site</SelectItem>
                       <SelectItem value="all">Todos os sites</SelectItem>
                       <SelectItem value="only_with">Com site</SelectItem>
                     </SelectContent>
-                  </Select>
-                  <Select value={sort} onValueChange={(v: string | null) => setSort((v as any) || "reviews")}>
-                    <SelectTrigger className="w-36"><SelectValue placeholder="Ordenar por">{SORT_LABELS[sort] || "Avaliações"}</SelectValue></SelectTrigger>
+                  </Select></div>
+                  <div className={styles.selectField}><span>Ordenar por</span><Select value={sort} onValueChange={(v: string | null) => setSort((v as any) || "reviews")}>
+                    <SelectTrigger aria-label="Ordenar por" className="w-36"><SelectValue placeholder="Ordenar por">{SORT_LABELS[sort] || "Avaliações"}</SelectValue></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="reviews">Avaliações</SelectItem>
                       <SelectItem value="rating">Nota</SelectItem>
                       <SelectItem value="created_at">Data captura</SelectItem>
                     </SelectContent>
-                  </Select>
-                  <Select value={order} onValueChange={(v: string | null) => setOrder((v as any) || "desc")}>
-                    <SelectTrigger className="w-36"><SelectValue placeholder="Ordem">{ORDER_LABELS[order] || "Maior → menor"}</SelectValue></SelectTrigger>
+                  </Select></div>
+                  <div className={styles.selectField}><span>Ordem</span><Select value={order} onValueChange={(v: string | null) => setOrder((v as any) || "desc")}>
+                    <SelectTrigger aria-label="Ordem" className="w-36"><SelectValue placeholder="Ordem">{ORDER_LABELS[order] || "Maior → menor"}</SelectValue></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="desc">Maior → menor</SelectItem>
                       <SelectItem value="asc">Menor → maior</SelectItem>
                     </SelectContent>
-                  </Select>
+                  </Select></div>
+                </div>
+                <div className={styles.filterActions}>
                   <label className="flex items-center gap-2 text-xs text-white/60">
                     <Switch checked={showOptOut} onCheckedChange={setShowOptOut} />
                     Mostrar descadastrados
@@ -1260,18 +1280,12 @@ export default function ProspeccaoSitesPage() {
                 </div>
 
                 {/* Disparo Status Segmented Control */}
-                <div className="flex items-center gap-2 pt-1">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-white/40">Disparo:</span>
-                  <div className="flex bg-white/5 p-0.5 rounded-lg border border-white/10">
-                    <Button variant="ghost" size="sm" className={cn("h-7 px-3 text-xs rounded-md transition-all", disparoFilter === "all" ? "bg-white/15 text-white" : "text-white/50 hover:text-white/80")}>
-                      <span onClick={() => setDisparoFilter("all")}>Todos</span>
-                    </Button>
-                    <Button variant="ghost" size="sm" className={cn("h-7 px-3 text-xs rounded-md transition-all gap-1", disparoFilter === "pending" ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" : "text-white/50 hover:text-white/80 border border-transparent")}>
-                      <span className="flex items-center gap-1" onClick={() => setDisparoFilter("pending")}><Send className="w-3 h-3" /> Pendentes</span>
-                    </Button>
-                    <Button variant="ghost" size="sm" className={cn("h-7 px-3 text-xs rounded-md transition-all gap-1", disparoFilter === "sent" ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30" : "text-white/50 hover:text-white/80 border border-transparent")}>
-                      <span className="flex items-center gap-1" onClick={() => setDisparoFilter("sent")}><CheckCircle2 className="w-3 h-3" /> Disparados</span>
-                    </Button>
+                <div className={styles.dispatchFilters}>
+                  <span>Status do disparo</span>
+                  <div className={styles.segmented} role="group" aria-label="Status do disparo">
+                    <Button variant="ghost" size="sm" aria-pressed={disparoFilter === "all"} onClick={() => setDisparoFilter("all")}>Todos</Button>
+                    <Button variant="ghost" size="sm" aria-pressed={disparoFilter === "pending"} onClick={() => setDisparoFilter("pending")}><Send className="size-3.5" /> Pendentes</Button>
+                    <Button variant="ghost" size="sm" aria-pressed={disparoFilter === "sent"} onClick={() => setDisparoFilter("sent")}><CheckCircle2 className="size-3.5" /> Disparados</Button>
                   </div>
                 </div>
               </CardContent>
@@ -1293,19 +1307,26 @@ export default function ProspeccaoSitesPage() {
             </div>
 
             {/* Table */}
-            <Card className="border-white/10 bg-white/[0.02]">
-              <CardContent className="p-0 overflow-x-auto">
+            <Card className={styles.listPanel}>
+              <div className={styles.listHeading}>
+                <h3>Empresas encontradas</h3>
+                <span>{rankedLeads.length} nesta página · {total} no total</span>
+              </div>
+              <CardContent className={styles.tableScroll} tabIndex={0} role="region" aria-label="Tabela de leads; role horizontalmente para ver todas as colunas">
                 {loadingLeads ? (
                   <div className="p-8 text-center text-white/40"><Loader2 className="w-5 h-5 animate-spin inline mr-2" /> Carregando…</div>
                 ) : rankedLeads.length === 0 ? (
-                  <div className="p-8 text-center text-white/40">
-                    Sem leads com esses filtros. Vá na aba Captura pra extrair empresas.
+                  <div className={styles.emptyState}>
+                    <Search className="size-6" />
+                    <h3>Nenhuma empresa com esses filtros</h3>
+                    <p>Ajuste a busca ou capture novas empresas por nicho e região.</p>
+                    <Button variant="outline" onClick={() => setTab("captura")}>Capturar empresas</Button>
                   </div>
                 ) : (
-                  <table className="w-full text-xs">
+                  <table className={styles.leadsTable}>
                     <thead className="bg-white/[0.03] text-white/50 uppercase tracking-wider">
                       <tr>
-                        <th className="p-2 text-left w-8"><input type="checkbox" checked={selected.size === rankedLeads.length && rankedLeads.length > 0} onChange={selectAllVisible} /></th>
+                        <th className="p-2 text-left w-8"><input aria-label="Selecionar todos os leads da página" type="checkbox" checked={selected.size === rankedLeads.length && rankedLeads.length > 0} onChange={selectAllVisible} /></th>
                         <th className="p-2 text-left">#</th>
                         <th className="p-2 text-left">Negócio</th>
                         <th className="p-2 text-left">Ramo</th>
@@ -1325,7 +1346,7 @@ export default function ProspeccaoSitesPage() {
                         const mUrl = mapsUrlFor(l);
                         return (
                           <tr key={l.id} className={cn("border-t border-white/5 hover:bg-white/[0.03]", selected.has(l.id) && "bg-primary/[0.05]")}>
-                            <td className="p-2"><input type="checkbox" checked={selected.has(l.id)} onChange={() => toggleSelect(l)} /></td>
+                            <td className="p-2"><input aria-label={`Selecionar ${l.nome_negocio || l.telefone || "lead"}`} type="checkbox" checked={selected.has(l.id)} onChange={() => toggleSelect(l)} /></td>
                             <td className="p-2 text-white/30 font-mono">{idx + 1}</td>
                             <td className="p-2 font-bold text-white">
                               <div className="flex items-center gap-1.5">
@@ -1389,19 +1410,17 @@ export default function ProspeccaoSitesPage() {
                               {l.opt_out ? (
                                 <Badge variant="outline" className="text-red-400 border-red-500/30"><Ban className="w-3 h-3 mr-1" />opt-out</Badge>
                               ) : (
-                                <Button variant="ghost" size="sm" onClick={() => markOptOut(l)} title="Marcar descadastro">
+                                <Button variant="ghost" size="sm" onClick={() => markOptOut(l)} aria-label={`Marcar descadastro de ${l.nome_negocio || "lead"}`} title="Marcar descadastro">
                                   <Ban className="w-3 h-3" />
                                 </Button>
                               )}
                             </td>
                             <td className="p-2">
                               <div className="flex items-center gap-1">
-                                <a href={mUrl} target="_blank" rel="noopener noreferrer" title="Ver no Google Maps">
-                                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0 text-blue-400 hover:bg-blue-500/10 hover:text-blue-300">
-                                    <ExternalLink className="w-3.5 h-3.5" />
-                                  </Button>
+                                <a href={mUrl} target="_blank" rel="noopener noreferrer" aria-label={`Ver ${l.nome_negocio || "empresa"} no Google Maps`} className={styles.rowLink}>
+                                  <ExternalLink className="w-3.5 h-3.5" />
                                 </a>
-                                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => deleteLeads([l.id])} title="Deletar lead">
+                                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => deleteLeads([l.id])} aria-label={`Deletar ${l.nome_negocio || "lead"}`} title="Deletar lead">
                                   <Trash2 className="w-3.5 h-3.5 text-red-400" />
                                 </Button>
                               </div>
@@ -1474,20 +1493,20 @@ export default function ProspeccaoSitesPage() {
                       ))}
                     </div>
                   </div>
-                  <Textarea value={template} onChange={(e) => setTemplate(e.target.value)} rows={5} className="text-sm font-mono bg-black/40 border-white/10" />
+                  <Textarea aria-label="Mensagem-base da campanha" value={template} onChange={(e) => setTemplate(e.target.value)} rows={5} className="text-sm font-mono bg-black/40 border-white/10" />
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-white/50">Vendedor:</span>
-                    <Input value={vendedor} onChange={(e) => setVendedor(e.target.value)} className="w-48" />
+                    <Input aria-label="Nome do vendedor" value={vendedor} onChange={(e) => setVendedor(e.target.value)} className="w-48" />
                   </div>
                 </CardContent></Card>
 
                 <Card className="border-white/10 bg-white/[0.02]"><CardContent className="p-3 space-y-2">
                   <div className="text-xs font-bold uppercase tracking-wider text-white/50">Filtros de envio</div>
                   <div className="flex flex-wrap gap-2 items-center">
-                    <Input placeholder="Nota mín (0-5)" type="number" step="0.1" min="0" max="5" value={ratingMin} onChange={(e) => setRatingMin(e.target.value)} className="w-28" />
-                    <Input placeholder="Avaliações mín" type="number" min="0" value={reviewsMin} onChange={(e) => setReviewsMin(e.target.value)} className="w-32" />
+                    <Input aria-label="Nota mínima" placeholder="Nota mín (0-5)" type="number" step="0.1" min="0" max="5" value={ratingMin} onChange={(e) => setRatingMin(e.target.value)} className="w-28" />
+                    <Input aria-label="Mínimo de avaliações dos leads" placeholder="Avaliações mín" type="number" min="0" value={reviewsMin} onChange={(e) => setReviewsMin(e.target.value)} className="w-32" />
                     <Select value={sort} onValueChange={(v: string | null) => setSort((v as any) || "reviews")}>
-                      <SelectTrigger className="w-36"><SelectValue placeholder="Ordenar por">{SORT_LABELS[sort] || "Avaliações"}</SelectValue></SelectTrigger>
+                      <SelectTrigger aria-label="Ordenar por" className="w-36"><SelectValue placeholder="Ordenar por">{SORT_LABELS[sort] || "Avaliações"}</SelectValue></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="reviews">Avaliações</SelectItem>
                         <SelectItem value="rating">Nota</SelectItem>
@@ -1495,7 +1514,7 @@ export default function ProspeccaoSitesPage() {
                       </SelectContent>
                     </Select>
                     <Select value={order} onValueChange={(v: string | null) => setOrder((v as any) || "desc")}>
-                      <SelectTrigger className="w-40"><SelectValue placeholder="Ordem">{ORDER_LABELS[order] || "Maior → menor"}</SelectValue></SelectTrigger>
+                      <SelectTrigger aria-label="Ordem" className="w-40"><SelectValue placeholder="Ordem">{ORDER_LABELS[order] || "Maior → menor"}</SelectValue></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="desc">Maior → menor</SelectItem>
                         <SelectItem value="asc">Menor → maior</SelectItem>
@@ -1536,7 +1555,7 @@ export default function ProspeccaoSitesPage() {
                             {lead.ramo_negocio} · {lead.telefone || lead.remoteJid.split("@")[0]} · {lead.rating || "—"} ★ ({lead.reviews || "0"})
                           </div>
                         </div>
-                        <Button variant="ghost" size="sm" onClick={() => toggleSelect(lead)}>
+                        <Button variant="ghost" size="sm" onClick={() => toggleSelect(lead)} aria-label={`Remover ${lead.nome_negocio || "lead"} da seleção`}>
                           <XCircle className="w-3.5 h-3.5 text-red-400" />
                         </Button>
                       </div>
@@ -1555,7 +1574,7 @@ export default function ProspeccaoSitesPage() {
 
         {/* TAB DISPARO */}
         {tab === "disparo" && (
-          <div className="max-w-2xl space-y-3">
+          <div className={cn(styles.campaignForm, "space-y-3")}>
             {selected.size === 0 ? (
               <Card className="border-white/10 bg-white/[0.02]"><CardContent className="p-8 text-center text-white/40">
                 Selecione leads na aba Leads primeiro.
@@ -1565,13 +1584,13 @@ export default function ProspeccaoSitesPage() {
               <Card className="border-white/10 bg-white/[0.02]"><CardContent className="p-4 space-y-3">
                 <div className="text-xs font-bold uppercase tracking-wider text-white/50">Nova campanha de prospecção</div>
                 <div>
-                  <label className="text-xs text-white/60">Nome da campanha</label>
-                  <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex: Pizzarias SP sem site — Agosto" />
+                  <label htmlFor="ps-campaign-name" className="text-xs text-white/60">Nome da campanha</label>
+                  <Input id="ps-campaign-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex: Pizzarias SP sem site — Agosto" />
                 </div>
                 <div>
                   <label className="text-xs text-white/60">Instância WhatsApp</label>
                   <Select value={instanceName} onValueChange={(v: string | null) => setInstanceName(v || "")}>
-                    <SelectTrigger><SelectValue placeholder="Selecione…">{instanceName || "Selecione…"}</SelectValue></SelectTrigger>
+                    <SelectTrigger aria-label="Instância WhatsApp" className="w-full"><SelectValue placeholder="Selecione…">{instanceName || "Selecione…"}</SelectValue></SelectTrigger>
                     <SelectContent>
                       {instances.map((i) => (
                         <SelectItem key={i.instance_name} value={i.instance_name}>
@@ -1583,28 +1602,28 @@ export default function ProspeccaoSitesPage() {
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div><label className="text-xs text-white/60">Intervalo mín (s)</label>
-                    <Input type="number" value={minSec} onChange={(e) => setMinSec(Number(e.target.value))} /></div>
+                    <Input aria-label="Intervalo mínimo entre envios em segundos" type="number" value={minSec} onChange={(e) => setMinSec(Number(e.target.value))} /></div>
                   <div><label className="text-xs text-white/60">Intervalo máx (s)</label>
-                    <Input type="number" value={maxSec} onChange={(e) => setMaxSec(Number(e.target.value))} /></div>
+                    <Input aria-label="Intervalo máximo entre envios em segundos" type="number" value={maxSec} onChange={(e) => setMaxSec(Number(e.target.value))} /></div>
                   <div><label className="text-xs text-white/60">Hora inicial</label>
-                    <Input type="number" value={startHour} onChange={(e) => setStartHour(Number(e.target.value))} min={0} max={23} /></div>
+                    <Input aria-label="Hora inicial dos envios" type="number" value={startHour} onChange={(e) => setStartHour(Number(e.target.value))} min={0} max={23} /></div>
                   <div><label className="text-xs text-white/60">Hora final</label>
-                    <Input type="number" value={endHour} onChange={(e) => setEndHour(Number(e.target.value))} min={0} max={23} /></div>
+                    <Input aria-label="Hora final dos envios" type="number" value={endHour} onChange={(e) => setEndHour(Number(e.target.value))} min={0} max={23} /></div>
                 </div>
 
-                <Card className="border-white/10 bg-white/[0.02]"><CardContent className="p-3 space-y-2">
-                  <div className="flex items-center justify-between">
+                <div className={styles.optionSection}>
+                  <div className="flex items-center justify-between gap-3">
                     <div>
                       <div className="text-xs font-bold uppercase tracking-wider text-white/50">Reescrever cada mensagem com IA</div>
                       <div className="text-xs text-white/40">Personaliza e varia o texto por lead pra reduzir banimento (igual Automação).</div>
                     </div>
-                    <Switch checked={personalizeWithAi} onCheckedChange={setPersonalizeWithAi} />
+                    <Switch aria-label="Reescrever cada mensagem com IA" checked={personalizeWithAi} onCheckedChange={setPersonalizeWithAi} />
                   </div>
                   {personalizeWithAi && (
                     <>
                       <div>
                         <label className="text-xs text-white/60">Modelo de IA</label>
-                        <select value={aiModel} onChange={(e) => setAiModel(e.target.value)} className="w-full mt-1 px-3 py-2 rounded-lg bg-black/40 border border-white/10 text-sm">
+                        <select aria-label="Modelo de IA para mensagens" value={aiModel} onChange={(e) => setAiModel(e.target.value)} className="w-full mt-1 px-3 py-2 rounded-lg bg-black/40 border border-white/10 text-sm">
                           {loadingAiModels && <option value="">Carregando…</option>}
                           {!loadingAiModels && aiModels.length === 0 && <option value="">(sem modelos — admin precisa configurar API key)</option>}
                           <ModelOptions models={aiModels as any} />
@@ -1612,23 +1631,23 @@ export default function ProspeccaoSitesPage() {
                       </div>
                       <div>
                         <label className="text-xs text-white/60">Prompt de reescrita</label>
-                        <Textarea value={aiPrompt} onChange={(e) => setAiPrompt(e.target.value)} rows={4} placeholder="Ex: Reescreva a mensagem a seguir de forma natural, variação conversacional, mantenha os dados do lead mas evite linguagem padrão. Não use emojis." />
+                        <Textarea aria-label="Instruções para reescrever mensagens" value={aiPrompt} onChange={(e) => setAiPrompt(e.target.value)} rows={4} placeholder="Ex: Reescreva a mensagem a seguir de forma natural, variação conversacional, mantenha os dados do lead mas evite linguagem padrão. Não use emojis." />
                       </div>
                     </>
                   )}
-                </CardContent></Card>
+                </div>
 
-                <Card className="border-white/10 bg-white/[0.02]"><CardContent className="p-3 space-y-2">
-                  <div className="flex items-center justify-between">
+                <div className={styles.optionSection}>
+                  <div className="flex items-center justify-between gap-3">
                     <div>
                       <div className="text-xs font-bold uppercase tracking-wider text-white/50">Humanizar Mensagens (Picotar)</div>
                       <div className="text-xs text-white/40">Divide a mensagem em várias partes e simula tempo de digitação entre elas (igual ao Agente de IA).</div>
                     </div>
-                    <Switch checked={humanizeMessages} onCheckedChange={setHumanizeMessages} />
+                    <Switch aria-label="Humanizar mensagens" checked={humanizeMessages} onCheckedChange={setHumanizeMessages} />
                   </div>
-                </CardContent></Card>
+                </div>
                 <div className="text-xs text-white/50">
-                  <Globe className="w-3.5 h-3.5 inline mr-1" /> {selected.size} alvos sem site
+                  <Globe className="w-3.5 h-3.5 inline mr-1" /> {selected.size} leads selecionados
                 </div>
                 <div className="flex gap-2">
                   <Button variant="outline" onClick={() => setTab("revisao")}>← Voltar</Button>
@@ -1652,8 +1671,11 @@ export default function ProspeccaoSitesPage() {
             {loadingCampaigns ? (
               <div className="p-8 text-center text-white/40"><Loader2 className="w-5 h-5 animate-spin inline" /></div>
             ) : campaigns.length === 0 ? (
-              <Card className="border-white/10 bg-white/[0.02]"><CardContent className="p-8 text-center text-white/40">
-                Nenhuma campanha ainda. Crie uma na aba Disparo.
+              <Card><CardContent className={styles.emptyState}>
+                <Send className="size-6" />
+                <h3>Sua primeira campanha começa pelos leads</h3>
+                <p>Selecione empresas, revise a mensagem e configure o envio. As campanhas aparecerão aqui.</p>
+                <Button variant="outline" onClick={() => setTab("leads")}>Selecionar leads</Button>
               </CardContent></Card>
             ) : (
               <div className="grid gap-3">
@@ -1678,7 +1700,7 @@ export default function ProspeccaoSitesPage() {
                           c.status === "paused" ? "text-amber-400 border-amber-500/30" :
                           c.status === "done" ? "text-blue-400 border-blue-500/30" :
                           "text-white/50"
-                        }>{c.status}</Badge>
+                        }>{({ draft: "Rascunho", running: "Em execução", paused: "Pausada", done: "Concluída", cancelled: "Cancelada", stopped: "Interrompida", error: "Erro" } as Record<string, string>)[c.status] || c.status}</Badge>
                       </div>
 
                       <div className="grid grid-cols-4 gap-2 text-xs">
@@ -1890,25 +1912,23 @@ export default function ProspeccaoSitesPage() {
 
         {/* TAB AUTOMAÇÃO */}
         {tab === "automacao" && (
-          <div className="space-y-3 max-w-4xl">
+          <div className={cn(styles.automationLayout, "space-y-3")}>
             <Card className="border-white/10 bg-white/[0.02]">
               <CardContent className="p-4 space-y-3">
-                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-white/70">
-                  <Zap className="w-4 h-4" /> Automação completa (captura → disparo → follow-up)
+                <div className={styles.sectionHeading}>
+                  <h3><Zap className="size-4" /> Nova automação</h3>
+                  <p>Defina o público, a mensagem e os retornos. Depois de criar, use Iniciar na lista de automações.</p>
                 </div>
-                <p className="text-xs text-white/50">
-                  Cria uma automação que capta leads do Google Maps, dispara o template via WhatsApp e faz follow-up automático. Tudo orquestrado em segundo plano.
-                </p>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
-                    <label className="text-xs text-white/60">Nome da automação</label>
-                    <Input value={autoName} onChange={(e) => setAutoName(e.target.value)} placeholder="Ex: Pizzarias SP - Outubro" />
+                    <label htmlFor="ps-automation-name" className="text-xs text-white/60">Nome da automação</label>
+                    <Input id="ps-automation-name" value={autoName} onChange={(e) => setAutoName(e.target.value)} placeholder="Ex: Pizzarias SP - Outubro" />
                   </div>
                   <div>
                     <label className="text-xs text-white/60">Instância WhatsApp</label>
                     <Select value={autoInstance} onValueChange={(v) => setAutoInstance(v || "")}>
-                      <SelectTrigger><SelectValue placeholder="Selecionar…" /></SelectTrigger>
+                      <SelectTrigger aria-label="Instância WhatsApp" className="w-full"><SelectValue placeholder="Selecionar…" /></SelectTrigger>
                       <SelectContent>
                         {instances.map((inst) => (
                           <SelectItem key={inst.instance_name} value={inst.instance_name}>
@@ -1920,18 +1940,20 @@ export default function ProspeccaoSitesPage() {
                   </div>
                 </div>
 
-                <div>
-                  <label className="text-xs text-white/60">Nichos (1 por linha)</label>
-                  <Textarea value={autoNiches} onChange={(e) => setAutoNiches(e.target.value)} rows={2} placeholder={"pizzaria\ndentista"} />
-                </div>
-                <div>
-                  <label className="text-xs text-white/60">Regiões (1 por linha)</label>
-                  <Textarea value={autoRegions} onChange={(e) => setAutoRegions(e.target.value)} rows={2} placeholder={"São Paulo SP\nCentro, Belo Horizonte MG"} />
+                <div className={styles.fieldGrid}>
+                  <div>
+                    <label htmlFor="auto-niches">Nichos (1 por linha)</label>
+                    <Textarea id="auto-niches" value={autoNiches} onChange={(e) => setAutoNiches(e.target.value)} rows={2} placeholder={"pizzaria\ndentista"} />
+                  </div>
+                  <div>
+                    <label htmlFor="auto-regions">Regiões (1 por linha)</label>
+                    <Textarea id="auto-regions" value={autoRegions} onChange={(e) => setAutoRegions(e.target.value)} rows={2} placeholder={"São Paulo SP\nCentro, Belo Horizonte MG"} />
+                  </div>
                 </div>
 
                 {/* Filtros Automáticos da Automação */}
-                <div className="space-y-3 rounded-lg border border-white/10 p-3 bg-white/[0.02]">
-                  <div className="flex items-center justify-between gap-3">
+                <div className={styles.filterSection}>
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
                     <div className="flex items-center gap-1.5">
                       <Filter className="w-3 h-3 text-white/60" />
                       <label className="text-xs font-semibold text-white/60 uppercase tracking-wider">Filtros Automáticos da Captura</label>
@@ -1970,20 +1992,10 @@ export default function ProspeccaoSitesPage() {
                     { label: "Remover telefones fixos", value: autoFilterLandlines, set: setAutoFilterLandlines },
                     { label: "Capturar somente leads sem site", value: autoFilterWithWebsite, set: setAutoFilterWithWebsite },
                   ].map((f) => (
-                    <div
-                      key={f.label}
-                      className="flex items-center justify-between p-2 rounded-lg hover:bg-white/5 cursor-pointer"
-                      onClick={() => f.set(!f.value)}
-                    >
-                      <span className="text-sm text-white/90 select-none flex-1">{f.label}</span>
-                      <input
-                        type="checkbox"
-                        checked={f.value}
-                        onChange={(e) => f.set(e.target.checked)}
-                        onClick={(e) => e.stopPropagation()}
-                        className="w-4 h-4 accent-primary cursor-pointer"
-                      />
-                    </div>
+                    <label key={f.label} className={styles.checkboxRow}>
+                      <span>{f.label}</span>
+                      <input type="checkbox" checked={f.value} onChange={(e) => f.set(e.target.checked)} />
+                    </label>
                   ))}
                 </div>
 
@@ -2018,24 +2030,24 @@ export default function ProspeccaoSitesPage() {
                     ))}
                   </div>
                   <label className="text-xs text-white/60">Mensagem-base (template de disparo)</label>
-                  <Textarea value={autoTemplate} onChange={(e) => setAutoTemplate(e.target.value)} rows={3}
+                  <Textarea aria-label="Mensagem-base da automação" value={autoTemplate} onChange={(e) => setAutoTemplate(e.target.value)} rows={3}
                     placeholder="Ex: {{saudacao}} {{nome_empresa}}! Vi vocês no Maps…"
                     className="bg-black/40 border-white/10 font-mono text-xs" />
                 </div>
 
                 {/* Intervalos de disparo */}
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
                     <label className="text-xs text-white/60">Máx. leads a captar</label>
-                    <Input type="number" value={autoMaxLeads} onChange={(e) => setAutoMaxLeads(Number(e.target.value))} min={1} />
+                    <Input aria-label="Máximo de leads a captar" type="number" value={autoMaxLeads} onChange={(e) => setAutoMaxLeads(Number(e.target.value))} min={1} />
                   </div>
                   <div>
                     <label className="text-xs text-white/60">Intervalo mín. entre disparos (s)</label>
-                    <Input type="number" value={autoMinSec} onChange={(e) => setAutoMinSec(Number(e.target.value))} min={5} />
+                    <Input aria-label="Intervalo mínimo entre disparos em segundos" type="number" value={autoMinSec} onChange={(e) => setAutoMinSec(Number(e.target.value))} min={5} />
                   </div>
                   <div>
                     <label className="text-xs text-white/60">Intervalo máx. entre disparos (s)</label>
-                    <Input type="number" value={autoMaxSec} onChange={(e) => setAutoMaxSec(Number(e.target.value))} min={autoMinSec} />
+                    <Input aria-label="Intervalo máximo entre disparos em segundos" type="number" value={autoMaxSec} onChange={(e) => setAutoMaxSec(Number(e.target.value))} min={autoMinSec} />
                   </div>
                 </div>
 
@@ -2054,6 +2066,7 @@ export default function ProspeccaoSitesPage() {
                       <div>
                         <label className="text-[10px] uppercase font-bold text-white/40">Modelo de IA</label>
                         <select
+                          aria-label="Modelo de IA da automação"
                           value={autoAiModel || ""}
                           onChange={(e) => setAutoAiModel(e.target.value)}
                           className="w-full mt-0.5 bg-black/40 border border-white/10 rounded-md px-2 h-8 text-xs"
@@ -2067,7 +2080,7 @@ export default function ProspeccaoSitesPage() {
                       </div>
                       <div>
                         <label className="text-[10px] uppercase font-bold text-white/40">Prompt para a IA (como reescrever)</label>
-                        <Textarea rows={3}
+                        <Textarea aria-label="Instruções de IA para disparos" rows={3}
                           value={autoAiPrompt}
                           onChange={(e) => setAutoAiPrompt(e.target.value)}
                           placeholder="Ex: Reescreva a mensagem-base de forma natural e única para cada cliente, mantendo o tom amigável e profissional. Não use emojis exagerados. Adapte ao ramo do negócio se for relevante. Mensagem deve ter no máximo 3 frases."
@@ -2113,6 +2126,7 @@ export default function ProspeccaoSitesPage() {
                       <div>
                         <label className="text-[10px] uppercase font-bold text-white/40">Modelo de IA</label>
                         <select
+                          aria-label="Modelo de IA para avaliações da automação"
                           value={autoReviewsAiModel || ""}
                           onChange={(e) => setAutoReviewsAiModel(e.target.value)}
                           className="w-full mt-0.5 bg-black/40 border border-white/10 rounded-md px-2 h-8 text-xs"
@@ -2126,7 +2140,7 @@ export default function ProspeccaoSitesPage() {
                       </div>
                       <div>
                         <label className="text-[10px] uppercase font-bold text-white/40">Prompt (vazio = padrão)</label>
-                        <Textarea rows={2}
+                        <Textarea aria-label="Instruções de IA para avaliações da automação" rows={2}
                           value={autoReviewsAiPrompt}
                           onChange={(e) => setAutoReviewsAiPrompt(e.target.value)}
                           placeholder="Ex: Resuma as avaliações focando em dores que um site profissional resolveria…"
@@ -2166,7 +2180,7 @@ export default function ProspeccaoSitesPage() {
                           <div key={idx} className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-start p-2 rounded-xl bg-black/20 border border-white/5 sm:border-none sm:bg-transparent sm:p-0">
                             <div className="flex flex-col gap-1 shrink-0 w-full sm:w-24">
                               <span className="text-[9px] uppercase font-bold text-white/40">Após (dias)</span>
-                              <NumberInput min={1} fallback={1} value={step.day_offset}
+                              <NumberInput aria-label={`Dias até o retorno ${idx + 1}`} min={1} fallback={1} value={step.day_offset}
                                 onChange={n => {
                                   const next = [...autoSteps];
                                   next[idx] = { ...next[idx], day_offset: n };
@@ -2198,7 +2212,7 @@ export default function ProspeccaoSitesPage() {
                                   ))}
                                 </div>
                               </div>
-                              <Textarea rows={2} value={step.template}
+                              <Textarea aria-label={`Mensagem do retorno ${idx + 1}`} rows={2} value={step.template}
                                 onChange={e => {
                                   const next = [...autoSteps];
                                   next[idx] = { ...next[idx], template: e.target.value };
@@ -2208,6 +2222,7 @@ export default function ProspeccaoSitesPage() {
                                 className="bg-black/40 border-white/10 font-mono text-xs" />
                             </div>
                             <Button onClick={() => setAutoSteps(autoSteps.filter((_, i) => i !== idx))}
+                              aria-label={`Remover retorno ${idx + 1}`}
                               variant="ghost" size="icon" className="h-8 w-8 text-red-400 self-end sm:mt-4">
                               <Trash2 className="w-3 h-3" />
                             </Button>
@@ -2215,7 +2230,7 @@ export default function ProspeccaoSitesPage() {
                         ))}
                         <Button onClick={() => setAutoSteps([...autoSteps, { day_offset: 3, template: "" }])}
                           variant="outline" className="text-[10px] uppercase font-bold gap-2 h-8">
-                          <Plus className="w-3 h-3" /> Adicionar step
+                          <Plus className="w-3 h-3" /> Adicionar retorno
                         </Button>
                       </div>
 
@@ -2223,11 +2238,11 @@ export default function ProspeccaoSitesPage() {
                       <div className="grid grid-cols-2 gap-3">
                         <div>
                           <label className="text-xs text-white/60">Intervalo mín. entre follow-ups (s)</label>
-                          <Input type="number" value={autoFuMinSec} onChange={(e) => setAutoFuMinSec(Number(e.target.value))} min={5} />
+                          <Input aria-label="Intervalo mínimo entre retornos em segundos" type="number" value={autoFuMinSec} onChange={(e) => setAutoFuMinSec(Number(e.target.value))} min={5} />
                         </div>
                         <div>
                           <label className="text-xs text-white/60">Intervalo máx. entre follow-ups (s)</label>
-                          <Input type="number" value={autoFuMaxSec} onChange={(e) => setAutoFuMaxSec(Number(e.target.value))} min={autoFuMinSec} />
+                          <Input aria-label="Intervalo máximo entre retornos em segundos" type="number" value={autoFuMaxSec} onChange={(e) => setAutoFuMaxSec(Number(e.target.value))} min={autoFuMinSec} />
                         </div>
                       </div>
 
@@ -2246,6 +2261,7 @@ export default function ProspeccaoSitesPage() {
                             <div>
                               <label className="text-[10px] uppercase font-bold text-white/40">Modelo de IA</label>
                               <select
+                                aria-label="Modelo de IA para retornos"
                                 value={autoFollowupAiModel || ""}
                                 onChange={(e) => setAutoFollowupAiModel(e.target.value)}
                                 className="w-full mt-0.5 bg-black/40 border border-white/10 rounded-md px-2 h-8 text-xs"
@@ -2259,7 +2275,7 @@ export default function ProspeccaoSitesPage() {
                             </div>
                             <div>
                               <label className="text-[10px] uppercase font-bold text-white/40">Prompt para a IA</label>
-                              <Textarea rows={3}
+                              <Textarea aria-label="Instruções de IA para retornos" rows={3}
                                 value={autoFollowupAiPrompt}
                                 onChange={(e) => setAutoFollowupAiPrompt(e.target.value)}
                                 placeholder="Ex: Você é um SDR cordial fazendo follow-up sem ser insistente. Use o histórico pra puxar gancho do que o cliente já mencionou. Tom natural, máximo 3 frases."
@@ -2276,11 +2292,11 @@ export default function ProspeccaoSitesPage() {
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="text-xs text-white/60">Enviar a partir das (h)</label>
-                    <Input type="number" value={autoStartHour} onChange={(e) => setAutoStartHour(Number(e.target.value))} min={0} max={23} />
+                    <Input aria-label="Hora inicial da automação" type="number" value={autoStartHour} onChange={(e) => setAutoStartHour(Number(e.target.value))} min={0} max={23} />
                   </div>
                   <div>
                     <label className="text-xs text-white/60">Enviar até as (h)</label>
-                    <Input type="number" value={autoEndHour} onChange={(e) => setAutoEndHour(Number(e.target.value))} min={1} max={24} />
+                    <Input aria-label="Hora final da automação" type="number" value={autoEndHour} onChange={(e) => setAutoEndHour(Number(e.target.value))} min={1} max={24} />
                   </div>
                 </div>
 
@@ -2386,6 +2402,7 @@ export default function ProspeccaoSitesPage() {
           </div>
         )}
 
+        </section>
         </div>
       </div>
     </div>
