@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, type ReactElement } from "react";
+import styles from "./followup.module.css";
 import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,7 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import {
-  Dialog, DialogContent, DialogTitle,
+  Dialog, DialogContent, DialogTitle, DialogDescription,
 } from "@/components/ui/dialog";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue, SelectGroup, SelectLabel,
@@ -71,7 +72,12 @@ const DEFAULT_STEPS: Step[] = [
 
 type FollowupLog = { id: number; followup_campaign_id: string; message: string; level: string; created_at: string };
 
-export default function FollowUpPage() {
+const STATUS_LABELS: Record<string, string> = {
+  active: "Ativa", paused: "Pausada", draft: "Rascunho", completed: "Concluída",
+  waiting: "Aguardando", responded: "Respondeu", exhausted: "Sem resposta", failed: "Falhou", sent: "Enviado",
+};
+
+export default function FollowUpPage(): ReactElement {
   const [campaigns, setCampaigns] = useState<FollowupCampaign[]>([]);
   const gwAccounts = useGatewayAccounts();
   const [loading, setLoading] = useState(true);
@@ -647,13 +653,6 @@ export default function FollowUpPage() {
     );
   };
 
-  const statusColor = (s: string) =>
-    s === "active"
-      ? "bg-green-500/10 text-green-400 border-green-500/20"
-      : s === "paused"
-      ? "bg-amber-500/10 text-amber-400 border-amber-500/20"
-      : "bg-neutral-500/10 text-neutral-400 border-neutral-500/20";
-
   const targetBadge = (s: string) =>
     s === "responded"
       ? "bg-green-500/10 text-green-400"
@@ -666,90 +665,82 @@ export default function FollowUpPage() {
       : "bg-white/5 text-white/70";
 
   return (
-    <div className="flex flex-col h-[100dvh] bg-background overflow-hidden">
+    <div className={cn(styles.page, "flex flex-col h-[100dvh] overflow-hidden")}>
       <Header />
-      <div className="flex-1 p-3 sm:p-6 space-y-4 sm:space-y-6 w-full max-w-7xl mx-auto mobile-safe-bottom overflow-y-auto">
-        <div className="flex items-center justify-between">
+      <main className={cn(styles.content, "flex-1 w-full max-w-7xl mx-auto overflow-y-auto")}>
+        <div className={styles.heading}>
           <div>
-            <h1 className="text-2xl font-black tracking-tight flex items-center gap-3">
-              <Repeat className="w-6 h-6 text-primary" /> Follow-up Automático
-            </h1>
-            <p className="text-sm text-muted-foreground mt-1">
-              Reengajamento automático de leads em follow-up. IA lê a conversa e escreve a próxima mensagem.
-            </p>
+            <h1>Follow-up automático</h1>
+            <p>Retome conversas com sequências de mensagens e acompanhe cada retorno.</p>
           </div>
-          <div className="flex gap-2">
-            <Button
-              onClick={() => window.location.href = '/follow-up-control'}
-              variant="outline"
-              className="gap-2"
-            >
-              <Bot className="w-4 h-4" /> Controle Sarah
-            </Button>
-            <Button onClick={() => { resetForm(); setShowForm(true); }} className="gap-2 glow-primary">
-              <Plus className="w-4 h-4" /> Nova Campanha
+          <div className={styles.headingActions}>
+            <a href="/follow-up-control" className={styles.secondaryAction}>
+              <Bot className="w-4 h-4" aria-hidden="true" /> Controle Sarah
+            </a>
+            <Button onClick={() => { resetForm(); setMsg(null); setShowForm(true); }} className={styles.primaryAction}>
+              <Plus className="w-4 h-4" aria-hidden="true" /> Nova campanha
             </Button>
           </div>
+        </div>
+        <div className={styles.overview} aria-label="Resumo das campanhas" aria-busy={loading}>
+          <span><Repeat aria-hidden="true" /><strong>{campaigns.length}</strong> campanhas</span>
+          <span><Play aria-hidden="true" /><strong>{campaigns.filter(c => c.status === "active").length}</strong> ativas</span>
+          <span><MessageSquare aria-hidden="true" /><strong>{campaigns.reduce((sum, c) => sum + c.total_responded, 0)}</strong> respostas</span>
         </div>
 
         {msg && (
           <div
-            className={cn(
-              "p-3 rounded-xl border text-sm",
-              msg.type === "ok"
-                ? "bg-green-500/10 border-green-500/30 text-green-300"
-                : "bg-red-500/10 border-red-500/30 text-red-300"
-            )}
+            role={msg.type === "err" ? "alert" : "status"}
+            className={cn(styles.notice, msg.type === "err" && styles.errorNotice)}
           >
             {msg.text}
           </div>
         )}
 
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-          {/* Lista de campanhas */}
-          <div className="xl:col-span-2 space-y-4">
+        <div className={styles.workspace}>
+          <section className={styles.campaignList} aria-label="Campanhas de follow-up">
             {loading ? (
               <div className="text-muted-foreground text-sm py-10 text-center">
                 <Loader2 className="w-4 h-4 inline animate-spin mr-2" /> Carregando...
               </div>
             ) : campaigns.length === 0 ? (
-              <Card className="border-white/10 bg-white/5">
-                <CardContent className="p-10 text-center text-muted-foreground">
-                  Nenhuma campanha de follow-up ainda. Clique em <strong>Nova Campanha</strong>.
-                </CardContent>
-              </Card>
+              <div className={styles.empty}>
+                <Repeat aria-hidden="true" />
+                <h2>Continue a conversa</h2>
+                <p>Crie sua primeira campanha para definir quando e como retomar o contato com seus leads.</p>
+                <Button className={styles.primaryAction} onClick={() => { resetForm(); setMsg(null); setShowForm(true); }}>
+                  <Plus className="w-4 h-4" aria-hidden="true" /> Criar primeira campanha
+                </Button>
+              </div>
             ) : (
               campaigns.map((c) => (
                 <Card
                   key={c.id}
-                  className={cn(
-                    "border-white/10 bg-black/40 hover:bg-white/5 cursor-pointer transition",
-                    selected?.id === c.id && "border-primary/40 bg-primary/5"
-                  )}
-                  onClick={() => loadDetail(c.id)}
+                  className={cn(styles.campaign, selected?.id === c.id && styles.selectedCampaign)}
                 >
-                  <CardContent className="p-5">
-                    <div className="flex items-start justify-between gap-3 mb-3">
+                  <CardContent className={styles.campaignBody}>
+                    <div className={styles.campaignHeading}>
                       <div className="min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <h3 className="font-black text-white truncate">{c.name}</h3>
-                          <Badge className={cn("text-[9px] uppercase border", statusColor(c.status))}>
-                            {c.status}
+                          <h2 className={styles.campaignTitle}>
+                            <button type="button" onClick={() => loadDetail(c.id)} aria-label={`Ver detalhes de ${c.name}`} aria-pressed={selected?.id === c.id}>{c.name}</button>
+                          </h2>
+                          <Badge className={styles.status} data-status={c.status}>
+                            {STATUS_LABELS[c.status] || c.status}
                           </Badge>
                           {c.auto_execute && (
-                            <Badge className="text-[9px] uppercase bg-primary/10 text-primary border border-primary/20">
-                              auto
+                            <Badge className={styles.status}>
+                              Automática
                             </Badge>
                           )}
                           {c.ai_enabled && (
-                            <Badge className="text-[9px] uppercase bg-purple-500/10 text-purple-300 border border-purple-500/20 gap-1">
+                            <Badge className={styles.status}>
                               <Sparkles className="w-2.5 h-2.5" /> IA
                             </Badge>
                           )}
                         </div>
-                        <p className="text-xs text-muted-foreground mt-1">
-                          Instância: <span className="font-mono">{c.instance_name}</span> ·{" "}
-                          {c.steps.length} passos · janela {c.allowed_start_hour}h–{c.allowed_end_hour}h
+                        <p className={styles.metadata}>
+                          {c.instance_name} · {c.steps.length} etapas · {c.allowed_start_hour}h–{c.allowed_end_hour}h
                         </p>
                         {/* Coluna do kanban que abastece — mostra qual pool a
                             campanha está mirando. Crítico pra cliente que tem
@@ -760,13 +751,10 @@ export default function FollowUpPage() {
                           const label = col?.label || src;
                           const color = col?.color || "#eab308";
                           return (
-                            <div className="flex items-center gap-1.5 mt-2 text-[10px]">
-                              <Workflow className="w-3 h-3 text-muted-foreground/60" />
-                              <span className="text-muted-foreground">Pool:</span>
-                              <span
-                                className="font-bold flex items-center gap-1 px-1.5 py-0.5 rounded ring-1"
-                                style={{ background: `${color}15`, color, borderColor: `${color}30` } as any}
-                              >
+                            <div className={styles.source}>
+                              <Workflow className="w-3.5 h-3.5" aria-hidden="true" />
+                              <span>Origem:</span>
+                              <span className={styles.sourceLabel}>
                                 <span className="w-1 h-1 rounded-full" style={{ background: color }} />
                                 {label}
                               </span>
@@ -775,28 +763,27 @@ export default function FollowUpPage() {
                         })()}
                       </div>
                       <div
-                        className="flex items-center gap-1 shrink-0"
-                        onClick={(e) => e.stopPropagation()}
+                        className={styles.iconActions}
                       >
                         {c.status === "active" ? (
-                          <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => setStatus(c.id, "paused")} title="Pausar">
+                          <Button size="icon" variant="ghost" className={styles.iconAction} onClick={() => setStatus(c.id, "paused")} disabled={actioning} aria-label={`Pausar ${c.name}`} title="Pausar campanha">
                             <Pause className="w-3.5 h-3.5" />
                           </Button>
                         ) : (
-                          <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => setStatus(c.id, "active")} title="Ativar">
+                          <Button size="icon" variant="ghost" className={styles.iconAction} onClick={() => setStatus(c.id, "active")} disabled={actioning} aria-label={`Ativar ${c.name}`} title="Ativar campanha">
                             <Play className="w-3.5 h-3.5 text-green-400" />
                           </Button>
                         )}
-                        <Button size="icon" variant="ghost" className="h-8 w-8 hover:bg-blue-500/20" onClick={() => openEdit(c)} title="Editar">
+                        <Button size="icon" variant="ghost" className={styles.iconAction} onClick={() => { setMsg(null); openEdit(c); }} disabled={actioning} aria-label={`Editar ${c.name}`} title="Editar campanha">
                           <Pencil className="w-3.5 h-3.5 text-blue-400" />
                         </Button>
-                        <Button size="icon" variant="ghost" className="h-8 w-8 hover:bg-red-500/20" onClick={() => deleteCampaign(c.id)} title="Excluir">
+                        <Button size="icon" variant="ghost" className={cn(styles.iconAction, styles.dangerAction)} onClick={() => deleteCampaign(c.id)} disabled={actioning} aria-label={`Excluir ${c.name}`} title="Excluir campanha">
                           <Trash2 className="w-3.5 h-3.5 text-red-400" />
                         </Button>
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-4 gap-2 text-center">
+                    <div className={styles.metrics}>
                       <div className="p-2 rounded-lg bg-white/5">
                         <p className="text-[9px] uppercase text-muted-foreground">Clientes</p>
                         <p className="text-sm font-black text-white">{c.total_enrolled}</p>
@@ -817,11 +804,11 @@ export default function FollowUpPage() {
 
                     {/* Banner "Agora..." com último log */}
                     {c.status === "active" && latestLogByCampaign[c.id] && (
-                      <div className="mt-3 flex items-start gap-2 p-2.5 rounded-lg bg-emerald-500/5 border border-emerald-500/20" onClick={(e) => e.stopPropagation()}>
-                        <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse mt-1.5 shrink-0" />
+                      <div className={styles.activity}>
+                        <span className={styles.activityDot} aria-hidden="true" />
                         <div className="min-w-0 flex-1">
-                          <p className="text-[9px] font-black uppercase tracking-widest text-emerald-400">
-                            Agora · {new Date(latestLogByCampaign[c.id].created_at).toLocaleTimeString()}
+                          <p className={styles.activityTitle}>
+                            Última atividade · {new Date(latestLogByCampaign[c.id].created_at).toLocaleTimeString()}
                           </p>
                           <p className={cn(
                             "text-[11px] break-words mt-0.5",
@@ -836,7 +823,7 @@ export default function FollowUpPage() {
 
                     {/* Último erro persistente */}
                     {c.last_error && (
-                      <div className="mt-3 flex items-start gap-2 p-2.5 rounded-lg bg-red-500/10 border border-red-500/30" onClick={(e) => e.stopPropagation()}>
+                      <div className={cn(styles.notice, styles.errorNotice, "mt-3 flex items-start gap-2")}>
                         <AlertCircle className="w-3.5 h-3.5 text-red-400 shrink-0 mt-0.5" />
                         <div className="min-w-0 flex-1">
                           <p className="text-[9px] font-black uppercase tracking-widest text-red-400">
@@ -848,16 +835,18 @@ export default function FollowUpPage() {
                     )}
 
                     {/* Logs ao vivo + histórico de envios */}
-                    <div className="mt-3 grid grid-cols-2 gap-2" onClick={(e) => e.stopPropagation()}>
+                    <div className="mt-3 grid grid-cols-2 gap-2">
                       <Button
                         variant="ghost"
                         size="sm"
                         onClick={() => setActiveLogCampaignId(activeLogCampaignId === c.id ? null : c.id)}
-                        className="justify-between h-8 bg-white/5 border border-white/5 hover:bg-white/10 text-[10px] uppercase font-black"
+                        aria-expanded={activeLogCampaignId === c.id}
+                        aria-controls={`logs-${c.id}`}
+                        className={styles.disclosure}
                       >
                         <span className="flex items-center gap-2">
                           <BarChart3 className="w-3 h-3 text-primary" />
-                          {activeLogCampaignId === c.id ? "Ocultar logs" : "Ver logs (tempo real)"}
+                          {activeLogCampaignId === c.id ? "Ocultar logs" : "Ver logs em tempo real"}
                         </span>
                         <ChevronRight className={cn("w-3 h-3 transition-transform", activeLogCampaignId === c.id && "rotate-90")} />
                       </Button>
@@ -865,7 +854,9 @@ export default function FollowUpPage() {
                         variant="ghost"
                         size="sm"
                         onClick={() => setActiveHistCampaignId(activeHistCampaignId === c.id ? null : c.id)}
-                        className="justify-between h-8 bg-white/5 border border-white/5 hover:bg-white/10 text-[10px] uppercase font-black"
+                        aria-expanded={activeHistCampaignId === c.id}
+                        aria-controls={`history-${c.id}`}
+                        className={styles.disclosure}
                       >
                         <span className="flex items-center gap-2">
                           <MessageSquare className="w-3 h-3 text-cyan-300" />
@@ -876,7 +867,7 @@ export default function FollowUpPage() {
                     </div>
 
                     {activeLogCampaignId === c.id && (
-                      <div className="mt-2 rounded-xl bg-black/40 border border-white/5 p-3 font-mono text-[10px] h-48 flex flex-col" onClick={(e) => e.stopPropagation()}>
+                      <div id={`logs-${c.id}`} className={styles.logPanel}>
                         <div className="flex items-center justify-between mb-2 border-b border-white/5 pb-2">
                           <span className="text-[9px] uppercase font-black text-muted-foreground">Histórico de execução</span>
                         </div>
@@ -896,18 +887,15 @@ export default function FollowUpPage() {
                     )}
 
                     {activeHistCampaignId === c.id && (
-                      <div className="mt-2 rounded-xl bg-black/40 border border-white/5 p-3 flex flex-col max-h-[420px]" onClick={(e) => e.stopPropagation()}>
+                      <div id={`history-${c.id}`} className={styles.historyPanel}>
                         <div className="flex items-center justify-between mb-2 border-b border-white/5 pb-2 gap-2 flex-wrap">
                           <span className="text-[9px] uppercase font-black text-muted-foreground">Histórico de envios</span>
-                          <div className="flex items-center gap-1 text-[9px]">
+                          <div className={styles.historyFilters} aria-label="Filtrar histórico de envios">
                             {(["all", "waiting", "responded", "exhausted", "failed"] as const).map(f => (
                               <button
                                 key={f}
                                 onClick={() => setHistFilter(f)}
-                                className={cn(
-                                  "px-2 py-0.5 rounded-md font-black uppercase tracking-widest transition",
-                                  histFilter === f ? "bg-cyan-500/20 text-cyan-200 border border-cyan-500/30" : "text-muted-foreground hover:text-white"
-                                )}
+                                aria-pressed={histFilter === f}
                               >
                                 {f === "all" ? `Todos (${histTargets.length})`
                                   : f === "waiting" ? `Aguardando (${histTargets.filter(t => t.status === "waiting").length})`
@@ -921,6 +909,8 @@ export default function FollowUpPage() {
                         <div className="flex-1 overflow-y-auto custom-scrollbar pr-1 space-y-2">
                           {histTargets.length === 0 ? (
                             <p className="text-muted-foreground italic text-center py-8 text-[11px]">Nenhum cliente inscrito ainda.</p>
+                          ) : histTargets.filter(t => histFilter === "all" || t.status === histFilter).length === 0 ? (
+                            <p className={styles.helper}>Nenhum envio neste filtro.</p>
                           ) : (
                             histTargets
                               .filter(t => histFilter === "all" || t.status === histFilter)
@@ -938,13 +928,13 @@ export default function FollowUpPage() {
                                       <div className="min-w-0 flex-1">
                                         <p className="text-[11px] font-bold text-white truncate">{t.nome_negocio || "(sem nome)"}</p>
                                         <p className="text-[9px] text-muted-foreground font-mono">
-                                          {phone} · step {t.current_step}/{c.steps.length}
+                                          {phone} · etapa {t.current_step}/{c.steps.length}
                                           {t.last_sent_at ? ` · enviado ${new Date(t.last_sent_at).toLocaleString("pt-BR")}` : ""}
                                           {t.next_send_at ? ` · próximo ${new Date(t.next_send_at).toLocaleDateString("pt-BR")}` : ""}
                                         </p>
                                       </div>
-                                      <span className={cn("text-[8px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded-md border shrink-0", statusColor)}>
-                                        {t.status}
+                                      <span className={cn(styles.status, statusColor)}>
+                                        {STATUS_LABELS[t.status] || t.status}
                                       </span>
                                     </div>
                                     {t.ai_input ? (
@@ -964,7 +954,7 @@ export default function FollowUpPage() {
                                       <p className="text-[11px] text-white/80 whitespace-pre-wrap bg-black/20 rounded-md px-2 py-1.5 border border-white/5">{t.last_rendered}</p>
                                     )}
                                     {t.error_message && (
-                                      <p className="text-[10px] text-red-300 bg-red-500/5 border border-red-500/20 rounded-md px-2 py-1">⚠ {t.error_message}</p>
+                                      <p className="text-xs text-red-300 bg-red-500/5 border border-red-500/20 rounded-md px-2 py-1"><AlertCircle className="inline w-3.5 h-3.5 mr-1" aria-hidden="true" />{t.error_message}</p>
                                     )}
                                   </div>
                                 );
@@ -977,51 +967,51 @@ export default function FollowUpPage() {
                 </Card>
               ))
             )}
-          </div>
+          </section>
 
-          {/* Painel da campanha selecionada */}
-          <div className="xl:col-span-1 space-y-4">
+          <aside className={styles.detailColumn} aria-label="Detalhes da campanha" aria-busy={loadingDetail}>
             {!selected ? (
-              <Card className="border-white/10 bg-white/5">
-                <CardContent className="p-10 text-center text-muted-foreground text-sm">
-                  Selecione uma campanha para ver detalhes e leads.
-                </CardContent>
-              </Card>
+              <div className={styles.detailEmpty}>
+                <h2>Detalhes da campanha</h2>
+                <p>Selecione o nome de uma campanha para acompanhar os leads e gerenciar os envios.</p>
+                <div className={styles.helper}><Clock className="w-4 h-4" aria-hidden="true" /> Os envios respeitam os dias e horários configurados.</div>
+              </div>
             ) : (
-              <Card className="border-white/10 bg-black/40">
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-base flex items-center gap-2">
+              <Card className={styles.detailPanel}>
+                <CardHeader className={styles.detailHeader}>
+                  <CardTitle className={styles.detailTitle}>
                     <Repeat className="w-4 h-4 text-primary" /> {selected.name}
                   </CardTitle>
                 </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="flex items-center justify-between p-3 rounded-xl bg-white/5 border border-white/10">
+                <CardContent className={styles.detailBody}>
+                  <div className={styles.optionRow}>
                     <div>
-                      <p className="text-xs font-bold text-white">Executar automaticamente</p>
-                      <p className="text-[10px] text-muted-foreground">Roda sozinho a cada ~2 min respeitando janela</p>
+                      <label htmlFor="detail-auto" className={styles.fieldLabel}>Executar automaticamente</label>
+                      <p className={styles.helper}>A cada 2 minutos, respeitando a janela de envio.</p>
                     </div>
                     <Switch
+                      id="detail-auto"
                       checked={selected.auto_execute}
                       onCheckedChange={(v) => toggleAuto(selected.id, v)}
                       disabled={actioning}
                     />
                   </div>
 
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className={styles.detailActions}>
                     <Button
                       variant="outline"
                       size="sm"
-                      className="gap-1.5 border-white/10 bg-white/5 hover:bg-white/10 text-[11px]"
+                      className={styles.secondaryAction}
                       onClick={() => enrollAllFollowUp(selected.id)}
                       disabled={actioning}
                       title="Adiciona todos os clientes do CRM em status follow-up"
                     >
-                      <UserPlus className="w-3.5 h-3.5" /> Todos
+                      <UserPlus className="w-3.5 h-3.5" aria-hidden="true" /> Adicionar do CRM
                     </Button>
                     <Button
                       variant="outline"
                       size="sm"
-                      className="gap-1.5 border-white/10 bg-white/5 hover:bg-white/10 text-[11px]"
+                      className={styles.secondaryAction}
                       onClick={() => openLeadPicker(selected.id)}
                       disabled={actioning}
                       title="Selecionar clientes específicos"
@@ -1030,17 +1020,17 @@ export default function FollowUpPage() {
                     </Button>
                     <Button
                       size="sm"
-                      className="gap-1.5 bg-primary hover:bg-primary/90 text-[11px]"
+                      className={styles.primaryAction}
                       onClick={() => tickNow(selected.id)}
                       disabled={actioning}
                     >
                       {actioning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
-                      Disparar
+                      Processar agora
                     </Button>
                   </div>
 
                   <div>
-                    <p className="text-[10px] font-black text-muted-foreground uppercase tracking-widest mb-2">
+                    <p className={styles.fieldLabel}>
                       Leads ({selTargets.length})
                     </p>
                     <div className="max-h-[420px] overflow-y-auto space-y-2 custom-scrollbar pr-1">
@@ -1048,22 +1038,23 @@ export default function FollowUpPage() {
                         <Loader2 className="w-4 h-4 animate-spin mx-auto" />
                       ) : selTargets.length === 0 ? (
                         <p className="text-xs text-muted-foreground py-4 text-center">
-                          Sem leads. Clique em <strong>Puxar CRM</strong>.
+                          Nenhum lead adicionado. Use <strong>Adicionar do CRM</strong> ou <strong>Escolher</strong> para começar.
                         </p>
                       ) : (
                         selTargets.map((t) => (
-                          <div key={t.id} className="p-2.5 rounded-lg bg-white/5 border border-white/5">
+                          <div key={t.id} className={styles.target}>
                             <div className="flex items-center justify-between gap-2">
                               <p className="text-xs font-bold text-white truncate flex-1">
                                 {t.nome_negocio || t.remote_jid.split("@")[0]}
                               </p>
-                              <Badge className={cn("text-[9px] uppercase", targetBadge(t.status))}>
-                                {t.status}
+                              <Badge className={cn(styles.status, targetBadge(t.status))}>
+                                {STATUS_LABELS[t.status] || t.status}
                               </Badge>
                               <Button
                                 size="icon"
                                 variant="ghost"
-                                className="h-6 w-6 shrink-0"
+                                className={styles.iconAction}
+                                aria-label={`Pré-visualizar mensagem para ${t.nome_negocio || t.remote_jid.split("@")[0]}`}
                                 onClick={() => openPreview(selected.id, t)}
                                 title="Ver o que a IA vai enviar (histórico + mensagem final)"
                               >
@@ -1090,41 +1081,42 @@ export default function FollowUpPage() {
                 </CardContent>
               </Card>
             )}
-          </div>
+          </aside>
         </div>
-      </div>
+      </main>
 
       {/* Dialog: criar campanha */}
       <Dialog open={showForm} onOpenChange={(o) => !creating && setShowForm(o)}>
-        <DialogContent className="glass-card border-white/20 w-[96vw] max-w-[1400px] sm:max-w-[1400px] h-[92vh] sm:h-[90vh] p-0 overflow-hidden flex flex-col gap-0">
-          <div className="p-6 border-b border-white/10 bg-gradient-to-r from-primary/15 via-purple-500/10 to-transparent shrink-0">
-            <DialogTitle className="text-xl font-black text-white flex items-center gap-3">
-              <Repeat className="w-6 h-6 text-primary" /> {editingId ? "Editar Campanha de Follow-up" : "Nova Campanha de Follow-up"}
+        <DialogContent className={cn(styles.page, styles.formDialog)}>
+          <div className={styles.dialogHeader}>
+            <DialogTitle className={styles.dialogTitle}>
+              {editingId ? "Editar campanha de follow-up" : "Nova campanha de follow-up"}
             </DialogTitle>
-            <p className="text-xs text-muted-foreground mt-1">
-              Define os passos de reengajamento. Se o cliente responder no meio, o follow-up PARA. Se esgotar
-              todos os passos sem resposta, o lead vai para <strong>Sem Interesse</strong> com motivo registrado.
-            </p>
+            <DialogDescription className={styles.helper}>
+              Defina a sequência de contato. Quando o lead responde, o follow-up é interrompido. Sem resposta após a última etapa, ele vai para Sem Interesse.
+            </DialogDescription>
           </div>
 
-          <div className="p-6 space-y-6 flex-1 overflow-y-auto custom-scrollbar">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className={styles.formBody}>
+            <section className={styles.connectionSection} aria-labelledby="connection-heading">
+              <h2 id="connection-heading" className={styles.sectionTitle}>Campanha e conexão</h2>
+              <div className={styles.fieldGrid}>
               <div>
-                <label className="text-[10px] font-black text-muted-foreground uppercase tracking-widest">Nome</label>
-                <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex: Reengajamento Out-2026" className="mt-1 h-10 bg-white/5 border-white/10" />
+                <label htmlFor="campaign-name" className={styles.fieldLabel}>Nome da campanha</label>
+                <Input id="campaign-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex.: Retorno comercial · Outubro" className={styles.field} aria-required="true" />
               </div>
               <div>
-                <label className="text-[10px] font-black text-muted-foreground uppercase tracking-widest">Instância WhatsApp</label>
+                <label htmlFor="campaign-instance" className={styles.fieldLabel}>Conta do WhatsApp</label>
                 {instances.length === 0 ? (
                   <div className="mt-1 text-xs text-orange-300 bg-orange-500/10 border border-orange-500/30 rounded px-2 py-1.5">
-                    Sem instância conectada. Vá em <strong>/whatsapp</strong> e conecte uma antes.
+                    Nenhuma conta disponível. <a href="/whatsapp" className="underline underline-offset-4">Conecte seu WhatsApp</a> antes de criar a campanha.
                   </div>
                 ) : (
                   <Select value={instanceName} onValueChange={(v) => setInstanceName(v as string)}>
-                    <SelectTrigger className="mt-1 h-10 bg-white/5 border-white/10">
-                      <SelectValue placeholder="Escolher" />
+                    <SelectTrigger id="campaign-instance" className={styles.field}>
+                      <SelectValue placeholder="Escolher conta">{instances.find(i => i.instanceName === instanceName)?.profileName || instanceName}</SelectValue>
                     </SelectTrigger>
-                    <SelectContent className="glass-card">
+                    <SelectContent className={styles.selectPopup}>
                       {instances.map((i, idx) => (
                         <SelectItem key={idx} value={i.instanceName}>
                           {i.profileName || i.instanceName}
@@ -1136,17 +1128,11 @@ export default function FollowUpPage() {
               </div>
             </div>
 
-            {/* Coluna fonte do kanban — KEY do feature pedida pelo cliente.
-                Cliente pode ter kanban customizado (gerado pelo Organizador IA).
-                Esse dropdown lê as colunas reais do kanban dele e permite
-                escolher de QUAL coluna esse follow-up vai puxar leads. Sem
-                isso, ficava hardcoded em "follow-up" e não rodava em kanban
-                personalizado. */}
-            <div className="p-4 rounded-xl bg-amber-500/5 border border-amber-500/20 space-y-3">
+            <div className={styles.sourceField}>
               <div className="flex items-center justify-between gap-3 flex-wrap">
                 <div className="flex items-center gap-2">
                   <Workflow className="w-4 h-4 text-amber-300" />
-                  <p className="text-sm font-bold text-white">Pool de leads (kanban)</p>
+                  <label htmlFor="campaign-source" className={styles.fieldLabel}>Origem dos leads no Kanban</label>
                 </div>
                 {kanbanCols.length > 0 && (() => {
                   const sel = kanbanCols.find(c => c.status_key === sourceStatus);
@@ -1159,20 +1145,17 @@ export default function FollowUpPage() {
                   ) : null;
                 })()}
               </div>
-              <p className="text-[11px] text-amber-200/80 leading-relaxed">
-                A campanha vai mandar follow-up <strong>apenas pros clientes que estiverem na coluna selecionada</strong>{" "}
-                do kanban deste cliente. Use isso quando seu kanban tem nomes customizados (criados via Organizador IA).
-              </p>
+              <p className={styles.helper}>Escolha a coluna que abastece esta campanha. Apenas os leads dessa coluna recebem o follow-up.</p>
               {kanbanCols.length === 0 ? (
                 <div className="text-[11px] text-zinc-400 italic">
-                  Carregando colunas do kanban… (default <code className="text-amber-300">follow-up</code>)
+                  Sem colunas disponíveis. Origem atual: <code>follow-up</code>.
                 </div>
               ) : (
                 <Select value={sourceStatus} onValueChange={(v) => setSourceStatus(v as string)}>
-                  <SelectTrigger className="h-10 bg-white/5 border-white/10">
-                    <SelectValue placeholder="Escolher coluna do kanban" />
+                  <SelectTrigger id="campaign-source" className={styles.field}>
+                    <SelectValue placeholder="Escolher coluna do Kanban">{kanbanCols.find(c => c.status_key === sourceStatus)?.label || sourceStatus}</SelectValue>
                   </SelectTrigger>
-                  <SelectContent className="glass-card max-h-72">
+                  <SelectContent className={cn(styles.selectPopup, "max-h-72")}>
                     {kanbanCols.map((c) => (
                       <SelectItem key={c.status_key} value={c.status_key}>
                         <span className="flex items-center gap-2">
@@ -1187,23 +1170,20 @@ export default function FollowUpPage() {
               )}
             </div>
 
-            {/* Agente IA — layout simplificado: vertical em qualquer tela.
-                 Antes o `grid-cols-[minmax(0,280px)_1fr]` empurrava o select
-                 contra o textarea e ficava bagunçado em larguras intermediárias. */}
-            <div className="p-4 rounded-xl bg-purple-500/5 border border-purple-500/20 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Bot className="w-4 h-4 text-purple-400" />
-                  <p className="text-sm font-bold text-white">Agente IA escreve a mensagem</p>
+            </section>
+
+            <section className={styles.aiSection} aria-labelledby="ai-heading">
+              <div className={styles.optionRow}>
+                <div>
+                  <h2 id="ai-heading" className={styles.sectionTitle}>Personalização com IA</h2>
+                  <label htmlFor="campaign-ai" className={styles.helper}>Adaptar a mensagem ao histórico de cada conversa</label>
                 </div>
-                <Switch checked={aiEnabled} onCheckedChange={setAiEnabled} />
+                <Switch id="campaign-ai" checked={aiEnabled} onCheckedChange={setAiEnabled} />
               </div>
               {aiEnabled && (
                 <div className="space-y-3">
                   <div>
-                    <label className="text-[10px] font-black text-muted-foreground uppercase tracking-widest">
-                      Modelo de IA
-                    </label>
+                    <label htmlFor="campaign-model" className={styles.fieldLabel}>Modelo de IA</label>
                     {aiModels.length === 0 && isAdmin ? (
                       <div className="mt-1 text-xs text-orange-300 bg-orange-500/10 border border-orange-500/30 rounded px-2 py-1.5">
                         Nenhum modelo disponível. Configure a API Key Gemini em <strong>Configurações → Organizador IA</strong>.
@@ -1214,10 +1194,10 @@ export default function FollowUpPage() {
                         onValueChange={(v) => setAiModel(v as string)}
                         disabled={!isAdmin}
                       >
-                        <SelectTrigger className={`mt-1 h-10 bg-white/5 border-white/10 max-w-md ${!isAdmin ? "opacity-70 cursor-not-allowed" : ""}`}>
-                          <SelectValue placeholder="Escolher modelo" />
+                        <SelectTrigger id="campaign-model" className={styles.field}>
+                          <SelectValue placeholder="Escolher modelo">{aiModels.find(m => m.id === (isAdmin ? aiModel : defaultAiModel))?.name || (isAdmin ? aiModel : defaultAiModel) || "Escolher modelo"}</SelectValue>
                         </SelectTrigger>
-                        <SelectContent className="glass-card max-h-[40vh]">
+                        <SelectContent className={cn(styles.selectPopup, "max-h-[40vh]")}>
                           {!isAdmin && defaultAiModel && !aiModels.some(m => m.id === defaultAiModel) && (
                             <SelectItem key={defaultAiModel} value={defaultAiModel}>
                               {defaultAiModel}
@@ -1252,35 +1232,35 @@ export default function FollowUpPage() {
                     )}
                     {!isAdmin && (
                       <p className="text-[10px] text-purple-300/80 mt-1.5 flex items-center gap-1">
-                        <span>🔒 Modelo definido pelo administrador:</span>
+                        <span>Modelo definido pelo administrador:</span>
                         <span className="font-mono font-bold bg-purple-500/10 px-1.5 py-0.5 rounded border border-purple-500/20">{defaultAiModel || "Não configurado"}</span>
                       </p>
                     )}
                   </div>
                   <div>
-                    <label className="text-[10px] font-black text-muted-foreground uppercase tracking-widest">
-                      Prompt do Agente — define como ele se comporta
-                    </label>
+                    <label htmlFor="campaign-prompt" className={styles.fieldLabel}>Instruções para a IA</label>
                     <Textarea
+                      id="campaign-prompt"
                       value={aiPrompt}
                       onChange={(e) => setAiPrompt(e.target.value)}
                       rows={6}
-                      className="mt-1 bg-white/5 border-white/10 text-sm leading-relaxed"
+                      className={cn(styles.field, styles.prompt)}
                       placeholder="Ex: Você é um SDR cordial, vai reengajar o cliente de forma humana..."
                     />
                   </div>
                 </div>
               )}
-            </div>
+            </section>
 
-            {/* Lead amostra pra preview de variáveis */}
-            <div className="p-3 rounded-xl bg-blue-500/5 border border-blue-500/20 space-y-2">
-              <div className="flex items-center gap-2">
-                <Eye className="w-3.5 h-3.5 text-blue-400" />
-                <p className="text-[11px] font-bold text-blue-200">Pré-visualizar variáveis usando o lead:</p>
-              </div>
+            <section className={styles.sequenceSection} aria-labelledby="sequence-heading">
+            <div className={styles.sectionHeading}>
+              <div><h2 id="sequence-heading" className={styles.sectionTitle}>Sequência de mensagens</h2><p className={styles.helper}>Defina os dias de espera e a mensagem de cada etapa.</p></div>
+              <Button size="sm" variant="outline" onClick={addStep} className={styles.secondaryAction}><Plus className="w-4 h-4" aria-hidden="true" /> Adicionar etapa</Button>
+            </div>
+            <div className={styles.sampleLead}>
+              <label htmlFor="preview-lead" className={styles.fieldLabel}>Lead para pré-visualização</label>
               <Select
-                value={previewLead.remoteJid}
+                value={availableLeads.some(l => l.remoteJid === previewLead.remoteJid) ? previewLead.remoteJid : "_mock"}
                 onValueChange={(v) => {
                   if (v === "_mock") {
                     setPreviewLead({
@@ -1300,10 +1280,10 @@ export default function FollowUpPage() {
                   }
                 }}
               >
-                <SelectTrigger className="h-9 bg-white/5 border-white/10 text-xs">
-                  <SelectValue />
+                <SelectTrigger id="preview-lead" className={styles.field}>
+                  <SelectValue>{availableLeads.some(l => l.remoteJid === previewLead.remoteJid) ? previewLead.nome_negocio || previewLead.remoteJid.split("@")[0] : "Exemplo genérico (Padaria São João)"}</SelectValue>
                 </SelectTrigger>
-                <SelectContent className="glass-card max-h-[40vh]">
+                <SelectContent className={cn(styles.selectPopup, "max-h-[40vh]")}>
                   <SelectItem value="_mock">Exemplo genérico (Padaria São João)</SelectItem>
                   {availableLeads.slice(0, 100).map((l) => (
                     <SelectItem key={l.id} value={l.remoteJid}>
@@ -1312,7 +1292,7 @@ export default function FollowUpPage() {
                   ))}
                 </SelectContent>
               </Select>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[10px]">
+              <details className={styles.variableGuide}><summary>Consultar variáveis disponíveis</summary><div className={styles.variableGrid}>
                 {TEMPLATE_VARIABLES.map((v) => (
                   <div
                     key={v.key}
@@ -1323,129 +1303,89 @@ export default function FollowUpPage() {
                     <p className="text-white/80 truncate">→ {variableValue(v.key) || "(vazio)"}</p>
                   </div>
                 ))}
-              </div>
+              </div></details>
+              <p className={styles.helper}>A amostra só preenche as variáveis; nenhuma mensagem é enviada.</p>
             </div>
 
-            {/* Passos */}
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <label className="text-[10px] font-black text-muted-foreground uppercase tracking-widest">
-                  Passos do Follow-up ({steps.length})
-                </label>
-                <Button size="sm" variant="ghost" onClick={addStep} className="h-7 text-xs gap-1">
-                  <Plus className="w-3 h-3" /> Adicionar passo
-                </Button>
-              </div>
-              <div className="space-y-3">
+            <div className={styles.stepsList}>
                 {steps.map((s, i) => (
-                  <div key={i} className="p-3 rounded-xl bg-white/5 border border-white/10 space-y-2">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] font-black text-primary bg-primary/10 px-2 py-1 rounded">
-                        {i + 1}º FOLLOW-UP
-                      </span>
-                      <span className="text-[10px] text-muted-foreground">após</span>
-                      <NumberInput
-                        min={1}
-                        max={60}
-                        fallback={1}
-                        value={s.day_offset}
-                        onChange={(n) => updateStep(i, { day_offset: n })}
-                        className="h-7 w-16 bg-black/30 border-white/10 text-center text-xs"
-                      />
-                      <span className="text-[10px] text-muted-foreground">
-                        dia{s.day_offset === 1 ? "" : "s"} sem resposta
-                      </span>
+                  <div key={i} className={styles.step}>
+                    <div className={styles.stepHeading}>
+                      <h3><span className={styles.stepNumber}>{i + 1}</span> Etapa {i + 1}</h3>
+                      <div className={styles.dayField}>
+                        <label htmlFor={`step-days-${i}`} className="sr-only">Dias sem resposta da etapa {i + 1}</label>
+                        <span>Após</span>
+                        <NumberInput id={`step-days-${i}`} min={1} max={60} fallback={1} value={s.day_offset} onChange={(n) => updateStep(i, { day_offset: n })} className={cn(styles.field, styles.dayInput)} />
+                        <span>dia{s.day_offset === 1 ? "" : "s"} sem resposta</span>
+                      </div>
                       {steps.length > 1 && (
-                        <Button size="icon" variant="ghost" className="h-7 w-7 ml-auto" onClick={() => removeStep(i)}>
-                          <Trash2 className="w-3 h-3 text-red-400" />
+                        <Button size="icon" variant="ghost" className={cn(styles.iconAction, styles.dangerAction)} aria-label={`Remover etapa ${i + 1}`} onClick={() => removeStep(i)}>
+                          <Trash2 className="w-4 h-4" aria-hidden="true" />
                         </Button>
                       )}
                     </div>
+                    <div className={styles.messageGrid}><div>
+                    <label htmlFor={`step-message-${i}`} className={styles.fieldLabel}>Mensagem da etapa {i + 1}</label>
                     <Textarea
+                      id={`step-message-${i}`}
                       value={s.template}
                       onChange={(e) => updateStep(i, { template: e.target.value })}
                       rows={3}
-                      className="bg-black/30 border-white/10 text-sm leading-relaxed"
+                      className={cn(styles.field, styles.messageInput)}
                       placeholder="{{saudacao}} {{nome_empresa}}, ainda faz sentido a gente conversar?"
                     />
-                    <div className="flex flex-wrap gap-1">
+                    <div className={styles.variables}>
                       {TEMPLATE_VARIABLES.map((v) => (
                         <button
                           key={v.key}
                           type="button"
                           onClick={() => insertVarIntoStep(i, v.key)}
-                          className="text-[9px] px-2 py-0.5 rounded bg-white/5 hover:bg-primary/20 text-muted-foreground hover:text-primary border border-white/5 font-mono flex items-center gap-1"
+                          aria-label={`Inserir ${v.key} na etapa ${i + 1}`}
                           title={`${v.hint} — valor atual: ${variableValue(v.key)}`}
                         >
                           <span>{`{{${v.key}}}`}</span>
-                          <span className="text-[8px] text-white/50 truncate max-w-[60px]">
-                            → {variableValue(v.key)}
-                          </span>
+
                         </button>
                       ))}
+                    </div></div>
+                    <div className={styles.messagePreview}>
+                      <p className={styles.previewLabel}><Eye className="w-3.5 h-3.5" aria-hidden="true" /> Prévia com variáveis</p>
+                      <p className={styles.bubble}>{s.template.trim() ? previewOf(s.template) : "Escreva a mensagem para ver a prévia."}</p>
+                      {aiEnabled && <p className={styles.helper}>A IA adapta esta base ao histórico do lead antes do envio.</p>}
                     </div>
-                    {s.template.trim() && (
-                      <div className="p-2.5 rounded-lg bg-green-500/5 border border-green-500/20">
-                        <p className="text-[9px] font-black text-green-400 uppercase tracking-widest mb-1 flex items-center gap-1">
-                          <Eye className="w-2.5 h-2.5" /> Prévia real
-                        </p>
-                        <p className="text-xs text-green-100/90 whitespace-pre-wrap leading-relaxed">
-                          {previewOf(s.template)}
-                        </p>
-                        {aiEnabled && (
-                          <p className="text-[9px] text-purple-300 mt-1.5 italic">
-                            ⓘ Esta é a base. A IA vai reescrever contextualizando com o histórico real do lead antes de enviar.
-                          </p>
-                        )}
-                      </div>
-                    )}
+                    </div>
                   </div>
                 ))}
               </div>
-              <p className="text-[10px] text-muted-foreground mt-2">
-                Após o último passo, se o cliente não responder, o lead vai pra <strong>Sem Interesse</strong>{" "}
-                com motivo automático.
-              </p>
-            </div>
+              <p className={styles.helper}>Após a última etapa sem resposta, o lead é movido para <strong>Sem Interesse</strong> com o motivo registrado.</p>
+            </section>
 
-            {/* Anti-bloqueio */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <div>
-                <label className="text-[10px] font-black text-muted-foreground uppercase">Min seg.</label>
-                <NumberInput min={5} fallback={30} value={minSec} onChange={(n) => setMinSec(n)} className="mt-1 h-10 bg-white/5 border-white/10" />
+            <section className={styles.rulesSection} aria-labelledby="rules-heading">
+              <h2 id="rules-heading" className={styles.sectionTitle}>Ritmo e horário de envio</h2>
+              <p className={styles.helper}>Intervalo entre mensagens, em segundos. A janela de envio usa o horário de Brasília.</p>
+              <div className={styles.timingGrid}>
+                <div><label htmlFor="min-interval" className={styles.fieldLabel}>Intervalo mínimo (segundos)</label><NumberInput id="min-interval" min={5} fallback={30} value={minSec} onChange={setMinSec} className={styles.field} /></div>
+                <div><label htmlFor="max-interval" className={styles.fieldLabel}>Intervalo máximo (segundos)</label><NumberInput id="max-interval" min={5} fallback={60} value={maxSec} onChange={setMaxSec} className={styles.field} /></div>
+                <div><label htmlFor="start-hour" className={styles.fieldLabel}>Hora de início</label><NumberInput id="start-hour" min={0} max={23} fallback={9} value={startHour} onChange={setStartHour} className={styles.field} /></div>
+                <div><label htmlFor="end-hour" className={styles.fieldLabel}>Hora de término</label><NumberInput id="end-hour" min={0} max={23} fallback={20} value={endHour} onChange={setEndHour} className={styles.field} /></div>
               </div>
-              <div>
-                <label className="text-[10px] font-black text-muted-foreground uppercase">Max seg.</label>
-                <NumberInput min={5} fallback={60} value={maxSec} onChange={(n) => setMaxSec(n)} className="mt-1 h-10 bg-white/5 border-white/10" />
+              <div className={styles.optionRow}>
+                <div><label htmlFor="campaign-auto" className={styles.fieldLabel}>Executar automaticamente</label><p className={styles.helper}>Respeita os dias e horários configurados. Desative para processar somente de forma manual.</p></div>
+                <Switch id="campaign-auto" checked={autoExecute} onCheckedChange={setAutoExecute} />
               </div>
+            </section>
+          </div>
+          <div className={styles.dialogFooter}>
+            {msg?.type === "err" && <p role="alert" className={styles.formError}>{msg.text}</p>}
+            <div className={styles.footerActions}>
+              <span className={styles.helper}>{steps.length} etapa{steps.length === 1 ? "" : "s"} na sequência</span>
               <div>
-                <label className="text-[10px] font-black text-muted-foreground uppercase">Hora início</label>
-                <NumberInput min={0} max={23} fallback={9} value={startHour} onChange={(n) => setStartHour(n)} className="mt-1 h-10 bg-white/5 border-white/10" />
+                <Button variant="outline" className={styles.secondaryAction} onClick={() => setShowForm(false)} disabled={creating}>Cancelar</Button>
+                <Button className={styles.primaryAction} onClick={submitCreate} disabled={creating}>
+                  {creating ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" /> : <CheckCircle2 className="w-4 h-4" aria-hidden="true" />}
+                  {editingId ? "Salvar alterações" : "Criar campanha"}
+                </Button>
               </div>
-              <div>
-                <label className="text-[10px] font-black text-muted-foreground uppercase">Hora fim</label>
-                <NumberInput min={0} max={23} fallback={20} value={endHour} onChange={(n) => setEndHour(n)} className="mt-1 h-10 bg-white/5 border-white/10" />
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between p-3 rounded-xl bg-white/5 border border-white/10">
-              <div>
-                <p className="text-sm font-bold text-white">Executar automaticamente</p>
-                <p className="text-[10px] text-muted-foreground">
-                  Se ligado, roda sozinho respeitando dias + janela. Desligue se quiser só disparar manual.
-                </p>
-              </div>
-              <Switch checked={autoExecute} onCheckedChange={setAutoExecute} />
-            </div>
-
-            <div className="flex justify-end gap-3 pt-2 border-t border-white/10">
-              <Button variant="ghost" onClick={() => setShowForm(false)} disabled={creating}>
-                Cancelar
-              </Button>
-              <Button className="gap-2" onClick={submitCreate} disabled={creating}>
-                {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-                {editingId ? "Salvar alterações" : "Criar campanha"}
-              </Button>
             </div>
           </div>
         </DialogContent>
@@ -1453,15 +1393,13 @@ export default function FollowUpPage() {
 
       {/* Dialog: Escolher leads específicos */}
       <Dialog open={pickerOpen} onOpenChange={(o) => !actioning && setPickerOpen(o)}>
-        <DialogContent className="glass-card border-white/20 max-w-2xl w-[95vw] p-0 overflow-hidden">
+        <DialogContent className={cn(styles.page, styles.smallDialog)}>
           <div className="p-5 border-b border-white/10 flex items-center justify-between gap-3">
             <div>
               <DialogTitle className="text-base font-black text-white flex items-center gap-2">
                 <CheckCircle2 className="w-4 h-4 text-primary" /> Escolher leads
               </DialogTitle>
-              <p className="text-[11px] text-muted-foreground mt-0.5">
-                Priorizando leads em status <strong>follow-up</strong>. Você também pode selecionar outros.
-              </p>
+              <DialogDescription className={styles.helper}>Leads em follow-up aparecem primeiro. Você também pode selecionar outros.</DialogDescription>
             </div>
             <Badge className="bg-primary/10 text-primary border-primary/20">
               {pickerSelected.size} selecionado{pickerSelected.size === 1 ? "" : "s"}
@@ -1469,13 +1407,14 @@ export default function FollowUpPage() {
           </div>
 
           <div className="p-4 space-y-3">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+            <div className={styles.search}>
+              <Search aria-hidden="true" />
               <Input
+                aria-label="Buscar leads por nome, telefone ou ramo"
                 value={pickerSearch}
                 onChange={(e) => setPickerSearch(e.target.value)}
                 placeholder="Buscar por nome, telefone, ramo..."
-                className="pl-9 h-10 bg-white/5 border-white/10 rounded-xl"
+                className={styles.field}
               />
             </div>
 
@@ -1568,14 +1507,12 @@ export default function FollowUpPage() {
 
       {/* Dialog: Preview de IA (histórico + mensagem final) */}
       <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
-        <DialogContent className="glass-card border-white/20 max-w-2xl w-[95vw] p-0 overflow-hidden">
-          <div className="p-5 border-b border-white/10 bg-gradient-to-r from-purple-500/15 via-primary/10 to-transparent">
+        <DialogContent className={cn(styles.page, styles.smallDialog)}>
+          <div className={styles.dialogHeader}>
             <DialogTitle className="text-base font-black text-white flex items-center gap-2">
               <Eye className="w-4 h-4 text-purple-400" /> O que a IA vai enviar
             </DialogTitle>
-            <p className="text-[11px] text-muted-foreground mt-0.5">
-              Preview completo — a IA leu este histórico e gerou esta mensagem sem enviá-la ainda.
-            </p>
+            <DialogDescription className={styles.helper}>Prévia gerada a partir do histórico. A mensagem ainda não foi enviada.</DialogDescription>
           </div>
 
           <div className="p-5 space-y-4 max-h-[75vh] overflow-y-auto custom-scrollbar">
