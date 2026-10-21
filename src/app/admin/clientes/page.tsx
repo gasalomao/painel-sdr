@@ -1,16 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useState, type FormEvent, type JSX } from "react";
 import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import {
-  Plus, Trash2, Pencil, KeyRound, LogIn, Power, Check, X, Loader2,
-  Shield, UserCog, AlertCircle, Bot, Copy, ClipboardCheck,
+  Plus, Trash2, Pencil, LogIn, Power, X, Loader2,
+  Shield, Users, AlertCircle, Copy, ClipboardCheck, Search, MoreHorizontal, RefreshCw,
 } from "lucide-react";
+import styles from "./clientes.module.css";
 
 type Client = {
   id: string;
@@ -73,8 +75,7 @@ const NO_FEATURES = Object.fromEntries(FEATURE_LIST.map((f) => [f.key, false]));
 
 type AiModel = { id: string; name: string; description?: string };
 
-export default function AdminClientesPage() {
-  const router = useRouter();
+export default function AdminClientesPage(): JSX.Element {
   const [clients, setClients] = useState<Client[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<Client | null>(null);
@@ -83,15 +84,28 @@ export default function AdminClientesPage() {
   const [error, setError] = useState<string | null>(null);
   // Cliente alvo do "copiar credenciais" — abre modal mini pra definir senha + copiar
   const [credsClient, setCredsClient] = useState<Client | null>(null);
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const filteredClients = clients.filter((client) => {
+    const search = query.trim().toLocaleLowerCase("pt-BR");
+    return `${client.name} ${client.email}`.toLocaleLowerCase("pt-BR").includes(search)
+      && (statusFilter === "all" || client.is_active === (statusFilter === "active"))
+      && (typeFilter === "all" || client.is_admin === (typeFilter === "admin"));
+  });
+  const hasFilters = !!query || statusFilter !== "all" || typeFilter !== "all";
+  const clearFilters = () => { setQuery(""); setStatusFilter("all"); setTypeFilter("all"); };
 
   const reload = async () => {
     setLoading(true);
+    setError(null);
     try {
       const r = await fetch("/api/admin/clients", { cache: "no-store" });
       const d = await r.json();
-      if (d.ok) setClients(d.clients);
-    } catch (err: any) {
-      setError(err?.message || "Falha ao carregar");
+      if (!r.ok || !d.ok || !Array.isArray(d.clients)) throw new Error(d.error || "Não foi possível carregar os clientes.");
+      setClients(d.clients);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Não foi possível carregar os clientes.");
     } finally {
       setLoading(false);
     }
@@ -127,6 +141,8 @@ export default function AdminClientesPage() {
       // que todos os componentes (banner, sidebar, dados) reinicializem
       // com a nova sessão de impersonação.
       window.location.href = "/";
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Não foi possível acessar o painel do cliente. Tente novamente.");
     } finally {
       setBusy(false);
     }
@@ -143,7 +159,9 @@ export default function AdminClientesPage() {
       });
       const d = await r.json();
       if (d.ok) await reload();
-      else alert("Erro: " + d.error);
+      else setError(d.error || "Não foi possível concluir a ação. Tente novamente.");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Não foi possível concluir a ação. Tente novamente.");
     } finally {
       setBusy(false);
     }
@@ -161,150 +179,129 @@ export default function AdminClientesPage() {
       const r = await fetch(`/api/admin/clients/${c.id}`, { method: "DELETE" });
       const d = await r.json();
       if (d.ok) await reload();
-      else alert("Erro: " + d.error);
+      else setError(d.error || "Não foi possível concluir a ação. Tente novamente.");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Não foi possível concluir a ação. Tente novamente.");
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="flex flex-col h-[100dvh] max-h-[100dvh] bg-background overflow-hidden text-white">
+    <div className={cn(styles.theme, styles.page)}>
       <Header />
-
-      <main className="flex-1 overflow-y-auto w-full">
-        <div className="max-w-6xl mx-auto p-4 sm:p-8 space-y-6">
-          {/* Title */}
-          <div className="flex items-center justify-between gap-4 flex-wrap">
+      <div className={styles.scrollArea}>
+        <section className={styles.content} aria-labelledby="clients-title">
+          <div className={styles.heading}>
             <div>
-              <h1 className="text-2xl font-black tracking-tight flex items-center gap-3">
-                <UserCog className="w-7 h-7 text-primary" /> Clientes
-              </h1>
-              <p className="text-xs text-muted-foreground mt-1">
-                Crie, edite, ative ou apague clientes. Cada cliente tem dados isolados e features customizáveis.
-              </p>
+              <h2 id="clients-title">Clientes</h2>
+              <p>Gerencie contas, acessos e os módulos de cada cliente.</p>
             </div>
-            <Button onClick={handleCreate} className="glow-primary gap-2 h-11 font-bold text-xs uppercase tracking-widest">
-              <Plus className="w-4 h-4" /> Novo Cliente
+            <Button onClick={handleCreate} className={styles.primaryAction}>
+              <Plus aria-hidden="true" /> Novo cliente
             </Button>
           </div>
 
-          {/* Error */}
+          <div className={styles.overview} aria-label="Resumo das contas">
+            <span><strong>{loading ? "—" : clients.length}</strong> contas cadastradas</span>
+            <span><i className={styles.activeDot} aria-hidden="true" /><strong>{loading ? "—" : clients.filter((c) => c.is_active).length}</strong> ativas</span>
+            <span><strong>{loading ? "—" : clients.filter((c) => !c.is_active).length}</strong> inativas</span>
+            <span className={styles.isolationNote}><Shield aria-hidden="true" /> Dados isolados por cliente</span>
+          </div>
+
           {error && (
-            <div className="flex items-start gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-200 text-xs">
-              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-              <span>{error}</span>
+            <div className={styles.error} role="alert">
+              <AlertCircle aria-hidden="true" /><span>{error}</span>
+              <Button variant="ghost" onClick={reload} className={styles.textAction}>Tentar novamente</Button>
             </div>
           )}
 
-          {/* List */}
-          {loading ? (
-            <div className="flex items-center gap-2 text-muted-foreground text-sm"><Loader2 className="w-4 h-4 animate-spin" /> Carregando...</div>
-          ) : (
-            <div className="glass-card rounded-2xl border-white/10 bg-white/[0.02] overflow-hidden">
-              <table className="w-full text-sm">
-                <thead className="bg-white/5">
-                  <tr className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">
-                    <th className="px-4 py-3 text-left">Nome / Email</th>
-                    <th className="px-4 py-3 text-left">Tipo</th>
-                    <th className="px-4 py-3 text-left">Status</th>
-                    <th className="px-4 py-3 text-left">Modelo IA</th>
-                    <th className="px-4 py-3 text-left">Features</th>
-                    <th className="px-4 py-3 text-right">Ações</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/5">
-                  {clients.map((c) => {
-                    const activeFeatures = Object.entries(c.features || {}).filter(([, v]) => v).length;
-                    const totalFeatures = FEATURE_LIST.length;
+          <div className={styles.listPanel}>
+            <div className={styles.toolbar}>
+              <div className={styles.search}>
+                <label htmlFor="client-search" className="sr-only">Buscar clientes</label>
+                <Search aria-hidden="true" />
+                <Input id="client-search" type="search" placeholder="Buscar por nome ou usuário..." value={query} onChange={(e) => setQuery(e.target.value)} className={styles.searchInput} />
+              </div>
+              <div className={styles.filters}>
+                <label className={styles.filter}>
+                  <span>Status</span>
+                  <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+                    <option value="all">Todos os status</option><option value="active">Ativos</option><option value="inactive">Inativos</option>
+                  </select>
+                </label>
+                <label className={styles.filter}>
+                  <span>Tipo de conta</span>
+                  <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+                    <option value="all">Todos os tipos</option><option value="client">Clientes</option><option value="admin">Administradores</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+            <div className={styles.listMeta}>
+              <p role="status">{loading ? "Carregando contas..." : `${filteredClients.length} de ${clients.length} contas`}</p>
+              {hasFilters ? <Button variant="ghost" onClick={clearFilters} className={styles.textAction}><X aria-hidden="true" /> Limpar filtros</Button>
+                : <Button variant="ghost" onClick={reload} disabled={loading || busy} className={styles.textAction}><RefreshCw aria-hidden="true" /> Atualizar</Button>}
+            </div>
+
+            {loading ? (
+              <div className={styles.empty} role="status"><Loader2 className={styles.spinner} aria-hidden="true" /><h3>Carregando clientes</h3><p>Aguarde enquanto buscamos as contas.</p></div>
+            ) : error && clients.length === 0 ? (
+              <div className={styles.empty}><AlertCircle aria-hidden="true" /><h3>Lista indisponível</h3><p>Tente carregar novamente para consultar os clientes.</p></div>
+            ) : filteredClients.length === 0 ? (
+              <div className={styles.empty}>
+                {hasFilters ? <Search aria-hidden="true" /> : <Users aria-hidden="true" />}
+                <h3>{hasFilters ? "Nenhum resultado encontrado" : "Nenhum cliente cadastrado"}</h3>
+                <p>{hasFilters ? "Ajuste a busca ou os filtros para encontrar uma conta." : "Crie a primeira conta e escolha os módulos disponíveis para ela."}</p>
+                <Button variant="outline" onClick={hasFilters ? clearFilters : handleCreate} className={styles.secondaryAction}>{hasFilters ? "Mostrar todas as contas" : "Criar primeiro cliente"}</Button>
+              </div>
+            ) : (
+              <table className={styles.table}>
+                <caption className="sr-only">Contas de clientes, permissões, status e ações</caption>
+                <thead><tr>
+                  <th scope="col">Cliente</th><th scope="col">Tipo</th><th scope="col">Status</th><th scope="col">Modelo de IA</th><th scope="col">Módulos</th><th scope="col" className={styles.actionsHeading}>Ações</th>
+                </tr></thead>
+                <tbody>
+                  {filteredClients.map((c) => {
+                    const activeFeatures = FEATURE_LIST.filter((feature) => c.features?.[feature.key]).length;
+                    const isDefault = c.id === "00000000-0000-0000-0000-000000000001";
                     return (
-                      <tr key={c.id} className="hover:bg-white/[0.02] transition-colors">
-                        <td className="px-4 py-3">
-                          <div className="font-bold">{c.name}</div>
-                          <div className="text-[10px] text-muted-foreground font-mono">{c.email}</div>
-                        </td>
-                        <td className="px-4 py-3">
-                          {c.is_admin ? (
-                            <span className="text-[10px] font-black uppercase tracking-widest text-purple-300 bg-purple-500/10 px-2 py-1 rounded-md border border-purple-500/30 inline-flex items-center gap-1">
-                              <Shield className="w-3 h-3" /> Admin
-                            </span>
-                          ) : (
-                            <span className="text-[10px] font-black uppercase tracking-widest text-cyan-300 bg-cyan-500/10 px-2 py-1 rounded-md border border-cyan-500/30">
-                              Cliente
-                            </span>
-                          )}
-                        </td>
-                        <td className="px-4 py-3">
-                          <span className={cn(
-                            "text-[10px] font-black uppercase tracking-widest px-2 py-1 rounded-md border",
-                            c.is_active
-                              ? "text-green-300 bg-green-500/10 border-green-500/30"
-                              : "text-red-300 bg-red-500/10 border-red-500/30"
-                          )}>
-                            {c.is_active ? "Ativo" : "Inativo"}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 font-mono text-[10px] text-muted-foreground">
-                          {c.default_ai_model || "(default global)"}
-                        </td>
-                        <td className="px-4 py-3 text-[11px]">
-                          <span className="font-mono">{activeFeatures}/{totalFeatures}</span>
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center justify-end gap-1">
-                            {!c.is_admin && (
-                              <Button
-                                onClick={() => handleImpersonate(c)}
-                                disabled={busy || !c.is_active}
-                                size="icon" variant="ghost"
-                                className="h-8 w-8 text-cyan-400 hover:bg-cyan-400/10 rounded-lg"
-                                title="Entrar como este cliente"
-                              ><LogIn className="w-4 h-4" /></Button>
-                            )}
-                            <Button
-                              onClick={() => setCredsClient(c)}
-                              disabled={busy}
-                              size="icon" variant="ghost"
-                              className="h-8 w-8 text-emerald-400 hover:bg-emerald-400/10 rounded-lg"
-                              title="Copiar credenciais (URL + usuário + senha)"
-                            ><Copy className="w-4 h-4" /></Button>
-                            <Button
-                              onClick={() => { setEditing(c); setCreating(false); }}
-                              disabled={busy}
-                              size="icon" variant="ghost"
-                              className="h-8 w-8 text-blue-400 hover:bg-blue-400/10 rounded-lg"
-                              title="Editar"
-                            ><Pencil className="w-4 h-4" /></Button>
-                            <Button
-                              onClick={() => toggleActive(c)}
-                              disabled={busy}
-                              size="icon" variant="ghost"
-                              className={cn(
-                                "h-8 w-8 rounded-lg",
-                                c.is_active ? "text-yellow-400 hover:bg-yellow-400/10" : "text-green-400 hover:bg-green-400/10"
-                              )}
-                              title={c.is_active ? "Desativar" : "Ativar"}
-                            ><Power className="w-4 h-4" /></Button>
-                            <Button
-                              onClick={() => handleDelete(c)}
-                              disabled={busy || c.id === "00000000-0000-0000-0000-000000000001"}
-                              size="icon" variant="ghost"
-                              className="h-8 w-8 text-red-400 hover:bg-red-400/10 rounded-lg"
-                              title={c.id === "00000000-0000-0000-0000-000000000001" ? "Cliente Default não pode ser apagado" : "Apagar"}
-                            ><Trash2 className="w-4 h-4" /></Button>
+                      <tr key={c.id}>
+                        <th scope="row" className={styles.identityCell}>
+                          <div className={styles.identity}>
+                            <span className={styles.avatar} aria-hidden="true">{c.name.trim().split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toLocaleUpperCase("pt-BR")}</span>
+                            <div><span className={styles.clientName}>{c.name}</span><span className={styles.email}>{c.email}</span></div>
+                          </div>
+                        </th>
+                        <td data-label="Tipo"><span className={cn(styles.badge, c.is_admin && styles.adminBadge)}>{c.is_admin && <Shield aria-hidden="true" />}{c.is_admin ? "Admin" : "Cliente"}</span></td>
+                        <td data-label="Status"><span className={cn(styles.status, !c.is_active && styles.inactive)}><i aria-hidden="true" />{c.is_active ? "Ativo" : "Inativo"}</span></td>
+                        <td data-label="Modelo de IA" className={styles.modelCell}><span className={styles.model}>{c.default_ai_model || "Padrão global"}</span></td>
+                        <td data-label="Módulos"><div className={styles.modules}><span>{activeFeatures}<span> / {FEATURE_LIST.length}</span></span><meter min={0} max={FEATURE_LIST.length} value={activeFeatures} aria-label={`${activeFeatures} de ${FEATURE_LIST.length} módulos liberados`} /></div></td>
+                        <td className={styles.actionsCell}>
+                          <div className={styles.rowActions}>
+                            <Button variant="ghost" onClick={() => { setEditing(c); setCreating(false); }} disabled={busy} aria-label={`Editar ${c.name}`} className={styles.editAction}><Pencil aria-hidden="true" /> Editar</Button>
+                            <DropdownMenu>
+                              <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className={styles.menuTrigger} />} aria-label={`Mais ações de ${c.name}`} disabled={busy}><MoreHorizontal aria-hidden="true" /></DropdownMenuTrigger>
+                              <DropdownMenuContent align="end" className={cn(styles.theme, styles.menu)}>
+                                {!c.is_admin && <DropdownMenuItem disabled={!c.is_active} onClick={() => handleImpersonate(c)}><LogIn aria-hidden="true" /> Entrar como cliente</DropdownMenuItem>}
+                                <DropdownMenuItem onClick={() => setCredsClient(c)}><Copy aria-hidden="true" /> Enviar credenciais</DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => toggleActive(c)}><Power aria-hidden="true" /> {c.is_active ? "Desativar cliente" : "Ativar cliente"}</DropdownMenuItem>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem className={styles.deleteAction} disabled={isDefault} title={isDefault ? "Cliente Default não pode ser apagado" : undefined} onClick={() => handleDelete(c)}><Trash2 aria-hidden="true" /> Excluir cliente{isDefault && " (protegido)"}</DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
                           </div>
                         </td>
                       </tr>
                     );
                   })}
-                  {clients.length === 0 && (
-                    <tr><td colSpan={6} className="px-4 py-12 text-center text-muted-foreground italic">Nenhum cliente cadastrado.</td></tr>
-                  )}
                 </tbody>
               </table>
-            </div>
-          )}
-        </div>
-      </main>
+            )}
+          </div>
+          <p className={styles.footnote}><Shield aria-hidden="true" /> As alterações de acesso e módulos se aplicam somente à conta selecionada.</p>
+        </section>
+      </div>
 
       {/* Modal editar/criar */}
       {editing && (
@@ -380,97 +377,41 @@ Acesse com essas credenciais e troque a senha no primeiro login.`;
       await navigator.clipboard.writeText(credsText);
       setCopied(true);
       setTimeout(() => setCopied(false), 3000);
-    } catch (e: any) {
-      setError(e?.message || "Falha ao copiar");
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Não foi possível copiar as credenciais. A senha pode já ter sido alterada; tente copiar novamente.");
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-      <div className="w-full max-w-md glass-card rounded-3xl border-white/10 bg-neutral-950 shadow-2xl">
-        <div className="px-6 py-5 border-b border-white/10 flex items-center justify-between">
-          <h2 className="text-lg font-black flex items-center gap-2">
-            <Copy className="w-5 h-5 text-emerald-400" /> Credenciais
-          </h2>
-          <Button onClick={onClose} size="icon" variant="ghost" className="h-8 w-8"><X className="w-4 h-4" /></Button>
+    <Dialog open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
+      <DialogContent showCloseButton={false} className={cn(styles.theme, styles.dialog, styles.credentialsDialog)}>
+        <div className={styles.dialogHeader}>
+          <div><DialogTitle>Credenciais de acesso</DialogTitle><DialogDescription>Prepare o acesso de {client.name} para compartilhar.</DialogDescription></div>
+          <Button onClick={onClose} disabled={busy} size="icon" variant="ghost" aria-label="Fechar credenciais" className={styles.menuTrigger}><X aria-hidden="true" /></Button>
         </div>
-
-        <div className="p-6 space-y-4">
-          <div className="text-[11px] text-muted-foreground bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 flex items-start gap-2">
-            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
-            <span>
-              A senha guardada no banco é <strong>hash</strong> — não dá pra recuperar a atual.
-              Defina uma <strong>nova</strong> aqui; ela vai ser aplicada ao cliente e o texto formatado
-              será copiado pro clipboard. As sessões antigas do cliente serão revogadas.
-            </span>
+        <div className={styles.dialogBody}>
+          <div className={styles.notice}><AlertCircle aria-hidden="true" /><p>A senha atual não pode ser recuperada. Ao aplicar uma nova senha, <strong>as sessões anteriores serão encerradas</strong>. O acesso será copiado para você compartilhar.</p></div>
+          <div className={styles.field}><label htmlFor="creds-url">Painel (URL)</label><Input id="creds-url" readOnly value={panelUrl} className={styles.input} /></div>
+          <div className={styles.field}><label htmlFor="creds-user">Usuário</label><Input id="creds-user" readOnly value={client.email} className={styles.input} /></div>
+          <div className={styles.field}>
+            <div className={styles.fieldHeading}><label htmlFor="creds-password">Nova senha</label><button type="button" disabled={busy} onClick={generatePassword} className={styles.inlineAction}>Gerar senha forte</button></div>
+            <Input id="creds-password" type="text" autoComplete="new-password" value={password} disabled={busy} onChange={(e) => { setPassword(e.target.value); setCopied(false); }} placeholder="Mínimo de 8 caracteres" className={styles.input} aria-describedby="creds-password-hint" />
+            <p id="creds-password-hint" className={styles.hint}>Será aplicada ao cliente ao confirmar abaixo.</p>
           </div>
-
-          <div className="space-y-1">
-            <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Painel (URL)</label>
-            <Input readOnly value={panelUrl} className="bg-white/5 border-white/10 h-10 text-xs font-mono" />
-          </div>
-
-          <div className="space-y-1">
-            <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Usuário</label>
-            <Input readOnly value={client.email} className="bg-white/5 border-white/10 h-10 text-xs font-mono" />
-          </div>
-
-          <div className="space-y-1">
-            <div className="flex items-center justify-between">
-              <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground flex items-center gap-1">
-                <KeyRound className="w-3 h-3" /> Nova senha (será aplicada)
-              </label>
-              <button type="button" onClick={generatePassword} className="text-[10px] text-emerald-400 hover:underline">
-                Gerar senha forte
-              </button>
-            </div>
-            <Input
-              type="text"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Mínimo 8 caracteres"
-              className="bg-white/5 border-white/10 h-10 text-sm font-mono"
-            />
-          </div>
-
-          {/* Preview do que vai ser copiado */}
-          <div className="space-y-1">
-            <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Preview (pronto pra colar)</label>
-            <pre className="bg-black/40 border border-white/10 rounded-lg p-3 text-[11px] text-white/80 whitespace-pre-wrap font-mono leading-relaxed">
-              {credsText}
-            </pre>
-          </div>
-
-          {error && (
-            <div className="flex items-start gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-200 text-xs">
-              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" /> <span>{error}</span>
-            </div>
-          )}
+          <div className={styles.field}><p id="creds-preview-label" className={styles.fieldLabel}>Mensagem para compartilhar</p><pre aria-labelledby="creds-preview-label" className={styles.preview}>{credsText}</pre></div>
+          {error && <div className={styles.error} role="alert"><AlertCircle aria-hidden="true" /><span>{error}</span></div>}
+          {copied && <p role="status" className={styles.success}>Senha aplicada e credenciais copiadas.</p>}
         </div>
-
-        <div className="px-6 py-4 border-t border-white/10 flex justify-end gap-2">
-          <Button onClick={onClose} variant="outline" className="text-xs">Cancelar</Button>
-          <Button
-            onClick={handleCopy}
-            disabled={busy || password.length < 8}
-            className={cn(
-              "text-xs gap-2",
-              copied ? "bg-emerald-500/20 text-emerald-200 border border-emerald-500/40" : "glow-primary"
-            )}
-          >
-            {busy ? (
-              <><Loader2 className="w-4 h-4 animate-spin" /> Aplicando...</>
-            ) : copied ? (
-              <><ClipboardCheck className="w-4 h-4" /> Copiado!</>
-            ) : (
-              <><Copy className="w-4 h-4" /> Resetar senha + Copiar</>
-            )}
+        <div className={styles.dialogFooter}>
+          <Button onClick={onClose} disabled={busy} variant="outline" className={styles.secondaryAction}>Cancelar</Button>
+          <Button onClick={handleCopy} disabled={busy || password.length < 8} className={styles.primaryAction}>
+            {busy ? <><Loader2 className={styles.spinner} aria-hidden="true" /> Aplicando...</> : copied ? <><ClipboardCheck aria-hidden="true" /> Copiado!</> : <><Copy aria-hidden="true" /> Aplicar senha e copiar</>}
           </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -517,8 +458,8 @@ function ClientEditor({
           // API key não configurada ou erro — mostra mensagem útil
           setModelsError(d.error || "Configure a API Key do Gemini em Configurações pra ver os modelos disponíveis.");
         }
-      } catch (e: any) {
-        if (!cancelled) setModelsError(e?.message || "Falha ao listar modelos");
+      } catch (e: unknown) {
+        if (!cancelled) setModelsError(e instanceof Error ? e.message : "Falha ao listar modelos");
       } finally {
         if (!cancelled) setModelsLoading(false);
       }
@@ -537,11 +478,14 @@ function ClientEditor({
 
   const toggleFeature = (key: string) => setFeatures((f) => ({ ...f, [key]: !f[key] }));
 
-  const handleSave = async () => {
+  const handleSave = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
     setError(null);
+    if (!name.trim() || !email.trim()) { setError("Preencha o nome e o usuário do cliente."); return; }
+    if (password && password.length < 8) { setError("A senha deve ter pelo menos 8 caracteres."); return; }
     setSaving(true);
     try {
-      const payload: any = {
+      const payload: Record<string, unknown> = {
         name: name.trim(),
         email: email.trim().toLowerCase(),
         is_admin: isAdmin,
@@ -574,218 +518,79 @@ function ClientEditor({
       const d = await r.json();
       if (!d.ok) { setError(d.error || "Falha ao salvar"); return; }
       onSaved();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Não foi possível salvar o cliente. Tente novamente.");
     } finally {
       setSaving(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 overflow-hidden">
-      <div className="w-full max-w-2xl glass-card rounded-3xl border-white/10 bg-neutral-950 shadow-2xl flex flex-col max-h-[90vh] my-8 overflow-hidden">
-        <div className="px-6 py-5 border-b border-white/10 flex items-center justify-between shrink-0">
-          <h2 className="text-lg font-black">{isNew ? "Novo Cliente" : "Editar Cliente"}</h2>
-          <Button onClick={onClose} size="icon" variant="ghost" className="h-8 w-8"><X className="w-4 h-4" /></Button>
+    <Dialog open onOpenChange={(open) => { if (!open && !saving) onClose(); }}>
+      <DialogContent showCloseButton={false} className={cn(styles.theme, styles.dialog)}>
+        <div className={styles.dialogHeader}>
+          <div><DialogTitle>{isNew ? "Novo cliente" : "Editar cliente"}</DialogTitle><DialogDescription>{isNew ? "Defina o acesso e os módulos da nova conta." : `Configurações de acesso de ${client.name}.`}</DialogDescription></div>
+          <Button onClick={onClose} disabled={saving} size="icon" variant="ghost" aria-label="Fechar edição" className={styles.menuTrigger}><X aria-hidden="true" /></Button>
         </div>
-
-        <div className="p-6 space-y-5 overflow-y-auto custom-scrollbar flex-1">
-          {/* Nome + Email */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div className="space-y-1">
-              <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Nome</label>
-              <Input value={name} onChange={(e) => setName(e.target.value)} className="bg-white/5 border-white/10 h-11" />
-            </div>
-            <div className="space-y-1">
-              <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Usuário ou Email (login)</label>
-              <Input type="text" value={email} onChange={(e) => setEmail(e.target.value)} className="bg-white/5 border-white/10 h-11 font-mono text-xs" />
-            </div>
-          </div>
-
-          {/* Senha */}
-          <div className="space-y-1">
-            <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground flex items-center gap-1">
-              <KeyRound className="w-3 h-3" /> {isNew ? "Senha inicial" : "Nova senha (deixe vazio pra não trocar)"}
-            </label>
-            <Input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder={isNew ? "Mínimo 8 caracteres" : "•••••••• (manter atual)"}
-              className="bg-white/5 border-white/10 h-11 font-mono"
-            />
-            {!isNew && password && (
-              <p className="text-[10px] text-amber-300">⚠ Ao salvar, todas as sessões deste cliente serão revogadas.</p>
-            )}
-          </div>
-
-          {/* Admin toggle */}
-          <label className="flex items-center justify-between gap-3 p-3 bg-purple-500/5 border border-purple-500/15 rounded-xl cursor-pointer">
-            <div>
-              <p className="text-xs font-bold text-white flex items-center gap-2"><Shield className="w-4 h-4 text-purple-400" /> Administrador</p>
-              <p className="text-[10px] text-muted-foreground">Pode acessar /admin/clientes e gerenciar outros clientes.</p>
-            </div>
-            <div
-              onClick={() => setIsAdmin(!isAdmin)}
-              className={cn("w-12 h-6 rounded-full p-1 cursor-pointer transition", isAdmin ? "bg-purple-500" : "bg-white/10")}
-            >
-              <div className={cn("w-4 h-4 rounded-full bg-white transition-all", isAdmin && "translate-x-6")} />
-            </div>
-          </label>
-
-          {/* Modelo IA — em tempo real via /api/ai-models */}
-          <div className="space-y-1">
-            <div className="flex items-center justify-between gap-2">
-              <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Modelo de IA padrão</label>
-              {modelsLoading && (
-                <span className="text-[9px] text-muted-foreground flex items-center gap-1">
-                  <Loader2 className="w-3 h-3 animate-spin" /> buscando modelos disponíveis...
-                </span>
-              )}
-              {!modelsLoading && !modelsError && models.length > 0 && (
-                <span className="text-[9px] text-emerald-400">{models.length} modelo(s) disponíveis (Gemini ao vivo)</span>
-              )}
-            </div>
-            <select
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              className="w-full bg-white/5 border border-white/10 h-11 rounded-xl text-sm px-3 font-mono"
-            >
-              {/* Garante que o valor salvo SEMPRE aparece, mesmo se não veio na lista da API */}
-              {model && !models.some((m) => m.id === model) && (
-                <option value={model} className="bg-neutral-900">{model} (salvo)</option>
-              )}
-              {modelsLoading && !models.length && (
-                <option value="" className="bg-neutral-900 text-muted-foreground">Carregando...</option>
-              )}
-              {models.map((m) => (
-                <option key={m.id} value={m.id} className="bg-neutral-900">
-                  {m.name} ({m.id})
-                </option>
-              ))}
-            </select>
-            {modelsError && (
-              <p className="text-[10px] text-amber-400 flex items-start gap-1 mt-1">
-                <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" /> {modelsError}
-              </p>
-            )}
-          </div>
-
-          {/* ========== ORGANIZADOR IA (toggle + prompt) ========== */}
-          <div className="rounded-xl bg-purple-500/[0.04] border border-purple-500/20 p-3 space-y-3">
-            <label className="flex items-center justify-between gap-3 cursor-pointer">
-              <div>
-                <p className="text-xs font-bold text-white flex items-center gap-2">
-                  <Bot className="w-4 h-4 text-purple-400" /> Organizador IA
-                  <span className={cn(
-                    "text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded",
-                    organizerEnabled ? "bg-emerald-500/20 text-emerald-300" : "bg-white/10 text-muted-foreground"
-                  )}>
-                    {organizerEnabled ? "Ativo" : "Desligado"}
-                  </span>
-                </p>
-                <p className="text-[10px] text-muted-foreground mt-0.5">
-                  Reorganiza o status dos leads automaticamente 1x/dia (hora definida em Configurações).
-                  {!organizerEnabled && <span className="text-amber-300"> Desligado: não roda pra este cliente.</span>}
-                </p>
+        <form className={styles.editorForm} onSubmit={handleSave}>
+          <div className={styles.dialogBody}>
+            <fieldset disabled={saving} className={styles.fieldset}>
+              <legend>Dados e acesso</legend>
+              <div className={styles.formGrid}>
+                <div className={styles.field}><label htmlFor="client-name">Nome</label><Input id="client-name" required value={name} onChange={(e) => setName(e.target.value)} placeholder="Nome do cliente" className={styles.input} /></div>
+                <div className={styles.field}><label htmlFor="client-email">Usuário ou e-mail</label><Input id="client-email" required type="text" autoComplete="off" spellCheck={false} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Usado para entrar no painel" className={styles.input} /></div>
               </div>
-              <button
-                type="button"
-                onClick={() => setOrganizerEnabled(!organizerEnabled)}
-                className={cn("w-12 h-6 rounded-full p-1 cursor-pointer transition shrink-0", organizerEnabled ? "bg-purple-500" : "bg-white/10")}
-              >
-                <div className={cn("w-4 h-4 rounded-full bg-white transition-all", organizerEnabled && "translate-x-6")} />
-              </button>
-            </label>
-
-            {organizerEnabled && (
-              <div className="space-y-1.5 pt-2 border-t border-purple-500/10">
-                <div className="flex items-center justify-between">
-                  <label className="text-[10px] font-black uppercase tracking-widest text-purple-300">Prompt customizado</label>
-                  {organizerPrompt && (
-                    <button
-                      type="button"
-                      onClick={() => setOrganizerPrompt("")}
-                      className="text-[10px] text-muted-foreground hover:text-red-400"
-                    >Limpar (usar padrão)</button>
-                  )}
-                  {!organizerPrompt && (
-                    <button
-                      type="button"
-                      onClick={() => setOrganizerPrompt(DEFAULT_ORGANIZER_PROMPT)}
-                      className="text-[10px] text-purple-300 hover:underline"
-                    >Carregar template padrão</button>
-                  )}
-                </div>
-                <Textarea
-                  value={organizerPrompt}
-                  onChange={(e) => setOrganizerPrompt(e.target.value)}
-                  placeholder="Vazio = usa o prompt global. Personalize aqui pra adaptar a IA ao negócio do cliente: vendas, atendimento, agendamento, suporte, etc."
-                  className="bg-black/40 border-white/10 h-40 text-xs font-mono"
-                />
-                <p className="text-[9px] text-muted-foreground italic">
-                  Dica: descreva o tipo de negócio, os status possíveis e a lógica de classificação. A IA usa isso pra decidir o próximo status de cada lead.
-                </p>
+              <div className={styles.field}>
+                <label htmlFor="client-password">{isNew ? "Senha inicial" : "Nova senha"}</label>
+                <Input id="client-password" type="password" autoComplete="new-password" required={isNew} minLength={8} value={password} onChange={(e) => setPassword(e.target.value)} placeholder={isNew ? "Mínimo de 8 caracteres" : "Deixe em branco para manter a atual"} className={styles.input} aria-describedby="client-password-hint" />
+                <p id="client-password-hint" className={cn(styles.hint, !isNew && password && styles.warning)}>{!isNew && password ? "Ao salvar a nova senha, todas as sessões deste cliente serão encerradas." : "Use pelo menos 8 caracteres para proteger o acesso."}</p>
               </div>
-            )}
-          </div>
+              <label className={styles.toggleRow}>
+                <span><span className={styles.fieldLabel}>Administrador</span><span className={styles.hint}>Permite gerenciar todas as contas de clientes.</span></span>
+                <input type="checkbox" role="switch" checked={isAdmin} onChange={(e) => setIsAdmin(e.target.checked)} aria-label="Administrador" className={styles.switch} />
+              </label>
+            </fieldset>
 
-          {/* Features */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Módulos liberados</label>
-              <div className="flex gap-1">
-                <button type="button" onClick={() => setFeatures(DEFAULT_FEATURES)} className="text-[10px] text-cyan-400 hover:underline">Todos</button>
-                <span className="text-muted-foreground text-[10px]">·</span>
-                <button type="button" onClick={() => setFeatures(NO_FEATURES)} className="text-[10px] text-red-400 hover:underline">Nenhum</button>
+            <fieldset disabled={saving} className={styles.fieldset}>
+              <legend>Inteligência artificial</legend>
+              <div className={styles.field}>
+                <label htmlFor="client-model">Modelo de IA padrão</label>
+                <select id="client-model" value={model} onChange={(e) => setModel(e.target.value)} className={styles.input} aria-describedby="client-model-hint">
+                  {model && !models.some((m) => m.id === model) && <option value={model}>{model} (salvo)</option>}
+                  {!model && !models.length && <option value="">{modelsLoading ? "Carregando modelos..." : "Padrão global"}</option>}
+                  {models.map((m) => <option key={m.id} value={m.id}>{m.name} ({m.id})</option>)}
+                </select>
+                <p id="client-model-hint" className={cn(styles.hint, modelsError && styles.warning)}>{modelsLoading ? "Buscando modelos disponíveis..." : modelsError || `${models.length} modelo(s) disponíveis`}</p>
               </div>
-            </div>
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
-              {FEATURE_LIST.map((f) => {
-                const on = !!features[f.key];
-                return (
-                  <button
-                    key={f.key}
-                    type="button"
-                    onClick={() => toggleFeature(f.key)}
-                    className={cn(
-                      "flex items-center gap-2 p-2 rounded-lg border text-left transition",
-                      on
-                        ? "bg-primary/10 border-primary/40 text-primary"
-                        : "bg-white/[0.02] border-white/10 text-muted-foreground hover:bg-white/5"
-                    )}
-                  >
-                    <div className={cn("w-3.5 h-3.5 rounded border-2 flex items-center justify-center shrink-0",
-                      on ? "bg-primary border-primary" : "border-white/20")}
-                    >
-                      {on && <Check className="w-2 h-2 text-white" />}
-                    </div>
-                    <span className="text-[11px] font-medium truncate">{f.label}</span>
-                  </button>
-                );
-              })}
-            </div>
+              <label className={styles.toggleRow}>
+                <span><span className={styles.fieldLabel}>Organizador IA</span><span className={styles.hint}>Reorganiza os leads uma vez por dia, no horário definido em Configurações.{!organizerEnabled && " Desativado para este cliente."}</span></span>
+                <input type="checkbox" role="switch" aria-label="Organizador IA" checked={organizerEnabled} onChange={(e) => setOrganizerEnabled(e.target.checked)} className={styles.switch} />
+              </label>
+              {organizerEnabled && <div className={styles.field}>
+                <div className={styles.fieldHeading}><label htmlFor="client-prompt">Prompt personalizado</label><button type="button" className={styles.inlineAction} onClick={() => setOrganizerPrompt(organizerPrompt ? "" : DEFAULT_ORGANIZER_PROMPT)}>{organizerPrompt ? "Usar padrão global" : "Carregar modelo padrão"}</button></div>
+                <Textarea id="client-prompt" value={organizerPrompt} onChange={(e) => setOrganizerPrompt(e.target.value)} placeholder="Descreva o negócio, os status e as regras de classificação..." className={cn(styles.input, styles.prompt)} aria-describedby="client-prompt-hint" />
+                <p id="client-prompt-hint" className={styles.hint}>Em branco, usa o prompt global. Personalize para o negócio deste cliente.</p>
+              </div>}
+            </fieldset>
+
+            <fieldset disabled={saving} className={styles.fieldset}>
+              <legend>Módulos liberados</legend>
+              <div className={styles.fieldHeading}>
+                <span className={styles.hint}>{FEATURE_LIST.filter((f) => features[f.key]).length} de {FEATURE_LIST.length} selecionados</span>
+                <div className={styles.bulkActions}><button type="button" className={styles.inlineAction} onClick={() => setFeatures(DEFAULT_FEATURES)}>Selecionar todos</button><button type="button" className={styles.inlineAction} onClick={() => setFeatures(NO_FEATURES)}>Limpar seleção</button></div>
+              </div>
+              <div className={styles.featureGrid}>{FEATURE_LIST.map((f) => <label key={f.key} className={styles.feature}><input type="checkbox" checked={!!features[f.key]} onChange={() => toggleFeature(f.key)} /><span>{f.label}</span></label>)}</div>
+            </fieldset>
+
+            <div className={styles.field}><label htmlFor="client-notes">Notas internas</label><Textarea id="client-notes" value={notes} disabled={saving} onChange={(e) => setNotes(e.target.value)} placeholder="Anotações sobre este cliente" className={cn(styles.input, styles.notes)} /></div>
           </div>
-
-          {/* Notes */}
-          <div className="space-y-1">
-            <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Notas internas</label>
-            <Input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Anotações sobre o cliente" className="bg-white/5 border-white/10 h-10 text-xs" />
+          <div className={styles.dialogFooter}>
+            {error && <div className={styles.error} role="alert"><AlertCircle aria-hidden="true" /><span>{error}</span></div>}
+            <Button type="button" onClick={onClose} disabled={saving} variant="outline" className={styles.secondaryAction}>Cancelar</Button>
+            <Button type="submit" disabled={saving || !name.trim() || !email.trim()} className={styles.primaryAction}>{saving ? <><Loader2 className={styles.spinner} aria-hidden="true" /> Salvando...</> : isNew ? "Criar cliente" : "Salvar alterações"}</Button>
           </div>
-
-          {/* Error */}
-          {error && (
-            <div className="flex items-start gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-200 text-xs">
-              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" /> <span>{error}</span>
-            </div>
-          )}
-        </div>
-
-        <div className="px-6 py-4 border-t border-white/10 flex justify-end gap-2 shrink-0">
-          <Button onClick={onClose} variant="outline" className="text-xs">Cancelar</Button>
-          <Button onClick={handleSave} disabled={saving || !name || !email} className="glow-primary text-xs gap-2">
-            {saving ? <><Loader2 className="w-4 h-4 animate-spin" /> Salvando...</> : "Salvar"}
-          </Button>
-        </div>
-      </div>
-    </div>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -15,6 +15,7 @@ import { BRAND } from "@/lib/brand";
 const pageTitles: Record<string, { title: string; description: string; icon: React.ElementType }> = {
   "/": { title: "Dashboard", description: "Visão geral da operação", icon: LayoutDashboard },
   "/leads": { title: "Gestão de Leads", description: "CRM completo", icon: Users },
+  "/admin/clientes": { title: "Administração", description: "Contas e permissões", icon: Shield },
   "/chat": { title: "Atendimento", description: "Chat em tempo real", icon: MessageSquare },
   "/agente": { title: "Agente IA", description: "Configuração de comportamento e conhecimento", icon: Bot },
   "/captador": { title: "Captador Maps", description: "Extração Google Maps", icon: MapPin },
