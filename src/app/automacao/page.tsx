@@ -1,23 +1,24 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Textarea } from "@/components/ui/textarea";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
 import {
-  Cpu, Play, Pause, Trash2, Plus, Loader2, ChevronDown, ChevronRight,
+  Play, Pause, Trash2, Plus, Loader2, ChevronDown, ChevronRight, ChevronLeft, X,
   CheckCircle2, XCircle, Bot, MapPin, Zap, Repeat, Clock, Save, AlertTriangle, Pencil,
-  Workflow, Sparkles, Target, MessageSquareText, Paperclip,
+  Workflow, Sparkles, Target, MessageSquareText, Paperclip, ShieldCheck, LockKeyhole, type LucideIcon,
 } from "lucide-react";
 import { AutomationLogs } from "./AutomationLogs";
 import { MediaUploader } from "@/components/media-uploader";
 import { LeadIntelligenceBatch } from "@/components/lead-intelligence-batch";
 import { ModelOptions } from "@/components/ai-module-shared";
+import styles from "./automacao.module.css";
 
 type FollowupStep = { day_offset: number; template: string };
 
@@ -95,15 +96,23 @@ async function safeJson(input: RequestInfo, init?: RequestInit): Promise<any> {
   }
 }
 
-const PHASE_LABEL: Record<string, { label: string; color: string }> = {
-  idle:        { label: "⏸ Pronta",       color: "text-zinc-300 bg-zinc-500/10 border-zinc-500/20" },
-  scraping:    { label: "🔍 Captando",    color: "text-blue-300 bg-blue-500/10 border-blue-500/30" },
-  dispatching: { label: "📨 Disparando",  color: "text-cyan-300 bg-cyan-500/10 border-cyan-500/30" },
-  following:   { label: "🔁 Follow-up",   color: "text-purple-300 bg-purple-500/10 border-purple-500/30" },
-  done:        { label: "✓ Concluída",   color: "text-emerald-300 bg-emerald-500/10 border-emerald-500/30" },
-  paused:      { label: "⏸ Pausada",     color: "text-amber-300 bg-amber-500/10 border-amber-500/30" },
-  error:       { label: "⚠ Erro",         color: "text-red-300 bg-red-500/10 border-red-500/30" },
+const PHASE_LABEL: Record<string, { label: string; icon: LucideIcon }> = {
+  idle: { label: "Pronta", icon: Workflow },
+  scraping: { label: "Captando", icon: MapPin },
+  dispatching: { label: "Disparando", icon: Zap },
+  following: { label: "Follow-up", icon: Repeat },
+  done: { label: "Concluída", icon: CheckCircle2 },
+  paused: { label: "Pausada", icon: Pause },
+  error: { label: "Erro", icon: AlertTriangle },
 };
+
+const FORM_STEPS = [
+  { label: "Identificação", description: "Nome, agente e conexão", icon: Workflow },
+  { label: "Captação e análise", description: "Público e inteligência", icon: MapPin },
+  { label: "Mensagem inicial", description: "Texto, IA e mídia", icon: MessageSquareText },
+  { label: "Follow-up", description: "Sequência de contatos", icon: Repeat },
+  { label: "Horários e revisão", description: "Janela de envio e resumo", icon: Clock },
+];
 
 export default function AutomacaoPage() {
   const [automations, setAutomations] = useState<Automation[]>([]);
@@ -127,6 +136,26 @@ export default function AutomacaoPage() {
   // O array final só é calculado no momento de salvar.
   const [nichesText, setNichesText] = useState("");
   const [regionsText, setRegionsText] = useState("");
+  const [formStep, setFormStep] = useState(0);
+  const contentRef = useRef<HTMLElement>(null);
+  const editorRef = useRef<HTMLDivElement>(null);
+
+  function revealEditor() {
+    requestAnimationFrame(() => {
+      if (contentRef.current) contentRef.current.scrollTop = 0;
+      editorRef.current?.focus({ preventScroll: true });
+    });
+  }
+
+  function changeStep(step: number) {
+    setFormStep(step);
+    requestAnimationFrame(() => {
+      const panel = document.getElementById(`automation-step-${step}`);
+      panel?.focus({ preventScroll: true });
+      panel?.scrollIntoView?.({ block: "start" });
+    });
+  }
+
   const editingAutomation = automations.find(a => a.id === editingId);
   const captureLocked = !!editingAutomation && (
     editingAutomation.scraped_count > 0 || editingAutomation.scrape_filters?._captureSessionId != null
@@ -279,7 +308,9 @@ export default function AutomacaoPage() {
     setFormData(blankAutomation());
     setNichesText("");
     setRegionsText("");
+    setFormStep(0);
     setShowForm(true);
+    revealEditor();
   }
 
   function openEditForm(a: Automation) {
@@ -299,9 +330,9 @@ export default function AutomacaoPage() {
     });
     setNichesText((a.niches || []).join("\n"));
     setRegionsText((a.regions || []).join("\n"));
+    setFormStep(0);
     setShowForm(true);
-    // scroll suave pro topo onde está o form
-    setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 50);
+    revealEditor();
   }
 
   function closeForm() {
@@ -397,22 +428,18 @@ export default function AutomacaoPage() {
   }
 
   return (
-    <div className="flex flex-col h-[100dvh] bg-background overflow-hidden text-white">
+    <div className={cn("flex flex-col h-[100dvh] overflow-hidden", styles.page)}>
       <Header />
-      <main className="flex-1 overflow-y-auto p-3 sm:p-4 md:p-8 max-w-6xl mx-auto w-full space-y-4 sm:space-y-6 mobile-safe-bottom">
+      <main ref={contentRef} className={styles.content}>
         {/* Cabeçalho */}
-        <div className="flex flex-col sm:flex-row items-start justify-between gap-3 sm:gap-4">
-          <div className="min-w-0">
-            <h1 className="text-xl sm:text-2xl font-black tracking-tight flex items-center gap-3">
-              <Cpu className="w-5 h-5 sm:w-6 sm:h-6 text-primary" /> Automação completa
-            </h1>
-            <p className="text-[11px] sm:text-xs text-muted-foreground mt-1 max-w-2xl">
-              Capte, dispare, faça follow-up e deixe a IA assumir a conversa quando o cliente responder —
-              tudo num pipeline só, no piloto automático.
-            </p>
+        <div className={styles.heading}>
+          <div>
+            <h2>Automação completa</h2>
+            <p>Da captação à conversa: configure mensagens, acompanhe os envios e deixe a IA assumir quando o cliente responder.</p>
           </div>
-          <Button onClick={() => (showForm ? closeForm() : openCreateForm())} className="glow-primary text-primary-foreground font-bold gap-2 w-full sm:w-auto shrink-0 h-11 px-5 uppercase tracking-wider text-xs">
-            <Plus className="w-4 h-4" /> Nova automação
+          <Button onClick={() => (showForm ? closeForm() : openCreateForm())} disabled={creating}
+            className={showForm ? styles.secondaryAction : styles.primaryAction}>
+            {showForm ? <><X className="w-4 h-4" /> Fechar configuração</> : <><Plus className="w-4 h-4" /> Nova automação</>}
           </Button>
         </div>
 
@@ -423,64 +450,75 @@ export default function AutomacaoPage() {
           const pausadas = automations.filter(a => a.status === "paused").length;
           const concluidas = automations.filter(a => a.status === "done").length;
           const totalCaptado = automations.reduce((sum, a) => sum + (a.scraped_count || 0), 0);
-          const overviewCards = [
-            { label: "Rodando", value: rodando, icon: Play, color: "text-emerald-300", bg: "bg-emerald-500/10", ring: "ring-emerald-500/20" },
-            { label: "Pausadas", value: pausadas, icon: Pause, color: "text-amber-300", bg: "bg-amber-500/10", ring: "ring-amber-500/20" },
-            { label: "Concluídas", value: concluidas, icon: CheckCircle2, color: "text-blue-300", bg: "bg-blue-500/10", ring: "ring-blue-500/20" },
-            { label: "Clientes captados", value: totalCaptado, icon: Target, color: "text-primary", bg: "bg-primary/10", ring: "ring-primary/20" },
+          const overview = [
+            { label: "Em execução", value: rodando, icon: Play, state: "running" },
+            { label: "Pausadas", value: pausadas, icon: Pause, state: "paused" },
+            { label: "Concluídas", value: concluidas, icon: CheckCircle2, state: "done" },
+            { label: "Leads captados", value: totalCaptado, icon: Target, state: "total" },
           ];
           return (
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-3">
-              {overviewCards.map((c) => {
-                const I = c.icon;
-                return (
-                  <Card key={c.label} className="border-white/5 bg-card/40 backdrop-blur-sm">
-                    <CardContent className="p-3 sm:p-4 flex items-center gap-3">
-                      <div className={cn("w-9 h-9 sm:w-10 sm:h-10 rounded-xl ring-1 flex items-center justify-center shrink-0", c.bg, c.ring)}>
-                        <I className={cn("w-4 h-4 sm:w-5 sm:h-5", c.color)} />
-                      </div>
-                      <div className="min-w-0">
-                        <p className="text-[9px] sm:text-[10px] uppercase font-black tracking-widest text-muted-foreground truncate">{c.label}</p>
-                        <p className="text-lg sm:text-2xl font-black tracking-tight text-white leading-none mt-0.5">{c.value.toLocaleString("pt-BR")}</p>
-                      </div>
-                    </CardContent>
-                  </Card>
-                );
-              })}
-            </div>
+            <dl className={styles.overview} aria-label="Resumo das automações">
+              {overview.map(({ label, value, icon: Icon, state }) => (
+                <div key={label} data-state={state}>
+                  <dt><Icon className="w-4 h-4" />{label}</dt>
+                  <dd>{value.toLocaleString("pt-BR")}</dd>
+                </div>
+              ))}
+            </dl>
           );
         })()}
 
         {/* Form de criação */}
         {showForm && (
-          <Card className="border-primary/30 bg-primary/[0.03]">
-            <CardHeader>
-              <CardTitle className="text-sm font-black uppercase tracking-widest text-primary flex items-center gap-2">
-                {editingId ? <><Pencil className="w-3.5 h-3.5" /> Editando automação</> : <>Configurar nova automação</>}
-              </CardTitle>
+          <Card ref={editorRef} tabIndex={-1} className={styles.editor} aria-labelledby="automation-editor-title">
+            <CardHeader className={styles.editorHeader}>
+              <div>
+                <h3 id="automation-editor-title" className={styles.editorTitle}>
+                  {editingId ? "Editando automação" : "Configurar nova automação"}
+                </h3>
+                <p>Configure no seu ritmo. Você pode salvar um rascunho em qualquer etapa.</p>
+              </div>
+              <span className={styles.stepCount}>Etapa {formStep + 1} de {FORM_STEPS.length}</span>
             </CardHeader>
-            <CardContent className="space-y-5">
+            <CardContent className={styles.editorContent}>
+              <div className={styles.editorLayout}>
+                <nav className={styles.stepNav} aria-label="Etapas da configuração">
+                  {FORM_STEPS.map((step, index) => {
+                    const Icon = step.icon;
+                    return (
+                      <button key={step.label} type="button" aria-current={formStep === index ? "step" : undefined}
+                        aria-controls={`automation-step-${index}`} onClick={() => changeStep(index)}>
+                        <span className={styles.stepNumber}>{index + 1}</span>
+                        <span><strong>{step.label}</strong><small>{step.description}</small></span>
+                        <Icon className="w-4 h-4" />
+                      </button>
+                    );
+                  })}
+                </nav>
+                <div className={styles.stepBody}>
               {editingAutomation?.status === "running" && (
                 <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-[11px] text-amber-200 flex items-start gap-2">
                   <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
                   <div>
-                    <p className="font-bold mb-0.5">⚠ Esta automação está rodando.</p>
+                    <p className="font-bold mb-0.5">Esta automação está rodando.</p>
                     <p className="opacity-90">Pause a automação antes de editar e salvar a configuração.</p>
                   </div>
                 </div>
               )}
-              {/* Identidade */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <section id="automation-step-0" tabIndex={-1} hidden={formStep !== 0} className={styles.stepPanel} aria-labelledby="identity-title">
+                <div className={styles.sectionIntro}>
+                  <h4 id="identity-title">Identifique sua automação</h4>
+                  <p>Escolha um nome, o agente que assume as respostas e a conexão usada nos envios.</p>
+                </div>
+              <div className={styles.identityGrid}>
                 <div>
-                  <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Nome</label>
-                  <Input value={formData.name || ""} onChange={e => setFormData({ ...formData, name: e.target.value })}
+                  <label htmlFor="automation-name">Nome da automação</label>
+                  <Input id="automation-name" aria-required="true" value={formData.name || ""} onChange={e => setFormData({ ...formData, name: e.target.value })}
                     placeholder="Pizzarias ES — Outubro" className="bg-black/40 border-white/10 h-10" />
                 </div>
                 <div>
-                  <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground flex items-center gap-1">
-                    <Bot className="w-3 h-3" /> Agente IA
-                  </label>
-                  <select value={formData.agent_id || ""}
+                  <label htmlFor="automation-agent"><Bot className="w-3 h-3" /> Agente IA</label>
+                  <select id="automation-agent" value={formData.agent_id || ""}
                     onChange={e => setFormData({ ...formData, agent_id: e.target.value ? Number(e.target.value) : null })}
                     className="w-full mt-0.5 bg-black/40 border border-white/10 rounded-md px-3 h-10 text-sm">
                     <option value="">— escolha um agente —</option>
@@ -488,8 +526,8 @@ export default function AutomacaoPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Instância WhatsApp</label>
-                  <select value={formData.instance_name || ""}
+                  <label htmlFor="automation-instance">Instância WhatsApp</label>
+                  <select id="automation-instance" aria-required="true" value={formData.instance_name || ""}
                     onChange={e => setFormData({ ...formData, instance_name: e.target.value })}
                     className="w-full mt-0.5 bg-black/40 border border-white/10 rounded-md px-3 h-10 text-sm">
                     <option value="">— escolha uma instância —</option>
@@ -498,28 +536,28 @@ export default function AutomacaoPage() {
                 </div>
               </div>
 
-              {/* Captação */}
-              <fieldset disabled={captureLocked} aria-label="Captação Google Maps" className="rounded-xl border border-blue-500/20 bg-blue-500/5 p-4 space-y-3 disabled:opacity-60">
+              <p className={styles.fieldHint}>Nome e instância WhatsApp são obrigatórios para salvar. As demais configurações estão nas próximas etapas.</p>
+              </section>
+
+              <section id="automation-step-1" tabIndex={-1} hidden={formStep !== 1} className={styles.stepPanel} aria-label="Captação e análise">
+              <fieldset disabled={captureLocked} aria-label="Captação Google Maps" className={styles.formSection}>
                 <div className="flex items-center justify-between gap-2 flex-wrap">
-                  <p className="text-[11px] font-black uppercase tracking-widest text-blue-300 flex items-center gap-2">
-                    <span className="text-[9px] font-mono bg-blue-500/20 text-blue-200 px-1.5 py-0.5 rounded">PASSO 1</span>
-                    <MapPin className="w-3 h-3" /> Captação Google Maps
-                  </p>
-                  <p className="text-[10px] text-blue-200/60 italic">Define DE ONDE vem o cliente</p>
+                  <h4 className={styles.sectionTitle}><MapPin className="w-4 h-4" /> Captação Google Maps</h4>
+                  <p className={styles.fieldHint}>Defina o público que deseja alcançar.</p>
                 </div>
                 {captureLocked && <p className="text-[11px] text-blue-200">A captura já foi iniciada. Crie outra automação para mudar nichos, regiões, filtros ou meta.</p>}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div>
-                    <label className="text-[10px] uppercase font-bold text-muted-foreground">Nichos (1 por linha — pode ter espaço)</label>
-                    <Textarea rows={3}
+                    <label htmlFor="automation-niches">Nichos (um por linha)</label>
+                    <Textarea id="automation-niches" rows={3}
                       value={nichesText}
                       onChange={e => setNichesText(e.target.value)}
                       placeholder="pizzaria artesanal&#10;hamburgueria gourmet&#10;açaí premium"
                       className="bg-black/40 border-white/10 font-mono text-xs" />
                   </div>
                   <div>
-                    <label className="text-[10px] uppercase font-bold text-muted-foreground">Regiões (1 por linha — pode ter espaço)</label>
-                    <Textarea rows={3}
+                    <label htmlFor="automation-regions">Regiões (uma por linha)</label>
+                    <Textarea id="automation-regions" rows={3}
                       value={regionsText}
                       onChange={e => setRegionsText(e.target.value)}
                       placeholder="Vitória/ES&#10;Vila Velha/ES&#10;Serra/ES"
@@ -540,8 +578,8 @@ export default function AutomacaoPage() {
                     </label>
                   ))}
                   <div className="w-full sm:w-auto sm:ml-auto flex items-center gap-2">
-                    <span className="text-[10px] uppercase font-bold text-muted-foreground">Limite de leads:</span>
-                    <NumberInput min={1} max={5000} fallback={100}
+                    <label htmlFor="automation-limit">Limite de leads</label>
+                    <NumberInput id="automation-limit" min={1} max={5000} fallback={100}
                       value={formData.scrape_max_leads}
                       onChange={n => setFormData({ ...formData, scrape_max_leads: n })}
                       className="bg-black/40 border-white/10 h-8 w-20 text-xs" />
@@ -577,10 +615,10 @@ export default function AutomacaoPage() {
                     Reúne TODAS as avaliações capturadas de cada lead e a IA resume elogios, reclamações e um gancho. Disponível como <code className="bg-black/40 px-1 rounded">{"{{resumo_avaliacoes}}"}</code> no template de disparo e follow-up. Ativa &quot;Capturar todas as avaliações&quot;.
                   </p>
                   {formData.scrape_filters?.reviews_ai?.enabled && (
-                    <div className="space-y-2 pl-3 border-l-2 border-cyan-500/30">
+                    <div className="space-y-2 pl-3 border-l border-cyan-500/30">
                       <div>
-                        <label className="text-[10px] uppercase font-bold text-white/40">Modelo de IA</label>
-                        <select
+                        <label htmlFor="automation-reviews-model">Modelo de IA das avaliações</label>
+                        <select id="automation-reviews-model"
                           value={formData.scrape_filters?.reviews_ai?.model || ""}
                           onChange={e => setFormData({
                             ...formData,
@@ -593,8 +631,8 @@ export default function AutomacaoPage() {
                         </select>
                       </div>
                       <div>
-                        <label className="text-[10px] uppercase font-bold text-white/40">Prompt (vazio = padrão: ELOGIOS / RECLAMAÇÕES / GANCHO / NOTA GERAL)</label>
-                        <Textarea rows={2}
+                        <label htmlFor="automation-reviews-prompt">Prompt das avaliações (vazio usa o padrão: elogios, reclamações, gancho e nota geral)</label>
+                        <Textarea id="automation-reviews-prompt" rows={2}
                           value={formData.scrape_filters?.reviews_ai?.prompt || ""}
                           onChange={e => setFormData({
                             ...formData,
@@ -611,32 +649,16 @@ export default function AutomacaoPage() {
               {/* Lead Intelligence — entre captação e disparo. Análise IA de
                   cada lead colhido (site, busca web, Maps). O briefing é
                   injetado automaticamente no disparo, follow-up E agente. */}
-              <div className={cn(
-                "rounded-xl border p-4 space-y-2 transition-colors",
-                formData.lead_intelligence_enabled
-                  ? "border-cyan-500/30 bg-gradient-to-br from-cyan-500/10 to-purple-500/10"
-                  : "border-white/10 bg-white/[0.02]"
-              )}>
+              <div className={styles.formSection}>
                 <div className="flex items-center justify-between gap-3 flex-wrap">
-                  <div className="flex items-center gap-2">
-                    <span className={cn(
-                      "text-[9px] font-mono px-1.5 py-0.5 rounded",
-                      formData.lead_intelligence_enabled ? "bg-cyan-500/20 text-cyan-200" : "bg-zinc-500/20 text-zinc-400"
-                    )}>PASSO 2 · OPCIONAL</span>
-                    <Bot className={cn("w-3 h-3", formData.lead_intelligence_enabled ? "text-cyan-300" : "text-zinc-500")} />
-                    <p className={cn(
-                      "text-[11px] font-black uppercase tracking-widest",
-                      formData.lead_intelligence_enabled ? "text-cyan-300" : "text-zinc-400"
-                    )}>
-                      Lead Intelligence
-                    </p>
-                  </div>
+                  <h4 className={styles.sectionTitle}><Bot className="w-4 h-4" /> Lead Intelligence <span className={styles.optional}>Opcional</span></h4>
                   <label className="flex items-center gap-2 text-[11px] cursor-pointer select-none">
                     <span className={cn("font-bold", formData.lead_intelligence_enabled ? "text-cyan-200" : "text-zinc-400")}>
                       {formData.lead_intelligence_enabled ? "ATIVADO" : "DESATIVADO"}
                     </span>
                     <input
                       type="checkbox"
+                      aria-label="Ativar Lead Intelligence"
                       className="h-4 w-8 appearance-none rounded-full bg-zinc-700 checked:bg-cyan-500 transition-colors relative cursor-pointer
                                  before:content-[''] before:absolute before:top-0.5 before:left-0.5 before:w-3 before:h-3 before:rounded-full before:bg-white before:transition-transform
                                  checked:before:translate-x-4"
@@ -656,14 +678,13 @@ export default function AutomacaoPage() {
                 )}
               </div>
 
-              {/* Disparo */}
-              <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-4 space-y-3">
+              </section>
+
+              <section id="automation-step-2" tabIndex={-1} hidden={formStep !== 2} className={styles.stepPanel} aria-label="Mensagem inicial">
+              <div className={styles.formSection}>
                 <div className="flex items-center justify-between gap-2 flex-wrap">
-                  <p className="text-[11px] font-black uppercase tracking-widest text-cyan-300 flex items-center gap-2">
-                    <span className="text-[9px] font-mono bg-cyan-500/20 text-cyan-200 px-1.5 py-0.5 rounded">PASSO 3</span>
-                    <Zap className="w-3 h-3" /> Disparo inicial
-                  </p>
-                  <p className="text-[10px] text-cyan-200/60 italic">O que cliente recebe primeiro</p>
+                  <h4 className={styles.sectionTitle}><Zap className="w-4 h-4" /> Disparo inicial</h4>
+                  <p className={styles.fieldHint}>Prepare o primeiro contato com cada lead.</p>
                 </div>
 
                 {/* Chips de variáveis — extraídas pelo captador. Clica pra inserir
@@ -702,10 +723,8 @@ export default function AutomacaoPage() {
                 </div>
 
                 <div>
-                  <label className="text-[10px] uppercase font-bold text-muted-foreground">
-                    Mensagem-base (template)
-                  </label>
-                  <Textarea rows={3}
+                  <label htmlFor="automation-message">Mensagem-base (template)</label>
+                  <Textarea id="automation-message" rows={4}
                     value={formData.dispatch_template || ""}
                     onChange={e => setFormData({ ...formData, dispatch_template: e.target.value })}
                     placeholder="Ex: {{saudacao}} {{nome_empresa}}! Vi vocês no Maps…"
@@ -716,17 +735,18 @@ export default function AutomacaoPage() {
                   <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2">
                     <span className="text-[10px] uppercase font-bold text-muted-foreground">Intervalo aleatório entre envios (segundos):</span>
                     <div className="flex items-center gap-2">
-                      <NumberInput min={5} fallback={60} value={formData.dispatch_min_interval}
+                      <NumberInput aria-label="Intervalo mínimo entre envios (segundos)" min={5} fallback={60} value={formData.dispatch_min_interval}
                         onChange={n => setFormData({ ...formData, dispatch_min_interval: n })}
                         className="bg-black/40 border-white/10 h-8 w-16 text-xs" />
                       <span className="text-[10px] text-muted-foreground">até</span>
-                      <NumberInput min={5} fallback={180} value={formData.dispatch_max_interval}
+                      <NumberInput aria-label="Intervalo máximo entre envios (segundos)" min={5} fallback={180} value={formData.dispatch_max_interval}
                         onChange={n => setFormData({ ...formData, dispatch_max_interval: n })}
                         className="bg-black/40 border-white/10 h-8 w-16 text-xs" />
                     </div>
                   </div>
-                  <p className="text-[9px] text-amber-300/80 italic">
-                    🛡 Recomendado: <strong>60–180s</strong> (anti-banimento WhatsApp).
+                  <p className="text-[9px] text-amber-300/80 italic flex items-center gap-1.5">
+                    <ShieldCheck aria-hidden="true" className="w-3.5 h-3.5 shrink-0" />
+                    <span>Recomendado: <strong>60–180s</strong> (anti-banimento WhatsApp).</span>
                   </p>
                 </div>
 
@@ -742,14 +762,14 @@ export default function AutomacaoPage() {
                     Cada lead recebe um <strong>texto único</strong> gerado pela Gemini a partir do template + dados do lead. Reduz risco de banimento por padrão repetitivo no WhatsApp.
                   </p>
                   {formData.dispatch_personalize && (
-                    <div className="space-y-2 pl-4 border-l-2 border-cyan-500/30">
+                    <div className="space-y-2 pl-4 border-l border-cyan-500/30">
                       <div>
-                        <label className="text-[10px] uppercase font-bold text-muted-foreground flex items-center gap-2">
-                          <span>Modelo de IA</span>
+                        <div className={styles.labelRow}>
+                          <label htmlFor="automation-dispatch-model">Modelo de IA do disparo</label>
                           {loadingAiModels && <Loader2 className="w-3 h-3 animate-spin" />}
-                          <button type="button" onClick={loadAiModels} className="text-cyan-300 hover:underline text-[9px] normal-case">recarregar</button>
-                        </label>
-                        <select value={isAdmin ? (formData.dispatch_ai_model || aiModels[0]?.id || "") : (defaultAiModel || "")}
+                          <button type="button" onClick={loadAiModels} className={styles.reloadAction}>Recarregar modelos</button>
+                        </div>
+                        <select id="automation-dispatch-model" value={isAdmin ? (formData.dispatch_ai_model || aiModels[0]?.id || "") : (defaultAiModel || "")}
                           onChange={e => setFormData({ ...formData, dispatch_ai_model: e.target.value })}
                           disabled={!isAdmin || aiModels.length === 0}
                           className="w-full mt-0.5 bg-black/40 border border-white/10 rounded-md px-2 h-8 text-xs disabled:opacity-50">
@@ -766,17 +786,17 @@ export default function AutomacaoPage() {
                         </select>
                         {!isAdmin && (
                           <p className="text-[10px] text-cyan-300/80 mt-1.5 flex items-center gap-1">
-                            <span>🔒 Modelo definido pelo administrador:</span>
+                            <LockKeyhole aria-hidden="true" className="w-3 h-3 shrink-0" /><span>Modelo definido pelo administrador:</span>
                             <span className="font-mono font-bold bg-cyan-500/10 px-1.5 py-0.5 rounded border border-cyan-500/20">{defaultAiModel || "Não configurado"}</span>
                           </p>
                         )}
                         {aiModelsError && isAdmin && (
-                          <p className="text-[9px] text-amber-300/80 mt-0.5">⚠ {aiModelsError} — admin precisa salvar a chave Gemini em Configurações.</p>
+                          <p className="text-[9px] text-amber-300/80 mt-0.5">{aiModelsError} — admin precisa salvar a chave Gemini em Configurações.</p>
                         )}
                       </div>
                       <div>
-                        <label className="text-[10px] uppercase font-bold text-muted-foreground">Prompt para a IA (instruções de como reescrever)</label>
-                        <Textarea rows={4}
+                        <label htmlFor="automation-dispatch-prompt">Prompt para a IA (instruções de como reescrever)</label>
+                        <Textarea id="automation-dispatch-prompt" rows={4}
                           value={formData.dispatch_ai_prompt || ""}
                           onChange={e => setFormData({ ...formData, dispatch_ai_prompt: e.target.value })}
                           placeholder="Ex: Reescreva a mensagem-base de forma natural e única para cada cliente, mantendo o tom amigável e profissional. Não use emojis exagerados. Adapte ao ramo do negócio se for relevante. Mensagem deve ter no máximo 3 frases."
@@ -826,6 +846,7 @@ export default function AutomacaoPage() {
                   {(!!formData.dispatch_media_url) && (
                     <input
                       type="text"
+                      aria-label="Legenda da mídia (opcional)"
                       placeholder="Legenda da mídia (opcional)"
                       value={formData.dispatch_media_caption ?? ""}
                       onChange={e => setFormData({ ...formData, dispatch_media_caption: e.target.value })}
@@ -835,20 +856,12 @@ export default function AutomacaoPage() {
                 </div>
               </div>
 
-              <div className={cn(
-                "rounded-xl border p-4 space-y-3 transition-colors",
-                formData.followup_enabled !== false
-                  ? "border-purple-500/20 bg-purple-500/5"
-                  : "border-zinc-500/20 bg-zinc-500/5 opacity-60"
-              )}>
+              </section>
+
+              <section id="automation-step-3" tabIndex={-1} hidden={formStep !== 3} className={styles.stepPanel} aria-label="Follow-up">
+              <div className={styles.formSection}>
                 <div className="flex items-center justify-between gap-3 flex-wrap">
-                  <p className="text-[11px] font-black uppercase tracking-widest text-purple-300 flex items-center gap-2">
-                    <span className={cn(
-                      "text-[9px] font-mono px-1.5 py-0.5 rounded",
-                      formData.followup_enabled !== false ? "bg-purple-500/20 text-purple-200" : "bg-zinc-500/20 text-zinc-400"
-                    )}>PASSO 4</span>
-                    <Repeat className="w-3 h-3" /> Follow-up automático
-                  </p>
+                  <h4 className={styles.sectionTitle}><Repeat className="w-4 h-4" /> Follow-up automático</h4>
                   {/* Toggle on/off — quando OFF, automação termina logo após o disparo */}
                   <label className="flex items-center gap-2 text-[11px] cursor-pointer select-none">
                     <span className={cn("font-bold", formData.followup_enabled !== false ? "text-purple-200" : "text-zinc-400")}>
@@ -856,6 +869,7 @@ export default function AutomacaoPage() {
                     </span>
                     <input
                       type="checkbox"
+                      aria-label="Ativar follow-up automático"
                       className="h-4 w-8 appearance-none rounded-full bg-zinc-700 checked:bg-purple-500 transition-colors relative cursor-pointer
                                  before:content-[''] before:absolute before:top-0.5 before:left-0.5 before:w-3 before:h-3 before:rounded-full before:bg-white before:transition-transform
                                  checked:before:translate-x-4"
@@ -873,8 +887,8 @@ export default function AutomacaoPage() {
                   {(formData.followup_steps || []).map((step, idx) => (
                     <div key={idx} className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-start p-2 rounded-xl bg-black/20 border border-white/5 sm:border-none sm:bg-transparent sm:p-0">
                       <div className="flex flex-col gap-1 shrink-0 w-full sm:w-24">
-                        <span className="text-[9px] uppercase font-bold text-muted-foreground">Após (dias)</span>
-                        <NumberInput min={1} fallback={1} value={step.day_offset}
+                        <label htmlFor={`followup-day-${idx}`}>Após (dias)</label>
+                        <NumberInput id={`followup-day-${idx}`} min={1} fallback={1} value={step.day_offset}
                           onChange={n => {
                             const next = [...(formData.followup_steps || [])];
                             next[idx] = { ...next[idx], day_offset: n };
@@ -883,8 +897,8 @@ export default function AutomacaoPage() {
                           className="bg-black/40 border-white/10 h-8 text-xs" />
                       </div>
                       <div className="flex-1">
-                        <span className="text-[9px] uppercase font-bold text-muted-foreground">Mensagem</span>
-                        <Textarea rows={2} value={step.template}
+                        <label htmlFor={`followup-message-${idx}`}>Mensagem do follow-up {idx + 1}</label>
+                        <Textarea id={`followup-message-${idx}`} rows={2} value={step.template}
                           onChange={e => {
                             const next = [...(formData.followup_steps || [])];
                             next[idx] = { ...next[idx], template: e.target.value };
@@ -895,7 +909,7 @@ export default function AutomacaoPage() {
                       <Button onClick={() => setFormData({
                         ...formData,
                         followup_steps: (formData.followup_steps || []).filter((_, i) => i !== idx),
-                      })} variant="ghost" size="icon" className="h-8 w-8 text-red-400 self-end sm:mt-4">
+                      })} aria-label={`Remover follow-up ${idx + 1}`} variant="ghost" size="icon" className={cn(styles.iconAction, styles.dangerAction, "self-end sm:mt-6")}>
                         <Trash2 className="w-3 h-3" />
                       </Button>
                     </div>
@@ -903,8 +917,8 @@ export default function AutomacaoPage() {
                   <Button onClick={() => setFormData({
                     ...formData,
                     followup_steps: [...(formData.followup_steps || []), { day_offset: 3, template: "" }],
-                  })} variant="outline" className="text-[10px] uppercase font-bold gap-2 h-8">
-                    <Plus className="w-3 h-3" /> Adicionar step
+                  })} variant="outline" className={styles.secondaryAction}>
+                    <Plus className="w-4 h-4" /> Adicionar etapa
                   </Button>
                 </div>
                 {/* Personalização IA do follow-up */}
@@ -919,14 +933,14 @@ export default function AutomacaoPage() {
                     Cada follow-up vira único, considerando o <strong>histórico da conversa</strong> daquele lead. Útil pra puxar gancho do que o cliente já disse e fugir de padrão repetitivo.
                   </p>
                   {formData.followup_ai_enabled && (
-                    <div className="space-y-2 pl-4 border-l-2 border-purple-500/30">
+                    <div className="space-y-2 pl-4 border-l border-purple-500/30">
                       <div>
-                        <label className="text-[10px] uppercase font-bold text-muted-foreground flex items-center gap-2">
-                          <span>Modelo de IA</span>
+                        <div className={styles.labelRow}>
+                          <label htmlFor="automation-followup-model">Modelo de IA do follow-up</label>
                           {loadingAiModels && <Loader2 className="w-3 h-3 animate-spin" />}
-                          <button type="button" onClick={loadAiModels} className="text-purple-300 hover:underline text-[9px] normal-case">recarregar</button>
-                        </label>
-                        <select value={isAdmin ? (formData.followup_ai_model || aiModels[0]?.id || "") : (defaultAiModel || "")}
+                          <button type="button" onClick={loadAiModels} className={styles.reloadAction}>Recarregar modelos</button>
+                        </div>
+                        <select id="automation-followup-model" value={isAdmin ? (formData.followup_ai_model || aiModels[0]?.id || "") : (defaultAiModel || "")}
                           onChange={e => setFormData({ ...formData, followup_ai_model: e.target.value })}
                           disabled={!isAdmin || aiModels.length === 0}
                           className="w-full mt-0.5 bg-black/40 border border-white/10 rounded-md px-2 h-8 text-xs disabled:opacity-50">
@@ -943,17 +957,17 @@ export default function AutomacaoPage() {
                         </select>
                         {!isAdmin && (
                           <p className="text-[10px] text-purple-300/80 mt-1.5 flex items-center gap-1">
-                            <span>🔒 Modelo definido pelo administrador:</span>
+                            <LockKeyhole aria-hidden="true" className="w-3 h-3 shrink-0" /><span>Modelo definido pelo administrador:</span>
                             <span className="font-mono font-bold bg-purple-500/10 px-1.5 py-0.5 rounded border border-purple-500/20">{defaultAiModel || "Não configurado"}</span>
                           </p>
                         )}
                         {aiModelsError && isAdmin && (
-                          <p className="text-[9px] text-amber-300/80 mt-0.5">⚠ {aiModelsError} — admin precisa salvar a chave Gemini em Configurações.</p>
+                          <p className="text-[9px] text-amber-300/80 mt-0.5">{aiModelsError} — admin precisa salvar a chave Gemini em Configurações.</p>
                         )}
                       </div>
                       <div>
-                        <label className="text-[10px] uppercase font-bold text-muted-foreground">Prompt para a IA</label>
-                        <Textarea rows={4}
+                        <label htmlFor="automation-followup-prompt">Prompt para a IA do follow-up</label>
+                        <Textarea id="automation-followup-prompt" rows={4}
                           value={formData.followup_ai_prompt || ""}
                           onChange={e => setFormData({ ...formData, followup_ai_prompt: e.target.value })}
                           placeholder="Ex: Você é um SDR cordial fazendo follow-up sem ser insistente. Use o histórico pra puxar gancho do que o cliente já mencionou. Tom natural, máximo 3 frases."
@@ -964,37 +978,60 @@ export default function AutomacaoPage() {
                 </div>
               </div>
 
-              {/* Janela de horário */}
-              <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4">
+              </section>
+
+              <section id="automation-step-4" tabIndex={-1} hidden={formStep !== 4} className={styles.stepPanel} aria-label="Horários e revisão">
+              <div className={styles.formSection}>
                 <div className="flex items-center justify-between gap-2 flex-wrap mb-3">
-                  <p className="text-[11px] font-black uppercase tracking-widest text-amber-300 flex items-center gap-2">
-                    <span className="text-[9px] font-mono bg-amber-500/20 text-amber-200 px-1.5 py-0.5 rounded">PASSO 5</span>
-                    <Clock className="w-3 h-3" /> Horário permitido
-                  </p>
-                  <p className="text-[10px] text-amber-200/60 italic">Vale pra disparo + follow-up</p>
+                  <h4 className={styles.sectionTitle}><Clock className="w-4 h-4" /> Horário permitido</h4>
+                  <p className={styles.fieldHint}>Aplicado ao disparo e ao follow-up, na hora local.</p>
                 </div>
                 <div className="flex items-center gap-3">
-                  <NumberInput min={0} max={23} fallback={9} value={formData.allowed_start_hour}
+                  <NumberInput aria-label="Horário inicial" min={0} max={23} fallback={9} value={formData.allowed_start_hour}
                     onChange={n => setFormData({ ...formData, allowed_start_hour: n })}
                     className="bg-black/40 border-white/10 h-8 w-20 text-xs" />
                   <span className="text-xs text-muted-foreground">até</span>
-                  <NumberInput min={0} max={23} fallback={20} value={formData.allowed_end_hour}
+                  <NumberInput aria-label="Horário final" min={0} max={23} fallback={20} value={formData.allowed_end_hour}
                     onChange={n => setFormData({ ...formData, allowed_end_hour: n })}
                     className="bg-black/40 border-white/10 h-8 w-20 text-xs" />
                   <span className="text-[10px] text-muted-foreground">(0–23, hora local)</span>
                 </div>
               </div>
 
-              <div className="flex flex-col sm:flex-row gap-2 sm:justify-end">
-                <Button onClick={closeForm} variant="ghost" disabled={creating} className="w-full sm:w-auto">Cancelar</Button>
-                <Button onClick={() => saveAutomation(false)} disabled={creating || editingAutomation?.status === "running"} className="gap-2 bg-white/5 border border-white/10 hover:bg-white/10 text-white font-bold text-xs uppercase tracking-widest w-full sm:w-auto">
-                  {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                  Salvar Rascunho
-                </Button>
-                <Button onClick={() => saveAutomation(true)} disabled={creating || editingAutomation?.status === "running"} className="gap-2 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-white font-black text-xs uppercase tracking-widest w-full sm:w-auto">
-                  {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-                  {editingId ? "Salvar e Iniciar" : "Salvar e Iniciar"}
-                </Button>
+              <div className={styles.review}>
+                <h4>Revise antes de iniciar</h4>
+                <dl>
+                  <div><dt>Automação</dt><dd>{formData.name || "Nome não preenchido"}</dd></div>
+                  <div><dt>WhatsApp</dt><dd>{formData.instance_name || "Selecione uma instância"}</dd></div>
+                  <div><dt>Público</dt><dd>{nichesText.split("\n").filter(s => s.trim()).length} nicho(s) · {regionsText.split("\n").filter(s => s.trim()).length} região(ões) · até {formData.scrape_max_leads} leads</dd></div>
+                  <div><dt>Mensagem</dt><dd>{formData.dispatch_personalize ? "Personalizada com IA" : "Mensagem-base"}{formData.dispatch_media_url ? " · com mídia" : ""}</dd></div>
+                  <div><dt>Follow-up</dt><dd>{formData.followup_enabled !== false ? `${formData.followup_steps?.length || 0} etapa(s) configurada(s)` : "Desativado"}</dd></div>
+                </dl>
+                <p>Salvar e iniciar coloca a automação em execução. Para configurar sem executar, salve como rascunho.</p>
+              </div>
+              </section>
+                </div>
+              </div>
+              <div className={styles.formFooter}>
+                <div className={styles.stepActions}>
+                  <Button onClick={() => changeStep(formStep - 1)} disabled={formStep === 0 || creating} variant="ghost" className={styles.secondaryAction}>
+                    <ChevronLeft className="w-4 h-4" /> Voltar
+                  </Button>
+                  {formStep < FORM_STEPS.length - 1 && <Button onClick={() => changeStep(formStep + 1)} className={styles.secondaryAction}>
+                    Próxima etapa <ChevronRight className="w-4 h-4" />
+                  </Button>}
+                </div>
+                <div className={styles.saveActions}>
+                  <Button onClick={closeForm} variant="ghost" disabled={creating} className={styles.textAction}>Cancelar</Button>
+                  <Button onClick={() => saveAutomation(false)} disabled={creating || editingAutomation?.status === "running"} className={styles.secondaryAction}>
+                    {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                    Salvar Rascunho
+                  </Button>
+                  <Button onClick={() => saveAutomation(true)} disabled={creating || editingAutomation?.status === "running"} className={styles.primaryAction}>
+                    {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                    Salvar e Iniciar
+                  </Button>
+                </div>
               </div>
             </CardContent>
           </Card>
@@ -1006,92 +1043,59 @@ export default function AutomacaoPage() {
             <Loader2 className="w-5 h-5 animate-spin mr-2" /> Carregando…
           </div>
         ) : automations.length === 0 ? (
-          <Card className="border-dashed border-primary/20 bg-gradient-to-br from-primary/[0.04] to-purple-500/[0.02]">
-            <CardContent className="py-12 sm:py-16 text-center space-y-6 max-w-xl mx-auto">
-              <div className="inline-flex w-16 h-16 rounded-2xl bg-primary/10 ring-1 ring-primary/25 items-center justify-center">
-                <Workflow className="w-7 h-7 text-primary" />
-              </div>
-              <div className="space-y-2">
-                <h3 className="text-lg sm:text-xl font-black tracking-tight text-white">Comece sua primeira automação</h3>
-                <p className="text-xs sm:text-sm text-muted-foreground leading-relaxed">
-                  Uma automação capta clientes no Google Maps, dispara a mensagem inicial,
-                  faz follow-ups e entrega a conversa pra IA quando o cliente responder.
-                </p>
-              </div>
-              {/* Mini-roteiro visual de 4 passos */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-left">
-                {[
-                  { n: 1, icon: MapPin, label: "Capta",     color: "text-blue-300 bg-blue-500/10 ring-blue-500/20" },
-                  { n: 2, icon: Sparkles, label: "Analisa", color: "text-cyan-300 bg-cyan-500/10 ring-cyan-500/20" },
-                  { n: 3, icon: Zap, label: "Dispara",      color: "text-amber-300 bg-amber-500/10 ring-amber-500/20" },
-                  { n: 4, icon: Bot, label: "IA assume",    color: "text-purple-300 bg-purple-500/10 ring-purple-500/20" },
-                ].map((s) => {
-                  const I = s.icon;
-                  return (
-                    <div key={s.n} className="p-3 rounded-xl bg-white/[0.02] border border-white/5">
-                      <div className={cn("w-8 h-8 rounded-lg ring-1 flex items-center justify-center mb-2", s.color)}>
-                        <I className="w-4 h-4" />
-                      </div>
-                      <p className="text-[9px] uppercase font-mono font-bold text-muted-foreground/60">Passo {s.n}</p>
-                      <p className="text-xs font-bold text-white">{s.label}</p>
-                    </div>
-                  );
-                })}
-              </div>
-              <Button onClick={openCreateForm} className="glow-primary h-11 px-6 font-bold text-xs uppercase tracking-wider gap-2">
-                <Plus className="w-4 h-4" /> Criar primeira automação
-              </Button>
-            </CardContent>
-          </Card>
+          !showForm && <section className={styles.empty}>
+            <Workflow className="w-8 h-8" />
+            <h3>Sua próxima conversa começa aqui</h3>
+            <p>Conecte a captação no Google Maps, a mensagem inicial e os retornos em uma automação. Quando o cliente responder, seu agente IA assume a conversa.</p>
+            <ol className={styles.emptyFlow}>
+              {[
+                { icon: MapPin, label: "Captação" },
+                { icon: Sparkles, label: "Análise" },
+                { icon: Zap, label: "Disparo" },
+                { icon: Bot, label: "Conversa com IA" },
+              ].map(({ icon: Icon, label }) => <li key={label}><Icon className="w-4 h-4" />{label}</li>)}
+            </ol>
+            <Button onClick={openCreateForm} className={styles.primaryAction}>
+              <Plus className="w-4 h-4" /> Criar primeira automação
+            </Button>
+          </section>
         ) : (
-          <div className="space-y-3">
+          <section className={styles.automationList} aria-labelledby="automations-title">
+            <div className={styles.listHeading}>
+              <h3 id="automations-title">Suas automações <span>{automations.length}</span></h3>
+              <p>Expanda uma automação para ver os detalhes e o histórico.</p>
+            </div>
             {automations.map(a => {
               const ph = PHASE_LABEL[a.phase] || PHASE_LABEL.idle;
+              const PhaseIcon = ph.icon;
               const isOpen = expanded === a.id;
               return (
-                <Card key={a.id} className={cn(
-                  "border-white/10 bg-white/[0.02] transition-colors",
-                  a.status === "running" && "border-emerald-500/30 bg-emerald-500/[0.02]",
-                  a.status === "error" && "border-red-500/30 bg-red-500/[0.02]"
-                )}>
-                  <CardContent className="p-4">
-                    <div className="flex items-center justify-between gap-3 flex-wrap">
-                      <div className="flex items-center gap-3 min-w-0 flex-1">
-                        <button onClick={() => setExpanded(isOpen ? null : a.id)} className="text-muted-foreground hover:text-white shrink-0">
-                          {isOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-                        </button>
-                        {/* Indicador visual de status — bolinha animada quando rodando */}
-                        <div className={cn(
-                          "w-2.5 h-2.5 rounded-full shrink-0",
-                          a.status === "running" ? "bg-emerald-500 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.6)]" :
-                          a.status === "paused" ? "bg-amber-500" :
-                          a.status === "done" ? "bg-blue-500" :
-                          a.status === "error" ? "bg-red-500" : "bg-zinc-500"
-                        )} />
-                        <div className="min-w-0">
-                          <p className="text-sm font-bold text-white truncate">{a.name}</p>
-                          <p className="text-[10px] text-muted-foreground truncate">
-                            <span className="font-mono">#{a.instance_name}</span> · agente {a.agent_id ?? "—"} · <span className="text-emerald-300 font-bold">{a.scraped_count}</span> {a.scraped_count === 1 ? "captado" : "captados"}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 shrink-0">
-                        <span className={cn("text-[10px] font-black uppercase tracking-widest px-2 py-1 rounded-md border", ph.color)}>
-                          {ph.label}
+                <Card key={a.id} className={styles.automation} data-state={a.status}>
+                  <CardContent className={styles.automationContent}>
+                    <div className={styles.automationHeader}>
+                      <button type="button" onClick={() => setExpanded(isOpen ? null : a.id)}
+                        aria-expanded={isOpen} aria-controls={`automation-details-${a.id}`} className={styles.automationToggle}>
+                        {isOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                        <span className={styles.automationIdentity}>
+                          <strong>{a.name}</strong>
+                          <span>{a.instance_name} · agente {a.agent_id ?? "—"} · <b>{a.scraped_count || 0}</b> {a.scraped_count === 1 ? "lead captado" : "leads captados"}</span>
                         </span>
+                      </button>
+                      <div className={styles.automationActions}>
+                        <span className={styles.status} data-phase={a.phase}><PhaseIcon className="w-3.5 h-3.5" />{ph.label}</span>
                         {a.status === "running" ? (
-                          <Button onClick={() => pauseAutomation(a.id)} disabled={busyId === a.id} size="sm" variant="ghost" className="h-8 px-2 text-amber-400 gap-1">
+                          <Button onClick={() => pauseAutomation(a.id)} disabled={busyId === a.id} size="sm" variant="ghost" className={cn(styles.secondaryAction, styles.pauseAction)}>
                             {busyId === a.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Pause className="w-3 h-3" />} Pausar
                           </Button>
                         ) : (
-                          <Button onClick={() => startAutomation(a.id)} disabled={busyId === a.id} size="sm" variant="ghost" className="h-8 px-2 text-emerald-400 gap-1">
+                          <Button onClick={() => startAutomation(a.id)} disabled={busyId === a.id} size="sm" variant="ghost" className={cn(styles.secondaryAction, styles.startAction)}>
                             {busyId === a.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />} {a.status === "done" || a.status === "error" ? "Rodar de novo" : "Iniciar"}
                           </Button>
                         )}
-                        <Button onClick={() => openEditForm(a)} size="icon" variant="ghost" className="h-8 w-8 text-cyan-300" title="Editar automação">
+                        <Button onClick={() => openEditForm(a)} size="icon" variant="ghost" className={styles.iconAction} title="Editar automação" aria-label={`Editar automação ${a.name}`}>
                           <Pencil className="w-3.5 h-3.5" />
                         </Button>
-                        <Button onClick={() => deleteAutomation(a.id)} size="icon" variant="ghost" className="h-8 w-8 text-red-400" title="Apagar automação">
+                        <Button onClick={() => deleteAutomation(a.id)} size="icon" variant="ghost" className={cn(styles.iconAction, styles.dangerAction)} title="Apagar automação" aria-label={`Apagar automação ${a.name}`}>
                           <Trash2 className="w-3.5 h-3.5" />
                         </Button>
                       </div>
@@ -1101,14 +1105,14 @@ export default function AutomacaoPage() {
                       <div className="mt-3 p-3 rounded-lg bg-red-500/15 border-2 border-red-500/50 text-red-100 text-xs flex items-start gap-2">
                         <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-red-300" />
                         <div className="flex-1 min-w-0">
-                          <p className="font-black uppercase text-[10px] tracking-widest text-red-300 mb-1">Último erro</p>
+                          <p className="font-medium text-xs text-red-200 mb-1">Último erro</p>
                           <p className="break-words whitespace-pre-wrap leading-relaxed">{a.last_error}</p>
                         </div>
                       </div>
                     )}
 
                     {isOpen && (
-                      <div className="mt-4 pt-4 border-t border-white/5 space-y-4">
+                      <div id={`automation-details-${a.id}`} className={styles.automationDetails}>
                         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 text-[11px]">
                           <Stat icon={MapPin}  label="Nichos"     value={(a.niches || []).join(", ") || "—"} color="text-blue-300" />
                           <Stat icon={MapPin}  label="Regiões"    value={(a.regions || []).join(", ") || "—"} color="text-blue-300" />
@@ -1143,7 +1147,7 @@ export default function AutomacaoPage() {
                 </Card>
               );
             })}
-          </div>
+          </section>
         )}
       </main>
     </div>
@@ -1177,8 +1181,8 @@ function AutomationLeadIntelBatch({ automationId, startedAt, scrapedCount }: { a
   if (leadIds.length === 0) return null;
 
   return (
-    <div className="rounded-xl border border-cyan-500/20 bg-gradient-to-br from-cyan-500/5 to-purple-500/5 p-3 space-y-2">
-      <p className="text-[10px] font-black text-cyan-300 uppercase tracking-widest flex items-center gap-2">
+    <div className={styles.intelligenceBatch}>
+      <p className="text-xs font-medium text-cyan-200 flex items-center gap-2">
         <Bot className="w-3.5 h-3.5" /> Lead Intelligence — pré-análise
       </p>
       <p className="text-[11px] text-cyan-100/80 leading-relaxed">
@@ -1189,13 +1193,13 @@ function AutomationLeadIntelBatch({ automationId, startedAt, scrapedCount }: { a
   );
 }
 
-function Stat({ icon: Icon, label, value, color }: { icon: any; label: string; value: string; color: string }) {
+function Stat({ icon: Icon, label, value, color }: { icon: LucideIcon; label: string; value: string; color: string }) {
   return (
-    <div className="flex items-start gap-2 min-w-0">
+    <div className={styles.stat}>
       <Icon className={cn("w-3.5 h-3.5 shrink-0 mt-0.5", color)} />
       <div className="min-w-0">
-        <p className="text-[9px] uppercase font-bold tracking-widest text-muted-foreground">{label}</p>
-        <p className="text-[11px] text-white truncate">{value}</p>
+        <p>{label}</p>
+        <p>{value}</p>
       </div>
     </div>
   );

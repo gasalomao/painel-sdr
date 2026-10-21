@@ -1,5 +1,6 @@
 "use client";
 import { useState, useRef } from "react";
+import { FileText, Film, Music, X } from "lucide-react";
 
 type Props = {
   mediaUrl: string | null;
@@ -99,7 +100,9 @@ export function MediaUploader({ mediaUrl, mediaType, mediaFileName, mediaMimetyp
             // eslint-disable-next-line @next/next/no-img-element
             <img src={mediaUrl} alt="" className="w-10 h-10 object-cover rounded" />
           ) : (
-            <span className="text-[16px]">{mediaType === "audio" ? "🎵" : mediaType === "video" ? "🎬" : "📄"}</span>
+            mediaType === "audio" ? <Music aria-hidden="true" className="w-4 h-4 shrink-0" /> :
+              mediaType === "video" ? <Film aria-hidden="true" className="w-4 h-4 shrink-0" /> :
+                <FileText aria-hidden="true" className="w-4 h-4 shrink-0" />
           )}
           <div className="flex-1 truncate">
             <p className="text-[11px] text-zinc-300 truncate">{mediaFileName || "file"}</p>
@@ -107,10 +110,11 @@ export function MediaUploader({ mediaUrl, mediaType, mediaFileName, mediaMimetyp
           </div>
           <button
             type="button"
+            aria-label="Remover mídia anexada"
             onClick={() => onChange({ mediaUrl: null, mediaType: null, mediaFileName: null, mediaMimetype: null })}
-            className="text-[11px] text-red-400 hover:text-red-300"
+            className="inline-flex min-h-8 min-w-8 items-center justify-center text-red-400 hover:text-red-300"
           >
-            ✕
+            <X aria-hidden="true" className="w-4 h-4" />
           </button>
         </div>
       ) : (
@@ -126,6 +130,7 @@ export function MediaUploader({ mediaUrl, mediaType, mediaFileName, mediaMimetyp
       <input
         ref={inputRef}
         type="file"
+        aria-label="Arquivo de mídia"
         accept="image/*,video/*,audio/*,application/pdf,.doc,.docx,.xls,.xlsx,.txt"
         onChange={handleFile}
         className="hidden"

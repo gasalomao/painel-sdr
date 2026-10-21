@@ -3,7 +3,8 @@
 import { useEffect, useLayoutEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
-import { Loader2, MapPin, Zap, Repeat, MessageSquare, AlertTriangle, Activity, Send, ArrowDown } from "lucide-react";
+import { Loader2, MapPin, Zap, Repeat, MessageSquare, AlertTriangle, Activity, Send, ArrowDown, type LucideIcon } from "lucide-react";
+import styles from "./automacao.module.css";
 
 type LogEntry = {
   id: string;
@@ -14,7 +15,7 @@ type LogEntry = {
   remote_jid?: string | null;
 };
 
-const KIND_META: Record<LogEntry["kind"], { icon: any; color: string; label: string }> = {
+const KIND_META: Record<LogEntry["kind"], { icon: LucideIcon; color: string; label: string }> = {
   state:    { icon: Activity,        color: "text-zinc-300",   label: "estado" },
   scrape:   { icon: MapPin,          color: "text-blue-300",   label: "captação" },
   dispatch: { icon: Zap,             color: "text-cyan-300",   label: "disparo" },
@@ -260,29 +261,29 @@ export function AutomationLogs({
   }, [scraping, campaignId, followupCampaignId, fetchAll]);
 
   return (
-    <div className="rounded-xl bg-black/40 border border-white/5 overflow-hidden relative">
+    <div className={styles.logs}>
       {showJumpToBottom && (
         <button
           type="button"
           onClick={jumpToBottom}
-          className="absolute right-3 bottom-3 z-10 px-2.5 py-1.5 rounded-full bg-emerald-500/20 hover:bg-emerald-500/40 border border-emerald-500/40 text-emerald-100 text-[10px] font-bold flex items-center gap-1.5 backdrop-blur shadow-lg transition"
+          className={styles.jumpToLatest}
           title="Ir para o último log (e seguir novos)"
         >
           <ArrowDown className="w-3 h-3" /> Novos logs
         </button>
       )}
-      <div className="px-3 py-2 border-b border-white/5 flex items-center justify-between bg-white/[0.02]">
-        <p className="text-[10px] uppercase font-black tracking-widest text-white/70 flex items-center gap-1.5">
-          <Activity className="w-3 h-3 text-emerald-400" /> Log ao vivo
+      <div className={styles.logsHeader}>
+        <h4>
+          <Activity className="w-4 h-4 text-emerald-300" /> Histórico de atividade
           {scraping && <Loader2 className="w-3 h-3 animate-spin text-blue-300" />}
-        </p>
-        <div className="flex items-center gap-2 text-[9px] font-mono text-muted-foreground">
+        </h4>
+        <div className={styles.logCounts}>
           <span><span className="text-blue-300">{scrapeFeed.length}</span> captados</span>
           <span>·</span>
           <span><span className="text-emerald-300">{entries.filter(e => e.kind === "reply").length}</span> respostas</span>
         </div>
       </div>
-      <div ref={scrollContainerRef} onScroll={handleScroll} className="max-h-80 overflow-y-auto custom-scrollbar p-2 space-y-1 relative">
+      <div ref={scrollContainerRef} onScroll={handleScroll} className={styles.logFeed} tabIndex={0} role="region" aria-label="Eventos da automação" aria-busy={loading}>
         {loading ? (
           <div className="py-6 text-center text-[10px] text-muted-foreground flex items-center justify-center gap-2">
             <Loader2 className="w-3 h-3 animate-spin" /> Carregando histórico…
@@ -297,7 +298,7 @@ export function AutomationLogs({
             const meta = KIND_META[e.kind];
             const Icon = meta.icon;
             return (
-              <div key={e.id} className={cn("flex items-start gap-2 p-2 rounded-md border text-[11px]", LEVEL_BG[e.level])}>
+              <div key={e.id} className={cn(styles.logEntry, LEVEL_BG[e.level])}>
                 <Icon className={cn("w-3 h-3 shrink-0 mt-0.5", meta.color)} />
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-1.5 text-[9px] font-mono text-muted-foreground">
