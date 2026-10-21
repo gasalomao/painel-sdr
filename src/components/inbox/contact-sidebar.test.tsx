@@ -4,7 +4,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Contact } from "@/types";
 import { ContactSidebar } from "./contact-sidebar";
 
-const mocks = vi.hoisted(() => ({ fetch: vi.fn(), tagsFetch: vi.fn(), writes: [] as { payload: Record<string, unknown>; filters: [string, unknown][] }[], writeResult: null as Promise<unknown> | null, toast: { success: vi.fn(), error: vi.fn() } }));
+const mocks = vi.hoisted(() => ({
+  fetch: vi.fn(),
+  tagsFetch: vi.fn(),
+  appointmentsFetch: vi.fn(),
+  writes: [] as { payload: Record<string, unknown>; filters: [string, unknown][] }[],
+  writeResult: null as Promise<unknown> | null,
+  toast: { success: vi.fn(), error: vi.fn() },
+}));
 vi.mock("sonner", () => ({ toast: mocks.toast }));
 vi.mock("@/components/ui/scroll-area", () => ({ ScrollArea: ({ children }: { children: React.ReactNode }) => <div>{children}</div> }));
 vi.mock("@/lib/supabase", () => ({
@@ -33,11 +40,21 @@ const response = (body: unknown, status = 200) => new Response(JSON.stringify(bo
 const found = () => response({ state: "found", lead, columns });
 
 beforeEach(() => {
-  mocks.fetch.mockReset(); mocks.tagsFetch.mockReset(); mocks.toast.error.mockClear(); mocks.toast.success.mockClear();
-  mocks.writes = []; mocks.writeResult = null;
+  mocks.fetch.mockReset();
+  mocks.tagsFetch.mockReset();
+  mocks.appointmentsFetch.mockReset();
+  mocks.toast.error.mockClear();
+  mocks.toast.success.mockClear();
+  mocks.writes = [];
+  mocks.writeResult = null;
   mocks.fetch.mockImplementation(async () => found());
   mocks.tagsFetch.mockImplementation(async () => response({ tags: ["fazer_site", "fazer_video", "Reunião"] }));
-  vi.stubGlobal("fetch", (url: string, init?: RequestInit) => url.startsWith("/api/contacts/tags") ? mocks.tagsFetch(url, init) : mocks.fetch(url, init));
+  mocks.appointmentsFetch.mockImplementation(async () => response({ ok: true, appointments: [] }));
+  vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+    if (url.startsWith("/api/contacts/tags")) return mocks.tagsFetch(url, init);
+    if (url.startsWith("/api/appointments")) return mocks.appointmentsFetch(url, init);
+    return mocks.fetch(url, init);
+  });
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
@@ -401,5 +418,124 @@ describe("ContactSidebar CRM", () => {
     expect(await screen.findByLabelText("Estágio no Funil")).toBeDefined();
     expect(onContactUpdate).toHaveBeenCalledWith(expect.objectContaining({ id: contact.id, lead_id: 7 }));
     expect(mocks.toast.success).toHaveBeenLastCalledWith("Lead existente vinculado ao contato.");
+  });
+});
+
+describe("ContactSidebar Reunião & Lembretes", () => {
+  it("exibe botão para agendar reunião quando não há agendamentos", async () => {
+    render(<ContactSidebar contact={contact} clientId="tenant-a" />);
+    expect(await screen.findByRole("button", { name: /Agendar Reunião com Lead/i })).toBeDefined();
+  });
+
+  it("abre formulário, gerencia lembretes e envia POST para agendar com WhatsApp", async () => {
+    render(<ContactSidebar contact={contact} clientId="tenant-a" instanceName="instancia-zap" />);
+    const openBtn = await screen.findByRole("button", { name: /Agendar Reunião com Lead/i });
+    fireEvent.click(openBtn);
+
+    // Verifica campos do formulário
+    const titleInput = screen.getByLabelText("Assunto / Título") as HTMLInputElement;
+    expect(titleInput.value).toBe("Reunião com Vidraçaria Geral");
+
+    const dateInput = screen.getByLabelText("Data e Horário") as HTMLInputElement;
+    expect(dateInput.value).toBeTruthy();
+
+    // Adiciona chip de 30 min
+    const chip30 = screen.getByRole("button", { name: "+ 30 min" });
+    expect(chip30).toBeEnabled();
+    fireEvent.click(chip30);
+    expect(chip30).toBeDisabled();
+
+    // Adiciona horário customizado (45 min)
+    fireEvent.click(screen.getByRole("button", { name: "+ Outro horário" }));
+    const customMinInput = screen.getByPlaceholderText("Min");
+    fireEvent.change(customMinInput, { target: { value: "45" } });
+    fireEvent.click(screen.getByRole("button", { name: "Adicionar" }));
+
+    // Remove aviso de 10 min
+    const removeBtn = screen.getByLabelText("Remover aviso de 10 min antes");
+    fireEvent.click(removeBtn);
+    expect(screen.queryByLabelText("Remover aviso de 10 min antes")).toBeNull();
+
+    // Submete o agendamento
+    mocks.appointmentsFetch.mockResolvedValueOnce(response({ ok: true, appointment: { id: "new-appt" } }));
+    const submitBtn = screen.getByRole("button", { name: "Agendar e Ativar Avisos" });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(mocks.appointmentsFetch).toHaveBeenCalledWith(
+        "/api/appointments",
+        expect.objectContaining({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+    });
+
+    const postCall = mocks.appointmentsFetch.mock.calls.find(
+      (c: [string, RequestInit | undefined]) => c[0] === "/api/appointments" && c[1]?.method === "POST"
+    );
+    expect(postCall).toBeDefined();
+    const payload = JSON.parse(postCall![1]!.body as string);
+
+    expect(payload.title).toBe("Reunião com Vidraçaria Geral");
+    expect(payload.remote_jid).toBe(contact.remote_jid);
+    expect(payload.instance_name).toBe("instancia-zap");
+    expect(payload.metadata.attendee_name).toBe("Vidraçaria Geral");
+    expect(payload.metadata.custom_reminders).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ offset_minutes: 60 }),
+        expect.objectContaining({ offset_minutes: 45 }),
+        expect.objectContaining({ offset_minutes: 30 }),
+      ])
+    );
+    expect(payload.metadata.custom_reminders.find((r: { offset_minutes: number }) => r.offset_minutes === 10)).toBeUndefined();
+    expect(mocks.toast.success).toHaveBeenCalledWith(expect.stringContaining("aviso(s) automático(s) ativado(s)"));
+  });
+
+  it("exibe card de reunião confirmada com status dos lembretes e permite cancelar", async () => {
+    const futureDate = new Date(Date.now() + 2 * 3600 * 1000).toISOString();
+    const confirmedAppt = {
+      id: "appt-teste-1",
+      client_id: "tenant-a",
+      title: "Reunião de Diagnóstico",
+      start_at: futureDate,
+      end_at: new Date(Date.now() + 3 * 3600 * 1000).toISOString(),
+      status: "confirmed",
+      reminders_sent: ["60min"],
+      metadata: {
+        custom_reminders: [
+          { offset_minutes: 60, message: "Aviso 1h" },
+          { offset_minutes: 10, message: "Aviso 10m" },
+        ],
+        attendee_name: "Vidraçaria Geral",
+      },
+    };
+
+    let appts = [confirmedAppt];
+    mocks.appointmentsFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "DELETE") {
+        appts = [];
+        return response({ ok: true });
+      }
+      return response({ ok: true, appointments: appts });
+    });
+    render(<ContactSidebar contact={contact} clientId="tenant-a" />);
+
+    expect(await screen.findByText("Reunião Confirmada")).toBeDefined();
+    expect(screen.getByText("Reunião de Diagnóstico")).toBeDefined();
+    expect(screen.getByText("Enviado")).toBeDefined();
+    expect(screen.getByText("Agendado")).toBeDefined();
+
+    // Cancelar reunião
+    const cancelBtn = screen.getByRole("button", { name: "Cancelar Reunião" });
+    fireEvent.click(cancelBtn);
+
+    await waitFor(() => {
+      expect(mocks.appointmentsFetch).toHaveBeenCalledWith(
+        "/api/appointments/appt-teste-1",
+        expect.objectContaining({ method: "DELETE" })
+      );
+    });
+    expect(mocks.toast.success).toHaveBeenCalledWith("Reunião cancelada!");
   });
 });

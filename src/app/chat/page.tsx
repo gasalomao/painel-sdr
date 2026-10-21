@@ -735,6 +735,7 @@ function ChatPageContent() {
               aiAgents={aiAgents}
               onContactUpdate={handleContactUpdate}
               sessionId={activeConversation.session_id}
+              instanceName={activeConversation.instance_name || activeConversation.last_instance || undefined}
             />
           </div>
         )}

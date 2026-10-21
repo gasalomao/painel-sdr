@@ -15,12 +15,91 @@ import {
   StickyNote,
   Plus,
   Briefcase,
-  Bot
+  Bot,
+  Calendar,
+  Clock,
+  Bell,
+  Trash2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { toast } from "sonner";
 import styles from "./inbox.module.css";
+
+interface ReminderItem {
+  offset_minutes: number;
+  message: string;
+}
+
+interface AppointmentItem {
+  id: string;
+  client_id: string;
+  title: string;
+  start_at: string;
+  end_at: string;
+  status: string;
+  reminders_sent?: string[];
+  metadata?: {
+    custom_reminders?: ReminderItem[];
+    attendee_name?: string;
+  } | null;
+}
+
+function formatOffsetLabel(minutes: number): string {
+  if (minutes < 60) return `${minutes} min antes`;
+  if (minutes % 1440 === 0) {
+    const days = minutes / 1440;
+    return `${days} ${days === 1 ? "dia" : "dias"} antes`;
+  }
+  if (minutes % 60 === 0) {
+    const hours = minutes / 60;
+    return `${hours} ${hours === 1 ? "hora" : "horas"} antes`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const rem = minutes % 60;
+  return `${hours}h ${rem}min antes`;
+}
+
+function getDefaultReminderMessage(minutes: number): string {
+  if (minutes === 10) {
+    return "Oi {nome}! Nossa reunião começa em 10 minutos. Te aguardo!";
+  }
+  if (minutes === 30) {
+    return "Oi {nome}! Lembrando que nossa reunião começa em 30 minutos.";
+  }
+  if (minutes === 60) {
+    return "Oi {nome}! Passando para lembrar da nossa reunião hoje às {hora_agendamento}.";
+  }
+  if (minutes === 120) {
+    return "Oi {nome}! Lembrando da nossa reunião hoje às {hora_agendamento}.";
+  }
+  if (minutes >= 1440) {
+    return "Oi {nome}! Lembrete: amanhã às {hora_agendamento} temos nossa reunião agendada. Confirma sua presença?";
+  }
+  return "Oi {nome}! Lembrete da nossa reunião agendada para às {hora_agendamento}.";
+}
+
+function getInitialDateTime(): string {
+  const date = new Date(Date.now() + 60 * 60 * 1000);
+  date.setMinutes(0, 0, 0);
+  const tzOffset = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - tzOffset).toISOString().slice(0, 16);
+}
+
+function formatMeetingDateBR(isoString: string): string {
+  try {
+    const d = new Date(isoString);
+    return d.toLocaleString("pt-BR", {
+      weekday: "short",
+      day: "2-digit",
+      month: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return isoString;
+  }
+}
 
 interface ContactSidebarProps {
   contact: Contact | null;
@@ -31,6 +110,8 @@ interface ContactSidebarProps {
    * busca/atualiza o agent_id DIRETO por id — evita ambiguidade quando
    * o contato tem múltiplas sessões (várias instâncias conectadas). */
   sessionId?: string;
+  /** Instância ativa associada à conversa/conexão para envio WhatsApp. */
+  instanceName?: string | null;
 }
 
 export function ContactSidebar(props: ContactSidebarProps): React.JSX.Element {
@@ -38,7 +119,7 @@ export function ContactSidebar(props: ContactSidebarProps): React.JSX.Element {
   return <ContactSidebarContent key={JSON.stringify([clientId, contact?.id, contact?.phone, contact?.remote_jid])} {...props} />;
 }
 
-function ContactSidebarContent({ contact, clientId, aiAgents = [], onContactUpdate, sessionId }: ContactSidebarProps): React.JSX.Element {
+function ContactSidebarContent({ contact, clientId, aiAgents = [], onContactUpdate, sessionId, instanceName }: ContactSidebarProps): React.JSX.Element {
   const mounted = useRef(false);
   const latestContact = useRef(contact);
   useEffect(() => { latestContact.current = contact; }, [contact]);
@@ -61,9 +142,26 @@ function ContactSidebarContent({ contact, clientId, aiAgents = [], onContactUpda
   const lead = currentCrm?.lead ?? null;
   const kanbanColumns = currentCrm?.columns ?? [];
 
-  // Estado do Agente de IA atribuído à sessão
+  // Estado do Agente de IA e Instância atribuídos à sessão
   const [assignedAgentId, setAssignedAgentId] = useState<string>("");
+  const [sessionInstanceName, setSessionInstanceName] = useState<string | null>(null);
   const [updatingAgent, setUpdatingAgent] = useState(false);
+
+  // Estados de Agendamento de Reunião & Lembretes Automáticos (WhatsApp)
+  const [appointments, setAppointments] = useState<AppointmentItem[]>([]);
+  const [loadingAppointments, setLoadingAppointments] = useState(false);
+  const [isSchedulingOpen, setIsSchedulingOpen] = useState(false);
+  const [meetingTitle, setMeetingTitle] = useState("");
+  const [meetingDate, setMeetingDate] = useState(() => getInitialDateTime());
+  const [meetingDuration] = useState(60);
+  const [reminders, setReminders] = useState<ReminderItem[]>([
+    { offset_minutes: 60, message: "Oi {nome}! Passando para lembrar da nossa reunião hoje às {hora_agendamento}." },
+    { offset_minutes: 10, message: "Oi {nome}! Nossa reunião começa em 10 minutos. Te aguardo!" },
+  ]);
+  const [showCustomOffset, setShowCustomOffset] = useState(false);
+  const [customMinutes, setCustomMinutes] = useState(15);
+  const [savingAppointment, setSavingAppointment] = useState(false);
+  const [cancellingAppointmentId, setCancellingAppointmentId] = useState<string | null>(null);
 
   // Estados para anotações (campo notes na tabela contacts)
   const contactNotes = (contact as (Contact & { notes?: string }) | null)?.notes || "";
@@ -119,18 +217,184 @@ function ContactSidebarContent({ contact, clientId, aiAgents = [], onContactUpda
     let active = true;
     void (async () => {
       try {
-        let query = supabase.from("sessions").select("agent_id").eq("client_id", clientId);
+        let query = supabase.from("sessions").select("agent_id, instance_name").eq("client_id", clientId);
         query = sessionId ? query.eq("id", sessionId) : query.eq("contact_id", contactId)
           .order("last_message_at", { ascending: false, nullsFirst: false }).limit(1);
         const { data, error } = await query.maybeSingle();
         if (error) throw error;
-        if (active) setAssignedAgentId(data?.agent_id ? String(data.agent_id) : "");
+        if (active) {
+          setAssignedAgentId(data?.agent_id ? String(data.agent_id) : "");
+          if (data?.instance_name) setSessionInstanceName(data.instance_name);
+        }
       } catch {
-        if (active) setAssignedAgentId("");
+        if (active) {
+          setAssignedAgentId("");
+          setSessionInstanceName(null);
+        }
       }
     })();
     return () => { active = false; };
   }, [contactId, clientId, sessionId]);
+
+  // Atualiza título e data padrão quando o contato mudar
+  useEffect(() => {
+    if (contact) {
+      const name = contact.name || contact.phone || "Lead";
+      setMeetingTitle(`Reunião com ${name}`);
+      setMeetingDate(getInitialDateTime());
+      setReminders([
+        { offset_minutes: 60, message: "Oi {nome}! Passando para lembrar da nossa reunião hoje às {hora_agendamento}." },
+        { offset_minutes: 10, message: "Oi {nome}! Nossa reunião começa em 10 minutos. Te aguardo!" },
+      ]);
+    }
+  }, [contact?.id, contact?.phone, contact?.name]);
+
+  const leadIdRef = useRef(lead?.id);
+  useEffect(() => { leadIdRef.current = lead?.id; }, [lead?.id]);
+
+  // Consulta agendamentos confirmados do contato
+  const fetchAppointments = useCallback(async () => {
+    if (!clientId || (!contactJid && !contactPhone && !leadIdRef.current)) {
+      setAppointments([]);
+      return;
+    }
+    const jid = contactJid || (contactPhone ? (contactPhone.includes("@") ? contactPhone : `${contactPhone.replace(/\D/g, "")}@s.whatsapp.net`) : "");
+    const params = new URLSearchParams();
+    if (jid) params.set("remote_jid", jid);
+    if (leadIdRef.current) params.set("lead_id", String(leadIdRef.current));
+    params.set("status", "confirmed");
+
+    try {
+      setLoadingAppointments(true);
+      const res = await fetch(`/api/appointments?${params.toString()}`, { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data && data.ok && Array.isArray(data.appointments)) {
+        setAppointments(data.appointments);
+      }
+    } catch {
+      // Falhas secundárias de rede não bloqueiam o painel
+    } finally {
+      setLoadingAppointments(false);
+    }
+  }, [clientId, contactJid, contactPhone]);
+
+  useEffect(() => {
+    void fetchAppointments();
+  }, [fetchAppointments]);
+
+  // Próxima reunião confirmada
+  const activeMeeting = appointments.find((a) => {
+    if (a.status !== "confirmed") return false;
+    const t = new Date(a.start_at).getTime();
+    return Number.isFinite(t) && t > Date.now() - 30 * 60 * 1000;
+  });
+
+  const handleAddPresetReminder = (offsetMinutes: number) => {
+    if (reminders.some((r) => r.offset_minutes === offsetMinutes)) return;
+    const newRem: ReminderItem = {
+      offset_minutes: offsetMinutes,
+      message: getDefaultReminderMessage(offsetMinutes),
+    };
+    setReminders((prev) => [...prev, newRem].sort((a, b) => b.offset_minutes - a.offset_minutes));
+  };
+
+  const handleRemoveReminder = (idx: number) => {
+    setReminders((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const handleUpdateReminderMessage = (idx: number, message: string) => {
+    setReminders((prev) => prev.map((r, i) => (i === idx ? { ...r, message } : r)));
+  };
+
+  const handleScheduleMeeting = async () => {
+    if (!contact || !clientId) return;
+    if (!meetingDate) {
+      toast.error("Informe a data e horário da reunião.");
+      return;
+    }
+    const start = new Date(meetingDate);
+    if (isNaN(start.getTime()) || start.getTime() < Date.now() - 5 * 60 * 1000) {
+      toast.error("Selecione um horário futuro para a reunião.");
+      return;
+    }
+    const end = new Date(start.getTime() + meetingDuration * 60 * 1000);
+
+    const jid = contact.remote_jid || (contact.phone ? (contact.phone.includes("@") ? contact.phone : `${contact.phone.replace(/\D/g, "")}@s.whatsapp.net`) : "");
+    if (!jid) {
+      toast.error("Contato sem número de WhatsApp identificado.");
+      return;
+    }
+
+    const activeInstance = instanceName || sessionInstanceName || "sdr";
+
+    const validReminders = reminders
+      .filter((r) => Number.isFinite(r.offset_minutes) && r.offset_minutes > 0 && r.message?.trim())
+      .map((r) => ({ offset_minutes: r.offset_minutes, message: r.message.trim() }));
+
+    const resolvedTitle = meetingTitle.trim() || `Reunião com ${contact.name || contact.phone || "Lead"}`;
+
+    const payload = {
+      title: resolvedTitle,
+      remote_jid: jid,
+      instance_name: activeInstance,
+      agent_id: assignedAgentId ? Number(assignedAgentId) : (aiAgents[0]?.id ? Number(aiAgents[0].id) : null),
+      lead_id: lead?.id ?? null,
+      start_at: start.toISOString(),
+      end_at: end.toISOString(),
+      service_name: resolvedTitle,
+      metadata: {
+        custom_reminders: validReminders,
+        attendee_name: contact.name || contact.phone || "Lead",
+      },
+      sync_google: true,
+    };
+
+    setSavingAppointment(true);
+    try {
+      const res = await fetch("/api/appointments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || "Não foi possível agendar a reunião.");
+      }
+      toast.success(
+        validReminders.length > 0
+          ? `Reunião agendada! ${validReminders.length} aviso(s) automático(s) ativado(s).`
+          : "Reunião agendada com sucesso!"
+      );
+      setIsSchedulingOpen(false);
+      await fetchAppointments();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Erro ao agendar reunião.";
+      toast.error(message);
+    } finally {
+      setSavingAppointment(false);
+    }
+  };
+
+  const handleCancelMeeting = async (appointmentId: string) => {
+    setCancellingAppointmentId(appointmentId);
+    try {
+      const res = await fetch(`/api/appointments/${appointmentId}`, {
+        method: "DELETE",
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || "Erro ao cancelar reunião");
+      }
+      toast.success("Reunião cancelada!");
+      await fetchAppointments();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Não foi possível cancelar a reunião.";
+      toast.error(message);
+    } finally {
+      setCancellingAppointmentId(null);
+    }
+  };
 
   useEffect(() => {
     const request = ++crmRequest.current;
@@ -490,6 +754,305 @@ function ContactSidebarContent({ contact, clientId, aiAgents = [], onContactUpda
                   >
                     Criar Lead no Kanban
                   </Button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <hr className="border-border/60" />
+
+          {/* Seção de Reunião & Lembretes Automáticos */}
+          <div>
+            <div className={styles.contactHeading}>
+              <Calendar className="h-3.5 w-3.5 text-primary" />
+              Reunião & Lembretes
+            </div>
+
+            <div className="mt-3 space-y-2.5">
+              {loadingAppointments && appointments.length === 0 ? (
+                <p className="text-xs text-muted-foreground" role="status">
+                  Consultando agendamentos...
+                </p>
+              ) : activeMeeting && !isSchedulingOpen ? (
+                /* Card de Reunião Confirmada */
+                <div className="rounded-lg bg-emerald-500/[0.04] border border-emerald-500/20 p-3 space-y-2.5">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-400 border border-emerald-500/20">
+                          <Check className="h-2.5 w-2.5" />
+                          Reunião Confirmada
+                        </span>
+                      </div>
+                      <p className="text-xs font-semibold text-foreground mt-1.5 break-words">
+                        {activeMeeting.title}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 text-xs text-foreground/90 font-medium bg-muted/60 rounded-md px-2.5 py-1.5 border border-border/60">
+                    <Clock className="h-3.5 w-3.5 text-primary shrink-0" />
+                    <span>{formatMeetingDateBR(activeMeeting.start_at)}</span>
+                  </div>
+
+                  {/* Lembretes Configurados */}
+                  <div className="space-y-1">
+                    <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+                      <Bell className="h-2.5 w-2.5 text-primary" />
+                      Avisos automáticos (WhatsApp):
+                    </span>
+                    {activeMeeting.metadata?.custom_reminders && activeMeeting.metadata.custom_reminders.length > 0 ? (
+                      <div className="space-y-1">
+                        {activeMeeting.metadata.custom_reminders.map((rem, idx) => {
+                          const sent = activeMeeting.reminders_sent?.includes(`${rem.offset_minutes}min`);
+                          return (
+                            <div
+                              key={idx}
+                              className="flex items-center justify-between text-[11px] rounded bg-muted/40 px-2 py-1 border border-border/40"
+                            >
+                              <span className="text-muted-foreground">
+                                {formatOffsetLabel(rem.offset_minutes)}
+                              </span>
+                              {sent ? (
+                                <span className="text-[10px] font-medium text-emerald-400 flex items-center gap-0.5">
+                                  <Check className="h-2.5 w-2.5" /> Enviado
+                                </span>
+                              ) : (
+                                <span className="text-[10px] text-amber-400/90 flex items-center gap-0.5">
+                                  <Clock className="h-2.5 w-2.5" /> Agendado
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="text-[10px] text-muted-foreground italic">
+                        Sem avisos automáticos customizados.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2 pt-1">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      data-compact="true"
+                      className="flex-1 text-xs text-red-400 hover:text-red-300 hover:bg-red-500/10 border-red-500/20 cursor-pointer"
+                      onClick={() => handleCancelMeeting(activeMeeting.id)}
+                      disabled={cancellingAppointmentId === activeMeeting.id}
+                    >
+                      {cancellingAppointmentId === activeMeeting.id ? "Cancelando..." : "Cancelar Reunião"}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      data-compact="true"
+                      className="text-xs text-muted-foreground hover:text-foreground cursor-pointer"
+                      onClick={() => setIsSchedulingOpen(true)}
+                    >
+                      + Nova
+                    </Button>
+                  </div>
+                </div>
+              ) : !isSchedulingOpen ? (
+                /* Botão para abrir o formulário quando não há reunião */
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="w-full text-xs font-medium border-border/80 hover:bg-muted cursor-pointer flex items-center justify-center gap-1.5"
+                  onClick={() => setIsSchedulingOpen(true)}
+                >
+                  <Calendar className="h-3.5 w-3.5 text-primary" />
+                  Agendar Reunião com Lead
+                </Button>
+              ) : (
+                /* Formulário de Agendamento */
+                <div className="rounded-lg bg-muted/40 border border-border/80 p-3 space-y-3">
+                  <div>
+                    <label htmlFor="meeting-title-input" className="text-[11px] font-medium text-muted-foreground block mb-1">
+                      Assunto / Título
+                    </label>
+                    <input
+                      id="meeting-title-input"
+                      type="text"
+                      value={meetingTitle}
+                      onChange={(e) => setMeetingTitle(e.target.value)}
+                      placeholder="Ex: Reunião de Apresentação"
+                      className="w-full text-xs bg-card border border-border/80 rounded-md px-2.5 py-1.5 text-foreground placeholder-muted-foreground focus:outline-none focus:border-primary/50"
+                    />
+                  </div>
+
+                  <div>
+                    <label htmlFor="meeting-datetime-input" className="text-[11px] font-medium text-muted-foreground block mb-1">
+                      Data e Horário
+                    </label>
+                    <input
+                      id="meeting-datetime-input"
+                      type="datetime-local"
+                      value={meetingDate}
+                      onChange={(e) => setMeetingDate(e.target.value)}
+                      min={new Date().toISOString().slice(0, 16)}
+                      className="w-full text-xs bg-card border border-border/80 rounded-md px-2.5 py-1.5 text-foreground focus:outline-none focus:border-primary/50"
+                    />
+                  </div>
+
+                  {/* Lembretes WhatsApp */}
+                  <div className="space-y-2 pt-1 border-t border-border/50">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-medium text-muted-foreground flex items-center gap-1">
+                        <Bell className="h-3 w-3 text-primary" />
+                        Avisos WhatsApp Automáticos
+                      </span>
+                      <span className="text-[10px] text-muted-foreground/70">
+                        {reminders.length} {reminders.length === 1 ? "aviso" : "avisos"}
+                      </span>
+                    </div>
+
+                    {/* Chips de adição rápida */}
+                    <div className="flex flex-wrap items-center gap-1">
+                      {[
+                        { label: "+ 10 min", min: 10 },
+                        { label: "+ 30 min", min: 30 },
+                        { label: "+ 1h", min: 60 },
+                        { label: "+ 2h", min: 120 },
+                        { label: "+ 1 dia", min: 1440 },
+                      ].map((chip) => {
+                        const added = reminders.some((r) => r.offset_minutes === chip.min);
+                        return (
+                          <button
+                            key={chip.min}
+                            type="button"
+                            data-compact="true"
+                            onClick={() => handleAddPresetReminder(chip.min)}
+                            disabled={added}
+                            className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors cursor-pointer ${
+                              added
+                                ? "bg-muted text-muted-foreground/40 border-border/30 cursor-not-allowed"
+                                : "bg-card text-foreground border-border/70 hover:bg-primary/10 hover:border-primary/40 hover:text-primary"
+                            }`}
+                          >
+                            {chip.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Lista de lembretes configurados */}
+                    {reminders.length === 0 ? (
+                      <p className="text-[10px] text-muted-foreground/70 italic py-1">
+                        Nenhum aviso configurado. Use os botões acima para adicionar.
+                      </p>
+                    ) : (
+                      <div className="space-y-1.5 max-h-48 overflow-y-auto pr-0.5">
+                        {reminders.map((rem, idx) => (
+                          <div
+                            key={idx}
+                            className="rounded-md border border-border/70 bg-card p-2 space-y-1.5 text-xs"
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="font-semibold text-primary text-[11px] flex items-center gap-1">
+                                <Clock className="h-3 w-3" />
+                                {formatOffsetLabel(rem.offset_minutes)}
+                              </span>
+                              <button
+                                type="button"
+                                data-compact="true"
+                                onClick={() => handleRemoveReminder(idx)}
+                                className="text-muted-foreground hover:text-red-400 p-0.5 cursor-pointer"
+                                aria-label={`Remover aviso de ${formatOffsetLabel(rem.offset_minutes)}`}
+                              >
+                                <Trash2 className="h-3 w-3" />
+                              </button>
+                            </div>
+                            <textarea
+                              value={rem.message}
+                              onChange={(e) => handleUpdateReminderMessage(idx, e.target.value)}
+                              rows={2}
+                              aria-label={`Mensagem do aviso de ${formatOffsetLabel(rem.offset_minutes)}`}
+                              placeholder="Mensagem do aviso..."
+                              className="w-full resize-none rounded border border-border/60 bg-muted/60 p-1.5 text-[11px] text-foreground placeholder-muted-foreground/70 outline-none focus:border-primary/50"
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Outro horário customizado */}
+                    {showCustomOffset ? (
+                      <div className="flex items-center gap-1.5 pt-1">
+                        <input
+                          type="number"
+                          min={1}
+                          max={10080}
+                          value={customMinutes}
+                          onChange={(e) => setCustomMinutes(Math.max(1, Number(e.target.value)))}
+                          className="w-16 rounded border border-border bg-card px-2 py-0.5 text-xs text-foreground outline-none"
+                          placeholder="Min"
+                        />
+                        <span className="text-[10px] text-muted-foreground">min antes</span>
+                        <button
+                          type="button"
+                          data-compact="true"
+                          onClick={() => {
+                            if (customMinutes > 0) {
+                              handleAddPresetReminder(customMinutes);
+                              setShowCustomOffset(false);
+                            }
+                          }}
+                          className="text-[10px] px-2 py-0.5 rounded bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer font-medium"
+                        >
+                          Adicionar
+                        </button>
+                        <button
+                          type="button"
+                          data-compact="true"
+                          onClick={() => setShowCustomOffset(false)}
+                          className="text-[10px] text-muted-foreground hover:text-foreground cursor-pointer"
+                        >
+                          Cancelar
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        data-compact="true"
+                        onClick={() => setShowCustomOffset(true)}
+                        className="text-[10px] text-primary hover:underline cursor-pointer flex items-center gap-0.5"
+                      >
+                        + Outro horário
+                      </button>
+                    )}
+
+                    <p className="text-[10px] text-muted-foreground/70 leading-tight">
+                      Tags: <code className="text-primary">{`{nome}`}</code>, <code className="text-primary">{`{hora_agendamento}`}</code>, <code className="text-primary">{`{data_agendamento}`}</code>
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 pt-1">
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="flex-1 text-xs bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"
+                      onClick={handleScheduleMeeting}
+                      disabled={savingAppointment || !meetingDate}
+                    >
+                      {savingAppointment ? "Agendando..." : "Agendar e Ativar Avisos"}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="text-xs text-muted-foreground hover:text-foreground cursor-pointer"
+                      onClick={() => setIsSchedulingOpen(false)}
+                      disabled={savingAppointment}
+                    >
+                      Fechar
+                    </Button>
+                  </div>
                 </div>
               )}
             </div>

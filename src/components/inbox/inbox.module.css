@@ -268,7 +268,8 @@
   min-height: 34px;
 }
 
-.contact button[aria-label^="Remover tag"] {
+.contact button[aria-label^="Remover tag"],
+.contact button[data-compact="true"] {
   min-height: 24px;
   min-width: 24px;
 }

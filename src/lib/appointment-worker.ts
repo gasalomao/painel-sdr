@@ -178,20 +178,23 @@ export async function tickReminders(): Promise<{ checked: number; sent: number; 
   for (const appt of (appts || []) as AppointmentRow[]) {
     // Pula shadow rows do google_sync (não têm remote_jid real)
     if (!appt.remote_jid || appt.remote_jid.startsWith("google:")) continue;
-    if (!appt.agent_id || !appt.instance_name) continue;
+    if (!appt.instance_name) continue;
     if (!(await isInstanceOwnedByClient(appt.instance_name, appt.client_id))) {
       errors++;
       console.error(`[appointment-worker] instância "${appt.instance_name}" não pertence ao client_id do appointment ${appt.id}`);
       continue;
     }
 
-    // Lê config de reminders do agente
-    const { data: ag } = await supabase
-      .from("agent_settings")
-      .select("scheduler_config")
-      .eq("id", appt.agent_id)
-      .maybeSingle();
-    const cfg: SchedulerConfig = (ag?.scheduler_config || {}) as any;
+    // Lê config de reminders do agente (se houver)
+    let cfg: SchedulerConfig = {};
+    if (appt.agent_id) {
+      const { data: ag } = await supabase
+        .from("agent_settings")
+        .select("scheduler_config")
+        .eq("id", appt.agent_id)
+        .maybeSingle();
+      cfg = (ag?.scheduler_config || {}) as any;
+    }
 
     // Reminders: prioriza CUSTOM do appointment (override por sessão — quando
     // o dono define "esse agendamento aqui tem lembrete 2h antes + 10min"),
