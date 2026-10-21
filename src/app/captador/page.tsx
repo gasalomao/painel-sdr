@@ -14,10 +14,11 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import {
-  MapPin, Rocket, Square, Webhook, Filter, Loader2, CheckCircle2, XCircle, Terminal,
+  MapPin, Rocket, Square, Webhook, Filter, Loader2, CheckCircle2, XCircle, Terminal, Bot, ChevronRight,
   Download, Trash2, Send, ToggleLeft, Eye, Star, Clock, Image as ImageIcon, Link2, MapPinned, MessageSquare, Building2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { parseMinReviews } from "@/lib/scraper-review-count";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
@@ -107,6 +108,19 @@ export default function CaptadorPage() {
   const [filterDuplicates, setFilterDuplicates] = useState(true);
   const [filterLandlines, setFilterLandlines] = useState(false);
   const [captureAllReviews, setCaptureAllReviews] = useState(false);
+  const [filterWithWebsite, setFilterWithWebsite] = useState(false);
+  const [filterWithInstagram, setFilterWithInstagram] = useState(false);
+  const [minReviews, setMinReviews] = useState("0");
+  const [minReviewsError, setMinReviewsError] = useState(false);
+  const [limitEnabled, setLimitEnabled] = useState(true);
+  const [maxLeads, setMaxLeads] = useState("50");
+  const [maxLeadsError, setMaxLeadsError] = useState(false);
+  const [reviewsAiEnabled, setReviewsAiEnabled] = useState(false);
+  const [reviewsAiModel, setReviewsAiModel] = useState("");
+  const [reviewsAiPrompt, setReviewsAiPrompt] = useState("");
+  const [aiModels, setAiModels] = useState<{ id: string; name?: string }[]>([]);
+  const [loadingAiModels, setLoadingAiModels] = useState(false);
+  const [aiModelsError, setAiModelsError] = useState("");
   const [activeTab, setActiveTab] = useState<"config" | "leads">("config");
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -162,7 +176,46 @@ export default function CaptadorPage() {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
 
+  useEffect(() => {
+    if (!reviewsAiEnabled) return;
+    const controller = new AbortController();
+    setLoadingAiModels(true);
+    setAiModelsError("");
+    fetch("/api/ai-models", { signal: controller.signal })
+      .then(async response => {
+        const data = await response.json();
+        if (!response.ok || !data.success || !Array.isArray(data.models)) {
+          throw new Error(data.error || "Não foi possível carregar os modelos de IA.");
+        }
+        if (controller.signal.aborted) return;
+        const models: { id: string; name?: string }[] = data.models.filter(
+          (model: { id?: unknown } | null) => model && typeof model.id === "string",
+        );
+        setAiModels(models);
+        setReviewsAiModel(current => models.some(model => model.id === current) ? current : models[0]?.id || "");
+        if (!models.length) setAiModelsError("Sem modelos disponíveis. Configure a IA antes de ativar o resumo.");
+      })
+      .catch((error: Error) => {
+        if (controller.signal.aborted) return;
+        setAiModels([]);
+        setReviewsAiModel("");
+        setAiModelsError(error.message);
+      })
+      .finally(() => { if (!controller.signal.aborted) setLoadingAiModels(false); });
+    return () => controller.abort();
+  }, [reviewsAiEnabled]);
+
   async function handleStart() {
+    const minimum = parseMinReviews(minReviews.trim() === "" ? null : Number(minReviews));
+    const goal = limitEnabled ? Number(maxLeads) : 0;
+    const invalidGoal = limitEnabled && (maxLeads.trim() === "" || !Number.isInteger(goal) || goal < 1 || goal > 5000);
+    setMinReviewsError(minimum === null);
+    setMaxLeadsError(invalidGoal);
+    if (minimum === null || invalidGoal) return;
+    if (reviewsAiEnabled && (loadingAiModels || !reviewsAiModel)) {
+      addLog("Selecione um modelo de IA para resumir as avaliações.", "error");
+      return;
+    }
     const nicheList = niches.split("\n").map((n) => n.trim()).filter(Boolean);
     const regionList = regions.split("\n").map((r) => r.trim()).filter(Boolean);
     if (!nicheList.length || !regionList.length) {
@@ -184,7 +237,14 @@ export default function CaptadorPage() {
           filterEmpty,
           filterDuplicates,
           filterLandlines,
+          filterWithWebsite,
+          filterWithInstagram,
+          minReviews: minimum,
+          maxLeads: goal,
           captureAllReviews,
+          reviews_ai: reviewsAiEnabled
+            ? { enabled: true, model: reviewsAiModel, prompt: reviewsAiPrompt || null }
+            : undefined,
         }),
       });
       const data = await res.json();
@@ -411,12 +471,12 @@ export default function CaptadorPage() {
               <CardContent className="space-y-4">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
-                    <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 block">Nichos (um por linha)</label>
-                    <Textarea placeholder={"Contabilidade\nAdvocacia\nPsicologia"} value={niches} onChange={(e) => setNiches(e.target.value)} className="h-32 bg-secondary/50 border-border/50 text-sm resize-none" />
+                    <label htmlFor="captador-niches" className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 block">Nichos (um por linha)</label>
+                    <Textarea id="captador-niches" disabled={isRunning} placeholder={"Contabilidade\nAdvocacia\nPsicologia"} value={niches} onChange={(e) => setNiches(e.target.value)} className="h-32 bg-secondary/50 border-border/50 text-sm resize-none" />
                   </div>
                   <div>
-                    <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 block">Regiões (uma por linha)</label>
-                    <Textarea placeholder={"São Paulo SP\nSerra ES\nVitória ES"} value={regions} onChange={(e) => setRegions(e.target.value)} className="h-32 bg-secondary/50 border-border/50 text-sm resize-none" />
+                    <label htmlFor="captador-regions" className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 block">Regiões (uma por linha)</label>
+                    <Textarea id="captador-regions" disabled={isRunning} placeholder={"São Paulo SP\nSerra ES\nVitória ES"} value={regions} onChange={(e) => setRegions(e.target.value)} className="h-32 bg-secondary/50 border-border/50 text-sm resize-none" />
                   </div>
                 </div>
 
@@ -425,40 +485,86 @@ export default function CaptadorPage() {
 
                 {/* Filters */}
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between gap-3 mb-1">
-                    <div className="flex items-center gap-1.5">
-                      <Filter className="w-3 h-3 text-muted-foreground" />
-                      <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Filtros Automáticos</label>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <label htmlFor="capture-all-reviews" className="text-xs text-muted-foreground cursor-pointer">Capturar todas as avaliações</label>
-                      <Switch id="capture-all-reviews" checked={captureAllReviews} onCheckedChange={setCaptureAllReviews} size="sm" />
-                    </div>
+                  <div className="flex items-center gap-1.5">
+                    <Filter className="w-3 h-3 text-muted-foreground" />
+                    <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Filtros Automáticos</h3>
                   </div>
-                  <p className="text-[11px] text-muted-foreground/80">Quando ativado, carrega e salva todos os comentários e avaliações disponíveis no Google Maps. A captação pode levar mais tempo.</p>
+                  <div className="space-y-1">
+                    <label htmlFor="captador-min-reviews" className="text-xs text-muted-foreground">Mínimo de avaliações no Google</label>
+                    <Input id="captador-min-reviews" disabled={isRunning} type="number" min={0} step={1} max={2147483647}
+                      value={minReviews} onChange={e => { setMinReviews(e.target.value); setMinReviewsError(false); }}
+                      aria-invalid={minReviewsError}
+                      aria-describedby={`captador-min-reviews-help${minReviewsError ? " captador-min-reviews-error" : ""}`} />
+                    <p id="captador-min-reviews-help" className="text-[11px] text-muted-foreground">Quantidade de pessoas que deram estrelas, com ou sem comentário. Não filtra pela nota. 0 = sem mínimo.</p>
+                    {minReviewsError && <p id="captador-min-reviews-error" role="alert" className="text-xs text-destructive">Informe um inteiro entre 0 e 2147483647.</p>}
+                  </div>
+                  <div className="space-y-1">
+                    <label className="flex items-center justify-between gap-2 p-2 rounded-lg hover:bg-secondary/20 cursor-pointer">
+                      <span className="text-sm">Somente com Instagram</span>
+                      <input type="checkbox" disabled={isRunning} checked={filterWithInstagram} onChange={e => setFilterWithInstagram(e.target.checked)}
+                        aria-describedby="captador-instagram-help" className="w-4 h-4 accent-primary" />
+                    </label>
+                    <p id="captador-instagram-help" className="text-[11px] text-muted-foreground">Exige perfil informado no Google Maps; não busca no site.</p>
+                  </div>
+                  <details className="border-y border-border/50 py-3 space-y-3">
+                    <summary className="flex items-center gap-2 text-xs cursor-pointer"><Bot className="w-4 h-4" /> Avaliações completas e análise com IA <ChevronRight className="w-4 h-4 ml-auto" /></summary>
+                    <div className="flex items-center justify-between gap-2">
+                      <label htmlFor="capture-all-reviews" className="text-xs cursor-pointer">Capturar todas as avaliações</label>
+                      <Switch id="capture-all-reviews" disabled={isRunning} checked={captureAllReviews} onCheckedChange={setCaptureAllReviews} size="sm" />
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">Salva os comentários disponíveis no Google Maps. Esta opção pode aumentar o tempo de captura.</p>
+                    <div className="flex items-center justify-between gap-2">
+                      <label htmlFor="captador-reviews-ai" className="text-xs cursor-pointer">Resumir avaliações com IA</label>
+                      <Switch id="captador-reviews-ai" disabled={isRunning} checked={reviewsAiEnabled} onCheckedChange={enabled => { setReviewsAiEnabled(enabled); if (enabled) setCaptureAllReviews(true); }} size="sm" />
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">Ativa a captura de comentários e gera um resumo por lead após salvar. Disponível no CRM como resumo de avaliações.</p>
+                    {reviewsAiEnabled && (
+                      <div className="space-y-3">
+                        <div className="space-y-1">
+                          <label htmlFor="captador-reviews-model" className="text-xs">Modelo de IA para avaliações</label>
+                          <select id="captador-reviews-model" value={reviewsAiModel} onChange={e => setReviewsAiModel(e.target.value)} disabled={isRunning || loadingAiModels}
+                            className="w-full min-w-0 rounded-md border border-border bg-secondary/50 px-3 py-2 text-sm">
+                            {!aiModels.length && <option value="">{loadingAiModels ? "Carregando…" : "Sem modelos disponíveis"}</option>}
+                            {aiModels.map(model => <option key={model.id} value={model.id}>{model.name || model.id}</option>)}
+                          </select>
+                          {aiModelsError && <p role="alert" className="text-xs text-destructive">{aiModelsError}</p>}
+                        </div>
+                        <div className="space-y-1">
+                          <label htmlFor="captador-reviews-prompt" className="text-xs">Instruções para resumir avaliações</label>
+                          <Textarea id="captador-reviews-prompt" disabled={isRunning} value={reviewsAiPrompt} onChange={e => setReviewsAiPrompt(e.target.value)} rows={3}
+                            placeholder="Vazio usa o padrão: elogios, reclamações, gancho e nota geral." />
+                        </div>
+                      </div>
+                    )}
+                  </details>
                   {[
                     { label: "Remover leads sem telefone", value: filterEmpty, set: setFilterEmpty },
                     { label: "Remover telefones duplicados", value: filterDuplicates, set: setFilterDuplicates },
                     { label: "Remover telefones fixos", value: filterLandlines, set: setFilterLandlines },
+                    { label: "Capturar somente leads sem site", value: filterWithWebsite, set: setFilterWithWebsite },
                   ].map((f) => (
-                    <div 
-                      key={f.label} 
-                      className="flex items-center justify-between p-2 rounded-lg hover:bg-secondary/20 cursor-pointer"
-                      onClick={() => f.set(!f.value)}
-                    >
+                    <label key={f.label} className="flex items-center justify-between gap-2 p-2 rounded-lg hover:bg-secondary/20 cursor-pointer">
                       <span className="text-sm text-foreground/90 select-none flex-1">{f.label}</span>
-                      <input 
-                        type="checkbox" 
-                        checked={f.value} 
-                        onChange={(e) => f.set(e.target.checked)} 
-                        onClick={(e) => e.stopPropagation()}
-                        className="w-4 h-4 accent-primary cursor-pointer"
-                      />
-                    </div>
+                      <input type="checkbox" disabled={isRunning} checked={f.value} onChange={e => f.set(e.target.checked)} className="w-4 h-4 accent-primary cursor-pointer" />
+                    </label>
                   ))}
                 </div>
 
                 <Separator />
+
+                <div className="space-y-2">
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <label htmlFor="captador-limit-enabled" className="text-xs cursor-pointer">Limite de leads</label>
+                    <Switch id="captador-limit-enabled" disabled={isRunning} checked={limitEnabled} onCheckedChange={enabled => { setLimitEnabled(enabled); setMaxLeadsError(false); }} size="sm" />
+                    {limitEnabled && <Input aria-label="Quantidade máxima de leads" disabled={isRunning} type="number" min={1} step={1} max={5000}
+                      value={maxLeads} onChange={e => { setMaxLeads(e.target.value); setMaxLeadsError(false); }} className="w-24"
+                      aria-invalid={maxLeadsError} aria-describedby={`captador-limit-help${maxLeadsError ? " captador-limit-error" : ""}`} />}
+                  </div>
+                  <p id="captador-limit-help" className="text-[11px] text-muted-foreground">{limitEnabled
+                    ? "Continua buscando até atingir a meta de leads aprovados e salvos, com novas tentativas e expansão para cidades próximas. Você pode pausar ou parar."
+                    : "Sem limite definido: encerra ao esgotar as buscas informadas."}</p>
+                  {maxLeadsError && <p id="captador-limit-error" role="alert" className="text-xs text-destructive">Informe um inteiro entre 1 e 5000.</p>}
+                </div>
 
                 <div className="flex flex-col gap-3">
                   <div className="flex gap-2">

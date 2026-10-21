@@ -20,6 +20,49 @@ vi.mock("@/lib/supabase", () => ({
 import AutomacaoPage from "@/app/automacao/page";
 
 const fetchMock = vi.fn<typeof fetch>();
+const minimumLabel = "Mínimo de avaliações no Google";
+const minimumHelper = "Quantidade de pessoas que deram estrelas, com ou sem comentário. Não filtra pela nota. 0 = sem mínimo.";
+const minimumError = "Informe um inteiro entre 0 e 2147483647.";
+const instagramHelper = "Exige perfil informado no Google Maps; não busca no site.";
+const editableAutomation = {
+  id: "auto-1", name: "Padarias", instance_name: "whatsapp-A", status: "paused", phase: "idle",
+  niches: ["padaria"], regions: ["Vitória/ES"], scrape_max_leads: 20, scraped_count: 0,
+  scrape_filters: {
+    filterEmpty: false, filterDuplicates: false, filterLandlines: false,
+    filterWithInstagram: true, filterWithWebsite: true, minReviews: 40,
+    captureAllReviews: false, reviews_ai: { enabled: false, model: "modelo-teste", prompt: null },
+    futurePublicFilter: { mode: "preservar" },
+  },
+  dispatch_template: "Mensagem anterior", followup_enabled: false, followup_steps: [],
+};
+
+function mockAutomationRequests(automations: Record<string, unknown>[] = []): void {
+  fetchMock.mockImplementation(async (input, init) => {
+    if (init?.method === "POST" || init?.method === "PATCH") {
+      return Response.json({ success: true, automation: { id: "nova" } });
+    }
+    if (input === "/api/auth/session") return Response.json({ authenticated: true });
+    if (input === "/api/automations") return Response.json({ success: true, automations });
+    return Response.json({ success: true, instances: [], models: [{ id: "modelo-teste" }] });
+  });
+}
+
+async function openCaptureForm(mode: "create" | "edit"): Promise<void> {
+  mockAutomationRequests(mode === "edit" ? [editableAutomation] : []);
+  render(<AutomacaoPage />);
+  if (mode === "edit") {
+    fireEvent.click(await screen.findByTitle("Editar automação"));
+  } else {
+    fireEvent.click(await screen.findByRole("button", { name: "Nova automação" }));
+    fireEvent.change(screen.getByLabelText("Nome da automação"), { target: { value: "Nova captura" } });
+    const instanceSelect = screen.getByLabelText("Instância WhatsApp");
+    const option = document.createElement("option");
+    option.value = "whatsapp-A";
+    instanceSelect.appendChild(option);
+    fireEvent.change(instanceSelect, { target: { value: "whatsapp-A" } });
+  }
+  fireEvent.click(screen.getByRole("button", { name: /Captação e análise/ }));
+}
 
 beforeEach(() => {
   fetchMock.mockReset();
@@ -46,6 +89,7 @@ describe("edição da automação com checkpoints de captura", () => {
       filterWithWebsite: true,
       filterWithInstagram: true,
       minReviews: 25,
+      futurePublicFilter: { mode: "preservar" },
       captureAllReviews: reviews.enabled,
       reviews_ai: reviews,
     };
@@ -86,7 +130,31 @@ describe("edição da automação com checkpoints de captura", () => {
     fireEvent.click(await screen.findByTitle("Editar automação"));
     fireEvent.click(screen.getByRole("button", { name: /Captação e análise/ }));
     expect(screen.getByRole("checkbox", { name: "Pular sem telefone" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Pular duplicados" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Pular fixos" })).not.toBeChecked();
+    expect(screen.getByRole("spinbutton", { name: minimumLabel })).toHaveValue(25);
+    expect(screen.getByRole("spinbutton", { name: minimumLabel })).toBeDisabled();
+    expect(screen.getByRole("spinbutton", { name: "Limite de leads" })).toHaveValue(20);
+    expect(screen.getByRole("spinbutton", { name: "Limite de leads" })).toBeDisabled();
+    for (const name of ["Somente com Instagram", "Capturar somente leads sem site"]) {
+      expect(screen.getByRole("checkbox", { name })).toBeChecked();
+      expect(screen.getByRole("checkbox", { name })).toBeDisabled();
+    }
+    const captureReviews = screen.getByRole("checkbox", { name: "Capturar todas as avaliações", exact: true });
+    const reviewsAi = screen.getByRole("checkbox", { name: /Resumir avaliações do Google com IA/ });
+    expect(captureReviews).toBeDisabled();
+    expect(reviewsAi).toBeDisabled();
+    expect(captureReviews).toHaveProperty("checked", reviews.enabled);
+    expect(reviewsAi).toHaveProperty("checked", reviews.enabled);
+    if (reviews.enabled) {
+      expect(screen.getByLabelText("Modelo de IA das avaliações")).toHaveValue("modelo-teste");
+      expect(screen.getByLabelText("Modelo de IA das avaliações")).toBeDisabled();
+      expect(screen.getByLabelText(/Prompt das avaliações/)).toHaveValue("Resuma as avaliações");
+      expect(screen.getByLabelText(/Prompt das avaliações/)).toBeDisabled();
+    }
     expect(screen.getByText("A captura já foi iniciada. Crie outra automação para mudar nichos, regiões, filtros ou meta.")).toBeInTheDocument();
+    await act(async () => finishModels(Response.json({ success: true, models: [{ id: "modelo-atrasado" }] })));
+    if (reviews.enabled) expect(screen.getByLabelText("Modelo de IA das avaliações")).toHaveValue("modelo-teste");
     fireEvent.click(screen.getByRole("button", { name: /Mensagem inicial/ }));
     fireEvent.change(screen.getByPlaceholderText("Ex: {{saudacao}} {{nome_empresa}}! Vi vocês no Maps…"), {
       target: { value: "Mensagem revisada" },
@@ -108,8 +176,169 @@ describe("edição da automação com checkpoints de captura", () => {
       ...(source === "prospeccao-sites" ? { _source: source } : {}),
     });
     expect(runtimeFilters).toEqual(originalFilters);
-    await act(async () => finishModels(Response.json({ success: true, models: [{ id: "modelo-atrasado" }] })));
     await waitFor(() => expect(screen.queryByText("Editando automação")).not.toBeInTheDocument());
+  });
+
+  it("não injeta defaults nem normaliza filtros legados de uma captura bloqueada", async () => {
+    const scrapeFilters = {
+      minReviews: "legado", reviews_ai: { enabled: true, prompt: "Não alterar" },
+      futurePublicFilter: { mode: "preservar" }, _captureSessionId: "session-legada", _futureMarker: 7,
+    };
+    mockAutomationRequests([{ ...editableAutomation, scrape_filters: scrapeFilters }]);
+    render(<AutomacaoPage />);
+    fireEvent.click(await screen.findByTitle("Editar automação"));
+    fireEvent.click(screen.getByRole("button", { name: /Captação e análise/ }));
+    expect(screen.getByRole("spinbutton", { name: minimumLabel })).toBeDisabled();
+    for (const name of ["Pular sem telefone", "Pular duplicados", "Pular fixos", "Somente com Instagram", "Capturar somente leads sem site", "Capturar todas as avaliações"]) {
+      expect(screen.getByRole("checkbox", { name, exact: true })).not.toBeChecked();
+      expect(screen.getByRole("checkbox", { name, exact: true })).toBeDisabled();
+    }
+    expect(screen.getByRole("checkbox", { name: /Resumir avaliações do Google com IA/ })).toBeChecked();
+    expect(screen.getByLabelText("Modelo de IA das avaliações")).toHaveValue("");
+    expect(screen.getByLabelText("Modelo de IA das avaliações")).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Salvar Rascunho" }));
+
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(1));
+    const [, init] = fetchMock.mock.calls.find(([, init]) => init?.method === "PATCH")!;
+    expect(JSON.parse(String(init?.body)).scrape_filters).toEqual({
+      minReviews: "legado", reviews_ai: { enabled: true, prompt: "Não alterar" },
+      futurePublicFilter: { mode: "preservar" },
+    });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("oferece os filtros acessíveis e mantém os defaults e a explicação de continuidade", async () => {
+    await openCaptureForm("create");
+    const minimum = screen.getByRole("spinbutton", { name: minimumLabel });
+    expect(minimum).toHaveValue(0);
+    expect(minimum).toHaveAttribute("min", "0");
+    expect(minimum).toHaveAttribute("step", "1");
+    expect(minimum).toHaveAttribute("max", "2147483647");
+    expect(minimum).toHaveAccessibleDescription(minimumHelper);
+    const instagram = screen.getByRole("checkbox", { name: "Somente com Instagram" });
+    expect(instagram).not.toBeChecked();
+    expect(instagram).toHaveAccessibleDescription(instagramHelper);
+    expect(screen.getByRole("checkbox", { name: "Capturar somente leads sem site" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Capturar todas as avaliações", exact: true })).not.toBeChecked();
+    for (const name of ["Pular sem telefone", "Pular duplicados", "Pular fixos"]) {
+      expect(screen.getByRole("checkbox", { name })).toBeChecked();
+    }
+    expect(screen.getByRole("spinbutton", { name: "Limite de leads" })).toHaveValue(100);
+    expect(screen.getByText(/somente leads elegíveis e salvos contam/i)).toHaveTextContent(/continua.*abaixo da meta/i);
+    fireEvent.click(screen.getByRole("button", { name: "Salvar Rascunho" }));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1));
+    const [, init] = fetchMock.mock.calls.find(([, init]) => init?.method === "POST")!;
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      scrape_max_leads: 100,
+      scrape_filters: {
+        filterEmpty: true, filterDuplicates: true, filterLandlines: true,
+        minReviews: 0, filterWithInstagram: false, filterWithWebsite: false,
+        captureAllReviews: false, reviews_ai: { enabled: false },
+      },
+    });
+  });
+
+  it.each(["create", "edit"] as const)("persiste os filtros da referência ao salvar no modo %s", async mode => {
+    await openCaptureForm(mode);
+    if (mode === "edit") {
+      expect(screen.getByRole("spinbutton", { name: minimumLabel })).toHaveValue(40);
+      expect(screen.getByRole("checkbox", { name: "Somente com Instagram" })).toBeChecked();
+      expect(screen.getByRole("checkbox", { name: "Capturar somente leads sem site" })).toBeChecked();
+    }
+    fireEvent.change(screen.getByRole("spinbutton", { name: minimumLabel }), { target: { value: "25" } });
+    const filters = [
+      ["Pular sem telefone", true], ["Pular duplicados", false], ["Pular fixos", false],
+      ["Somente com Instagram", true], ["Capturar somente leads sem site", true],
+    ] as const;
+    for (const [name, checked] of filters) {
+      const checkbox = screen.getByRole("checkbox", { name }) as HTMLInputElement;
+      if (checkbox.checked !== checked) fireEvent.click(checkbox);
+    }
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Limite de leads" }), { target: { value: "50" } });
+    fireEvent.click(screen.getByRole("button", { name: /Horários e revisão/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Salvar Rascunho" }));
+
+    const method = mode === "edit" ? "PATCH" : "POST";
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => init?.method === method)).toHaveLength(1));
+    const [url, init] = fetchMock.mock.calls.find(([, init]) => init?.method === method)!;
+    const payload = JSON.parse(String(init?.body));
+    expect(url).toBe(mode === "edit" ? "/api/automations/auto-1" : "/api/automations");
+    expect(payload).toMatchObject({
+      scrape_max_leads: 50,
+      scrape_filters: {
+        minReviews: 25, filterWithInstagram: true, filterWithWebsite: true,
+        filterEmpty: true, filterDuplicates: false, filterLandlines: false,
+        captureAllReviews: false, reviews_ai: { enabled: false },
+      },
+    });
+    if (mode === "edit") expect(payload.scrape_filters.futurePublicFilter).toEqual({ mode: "preservar" });
+  });
+
+  it.each((["create", "edit"] as const).flatMap(mode => ["0", "25", "2147483647"].map(value => ({ mode, value }))))(
+    "aceita mínimo $value sem ativar avaliações/IA no modo $mode", async ({ mode, value }) => {
+      await openCaptureForm(mode);
+      fireEvent.change(screen.getByRole("spinbutton", { name: minimumLabel }), { target: { value } });
+      fireEvent.click(screen.getByRole("button", { name: "Salvar Rascunho" }));
+      const method = mode === "edit" ? "PATCH" : "POST";
+      await waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => init?.method === method)).toHaveLength(1));
+      const [, init] = fetchMock.mock.calls.find(([, init]) => init?.method === method)!;
+      expect(JSON.parse(String(init?.body)).scrape_filters).toMatchObject({
+        minReviews: Number(value), captureAllReviews: false, reviews_ai: { enabled: false },
+      });
+    },
+  );
+
+  it.each((["create", "edit"] as const).flatMap(mode => ["", "-1", "1.5", "2147483648", "1e309", "abc"].map(value => ({ mode, value }))))(
+    "bloqueia mínimo inválido '$value' de outra etapa e limpa o erro ao corrigir no modo $mode", async ({ mode, value }) => {
+      await openCaptureForm(mode);
+      const minimum = screen.getByRole("spinbutton", { name: minimumLabel });
+      fireEvent.change(minimum, { target: { value } });
+      fireEvent.click(screen.getByRole("button", { name: /Mensagem inicial/ }));
+      fireEvent.click(screen.getByRole("button", { name: "Salvar Rascunho" }));
+      expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST" || init?.method === "PATCH")).toHaveLength(0);
+      expect(screen.getByRole("region", { name: "Captação e análise" })).toBeVisible();
+      expect(minimum).toHaveAttribute("aria-invalid", "true");
+      expect(minimum).toHaveAccessibleDescription(`${minimumHelper} ${minimumError}`);
+      expect(screen.getByRole("alert")).toHaveTextContent(minimumError);
+      expect(screen.getByRole("checkbox", { name: "Capturar todas as avaliações", exact: true })).not.toBeChecked();
+      expect(screen.getByRole("checkbox", { name: /Resumir avaliações do Google com IA/ })).not.toBeChecked();
+      fireEvent.click(screen.getByRole("button", { name: /Mensagem inicial/ }));
+      fireEvent.click(screen.getByRole("button", { name: "Salvar e Iniciar" }));
+      expect(screen.getByRole("region", { name: "Captação e análise" })).toBeVisible();
+      expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST" || init?.method === "PATCH")).toHaveLength(0);
+      fireEvent.change(minimum, { target: { value: "25" } });
+      expect(minimum).toHaveAttribute("aria-invalid", "false");
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Salvar Rascunho" }));
+      const method = mode === "edit" ? "PATCH" : "POST";
+      await waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => init?.method === method)).toHaveLength(1));
+    },
+  );
+
+  it.each([false, true])("permite avaliações completas com IA=%s sem acoplar os demais filtros", async withAi => {
+    await openCaptureForm("create");
+    const fullReviews = screen.getByRole("checkbox", { name: "Capturar todas as avaliações", exact: true });
+    const reviewsAi = screen.getByRole("checkbox", { name: /Resumir avaliações do Google com IA/ });
+    fireEvent.click(fullReviews);
+    expect(fullReviews).toBeChecked();
+    expect(reviewsAi).not.toBeChecked();
+    fireEvent.click(fullReviews);
+    expect(fullReviews).not.toBeChecked();
+    fireEvent.click(reviewsAi);
+    expect(fullReviews).toBeChecked();
+    fireEvent.change(screen.getByLabelText(/Prompt das avaliações/), { target: { value: "Resuma elogios e reclamações" } });
+    if (!withAi) fireEvent.click(reviewsAi);
+    expect(fullReviews).toBeChecked();
+    expect(screen.getByRole("spinbutton", { name: minimumLabel })).toHaveValue(0);
+    expect(screen.getByRole("checkbox", { name: "Somente com Instagram" })).not.toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Salvar Rascunho" }));
+
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1));
+    const [, init] = fetchMock.mock.calls.find(([, init]) => init?.method === "POST")!;
+    expect(JSON.parse(String(init?.body)).scrape_filters).toMatchObject({
+      captureAllReviews: true,
+      reviews_ai: { enabled: withAi, model: "modelo-teste", prompt: "Resuma elogios e reclamações" },
+    });
   });
 
   it("preserva todos os ajustes ao navegar pelas etapas e criar um rascunho", async () => {

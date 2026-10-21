@@ -9,6 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
+import { parseMinReviews } from "@/lib/scraper-review-count";
 import {
   Play, Pause, Trash2, Plus, Loader2, ChevronDown, ChevronRight, ChevronLeft, X,
   CheckCircle2, XCircle, Bot, MapPin, Zap, Repeat, Clock, Save, AlertTriangle, Pencil,
@@ -73,6 +74,9 @@ type GeminiModel = { id: string; name?: string; version?: string; description?: 
 // (que consulta a API da Google). Modelos novos aparecem automaticamente
 // sem deploy. Se a API falhar, dropdown fica vazio + aviso pro user.
 const FALLBACK_MODELS: GeminiModel[] = [];
+const MIN_REVIEWS_HELP = "Quantidade de pessoas que deram estrelas, com ou sem comentário. Não filtra pela nota. 0 = sem mínimo.";
+const MIN_REVIEWS_ERROR = "Informe um inteiro entre 0 e 2147483647.";
+const INSTAGRAM_FILTER_HELP = "Exige perfil informado no Google Maps; não busca no site.";
 
 // safeJson: parse defensivo. Se a rota retornar HTML (404 do Next, redirect,
 // página de erro), `r.json()` joga "Unexpected token '<'". Isso aqui captura
@@ -136,6 +140,8 @@ export default function AutomacaoPage() {
   // O array final só é calculado no momento de salvar.
   const [nichesText, setNichesText] = useState("");
   const [regionsText, setRegionsText] = useState("");
+  const [minReviews, setMinReviews] = useState("0");
+  const [minReviewsError, setMinReviewsError] = useState(false);
   const [formStep, setFormStep] = useState(0);
   const contentRef = useRef<HTMLElement>(null);
   const editorRef = useRef<HTMLDivElement>(null);
@@ -168,7 +174,7 @@ export default function AutomacaoPage() {
       agent_id: null,
       niches: [],
       regions: [],
-      scrape_filters: { filterEmpty: true, filterDuplicates: true, filterLandlines: true, captureAllReviews: false, reviews_ai: { enabled: false, model: null, prompt: null } },
+      scrape_filters: { filterEmpty: true, filterDuplicates: true, filterLandlines: true, minReviews: 0, filterWithInstagram: false, filterWithWebsite: false, captureAllReviews: false, reviews_ai: { enabled: false, model: null, prompt: null } },
       scrape_max_leads: 100,
       dispatch_template: "{{saudacao}} {{nome_empresa}}! Sou da Sarah Tech, vi sua empresa no Maps e queria saber se faz sentido conversarmos sobre [oferta]. Pode ser?",
       // Defaults SEGUROS WhatsApp: 60-180s aleatório (média ~2 min, ~30 envios/h)
@@ -308,6 +314,8 @@ export default function AutomacaoPage() {
     setFormData(blankAutomation());
     setNichesText("");
     setRegionsText("");
+    setMinReviews("0");
+    setMinReviewsError(false);
     setFormStep(0);
     setShowForm(true);
     revealEditor();
@@ -322,6 +330,7 @@ export default function AutomacaoPage() {
         ? { ...a.scrape_filters }
         : {
           filterEmpty: true, filterDuplicates: true, filterLandlines: true,
+          minReviews: 0, filterWithInstagram: false, filterWithWebsite: false,
           ...(a.scrape_filters || {}),
           captureAllReviews: a.scrape_filters?.captureAllReviews ?? false,
           reviews_ai: { enabled: false, model: null, prompt: null, ...(a.scrape_filters?.reviews_ai || {}) },
@@ -330,6 +339,8 @@ export default function AutomacaoPage() {
     });
     setNichesText((a.niches || []).join("\n"));
     setRegionsText((a.regions || []).join("\n"));
+    setMinReviews(String(a.scrape_filters?.minReviews ?? 0));
+    setMinReviewsError(false);
     setFormStep(0);
     setShowForm(true);
     revealEditor();
@@ -341,9 +352,17 @@ export default function AutomacaoPage() {
     setFormData(blankAutomation());
     setNichesText("");
     setRegionsText("");
+    setMinReviews("0");
+    setMinReviewsError(false);
   }
 
   async function saveAutomation(startImmediately: boolean = false) {
+    const minimum = captureLocked ? undefined : parseMinReviews(minReviews.trim() === "" ? null : Number(minReviews));
+    setMinReviewsError(minimum === null);
+    if (minimum === null) {
+      changeStep(1);
+      return;
+    }
     if (!formData.name?.trim() || !formData.instance_name) {
       alert("Preenche nome e instância antes de salvar.");
       return;
@@ -357,6 +376,7 @@ export default function AutomacaoPage() {
       const scrape_filters = Object.fromEntries(Object.entries(formData.scrape_filters || {}).filter(
         ([key, value]) => !key.startsWith("_") || (key === "_source" && value === "prospeccao-sites"),
       ));
+      if (!captureLocked) scrape_filters.minReviews = minimum;
       const payload = { ...formData, niches, regions, scrape_filters };
 
       const url = editingId ? `/api/automations/${editingId}` : "/api/automations";
@@ -564,11 +584,32 @@ export default function AutomacaoPage() {
                       className="bg-black/40 border-white/10 font-mono text-xs" />
                   </div>
                 </div>
+                <div className="space-y-1">
+                  <label htmlFor="automation-min-reviews">Mínimo de avaliações no Google</label>
+                  <Input id="automation-min-reviews" type="number" min={0} step={1} max={2147483647}
+                    value={minReviews} onChange={e => { setMinReviews(e.target.value); setMinReviewsError(false); }}
+                    aria-invalid={minReviewsError}
+                    aria-describedby={`automation-min-reviews-help${minReviewsError ? " automation-min-reviews-error" : ""}`}
+                    className="bg-black/40 border-white/10 h-8 text-xs" />
+                  <p id="automation-min-reviews-help" className={styles.fieldHint}>{MIN_REVIEWS_HELP}</p>
+                  {minReviewsError && <p id="automation-min-reviews-error" role="alert" className="text-xs text-red-400">{MIN_REVIEWS_ERROR}</p>}
+                </div>
+                <div className="space-y-1">
+                  <label htmlFor="automation-with-instagram" className="flex items-center gap-1.5 text-[11px] cursor-pointer">
+                    <input id="automation-with-instagram" type="checkbox"
+                      checked={!!formData.scrape_filters?.filterWithInstagram}
+                      onChange={e => setFormData({ ...formData, scrape_filters: { ...formData.scrape_filters, filterWithInstagram: e.target.checked } })}
+                      aria-describedby="automation-with-instagram-help" />
+                    Somente com Instagram
+                  </label>
+                  <p id="automation-with-instagram-help" className={styles.fieldHint}>{INSTAGRAM_FILTER_HELP}</p>
+                </div>
                 <div className="flex flex-wrap gap-3 items-start">
                   {[
                     { key: "filterEmpty",      label: "Pular sem telefone" },
                     { key: "filterDuplicates", label: "Pular duplicados" },
                     { key: "filterLandlines",  label: "Pular fixos" },
+                    { key: "filterWithWebsite", label: "Capturar somente leads sem site" },
                   ].map(f => (
                     <label key={f.key} className="flex items-center gap-1.5 text-[11px] cursor-pointer">
                       <input type="checkbox"
@@ -584,6 +625,17 @@ export default function AutomacaoPage() {
                       onChange={n => setFormData({ ...formData, scrape_max_leads: n })}
                       className="bg-black/40 border-white/10 h-8 w-20 text-xs" />
                   </div>
+                </div>
+                <p className={styles.fieldHint}>Somente leads elegíveis e salvos contam para o limite. A captura continua enquanto estiver abaixo da meta, retomando ou ampliando a busca antes do disparo.</p>
+                <div className="space-y-1">
+                  <label htmlFor="automation-capture-all-reviews" className="flex items-center gap-1.5 text-[11px] cursor-pointer">
+                    <input id="automation-capture-all-reviews" type="checkbox"
+                      checked={!!formData.scrape_filters?.captureAllReviews}
+                      onChange={e => setFormData({ ...formData, scrape_filters: { ...formData.scrape_filters, captureAllReviews: e.target.checked } })}
+                      aria-describedby="automation-capture-all-reviews-help" />
+                    Capturar todas as avaliações
+                  </label>
+                  <p id="automation-capture-all-reviews-help" className={styles.fieldHint}>Salva os comentários disponíveis no Google Maps. Esta opção pode aumentar o tempo de captura.</p>
                 </div>
 
                 {/* Resumo de avaliações com IA (reviews-ai) */}
@@ -626,6 +678,10 @@ export default function AutomacaoPage() {
                           })}
                           className="w-full mt-0.5 bg-black/40 border border-white/10 rounded-md px-2 h-8 text-xs"
                         >
+                          {formData.scrape_filters?.reviews_ai?.model && !aiModels.some(m => m.id === formData.scrape_filters.reviews_ai.model) && (
+                            <option value={formData.scrape_filters.reviews_ai.model}>{formData.scrape_filters.reviews_ai.model}</option>
+                          )}
+                          {!formData.scrape_filters?.reviews_ai?.model && aiModels.length > 0 && <option value="">(modelo não definido)</option>}
                           {aiModels.length === 0 && <option value="">{loadingAiModels ? "carregando…" : "(sem modelos — configure API key)"}</option>}
                           {aiModels.map((m: any) => <option key={m.id} value={m.id}>{m.name || m.id}{m.provider ? ` (${m.provider})` : ""}</option>)}
                         </select>
