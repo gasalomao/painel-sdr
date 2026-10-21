@@ -1,7 +1,9 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { Autocomplete } from "@base-ui/react/autocomplete";
 import { supabase } from "@/lib/supabase";
+import type { ContactCrmData, ContactCrmLead } from "@/lib/inbox/contact-crm";
 import type { Contact } from "@/types";
 import {
   Phone,
@@ -31,102 +33,134 @@ interface ContactSidebarProps {
   sessionId?: string;
 }
 
-export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpdate, sessionId }: ContactSidebarProps) {
+export function ContactSidebar(props: ContactSidebarProps): React.JSX.Element {
+  const { contact, clientId } = props;
+  return <ContactSidebarContent key={JSON.stringify([clientId, contact?.id, contact?.phone, contact?.remote_jid])} {...props} />;
+}
+
+function ContactSidebarContent({ contact, clientId, aiAgents = [], onContactUpdate, sessionId }: ContactSidebarProps): React.JSX.Element {
+  const mounted = useRef(false);
+  const latestContact = useRef(contact);
+  useEffect(() => { latestContact.current = contact; }, [contact]);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [copied, setCopied] = useState(false);
-  const [loading, setLoading] = useState(false);
-  
-  // Estados para integração com Kanban (leads_extraidos) do Painel-SDR
-  const [lead, setLead] = useState<any | null>(null);
-  const [kanbanColumns, setKanbanColumns] = useState<any[]>([]);
+  // Tags, fotos, anotações e sessão não alteram a identidade do CRM.
+  const contactId = contact?.id;
+  const contactPhone = contact?.phone;
+  const contactJid = contact?.remote_jid;
+  const persistedContactId = contactId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(contactId) ? contactId : null;
+  const crmSelection = JSON.stringify([clientId, contactId, contactPhone, contactJid]);
+  const [crm, setCrm] = useState<(ContactCrmData & { selection: string }) | null>(null);
+  const [crmError, setCrmError] = useState<string | null>(null);
+  const [crmLoading, setCrmLoading] = useState(true);
+  const [crmRetry, setCrmRetry] = useState(0);
   const [updatingLead, setUpdatingLead] = useState(false);
+  const crmRequest = useRef(0);
+  const leadMutation = useRef(false);
+  const currentCrm = crm?.selection === crmSelection ? crm : null;
+  const lead = currentCrm?.lead ?? null;
+  const kanbanColumns = currentCrm?.columns ?? [];
 
   // Estado do Agente de IA atribuído à sessão
   const [assignedAgentId, setAssignedAgentId] = useState<string>("");
   const [updatingAgent, setUpdatingAgent] = useState(false);
 
   // Estados para anotações (campo notes na tabela contacts)
-  const [noteText, setNoteText] = useState("");
+  const contactNotes = (contact as (Contact & { notes?: string }) | null)?.notes || "";
+  const syncedNotes = useRef(contactNotes);
+  const [noteText, setNoteText] = useState(contactNotes);
   const [savingNote, setSavingNote] = useState(false);
+  const noteMutation = useRef(false);
 
   // Estado para gerenciar novas tags
   const [newTag, setNewTag] = useState("");
   const [addingTag, setAddingTag] = useState(false);
-
-  // Carrega as informações do Lead, Agente de IA e colunas do Kanban
-  const fetchLeadAndKanbanData = useCallback(async () => {
-    if (!contact || !clientId) return;
-    setLoading(true);
-
-    try {
-      // 1. Busca as colunas do Kanban configuradas
-      const { data: cols } = await supabase
-        .from("kanban_columns")
-        .select("*")
-        .eq("client_id", clientId)
-        .order("order_index", { ascending: true });
-      if (cols) setKanbanColumns(cols);
-
-      // 2. Busca o Agente de IA atribuído na sessão ATIVA.
-      //    Usa sessionId quando fornecido (id exato da sessão corrente) —
-      //    antes usava só contact_id com maybeSingle, que falha quando o
-      //    contato tem múltiplas sessões (várias instâncias conectadas):
-      //    maybeSingle retorna erro e agent_id aparecia vazio ao reabrir.
-      let sessionQuery = supabase.from("sessions").select("agent_id");
-      if (sessionId) {
-        sessionQuery = (sessionQuery as any).eq("id", sessionId).maybeSingle();
-      } else {
-        // Fallback: sessão mais recente do contato (ordena por last_message_at).
-        sessionQuery = (sessionQuery as any)
-          .eq("contact_id", contact.id)
-          .order("last_message_at", { ascending: false, nullsFirst: false })
-          .limit(1)
-          .single();
-      }
-      const { data: sessionData } = await sessionQuery;
-
-      if ((sessionData as any)?.agent_id) {
-        setAssignedAgentId(String((sessionData as any).agent_id));
-      } else {
-        setAssignedAgentId("");
-      }
-
-      // 3. Busca os dados do lead vinculados a este contato (se houver lead_id ou via telefone)
-      let query = supabase.from("leads_extraidos").select("*").eq("client_id", clientId);
-      
-      const rawContact = contact as any;
-      if (rawContact.lead_id) {
-        query = query.eq("id", rawContact.lead_id);
-      } else {
-        // Fallback por telefone
-        const phoneClean = contact.phone ? contact.phone.replace(/\D/g, "") : "";
-        query = query.eq("telefone", phoneClean);
-      }
-
-      const { data: leadData } = await query.maybeSingle();
-      if (leadData) {
-        setLead(leadData);
-        if (!rawContact.lead_id) {
-          await supabase
-            .from("contacts")
-            .update({ lead_id: leadData.id })
-            .eq("id", contact.id);
-        }
-      } else {
-        setLead(null);
-      }
-      
-      // Carrega a anotação atual do contato
-      setNoteText(rawContact.notes || "");
-    } catch (err) {
-      console.error("Erro ao carregar dados do contato:", err);
-    } finally {
-      setLoading(false);
-    }
-  }, [contact, clientId, sessionId]);
+  const tagMutation = useRef(false);
+  const [tagCatalog, setTagCatalog] = useState<string[]>([]);
+  const [tagCatalogError, setTagCatalogError] = useState(false);
+  const [tagCatalogLoading, setTagCatalogLoading] = useState(true);
+  const [tagRetry, setTagRetry] = useState(0);
+  const [tagSuggestionsOpen, setTagSuggestionsOpen] = useState(false);
+  const tagPopup = useRef<HTMLDivElement>(null);
+  const { contains: matchesTag } = Autocomplete.useFilter({ locale: "pt-BR", sensitivity: "base" });
+  const availableTags = tagCatalog.filter((name) => !contact?.tags?.some((tag) => tag.name.toLocaleLowerCase("pt-BR") === name.toLocaleLowerCase("pt-BR")));
 
   useEffect(() => {
-    fetchLeadAndKanbanData();
-  }, [fetchLeadAndKanbanData]);
+    if (!clientId) return;
+    const controller = new AbortController();
+    let active = true;
+    setTagCatalogLoading(true);
+    setTagCatalogError(false);
+    void (async () => {
+      try {
+        const response = await fetch("/api/contacts/tags", { cache: "no-store", signal: controller.signal });
+        if (!response.ok) throw new Error("Catálogo indisponível");
+        const data: { tags?: unknown } = await response.json();
+        if (!Array.isArray(data.tags) || !data.tags.every((tag): tag is string => typeof tag === "string")) throw new Error("Catálogo inválido");
+        if (active) setTagCatalog(data.tags);
+      } catch {
+        if (active) setTagCatalogError(true);
+      } finally {
+        if (active) setTagCatalogLoading(false);
+      }
+    })();
+    return () => { active = false; controller.abort(); };
+  }, [clientId, tagRetry]);
+
+  // Sincroniza a nota persistida sem descartar edições locais ainda não salvas.
+  useEffect(() => {
+    const previous = syncedNotes.current;
+    syncedNotes.current = contactNotes;
+    setNoteText((draft) => draft === previous ? contactNotes : draft);
+  }, [contactNotes]);
+
+  useEffect(() => {
+    if (!contactId || !clientId) return;
+    let active = true;
+    void (async () => {
+      try {
+        let query = supabase.from("sessions").select("agent_id").eq("client_id", clientId);
+        query = sessionId ? query.eq("id", sessionId) : query.eq("contact_id", contactId)
+          .order("last_message_at", { ascending: false, nullsFirst: false }).limit(1);
+        const { data, error } = await query.maybeSingle();
+        if (error) throw error;
+        if (active) setAssignedAgentId(data?.agent_id ? String(data.agent_id) : "");
+      } catch {
+        if (active) setAssignedAgentId("");
+      }
+    })();
+    return () => { active = false; };
+  }, [contactId, clientId, sessionId]);
+
+  useEffect(() => {
+    const request = ++crmRequest.current;
+    const controller = new AbortController();
+    setCrmLoading(true);
+    setCrmError(null);
+    setUpdatingLead(false);
+    leadMutation.current = false;
+    if (clientId && (contactId || contactPhone || contactJid)) {
+      const params = new URLSearchParams();
+      if (persistedContactId) params.set("contactId", persistedContactId);
+      else {
+        params.set("phone", contactPhone || "");
+        params.set("remote_jid", contactJid || "");
+      }
+      void (async () => {
+        try {
+          const response = await fetch(`/api/contacts/crm?${params}`, { cache: "no-store", signal: controller.signal });
+          if (!response.ok) throw new Error("Consulta indisponível");
+          const data: ContactCrmData = await response.json();
+          if (request === crmRequest.current) setCrm({ ...data, selection: crmSelection });
+        } catch {
+          if (request === crmRequest.current) setCrmError("Não foi possível consultar o CRM. Tente novamente.");
+        } finally {
+          if (request === crmRequest.current) setCrmLoading(false);
+        }
+      })();
+    }
+    return () => { controller.abort(); crmRequest.current = request + 1; };
+  }, [contactId, persistedContactId, contactPhone, contactJid, clientId, crmSelection, crmRetry]);
 
   // Copiar telefone do contato
   const handleCopyPhone = useCallback(async () => {
@@ -175,179 +209,128 @@ export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpda
   }, [contact, clientId, sessionId]);
 
   // Salvar anotação direto em contacts.notes
-  const handleSaveNote = useCallback(async () => {
-    if (!contact) return;
+  const handleSaveNote = async (): Promise<void> => {
+    const current = latestContact.current;
+    if (!current || !clientId || noteMutation.current) return;
+    const savedNote = noteText.trim();
+    noteMutation.current = true;
     setSavingNote(true);
-
     try {
-      const { error } = await supabase
-        .from("contacts")
-        .update({ notes: noteText.trim() })
-        .eq("id", contact.id);
-
-      if (error) throw error;
-
+      const { data, error } = await supabase.from("contacts").update({ notes: savedNote })
+        .eq("id", current.id).eq("client_id", clientId).select("id").maybeSingle();
+      if (error || !data) throw new Error("Contato não atualizado");
+      if (!mounted.current) return;
+      const updated = { ...latestContact.current!, notes: savedNote };
+      latestContact.current = updated;
+      syncedNotes.current = savedNote;
+      setNoteText((draft) => draft === noteText ? savedNote : draft);
+      onContactUpdate?.(updated);
       toast.success("Anotações salvas com sucesso!");
-      if (onContactUpdate) {
-        onContactUpdate({
-          ...contact,
-          notes: noteText.trim()
-        } as any);
-      }
-    } catch (err: any) {
-      toast.error("Erro ao salvar anotações: " + err.message);
+    } catch {
+      if (mounted.current) toast.error("Não foi possível salvar as anotações.");
     } finally {
-      setSavingNote(false);
+      noteMutation.current = false;
+      if (mounted.current) setSavingNote(false);
     }
-  }, [contact, noteText, onContactUpdate]);
+  };
 
-  // Criar nova oportunidade no Kanban para este contato
+  // A API revalida a identidade no tenant antes de criar ou vincular.
   const handleCreateLead = useCallback(async () => {
-    if (!contact || !clientId) return;
+    if (!contact || !clientId || currentCrm?.state !== "missing" || crmLoading || leadMutation.current) return;
+    const request = crmRequest.current;
+    leadMutation.current = true;
     setUpdatingLead(true);
-
     try {
-      const firstColumn = kanbanColumns[0]?.status_key || "novo";
-      const cleanPhone = contact.phone ? contact.phone.replace(/\D/g, "") : "";
-
-      const newLeadPayload = {
-        client_id: clientId,
-        nome_negocio: contact.name || "Lead WhatsApp",
-        telefone: cleanPhone,
-        status: firstColumn,
-        remoteJid: (contact as any).remote_jid || `${cleanPhone}@s.whatsapp.net`,
-        primeiro_contato_at: new Date().toISOString(),
-        primeiro_contato_source: "whatsapp_chat"
-      };
-
-      const { data: newLead, error } = await supabase
-        .from("leads_extraidos")
-        .insert(newLeadPayload)
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      await supabase
-        .from("contacts")
-        .update({ lead_id: newLead.id })
-        .eq("id", contact.id);
-
-      setLead(newLead);
-      toast.success("Oportunidade criada no Kanban!");
-      
-      if (onContactUpdate) {
-        onContactUpdate({
-          ...contact,
-          lead_id: newLead.id
-        } as any);
+      const response = await fetch("/api/contacts/crm", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(persistedContactId ? { contactId: persistedContactId } : { phone: contact.phone, remote_jid: contact.remote_jid, name: contact.name }),
+      });
+      const data: ContactCrmData = await response.json();
+      if (request !== crmRequest.current) return;
+      if (data.state === "ambiguous" || data.state === "unresolved") {
+        setCrm({ ...data, selection: crmSelection });
+        return;
       }
-    } catch (err: any) {
-      toast.error("Erro ao criar lead: " + err.message);
+      if (!response.ok || !data.lead) throw new Error("Criação indisponível");
+      setCrm({ ...data, selection: crmSelection });
+      toast.success(data.created ? "Oportunidade criada no Kanban!" : "Lead existente vinculado ao contato.");
+      const updatedContact: Contact & { lead_id: number } = { ...latestContact.current!, lead_id: data.lead.id };
+      latestContact.current = updatedContact;
+      onContactUpdate?.(updatedContact);
+    } catch {
+      if (request === crmRequest.current) setCrmError("Não foi possível confirmar o lead no CRM. Consulte novamente antes de criar.");
     } finally {
-      setUpdatingLead(false);
+      if (request === crmRequest.current) {
+        leadMutation.current = false;
+        setUpdatingLead(false);
+      }
     }
-  }, [contact, clientId, kanbanColumns, onContactUpdate]);
+  }, [contact, persistedContactId, clientId, currentCrm, crmLoading, crmSelection, onContactUpdate]);
 
-  // Atualizar estágio do lead no Kanban
   const handleUpdateLeadStage = useCallback(async (newStage: string) => {
-    if (!lead) return;
+    if (!lead || !clientId || crmLoading || leadMutation.current) return;
+    const request = crmRequest.current;
+    leadMutation.current = true;
     setUpdatingLead(true);
-
     try {
-      const { error } = await supabase
-        .from("leads_extraidos")
-        .update({ status: newStage })
-        .eq("id", lead.id);
-
-      if (error) throw error;
-
-      setLead((prev: any) => ({ ...prev, status: newStage }));
+      const response = await fetch("/api/contacts/crm", {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ leadId: lead.id, status: newStage }),
+      });
+      if (!response.ok) throw new Error("Atualização indisponível");
+      const data: { lead: ContactCrmLead } = await response.json();
+      if (request !== crmRequest.current) return;
+      setCrm((previous) => previous?.selection === crmSelection ? { ...previous, lead: data.lead } : previous);
       toast.success("Estágio do Kanban atualizado!");
-    } catch (err: any) {
-      toast.error("Erro ao atualizar estágio: " + err.message);
+    } catch {
+      if (request === crmRequest.current) toast.error("Não foi possível atualizar o estágio do Kanban.");
     } finally {
-      setUpdatingLead(false);
+      if (request === crmRequest.current) {
+        leadMutation.current = false;
+        setUpdatingLead(false);
+      }
     }
-  }, [lead]);
+  }, [lead, clientId, crmLoading, crmSelection]);
 
-  // Adicionar Tag ao Contato
-  const handleAddTag = useCallback(async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!contact || !newTag.trim()) return;
-    setAddingTag(true);
-
-    const tagToAdd = newTag.trim();
-    const currentTags = contact.tags?.map(t => t.name) || [];
-    if (currentTags.includes(tagToAdd)) {
+  const handleTagChange = async (value: string, remove = false): Promise<void> => {
+    const current = latestContact.current;
+    if (!current || !clientId || tagMutation.current || !value.trim()) return;
+    const typedTag = value.trim();
+    const tagName = tagCatalog.find((name) => name.toLocaleLowerCase("pt-BR") === typedTag.toLocaleLowerCase("pt-BR")) || typedTag;
+    const currentTags = current.tags?.map((tag) => tag.name) || [];
+    if (!remove && currentTags.some((name) => name.toLocaleLowerCase("pt-BR") === tagName.toLocaleLowerCase("pt-BR"))) {
       toast.error("Esta tag já está associada ao contato.");
-      setAddingTag(false);
       return;
     }
-
-    const updatedTags = [...currentTags, tagToAdd];
-
+    const updatedTags = remove ? currentTags.filter((name) => name !== value) : [...currentTags, tagName];
+    tagMutation.current = true;
+    setTagSuggestionsOpen(false);
+    setAddingTag(true);
     try {
-      const { error } = await supabase
-        .from("contacts")
-        .update({ tags: updatedTags })
-        .eq("id", contact.id);
-
-      if (error) throw error;
-
-      toast.success("Tag adicionada!");
-      setNewTag("");
-      if (onContactUpdate) {
-        onContactUpdate({
-          ...contact,
-          tags: updatedTags.map(name => ({
-            id: name,
-            name,
-            color: "#3b82f6",
-            user_id: clientId || "",
-            created_at: new Date().toISOString()
-          }))
-        });
+      const { data, error } = await supabase.from("contacts").update({ tags: updatedTags })
+        .eq("id", current.id).eq("client_id", clientId).select("id").maybeSingle();
+      if (error || !data) throw new Error("Contato não atualizado");
+      if (!mounted.current) return;
+      const updated = {
+        ...latestContact.current!,
+        tags: updatedTags.map((name) => current.tags?.find((tag) => tag.name === name) || {
+          id: name, name, color: "#3b82f6", user_id: clientId, created_at: new Date().toISOString(),
+        }),
+      };
+      latestContact.current = updated;
+      onContactUpdate?.(updated);
+      if (!remove) {
+        setNewTag("");
+        setTagCatalog((previous) => [...new Set([...previous, tagName])].sort((a, b) => a.localeCompare(b, "pt-BR")));
       }
-    } catch (err: any) {
-      toast.error("Erro ao adicionar tag: " + err.message);
+      toast.success(remove ? "Tag removida!" : "Tag adicionada!");
+    } catch {
+      if (mounted.current) toast.error(remove ? "Não foi possível remover a tag." : "Não foi possível adicionar a tag.");
     } finally {
-      setAddingTag(false);
+      tagMutation.current = false;
+      if (mounted.current) setAddingTag(false);
     }
-  }, [contact, newTag, clientId, onContactUpdate]);
-
-  // Remover Tag do Contato
-  const handleRemoveTag = useCallback(async (tagName: string) => {
-    if (!contact) return;
-
-    const currentTags = contact.tags?.map(t => t.name) || [];
-    const updatedTags = currentTags.filter(t => t !== tagName);
-
-    try {
-      const { error } = await supabase
-        .from("contacts")
-        .update({ tags: updatedTags })
-        .eq("id", contact.id);
-
-      if (error) throw error;
-
-      toast.success("Tag removida!");
-      if (onContactUpdate) {
-        onContactUpdate({
-          ...contact,
-          tags: updatedTags.map(name => ({
-            id: name,
-            name,
-            color: "#3b82f6",
-            user_id: clientId || "",
-            created_at: new Date().toISOString()
-          }))
-        });
-      }
-    } catch (err: any) {
-      toast.error("Erro ao remover tag: " + err.message);
-    }
-  }, [contact, clientId, onContactUpdate]);
+  };
 
   if (!contact) {
     return (
@@ -451,15 +434,22 @@ export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpda
               Oportunidade CRM (Kanban)
             </div>
             
-            <div className="mt-3">
-              {lead ? (
+            <div className="mt-3" aria-live="polite" aria-busy={crmLoading}>
+              {crmLoading ? (
+                <p className="text-xs text-muted-foreground" role="status">Consultando CRM...</p>
+              ) : crmError ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground" role="alert">{crmError}</p>
+                  <Button size="sm" onClick={() => setCrmRetry((value) => value + 1)}>Tentar novamente</Button>
+                </div>
+              ) : lead ? (
                 <div className="rounded-lg bg-muted p-3 space-y-3">
                   <div>
                     <p className="text-xs font-medium text-foreground">
                       {lead.nome_negocio || "Lead Sem Nome"}
                     </p>
                     <p className="text-[10px] text-muted-foreground mt-0.5">
-                      Criado em: {new Date(lead.created_at).toLocaleDateString("pt-BR")}
+                      Criado em: {lead.created_at ? new Date(lead.created_at).toLocaleDateString("pt-BR") : "Não informado"}
                     </p>
                   </div>
 
@@ -469,19 +459,26 @@ export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpda
                     </label>
                     <select
                       id="chat-lead-stage"
-                      value={lead.status}
-                      disabled={updatingLead}
+                      value={lead.status ?? ""}
+                      disabled={updatingLead || crmLoading}
                       onChange={(e) => handleUpdateLeadStage(e.target.value)}
                       className="w-full text-xs bg-card border border-border/80 rounded-md p-1.5 text-foreground focus:outline-none focus:border-primary/50"
                     >
+                      {!kanbanColumns.some((col) => col.status_key === lead.status) && (
+                        <option value={lead.status ?? ""}>{lead.status || "Sem etapa definida"}</option>
+                      )}
                       {kanbanColumns.map((col) => (
-                        <option key={col.id} value={col.status_key}>
+                        <option key={col.status_key} value={col.status_key}>
                           {col.label} {col.is_terminal ? "🔒" : ""}
                         </option>
                       ))}
                     </select>
                   </div>
                 </div>
+              ) : currentCrm?.state === "ambiguous" ? (
+                <p className="text-xs text-muted-foreground" role="status">Mais de um lead corresponde a este contato. Confira os cadastros no Kanban antes de vincular.</p>
+              ) : currentCrm?.state !== "missing" ? (
+                <p className="text-xs text-muted-foreground" role="status">Não foi possível identificar este contato no CRM com segurança.</p>
               ) : (
                 <div className="text-center py-2">
                   <p className="text-xs text-muted-foreground mb-2">Este contato não está cadastrado como Lead.</p>
@@ -507,16 +504,37 @@ export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpda
               Tags do Contato
             </div>
 
-            <form onSubmit={handleAddTag} className="mt-3 flex gap-1.5">
-              <input
-                type="text"
+            <form onSubmit={(event) => { event.preventDefault(); void handleTagChange(newTag); }} className="mt-3 flex gap-1.5">
+              <Autocomplete.Root
+                items={availableTags}
+                filter={matchesTag}
+                open={tagSuggestionsOpen && availableTags.some((name) => matchesTag(name, newTag.trim()))}
+                onOpenChange={setTagSuggestionsOpen}
                 value={newTag}
-                onChange={(e) => setNewTag(e.target.value)}
-                placeholder="Nova tag..."
-                aria-label="Nova tag do contato"
-                disabled={addingTag}
-                className="flex-1 rounded-md border border-border/80 bg-muted px-2.5 py-1 text-xs text-foreground placeholder-muted-foreground outline-none focus:border-primary/50"
-              />
+                onValueChange={(value, details) => {
+                  setNewTag(value);
+                  if (details.reason === "item-press") void handleTagChange(value);
+                }}
+                disabled={addingTag || !clientId}
+              >
+                <Autocomplete.Input
+                  placeholder="Buscar ou criar tag..."
+                  aria-label="Nova tag do contato"
+                  onBlur={(event) => {
+                    if (!(event.relatedTarget instanceof Node) || !tagPopup.current?.contains(event.relatedTarget)) setTagSuggestionsOpen(false);
+                  }}
+                  className="min-w-0 flex-1 rounded-md border border-border/80 bg-muted px-2.5 py-1 text-xs text-foreground placeholder-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                />
+                <Autocomplete.Portal>
+                  <Autocomplete.Positioner sideOffset={4} className={`${styles.portal} z-50`}>
+                    <Autocomplete.Popup ref={tagPopup} className="w-[var(--anchor-width)] overflow-hidden rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md">
+                      <Autocomplete.List className="max-h-48 overflow-y-auto" aria-label="Tags existentes">
+                        {(name: string) => <Autocomplete.Item key={name} value={name} className="cursor-pointer break-words rounded px-2 py-2 text-xs data-highlighted:bg-accent data-highlighted:text-accent-foreground">{name}</Autocomplete.Item>}
+                      </Autocomplete.List>
+                    </Autocomplete.Popup>
+                  </Autocomplete.Positioner>
+                </Autocomplete.Portal>
+              </Autocomplete.Root>
               <Button
                 type="submit"
                 aria-label="Adicionar tag"
@@ -527,6 +545,10 @@ export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpda
                 <Plus className="h-3.5 w-3.5" />
               </Button>
             </form>
+            {tagCatalogLoading && <p className="mt-1 text-xs text-muted-foreground" role="status">Carregando tags...</p>}
+            {tagCatalogError && <div className="mt-1 text-xs text-muted-foreground" role="status">
+              Não foi possível carregar as sugestões. <button type="button" className="underline focus-visible:outline-2" onClick={() => setTagRetry((value) => value + 1)}>Recarregar tags</button>
+            </div>}
 
             <div className="mt-3 flex flex-wrap gap-1">
               {(!contact.tags || contact.tags.length === 0) ? (
@@ -540,9 +562,10 @@ export function ContactSidebar({ contact, clientId, aiAgents = [], onContactUpda
                     {tag.name}
                     <button
                       type="button"
-                      onClick={() => handleRemoveTag(tag.name)}
+                      onClick={() => void handleTagChange(tag.name, true)}
                       aria-label={`Remover tag ${tag.name}`}
-                      className="text-primary hover:text-red-500 transition-colors cursor-pointer"
+                      disabled={addingTag}
+                      className="text-primary hover:text-red-500 transition-colors cursor-pointer disabled:pointer-events-none disabled:opacity-50"
                     >
                       <X className="h-3 w-3" />
                     </button>
