@@ -1,0 +1,46 @@
+.sidebar, .bottomNav, .mobileSheet {
+  --color-background: #101411;
+  --color-foreground: #edf2ee;
+  --color-primary: #6ee7b7;
+  --color-primary-foreground: #10251b;
+  --color-secondary: #262e28;
+  --color-muted: #222a24;
+  --color-muted-foreground: #a5b1a8;
+  --color-border: #303a32;
+  --color-ring: #6ee7b7;
+  background: #141a16;
+  color: #edf2ee;
+  color-scheme: dark;
+}
+.sidebar { display: none; width: 240px; flex: 0 0 auto; border-right: 1px solid #303a32; transition: width 180ms ease-out; }
+.sidebar[data-collapsed="true"] { width: 76px; }
+.content { display: flex; flex-direction: column; height: 100%; min-height: 0; width: 100%; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 18px 12px; min-height: 80px; border-bottom: 1px solid #303a32; flex-shrink: 0; }
+.logo { width: 38px; height: 38px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.brandName { min-width: 0; flex: 1; white-space: nowrap; }
+.brandName > span { font-size: 14px; font-weight: 650; letter-spacing: -.02em; }
+.brandName p { margin-top: 3px; color: #a5b1a8; font-size: 11px; }
+.toggle { width: 36px; height: 36px; min-width: 36px; padding: 0; color: #b7c5bb; border: 1px solid #354138; background: #1b241e; border-radius: 8px; }
+.toggle:hover { background: #2b3930; color: #edf2ee; }
+.navigation { flex: 1; min-height: 0; overflow: auto; overflow-x: hidden; padding: 16px 10px; scrollbar-width: thin; scrollbar-color: #425447 transparent; }
+.navLink { display: flex; align-items: center; gap: 11px; width: 100%; min-height: 42px; padding: 10px 12px; margin-bottom: 3px; border: 1px solid transparent; border-radius: 7px; color: #b7c5bb; font-size: 13px; font-weight: 500; white-space: nowrap; transition: background-color 150ms, color 150ms; }
+.navLink:hover { background: #222d25; color: #edf2ee; }
+.navLink.active { background: #253d2f; border-color: #365642; color: #8aefc7; }
+.navLink svg { color: inherit; }
+.adminSection { margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid #303a32; }
+.sectionLabel { display: flex; align-items: center; gap: 7px; margin: 0 12px 8px; color: #a9b8ad; font-size: 11px; font-weight: 500; }
+.adminLink { color: #c4b5df; }
+.footer { flex-shrink: 0; padding: 10px; border-top: 1px solid #303a32; }
+.logout { color: #eda5af; }
+.logout:hover { color: #ffd1d7; background: #38252b; }
+.systemStatus { display: flex; align-items: center; gap: 9px; padding: 12px; color: #a5b1a8; font-size: 11px; }
+.statusDot { width: 6px; height: 6px; border-radius: 50%; background: #6ee7b7; flex-shrink: 0; }
+.sidebar[data-collapsed="true"] .brand { flex-direction: column; gap: 10px; padding: 14px 10px; }
+.sidebar[data-collapsed="true"] .navigation { padding-inline: 10px; }
+.sidebar[data-collapsed="true"] .navLink, .sidebar[data-collapsed="true"] .systemStatus { justify-content: center; padding-inline: 0; }
+.sidebar :focus-visible, .bottomNav :focus-visible, .mobileSheet :focus-visible { outline: 2px solid #6ee7b7; outline-offset: 2px; }
+.sidebar ::selection { background: #6ee7b733; color: #edf2ee; }
+.bottomNav { border-top: 1px solid #303a32; }
+.mobileSheet { border-color: #303a32; }
+@media (min-width: 1024px) { .sidebar { display: flex; } }
+@media (prefers-reduced-motion: reduce) { .sidebar, .navLink { transition: none; } }

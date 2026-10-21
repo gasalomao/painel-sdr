@@ -10,7 +10,6 @@ import {
   MapPin,
   Bot,
   ChevronLeft,
-  Menu,
   Smartphone,
   Zap,
   Repeat,
@@ -32,8 +31,9 @@ import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
 import { BRAND } from "@/lib/brand";
 import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetTrigger, SheetClose } from "@/components/ui/sheet";
-import { Separator } from "@/components/ui/separator";
+import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import type { LucideIcon } from "lucide-react";
+import styles from "./sidebar.module.css";
 import {
   Tooltip,
   TooltipContent,
@@ -43,7 +43,7 @@ import {
 // Cada item tem `feature` — chave que bate com client.features no DB. Quando
 // o cliente não tem aquela feature true, o item some do menu. Items SEM
 // feature key (admin) são sempre visíveis pra quem tem acesso.
-type NavItem = { href: string; label: string; icon: any; feature?: string; adminOnly?: boolean };
+type NavItem = { href: string; label: string; icon: LucideIcon; feature?: string; adminOnly?: boolean };
 
 // Items admin-only — aparecem no topo do menu, com destaque visual.
 // "Clientes" é EXCLUSIVO de admin (cliente nunca vê, mesmo com feature marcada).
@@ -144,68 +144,55 @@ function SidebarContent({ collapsed, onToggle, onNavigate }: { collapsed: boolea
   const visibleAdmin = filterNav(adminItems, session);
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Logo */}
-      <div className="p-4 flex items-center gap-3">
-        <div className="w-10 h-10 rounded-xl bg-primary/10 ring-1 ring-primary/25 flex items-center justify-center shrink-0 overflow-hidden p-1">
-          <Image
-            src={BRAND.logoUrl}
-            alt={BRAND.name}
-            width={40}
-            height={40}
-            className="object-contain drop-shadow-[0_0_10px_rgba(132,204,22,0.25)]"
-            unoptimized
-          />
+    <div className={styles.content}>
+      <div className={styles.brand}>
+        <div className={styles.logo}>
+          <Image src={BRAND.logoUrl} alt={BRAND.name} width={40} height={40} className="object-contain" unoptimized />
         </div>
         {!collapsed && (
-          <div className="overflow-hidden">
-            <h1 className="text-sm font-bold tracking-tight text-foreground">Salomão AI</h1>
-            <p className="text-[10px] uppercase tracking-[0.18em] text-primary/80 font-bold">Plataforma</p>
+          <div className={styles.brandName}>
+            <span>Salomão AI</span>
+            <p>Plataforma</p>
           </div>
         )}
         <Button
           variant="ghost"
           size="icon"
-          className="ml-auto shrink-0 w-7 h-7 hidden lg:flex"
+          className={styles.toggle}
           onClick={onToggle}
+          aria-label={collapsed ? "Expandir menu" : "Recolher menu"}
+          title={collapsed ? "Expandir menu" : "Recolher menu"}
+          aria-expanded={!collapsed}
+          aria-controls="desktop-navigation"
         >
-          <ChevronLeft className={cn("w-4 h-4 transition-transform duration-200", collapsed && "rotate-180")} />
+          <ChevronLeft className={cn("w-4 h-4", collapsed && "rotate-180")} />
         </Button>
       </div>
 
-      <Separator className="mx-3 w-auto" />
-
-      {/* Nav Items */}
-      <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
+      <nav id="desktop-navigation" aria-label="Navegação principal" className={styles.navigation}>
         {/* Bloco ADMIN — só aparece pra admin não-impersonando.
             Visual diferenciado (purple) pra distinguir da navegação do cliente. */}
         {visibleAdmin.length > 0 && (
-          <div className="space-y-1 pb-2 mb-2 border-b border-white/5">
+          <div className={styles.adminSection}>
             {!collapsed && (
-              <p className="px-3 pt-1 pb-1 text-[9px] font-black uppercase tracking-widest text-purple-400/70 flex items-center gap-1.5">
+              <p className={styles.sectionLabel}>
                 <ShieldAlert className="w-3 h-3" /> Administração
               </p>
             )}
             {visibleAdmin.map((item) => {
               const isActive = pathname === item.href || pathname.startsWith(item.href + "/");
               const ItemIcon = item.icon;
-              const className = cn(
-                "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200",
-                "min-h-[44px]",
-                isActive
-                  ? "bg-purple-500/20 text-purple-200 shadow-[0_0_12px_rgba(168,85,247,0.25)]"
-                  : "text-purple-300/70 hover:text-purple-100 hover:bg-purple-500/10"
-              );
+              const className = cn(styles.navLink, styles.adminLink, isActive && styles.active);
               const link = (
-                <Link key={item.href} href={item.href} onClick={onNavigate} className={className}>
-                  <ItemIcon className={cn("w-[18px] h-[18px] shrink-0", isActive ? "text-purple-200" : "text-purple-300/80")} />
+                <Link key={item.href} href={item.href} onClick={onNavigate} className={className} aria-label={item.label} aria-current={isActive ? "page" : undefined}>
+                  <ItemIcon className="w-[18px] h-[18px] shrink-0" />
                   {!collapsed && <span>{item.label}</span>}
                 </Link>
               );
               if (collapsed) {
                 return (
                   <Tooltip key={item.href}>
-                    <TooltipTrigger>{link}</TooltipTrigger>
+                    <TooltipTrigger render={link} />
                     <TooltipContent side="right" className="font-medium">{item.label}</TooltipContent>
                   </Tooltip>
                 );
@@ -224,13 +211,9 @@ function SidebarContent({ collapsed, onToggle, onNavigate }: { collapsed: boolea
               key={item.href}
               href={item.href}
               onClick={onNavigate}
-              className={cn(
-                "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200",
-                "min-h-[44px]", /* Touch-friendly */
-                isActive
-                  ? "bg-primary/15 text-primary glow-primary"
-                  : "text-muted-foreground hover:text-foreground hover:bg-secondary"
-              )}
+              aria-label={item.label}
+              aria-current={isActive ? "page" : undefined}
+              className={cn(styles.navLink, isActive && styles.active)}
             >
               <ItemIcon className={cn("w-[18px] h-[18px] shrink-0", isActive && "text-primary")} />
               {!collapsed && <span>{item.label}</span>}
@@ -240,21 +223,7 @@ function SidebarContent({ collapsed, onToggle, onNavigate }: { collapsed: boolea
           if (collapsed) {
             return (
               <Tooltip key={item.href}>
-                <TooltipTrigger>
-                  <Link
-                    href={item.href}
-                    onClick={onNavigate}
-                    className={cn(
-                      "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200",
-                      "min-h-[44px]",
-                      isActive
-                        ? "bg-primary/15 text-primary glow-primary"
-                        : "text-muted-foreground hover:text-foreground hover:bg-secondary"
-                    )}
-                  >
-                    <ItemIcon className={cn("w-[18px] h-[18px] shrink-0", isActive && "text-primary")} />
-                  </Link>
-                </TooltipTrigger>
+                <TooltipTrigger render={linkContent} />
                 <TooltipContent side="right" className="font-medium">
                   {item.label}
                 </TooltipContent>
@@ -267,7 +236,7 @@ function SidebarContent({ collapsed, onToggle, onNavigate }: { collapsed: boolea
       </nav>
 
       {/* Footer */}
-      <div className="p-4 space-y-2">
+      <div className={styles.footer}>
         {/* Se impersonando: botão de voltar pra conta do admin */}
         {session?.impersonating && (
           <button
@@ -284,11 +253,9 @@ function SidebarContent({ collapsed, onToggle, onNavigate }: { collapsed: boolea
                 alert("Erro ao restaurar sessão.");
               }
             }}
-            className={cn(
-              "flex w-full items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200",
-              "text-purple-300 hover:text-purple-100 hover:bg-purple-500/10 border border-purple-500/20",
-              collapsed && "justify-center"
-            )}
+            aria-label="Voltar para Admin"
+            title={collapsed ? "Voltar para Admin" : undefined}
+            className={cn(styles.navLink, styles.adminLink)}
           >
             <LogOut className="w-5 h-5 shrink-0" />
             {!collapsed && <span>Voltar para Admin</span>}
@@ -301,19 +268,17 @@ function SidebarContent({ collapsed, onToggle, onNavigate }: { collapsed: boolea
             await fetch("/api/auth/logout", { method: "POST" });
             window.location.href = "/login";
           }}
-          className={cn(
-            "flex w-full items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200",
-            "text-red-400/80 hover:text-red-300 hover:bg-red-500/10",
-            collapsed && "justify-center"
-          )}
+          aria-label="Deslogar"
+          title={collapsed ? "Deslogar" : undefined}
+          className={cn(styles.navLink, styles.logout)}
         >
           <LogOut className="w-5 h-5 shrink-0" />
           {!collapsed && <span>Deslogar</span>}
         </button>
 
-        <div className={cn("flex items-center gap-2 px-3 py-2 rounded-lg bg-secondary/50", collapsed && "justify-center")}>
-          <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse-dot" />
-          {!collapsed && <span className="text-xs text-muted-foreground">Sistema Online</span>}
+        <div className={styles.systemStatus} title="Sistema Online">
+          <div className={styles.statusDot} />
+          <span className={collapsed ? "sr-only" : undefined}>Sistema Online</span>
         </div>
       </div>
     </div>
@@ -341,10 +306,10 @@ function MobileBottomNav() {
       <nav
         className={cn(
           "lg:hidden fixed bottom-0 left-0 right-0 z-50",
-          "glass border-t border-white/10",
+          styles.bottomNav,
           "flex items-stretch justify-around",
-          "h-[var(--bottom-nav-height)]",
-          "pb-[var(--safe-bottom)]",
+          "h-[calc(4rem+env(safe-area-inset-bottom,0px))]",
+          "pb-[env(safe-area-inset-bottom,0px)]",
           "mobile-bottom-nav"
         )}
       >
@@ -391,17 +356,18 @@ function MobileBottomNav() {
 
       {/* "More" Sheet — shows all remaining navigation items */}
       <Sheet open={moreOpen} onOpenChange={setMoreOpen}>
-        <SheetContent side="bottom" className="glass border-t border-white/10 rounded-t-3xl p-0 max-h-[70vh]">
+        <SheetContent side="bottom" showCloseButton={false} className={cn(styles.mobileSheet, "rounded-t-2xl p-0 max-h-[70vh] gap-0")}>
           <div className="p-4 pb-2 flex items-center justify-between border-b border-white/5">
             <div className="flex items-center gap-3">
               <div className="w-8 h-8 rounded-lg bg-primary/20 flex items-center justify-center shrink-0">
                 <Image src={BRAND.logoUrl} alt={BRAND.name} width={32} height={32} unoptimized className="object-contain" />
               </div>
-              <h3 className="text-sm font-bold text-white">Menu completo</h3>
+              <SheetTitle className="text-sm font-semibold text-white">Menu completo</SheetTitle>
             </div>
             <button
               onClick={() => setMoreOpen(false)}
-              className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center"
+              aria-label="Fechar menu"
+              className="w-10 h-10 rounded-lg bg-white/5 flex items-center justify-center"
             >
               <X className="w-4 h-4 text-muted-foreground" />
             </button>
@@ -475,12 +441,10 @@ export function Sidebar() {
     <>
       {/* Desktop Sidebar */}
       <aside
-        className={cn(
-          "hidden lg:flex flex-col border-r border-border glass transition-all duration-300",
-          collapsed ? "w-[68px]" : "w-[240px]"
-        )}
+        className={styles.sidebar}
+        data-collapsed={collapsed}
       >
-        <SidebarContent collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />
+        <SidebarContent collapsed={collapsed} onToggle={() => setCollapsed(value => !value)} />
       </aside>
 
       {/* Mobile Bottom Navigation Bar */}
