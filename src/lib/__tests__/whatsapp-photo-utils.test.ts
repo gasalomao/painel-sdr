@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { safePhotoUrl, getPhotoJid } from "../whatsapp-photo-utils";
+import { safePhotoUrl, getPhotoJid, getPhotoJidAliases } from "../whatsapp-photo-utils";
 
 describe("whatsapp-photo-utils", () => {
   describe("safePhotoUrl", () => {
@@ -61,6 +61,22 @@ describe("whatsapp-photo-utils", () => {
       expect(safePhotoUrl(12345)).toBeNull();
       expect(safePhotoUrl({})).toBeNull();
     });
+  });
+
+  it("normaliza prefixos telefônicos e gera aliases móveis BR sem confundir fixos ou estrangeiros", () => {
+    expect(getPhotoJid("phone:+55 (11) 99999-9999")).toBe("5511999999999@s.whatsapp.net");
+    expect(getPhotoJid("0055 11 99999-9999")).toBe("5511999999999@s.whatsapp.net");
+    expect(getPhotoJidAliases("(11) 99999-9999")).toEqual(["5511999999999@s.whatsapp.net", "551199999999@s.whatsapp.net"]);
+    expect(getPhotoJidAliases("551199999999@s.whatsapp.net")).toEqual(["551199999999@s.whatsapp.net", "5511999999999@s.whatsapp.net"]);
+    expect(getPhotoJidAliases("551132345678@s.whatsapp.net")).toHaveLength(1);
+    expect(getPhotoJidAliases("+14155552671")).toHaveLength(1);
+    expect(getPhotoJidAliases("1234567890123@lid")).toEqual([]);
+  });
+
+  it("rejeita URLs com expiração Meta vencida sem rejeitar parâmetros não temporais", () => {
+    expect(safePhotoUrl("https://pps.whatsapp.net/avatar.jpg?oe=5E0BE100")).toBeNull();
+    expect(safePhotoUrl("https://pps.whatsapp.net/avatar.jpg?oe=FFFFFFFF")).not.toBeNull();
+    expect(safePhotoUrl("https://pps.whatsapp.net/avatar.jpg?oe=xyz")).not.toBeNull();
   });
 
   describe("getPhotoJid", () => {

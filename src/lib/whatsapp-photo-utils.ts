@@ -33,6 +33,8 @@ export function safePhotoUrl(value: unknown): string | null {
     );
 
     if (!isAllowedMetaCdn) return null;
+    const expiry = url.searchParams.get("oe");
+    if (expiry && /^[a-f\d]{8}$/i.test(expiry) && parseInt(expiry, 16) * 1000 <= Date.now()) return null;
 
     return url.href;
   } catch {
@@ -45,10 +47,21 @@ export function safePhotoUrl(value: unknown): string | null {
  */
 export function getPhotoJid(value: unknown): string | null {
   if (typeof value !== "string") return null;
-  const normalized = normalizeJid(value);
+  const normalized = normalizeJid(value.trim().replace(/^phone:/i, "").replace(/^00(?=\d)/, "+"));
   if (!normalized) return null;
   if (normalized.endsWith("@g.us") || normalized.endsWith("@lid") || !normalized.endsWith("@s.whatsapp.net")) {
     return null;
   }
   return normalized;
+}
+
+/** Variação histórica de celulares brasileiros; nunca remove dígito de fixo/estrangeiro. */
+export function getPhotoJidAliases(value: unknown): string[] {
+  const jid = getPhotoJid(value);
+  if (!jid) return [];
+  const phone = jid.split("@")[0];
+  let alternate: string | null = null;
+  if (/^55[1-9]\d9[6-9]\d{7}$/.test(phone)) alternate = phone.slice(0, 4) + phone.slice(5);
+  else if (/^55[1-9]\d[6-9]\d{7}$/.test(phone)) alternate = phone.slice(0, 4) + "9" + phone.slice(4);
+  return alternate ? [jid, `${alternate}@s.whatsapp.net`] : [jid];
 }

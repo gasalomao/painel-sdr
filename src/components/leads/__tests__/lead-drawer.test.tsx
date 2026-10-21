@@ -247,6 +247,13 @@ describe("LeadDrawer", () => {
   });
 
   describe("Sincronização individual de foto do WhatsApp", () => {
+    beforeEach(() => {
+      vi.stubGlobal("Image", class {
+        onload: (() => void) | null = null;
+        set src(url: string) { if (url) this.onload?.(); }
+      });
+    });
+
     it("chama POST /api/contacts/avatars com force:true e atualiza foto e notifica parent", async () => {
       const onLeadUpdated = vi.fn();
       mockPost.mockResolvedValue(response({
@@ -283,6 +290,61 @@ describe("LeadDrawer", () => {
       });
     });
 
+    it.each([sampleLead.profilePicUrl!, "https://pps.whatsapp.net/v/foto-preservada.jpg"])("mantém a URL devolvida e no parent quando noPhoto preserva %s", async (preservedUrl) => {
+      const onLeadUpdated = vi.fn();
+      mockPost.mockResolvedValue(response({
+        success: true,
+        updated: 0,
+        noPhoto: 1,
+        preserved: 1,
+        failed: 0,
+        avatars: { "5511999998888@s.whatsapp.net": preservedUrl },
+      }));
+      function Parent() {
+        const [lead, setLead] = useState(sampleLead);
+        return <LeadDrawer lead={lead} open onOpenChange={vi.fn()} onLeadUpdated={(updated) => {
+          onLeadUpdated(updated);
+          setLead((prev) => ({ ...prev, ...updated }));
+        }} />;
+      }
+      render(<Parent />);
+      expect(await screen.findByRole("img", { name: sampleLead.nome_negocio })).toHaveAttribute("src", sampleLead.profilePicUrl);
+      fireEvent.click(screen.getByRole("button", { name: /Atualizar foto do WhatsApp/i }));
+
+      await waitFor(() => expect(onLeadUpdated).toHaveBeenCalledWith({ id: 123, profilePicUrl: preservedUrl }));
+      expect(screen.getByRole("img", { name: sampleLead.nome_negocio })).toHaveAttribute("src", preservedUrl);
+      expect(onLeadUpdated).toHaveBeenCalledTimes(1);
+      expect(toast.info).toHaveBeenCalledWith("Contato não possui foto pública no WhatsApp. Foto anterior preservada.");
+      expect(toast.success).not.toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: /Atualizar foto do WhatsApp/i })).toBeEnabled();
+    });
+
+    it.each([
+      { remoteJid: "1234567890123@lid", telefone: sampleLead.telefone },
+      { remoteJid: null, telefone: "phone:+55 (11) 99999-8888" },
+      { remoteJid: "1234567890123@lid", telefone: "phone:+55 (11) 99999-8888" },
+    ])("normaliza telefone para foto com fallback: $remoteJid / $telefone", async ({ remoteJid, telefone }) => {
+      const onLeadUpdated = vi.fn();
+      const url = "https://pps.whatsapp.net/v/foto-telefone.jpg";
+      mockPost.mockResolvedValue(response({ failed: 0, avatars: { "5511999998888@s.whatsapp.net": url } }));
+      render(<LeadDrawer lead={{ ...sampleLead, remoteJid, telefone, instance_name: "vendas" }} open onOpenChange={vi.fn()} onLeadUpdated={onLeadUpdated} />);
+      fireEvent.click(screen.getByRole("button", { name: /Atualizar foto do WhatsApp/i }));
+
+      await waitFor(() => expect(onLeadUpdated).toHaveBeenCalledWith({ id: 123, profilePicUrl: url }));
+      expect(mockPost).toHaveBeenCalledWith("/api/contacts/avatars", expect.objectContaining({
+        body: JSON.stringify({ jids: ["5511999998888@s.whatsapp.net"], force: true, instance: "vendas" }),
+      }));
+      expect(screen.getByRole("img", { name: sampleLead.nome_negocio })).toHaveAttribute("src", url);
+      expect(toast.error).not.toHaveBeenCalled();
+    });
+
+    it.each(["1234567890123@lid", "1203630248234@g.us"])("não consulta foto de %s sem telefone válido", (remoteJid) => {
+      render(<LeadDrawer lead={{ ...sampleLead, remoteJid, telefone: null }} open onOpenChange={vi.fn()} />);
+      fireEvent.click(screen.getByRole("button", { name: /Atualizar foto do WhatsApp/i }));
+      expect(mockPost).not.toHaveBeenCalled();
+      expect(toast.error).toHaveBeenCalledWith("Lead sem telefone ou JID válido para buscar foto.");
+    });
+
     it("avisa quando contato não possui foto pública e limpa foto informando parent", async () => {
       const onLeadUpdated = vi.fn();
       mockPost.mockResolvedValue(response({
@@ -306,9 +368,12 @@ describe("LeadDrawer", () => {
       });
     });
 
-    it("exibe erro honestamente quando endpoint falha e não apaga foto nem rascunhos", async () => {
+    it.each([
+      { ok: false, failed: 0 },
+      { ok: true, failed: 1 },
+    ])("erro HTTP/failed ($ok/$failed) não apaga foto nem rascunhos", async ({ ok, failed }) => {
       const onLeadUpdated = vi.fn();
-      mockPost.mockResolvedValue(response({ error: "Instância desconectada", failed: 1 }, 400, false));
+      mockPost.mockResolvedValue(response({ error: "Instância desconectada", failed }, ok));
 
       render(<LeadDrawer lead={sampleLead} open defaultTab="notes" onOpenChange={vi.fn()} onLeadUpdated={onLeadUpdated} />);
       fireEvent.change(screen.getByPlaceholderText(/Falou com o gerente/i), { target: { value: "Rascunho de nota" } });
@@ -320,6 +385,8 @@ describe("LeadDrawer", () => {
         expect(toast.error).toHaveBeenCalledWith("Instância desconectada");
       });
       expect(onLeadUpdated).not.toHaveBeenCalled();
+      expect(screen.getByRole("img", { name: sampleLead.nome_negocio })).toHaveAttribute("src", sampleLead.profilePicUrl);
+      expect(btn).toBeEnabled();
       expect(screen.getByPlaceholderText(/Falou com o gerente/i)).toHaveValue("Rascunho de nota");
     });
 
@@ -336,31 +403,53 @@ describe("LeadDrawer", () => {
       expect(screen.getByPlaceholderText(/Falou com o gerente/i)).toHaveValue("Nota não salva ainda");
     });
 
-    it("descarta resposta de busca de foto se lead foi trocado antes da resposta (generation guard)", async () => {
-      const pending = deferred<Response>();
-      mockPost.mockReturnValueOnce(pending.promise);
+    it.each(["troca de lead", "fechar e reabrir"] as const)("foto pendente não bloqueia nem altera a próxima abertura: %s", async (transition) => {
+      const oldPost = deferred<Response>();
+      const newPost = deferred<Response>();
+      mockPost.mockReturnValueOnce(oldPost.promise).mockReturnValueOnce(newPost.promise);
       const onLeadUpdated = vi.fn();
-
       const props = { open: true, onOpenChange: vi.fn(), onLeadUpdated };
       const { rerender } = render(<LeadDrawer {...props} lead={sampleLead} />);
+      fireEvent.click(screen.getByRole("button", { name: /Atualizar foto do WhatsApp/i }));
 
+      const nextLead = transition === "troca de lead" ? { ...sampleLead, id: 456 } : sampleLead;
+      if (transition === "fechar e reabrir") rerender(<LeadDrawer {...props} lead={sampleLead} open={false} />);
+      rerender(<LeadDrawer {...props} lead={nextLead} />);
       const btn = screen.getByRole("button", { name: /Atualizar foto do WhatsApp/i });
+      expect(btn).toBeEnabled();
       fireEvent.click(btn);
+      expect(btn).toBeDisabled();
 
-      // Troca de lead para ID 456
-      rerender(<LeadDrawer {...props} lead={{ ...sampleLead, id: 456, remoteJid: "5511977776666@s.whatsapp.net" }} />);
-
-      // Resposta da foto anterior chega
-      await act(async () => {
-        pending.resolve(response({
-          success: true,
-          updated: 1,
-          avatars: { "5511999998888@s.whatsapp.net": "https://pps.whatsapp.net/v/foto-antiga.jpg" },
-        }));
-      });
-
+      await act(async () => { oldPost.resolve(response({
+        noPhoto: 1, preserved: 1, failed: 0,
+        avatars: { "5511999998888@s.whatsapp.net": "https://pps.whatsapp.net/v/foto-antiga.jpg" },
+      })); });
+      expect(btn).toBeDisabled();
       expect(onLeadUpdated).not.toHaveBeenCalled();
       expect(toast.success).not.toHaveBeenCalled();
+      expect(toast.info).not.toHaveBeenCalled();
+      expect(screen.getByRole("img", { name: nextLead.nome_negocio })).toHaveAttribute("src", sampleLead.profilePicUrl);
+
+      const url = "https://pps.whatsapp.net/v/foto-nova.jpg";
+      await act(async () => { newPost.resolve(response({ failed: 0, avatars: { "5511999998888@s.whatsapp.net": url } })); });
+      expect(btn).toBeEnabled();
+      expect(onLeadUpdated).toHaveBeenCalledTimes(1);
+      expect(onLeadUpdated).toHaveBeenCalledWith({ id: nextLead.id, profilePicUrl: url });
+      expect(screen.getByRole("img", { name: nextLead.nome_negocio })).toHaveAttribute("src", url);
+    });
+
+    it("ignora rejeição de busca de foto de outra abertura", async () => {
+      let reject!: (reason: Error) => void;
+      mockPost.mockReturnValueOnce(new Promise<Response>((_resolve, fail) => { reject = fail; }));
+      const props = { lead: sampleLead, open: true, onOpenChange: vi.fn(), onLeadUpdated: vi.fn() };
+      const { rerender } = render(<LeadDrawer {...props} />);
+      fireEvent.click(screen.getByRole("button", { name: /Atualizar foto do WhatsApp/i }));
+      rerender(<LeadDrawer {...props} open={false} />);
+      rerender(<LeadDrawer {...props} />);
+      await act(async () => { reject(new Error("Erro antigo")); });
+      expect(toast.error).not.toHaveBeenCalled();
+      expect(props.onLeadUpdated).not.toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: /Atualizar foto do WhatsApp/i })).toBeEnabled();
     });
   });
 });

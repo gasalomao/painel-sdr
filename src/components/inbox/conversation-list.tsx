@@ -476,7 +476,7 @@ export function ConversationList({
         body: JSON.stringify({ instance: targetInstance }),
       });
       const dataBulk = await resBulk.json().catch(() => ({}));
-      if (!resBulk.ok || !dataBulk.success) throw new Error(dataBulk.error || "Falha ao sincronizar fotos da conexão.");
+      if (!resBulk.ok || !dataBulk.success || dataBulk.partial || dataBulk.failed > 0 || dataBulk.cancelled) throw new Error(dataBulk.error || "Falha ao sincronizar fotos da conexão.");
 
       // 2. Força re-hidratação de todas as conversas visíveis (com force: true)
       const allJids = conversations.map((c) => c.id).filter(Boolean) as string[];
@@ -486,38 +486,38 @@ export function ConversationList({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ jids: allJids.slice(0, 150), instance: targetInstance, force: true }),
         });
-        if (resAvatars.ok) {
-          const dataAvatars = await resAvatars.json();
-          if (dataAvatars?.failed > 0) throw new Error("Algumas fotos não puderam ser atualizadas. As fotos anteriores foram preservadas.");
-          if (dataAvatars?.avatars) {
-            const updates = Object.entries(dataAvatars.avatars).filter(([, url]) => !!url);
-            const avatarMap = new Map<string, string>();
-            for (const [key, url] of updates) {
-              avatarMap.set(key, url as string);
-              const digits = key.replace(/\D/g, "");
-              if (digits) avatarMap.set(digits, url as string);
-            }
-            onConversationsLoadedRef.current(
-              conversations.map((c) => {
-                const url = avatarMap.get(c.id) || avatarMap.get(c.id.replace(/\D/g, "")) || (c.contact?.remote_jid ? avatarMap.get(c.contact.remote_jid) : null);
-                if (!url) return c;
-                return {
-                  ...c,
-                  contact: c.contact
-                    ? { ...c.contact, avatar_url: url }
-                    : ({
-                        id: c.id,
-                        remote_jid: c.id,
-                        phone: c.id.replace(/@.*$/, "").replace(/\D/g, ""),
-                        avatar_url: url,
-                        user_id: clientId || "",
-                        created_at: new Date().toISOString(),
-                        updated_at: new Date().toISOString(),
-                      } as any),
-                };
-              })
-            );
+        const dataAvatars = await resAvatars.json().catch(() => null);
+        if (!resAvatars.ok || !dataAvatars?.success || dataAvatars.partial || dataAvatars.failed > 0 || dataAvatars.cancelled) {
+          throw new Error(dataAvatars?.error || "Algumas fotos não puderam ser atualizadas. As fotos anteriores foram preservadas.");
+        }
+        if (dataAvatars.avatars) {
+          const updates = Object.entries(dataAvatars.avatars).filter(([, url]) => !!url);
+          const avatarMap = new Map<string, string>();
+          for (const [key, url] of updates) {
+            avatarMap.set(key, url as string);
+            const digits = key.replace(/\D/g, "");
+            if (digits) avatarMap.set(digits, url as string);
           }
+          onConversationsLoadedRef.current(
+            conversations.map((c) => {
+              const url = avatarMap.get(c.id) || avatarMap.get(c.id.replace(/\D/g, "")) || (c.contact?.remote_jid ? avatarMap.get(c.contact.remote_jid) : null);
+              if (!url) return c;
+              return {
+                ...c,
+                contact: c.contact
+                  ? { ...c.contact, avatar_url: url }
+                  : ({
+                      id: c.id,
+                      remote_jid: c.id,
+                      phone: c.id.replace(/@.*$/, "").replace(/\D/g, ""),
+                      avatar_url: url,
+                      user_id: clientId || "",
+                      created_at: new Date().toISOString(),
+                      updated_at: new Date().toISOString(),
+                    } as any),
+              };
+            })
+          );
         }
       }
 

@@ -28,7 +28,7 @@ async function handle(req: NextRequest, body: unknown, clientId: string): Promis
   const normalized = new Map(requested.map((jid) => [jid, getPhotoJid(jid)]));
   const jids = [...new Set([...normalized.values()].filter((jid): jid is string => jid !== null))];
   const invalid = [...normalized.values()].filter((jid) => jid === null).length;
-  let result: { avatars: Record<string, string | null>; updated: number; noPhoto: number; skipped: number; failed: number };
+  let result: { avatars: Record<string, string | null>; updated: number; noPhoto: number; skipped: number; failed: number; preserved?: number; cancelled?: boolean };
   let instance: string | null = null;
   if (input.cachedOnly || jids.length === 0) {
     const cached = await readPhotoCache(clientId, jids);
@@ -40,7 +40,7 @@ async function handle(req: NextRequest, body: unknown, clientId: string): Promis
   }
   const avatars = { ...result.avatars };
   for (const [original, jid] of normalized) avatars[original] = jid ? result.avatars[jid] ?? null : null;
-  return NextResponse.json({ ...result, avatars, skipped: result.skipped + invalid, success: result.failed === 0, partial: result.failed > 0, refreshed: result.updated + result.noPhoto, instance });
+  return NextResponse.json({ ...result, avatars, skipped: result.skipped + invalid, success: result.failed === 0 && !result.cancelled, partial: result.failed > 0 || !!result.cancelled, refreshed: result.updated + result.noPhoto - (result.preserved ?? 0), instance });
 }
 
 function failure(error: unknown): NextResponse {

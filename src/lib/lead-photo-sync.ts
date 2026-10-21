@@ -70,7 +70,8 @@ export async function syncLeadPhotosSequentially(
       scope: "leads",
       cursor,
     };
-    if (options.instance) payload.instance = options.instance;
+    const instance = options.instance ?? state.instance;
+    if (instance) payload.instance = instance;
     if (upperId !== undefined) payload.upperId = upperId;
 
     let res: Response;
@@ -92,6 +93,8 @@ export async function syncLeadPhotosSequentially(
       throw err;
     }
 
+    if (options.signal?.aborted) break;
+
     // non-2xx stop
     if (!res.ok) {
       let msg = `Falha na sincronização (HTTP ${res.status})`;
@@ -99,12 +102,15 @@ export async function syncLeadPhotosSequentially(
         const json = await res.json();
         if (json?.error) msg = json.error;
       } catch {}
+      if (options.signal?.aborted) break;
       state.inFlight = false;
       state.error = msg;
       throw new Error(msg);
     }
 
     const data: SyncBatchResponse = await res.json();
+    // Abort invalida o tenant/desmontagem; cancelar manualmente ainda conclui o lote atual.
+    if (options.signal?.aborted) break;
 
     // Snapshot upperId returned on first request
     if (upperId === undefined && typeof data.upperId === "number") {
@@ -137,6 +143,6 @@ export async function syncLeadPhotosSequentially(
   }
 
   state.inFlight = false;
-  state.cancelled = isCancelledRef.current || state.cancelled;
+  state.cancelled = !!options.signal?.aborted || isCancelledRef.current || state.cancelled;
   return state;
 }

@@ -24,7 +24,7 @@ import { AddLeadDialog } from "@/components/add-lead-dialog";
 import { LeadAvatar } from "@/components/leads/lead-avatar";
 import { syncLeadPhotosSequentially, type SyncProgressState } from "@/lib/lead-photo-sync";
 import { supabase } from "@/lib/supabase";
-import { normalizeJid } from "@/lib/jid-utils";
+import { getPhotoJid, safePhotoUrl } from "@/lib/whatsapp-photo-utils";
 import dynamic from "next/dynamic";
 
 const KanbanBoard = dynamic(
@@ -118,15 +118,17 @@ export default function LeadsPage() {
   const [syncProgress, setSyncProgress] = useState<SyncProgressState | null>(null);
   const syncAbortRef = useRef<AbortController | null>(null);
   const syncCancelRef = useRef<{ current: boolean }>({ current: false });
+  const syncGenerationRef = useRef(0);
   const fetchGenerationRef = useRef<number>(0);
 
   // Cancela sincronização e descarta fetch pendente ao desmontar ou trocar tenant
   useEffect(() => {
+    setSyncProgress(null);
     return () => {
       fetchGenerationRef.current++;
-      if (syncAbortRef.current) {
-        syncAbortRef.current.abort();
-      }
+      syncGenerationRef.current++;
+      syncAbortRef.current?.abort();
+      syncAbortRef.current = null;
       syncCancelRef.current.current = true;
     };
   }, [clientId]);
@@ -152,9 +154,10 @@ export default function LeadsPage() {
   }, [clientId]);
 
   const handleSyncPhotos = async () => {
-    if (syncProgress?.inFlight) return;
+    if (!clientId || syncAbortRef.current) return;
     syncCancelRef.current = { current: false };
     const controller = new AbortController();
+    const generation = ++syncGenerationRef.current;
     syncAbortRef.current = controller;
 
     setSyncProgress({
@@ -170,13 +173,15 @@ export default function LeadsPage() {
       error: null,
     });
 
+    const isCurrentSync = () => !controller.signal.aborted && syncGenerationRef.current === generation;
     const applyAvatars = (newAvatars: Record<string, string | null>) => {
+      if (!isCurrentSync()) return;
       setLeads((prev) =>
-        prev.map((lead) => {
-          const jid = lead.remoteJid || normalizeJid(lead.telefone);
+        !isCurrentSync() ? prev : prev.map((lead) => {
+          const jid = getPhotoJid(lead.remoteJid) ?? getPhotoJid(lead.telefone);
           if (jid && jid in newAvatars) {
-            const freshUrl = newAvatars[jid];
-            if (freshUrl !== undefined && freshUrl !== lead.profilePicUrl) {
+            const freshUrl = newAvatars[jid] ?? safePhotoUrl(lead.profilePicUrl);
+            if (freshUrl !== lead.profilePicUrl) {
               return { ...lead, profilePicUrl: freshUrl };
             }
           }
@@ -184,11 +189,11 @@ export default function LeadsPage() {
         })
       );
       setSelectedLead((prev) => {
-        if (!prev) return null;
-        const jid = prev.remoteJid || normalizeJid(prev.telefone);
+        if (!isCurrentSync() || !prev) return prev;
+        const jid = getPhotoJid(prev.remoteJid) ?? getPhotoJid(prev.telefone);
         if (jid && jid in newAvatars) {
-          const freshUrl = newAvatars[jid];
-          if (freshUrl !== undefined && freshUrl !== prev.profilePicUrl) {
+          const freshUrl = newAvatars[jid] ?? safePhotoUrl(prev.profilePicUrl);
+          if (freshUrl !== prev.profilePicUrl) {
             return { ...prev, profilePicUrl: freshUrl };
           }
         }
@@ -200,12 +205,13 @@ export default function LeadsPage() {
       const finalState = await syncLeadPhotosSequentially(
         {
           signal: controller.signal,
-          onProgress: (state) => setSyncProgress(state),
+          onProgress: (state) => { if (isCurrentSync()) setSyncProgress(state); },
           onBatchAvatars: (batchAvatars) => applyAvatars(batchAvatars),
         },
         syncCancelRef.current
       );
 
+      if (!isCurrentSync()) return;
       setSyncProgress(finalState);
 
       if (finalState.cancelled) {
@@ -218,19 +224,17 @@ export default function LeadsPage() {
         );
       } else {
         toast.success(
-          finalState.updated > 0
-            ? `${finalState.updated} fotos atualizadas com sucesso (${finalState.processed}/${finalState.total || finalState.processed} leads processados).`
-            : "Sincronização concluída. Fotos já estão atualizadas."
+          `Sincronização concluída: ${finalState.updated} fotos atualizadas, ${finalState.noPhoto} sem foto disponibilizada pelo WhatsApp, ${finalState.skipped} ignoradas (${finalState.processed} leads processados).`
         );
       }
     } catch (err: unknown) {
-      if (!controller.signal.aborted) {
+      if (isCurrentSync()) {
         const msg = err instanceof Error ? err.message : "Erro na sincronização de fotos";
         toast.error(msg);
         setSyncProgress((prev) => (prev ? { ...prev, inFlight: false, error: msg } : null));
       }
     } finally {
-      syncAbortRef.current = null;
+      if (syncAbortRef.current === controller) syncAbortRef.current = null;
     }
   };
 
@@ -374,12 +378,12 @@ export default function LeadsPage() {
 
       // Garante remoteJid normalizado para todos os leads (inclusive os extraídos sem conversa prévia)
       fetchedList.forEach((l) => {
-        l.remoteJid = l.remoteJid || normalizeJid(l.telefone) || "";
+        l.remoteJid = l.remoteJid || getPhotoJid(l.telefone) || "";
       });
 
       // Hidratação das fotos em cache (chunks de até 200 JIDs, sem chamadas ao provedor na visualização)
       if (fetchedList.length > 0) {
-        const jids = Array.from(new Set(fetchedList.map((l) => l.remoteJid).filter(Boolean)));
+        const jids = Array.from(new Set(fetchedList.map((l) => getPhotoJid(l.remoteJid) ?? getPhotoJid(l.telefone)).filter((jid): jid is string => !!jid)));
         if (jids.length > 0) {
           const CHUNK_SIZE = 200;
           const chunks: string[][] = [];
@@ -408,9 +412,8 @@ export default function LeadsPage() {
               }
 
               fetchedList.forEach((l) => {
-                if (l.remoteJid && cachedMap[l.remoteJid]) {
-                  l.profilePicUrl = cachedMap[l.remoteJid];
-                }
+                const jid = getPhotoJid(l.remoteJid) ?? getPhotoJid(l.telefone);
+                if (jid && cachedMap[jid]) l.profilePicUrl = cachedMap[jid];
               });
             }
           } catch {
@@ -699,12 +702,14 @@ export default function LeadsPage() {
               )}
               <span className="font-medium">
                 {syncProgress.inFlight
-                  ? `Sincronizando todos os leads (${syncProgress.processed}/${syncProgress.total || syncProgress.processed}): ${syncProgress.updated} atualizadas, ${syncProgress.noPhoto} sem foto, ${syncProgress.skipped} ignoradas${syncProgress.failed > 0 ? `, ${syncProgress.failed} falhas` : ""}`
+                  ? syncProgress.total === 0 && syncProgress.processed === 0
+                    ? "Preparando sincronização de todos os leads…"
+                    : `Sincronizando todos os leads (${syncProgress.processed}/${syncProgress.total}): ${syncProgress.updated} atualizadas, ${syncProgress.noPhoto} sem foto, ${syncProgress.skipped} ignoradas${syncProgress.failed > 0 ? `, ${syncProgress.failed} falhas` : ""}`
                   : syncProgress.cancelled
                   ? `Sincronização interrompida: ${syncProgress.updated} atualizadas (${syncProgress.processed}/${syncProgress.total || syncProgress.processed} processados)`
                   : syncProgress.error
                   ? `Erro na sincronização: ${syncProgress.error} (${syncProgress.updated} fotos atualizadas antes da falha)`
-                  : `Sincronização concluída: ${syncProgress.updated} fotos atualizadas, ${syncProgress.noPhoto} sem foto de ${syncProgress.total || syncProgress.processed} leads processados.`}
+                  : `Sincronização concluída${syncProgress.failed ? " com avisos" : ""}: ${syncProgress.updated} fotos atualizadas, ${syncProgress.noPhoto} sem foto disponibilizada pelo WhatsApp, ${syncProgress.skipped} ignoradas, ${syncProgress.failed} falhas (${syncProgress.processed} leads processados).`}
               </span>
             </div>
 

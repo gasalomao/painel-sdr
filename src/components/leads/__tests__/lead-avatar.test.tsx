@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { LeadAvatar, safePhotoUrl, getInitials } from "../lead-avatar";
 
 class MockImage {
@@ -32,7 +32,9 @@ describe("LeadAvatar helper functions", () => {
 
   it("valida URLs seguras e rejeita esquemas inseguros ou strings inválidas", () => {
     expect(safePhotoUrl("https://pps.whatsapp.net/v/avatar.jpg")).toBe("https://pps.whatsapp.net/v/avatar.jpg");
-    expect(safePhotoUrl("http://localhost:3000/photo.png")).toBe("http://localhost:3000/photo.png");
+    expect(safePhotoUrl("http://localhost:3000/photo.png")).toBeNull();
+    expect(safePhotoUrl("https://evil.test/photo.png")).toBeNull();
+    expect(safePhotoUrl("https://pps.whatsapp.net/photo.jpg?oe=5E0BE100")).toBeNull();
     expect(safePhotoUrl("javascript:alert(1)")).toBeNull();
     expect(safePhotoUrl("data:text/html,bad")).toBeNull();
     expect(safePhotoUrl("")).toBeNull();
@@ -51,6 +53,7 @@ describe("LeadAvatar component", () => {
 
   afterEach(() => {
     window.Image = originalImage;
+    cleanup();
   });
 
   it("renderiza fallback com iniciais quando URL não for fornecida", () => {
@@ -61,6 +64,16 @@ describe("LeadAvatar component", () => {
   it("renderiza fallback quando URL for insegura ou vazia", () => {
     render(<LeadAvatar name="Clínica Sorriso" url="javascript:bad" />);
     expect(screen.getByText("CS")).toBeInTheDocument();
+  });
+
+  it("volta às iniciais se a imagem falhar e tenta novamente quando a URL mudar", async () => {
+    const { rerender } = render(<LeadAvatar name="Auto Mecânica" url="https://pps.whatsapp.net/old.jpg" />);
+    const img = await screen.findByRole("img", { name: "Auto Mecânica" });
+    fireEvent.error(img);
+    await waitFor(() => expect(screen.queryByRole("img", { name: "Auto Mecânica" })).not.toBeInTheDocument());
+    expect(screen.getByText("AM")).toBeInTheDocument();
+    rerender(<LeadAvatar name="Auto Mecânica" url="https://pps.whatsapp.net/new.jpg" />);
+    await waitFor(() => expect(screen.getByRole("img", { name: "Auto Mecânica" })).toHaveAttribute("src", "https://pps.whatsapp.net/new.jpg"));
   });
 
   it("renderiza imagem com referrerPolicy no-referrer e lazy loading quando URL for válida", async () => {

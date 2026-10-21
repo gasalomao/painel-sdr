@@ -170,6 +170,16 @@ describe("lead-photo-sync orchestration", () => {
     expect(result.avatars["5511999990002@s.whatsapp.net"]).toBe("https://img.wa/2.jpg");
   });
 
+  it("fixa a instância retornada no primeiro lote quando nenhuma foi informada", async () => {
+    const batch: SyncBatchResponse = {
+      success: true, partial: false, instance: "inst-1", processed: 1, updated: 0,
+      noPhoto: 1, skipped: 0, failed: 0, total: 2, upperId: 2, nextCursor: 1, avatars: {},
+    };
+    mockFetch.mockResolvedValueOnce(makeResponse(batch)).mockResolvedValueOnce(makeResponse({ ...batch, nextCursor: null }));
+    await syncLeadPhotosSequentially();
+    expect(JSON.parse(mockFetch.mock.calls[1][1].body)).toEqual({ scope: "leads", cursor: 1, upperId: 2, instance: "inst-1" });
+  });
+
   it("interrompe imediatamente em resposta non-2xx e propaga erro", async () => {
     mockFetch.mockResolvedValueOnce(makeResponse({ error: "Instância desconectada" }, 400, false));
 
@@ -208,6 +218,46 @@ describe("lead-photo-sync orchestration", () => {
     expect(result.processed).toBe(40);
     expect(result.updated).toBe(10);
     expect(result.avatars["5511999990001@s.whatsapp.net"]).toBe("https://img.wa/1.jpg");
+  });
+
+  it.each(["fetch", "json", "error-json"])("descarta lote invalidado por AbortSignal durante %s sem callbacks", async (stage) => {
+    const controller = new AbortController();
+    const onBatchAvatars = vi.fn();
+    const onProgress = vi.fn();
+    let release!: () => void;
+    let started!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const reading = new Promise<void>((resolve) => { started = resolve; });
+    const batch = {
+      success: true, processed: 1, updated: 1, total: 1, nextCursor: null,
+      avatars: { "5511999990001@s.whatsapp.net": "https://pps.whatsapp.net/old.jpg" },
+    };
+    mockFetch.mockImplementation(async () => {
+      if (stage === "fetch") {
+        started();
+        await pending;
+      }
+      return {
+        ok: stage !== "error-json", status: stage === "error-json" ? 500 : 200,
+        json: async () => {
+          if (stage !== "fetch") {
+            started();
+            await pending;
+          }
+          return stage === "error-json" ? { error: "Erro do tenant antigo" } : batch;
+        },
+      } as Response;
+    });
+    const syncing = syncLeadPhotosSequentially({ signal: controller.signal, onBatchAvatars, onProgress });
+    await reading;
+    controller.abort();
+    release();
+    const result = await syncing;
+    expect(result).toMatchObject({ cancelled: true, inFlight: false, processed: 0 });
+    expect(result.avatars).toEqual({});
+    expect(onBatchAvatars).not.toHaveBeenCalled();
+    expect(onProgress).not.toHaveBeenCalled();
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
   it("aborta requisição em voo quando AbortSignal é acionado", async () => {

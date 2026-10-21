@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import { POST } from "../route";
 import { requireClientId } from "@/lib/tenant";
 import { supabaseAdmin } from "@/lib/supabase_admin";
+import { fetchProfilePicture } from "@/lib/channel";
 
 vi.mock("@/lib/tenant", () => ({ requireClientId: vi.fn(), isInstanceOwnedByClient: vi.fn().mockResolvedValue(true) }));
 vi.mock("@/lib/supabase_admin", () => ({ supabaseAdmin: { from: vi.fn() } }));
@@ -47,6 +48,24 @@ describe("sync avatars boundaries", () => {
     const response = await POST(request({ instance: "other", scope: "leads" }));
     expect(response.status).toBe(404);
     expect((await response.json()).success).toBe(false);
+  });
+
+  it("sincronização manual renova cache negativo recente e retorna chaves normalizadas para o lead", async () => {
+    const db = database();
+    const jid = "5511999990001@s.whatsapp.net";
+    const contacts = {
+      select: vi.fn().mockReturnThis(), eq: vi.fn().mockReturnThis(),
+      in: vi.fn().mockResolvedValue({ data: [{ remote_jid: jid, profile_pic_url: null, profile_pic_fetched_at: new Date().toISOString() }], error: null }),
+      upsert: vi.fn().mockResolvedValue({ error: null }),
+    };
+    db.leads.then = (resolve) => Promise.resolve(resolve({ data: [{ id: 1, remoteJid: "phone:+55 (11) 99999-0001", telefone: "11999990001" }], count: 1, error: null }));
+    vi.mocked(supabaseAdmin.from).mockImplementation((table) => (table === "channel_connections" ? db.connection : table === "contacts" ? contacts : db.leads) as never);
+    vi.mocked(fetchProfilePicture).mockResolvedValue("https://pps.whatsapp.net/avatar.jpg");
+    const response = await POST(request({ instance: "own", scope: "leads", upperId: 1 }));
+    const data = await response.json();
+    expect(data).toMatchObject({ updated: 1, noPhoto: 0, skipped: 0, failed: 0 });
+    expect(data.avatars[jid]).toBe("https://pps.whatsapp.net/avatar.jpg");
+    expect(fetchProfilePicture).toHaveBeenCalledWith(jid, "own", "a");
   });
 
   it("paginates beyond 200 leads by ID, independent of displayed cards", async () => {

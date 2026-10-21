@@ -385,23 +385,19 @@ export async function fetchProfilePicture(
   instanceName: string,
   clientId?: string
 ): Promise<string | null> {
-  const ch = await resolveChannel(instanceName);
-  if (ch.provider === "whatsapp_cloud") {
-    return null;
-  }
-
-  if (clientId && ch.client_id && ch.client_id !== clientId) {
-    const { PhotoError } = await import("@/lib/whatsapp-photos");
-    throw new PhotoError("Conexão não pertence a este cliente.", 404);
-  }
-
-  // Strict mode: se clientId for passado, nunca faz fallback cruzado
+  // Fotos autenticadas resolvem o tenant novamente sem cache/fallback global.
   if (clientId) {
-    if (ch.provider === "evolution_go") {
+    const { PhotoError, resolvePhotoConnection } = await import("@/lib/whatsapp-photos");
+    const connection = await resolvePhotoConnection(clientId, instanceName);
+    if (connection.client_id !== clientId) throw new PhotoError("Conexão não pertence a este cliente.", 404);
+    if (connection.provider.toLowerCase() === "evolution_go") {
       return evolutionGo.fetchProfilePicture(remoteJid, instanceName);
     }
     return evolutionV2.fetchProfilePicture(remoteJid, instanceName);
   }
+
+  const ch = await resolveChannel(instanceName);
+  if (ch.provider === "whatsapp_cloud") return null;
 
   // Modo compatibilidade para chamadas legadas
   const { primary, fallback } = await getProvider(instanceName);
@@ -413,7 +409,7 @@ export async function fetchProfilePicture(
   return null;
 }
 
-async function tryBulkContactsV2(instanceName: string): Promise<Array<{ remoteJid: string; profilePicUrl: string | null }> | null> {
+async function tryBulkContactsV2(instanceName: string, strict = false): Promise<Array<{ remoteJid: string; profilePicUrl: string | null }> | null> {
   const { getEvolutionConfig } = await import("@/lib/evolution");
   const cfg = await getEvolutionConfig({ resolve: false });
   if (!cfg?.url) return null;
@@ -431,9 +427,12 @@ async function tryBulkContactsV2(instanceName: string): Promise<Array<{ remoteJi
         signal: AbortSignal.timeout(15000),
       }
     );
-    if (!res.ok) return null;
+    if (!res.ok) throw new Error(`findContacts: HTTP ${res.status}`);
     const data = await res.json();
-    const list = Array.isArray(data) ? data : data?.data || [];
+    const list = Array.isArray(data) ? data : data?.data || (strict ? null : []);
+    if (strict && (!Array.isArray(list) || data?.success === false || data?.error || data?.partial || data?.failed > 0 || data?.cancelled)) {
+      throw new Error("Resposta inválida ou parcial de findContacts.");
+    }
     const contacts: Array<{ remoteJid: string; profilePicUrl: string | null }> = [];
     for (const c of list) {
       const jid = c.id || (c.number ? `${c.number.replace(/\D/g, "")}@s.whatsapp.net` : null);
@@ -445,13 +444,17 @@ async function tryBulkContactsV2(instanceName: string): Promise<Array<{ remoteJi
       }
     }
     return contacts;
-  } catch (e: any) {
-    console.warn(`[bulkSync] findContacts failed:`, e?.message);
+  } catch (error) {
+    if (strict) {
+      const { PhotoError } = await import("@/lib/whatsapp-photos");
+      throw new PhotoError("Não foi possível obter as fotos da conexão.", 502);
+    }
+    console.warn(`[bulkSync] findContacts failed:`, error instanceof Error ? error.message : error);
     return null;
   }
 }
 
-async function tryBulkContactsGo(instanceName: string): Promise<Array<{ remoteJid: string; profilePicUrl: string | null }> | null> {
+async function tryBulkContactsGo(instanceName: string, strict = false): Promise<Array<{ remoteJid: string; profilePicUrl: string | null }> | null> {
   const { data: settings } = await supabase
     .from("app_settings")
     .select("key, value")
@@ -486,9 +489,12 @@ async function tryBulkContactsGo(instanceName: string): Promise<Array<{ remoteJi
       },
       signal: AbortSignal.timeout(15000),
     });
-    if (!res.ok) return null;
+    if (!res.ok) throw new Error(`GO contacts: HTTP ${res.status}`);
     const data = await res.json();
-    const list = Array.isArray(data) ? data : data?.contacts || data?.data || [];
+    const list = Array.isArray(data) ? data : data?.contacts || data?.data || (strict ? null : []);
+    if (strict && (!Array.isArray(list) || data?.success === false || data?.error || data?.partial || data?.failed > 0 || data?.cancelled)) {
+      throw new Error("Resposta inválida ou parcial de GO contacts.");
+    }
     const contacts: Array<{ remoteJid: string; profilePicUrl: string | null }> = [];
     for (const c of list) {
       const jid = c.id || (c.number ? `${c.number.replace(/\D/g, "")}@s.whatsapp.net` : null);
@@ -501,8 +507,12 @@ async function tryBulkContactsGo(instanceName: string): Promise<Array<{ remoteJi
       }
     }
     return contacts;
-  } catch (e: any) {
-    console.warn(`[bulkSync] GO contacts failed:`, e?.message);
+  } catch (error) {
+    if (strict) {
+      const { PhotoError } = await import("@/lib/whatsapp-photos");
+      throw new PhotoError("Não foi possível obter as fotos da conexão.", 502);
+    }
+    console.warn(`[bulkSync] GO contacts failed:`, error instanceof Error ? error.message : error);
     return null;
   }
 }
@@ -517,10 +527,14 @@ async function tryBulkContactsGo(instanceName: string): Promise<Array<{ remoteJi
  * Atualiza a tabela `contacts` com as URLs encontradas. Muito mais eficiente
  * que buscar foto por foto (1 request vs N requests).
  *
- * Retorna o número de contatos atualizados.
+ * Retorna o número de contatos atualizados. A API manual usa strict para reportar
+ * falhas; chamadas legadas mantêm o retorno tolerante.
  */
-export async function bulkSyncProfilePics(instanceName: string, targetClientId?: string): Promise<number> {
-  const ch = await resolveChannel(instanceName);
+export async function bulkSyncProfilePics(instanceName: string, targetClientId?: string, options: { strict?: boolean } = {}): Promise<number> {
+  const { PhotoError, resolvePhotoConnection } = await import("@/lib/whatsapp-photos");
+  const ch = options.strict
+    ? await resolvePhotoConnection(targetClientId || "", instanceName)
+    : await resolveChannel(instanceName);
   if (ch.provider === "whatsapp_cloud") return 0;
   if (targetClientId && ch.client_id && ch.client_id !== targetClientId) {
     console.warn(`[bulkSync] instância "${instanceName}" pertence a outro cliente (${ch.client_id} != ${targetClientId}).`);
@@ -537,9 +551,9 @@ export async function bulkSyncProfilePics(instanceName: string, targetClientId?:
 
   // Strict provider: nunca faz fallback cruzado entre provedores na busca de fotos
   if (ch.provider === "evolution_go") {
-    contacts = await tryBulkContactsGo(instanceName);
+    contacts = await tryBulkContactsGo(instanceName, options.strict);
   } else if (ch.provider === "evolution" || ch.provider === "evolution_v2") {
-    contacts = await tryBulkContactsV2(instanceName);
+    contacts = await tryBulkContactsV2(instanceName, options.strict);
   } else {
     const { primary, fallback } = await getProvider(instanceName);
     try {
@@ -553,6 +567,9 @@ export async function bulkSyncProfilePics(instanceName: string, targetClientId?:
     }
   }
 
+  if (!contacts && options.strict) {
+    throw new PhotoError("Não foi possível obter as fotos da conexão.", 502);
+  }
   if (!contacts || contacts.length === 0) return 0;
 
   const { safePhotoUrl, getPhotoJid } = await import("@/lib/whatsapp-photo-utils");
@@ -594,6 +611,9 @@ export async function bulkSyncProfilePics(instanceName: string, targetClientId?:
           )
       )
     );
+    if (options.strict && results.some((r) => r.status === "rejected" || r.value?.error)) {
+      throw new PhotoError("Não foi possível salvar todas as fotos. A sincronização ficou incompleta.", 500);
+    }
     results.forEach((r) => {
       if (r.status === "fulfilled" && (!r.value || !r.value.error)) updated++;
     });

@@ -4,20 +4,8 @@ import React from "react";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
 
-export function safePhotoUrl(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  if (/^https?:\/\//i.test(trimmed)) {
-    try {
-      new URL(trimmed);
-      return trimmed;
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
+import { safePhotoUrl } from "@/lib/whatsapp-photo-utils";
+export { safePhotoUrl } from "@/lib/whatsapp-photo-utils";
 
 export function getInitials(name?: string | null): string {
   if (!name || typeof name !== "string") return "L";
@@ -48,16 +36,18 @@ export function LeadAvatar({
   size = "default",
 }: LeadAvatarProps) {
   const safeUrl = safePhotoUrl(url);
+  const [failedUrl, setFailedUrl] = React.useState<string | null>(null);
   const initials = getInitials(name);
 
   return (
-    <Avatar size={size} className={cn("overflow-hidden shrink-0", className)}>
-      {safeUrl ? (
+    <Avatar key={safeUrl === failedUrl ? "fallback" : safeUrl} size={size} className={cn("overflow-hidden shrink-0", className)}>
+      {safeUrl && safeUrl !== failedUrl ? (
         <AvatarImage
           src={safeUrl}
           alt={name || "Lead"}
           referrerPolicy="no-referrer"
           loading="lazy"
+          onError={() => setFailedUrl(safeUrl)}
           className={cn("object-cover size-full", imageClassName)}
           render={(props) => <img {...props} referrerPolicy="no-referrer" />}
         />

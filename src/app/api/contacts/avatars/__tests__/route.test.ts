@@ -243,13 +243,13 @@ describe.each(METHODS)("%s /api/contacts/avatars", (method) => {
     const cached = contact({ profile_pic_fetched_at: OLD_FETCHED_AT });
     const db = database({ contacts: [cached] });
     if (failure === "rejection") vi.mocked(fetchProfilePicture).mockRejectedValueOnce(new Error("provider unavailable"));
-    else vi.mocked(fetchProfilePicture).mockResolvedValueOnce(null);
+    else vi.mocked(fetchProfilePicture).mockResolvedValue(null);
 
     const response = await invoke(method, { jids: [JID], instance: INSTANCE, force: true });
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(fetchProfilePicture).toHaveBeenCalledWith(JID, INSTANCE);
+    expect(fetchProfilePicture).toHaveBeenCalledWith(JID, INSTANCE, CLIENT_ID);
     expect.soft(body.avatars[JID]).toBe(PHOTO);
     expect.soft(body.refreshed).toBe(0);
     expect.soft(db.contacts).toEqual([cached]);
@@ -264,7 +264,7 @@ describe.each(METHODS)("%s /api/contacts/avatars", (method) => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(fetchProfilePicture).toHaveBeenCalledWith(JID, INSTANCE);
+    expect(fetchProfilePicture).toHaveBeenCalledWith(JID, INSTANCE, CLIENT_ID);
     expect(db.upsert).toHaveBeenCalledTimes(1);
     expect.soft(body.refreshed).toBe(0);
     expect.soft(body.avatars[JID]).toBe(PHOTO);

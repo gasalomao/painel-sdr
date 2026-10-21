@@ -292,25 +292,27 @@ export const evolutionGo: WhatsAppProvider = {
     const cleanNumber = formatNumberForGo(remoteJid);
     if (!cleanNumber) return null;
 
-    try {
-      const res = await goFetch(
-        "/message/avatar",
-        {
-          instance: instanceName,
-          number: cleanNumber,
-        },
-        instanceToken,
-        5000
-      );
-      return res?.pictureUrl || res?.url || res?.avatar || null;
-    } catch (err: any) {
-      const msg = String(err?.message || "");
-      if (/404|not found|no profile|não encontrado|contact not found/i.test(msg)) {
-        if (!/401|403|unauthorized|forbidden|offline/i.test(msg)) {
-          return null;
-        }
-      }
-      throw err;
+    if (!GO_URL) throw new Error("Evolution GO não configurado.");
+    const response = await fetch(`${GO_URL.replace(/\/+$/, "")}/message/avatar`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", apikey: GO_KEY, token: instanceToken },
+      body: JSON.stringify({ instance: instanceName, number: cleanNumber }),
+      signal: AbortSignal.timeout(5000),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      const message = JSON.stringify(payload);
+      if ([400, 404].includes(response.status) && !/instance|instância|offline|unauthorized|forbidden|<html/i.test(message) &&
+          /(?:contact not found|no profile (?:picture|photo)|profile (?:picture|photo) (?:not found|not available)|item-not-found)/i.test(message)) return null;
+      throw new Error(`Evolution GO HTTP ${response.status}`);
     }
+    if (!payload || typeof payload !== "object") throw new Error("Resposta de foto inválida da Evolution GO.");
+    const record = payload as Record<string, unknown>;
+    const key = ["pictureUrl", "url", "avatar"].find((field) => field in record);
+    if (!key) throw new Error("Resposta de foto inválida da Evolution GO.");
+    const url = record[key];
+    if (url === null || url === "") return null;
+    if (typeof url !== "string") throw new Error("Resposta de foto inválida da Evolution GO.");
+    return url;
   },
 };

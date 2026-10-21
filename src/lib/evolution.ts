@@ -373,9 +373,7 @@ export const evolution = {
    * Body: { number: "5527999999999@s.whatsapp.net" }
    * Retorno: { wuid, profilePictureUrl } | { profilePictureUrl: null } se não tiver foto
    *
-   * Evolution v2 às vezes responde 400 para números fora dos contatos da
-   * instância — não é erro fatal, só significa "sem foto / sem visibilidade".
-   * Retornamos null nesses casos.
+   * Só ausência explícita vira null; 400/404 genérico, proxy offline e erro de rede propagam.
    */
   async fetchProfilePicture(number: string, instance?: string): Promise<string | null> {
     if (!instance || !instance.trim()) {
@@ -387,15 +385,18 @@ export const evolution = {
     }
     try {
       const res = await evoFetch(`/chat/fetchProfilePictureUrl/${resolvedInstance}`, "POST", { number }, 5000);
-      const url = res?.profilePictureUrl ?? res?.data?.profilePictureUrl ?? null;
-      return typeof url === "string" && url.startsWith("http") ? url : null;
-    } catch (err: any) {
-      const msg = String(err?.message || "");
-      if (/40[04]|not found|no profile|não encontrado|cannot find/i.test(msg)) {
-        if (!/401|403|unauthorized|forbidden|offline/i.test(msg)) {
-          return null;
-        }
+      const payload: unknown = res?.data ?? res;
+      if (!payload || typeof payload !== "object" || !("profilePictureUrl" in payload)) {
+        throw new Error("Resposta de foto inválida da Evolution v2.");
       }
+      const url = (payload as Record<string, unknown>).profilePictureUrl;
+      if (url === null || url === "") return null;
+      if (typeof url !== "string") throw new Error("Resposta de foto inválida da Evolution v2.");
+      return url;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "";
+      if (/^Erro (400|404):/.test(msg) && !/<html|<!doctype|offline|instance|instância/i.test(msg) &&
+          /(?:no profile (?:picture|photo)|profile (?:picture|photo) (?:not found|not available)|item-not-found|contact not found)/i.test(msg)) return null;
       throw err;
     }
   },

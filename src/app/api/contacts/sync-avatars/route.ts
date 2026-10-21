@@ -29,7 +29,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const input = parseInput(await req.json().catch(() => null));
     const connection = await resolvePhotoConnection(auth.clientId, input.instance);
     if (input.scope !== "leads") {
-      const updated = await bulkSyncProfilePics(connection.instance_name, auth.clientId);
+      const updated = await bulkSyncProfilePics(connection.instance_name, auth.clientId, { strict: true });
       return NextResponse.json({ success: true, updated, instance: connection.instance_name });
     }
 
@@ -49,10 +49,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (page.error) throw page.error;
     const leads = (page.data ?? []).slice(0, BATCH_SIZE);
     const jids = [...new Set(leads.map((lead) => getPhotoJid(lead.remoteJid) ?? getPhotoJid(lead.telefone)).filter((jid): jid is string => jid !== null))];
-    const result = await refreshPhotos(auth.clientId, connection, jids, { signal: req.signal });
+    const result = await refreshPhotos(auth.clientId, connection, jids, { force: true, signal: req.signal });
     // Progresso conta registros de leads; duplicados e números inválidos são ignorados.
     return NextResponse.json({
-      ...result, success: result.failed === 0, partial: result.failed > 0,
+      ...result, success: result.failed === 0 && !result.cancelled, partial: result.failed > 0 || !!result.cancelled,
       processed: leads.length, skipped: result.skipped + leads.length - jids.length,
       total: totalQuery.count ?? 0, upperId,
       nextCursor: !result.cancelled && (page.data?.length ?? 0) > BATCH_SIZE ? leads[leads.length - 1].id : null,

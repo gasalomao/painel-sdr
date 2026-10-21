@@ -3,12 +3,15 @@ import { readFileSync } from "node:fs";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup, act } from "@testing-library/react";
 import LeadsPage from "@/app/leads/page";
+import { toast } from "sonner";
+import * as photoSync from "@/lib/lead-photo-sync";
 
+const session = vi.hoisted(() => ({ clientId: "client-test-123" }));
 vi.mock("@/lib/use-session", () => ({
   useClientSession: () => ({
-    clientId: "client-test-123",
+    clientId: session.clientId,
     loading: false,
-    session: { authenticated: true, clientId: "client-test-123" },
+    session: { authenticated: true, clientId: session.clientId },
   }),
 }));
 
@@ -110,6 +113,7 @@ describe("LeadsPage - Sincronização e Hidratação de Fotos", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    session.clientId = "client-test-123";
     totalCount = 2;
     customColumns = [];
     sampleLeads[0].status = "novo";
@@ -338,6 +342,100 @@ describe("LeadsPage - Sincronização e Hidratação de Fotos", () => {
         body: JSON.stringify({ scope: "leads", cursor: 1, upperId: 100 }),
       })
     );
+  });
+
+  it("anuncia preparação sem 0/0 e não diz que fotos estão atualizadas quando WhatsApp não disponibiliza", async () => {
+    const pendingBatch = deferred<Response>();
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes("/api/kanban-columns")) return response({ ok: true, columns: [] });
+      if (url.includes("/api/contacts/sync-avatars")) return pendingBatch.promise;
+      return response({ success: true, avatars: {} });
+    });
+    render(<LeadsPage />);
+    await waitFor(() => expect(screen.getAllByText("Auto Mecânica Alpha")[0]).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Sincronizar fotos de todos os leads/i }));
+    expect(screen.getByRole("status")).toHaveTextContent(/Preparando sincronização/i);
+    expect(screen.getByRole("status")).not.toHaveTextContent("0/0");
+    await act(async () => pendingBatch.resolve(response({ success: true, processed: 2, updated: 0, noPhoto: 2, skipped: 0, failed: 0, total: 2, upperId: 2, nextCursor: null, avatars: {} })));
+    await waitFor(() => expect(toast.success).toHaveBeenCalled());
+    expect(toast.success).toHaveBeenCalledWith(expect.stringMatching(/2 sem foto/i));
+    expect(toast.success).not.toHaveBeenCalledWith(expect.stringMatching(/já estão atualizadas/i));
+  });
+
+  it("normaliza remoteJid inválido/LID pelo telefone na hidratação e ao aplicar sincronização", async () => {
+    const original = sampleLeads[0].remoteJid;
+    sampleLeads[0].remoteJid = "1234567890123@lid";
+    try {
+      render(<LeadsPage />);
+      await waitFor(() => expect(screen.getAllByText("Auto Mecânica Alpha")[0]).toBeInTheDocument());
+      const hydration = mockFetch.mock.calls.find(([url]) => url.includes("/api/contacts/avatars"));
+      expect(JSON.parse(hydration?.[1]?.body as string).jids).toContain("5511999990001@s.whatsapp.net");
+      expect(JSON.parse(hydration?.[1]?.body as string).jids).not.toContain("1234567890123@lid");
+    } finally {
+      sampleLeads[0].remoteJid = original;
+    }
+  });
+
+  it("preserva foto válida exibida quando o lote retorna null", async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes("/api/kanban-columns")) return response({ ok: true, columns: [] });
+      if (url.includes("/api/contacts/avatars")) return response({ success: true, avatars: { "5511999990001@s.whatsapp.net": "https://pps.whatsapp.net/v/alpha.jpg" } });
+      if (url.includes("/api/contacts/sync-avatars")) return response({
+        success: false, partial: true, processed: 2, updated: 0, noPhoto: 1, skipped: 0, failed: 1,
+        total: 2, upperId: 2, nextCursor: null, avatars: { "5511999990001@s.whatsapp.net": null },
+      });
+      return response({});
+    });
+    vi.stubGlobal("Image", class {
+      onload: (() => void) | null = null;
+      set src(value: string) { if (value) this.onload?.(); }
+    });
+    render(<LeadsPage />);
+    await waitFor(() => expect(screen.getAllByRole("img", { name: "Auto Mecânica Alpha" }).length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByRole("button", { name: /Sincronizar fotos de todos os leads/i }));
+    await waitFor(() => expect(toast.warning).toHaveBeenCalled());
+    expect(screen.getAllByRole("img", { name: "Auto Mecânica Alpha" }).length).toBeGreaterThan(0);
+  });
+
+  it("ignora callbacks, conclusão e limpeza da sincronização do tenant anterior", async () => {
+    vi.stubGlobal("Image", class {
+      onload: (() => void) | null = null;
+      set src(value: string) { if (value) this.onload?.(); }
+    });
+    const oldRun = deferred<photoSync.SyncProgressState>();
+    const newRun = deferred<photoSync.SyncProgressState>();
+    let oldCallbacks: photoSync.SyncOptions = {};
+    let newCallbacks: photoSync.SyncOptions = {};
+    vi.spyOn(photoSync, "syncLeadPhotosSequentially")
+      .mockImplementationOnce((options = {}) => { oldCallbacks = options; return oldRun.promise; })
+      .mockImplementationOnce((options = {}) => { newCallbacks = options; return newRun.promise; });
+    const { rerender } = render(<LeadsPage />);
+    await waitFor(() => expect(screen.getAllByRole("img", { name: "Auto Mecânica Alpha" }).length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByRole("button", { name: /Sincronizar fotos de todos os leads/i }));
+    session.clientId = "client-second";
+    rerender(<LeadsPage />);
+    expect(oldCallbacks.signal?.aborted).toBe(true);
+    await waitFor(() => expect(screen.getByRole("button", { name: /Sincronizar fotos de todos os leads/i })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole("button", { name: /Sincronizar fotos de todos os leads/i }));
+    const stale: photoSync.SyncProgressState = {
+      processed: 99, total: 99, updated: 99, noPhoto: 0, skipped: 0, failed: 0,
+      avatars: { "5511999990001@s.whatsapp.net": "https://pps.whatsapp.net/stale.jpg" },
+      inFlight: false, cancelled: false,
+    };
+    await act(async () => {
+      oldCallbacks.onBatchAvatars?.(stale.avatars);
+      oldCallbacks.onProgress?.(stale);
+      oldRun.resolve(stale);
+    });
+    expect(screen.getByRole("status")).toHaveTextContent(/Preparando sincronização/i);
+    expect(screen.getAllByRole("img", { name: "Auto Mecânica Alpha" }).every(image => image.getAttribute("src")?.includes("alpha.jpg"))).toBe(true);
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.warning).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+    rerender(<></>);
+    expect(newCallbacks.signal?.aborted).toBe(true);
+    await act(async () => newRun.resolve({ ...stale, updated: 0, avatars: {}, cancelled: true }));
+    expect(toast.info).not.toHaveBeenCalled();
   });
 
   it("permite cancelar sincronização pelo botão Cancelar e interrompe próximos lotes", async () => {

@@ -30,7 +30,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { LeadAvatar } from "@/components/leads/lead-avatar";
-import { normalizeJid } from "@/lib/jid-utils";
+import { getPhotoJid } from "@/lib/whatsapp-photo-utils";
 
 function formatPhoneNumber(phoneOrJid?: string | null): string {
   if (!phoneOrJid) return "—";
@@ -113,6 +113,7 @@ export function LeadDrawer({
     edited.current = { notes: false, text: false, due: false };
     setSavingNotes(false);
     setSavingReminder(false);
+    setSyncingPhoto(false);
     if (lead && open) {
       setObservacoes(lead.observacoes || "");
       setLembreteTexto(lead.next_follow_up ? (lead.lembrete_texto ?? lead.business_details?.lembrete_texto ?? lead.observacoes ?? "") : "");
@@ -175,7 +176,7 @@ export function LeadDrawer({
   const handleRefreshPhoto = async () => {
     if (!lead) return;
     const currentGeneration = generation.current;
-    const jid = normalizeJid(lead.remoteJid || lead.telefone);
+    const jid = getPhotoJid(lead.remoteJid) ?? getPhotoJid(lead.telefone);
     if (!jid) {
       toast.error("Lead sem telefone ou JID válido para buscar foto.");
       return;
@@ -201,13 +202,17 @@ export function LeadDrawer({
       }
 
       const freshUrl = data.avatars?.[jid] ?? null;
-      if (data.noPhoto > 0 || !freshUrl) {
+      if (!freshUrl) {
         setProfilePic(null);
         toast.info("Contato não possui foto pública no WhatsApp.");
         onLeadUpdated?.({ id: lead.id, profilePicUrl: null });
       } else {
         setProfilePic(freshUrl);
-        toast.success("Foto do WhatsApp atualizada!");
+        if (data.noPhoto > 0) {
+          toast.info("Contato não possui foto pública no WhatsApp. Foto anterior preservada.");
+        } else {
+          toast.success("Foto do WhatsApp atualizada!");
+        }
         onLeadUpdated?.({ id: lead.id, profilePicUrl: freshUrl });
       }
     } catch (err: unknown) {
