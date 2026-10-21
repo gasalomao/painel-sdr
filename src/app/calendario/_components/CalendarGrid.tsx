@@ -135,8 +135,7 @@ export default function CalendarGrid({
 
   return (
     <div
-      className="calendar-dark rounded-2xl border border-white/10 bg-secondary/20 p-1 sm:p-2"
-      style={{ height: "calc(100vh - 240px)", minHeight: 520 }}
+      className="calendar-dark calendar-grid"
     >
       <DnDCalendar
         localizer={rbcLocalizer}

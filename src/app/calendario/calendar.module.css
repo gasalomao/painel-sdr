@@ -1,0 +1,103 @@
+.calendar, .appointmentDialog, .popover {
+  /* ponytail: mesmo sistema local do CRM; tema global fica fora deste escopo. */
+  --color-background: #101411;
+  --color-foreground: #edf2ee;
+  --color-card: #181d19;
+  --color-card-foreground: #edf2ee;
+  --color-popover: #1d251f;
+  --color-popover-foreground: #edf2ee;
+  --color-primary: #6ee7b7;
+  --color-primary-foreground: #10251b;
+  --color-secondary: #262e28;
+  --color-secondary-foreground: #edf2ee;
+  --color-muted: #222a24;
+  --color-muted-foreground: #a5b1a8;
+  --color-accent: #2b3930;
+  --color-accent-foreground: #edf2ee;
+  --color-border: #303a32;
+  --color-input: #3b483e;
+  --color-ring: #6ee7b7;
+  background: var(--color-background);
+  color: var(--color-foreground);
+  color-scheme: dark;
+  caret-color: #6ee7b7;
+}
+.calendar *, .appointmentDialog *, .popover * { border-color: revert-layer; }
+.popover { border: 1px solid #3b483e; background: #1d251f; color: #edf2ee; }
+.calendar ::selection, .appointmentDialog ::selection { background: #6ee7b733; color: #edf2ee; }
+.calendar :focus-visible, .appointmentDialog :focus-visible { outline: 2px solid #6ee7b7; outline-offset: 2px; }
+.calendar > header { background: #101411; border-color: #303a32; }
+.content { padding: 20px 24px 24px; scrollbar-width: thin; scrollbar-color: #425447 #101411; }
+.statusBar { display: flex; flex-wrap: wrap; align-items: stretch; gap: 12px 24px; padding-bottom: 16px; border-bottom: 1px solid #303a32; }
+.statusItem { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1 1 190px; }
+.statusIcon { color: #8db39a; flex-shrink: 0; }
+.statusLabel { display: flex; align-items: center; gap: 5px; color: #a5b1a8; font-size: 10px; }
+.statusValue { margin-top: 4px; color: #d5dfd8; font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modelSelect { width: 100%; min-height: 28px; height: 28px; padding: 0 3px; margin-left: -3px; background: transparent; border: 0; border-radius: 4px; color: #d5dfd8; font-size: 12px; font-weight: 500; box-shadow: none; }
+.workspace { margin-top: 20px; }
+.periodRow { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding-bottom: 20px; }
+.period { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 24px; min-width: 0; }
+.period h2 { margin: 0; font-size: 25px; font-weight: 600; line-height: 1.3; letter-spacing: -.025em; }
+.period h2::first-letter { text-transform: uppercase; }
+.dateNavigation { display: flex; align-items: center; gap: 3px; }
+.iconButton { width: 36px; height: 36px; color: #b7c5bb; border-radius: 7px; }
+.todayButton, .secondaryButton { min-height: 36px; padding: 0 11px; gap: 7px; border: 1px solid #3b483e; border-radius: 7px; background: #181d19; color: #d2ddd5; font-size: 12px; box-shadow: none; }
+.todayButton { margin-left: 5px; }
+.secondaryButton:hover, .todayButton:hover, .iconButton:hover { background: #29362d; color: #edf2ee; }
+.createButton { flex-shrink: 0; min-height: 40px; padding: 0 15px; gap: 8px; border-radius: 8px; background: #6ee7b7; color: #10251b; font-size: 13px; font-weight: 600; box-shadow: none; }
+.createButton:hover { background: #91efcb; }
+.toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 14px 0; border-top: 1px solid #303a32; border-bottom: 1px solid #303a32; }
+.viewModes { display: flex; flex-shrink: 0; gap: 2px; padding: 3px; border: 1px solid #354138; border-radius: 8px; background: #181d19; }
+.viewModes > button { height: 32px; padding: 0 12px; border-radius: 5px; background: transparent; color: #b7c5bb; font-size: 12px; }
+.viewModes > button[aria-pressed="true"] { background: #2b3930; color: #8aefc7; }
+.filters { display: flex; flex-wrap: wrap; gap: 8px; }
+.filterSelect { width: 165px; min-height: 38px; background: #181d19; border: 1px solid #3b483e; border-radius: 7px; padding: 0 10px; color: #c5d2c8; font-size: 12px; }
+.integrations { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+.googleBadge { display: flex; align-items: center; gap: 7px; min-width: 0; max-width: 210px; min-height: 36px; border-radius: 6px; padding: 0 7px; font-size: 11px; }
+.googleConnected { color: #a2ddbc; }
+.googleDisconnected { color: #edb0b9; }
+.googleBadge:hover { background: #222a24; }
+.summary { display: flex; justify-content: space-between; gap: 12px; padding: 12px 0; color: #a5b1a8; font-size: 11px; font-variant-numeric: tabular-nums; }
+.calendarBody { min-width: 0; }
+.emptyState { background: #181d19; border: 1px solid #303a32; border-radius: 10px; box-shadow: none; }
+.agendaList { padding: 8px 0; }
+.agendaDay + .agendaDay { margin-top: 24px; }
+.agendaEvent { margin-top: 8px; padding: 0; background: #181d19; border: 1px solid #303a32; border-radius: 8px; box-shadow: none; }
+.agendaEvent:hover { border-color: #425447; }
+.agendaEventContent { display: flex; align-items: flex-start; gap: 14px; padding: 16px; }
+.agendaActions { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
+.agendaActions > button { min-width: 34px; min-height: 34px; }
+.appointmentDialog { border: 1px solid #3b483e; background: #181d19; }
+.appointmentDialog input::placeholder, .appointmentDialog textarea::placeholder { color: #a5b1a8; }
+.appointmentDialog input[type="checkbox"] { accent-color: #6ee7b7; }
+@media (max-width: 1023px) {
+  .content { padding: 16px 16px calc(5rem + env(safe-area-inset-bottom, 0px)); }
+  .period h2 { font-size: 22px; }
+  .integrations { margin-left: 0; }
+}
+@media (max-width: 600px) {
+  .content { padding-inline: 12px; }
+  .statusBar { gap: 10px 16px; }
+  .statusItem { flex-basis: calc(50% - 8px); }
+  .statusItem:first-child { flex-basis: 100%; }
+  .statusItem .statusValue { font-size: 11px; }
+  .workspace { margin-top: 18px; }
+  .periodRow { flex-wrap: wrap; gap: 14px; padding-bottom: 16px; }
+  .period { flex-basis: 100%; gap: 10px; justify-content: space-between; }
+  .period h2 { font-size: 21px; }
+  .dateNavigation { margin-left: -4px; }
+  .createButton { width: 100%; }
+  .toolbar { gap: 12px; }
+  .viewModes { width: 100%; }
+  .viewModes > button { flex: 1; height: 36px; padding-inline: 9px; }
+  .filters { flex-wrap: nowrap; width: 100%; }
+  .filterSelect { flex: 1; width: 0; min-width: 0; min-height: 40px; }
+  .integrations { gap: 6px; width: 100%; }
+  .googleBadge { max-width: 100%; flex-basis: 100%; padding: 0; min-height: 28px; }
+  .secondaryButton { flex: 1; min-height: 40px; }
+  .summary { font-size: 10px; gap: 8px; }
+  .summary > span:last-child { text-align: right; }
+  .agendaEventContent { flex-wrap: wrap; padding: 12px; gap: 10px; }
+  .agendaActions { justify-content: flex-end; width: 100%; padding-top: 8px; border-top: 1px solid #303a32; }
+  .agendaActions > button { min-width: 40px; min-height: 40px; }
+}

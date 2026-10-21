@@ -15,7 +15,8 @@
  */
 
 import { useEffect, useState, useCallback } from "react";
-import { Loader2, Bot, Smartphone, Sparkles, ChevronDown, CheckCircle2 } from "lucide-react";
+import { Loader2, Bot, Smartphone, Cpu, CheckCircle2 } from "lucide-react";
+import styles from "@/app/calendario/calendar.module.css";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
@@ -105,23 +106,23 @@ export function CalendarStatusBar({
   }, [isAdmin, currentModel, onModelChange]);
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+    <div className={styles.statusBar} aria-label="Contexto da agenda">
       {/* Card 1: Modelo IA */}
-      <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-purple-500/[0.05] border border-purple-500/15">
-        <div className="w-8 h-8 rounded-md bg-purple-500/15 flex items-center justify-center shrink-0">
-          <Sparkles className="w-4 h-4 text-purple-300" />
+      <div className={styles.statusItem}>
+        <div className={styles.statusIcon}>
+          <Cpu className="w-4 h-4" />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="text-[9px] font-black uppercase tracking-widest text-purple-200/70">
+          <div className={styles.statusLabel}>
             Modelo IA {!isAdmin && <span className="opacity-60">(somente leitura)</span>}
           </div>
           {isAdmin ? (
             <Select value={currentModel} onValueChange={(v) => saveModel(v || "")} disabled={savingModel}>
-              <SelectTrigger className="h-6 px-1 py-0 border-0 bg-transparent text-xs font-mono font-bold text-purple-100 hover:bg-white/5 -ml-1 w-full">
+              <SelectTrigger className={styles.modelSelect} aria-label="Modelo IA da agenda">
                 <SelectValue placeholder={savingModel ? "salvando…" : "—"} />
-                {savingModel ? <Loader2 className="w-3 h-3 animate-spin ml-1" /> : <ChevronDown className="w-3 h-3 opacity-60" />}
+                {savingModel && <Loader2 className="w-3 h-3 animate-spin ml-1" />}
               </SelectTrigger>
-              <SelectContent className="max-h-[50vh]">
+              <SelectContent className={cn(styles.popover, "max-h-[50vh]")}>
                 {modelOptions.length === 0 ? (
                   <div className="text-[10px] text-muted-foreground px-2 py-1">Configure API Key Gemini</div>
                 ) : modelOptions.map(m => (
@@ -132,7 +133,7 @@ export function CalendarStatusBar({
               </SelectContent>
             </Select>
           ) : (
-            <div className="text-xs font-mono font-bold text-purple-100 truncate" title={currentModel}>
+            <div className={styles.statusValue} title={currentModel}>
               {currentModel || "—"}
             </div>
           )}
@@ -140,36 +141,36 @@ export function CalendarStatusBar({
       </div>
 
       {/* Card 2: Agente vinculado */}
-      <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-blue-500/[0.05] border border-blue-500/15">
-        <div className="w-8 h-8 rounded-md bg-blue-500/15 flex items-center justify-center shrink-0">
-          <Bot className="w-4 h-4 text-blue-300" />
+      <div className={styles.statusItem}>
+        <div className={styles.statusIcon}>
+          <Bot className="w-4 h-4" />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="text-[9px] font-black uppercase tracking-widest text-blue-200/70 flex items-center gap-1">
+          <div className={styles.statusLabel}>
             Agente vinculado
             {primaryAgent?.google_connected && (
               <CheckCircle2 className="w-2.5 h-2.5 text-emerald-400" />
             )}
           </div>
-          <div className="text-xs font-bold text-blue-100 truncate" title={primaryAgent?.name || ""}>
+          <div className={styles.statusValue} title={primaryAgent?.name || ""}>
             {primaryAgent?.name || <span className="text-muted-foreground/70 font-normal">Nenhum agente scheduler</span>}
           </div>
         </div>
       </div>
 
       {/* Card 3: Instância de envio */}
-      <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-emerald-500/[0.05] border border-emerald-500/15">
-        <div className="w-8 h-8 rounded-md bg-emerald-500/15 flex items-center justify-center shrink-0">
-          <Smartphone className="w-4 h-4 text-emerald-300" />
+      <div className={styles.statusItem}>
+        <div className={styles.statusIcon}>
+          <Smartphone className="w-4 h-4" />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="text-[9px] font-black uppercase tracking-widest text-emerald-200/70 flex items-center gap-1">
+          <div className={styles.statusLabel}>
             Disparo follow-up
             {primaryInstance?.status === "open" && (
               <span className={cn("w-1 h-1 rounded-full bg-emerald-400 animate-pulse")} />
             )}
           </div>
-          <div className="text-xs font-mono font-bold text-emerald-100 truncate" title={primaryInstance?.instance_name || ""}>
+          <div className={styles.statusValue} title={primaryInstance?.instance_name || ""}>
             {primaryInstance?.instance_name || <span className="text-muted-foreground/70 font-normal">Sem instância vinculada</span>}
           </div>
         </div>

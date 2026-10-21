@@ -23,6 +23,7 @@ import { CalendarStatusBar } from "@/components/calendar-status-bar";
 import { SendFollowupDialog } from "@/components/send-followup-dialog";
 import { GOOGLE_EVENT_COLORS } from "@/lib/google-calendar-colors";
 import "./calendar-theme.css";
+import styles from "./calendar.module.css";
 import dynamic from "next/dynamic";
 
 const CalendarGrid = dynamic(
@@ -32,7 +33,7 @@ const CalendarGrid = dynamic(
 
 function CalendarSkeleton() {
   return (
-    <div className="rounded-2xl border border-white/10 bg-secondary/20 p-1 sm:p-2 flex items-center justify-center" style={{ height: "calc(100vh - 240px)", minHeight: 520 }}>
+    <div className="calendar-grid flex items-center justify-center" role="status">
       <div className="text-center text-muted-foreground">
         <div className="w-8 h-8 mx-auto animate-spin rounded-full border-2 border-primary border-t-transparent" />
         <p className="text-xs mt-3">Carregando calendário…</p>
@@ -366,29 +367,35 @@ export default function CalendarioPage() {
   }, []);
 
   return (
-    <div className="flex flex-col h-full">
+    <div className={cn(styles.calendar, "flex flex-col h-full min-h-0")}>
       <Header />
 
-      <div className="flex-1 overflow-auto p-3 md:p-6 space-y-4">
-        {/* Barra de status — modelo IA + agente + instância */}
+      <div className={cn(styles.content, "flex-1 overflow-auto min-h-0")}>
         <CalendarStatusBar agents={agents} isAdmin={isAdmin} />
 
-        {/* Barra de controle */}
-        <div className="flex flex-wrap gap-2 items-center">
-          <div className="flex items-center gap-1 border border-white/10 rounded-lg p-0.5 bg-secondary/30">
-            <Button variant={view === "day" ? "default" : "ghost"} size="sm" onClick={() => setView("day")} className="text-xs h-7">Dia</Button>
-            <Button variant={view === "week" ? "default" : "ghost"} size="sm" onClick={() => setView("week")} className="text-xs h-7">Semana</Button>
-            <Button variant={view === "month" ? "default" : "ghost"} size="sm" onClick={() => setView("month")} className="text-xs h-7">Mês</Button>
-            <Button variant={view === "agenda" ? "default" : "ghost"} size="sm" onClick={() => setView("agenda")} className="text-xs h-7">Agenda</Button>
+        <section className={styles.workspace} aria-label="Agenda de agendamentos">
+        <div className={styles.periodRow}>
+          <div className={styles.period}>
+            <h2 aria-live="polite">{view === "day" ? fmtDateLong(anchor) : view === "week" ? `${fmtDate(from.toISOString())} – ${fmtDate(to.toISOString())}` : anchor.toLocaleDateString("pt-BR", { month: "long", year: "numeric" })}</h2>
+            <div className={styles.dateNavigation}>
+              <Button variant="ghost" size="icon" onClick={() => moveAnchor(-1)} aria-label="Período anterior" className={styles.iconButton}><ChevronLeft className="w-4 h-4" /></Button>
+              <Button variant="ghost" size="icon" onClick={() => moveAnchor(1)} aria-label="Próximo período" className={styles.iconButton}><ChevronRight className="w-4 h-4" /></Button>
+              <Button variant="outline" size="sm" onClick={() => setAnchor(new Date())} className={styles.todayButton}>Hoje</Button>
+            </div>
           </div>
-          <div className="flex items-center gap-1">
-            <Button variant="ghost" size="icon" onClick={() => moveAnchor(-1)} className="w-7 h-7"><ChevronLeft className="w-4 h-4" /></Button>
-            <button onClick={() => setAnchor(new Date())} className="text-xs font-medium text-muted-foreground hover:text-foreground px-2 py-1 rounded hover:bg-white/5">
-              {view === "day" ? fmtDateLong(anchor) : view === "week" ? `${fmtDate(from.toISOString())} – ${fmtDate(to.toISOString())}` : anchor.toLocaleDateString("pt-BR", { month: "long", year: "numeric" })}
-            </button>
-            <Button variant="ghost" size="icon" onClick={() => moveAnchor(1)} className="w-7 h-7"><ChevronRight className="w-4 h-4" /></Button>
-            <Button variant="ghost" size="icon" onClick={() => setAnchor(new Date())} title="Hoje" className="w-7 h-7"><RefreshCw className="w-3.5 h-3.5" /></Button>
+          <Button onClick={() => { setEditing(null); setInitialStart(null); setCreateOpen(true); }} size="sm" className={styles.createButton}>
+            <Plus className="w-4 h-4" /> Novo agendamento
+          </Button>
+        </div>
+
+        <div className={styles.toolbar}>
+          <div className={styles.viewModes} role="group" aria-label="Visualização do calendário">
+            <Button variant="ghost" size="sm" aria-pressed={view === "day"} onClick={() => setView("day")}>Dia</Button>
+            <Button variant="ghost" size="sm" aria-pressed={view === "week"} onClick={() => setView("week")}>Semana</Button>
+            <Button variant="ghost" size="sm" aria-pressed={view === "month"} onClick={() => setView("month")}>Mês</Button>
+            <Button variant="ghost" size="sm" aria-pressed={view === "agenda"} onClick={() => setView("agenda")}>Agenda</Button>
           </div>
+          <div className={styles.filters}>
 
           {/* Filtros: passa o label CALCULADO pro SelectValue. Antes ele
               tentava inferir o texto do filho que estava com value selecionado,
@@ -406,10 +413,10 @@ export default function CalendarioPage() {
             };
             return (
               <Select value={filterStatus} onValueChange={(v) => setFilterStatus(v || "all")}>
-                <SelectTrigger className="h-8 text-xs w-[160px]">
+                <SelectTrigger className={styles.filterSelect} aria-label="Filtrar por status">
                   <SelectValue placeholder="Status">{STATUS_LABELS[filterStatus] || "Status"}</SelectValue>
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className={styles.popover}>
                   <SelectItem value="all">Todos status</SelectItem>
                   <SelectItem value="active">Ativos (não cancelados)</SelectItem>
                   <SelectItem value="confirmed">Confirmados</SelectItem>
@@ -427,10 +434,10 @@ export default function CalendarioPage() {
               : (agents.find(a => String(a.id) === filterAgent)?.name || "Agente");
             return (
               <Select value={filterAgent} onValueChange={(v) => setFilterAgent(v || "all")}>
-                <SelectTrigger className="h-8 text-xs w-[180px]">
+                <SelectTrigger className={styles.filterSelect} aria-label="Filtrar por agente">
                   <SelectValue placeholder="Agente">{agentLabel}</SelectValue>
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className={styles.popover}>
                   <SelectItem value="all">Todos os agentes</SelectItem>
                   {agents.map(a => <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>)}
                 </SelectContent>
@@ -438,7 +445,8 @@ export default function CalendarioPage() {
             );
           })()}
 
-          <div className="ml-auto flex items-center gap-2">
+          </div>
+          <div className={styles.integrations}>
             {/* Badge de status — verde se PELO MENOS UM agente tem Google
                 conectado, vermelho se nenhum. Clica pra abrir o modal de
                 conectar diretamente. */}
@@ -452,12 +460,7 @@ export default function CalendarioPage() {
               return (
                 <button
                   onClick={() => setConnectGoogleOpen(true)}
-                  className={cn(
-                    "flex items-center gap-1.5 px-2 py-1 rounded-md border text-[10px] font-bold tracking-widest transition max-w-[260px]",
-                    ok
-                      ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20"
-                      : "bg-red-500/10 border-red-500/30 text-red-300 hover:bg-red-500/20 uppercase"
-                  )}
+                  className={cn(styles.googleBadge, ok ? styles.googleConnected : styles.googleDisconnected)}
                   title={
                     ok
                       ? `Eventos vão para: ${emails.join(", ") || "(conta conectada)"}. ${connectedCount}/${totalScheduler} agente(s) conectado(s). Clique pra gerenciar.`
@@ -471,40 +474,38 @@ export default function CalendarioPage() {
                 </button>
               );
             })()}
-            <span className="text-xs text-muted-foreground">
-              {appointments.length} agendamento{appointments.length !== 1 ? "s" : ""}
-              {lastSyncedAt && <span className="hidden md:inline"> • Sync {fmtTime(lastSyncedAt.toISOString())}</span>}
-            </span>
-            <Button onClick={() => syncGoogle(false)} size="sm" variant="outline" disabled={syncing} className="h-8" title="Sincronizar agora com Google Calendar">
+            <Button onClick={() => syncGoogle(false)} size="sm" variant="outline" disabled={syncing} className={styles.secondaryButton} title="Sincronizar agora com Google Calendar" aria-label="Sincronizar com Google Calendar">
               {syncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-              <span className="hidden sm:inline ml-1">Google</span>
+              <span>Sincronizar</span>
             </Button>
-            <Button onClick={() => setConnectGoogleOpen(true)} size="sm" variant="outline" className="h-8" title="Conectar Google Calendar de um agente">
+            <Button onClick={() => setConnectGoogleOpen(true)} size="sm" variant="outline" className={styles.secondaryButton} title="Conectar Google Calendar de um agente" aria-label="Conectar Google Calendar">
               <Link2 className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline ml-1">Conectar</span>
-            </Button>
-            <Button onClick={() => { setEditing(null); setInitialStart(null); setCreateOpen(true); }} size="sm" className="h-8">
-              <Plus className="w-3.5 h-3.5 mr-1" /> Novo
+              <span>Conectar</span>
             </Button>
           </div>
         </div>
 
-        {/* Conteúdo */}
+        <div className={styles.summary}>
+          <span>{appointments.length} agendamento{appointments.length !== 1 ? "s" : ""} no período</span>
+          <span>{syncing ? "Sincronizando com Google…" : lastSyncedAt ? `Última sincronização às ${fmtTime(lastSyncedAt.toISOString())}` : "Google Calendar"}</span>
+        </div>
+
+        <div className={styles.calendarBody}>
         {loading ? (
           <div className="flex items-center justify-center py-12 text-muted-foreground gap-2">
             <Loader2 className="w-4 h-4 animate-spin" /> Carregando…
           </div>
         ) : view === "agenda" ? (
           grouped.length === 0 ? (
-          <Card className="border-white/5">
+          <Card className={styles.emptyState}>
             <CardContent className="py-12 text-center text-muted-foreground">
               <CalendarDays className="w-12 h-12 mx-auto mb-3 opacity-30" />
               <p className="text-sm">Nenhum agendamento no período.</p>
-              <p className="text-xs mt-1">Clique em <span className="font-bold text-primary">+ Novo</span> pra criar um manual, ou deixe a IA agendar automaticamente.</p>
+              <p className="text-xs mt-1">Clique em <span className="font-bold text-primary">Novo agendamento</span> pra criar um manual, ou deixe a IA agendar automaticamente.</p>
             </CardContent>
           </Card>
         ) : (
-          <div className="space-y-4">
+          <div className={styles.agendaList}>
             {grouped.map(({ day, items }) => {
               const isToday = day.getTime() === today;
               const isPast = day.getTime() < today;
@@ -522,11 +523,7 @@ export default function CalendarioPage() {
                 else { aheadLabel = `EM ${Math.round(daysAhead / 7)} SEMANAS`; aheadColor = "bg-white/5 text-muted-foreground ring-1 ring-white/10"; }
               }
               return (
-                <div key={day.toISOString()} className={cn(
-                  // Wrapper visual: dias futuros próximos ganham borda esquerda colorida
-                  !isPast && !isToday && daysAhead <= 7 && "border-l-2 border-emerald-500/40 pl-3 -ml-3",
-                  isToday && "border-l-2 border-primary pl-3 -ml-3"
-                )}>
+                <div key={day.toISOString()} className={styles.agendaDay}>
                   <div className={cn(
                     "text-xs font-bold uppercase tracking-widest mb-2 px-1 flex items-center gap-2 flex-wrap",
                     isToday ? "text-primary" : isPast ? "text-muted-foreground/60" : "text-foreground"
@@ -540,8 +537,8 @@ export default function CalendarioPage() {
                   </div>
                   <div className="space-y-2">
                     {items.map((a) => (
-                      <Card key={a.id} className={cn("border-white/5 hover:border-white/10 transition-colors", a.status === "cancelled" && "opacity-50")}>
-                        <CardContent className="p-3 flex items-start gap-3">
+                      <Card key={a.id} className={cn(styles.agendaEvent, a.status === "cancelled" && "opacity-50")}>
+                        <CardContent className={styles.agendaEventContent}>
                           <div className="flex flex-col items-center justify-center text-xs font-mono shrink-0 w-14 py-1 rounded bg-secondary/50">
                             <Clock className="w-3 h-3 mb-0.5 text-muted-foreground" />
                             <span className="font-bold">{fmtTime(a.start_at)}</span>
@@ -570,7 +567,7 @@ export default function CalendarioPage() {
                             </div>
                             {a.description && <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{a.description}</p>}
                           </div>
-                          <div className="flex items-center gap-1 shrink-0">
+                          <div className={styles.agendaActions}>
                             {a.status === "confirmed" && (
                               <>
                                 {!a.remote_jid.startsWith("google:") && (
@@ -629,6 +626,8 @@ export default function CalendarioPage() {
             onEventDropOrResize={onEventDropOrResize}
           />
         )}
+        </div>
+        </section>
       </div>
 
       <AppointmentDialog
@@ -876,7 +875,7 @@ function AppointmentDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xl max-h-[90vh] flex flex-col p-0 gap-0">
+      <DialogContent className={cn(styles.appointmentDialog, "max-w-xl max-h-[90vh] flex flex-col p-0 gap-0")}>
         <DialogTitle className="flex items-center justify-between px-6 pt-5 pb-3 shrink-0 border-b border-white/5">
           <span>{editing ? "Editar agendamento" : "Novo agendamento"}</span>
           {editing?.html_link && (
@@ -997,7 +996,7 @@ function AppointmentDialog({
                 <Eye className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                 <Select value={visibility} onValueChange={(v) => setVisibility(v as any)}>
                   <SelectTrigger className="h-8 text-xs w-[210px]"><SelectValue /></SelectTrigger>
-                  <SelectContent>
+                  <SelectContent className={styles.popover}>
                     <SelectItem value="default">Padrão do calendário</SelectItem>
                     <SelectItem value="public">Público</SelectItem>
                     <SelectItem value="private">Privado</SelectItem>
@@ -1138,7 +1137,7 @@ function AppointmentDialog({
                 <div>
                   <Select value={agentId} onValueChange={(v) => setAgentId(v || "none")}>
                     <SelectTrigger><SelectValue placeholder="Agente IA (responsável)" /></SelectTrigger>
-                    <SelectContent>
+                    <SelectContent className={styles.popover}>
                       <SelectItem value="none">Nenhum</SelectItem>
                       {agents.map(a => (
                         <SelectItem key={a.id} value={String(a.id)}>
