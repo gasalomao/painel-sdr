@@ -181,15 +181,15 @@ export function AiCombosManager() {
   return (
     <Card className="border-amber-500/20 bg-gradient-to-b from-amber-500/[0.04] to-card/60 shadow-lg">
       <CardHeader className="pb-3 border-b border-border/50">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5">
-            <div className="p-2 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-400">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="flex items-start gap-2.5 min-w-0 flex-1 basis-72">
+            <div className="p-2 shrink-0 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-400">
               <Zap className="w-5 h-5" />
             </div>
-            <div>
-              <CardTitle className="text-base flex items-center gap-2">
+            <div className="min-w-0">
+              <CardTitle className="text-base flex flex-wrap items-center gap-2">
                 ⚡ Combos Virtuais de IA (Fallback & Rotação 9Router-Style)
-                <Badge variant="outline" className="text-[10px] bg-amber-500/10 text-amber-400 border-amber-500/30 font-mono">
+                <Badge variant="outline" className="text-xs bg-amber-500/10 text-amber-400 border-amber-500/30 font-mono">
                   Multi-Account & Auto-Cascade
                 </Badge>
               </CardTitle>
@@ -200,7 +200,7 @@ export function AiCombosManager() {
           </div>
           <div className="flex items-center gap-2">
             {saveSuccess && (
-              <span className="flex items-center gap-1 text-[11px] text-green-400 font-medium">
+              <span className="flex items-center gap-1 text-xs text-green-400 font-medium">
                 <Check className="w-3.5 h-3.5" />
                 Salvo
               </span>
@@ -239,13 +239,13 @@ export function AiCombosManager() {
             {combos.map((combo) => (
               <div
                 key={combo.id}
-                className="rounded-xl border border-border/70 bg-card/40 p-4 space-y-3 relative group"
+                className="rounded-xl border border-border/70 bg-card/40 p-3 sm:p-4 space-y-3 relative group"
               >
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
+                  <div className="space-y-1 min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="font-semibold text-sm text-foreground">{combo.name}</span>
-                      <code className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground font-mono">
+                      <code className="text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground font-mono">
                         combo:{combo.id}
                       </code>
                     </div>
@@ -273,6 +273,7 @@ export function AiCombosManager() {
                       variant="ghost"
                       size="sm"
                       onClick={() => handleDeleteCombo(combo.id)}
+                      aria-label={`Excluir combo ${combo.name}`}
                       className="text-xs h-7 text-red-400 hover:bg-red-500/10"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
@@ -282,9 +283,9 @@ export function AiCombosManager() {
 
                 {/* Lista Ordenada de Modelos na Fila */}
                 <div className="space-y-1.5 pt-1">
-                  <div className="text-[10px] uppercase font-bold text-muted-foreground tracking-wider flex items-center justify-between">
+                  <div className="text-xs uppercase font-bold text-muted-foreground tracking-wider flex items-center justify-between">
                     <span>Ordem de Prioridade na Fila ({combo.models.length} modelos)</span>
-                    <span className="text-[9px] text-muted-foreground lowercase">Tenta todas as contas do 1º antes do 2º</span>
+                    <span className="text-xs text-muted-foreground lowercase">Tenta todas as contas do 1º antes do 2º</span>
                   </div>
 
                   <div className="space-y-1">
@@ -292,28 +293,29 @@ export function AiCombosManager() {
                       <div
                         key={`${step.modelRef}_${idx}`}
                         className={cn(
-                          "flex items-center justify-between p-2 rounded-lg border text-xs gap-2 transition-all",
+                          "flex flex-col sm:flex-row items-stretch sm:items-center justify-between p-2 rounded-lg border text-xs gap-2 transition-all",
                           step.enabled !== false
                             ? "bg-secondary/40 border-border/60"
                             : "bg-secondary/10 border-border/20 opacity-50"
                         )}
                       >
-                        <div className="flex items-center gap-2 min-w-0">
-                          <span className="w-5 h-5 rounded-full bg-amber-500/20 text-amber-300 font-bold text-[10px] flex items-center justify-center shrink-0">
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          <span className="w-5 h-5 rounded-full bg-amber-500/20 text-amber-300 font-bold text-xs flex items-center justify-center shrink-0">
                             {idx + 1}
                           </span>
                           <span className="font-mono text-xs truncate">{step.modelRef}</span>
                           {step.label && step.label !== step.modelRef && (
-                            <span className="text-[10px] text-muted-foreground truncate">({step.label})</span>
+                            <span className="hidden sm:inline text-xs text-muted-foreground truncate">({step.label})</span>
                           )}
                         </div>
 
-                        <div className="flex items-center gap-1 shrink-0">
+                        <div className="flex items-center justify-end gap-1 shrink-0">
                           <Button
                             variant="ghost"
                             size="sm"
                             disabled={idx === 0}
                             onClick={() => handleMoveStep(combo.id, idx, idx - 1)}
+                            aria-label={`Aumentar prioridade de ${step.label || step.modelRef}`}
                             className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground"
                           >
                             <MoveUp className="w-3 h-3" />
@@ -323,6 +325,7 @@ export function AiCombosManager() {
                             size="sm"
                             disabled={idx === combo.models.length - 1}
                             onClick={() => handleMoveStep(combo.id, idx, idx + 1)}
+                            aria-label={`Diminuir prioridade de ${step.label || step.modelRef}`}
                             className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground"
                           >
                             <MoveDown className="w-3 h-3" />
@@ -332,7 +335,7 @@ export function AiCombosManager() {
                             size="sm"
                             onClick={() => handleToggleStep(combo.id, idx)}
                             className={cn(
-                              "h-6 px-1.5 text-[10px]",
+                              "h-6 px-1.5 text-xs",
                               step.enabled !== false ? "text-green-400" : "text-muted-foreground"
                             )}
                           >
@@ -342,6 +345,7 @@ export function AiCombosManager() {
                             variant="ghost"
                             size="sm"
                             onClick={() => handleRemoveModelFromCombo(combo.id, idx)}
+                            aria-label={`Remover ${step.label || step.modelRef} do combo ${combo.name}`}
                             className="h-6 w-6 p-0 text-red-400 hover:text-red-300"
                           >
                             <Trash2 className="w-3 h-3" />
@@ -355,6 +359,7 @@ export function AiCombosManager() {
                 {/* Adicionar Modelo ao Combo */}
                 <div className="flex items-center gap-2 pt-1">
                   <select
+                    aria-label={`Adicionar modelo ao combo ${combo.name}`}
                     className="flex-1 h-8 rounded-lg bg-secondary/50 border border-border/60 text-xs px-2 text-foreground outline-none"
                     onChange={(e) => {
                       if (e.target.value) {
@@ -382,24 +387,24 @@ export function AiCombosManager() {
                         {testResult.data.success ? "Cascata Resiliente Executada com Sucesso" : "Falha na Cascata"}
                       </span>
                       {testResult.data.totalDurationMs && (
-                        <span className="text-[10px] text-muted-foreground font-mono">
+                        <span className="text-xs text-muted-foreground font-mono">
                           {testResult.data.totalDurationMs}ms
                         </span>
                       )}
                     </div>
 
                     {testResult.data.finalModelUsed && (
-                      <div className="text-[11px] text-muted-foreground">
+                      <div className="text-xs text-muted-foreground">
                         Modelo que respondeu: <strong className="text-foreground">{testResult.data.finalModelUsed}</strong>
                       </div>
                     )}
 
                     <div className="space-y-1">
                       {testResult.data.steps?.map((st: any) => (
-                        <div key={st.step} className="flex items-center justify-between text-[11px] bg-background/50 p-1.5 rounded">
+                        <div key={st.step} className="flex items-center justify-between text-xs bg-background/50 p-1.5 rounded">
                           <span className="font-mono">{st.step}. {st.modelRef}</span>
                           <span className={cn(
-                            "font-bold text-[10px]",
+                            "font-bold text-xs",
                             st.status === "success" ? "text-green-400" : "text-amber-400"
                           )}>
                             {st.status === "success" ? `✓ OK (${st.latencyMs}ms)` : `✗ ${st.error}`}

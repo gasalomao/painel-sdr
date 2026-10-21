@@ -9,6 +9,15 @@ import { Settings2, Key, Save, CheckCircle2, XCircle, Loader2, Info, Database, C
 import { cn } from "@/lib/utils";
 import { ModelOptions } from "@/components/ai-module-shared";
 import { AiCombosManager } from "@/components/ai-combos-manager";
+import styles from "./configuracoes.module.css";
+
+const settingsSections = [
+  { id: "ai_keys", label: "Chaves e banco", description: "Provedores de IA e Supabase", icon: Key, title: "Chaves de API e banco de dados", help: "Gerencie os provedores de IA e a conexão com o Supabase. Cada seção tem seu próprio botão de salvar." },
+  { id: "whatsapp", label: "WhatsApp", description: "Servidores e instâncias Evolution", icon: Server, title: "Conexão com o WhatsApp", help: "Configure o servidor, teste a conexão e gerencie a instância do WhatsApp." },
+  { id: "gateway", label: "Contas e conexões", description: "Gateway, assinaturas e DeepSeek", icon: Plug, title: "Contas e conexões de IA", help: "Conecte suas contas pelo Gateway ou gerencie proxies e sessões do DeepSeek." },
+  { id: "models", label: "Modelos de IA", description: "Análise de leads e embeddings", icon: Bot, title: "Modelos de IA", help: "Escolha os modelos de análise de leads e da base de conhecimento. A seleção é salva automaticamente." },
+  { id: "backup", label: "Backup", description: "Cópias de segurança no Google Drive", icon: HardDrive, title: "Backup e recuperação", help: "Consulte os requisitos e acesse o painel de cópias de segurança." },
+] as const;
 
 export default function ConfiguracoesPage() {
   const [apiKey, setApiKey] = useState("");
@@ -1604,96 +1613,58 @@ export default function ConfiguracoesPage() {
     }
   }
 
+  const selectedSection = settingsSections.find((section) => section.id === activeTab)!;
+
   return (
-    <div className="flex flex-col h-[100dvh] max-h-[100dvh] bg-background overflow-hidden text-white">
+    <div className={cn(styles.settings, "flex flex-col h-[100dvh] max-h-[100dvh] overflow-hidden")}>
       <Header />
-      <main className="flex-1 overflow-y-auto p-3 sm:p-6 md:p-10 max-w-4xl mx-auto w-full space-y-4 sm:space-y-6 mobile-safe-bottom">
-        <div>
-          <h1 className="text-2xl font-black tracking-tight flex items-center gap-3">
-            <Settings2 className="w-6 h-6 text-primary" /> Configurações
-          </h1>
-          <p className="text-xs text-muted-foreground mt-1">
-            {isAdmin
-              ? "Credenciais compartilhadas por todo o sistema. Configure aqui uma vez — Agente IA, Disparo em Massa, Follow-up e Organizador usam automaticamente."
-              : "Configurações da sua conta."}
-          </p>
+      <main className={cn(styles.main, "flex-1 overflow-y-auto w-full mobile-safe-bottom")}>
+        <div className={styles.heading}>
+          <div>
+            <h1><Settings2 aria-hidden="true" /> Configurações</h1>
+            <p>{isAdmin ? "Integrações e preferências do sistema, em um só lugar." : "Configurações da sua conta."}</p>
+          </div>
+          {isAdmin && <span className={styles.adminBadge}>Acesso de administrador</span>}
         </div>
+
+        {!sessionLoaded && (
+          <p className={styles.loading} role="status"><Loader2 className="w-4 h-4 animate-spin" /> Carregando configurações…</p>
+        )}
 
         {!isAdmin && sessionLoaded && (
           <div className="rounded-xl bg-amber-500/10 border border-amber-500/30 p-4 text-xs text-amber-200">
             <p className="font-bold">⚠ Configurações do sistema estão disponíveis apenas para administradores.</p>
-            <p className="text-[10px] text-amber-200/70 mt-1">Contate seu administrador para alterar API Keys, servidor Evolution ou banco de dados.</p>
+            <p className="text-xs text-amber-200/70 mt-1">Contate seu administrador para alterar API Keys, servidor Evolution ou banco de dados.</p>
           </div>
         )}
 
         {isAdmin && (
-          <div className="space-y-6">
-            {/* Tabs Nav Bar */}
-            <div className="flex flex-wrap p-1.5 gap-2 bg-white/[0.02] border border-white/5 rounded-2xl backdrop-blur-md sticky top-0 z-20">
-              <button
-                onClick={() => setActiveTab("ai_keys")}
-                className={cn(
-                  "flex-1 min-w-[140px] flex items-center justify-center gap-2 py-3 px-4 rounded-xl text-xs font-black uppercase tracking-wider transition-all duration-300",
-                  activeTab === "ai_keys"
-                    ? "bg-gradient-to-r from-blue-600/30 to-indigo-600/30 text-blue-200 border border-blue-500/30 shadow-[0_0_15px_rgba(59,130,246,0.15)]"
-                    : "text-muted-foreground hover:text-white hover:bg-white/5"
-                )}
-              >
-                <Key className="w-3.5 h-3.5" /> Chaves API & Banco
-              </button>
-              <button
-                onClick={() => setActiveTab("whatsapp")}
-                className={cn(
-                  "flex-1 min-w-[140px] flex items-center justify-center gap-2 py-3 px-4 rounded-xl text-xs font-black uppercase tracking-wider transition-all duration-300",
-                  activeTab === "whatsapp"
-                    ? "bg-gradient-to-r from-cyan-600/30 to-blue-600/30 text-cyan-200 border border-cyan-500/30 shadow-[0_0_15px_rgba(6,182,212,0.15)]"
-                    : "text-muted-foreground hover:text-white hover:bg-white/5"
-                )}
-              >
-                <Server className="w-3.5 h-3.5" /> WhatsApp (Evolution)
-              </button>
-              <button
-                onClick={() => setActiveTab("gateway")}
-                className={cn(
-                  "flex-1 min-w-[140px] flex items-center justify-center gap-2 py-3 px-4 rounded-xl text-xs font-black uppercase tracking-wider transition-all duration-300",
-                  activeTab === "gateway"
-                    ? "bg-gradient-to-r from-emerald-600/30 to-teal-600/30 text-emerald-200 border border-emerald-500/30 shadow-[0_0_15px_rgba(16,185,129,0.15)]"
-                    : "text-muted-foreground hover:text-white hover:bg-white/5"
-                )}
-              >
-                <Plug className="w-3.5 h-3.5" /> Contas Grátis (Gateway)
-              </button>
-              <button
-                onClick={() => setActiveTab("models")}
-                className={cn(
-                  "flex-1 min-w-[140px] flex items-center justify-center gap-2 py-3 px-4 rounded-xl text-xs font-black uppercase tracking-wider transition-all duration-300",
-                  activeTab === "models"
-                    ? "bg-gradient-to-r from-purple-600/30 to-pink-600/30 text-purple-200 border border-purple-500/30 shadow-[0_0_15px_rgba(168,85,247,0.15)]"
-                    : "text-muted-foreground hover:text-white hover:bg-white/5"
-                )}
-              >
-                <Bot className="w-3.5 h-3.5" /> Modelos Ativos
-              </button>
-              <button
-                onClick={() => setActiveTab("backup")}
-                className={cn(
-                  "flex-1 min-w-[140px] flex items-center justify-center gap-2 py-3 px-4 rounded-xl text-xs font-black uppercase tracking-wider transition-all duration-300",
-                  activeTab === "backup"
-                    ? "bg-gradient-to-r from-orange-600/30 to-red-600/30 text-orange-200 border border-orange-500/30 shadow-[0_0_15px_rgba(249,115,22,0.15)]"
-                    : "text-muted-foreground hover:text-white hover:bg-white/5"
-                )}
-              >
-                <HardDrive className="w-3.5 h-3.5" /> Backup
-              </button>
-            </div>
+          <div className={styles.workspace}>
+            <aside className={styles.aside}>
+              <nav className={styles.navigation} aria-label="Categorias de configurações">
+                {settingsSections.map(({ id, label, description, icon: Icon }) => (
+                  <button key={id} type="button" aria-pressed={activeTab === id} aria-controls="settings-content"
+                    onClick={() => setActiveTab(id)} className={styles.navButton}>
+                    <Icon aria-hidden="true" />
+                    <span><span className={styles.navLabel}>{label}</span><span className={styles.navDescription} aria-hidden="true">{description}</span></span>
+                    <ChevronRight aria-hidden="true" className={styles.navArrow} />
+                  </button>
+                ))}
+              </nav>
+              <p className={styles.scopeNote}><Info aria-hidden="true" /> As alterações são compartilhadas pelos agentes e serviços do sistema.</p>
+            </aside>
+            <section id="settings-content" className={styles.panel} aria-labelledby="settings-section-title">
+              <div className={styles.sectionHeading}>
+                <h2 id="settings-section-title">{selectedSection.title}</h2>
+                <p>{selectedSection.help}</p>
+              </div>
 
             {/* TAB: Chaves API & Banco */}
             {activeTab === "ai_keys" && (
               <div className="space-y-4 sm:space-y-6 animate-in fade-in duration-200">
                 {/* Google Gemini Card */}
                 <Card className="border-white/10 bg-white/[0.02] overflow-hidden transition-all duration-300 shadow-md">
-                  <CardHeader
-                    className="cursor-pointer hover:bg-white/[0.01] transition-all flex flex-row items-center justify-between space-y-0 p-5 select-none"
+                  <button type="button" data-slot="card-header" aria-expanded={openGemini} aria-controls={openGemini ? "settings-gemini" : undefined}
                     onClick={() => setOpenGemini(!openGemini)}
                   >
                     <div className="flex items-center gap-3">
@@ -1704,18 +1675,18 @@ export default function ConfiguracoesPage() {
                         <CardTitle className="text-sm font-bold uppercase tracking-wider">
                           Google Gemini API Key
                         </CardTitle>
-                        <p className="text-[10px] text-muted-foreground font-medium">
+                        <p className="text-xs text-muted-foreground font-medium">
                           {hasKey ? "Chave configurada e ativa" : "Chave de API do Gemini pendente"}
                         </p>
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
                       {hasKey ? (
-                        <span className="text-[9px] bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+                        <span className="text-xs bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded-full font-black uppercase">
                           Ativa
                         </span>
                       ) : (
-                        <span className="text-[9px] bg-red-500/10 text-red-400 border border-red-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+                        <span className="text-xs bg-red-500/10 text-red-400 border border-red-500/20 px-2 py-0.5 rounded-full font-black uppercase">
                           Pendente
                         </span>
                       )}
@@ -1725,31 +1696,32 @@ export default function ConfiguracoesPage() {
                         <ChevronRight className="w-4 h-4 text-muted-foreground transition-transform duration-300" />
                       )}
                     </div>
-                  </CardHeader>
+                  </button>
                   {openGemini && (
-                    <CardContent className="space-y-5 p-5 border-t border-white/5 animate-in fade-in slide-in-from-top-2 duration-200">
+                    <CardContent id="settings-gemini" className="space-y-5 p-5 border-t border-white/5 animate-in fade-in slide-in-from-top-2 duration-200">
                       <div className="flex items-center gap-2">
-                        <span className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Status:</span>
+                        <span className="text-xs font-black uppercase tracking-widest text-muted-foreground">Status:</span>
                         {loading ? (
-                          <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+                          <span className="text-xs text-muted-foreground flex items-center gap-1">
                             <Loader2 className="w-3 h-3 animate-spin" /> Verificando…
                           </span>
                         ) : hasKey ? (
-                          <span className="text-[10px] font-black text-green-400 flex items-center gap-1">
+                          <span className="text-xs font-black text-green-400 flex items-center gap-1">
                             <CheckCircle2 className="w-3 h-3" /> Configurada (salva com segurança no banco)
                           </span>
                         ) : (
-                          <span className="text-[10px] font-black text-red-400 flex items-center gap-1">
+                          <span className="text-xs font-black text-red-400 flex items-center gap-1">
                             <XCircle className="w-3 h-3" /> Não configurada — nenhum serviço de IA vai funcionar
                           </span>
                         )}
                       </div>
 
                       <div className="space-y-2">
-                        <label className="text-[10px] font-black uppercase tracking-widest text-primary">
+                        <label htmlFor="gemini-api-key" className="text-xs font-black uppercase tracking-widest text-primary">
                           {hasKey ? "Substituir chave" : "Cole sua API Key aqui"}
                         </label>
                         <Input
+                          id="gemini-api-key"
                           type="password"
                           value={apiKey}
                           onChange={e => setApiKey(e.target.value)}
@@ -1758,8 +1730,8 @@ export default function ConfiguracoesPage() {
                           autoComplete="off"
                           spellCheck={false}
                         />
-                        <p className="text-[9px] text-muted-foreground flex items-start gap-1 leading-relaxed">
-                          <Info className="w-3 h-3 shrink-0 mt-0.5" />
+                        <p className={cn(styles.fieldHelp, "text-xs text-muted-foreground leading-relaxed")}>
+                          <Info aria-hidden="true" className="w-3 h-3" />
                           Obtenha sua chave em {" "}
                           <a
                             href="https://aistudio.google.com/app/apikey"
@@ -1796,7 +1768,7 @@ export default function ConfiguracoesPage() {
                       {testResult && (
                         <div
                           className={cn(
-                            "flex items-start gap-2 p-3 rounded-xl border text-[11px]",
+                            "flex items-start gap-2 p-3 rounded-xl border text-[13px]",
                             testResult.ok
                               ? "bg-green-500/10 border-green-500/30 text-green-200"
                               : "bg-red-500/10 border-red-500/30 text-red-200"
@@ -1806,7 +1778,7 @@ export default function ConfiguracoesPage() {
                           <div>
                             <p className="font-bold">{testResult.message}</p>
                             {typeof testResult.count === "number" && (
-                              <p className="text-[10px] opacity-70 mt-0.5">{testResult.count} modelos Gemini disponíveis.</p>
+                              <p className="text-xs opacity-70 mt-0.5">{testResult.count} modelos Gemini disponíveis.</p>
                             )}
                           </div>
                         </div>
@@ -1817,8 +1789,7 @@ export default function ConfiguracoesPage() {
 
                 {/* OpenRouter Card */}
                 <Card className="border-purple-500/20 bg-purple-500/[0.03] overflow-hidden transition-all duration-300 shadow-md">
-                  <CardHeader
-                    className="cursor-pointer hover:bg-white/[0.01] transition-all flex flex-row items-center justify-between space-y-0 p-5 select-none"
+                  <button type="button" data-slot="card-header" aria-expanded={openOpenRouter} aria-controls={openOpenRouter ? "settings-openrouter" : undefined}
                     onClick={() => setOpenOpenRouter(!openOpenRouter)}
                   >
                     <div className="flex items-center gap-3">
@@ -1829,18 +1800,18 @@ export default function ConfiguracoesPage() {
                         <CardTitle className="text-sm font-bold uppercase tracking-wider">
                           OpenRouter API Key
                         </CardTitle>
-                        <p className="text-[10px] text-muted-foreground font-medium">
+                        <p className="text-xs text-muted-foreground font-medium">
                           {hasOrKey ? "Chave configurada e ativa" : "Modelos extras (Claude, GPT, Llama, etc.) desativados"}
                         </p>
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
                       {hasOrKey ? (
-                        <span className="text-[9px] bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+                        <span className="text-xs bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded-full font-black uppercase">
                           Ativa
                         </span>
                       ) : (
-                        <span className="text-[9px] bg-zinc-500/10 text-zinc-400 border border-zinc-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+                        <span className="text-xs bg-zinc-500/10 text-zinc-400 border border-zinc-500/20 px-2 py-0.5 rounded-full font-black uppercase">
                           Opcional
                         </span>
                       )}
@@ -1850,21 +1821,21 @@ export default function ConfiguracoesPage() {
                         <ChevronRight className="w-4 h-4 text-muted-foreground transition-transform duration-300" />
                       )}
                     </div>
-                  </CardHeader>
+                  </button>
                   {openOpenRouter && (
-                    <CardContent className="space-y-5 p-5 border-t border-white/5 animate-in fade-in slide-in-from-top-2 duration-200">
+                    <CardContent id="settings-openrouter" className="space-y-5 p-5 border-t border-white/5 animate-in fade-in slide-in-from-top-2 duration-200">
                       <div className="flex items-center gap-2">
-                        <span className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Status:</span>
+                        <span className="text-xs font-black uppercase tracking-widest text-muted-foreground">Status:</span>
                         {loading ? (
-                          <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+                          <span className="text-xs text-muted-foreground flex items-center gap-1">
                             <Loader2 className="w-3 h-3 animate-spin" /> Verificando…
                           </span>
                         ) : hasOrKey ? (
-                          <span className="text-[10px] font-black text-green-400 flex items-center gap-1">
+                          <span className="text-xs font-black text-green-400 flex items-center gap-1">
                             <CheckCircle2 className="w-3 h-3" /> Configurada (salva com segurança no banco)
                           </span>
                         ) : (
-                          <span className="text-[10px] font-black text-muted-foreground flex items-center gap-1">
+                          <span className="text-xs font-black text-muted-foreground flex items-center gap-1">
                             <XCircle className="w-3 h-3" /> Não configurada — opcional (sem ela, só os modelos Gemini aparecem)
                           </span>
                         )}
@@ -1873,9 +1844,9 @@ export default function ConfiguracoesPage() {
                       {/* Lista de Chaves Multi-Conta Cadastradas */}
                       {orKeysList.length > 0 && (
                         <div className="space-y-2 pt-2 border-t border-white/5">
-                          <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground flex items-center justify-between">
+                          <label className="text-xs font-black uppercase tracking-widest text-muted-foreground flex items-center justify-between">
                             <span>Chaves Ativas para Rotação ({orKeysList.length})</span>
-                            <span className="text-[9px] text-purple-400 font-normal">Rotação automática em 429/Quota</span>
+                            <span className="text-xs text-purple-400 font-normal">Rotação automática em 429/Quota</span>
                           </label>
                           <div className="space-y-1.5">
                             {orKeysList.map((k, idx) => (
@@ -1884,7 +1855,7 @@ export default function ConfiguracoesPage() {
                                 className="flex items-center justify-between p-2.5 rounded-lg bg-black/40 border border-white/5 text-xs font-mono"
                               >
                                 <div className="flex items-center gap-2">
-                                  <span className="text-[9px] bg-purple-500/10 text-purple-400 border border-purple-500/20 px-1.5 py-0.5 rounded font-bold">
+                                  <span className="text-xs bg-purple-500/10 text-purple-400 border border-purple-500/20 px-1.5 py-0.5 rounded font-bold">
                                     {idx === 0 ? "PRIORITÁRIA" : `CONTA #${idx + 1}`}
                                   </span>
                                   <span className="text-zinc-300">{k.masked}</span>
@@ -1915,7 +1886,7 @@ export default function ConfiguracoesPage() {
                                     size="sm"
                                     onClick={() => handleRemoveOpenRouterKey(idx)}
                                     disabled={orSaving}
-                                    className="h-7 px-2 text-red-400 hover:text-red-300 hover:bg-red-500/10 text-[10px]"
+                                    className="h-7 px-2 text-red-400 hover:text-red-300 hover:bg-red-500/10 text-xs"
                                   >
                                     Remover
                                   </Button>
@@ -1927,10 +1898,11 @@ export default function ConfiguracoesPage() {
                       )}
 
                       <div className="space-y-2">
-                        <label className="text-[10px] font-black uppercase tracking-widest text-purple-400">
+                        <label htmlFor="openrouter-api-keys" className="text-xs font-black uppercase tracking-widest text-purple-400">
                           {orKeysList.length > 0 ? "Adicionar API Keys do OpenRouter (Multi-Conta / Lote)" : "Cole sua(s) API Key(s) do OpenRouter"}
                         </label>
                         <textarea
+                          id="openrouter-api-keys"
                           value={orKey}
                           onChange={e => setOrKey(e.target.value)}
                           placeholder={orKeysList.length > 0 ? "sk-or-v1-...\nsk-or-v1-... (pode colar várias chaves de contas diferentes, uma por linha)" : "sk-or-v1-...\n(pode colar 1 ou várias chaves de contas diferentes, uma por linha)"}
@@ -1939,8 +1911,8 @@ export default function ConfiguracoesPage() {
                           autoComplete="off"
                           spellCheck={false}
                         />
-                        <p className="text-[9px] text-muted-foreground flex items-start gap-1 leading-relaxed">
-                          <Info className="w-3 h-3 shrink-0 mt-0.5" />
+                        <p className={cn(styles.fieldHelp, "text-xs text-muted-foreground leading-relaxed")}>
+                          <Info aria-hidden="true" className="w-3 h-3" />
                           Obtenha suas chaves em {" "}
                           <a
                             href="https://openrouter.ai/keys"
@@ -1977,7 +1949,7 @@ export default function ConfiguracoesPage() {
                       {orTestResult && (
                         <div
                           className={cn(
-                            "flex items-start gap-2 p-3 rounded-xl border text-[11px]",
+                            "flex items-start gap-2 p-3 rounded-xl border text-[13px]",
                             orTestResult.ok
                               ? "bg-green-500/10 border-green-500/30 text-green-200"
                               : "bg-red-500/10 border-red-500/30 text-red-200"
@@ -1987,7 +1959,7 @@ export default function ConfiguracoesPage() {
                           <div>
                             <p className="font-bold">{orTestResult.message}</p>
                             {typeof orTestResult.count === "number" && (
-                              <p className="text-[10px] opacity-70 mt-0.5">{orTestResult.count} modelos OpenRouter disponíveis.</p>
+                              <p className="text-xs opacity-70 mt-0.5">{orTestResult.count} modelos OpenRouter disponíveis.</p>
                             )}
                           </div>
                         </div>
@@ -1998,8 +1970,7 @@ export default function ConfiguracoesPage() {
 
                 {/* NVIDIA NIM Card */}
                 <Card className="border-emerald-500/20 bg-emerald-500/[0.03] overflow-hidden transition-all duration-300 shadow-md">
-                  <CardHeader
-                    className="cursor-pointer hover:bg-white/[0.01] transition-all flex flex-row items-center justify-between space-y-0 p-5 select-none"
+                  <button type="button" data-slot="card-header" aria-expanded={openNvidia} aria-controls={openNvidia ? "settings-nvidia" : undefined}
                     onClick={() => setOpenNvidia(!openNvidia)}
                   >
                     <div className="flex items-center gap-3">
@@ -2010,18 +1981,18 @@ export default function ConfiguracoesPage() {
                         <CardTitle className="text-sm font-bold uppercase tracking-wider">
                           NVIDIA NIM / AI Foundation API Key
                         </CardTitle>
-                        <p className="text-[10px] text-muted-foreground font-medium">
+                        <p className="text-xs text-muted-foreground font-medium">
                           {hasNvKey ? "Chave configurada — modelos NVIDIA disponíveis no sistema inteiro" : "Modelos Nemotron, Llama 3.3/3.1 NVIDIA, DeepSeek NVIDIA e outros"}
                         </p>
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
                       {hasNvKey ? (
-                        <span className="text-[9px] bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+                        <span className="text-xs bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded-full font-black uppercase">
                           Ativa
                         </span>
                       ) : (
-                        <span className="text-[9px] bg-zinc-500/10 text-zinc-400 border border-zinc-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+                        <span className="text-xs bg-zinc-500/10 text-zinc-400 border border-zinc-500/20 px-2 py-0.5 rounded-full font-black uppercase">
                           Opcional
                         </span>
                       )}
@@ -2031,18 +2002,18 @@ export default function ConfiguracoesPage() {
                         <ChevronRight className="w-4 h-4 text-muted-foreground transition-transform duration-300" />
                       )}
                     </div>
-                  </CardHeader>
+                  </button>
                   {openNvidia && (
-                    <CardContent className="space-y-5 p-5 border-t border-white/5 animate-in fade-in slide-in-from-top-2 duration-200">
+                    <CardContent id="settings-nvidia" className="space-y-5 p-5 border-t border-white/5 animate-in fade-in slide-in-from-top-2 duration-200">
                       <div className="flex items-center gap-2">
-                        <span className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Status:</span>
+                        <span className="text-xs font-black uppercase tracking-widest text-muted-foreground">Status:</span>
                         {loading ? (
-                          <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+                          <span className="text-xs text-muted-foreground flex items-center gap-1">
                             <Loader2 className="w-3 h-3 animate-spin" /> Verificando…
                           </span>
                         ) : hasNvKey ? (
                           <div className="flex items-center gap-3">
-                            <span className="text-[10px] font-black text-green-400 flex items-center gap-1">
+                            <span className="text-xs font-black text-green-400 flex items-center gap-1">
                               <CheckCircle2 className="w-3 h-3" /> Configurada (salva com segurança no banco)
                             </span>
                             <Button
@@ -2050,23 +2021,24 @@ export default function ConfiguracoesPage() {
                               size="sm"
                               onClick={handleRemoveNvidia}
                               disabled={nvSaving}
-                              className="h-6 px-2 text-red-400 hover:text-red-300 hover:bg-red-500/10 text-[10px]"
+                              className="h-6 px-2 text-red-400 hover:text-red-300 hover:bg-red-500/10 text-xs"
                             >
                               Remover
                             </Button>
                           </div>
                         ) : (
-                          <span className="text-[10px] font-black text-muted-foreground flex items-center gap-1">
+                          <span className="text-xs font-black text-muted-foreground flex items-center gap-1">
                             <XCircle className="w-3 h-3" /> Não configurada (adicione sua chave nvapi-... para liberar os modelos)
                           </span>
                         )}
                       </div>
 
                       <div className="space-y-2">
-                        <label className="text-[10px] font-black uppercase tracking-widest text-emerald-400">
+                        <label htmlFor="nvidia-api-key" className="text-xs font-black uppercase tracking-widest text-emerald-400">
                           {hasNvKey ? "Atualizar API Key da NVIDIA" : "Cole sua API Key da NVIDIA (NIM / AI Foundation)"}
                         </label>
                         <Input
+                          id="nvidia-api-key"
                           type="password"
                           value={nvKey}
                           onChange={e => setNvKey(e.target.value)}
@@ -2075,8 +2047,8 @@ export default function ConfiguracoesPage() {
                           autoComplete="off"
                           spellCheck={false}
                         />
-                        <p className="text-[9px] text-muted-foreground flex items-start gap-1 leading-relaxed">
-                          <Info className="w-3 h-3 shrink-0 mt-0.5" />
+                        <p className={cn(styles.fieldHelp, "text-xs text-muted-foreground leading-relaxed")}>
+                          <Info aria-hidden="true" className="w-3 h-3" />
                           Obtenha seus créditos e chave em {" "}
                           <a
                             href="https://build.nvidia.com"
@@ -2113,7 +2085,7 @@ export default function ConfiguracoesPage() {
                       {nvTestResult && (
                         <div
                           className={cn(
-                            "flex items-start gap-2 p-3 rounded-xl border text-[11px]",
+                            "flex items-start gap-2 p-3 rounded-xl border text-[13px]",
                             nvTestResult.ok
                               ? "bg-green-500/10 border-green-500/30 text-green-200"
                               : "bg-red-500/10 border-red-500/30 text-red-200"
@@ -2123,7 +2095,7 @@ export default function ConfiguracoesPage() {
                           <div>
                             <p className="font-bold">{nvTestResult.message}</p>
                             {typeof nvTestResult.count === "number" && (
-                              <p className="text-[10px] opacity-70 mt-0.5">{nvTestResult.count} modelos NVIDIA disponíveis no sistema.</p>
+                              <p className="text-xs opacity-70 mt-0.5">{nvTestResult.count} modelos NVIDIA disponíveis no sistema.</p>
                             )}
                           </div>
                         </div>
@@ -2134,8 +2106,7 @@ export default function ConfiguracoesPage() {
 
                 {/* Setup do Banco de Dados */}
                 <Card className="border-white/10 bg-white/[0.02] overflow-hidden transition-all duration-300 shadow-md">
-                  <CardHeader
-                    className="cursor-pointer hover:bg-white/[0.01] transition-all flex flex-row items-center justify-between space-y-0 p-5 select-none"
+                  <button type="button" data-slot="card-header" aria-expanded={openDatabase} aria-controls={openDatabase ? "settings-database" : undefined}
                     onClick={() => setOpenDatabase(!openDatabase)}
                   >
                     <div className="flex items-center gap-3">
@@ -2146,18 +2117,18 @@ export default function ConfiguracoesPage() {
                         <CardTitle className="text-sm font-bold uppercase tracking-wider">
                           Setup do Banco de Dados
                         </CardTitle>
-                        <p className="text-[10px] text-muted-foreground font-medium">
+                        <p className="text-xs text-muted-foreground font-medium">
                           {dbCheckResult?.ok ? "Tabelas e realtime em conformidade" : "Verifique e configure a estrutura SQL"}
                         </p>
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
                       {dbCheckResult?.ok ? (
-                        <span className="text-[9px] bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+                        <span className="text-xs bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded-full font-black uppercase">
                           Banco Pronto
                         </span>
                       ) : (
-                        <span className="text-[9px] bg-yellow-500/10 text-yellow-400 border border-yellow-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+                        <span className="text-xs bg-yellow-500/10 text-yellow-400 border border-yellow-500/20 px-2 py-0.5 rounded-full font-black uppercase">
                           Verificar
                         </span>
                       )}
@@ -2167,13 +2138,13 @@ export default function ConfiguracoesPage() {
                         <ChevronRight className="w-4 h-4 text-muted-foreground transition-transform duration-300" />
                       )}
                     </div>
-                  </CardHeader>
+                  </button>
                   {openDatabase && (
-                    <CardContent className="space-y-5 p-5 border-t border-white/5 animate-in fade-in slide-in-from-top-2 duration-200">
+                    <CardContent id="settings-database" className="space-y-5 p-5 border-t border-white/5 animate-in fade-in slide-in-from-top-2 duration-200">
                       {dbCurrentUrl && (
                         <div className="p-3 rounded-xl bg-white/5 border border-white/10 space-y-1">
-                          <p className="text-[9px] uppercase font-black tracking-widest text-muted-foreground">Banco conectado atualmente</p>
-                          <p className="text-[11px] font-mono text-emerald-300 break-all">{dbCurrentUrl}</p>
+                          <p className="text-xs uppercase font-black tracking-widest text-muted-foreground">Banco conectado atualmente</p>
+                          <p className="text-[13px] font-mono text-emerald-300 break-all">{dbCurrentUrl}</p>
                         </div>
                       )}
 
@@ -2181,13 +2152,13 @@ export default function ConfiguracoesPage() {
                         <div className="flex items-center justify-between flex-wrap gap-2">
                           <div>
                             <p className="text-xs font-bold text-white">Verificar se o banco está pronto</p>
-                            <p className="text-[10px] text-muted-foreground">Checa se todas as tabelas essenciais existem.</p>
+                            <p className="text-xs text-muted-foreground">Checa se todas as tabelas essenciais existem.</p>
                           </div>
                           <Button
                             onClick={() => checkDatabase()}
                             disabled={dbCheckLoading}
                             variant="outline"
-                            className="bg-white/5 border-white/10 text-white hover:bg-white/10 text-[11px] font-bold uppercase tracking-widest gap-2"
+                            className="bg-white/5 border-white/10 text-white hover:bg-white/10 text-[13px] font-bold uppercase tracking-widest gap-2"
                           >
                             {dbCheckLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
                             Verificar agora
@@ -2196,7 +2167,7 @@ export default function ConfiguracoesPage() {
 
                         {dbCheckResult && (
                           <div className={cn(
-                            "p-3 rounded-xl border text-[11px] space-y-1.5",
+                            "p-3 rounded-xl border text-[13px] space-y-1.5",
                             dbCheckResult.ok
                               ? "bg-green-500/10 border-green-500/30 text-green-200"
                               : dbCheckResult.error
@@ -2210,8 +2181,8 @@ export default function ConfiguracoesPage() {
                             ) : (
                               <>
                                 <p className="font-bold flex items-center gap-1.5"><XCircle className="w-4 h-4" /> Faltam {dbCheckResult.missing.length} tabela(s)</p>
-                                <p className="font-mono text-[10px] opacity-80 break-all">{dbCheckResult.missing.join(", ")}</p>
-                                <p className="text-[10px] opacity-80">Role o SQL abaixo no SQL Editor do Supabase pra criar as que faltam.</p>
+                                <p className="font-mono text-xs opacity-80 break-all">{dbCheckResult.missing.join(", ")}</p>
+                                <p className="text-xs opacity-80">Role o SQL abaixo no SQL Editor do Supabase pra criar as que faltam.</p>
                               </>
                             )}
                           </div>
@@ -2223,12 +2194,12 @@ export default function ConfiguracoesPage() {
                           <div className="w-7 h-7 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-black text-xs flex items-center justify-center shrink-0">1</div>
                           <div className="flex-1">
                             <p className="text-[12px] font-bold text-white">Abra o SQL Editor do Supabase</p>
-                            <p className="text-[10px] text-muted-foreground mt-0.5">
+                            <p className="text-xs text-muted-foreground mt-0.5">
                               Atalho abaixo abre direto no projeto conectado. Se quiser rodar em outro projeto, abra manualmente em <span className="font-mono">supabase.com/dashboard/project/SEU_PROJETO/sql/new</span>.
                             </p>
                             {dbSqlEditorUrl && (
                               <a href={dbSqlEditorUrl} target="_blank" rel="noreferrer"
-                                 className="inline-flex mt-2 items-center gap-1.5 text-[11px] font-bold text-emerald-300 hover:text-emerald-200 bg-emerald-500/10 border border-emerald-500/30 px-3 py-1.5 rounded-lg">
+                                 className="inline-flex mt-2 items-center gap-1.5 text-[13px] font-bold text-emerald-300 hover:text-emerald-200 bg-emerald-500/10 border border-emerald-500/30 px-3 py-1.5 rounded-lg">
                                 <ExternalLink className="w-3 h-3" /> Abrir SQL Editor
                               </a>
                             )}
@@ -2241,13 +2212,13 @@ export default function ConfiguracoesPage() {
                           <div className="w-7 h-7 rounded-full bg-blue-500/20 border border-blue-500/40 text-blue-300 font-black text-xs flex items-center justify-center shrink-0">2</div>
                           <div className="flex-1">
                             <p className="text-[12px] font-bold text-white">Copie o SQL abaixo e cole no editor</p>
-                            <p className="text-[10px] text-muted-foreground mt-0.5">
+                            <p className="text-xs text-muted-foreground mt-0.5">
                               Depois é só clicar <strong>Run</strong> no Supabase. Aparece &quot;Success. No rows returned.&quot; quando terminar.
                             </p>
                             <Button
                               onClick={copySql}
                               className={cn(
-                                "mt-2 gap-1.5 text-[11px] font-bold uppercase tracking-widest h-8",
+                                "mt-2 gap-1.5 text-[13px] font-bold uppercase tracking-widest h-8",
                                 dbCopied ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40" : "bg-blue-500/20 text-blue-200 border border-blue-500/40 hover:bg-blue-500/30"
                               )}
                             >
@@ -2256,23 +2227,25 @@ export default function ConfiguracoesPage() {
                           </div>
                         </div>
                         <details className="mt-2">
-                          <summary className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground cursor-pointer hover:text-white">Ver o SQL ({Math.round(dbSql.length / 1024)} KB)</summary>
+                          <summary className="text-xs font-bold uppercase tracking-widest text-muted-foreground cursor-pointer hover:text-white">Ver o SQL ({Math.round(dbSql.length / 1024)} KB)</summary>
                           <textarea
+                            aria-label="SQL completo de configuração do banco"
                             readOnly
                             value={dbSql}
-                            className="mt-2 w-full h-80 bg-black/60 border border-white/5 rounded-lg p-3 font-mono text-[10px] text-white/70 leading-relaxed custom-scrollbar"
+                            className="mt-2 w-full h-80 bg-black/60 border border-white/5 rounded-lg p-3 font-mono text-xs text-white/70 leading-relaxed custom-scrollbar"
                           />
                         </details>
                       </div>
 
                       <details className="rounded-2xl border border-white/10 bg-white/[0.02] overflow-hidden" open>
-                        <summary className="cursor-pointer px-4 py-3 text-[11px] font-bold text-white/80 hover:text-white">
+                        <summary className="cursor-pointer px-4 py-3 text-[13px] font-bold text-white/80 hover:text-white">
                           Vincular sistema a um novo Supabase (Salvar credenciais)
                         </summary>
                         <div className="p-4 pt-2 space-y-3">
                           <div className="space-y-1">
-                            <label className="text-[9px] font-black uppercase tracking-widest text-muted-foreground">URL do novo Supabase</label>
+                            <label htmlFor="supabase-url" className="text-xs font-black uppercase tracking-widest text-muted-foreground">URL do novo Supabase</label>
                             <Input
+                              id="supabase-url"
                               value={customUrl}
                               onChange={e => setCustomUrl(e.target.value)}
                               placeholder="https://xxxxxx.supabase.co"
@@ -2281,8 +2254,9 @@ export default function ConfiguracoesPage() {
                             />
                           </div>
                           <div className="space-y-1">
-                            <label className="text-[9px] font-black uppercase tracking-widest text-muted-foreground">Anon Key</label>
+                            <label htmlFor="supabase-anon-key" className="text-xs font-black uppercase tracking-widest text-muted-foreground">Anon Key</label>
                             <Input
+                              id="supabase-anon-key"
                               type="password"
                               value={customAnonKey}
                               onChange={e => setCustomAnonKey(e.target.value)}
@@ -2292,8 +2266,9 @@ export default function ConfiguracoesPage() {
                             />
                           </div>
                           <div className="space-y-1">
-                            <label className="text-[9px] font-black uppercase tracking-widest text-muted-foreground">Service Role Key</label>
+                            <label htmlFor="supabase-service-role" className="text-xs font-black uppercase tracking-widest text-muted-foreground">Service Role Key</label>
                             <Input
+                              id="supabase-service-role"
                               type="password"
                               value={customServiceRole}
                               onChange={e => setCustomServiceRole(e.target.value)}
@@ -2301,7 +2276,7 @@ export default function ConfiguracoesPage() {
                               className="bg-black/40 border-white/10 font-mono text-xs h-9"
                               autoComplete="off"
                             />
-                            <p className="text-[9px] text-muted-foreground">Dashboard → Project Settings → API → <strong>service_role secret</strong>.</p>
+                            <p className="text-xs text-muted-foreground">Dashboard → Project Settings → API → <strong>service_role secret</strong>.</p>
                           </div>
                           
                           <div className="flex gap-2 pt-2">
@@ -2309,7 +2284,7 @@ export default function ConfiguracoesPage() {
                               onClick={() => checkDatabase(customUrl, customServiceRole)}
                               disabled={!customUrl || !customServiceRole || dbCheckLoading}
                               variant="outline"
-                              className="bg-white/5 border-white/10 text-white hover:bg-white/10 text-[11px] font-bold uppercase tracking-widest gap-2"
+                              className="bg-white/5 border-white/10 text-white hover:bg-white/10 text-[13px] font-bold uppercase tracking-widest gap-2"
                             >
                               {dbCheckLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
                               Verificar apenas
@@ -2337,12 +2312,12 @@ export default function ConfiguracoesPage() {
                                 }
                               }}
                               disabled={!customUrl || !customAnonKey || !customServiceRole}
-                              className="bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold uppercase tracking-widest gap-2 flex-1"
+                              className="bg-emerald-600 hover:bg-emerald-500 text-white text-[13px] font-bold uppercase tracking-widest gap-2 flex-1"
                             >
                               Salvar e Sobrescrever .env.local
                             </Button>
                           </div>
-                          <p className="text-[10px] text-muted-foreground leading-relaxed">
+                          <p className="text-xs text-muted-foreground leading-relaxed">
                             <Info className="w-3 h-3 inline mr-1 -mt-0.5" />
                             O botão salvar escreve as credenciais no arquivo <span className="font-mono">.env.local</span>. Como o Next.js carrega esse arquivo apenas no momento em que o servidor liga, você <strong>precisará reiniciar o terminal</strong> para que as alterações tenham efeito.
                           </p>
@@ -2358,7 +2333,7 @@ export default function ConfiguracoesPage() {
                     <CardTitle className="text-xs font-black uppercase tracking-widest text-muted-foreground">Onde essas chaves são usadas</CardTitle>
                   </CardHeader>
                   <CardContent className="px-5 pb-5">
-                    <ul className="space-y-2 text-[11px] text-muted-foreground">
+                    <ul className="space-y-2 text-[13px] text-muted-foreground">
                       <li className="flex items-start gap-2">
                         <span className="text-primary">•</span>
                         <span>
@@ -2393,8 +2368,7 @@ export default function ConfiguracoesPage() {
             {activeTab === "whatsapp" && (
               <div className="space-y-4 sm:space-y-6 animate-in fade-in duration-200">
                 <Card className="border-white/10 bg-white/[0.02] overflow-hidden transition-all duration-300 shadow-md">
-                  <CardHeader
-                    className="cursor-pointer hover:bg-white/[0.01] transition-all flex flex-row items-center justify-between space-y-0 p-5 select-none"
+                  <button type="button" data-slot="card-header" aria-expanded={openEvolution} aria-controls={openEvolution ? "settings-evolution" : undefined}
                     onClick={() => setOpenEvolution(!openEvolution)}
                   >
                     <div className="flex items-center gap-3">
@@ -2405,18 +2379,18 @@ export default function ConfiguracoesPage() {
                         <CardTitle className="text-sm font-bold uppercase tracking-wider">
                           Evolution API (servidor WhatsApp)
                         </CardTitle>
-                        <p className="text-[10px] text-muted-foreground font-medium">
+                        <p className="text-xs text-muted-foreground font-medium">
                           {evoEffective?.url ? `Conectado a ${evoEffective.instance}` : "Gerencie a conexão com o WhatsApp"}
                         </p>
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
                       {evoEffective?.url ? (
-                        <span className="text-[9px] bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+                        <span className="text-xs bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded-full font-black uppercase">
                           Conectado
                         </span>
                       ) : (
-                        <span className="text-[9px] bg-red-500/10 text-red-400 border border-red-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+                        <span className="text-xs bg-red-500/10 text-red-400 border border-red-500/20 px-2 py-0.5 rounded-full font-black uppercase">
                           Desconectado
                         </span>
                       )}
@@ -2426,17 +2400,17 @@ export default function ConfiguracoesPage() {
                         <ChevronRight className="w-4 h-4 text-muted-foreground transition-transform duration-300" />
                       )}
                     </div>
-                  </CardHeader>
+                  </button>
                   {openEvolution && (
-                    <CardContent className="space-y-5 p-5 border-t border-white/5 animate-in fade-in slide-in-from-top-2 duration-200">
+                    <CardContent id="settings-evolution" className="space-y-5 p-5 border-t border-white/5 animate-in fade-in slide-in-from-top-2 duration-200">
                       {/* Status atual */}
                       {evoEffective && (
                         <div className="rounded-xl bg-black/30 border border-white/10 p-3 space-y-1">
-                          <p className="text-[9px] uppercase font-black tracking-widest text-muted-foreground">Conectado agora</p>
-                          <p className="text-[11px] font-mono text-cyan-300 break-all">
+                          <p className="text-xs uppercase font-black tracking-widest text-muted-foreground">Conectado agora</p>
+                          <p className="text-[13px] font-mono text-cyan-300 break-all">
                             {evoEffective.url || <span className="text-amber-300">(nenhum servidor configurado)</span>}
                           </p>
-                          <p className="text-[10px] text-muted-foreground">
+                          <p className="text-xs text-muted-foreground">
                             instância: <span className="font-mono text-white">{evoEffective.instance || "—"}</span> ·
                             apikey: <span className="font-mono text-white">{evoEffective.apiKey || "—"}</span> ·
                             origem: <span className="font-mono text-white">{evoEffective.source}</span>
@@ -2447,8 +2421,8 @@ export default function ConfiguracoesPage() {
                       {/* Form */}
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                         <div className="space-y-1 md:col-span-2">
-                          <label className="text-[10px] font-black uppercase tracking-widest text-cyan-400">URL do servidor Evolution</label>
-                          <Input
+                          <label htmlFor="evolution-url" className="text-xs font-black uppercase tracking-widest text-cyan-400">URL do servidor Evolution</label>
+                          <Input id="evolution-url"
                             value={evoUrl}
                             onChange={e => setEvoUrl(e.target.value)}
                             placeholder="https://evolution.seudominio.com"
@@ -2456,14 +2430,14 @@ export default function ConfiguracoesPage() {
                             autoComplete="off"
                             spellCheck={false}
                           />
-                          <p className="text-[9px] text-muted-foreground">
+                          <p className="text-xs text-muted-foreground">
                             URL pública sem barra no fim. Ex.: a que você acessa o painel da Evolution. Aceita http(s).
                           </p>
                         </div>
 
                         <div className="space-y-1">
-                          <label className="text-[10px] font-black uppercase tracking-widest text-cyan-400">Global API Key</label>
-                          <Input
+                          <label htmlFor="evolution-api-key" className="text-xs font-black uppercase tracking-widest text-cyan-400">Global API Key</label>
+                          <Input id="evolution-api-key"
                             type="password"
                             value={evoApiKey}
                             onChange={e => setEvoApiKey(e.target.value)}
@@ -2472,15 +2446,15 @@ export default function ConfiguracoesPage() {
                             autoComplete="off"
                             spellCheck={false}
                           />
-                          <p className="text-[9px] text-muted-foreground">
+                          <p className="text-xs text-muted-foreground">
                             Variável <span className="font-mono">AUTHENTICATION_API_KEY</span> do <span className="font-mono">.env</span> da Evolution
                             (header <span className="font-mono">apikey:</span> em todas as chamadas).
                           </p>
                         </div>
 
                         <div className="space-y-1">
-                          <label className="text-[10px] font-black uppercase tracking-widest text-cyan-400">Nome da instância</label>
-                          <Input
+                          <label htmlFor="evolution-instance" className="text-xs font-black uppercase tracking-widest text-cyan-400">Nome da instância</label>
+                          <Input id="evolution-instance"
                             value={evoInstance}
                             onChange={e => setEvoInstance(e.target.value)}
                             placeholder={evoAvailable.length > 0 ? "Escolha abaixo ou digite um nome novo" : "Digite um nome (ex: minhaempresa)"}
@@ -2488,7 +2462,7 @@ export default function ConfiguracoesPage() {
                             autoComplete="off"
                             spellCheck={false}
                           />
-                          <p className="text-[9px] text-muted-foreground">
+                          <p className="text-xs text-muted-foreground">
                             {evoInstance.trim() && evoAvailable.includes(evoInstance.trim()) ? (
                               <>Vai vincular a uma instância <span className="text-green-300 font-bold">já existente</span> nesse servidor.</>
                             ) : evoInstance.trim() ? (
@@ -2502,7 +2476,7 @@ export default function ConfiguracoesPage() {
 
                       {evoAvailable.length > 0 && (
                         <div className="rounded-xl border border-white/10 bg-black/30 p-3 space-y-2">
-                          <p className="text-[9px] uppercase font-black tracking-widest text-muted-foreground">
+                          <p className="text-xs uppercase font-black tracking-widest text-muted-foreground">
                             Instâncias detectadas no servidor ({evoAvailable.length})
                           </p>
                           <div className="flex flex-wrap gap-1.5">
@@ -2512,7 +2486,7 @@ export default function ConfiguracoesPage() {
                                 type="button"
                                 onClick={() => setEvoInstance(name)}
                                 className={cn(
-                                  "px-2.5 py-1 rounded-md text-[11px] font-mono border transition",
+                                  "px-2.5 py-1 rounded-md text-[13px] font-mono border transition",
                                   evoInstance.trim() === name
                                     ? "bg-cyan-500/20 border-cyan-500/60 text-cyan-100"
                                     : "bg-white/5 border-white/10 text-white/70 hover:bg-white/10 hover:text-white"
@@ -2522,7 +2496,7 @@ export default function ConfiguracoesPage() {
                               </button>
                             ))}
                           </div>
-                          <p className="text-[9px] text-muted-foreground">Clique pra usar uma existente, ou digite um nome novo no campo acima pra criar.</p>
+                          <p className="text-xs text-muted-foreground">Clique pra usar uma existente, ou digite um nome novo no campo acima pra criar.</p>
                         </div>
                       )}
 
@@ -2530,7 +2504,7 @@ export default function ConfiguracoesPage() {
                         <div className="rounded-xl border border-green-500/30 bg-green-500/10 p-3 space-y-3">
                           <div className="flex items-start gap-2 text-green-200">
                             <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
-                            <div className="text-[11px] space-y-1">
+                            <div className="text-[13px] space-y-1">
                               <p className="font-bold">Instância criada com sucesso!</p>
                               <p className="opacity-80">
                                 Settings padrão aplicados (<span className="font-mono">rejectCall</span>, <span className="font-mono">groupsIgnore</span>, <span className="font-mono">alwaysOnline</span>) e webhook registrado. Escaneie o QR Code abaixo no WhatsApp do celular pra finalizar a conexão.
@@ -2544,13 +2518,13 @@ export default function ConfiguracoesPage() {
                                 alt="QR Code WhatsApp"
                                 className="w-56 h-56 rounded-lg bg-white p-2"
                               />
-                              <p className="text-[10px] text-muted-foreground">
+                              <p className="text-xs text-muted-foreground">
                                 WhatsApp → Configurações → Aparelhos conectados → Conectar aparelho. O QR expira em ~60s — clique <span className="font-mono">Salvar e conectar</span> de novo se passar.
                               </p>
                             </div>
                           )}
                           {evoPairingCode && (
-                            <p className="text-center text-[11px] font-mono text-cyan-300">
+                            <p className="text-center text-[13px] font-mono text-cyan-300">
                               Ou use o código de pareamento: <span className="font-bold text-base">{evoPairingCode}</span>
                             </p>
                           )}
@@ -2578,24 +2552,24 @@ export default function ConfiguracoesPage() {
                         <Button
                           onClick={loadEvolutionConfig}
                           variant="ghost"
-                          className="text-[11px] font-bold uppercase tracking-widest gap-2 text-muted-foreground hover:text-white"
+                          className="text-[13px] font-bold uppercase tracking-widest gap-2 text-muted-foreground hover:text-white"
                         >
                           <RefreshCw className="w-3.5 h-3.5" /> Recarregar
                         </Button>
                       </div>
 
                       {evoMigration && (
-                        <div className="flex items-start gap-2 p-3 rounded-xl border text-[11px] bg-blue-500/10 border-blue-500/30 text-blue-100">
+                        <div className="flex items-start gap-2 p-3 rounded-xl border text-[13px] bg-blue-500/10 border-blue-500/30 text-blue-100">
                           <RefreshCw className="w-4 h-4 shrink-0 mt-0.5" />
                           <div className="space-y-1">
                             <p className="font-bold">
                               Histórico migrado: instância <span className="font-mono">{evoMigration.from || "(vazia)"}</span> → <span className="font-mono">{evoMigration.to}</span>
                             </p>
-                            <p className="text-[10px] opacity-80">
+                            <p className="text-xs opacity-80">
                               {Object.entries(evoMigration.tables).filter(([, v]) => v.ok).length}/{Object.keys(evoMigration.tables).length} tabelas migradas com sucesso. Mensagens, leads, sessões, campanhas e follow-ups antigos agora aparecem sob o novo nome.
                             </p>
                             {Object.entries(evoMigration.tables).filter(([, v]) => !v.ok).map(([t, v]) => (
-                              <p key={t} className="text-[10px] text-red-300 font-mono">⚠ {t}: {v.error}</p>
+                              <p key={t} className="text-xs text-red-300 font-mono">⚠ {t}: {v.error}</p>
                             ))}
                           </div>
                         </div>
@@ -2604,7 +2578,7 @@ export default function ConfiguracoesPage() {
                       {evoTestResult && (
                         <div
                           className={cn(
-                            "flex items-start gap-2 p-3 rounded-xl border text-[11px]",
+                            "flex items-start gap-2 p-3 rounded-xl border text-[13px]",
                             evoTestResult.ok
                               ? "bg-green-500/10 border-green-500/30 text-green-200"
                               : "bg-red-500/10 border-red-500/30 text-red-200"
@@ -2615,7 +2589,7 @@ export default function ConfiguracoesPage() {
                             {evoTestResult.ok ? (
                               <>
                                 <p className="font-bold">Conectou! Servidor respondeu corretamente.</p>
-                                <p className="text-[10px] opacity-80">
+                                <p className="text-xs opacity-80">
                                   {evoTestResult.instances?.length || 0} instância(s) disponível(is) nesse servidor.
                                   {evoTestResult.instances && evoTestResult.instances.length > 0 && (
                                     <span className="block mt-1 font-mono">
@@ -2628,14 +2602,14 @@ export default function ConfiguracoesPage() {
                             ) : (
                               <>
                                 <p className="font-bold">Falha ao conectar</p>
-                                <p className="text-[10px] opacity-80 break-all">{evoTestResult.error}</p>
+                                <p className="text-xs opacity-80 break-all">{evoTestResult.error}</p>
                               </>
                             )}
                           </div>
                         </div>
                       )}
 
-                      <details className="rounded-xl border border-white/5 bg-black/20 overflow-hidden text-[11px]">
+                      <details className="rounded-xl border border-white/5 bg-black/20 overflow-hidden text-[13px]">
                         <summary className="cursor-pointer px-3 py-2 font-bold text-white/70 hover:text-white">
                           Como funciona / o que cada campo faz
                         </summary>
@@ -2676,26 +2650,26 @@ export default function ConfiguracoesPage() {
                         <CardTitle className="text-sm font-bold uppercase tracking-wider">
                           Evolution GO (Go/whatsmeow)
                         </CardTitle>
-                        <p className="text-[10px] text-muted-foreground font-medium">
+                        <p className="text-xs text-muted-foreground font-medium">
                           {goStored?.hasKey ? `Configurado · ${goStored.url}` : "Não configurado ·provedor novo, mais rápido"}
                         </p>
                       </div>
                     </div>
                     {goStored?.hasKey && (
-                      <span className="text-[9px] bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+                      <span className="text-xs bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 px-2 py-0.5 rounded-full font-black uppercase">
                         Configurado
                       </span>
                     )}
                   </CardHeader>
                   <CardContent className="space-y-3 p-5 border-t border-cyan-500/10">
-                    <p className="text-[11px] text-muted-foreground leading-relaxed">
+                    <p className="text-[13px] text-muted-foreground leading-relaxed">
                       O <strong className="text-cyan-300">Evolution GO</strong> é a versão nova da Evolution API, escrita em Go — mais leve e performática.
                       Instale no Easypanel (Docker <code className="text-cyan-300">evoapicloud/evolution-go</code>), cole a URL e API Key aqui.
                       O webhook já está pronto: <code className="text-cyan-300 break-all">{typeof window !== "undefined" ? window.location.origin : ""}/api/webhooks/evolution-go</code>
                     </p>
                     <div className="space-y-2">
-                      <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">URL do servidor Evolution GO</label>
-                      <Input
+                      <label htmlFor="evolution-go-url" className="text-xs font-black uppercase tracking-widest text-muted-foreground">URL do servidor Evolution GO</label>
+                      <Input id="evolution-go-url"
                         value={goUrl}
                         onChange={(e) => setGoUrl(e.target.value)}
                         placeholder="https://evolution-go.seu-dominio.com:8080"
@@ -2703,8 +2677,8 @@ export default function ConfiguracoesPage() {
                       />
                     </div>
                     <div className="space-y-2">
-                      <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">API Key (GLOBAL_API_KEY)</label>
-                      <Input
+                      <label htmlFor="evolution-go-api-key" className="text-xs font-black uppercase tracking-widest text-muted-foreground">API Key (GLOBAL_API_KEY)</label>
+                      <Input id="evolution-go-api-key"
                         type="password"
                         value={goApiKey}
                         onChange={(e) => setGoApiKey(e.target.value)}
@@ -2727,21 +2701,21 @@ export default function ConfiguracoesPage() {
                       </Button>
                     </div>
                     {goTestResult && (
-                      <p className={cn("text-[10px] font-medium", goTestResult.ok ? "text-green-400" : "text-red-400")}>
+                      <p className={cn("text-xs font-medium", goTestResult.ok ? "text-green-400" : "text-red-400")}>
                         {goTestResult.ok ? "✓ " : "✗ "}{goTestResult.message || goTestResult.error}
                       </p>
                     )}
                     {goConnStatus && (
-                      <p className={cn("text-[10px] font-medium", goQrCode ? "text-cyan-300" : "text-amber-300")}>
+                      <p className={cn("text-xs font-medium", goQrCode ? "text-cyan-300" : "text-amber-300")}>
                         {goConnStatus}
                       </p>
                     )}
                     {goQrCode && (
                       <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/[0.06] p-4 space-y-3">
-                        <p className="text-[11px] font-bold text-cyan-200">📱 Escaneie o QR Code no WhatsApp</p>
+                        <p className="text-[13px] font-bold text-cyan-200">📱 Escaneie o QR Code no WhatsApp</p>
                         <div className="flex flex-col items-center gap-2">
                           <img src={goQrCode} alt="QR Code WhatsApp" className="w-56 h-56 rounded-lg bg-white p-2" />
-                          <p className="text-[10px] text-muted-foreground">
+                          <p className="text-xs text-muted-foreground">
                             WhatsApp → Configurações → Aparelhos conectados → Conectar aparelho. O QR expira em ~60s — clique &quot;Conectar e gerar QR&quot; de novo se precisar.
                           </p>
                         </div>
@@ -2757,8 +2731,7 @@ export default function ConfiguracoesPage() {
               <div className="space-y-4 sm:space-y-6 animate-in fade-in duration-200">
                 {/* Gateway Card */}
                 <Card className="border-emerald-500/20 bg-emerald-500/[0.03] overflow-hidden transition-all duration-300">
-                  <CardHeader
-                    className="cursor-pointer hover:bg-white/[0.01] transition-all flex flex-row items-center justify-between space-y-0 p-5 select-none"
+                  <button type="button" data-slot="card-header" aria-expanded={openGateway} aria-controls={openGateway ? "settings-gateway" : undefined}
                     onClick={() => setOpenGateway(!openGateway)}
                   >
                     <div className="flex items-center gap-3">
@@ -2769,7 +2742,7 @@ export default function ConfiguracoesPage() {
                         <CardTitle className="text-sm font-bold uppercase tracking-wider">
                           Gateway de Assinatura (Conector local)
                         </CardTitle>
-                        <p className="text-[10px] text-muted-foreground font-medium">
+                        <p className="text-xs text-muted-foreground font-medium">
                           {pxStatus?.accounts.length ? `${pxStatus.accounts.length} conta(s) ativa(s) no proxy` : "Nenhuma conta logada no proxy"}
                         </p>
                       </div>
@@ -2779,18 +2752,18 @@ export default function ConfiguracoesPage() {
                         const st = pxBadgeState();
                         if (st === "on")
                           return (
-                            <span className="text-[9px] bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+                            <span className="text-xs bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded-full font-black uppercase">
                               Conector Ligado
                             </span>
                           );
                         if (st === "starting")
                           return (
-                            <span className="text-[9px] bg-blue-500/10 text-blue-300 border border-blue-500/20 px-2 py-0.5 rounded-full font-black uppercase flex items-center gap-1">
+                            <span className="text-xs bg-blue-500/10 text-blue-300 border border-blue-500/20 px-2 py-0.5 rounded-full font-black uppercase flex items-center gap-1">
                               <Loader2 className="w-2.5 h-2.5 animate-spin" /> Ligando…
                             </span>
                           );
                         return (
-                          <span className="text-[9px] bg-zinc-500/10 text-zinc-400 border border-zinc-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+                          <span className="text-xs bg-zinc-500/10 text-zinc-400 border border-zinc-500/20 px-2 py-0.5 rounded-full font-black uppercase">
                             Inativo
                           </span>
                         );
@@ -2801,10 +2774,10 @@ export default function ConfiguracoesPage() {
                         <ChevronRight className="w-4 h-4 text-muted-foreground transition-transform duration-300" />
                       )}
                     </div>
-                  </CardHeader>
+                  </button>
                   {openGateway && (
-                    <CardContent className="space-y-5 p-5 border-t border-emerald-500/10 animate-in fade-in slide-in-from-top-2 duration-200">
-                      <p className="text-[11px] text-muted-foreground leading-relaxed">
+                    <CardContent id="settings-gateway" className="space-y-5 p-5 border-t border-emerald-500/10 animate-in fade-in slide-in-from-top-2 duration-200">
+                      <p className="text-[13px] text-muted-foreground leading-relaxed">
                         Use suas <strong className="text-emerald-200">contas/assinaturas</strong> (Gemini, Claude, ChatGPT) no lugar
                         de crédito de API — como se você estivesse usando pelo site. Funciona por meio de um proxy local
                         OpenAI-compatível (ex.: <span className="font-mono text-emerald-300/90">CLIProxyAPI</span>) onde você faz login
@@ -2814,21 +2787,21 @@ export default function ConfiguracoesPage() {
 
                       {/* ===== CONECTAR EM 1 CLIQUE (conector embutido) ===== */}
                       <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/[0.06] p-4 space-y-3">
-                        <p className="text-[11px] font-black uppercase tracking-widest text-emerald-300 flex items-center gap-2">
+                        <p className="text-[13px] font-black uppercase tracking-widest text-emerald-300 flex items-center gap-2">
                           <Plug className="w-3.5 h-3.5" /> Conectar conta em 1 clique
                         </p>
-                        <p className="text-[11px] text-muted-foreground leading-relaxed">
+                        <p className="text-[13px] text-muted-foreground leading-relaxed">
                           Clique no botão da conta que quer usar. O painel <strong className="text-white">instala e liga o conector
                           sozinho</strong> e abre a página de login oficial — você só faz o login. Ao terminar,
                           os modelos da sua conta aparecem em todos os seletores, <strong className="text-emerald-200">sem gastar API</strong>.
                         </p>
-                        <p className="text-[10px] text-emerald-200/90 leading-relaxed rounded-lg border border-emerald-400/20 bg-emerald-500/10 p-2">
+                        <p className="text-xs text-emerald-200/90 leading-relaxed rounded-lg border border-emerald-400/20 bg-emerald-500/10 p-2">
                           💡 <strong>Quer o máximo de graça com 1 login só?</strong> Use o <strong>Antigravity</strong> (conta Google):
                           ele libera <strong>Gemini 3 Pro, Claude, GPT e Grok</strong> de uma vez.
                         </p>
 
                         {/* Status do conector */}
-                        <div className="flex items-center gap-2 flex-wrap text-[10px]">
+                        <div className="flex items-center gap-2 flex-wrap text-xs">
                           <span className="font-black uppercase tracking-widest text-muted-foreground">Conector:</span>
                           {pxAutoStarting ? (
                             <span className="font-black text-blue-300 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> ligando o conector…</span>
@@ -2883,7 +2856,7 @@ export default function ConfiguracoesPage() {
 
                         {/* Login em andamento */}
                         {pxLogin && (
-                          <div className="flex items-start gap-2 p-3 rounded-xl border border-blue-500/30 bg-blue-500/10 text-blue-100 text-[11px]">
+                          <div className="flex items-start gap-2 p-3 rounded-xl border border-blue-500/30 bg-blue-500/10 text-blue-100 text-[13px]">
                             <Loader2 className="w-4 h-4 shrink-0 animate-spin mt-0.5" />
                             <div className="space-y-2 flex-1 min-w-0">
                               <p className="font-bold">Esperando você concluir o login na outra aba…</p>
@@ -2899,7 +2872,7 @@ export default function ConfiguracoesPage() {
                                   <Button
                                     onClick={handlePxPasteFromClipboard}
                                     size="sm"
-                                    className="h-8 text-[10px] font-black bg-blue-500/40 text-blue-50 border border-blue-400/60 hover:bg-blue-500/60 gap-1.5"
+                                    className="h-8 text-xs font-black bg-blue-500/40 text-blue-50 border border-blue-400/60 hover:bg-blue-500/60 gap-1.5"
                                   >
                                     <Copy className="w-3.5 h-3.5" /> Colar do clipboard e concluir
                                   </Button>
@@ -2911,7 +2884,7 @@ export default function ConfiguracoesPage() {
 
                         {/* Instalação/ação demorada em andamento */}
                         {(pxBusy === "install" || pxBusy === "start" || pxBusy === "stop") && (
-                          <p className="text-[10px] text-muted-foreground flex items-center gap-1.5">
+                          <p className="text-xs text-muted-foreground flex items-center gap-1.5">
                             <Loader2 className="w-3 h-3 animate-spin" />
                             {pxBusy === "install" ? "Baixando e instalando o conector (1ª vez demora ~1 min)…" : pxBusy === "start" ? "Ligando o conector…" : "Desligando…"}
                           </p>
@@ -2919,7 +2892,7 @@ export default function ConfiguracoesPage() {
 
                         {/* Erro do conector */}
                         {pxError && (
-                          <div className="flex items-start gap-2 p-3 rounded-xl border border-red-500/30 bg-red-500/10 text-red-200 text-[11px]">
+                          <div className="flex items-start gap-2 p-3 rounded-xl border border-red-500/30 bg-red-500/10 text-red-200 text-[13px]">
                             <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
                             <p className="whitespace-pre-wrap">{pxError}</p>
                           </div>
@@ -2936,16 +2909,16 @@ export default function ConfiguracoesPage() {
                         }
                         return (
                           <div className="space-y-2 pt-1">
-                            <p className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">
+                            <p className="text-xs font-black uppercase tracking-widest text-muted-foreground">
                               Contas conectadas ({pxStatus.accounts.length})
                             </p>
-                            <p className="text-[9px] text-muted-foreground/80 leading-relaxed">
+                            <p className="text-xs text-muted-foreground/80 leading-relaxed">
                               Dá um <strong className="text-white">apelido</strong> em cada uma pra saber qual é qual (ex.: “GPT pessoal”, “GPT trabalho”).
                             </p>
                             <div className="space-y-2">
                               {Array.from(groups.entries()).map(([provider, accs]) => (
                                 <div key={provider} className="space-y-1.5">
-                                  <p className="text-[9px] font-black uppercase tracking-widest text-muted-foreground/70 pl-1">
+                                  <p className="text-xs font-black uppercase tracking-widest text-muted-foreground/70 pl-1">
                                     {providerLabel(provider)} <span className="opacity-60">({accs.length})</span>
                                   </p>
                                   {accs.map((a: any) => {
@@ -2967,7 +2940,7 @@ export default function ConfiguracoesPage() {
                                         )}
                                       >
                                         <span className={cn(
-                                          "shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[9px] font-black uppercase tracking-widest",
+                                          "shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-xs font-black uppercase tracking-widest",
                                           paused
                                             ? "bg-yellow-500/15 text-yellow-100 border-yellow-500/40"
                                             : providerBadgeClass(a.provider),
@@ -2976,16 +2949,17 @@ export default function ConfiguracoesPage() {
                                             ? <><Info className="w-2.5 h-2.5" /> {providerLabel(a.provider)} · Pausada</>
                                             : <><CheckCircle2 className="w-2.5 h-2.5" /> {providerLabel(a.provider)}</>}
                                         </span>
-                                        <div className="flex-1 min-w-0 flex flex-col gap-1">
+                                        <div className="flex-1 basis-48 min-w-0 flex flex-col gap-1">
                                           <Input
+                                            aria-label={`Apelido da conta ${subtitle}`}
                                             value={editing ? draft : currentLabel}
                                             onChange={(e) => setPxLabelDraft((m) => ({ ...m, [a.name]: e.target.value }))}
                                             placeholder="Dê um apelido (ex.: GPT pessoal)"
                                             maxLength={60}
                                             disabled={busy}
-                                            className="h-7 bg-black/40 border-white/10 text-[11px] text-white placeholder:text-white/30"
+                                            className="h-7 bg-black/40 border-white/10 text-[13px] text-white placeholder:text-white/30"
                                           />
-                                          <p className="text-[9px] text-muted-foreground/70 truncate font-mono" title={a.name}>
+                                          <p className="text-xs text-muted-foreground/70 truncate font-mono" title={a.name}>
                                             {subtitle}
                                           </p>
                                         </div>
@@ -2994,7 +2968,7 @@ export default function ConfiguracoesPage() {
                                             onClick={() => handleRenameAccount(a.name)}
                                             disabled={busy}
                                             size="sm"
-                                            className="h-7 text-[10px] font-black bg-emerald-500/25 text-emerald-50 border border-emerald-400/40 hover:bg-emerald-500/40 gap-1"
+                                            className="h-7 text-xs font-black bg-emerald-500/25 text-emerald-50 border border-emerald-400/40 hover:bg-emerald-500/40 gap-1"
                                           >
                                             {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
                                             Salvar
@@ -3007,7 +2981,7 @@ export default function ConfiguracoesPage() {
                                             size="sm"
                                             variant="outline"
                                             title="Voltar a usar esta conta"
-                                            className="h-7 text-[10px] bg-emerald-500/10 border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/25 gap-1"
+                                            className="h-7 text-xs bg-emerald-500/10 border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/25 gap-1"
                                           >
                                             {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
                                             Retomar
@@ -3019,7 +2993,7 @@ export default function ConfiguracoesPage() {
                                             size="sm"
                                             variant="outline"
                                             title="Tirar da rotação sem perder o login (anti-banimento)"
-                                            className="h-7 text-[10px] bg-yellow-500/10 border-yellow-500/30 text-yellow-200 hover:bg-yellow-500/25 gap-1"
+                                            className="h-7 text-xs bg-yellow-500/10 border-yellow-500/30 text-yellow-200 hover:bg-yellow-500/25 gap-1"
                                           >
                                             {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Info className="w-3 h-3" />}
                                             Pausar
@@ -3031,7 +3005,8 @@ export default function ConfiguracoesPage() {
                                           size="sm"
                                           variant="outline"
                                           title="Remover esta conta do conector"
-                                          className="h-7 text-[10px] bg-red-500/10 border-red-500/30 text-red-200 hover:bg-red-500/25 gap-1"
+                                          aria-label={`Remover conta ${currentLabel || subtitle}`}
+                                          className="h-7 text-xs bg-red-500/10 border-red-500/30 text-red-200 hover:bg-red-500/25 gap-1"
                                         >
                                           {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
                                         </Button>
@@ -3041,7 +3016,7 @@ export default function ConfiguracoesPage() {
                                 </div>
                               ))}
                             </div>
-                            <details className="text-[10px] text-muted-foreground/80 pt-1">
+                            <details className="text-xs text-muted-foreground/80 pt-1">
                               <summary className="cursor-pointer select-none underline">Boas práticas pra não perder as contas grátis</summary>
                               <ul className="list-disc pl-4 space-y-0.5 mt-1.5">
                                 <li><strong className="text-yellow-200">Pause antes de banir:</strong> notou erro 429 ou “quota exceeded”? Clique em <strong>Pausar</strong> — a conta sai da rotação SEM perder o login.</li>
@@ -3056,10 +3031,10 @@ export default function ConfiguracoesPage() {
 
                       {/* Modo manual (avançado) — proxy próprio/externo */}
                       <details className="rounded-xl border border-white/10 bg-white/[0.02] p-4 group">
-                        <summary className="text-[11px] font-black uppercase tracking-widest text-muted-foreground cursor-pointer select-none hover:text-white">
+                        <summary className="text-[13px] font-black uppercase tracking-widest text-muted-foreground cursor-pointer select-none hover:text-white">
                           Modo manual (avançado) — usar um proxy que você mesmo roda
                         </summary>
-                        <ol className="text-[11px] text-muted-foreground leading-relaxed list-decimal pl-4 space-y-1 mt-3">
+                        <ol className="text-[13px] text-muted-foreground leading-relaxed list-decimal pl-4 space-y-1 mt-3">
                           <li>No seu PC/servidor, rode um <strong className="text-white">proxy OpenAI-compatível</strong> — ex.: <span className="font-mono text-emerald-300/90">CLIProxyAPI</span>. Passo a passo em <span className="font-mono text-emerald-300/90">docs/GATEWAY_ASSINATURA.md</span>.</li>
                           <li><strong className="text-white">Faça login</strong> na conta dentro do proxy. É a sua assinatura — <strong className="text-emerald-200">sem API key</strong>.</li>
                           <li>Copie a <strong className="text-white">URL local</strong> do proxy, cole numa conexão abaixo, clique <strong className="text-emerald-200">Testar</strong> e depois <strong className="text-emerald-200">Salvar conexões</strong>.</li>
@@ -3068,17 +3043,17 @@ export default function ConfiguracoesPage() {
 
                       {/* Status */}
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Status:</span>
+                        <span className="text-xs font-black uppercase tracking-widest text-muted-foreground">Status:</span>
                         {loading ? (
-                          <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+                          <span className="text-xs text-muted-foreground flex items-center gap-1">
                             <Loader2 className="w-3 h-3 animate-spin" /> Verificando…
                           </span>
                         ) : gwConfigured ? (
-                          <span className="text-[10px] font-black text-green-400 flex items-center gap-1">
+                          <span className="text-xs font-black text-green-400 flex items-center gap-1">
                             <CheckCircle2 className="w-3 h-3" /> {gwConns.filter((c) => c.baseUrl.trim()).length} conexão(ões) configurada(s)
                           </span>
                         ) : (
-                          <span className="text-[10px] font-black text-muted-foreground flex items-center gap-1">
+                          <span className="text-xs font-black text-muted-foreground flex items-center gap-1">
                             <XCircle className="w-3 h-3" /> Nenhuma conexão Gateway
                           </span>
                         )}
@@ -3087,12 +3062,12 @@ export default function ConfiguracoesPage() {
                       {/* Lista de conexões (uma por conta) */}
                       <div className="space-y-3">
                         {gwConns.length === 0 && (
-                          <p className="text-[11px] text-muted-foreground italic">Nenhuma conexão ainda. Adicione uma abaixo.</p>
+                          <p className="text-[13px] text-muted-foreground italic">Nenhuma conexão ainda. Adicione uma abaixo.</p>
                         )}
                         {gwConns.map((c, idx) => (
                           <div key={c.id} className="rounded-xl border border-white/10 bg-black/30 p-3 space-y-2.5">
                             <div className="flex items-center justify-between gap-2">
-                              <span className="text-[10px] font-black uppercase tracking-widest text-emerald-400">
+                              <span className="text-xs font-black uppercase tracking-widest text-emerald-400">
                                 Conexão {idx + 1}{c.hasApiKey ? " · 🔑 chave salva" : ""}
                               </span>
                               <Button
@@ -3101,14 +3076,15 @@ export default function ConfiguracoesPage() {
                                 size="sm"
                                 className="h-7 px-2 bg-red-500/5 border-red-500/20 text-red-300 hover:bg-red-500/15"
                                 title="Remover conexão"
+                                aria-label={`Remover conexão ${c.label || idx + 1}`}
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
                               </Button>
                             </div>
                             <div className="grid gap-2.5 sm:grid-cols-2">
                               <div className="space-y-1">
-                                <label className="text-[9px] font-black uppercase tracking-widest text-muted-foreground">Apelido</label>
-                                <Input
+                                <label htmlFor={`gateway-label-${c.id}`} className="text-xs font-black uppercase tracking-widest text-muted-foreground">Apelido</label>
+                                <Input id={`gateway-label-${c.id}`}
                                   value={c.label}
                                   onChange={(e) => updateGwConn(c.id, { label: e.target.value })}
                                   placeholder="ex.: Claude Pro"
@@ -3117,8 +3093,8 @@ export default function ConfiguracoesPage() {
                                 />
                               </div>
                               <div className="space-y-1">
-                                <label className="text-[9px] font-black uppercase tracking-widest text-muted-foreground">URL do proxy</label>
-                                <Input
+                                <label htmlFor={`gateway-url-${c.id}`} className="text-xs font-black uppercase tracking-widest text-muted-foreground">URL do proxy</label>
+                                <Input id={`gateway-url-${c.id}`}
                                   value={c.baseUrl}
                                   onChange={(e) => updateGwConn(c.id, { baseUrl: e.target.value })}
                                   placeholder="http://localhost:8317/v1"
@@ -3128,10 +3104,11 @@ export default function ConfiguracoesPage() {
                               </div>
                             </div>
                             <div className="space-y-1">
-                              <label className="text-[9px] font-black uppercase tracking-widest text-muted-foreground">
+                              <label htmlFor={`gateway-key-${c.id}`} className="text-xs font-black uppercase tracking-widest text-muted-foreground">
                                 {c.hasApiKey ? "Substituir chave (opcional)" : "Chave do proxy (opcional)"}
                               </label>
                               <Input
+                                id={`gateway-key-${c.id}`}
                                 type="password"
                                 value={c.apiKey}
                                 onChange={(e) => updateGwConn(c.id, { apiKey: e.target.value })}
@@ -3146,12 +3123,12 @@ export default function ConfiguracoesPage() {
                                 disabled={!c.baseUrl.trim()}
                                 variant="outline"
                                 size="sm"
-                                className="h-8 bg-white/5 border-white/10 text-white hover:bg-white/10 text-[11px] font-bold gap-1.5"
+                                className="h-8 bg-white/5 border-white/10 text-white hover:bg-white/10 text-[13px] font-bold gap-1.5"
                               >
                                 Testar
                               </Button>
                               {c.testResult && (
-                                <span className={cn("text-[10px] font-bold flex items-center gap-1", c.testResult.ok ? "text-green-300" : "text-red-300")}>
+                                <span className={cn("text-xs font-bold flex items-center gap-1", c.testResult.ok ? "text-green-300" : "text-red-300")}>
                                   {c.testResult.ok ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
                                   {c.testResult.message}{typeof c.testResult.count === "number" ? ` (${c.testResult.count} modelos)` : ""}
                                 </span>
@@ -3167,21 +3144,21 @@ export default function ConfiguracoesPage() {
                           onClick={() => addGwConn()}
                           variant="outline"
                           size="sm"
-                          className="bg-emerald-500/10 border-emerald-500/30 text-emerald-100 hover:bg-emerald-500/20 text-[11px] font-bold gap-1.5"
+                          className="bg-emerald-500/10 border-emerald-500/30 text-emerald-100 hover:bg-emerald-500/20 text-[13px] font-bold gap-1.5"
                         >
                           <Plus className="w-3.5 h-3.5" /> Adicionar conexão
                         </Button>
-                        <Button onClick={() => addGwConn({ label: "Gemini (conta)" })} variant="outline" size="sm" className="bg-blue-500/10 border-blue-500/30 text-blue-100 hover:bg-blue-500/20 text-[11px] font-bold">+ Gemini</Button>
-                        <Button onClick={() => addGwConn({ label: "Claude (assinatura)" })} variant="outline" size="sm" className="bg-orange-500/10 border-orange-500/30 text-orange-100 hover:bg-orange-500/20 text-[11px] font-bold">+ Claude</Button>
-                        <Button onClick={() => addGwConn({ label: "ChatGPT (conta)" })} variant="outline" size="sm" className="bg-teal-500/10 border-teal-500/30 text-teal-100 hover:bg-teal-500/20 text-[11px] font-bold">+ ChatGPT</Button>
+                        <Button onClick={() => addGwConn({ label: "Gemini (conta)" })} variant="outline" size="sm" className="bg-blue-500/10 border-blue-500/30 text-blue-100 hover:bg-blue-500/20 text-[13px] font-bold">+ Gemini</Button>
+                        <Button onClick={() => addGwConn({ label: "Claude (assinatura)" })} variant="outline" size="sm" className="bg-orange-500/10 border-orange-500/30 text-orange-100 hover:bg-orange-500/20 text-[13px] font-bold">+ Claude</Button>
+                        <Button onClick={() => addGwConn({ label: "ChatGPT (conta)" })} variant="outline" size="sm" className="bg-teal-500/10 border-teal-500/30 text-teal-100 hover:bg-teal-500/20 text-[13px] font-bold">+ ChatGPT</Button>
                       </div>
 
                       {/* Fallback global */}
                       <div className="space-y-2 pt-1 border-t border-white/5">
-                        <label className="text-[10px] font-black uppercase tracking-widest text-emerald-400">
+                        <label htmlFor="gateway-fallback-model" className="text-xs font-black uppercase tracking-widest text-emerald-400">
                           Modelo de fallback (nunca quebra)
                         </label>
-                        <Input
+                        <Input id="gateway-fallback-model"
                           type="text"
                           value={gwFallback}
                           onChange={(e) => setGwFallback(e.target.value)}
@@ -3189,7 +3166,7 @@ export default function ConfiguracoesPage() {
                           className="bg-black/40 border-white/10 font-mono text-sm h-11"
                           autoComplete="off"
                         />
-                        <p className="text-[9px] text-muted-foreground flex items-start gap-1 leading-relaxed">
+                        <p className="text-xs text-muted-foreground flex items-start gap-1 leading-relaxed">
                           <Info className="w-3 h-3 shrink-0 mt-0.5" />
                           Se uma conta/proxy do Gateway falhar, o sistema usa este modelo de API automaticamente.
                         </p>
@@ -3220,16 +3197,16 @@ export default function ConfiguracoesPage() {
                       {/* Controles do conector manual */}
                       <div className="flex items-center gap-2 flex-wrap pt-3 border-t border-emerald-500/10">
                         {pxStatus?.installed && !pxStatus.running && (
-                          <Button onClick={() => handlePxAction("start")} disabled={!!pxBusy} variant="outline" size="sm" className="h-7 text-[10px] bg-white/5 border-white/10 text-white hover:bg-white/10 font-bold">
+                          <Button onClick={() => handlePxAction("start")} disabled={!!pxBusy} variant="outline" size="sm" className="h-7 text-xs bg-white/5 border-white/10 text-white hover:bg-white/10 font-bold">
                             Ligar conector
                           </Button>
                         )}
                         {pxStatus?.running && pxStatus.managementReady && (
-                          <Button onClick={() => handlePxAction("stop")} disabled={!!pxBusy} variant="outline" size="sm" className="h-7 text-[10px] bg-white/5 border-white/10 text-muted-foreground hover:bg-white/10 font-bold">
+                          <Button onClick={() => handlePxAction("stop")} disabled={!!pxBusy} variant="outline" size="sm" className="h-7 text-xs bg-white/5 border-white/10 text-muted-foreground hover:bg-white/10 font-bold">
                             Desligar conector
                           </Button>
                         )}
-                        <Button onClick={() => refreshProxyStatus()} disabled={!!pxBusy} variant="outline" size="sm" className="h-7 text-[10px] bg-white/5 border-white/10 text-muted-foreground hover:bg-white/10 font-bold gap-1">
+                        <Button onClick={() => refreshProxyStatus()} disabled={!!pxBusy} variant="outline" size="sm" className="h-7 text-xs bg-white/5 border-white/10 text-muted-foreground hover:bg-white/10 font-bold gap-1">
                           <RefreshCw className="w-3 h-3" /> Atualizar status
                         </Button>
                       </div>
@@ -3244,8 +3221,7 @@ export default function ConfiguracoesPage() {
 
                 {/* DeepSeek "modo conta" */}
                 <Card className="border-red-500/20 bg-red-500/[0.02] overflow-hidden transition-all duration-300">
-                  <CardHeader
-                    className="cursor-pointer hover:bg-white/[0.01] transition-all flex flex-row items-center justify-between space-y-0 p-5 select-none"
+                  <button type="button" data-slot="card-header" aria-expanded={openDeepSeek} aria-controls={openDeepSeek ? "settings-deepseek" : undefined}
                     onClick={() => setOpenDeepSeek(!openDeepSeek)}
                   >
                     <div className="flex items-center gap-3">
@@ -3256,18 +3232,18 @@ export default function ConfiguracoesPage() {
                         <CardTitle className="text-sm font-bold uppercase tracking-wider">
                           DeepSeek — Sessão de Conta Grátis
                         </CardTitle>
-                        <p className="text-[10px] text-muted-foreground font-medium">
+                        <p className="text-xs text-muted-foreground font-medium">
                           {dsTokens.length ? `${dsTokens.filter(t => !t.paused).length} conta(s) ativa(s)` : "Sincronização de conta experimental pendente"}
                         </p>
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
                       {dsTokens.length > 0 ? (
-                        <span className="text-[9px] bg-red-500/10 text-red-400 border border-red-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+                        <span className="text-xs bg-red-500/10 text-red-400 border border-red-500/20 px-2 py-0.5 rounded-full font-black uppercase">
                           {dsTokens.filter(t => !t.paused).length} Ativa(s)
                         </span>
                       ) : (
-                        <span className="text-[9px] bg-zinc-500/10 text-zinc-400 border border-zinc-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+                        <span className="text-xs bg-zinc-500/10 text-zinc-400 border border-zinc-500/20 px-2 py-0.5 rounded-full font-black uppercase">
                           Sem Contas
                         </span>
                       )}
@@ -3277,24 +3253,24 @@ export default function ConfiguracoesPage() {
                         <ChevronRight className="w-4 h-4 text-muted-foreground transition-transform duration-300" />
                       )}
                     </div>
-                  </CardHeader>
+                  </button>
                   {openDeepSeek && (
-                    <CardContent className="space-y-5 p-5 border-t border-red-500/10 animate-in fade-in slide-in-from-top-2 duration-200">
+                    <CardContent id="settings-deepseek" className="space-y-5 p-5 border-t border-red-500/10 animate-in fade-in slide-in-from-top-2 duration-200">
                       <div className="flex items-start gap-2">
                         <Info className="w-4 h-4 shrink-0 text-red-300 mt-0.5" />
                         <div className="flex-1 min-w-0 space-y-1.5">
-                          <p className="text-[10px] text-red-100/90 leading-relaxed">
+                          <p className="text-xs text-red-100/90 leading-relaxed">
                             Usa o <strong>userToken</strong> da sua conta logada em <a href="https://chat.deepseek.com" target="_blank" rel="noreferrer" className="underline">chat.deepseek.com</a>{" "}
                             — <strong>sem API key, sem gastar crédito</strong>. O painel resolve o Proof-of-Work automaticamente e atenua riscos de banimento (rate-limit de 1 msg/min por conta, rotação multi-conta, recuo em 429).
                           </p>
-                          <p className="text-[10px] text-yellow-200/90 leading-relaxed rounded-md border border-yellow-500/30 bg-yellow-500/10 p-2">
+                          <p className="text-xs text-yellow-200/90 leading-relaxed rounded-md border border-yellow-500/30 bg-yellow-500/10 p-2">
                             ⚠ <strong>Experimental — risco de ban real.</strong> O DeepSeek não tem OAuth oficial (ao contrário do Conector Antigravity/Codex, que é estável). Use com moderação. Para uso robusto no Agente de IA, prefira o <strong>Conector</strong> acima (contas Google/OpenAI via OAuth legítimo).
                           </p>
                         </div>
                       </div>
 
                       {/* Tutorial de userToken */}
-                      <details open={dsHelpOpen} onToggle={(e) => setDsHelpOpen((e.target as HTMLDetailsElement).open)} className="text-[10px] text-red-100/85 leading-relaxed">
+                      <details open={dsHelpOpen} onToggle={(e) => setDsHelpOpen((e.target as HTMLDetailsElement).open)} className="text-xs text-red-100/85 leading-relaxed">
                         <summary className="cursor-pointer select-none underline font-bold">Como pegar o <code>userToken</code> da sua conta (Manual)</summary>
                         <ol className="list-decimal pl-4 space-y-1 mt-2">
                           <li>Abra <a href="https://chat.deepseek.com" target="_blank" rel="noreferrer" className="underline">chat.deepseek.com</a> e faça login.</li>
@@ -3309,7 +3285,7 @@ export default function ConfiguracoesPage() {
                           <p className="text-sm font-black text-emerald-200 flex items-center gap-1.5">
                             ⚡ Conectar DeepSeek
                           </p>
-                          <span className="text-[9px] text-emerald-200/70">sem extensão · funciona no Opera GX</span>
+                          <span className="text-xs text-emerald-200/70">sem extensão · funciona no Opera GX</span>
                         </div>
 
                         {/* Estado: esperando o token ser copiado (detecção de clipboard ativa) */}
@@ -3319,19 +3295,19 @@ export default function ConfiguracoesPage() {
                               <Loader2 className="w-4 h-4 animate-spin" />
                               Aguardando você copiar o token…
                             </p>
-                            <ol className="text-[11px] text-emerald-100/90 leading-relaxed space-y-2">
+                            <ol className="text-[13px] text-emerald-100/90 leading-relaxed space-y-2">
                               <li><strong>1.</strong> A aba do DeepSeek abriu. Faça o login lá (se ainda não tiver feito).</li>
                               <li>
-                                <strong>2.</strong> Aperte <kbd className="px-1.5 py-0.5 rounded bg-black/40 border border-emerald-500/30 text-emerald-100 font-mono text-[10px]">F12</kbd>
+                                <strong>2.</strong> Aperte <kbd className="px-1.5 py-0.5 rounded bg-black/40 border border-emerald-500/30 text-emerald-100 font-mono text-xs">F12</kbd>
                                 {" "}→ aba <strong>Console</strong> → cole isto e dê Enter:
-                                <code className="block mt-1 px-2 py-1.5 rounded bg-black/50 border border-emerald-500/20 text-emerald-200 font-mono text-[10px] break-all select-all">
+                                <code className="block mt-1 px-2 py-1.5 rounded bg-black/50 border border-emerald-500/20 text-emerald-200 font-mono text-xs break-all select-all">
                                   {`localStorage.getItem('userToken')`}
                                 </code>
                               </li>
                               <li><strong>3.</strong> Clique em cima do resultado, selecione tudo e <strong>copie</strong> (Ctrl+C).</li>
                               <li><strong>4.</strong> <strong>Volte pra esta aba</strong> — o painel detecta o token sozinho e conecta. ✓</li>
                             </ol>
-                            <p className="text-[10px] text-emerald-200/70">
+                            <p className="text-xs text-emerald-200/70">
                               ⏳ Fico de olho no clipboard. Quando voltar pra cá com o token copiado, conecto na hora.
                               <br/><span className="text-emerald-300/60">(Se o Opera GX pedir permissão pra ler o clipboard na 1ª vez, clique em <strong>Permitir</strong>.)</span>
                             </p>
@@ -3339,14 +3315,14 @@ export default function ConfiguracoesPage() {
                               onClick={() => { setDsWaitingClipboard(false); setDsTestResult(null); }}
                               size="sm"
                               variant="outline"
-                              className="h-7 text-[10px] border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/10"
+                              className="h-7 text-xs border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/10"
                             >
                               Cancelar
                             </Button>
                           </div>
                         ) : (
                           <>
-                            <p className="text-[11px] text-emerald-100/85 leading-relaxed">
+                            <p className="text-[13px] text-emerald-100/85 leading-relaxed">
                               Clique no botão → abre o DeepSeek. Depois de logar, <strong>copie o token</strong> lá (mostro como)
                               e <strong>volte aqui</strong>: o painel captura e conecta <strong>sozinho</strong>. Sem extensão, sem digitar nada aqui.
                             </p>
@@ -3358,20 +3334,22 @@ export default function ConfiguracoesPage() {
                               Conectar DeepSeek
                             </Button>
                             {/* Fallback manual: campo de colar o token direto */}
-                            <details className="text-[10px] text-emerald-100/70 leading-relaxed">
+                            <details className="text-xs text-emerald-100/70 leading-relaxed">
                               <summary className="cursor-pointer select-none underline">Prefiro colar o token aqui (ou a detecção não funcionou)</summary>
                               <div className="mt-2 space-y-2">
+                                <label htmlFor="deepseek-quick-token">userToken do DeepSeek</label>
                                 <Input
+                                  id="deepseek-quick-token"
                                   value={dsToken}
                                   onChange={(e) => setDsToken(e.target.value)}
                                   placeholder="Cole o userToken do DeepSeek (eyJ...)"
-                                  className="h-9 bg-black/40 border-emerald-500/20 text-[11px] font-mono"
+                                  className="h-9 bg-black/40 border-emerald-500/20 text-[13px] font-mono"
                                 />
                                 <Button
                                   onClick={handleDsAddToken}
                                   disabled={dsBusy === "add" || !dsToken.trim()}
                                   size="sm"
-                                  className="h-8 text-[11px] font-black bg-emerald-500/30 text-emerald-50 border border-emerald-400/60 hover:bg-emerald-500/50 gap-1.5"
+                                  className="h-8 text-[13px] font-black bg-emerald-500/30 text-emerald-50 border border-emerald-400/60 hover:bg-emerald-500/50 gap-1.5"
                                 >
                                   {dsBusy === "add" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
                                   Salvar token
@@ -3379,7 +3357,7 @@ export default function ConfiguracoesPage() {
                               </div>
                             </details>
                             {/* Alternativa: Tampermonkey (1x na vida = automático pra sempre) */}
-                            <details className="text-[10px] text-emerald-100/60 leading-relaxed">
+                            <details className="text-xs text-emerald-100/60 leading-relaxed">
                               <summary className="cursor-pointer select-none underline">Alternativa: automático pra sempre com Tampermonkey (1 instalação)</summary>
                               <p className="mt-1.5">Se instalar o <a href="https://www.tampermonkey.net/" target="_blank" rel="noreferrer" className="underline text-emerald-200">Tampermonkey</a> (1x) e o script abaixo, todo login no DeepSeek é capturado sozinho — nem precisa copiar. Mas no Opera GX pode exigir permissão extra.</p>
                               <Button
@@ -3387,7 +3365,7 @@ export default function ConfiguracoesPage() {
                                 disabled={dsSubBusy}
                                 size="sm"
                                 variant="outline"
-                                className="mt-2 h-8 text-[10px] border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/10 gap-1.5"
+                                className="mt-2 h-8 text-xs border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/10 gap-1.5"
                               >
                                 {dsSubBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
                                 Instalar captura automática
@@ -3400,7 +3378,7 @@ export default function ConfiguracoesPage() {
                         {/* Lista de scripts Tampermonkey */}
                         {dsSubs.length > 0 && (
                           <div className="space-y-2 pt-2 border-t border-emerald-500/15">
-                            <p className="text-[9px] font-black uppercase tracking-widest text-emerald-200/80 font-mono">
+                            <p className="text-xs font-black uppercase tracking-widest text-emerald-200/80 font-mono">
                               Assinaturas Tampermonkey Ativas ({dsSubs.length})
                             </p>
                             <div className="space-y-1.5">
@@ -3410,16 +3388,16 @@ export default function ConfiguracoesPage() {
                                 return (
                                   <div key={s.code} className="flex items-center justify-between gap-3 p-2 border border-emerald-500/10 bg-black/40 rounded">
                                     <div className="flex-1 min-w-0">
-                                      <p className="text-[9px] text-emerald-100 font-mono truncate">
+                                      <p className="text-xs text-emerald-100 font-mono truncate">
                                         …{s.code.slice(-12)}
                                       </p>
                                     </div>
-                                    <div className="flex items-center gap-1.5 shrink-0">
+                                    <div className="flex flex-wrap items-center gap-1.5 max-w-full">
                                       <a
                                         href={`${window.location.origin}/api/deepseek-chat/userscript.user.js?sub=${encodeURIComponent(s.code)}`}
                                         target="_blank"
                                         rel="noopener noreferrer"
-                                        className="inline-flex items-center justify-center rounded border border-emerald-500/30 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/25 h-7 px-2.5 text-[9px] font-black gap-1"
+                                        className="inline-flex items-center justify-center rounded border border-emerald-500/30 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/25 h-7 px-2.5 text-xs font-black gap-1"
                                       >
                                         Reinstalar Script
                                       </a>
@@ -3427,12 +3405,13 @@ export default function ConfiguracoesPage() {
                                         href="https://chat.deepseek.com"
                                         target="_blank"
                                         rel="noopener noreferrer"
-                                        className="inline-flex items-center justify-center rounded border border-white/10 bg-white/5 text-white hover:bg-white/10 h-7 px-2.5 text-[9px] font-black gap-1"
+                                        className="inline-flex items-center justify-center rounded border border-white/10 bg-white/5 text-white hover:bg-white/10 h-7 px-2.5 text-xs font-black gap-1"
                                       >
                                         DeepSeek
                                       </a>
                                       <Button
                                         onClick={() => handleCopySubUrl(s.code)}
+                                        aria-label={`Copiar URL da assinatura ${s.code.slice(-12)}`}
                                         className="h-7 w-7 p-0"
                                         variant="outline"
                                       >
@@ -3440,6 +3419,7 @@ export default function ConfiguracoesPage() {
                                       </Button>
                                       <Button
                                         onClick={() => handleRevokeSub(s.code)}
+                                        aria-label={`Revogar assinatura ${s.code.slice(-12)}`}
                                         className="h-7 w-7 p-0 bg-red-500/10 border-red-500/30 text-red-200 hover:bg-red-500/25"
                                         variant="outline"
                                       >
@@ -3455,22 +3435,23 @@ export default function ConfiguracoesPage() {
 
                       {/* Bookmarklet */}
                       <details open={dsAutoOpen} onToggle={(e) => setDsAutoOpen((e.target as HTMLDetailsElement).open)} className="rounded-lg border border-emerald-500/20 bg-emerald-500/[0.03] p-3">
-                        <summary className="text-[11px] font-black uppercase tracking-widest text-emerald-300/80 cursor-pointer select-none">
+                        <summary className="text-[13px] font-black uppercase tracking-widest text-emerald-300/80 cursor-pointer select-none">
                           Alternativa: Bookmarklet (Captura com 1 clique nos Favoritos)
                         </summary>
                         <div className="mt-3 space-y-2">
                           {!dsBookmarklet && (
                             <div className="flex gap-2 items-center">
                               <Input
+                                aria-label="Apelido da conta para o bookmarklet"
                                 value={dsLabel}
                                 onChange={(e) => setDsLabel(e.target.value)}
                                 placeholder="Apelido da conta"
-                                className="h-8 bg-black/40 border-emerald-500/20 text-[11px]"
+                                className="h-8 bg-black/40 border-emerald-500/20 text-[13px]"
                               />
                               <Button
                                 onClick={handleGenerateBookmarklet}
                                 size="sm"
-                                className="h-8 bg-emerald-500/20 text-emerald-100 border border-emerald-500/40 hover:bg-emerald-500/30 text-[10px] font-black"
+                                className="h-8 bg-emerald-500/20 text-emerald-100 border border-emerald-500/40 hover:bg-emerald-500/30 text-xs font-black"
                               >
                                 Gerar Bookmarklet
                               </Button>
@@ -3488,13 +3469,13 @@ export default function ConfiguracoesPage() {
                                 >
                                   ★ Capturar DeepSeek — arraste pra barra
                                 </a>
-                                <p className="text-[9px] text-muted-foreground mt-1.5">Arraste para a barra de favoritos e clique nele em chat.deepseek.com</p>
+                                <p className="text-xs text-muted-foreground mt-1.5">Arraste para a barra de favoritos e clique nele em chat.deepseek.com</p>
                               </div>
                               <div className="flex gap-2">
-                                <Button onClick={handleCopyBookmarklet} size="sm" className="h-7 text-[10px]">
+                                <Button onClick={handleCopyBookmarklet} size="sm" className="h-7 text-xs">
                                   {dsBookmarkletCopied ? "Copiado!" : "Copiar código"}
                                 </Button>
-                                <Button onClick={() => setDsBookmarklet(null)} size="sm" variant="outline" className="h-7 text-[10px]">
+                                <Button onClick={() => setDsBookmarklet(null)} size="sm" variant="outline" className="h-7 text-xs">
                                   Cancelar
                                 </Button>
                               </div>
@@ -3505,29 +3486,37 @@ export default function ConfiguracoesPage() {
 
                       {/* Manual token input */}
                       <div className="space-y-2 pt-2 border-t border-white/5">
-                        <p className="text-[10px] font-bold text-white">Vincular Token Manualmente</p>
-                        <div className="grid grid-cols-1 sm:grid-cols-[180px_1fr_auto] gap-2">
-                          <Input
-                            value={dsLabel}
-                            onChange={(e) => setDsLabel(e.target.value)}
-                            placeholder="Apelido (ex: pessoal)"
-                            className="h-8 bg-black/40 border-white/10 text-[11px]"
-                          />
-                          <Input
-                            type="password"
-                            value={dsToken}
-                            onChange={(e) => setDsToken(e.target.value)}
-                            placeholder="Cole o userToken aqui"
-                            className="h-8 bg-black/40 border-white/10 text-[11px] font-mono"
-                          />
-                          <Button onClick={handleDsAddToken} size="sm" className="h-8 bg-red-500/25 border border-red-500/40 text-[10px] font-black hover:bg-red-500/40">
+                        <p className="text-xs font-bold text-white">Vincular Token Manualmente</p>
+                        <div className={cn(styles.manualToken, "grid gap-2 items-end")}>
+                          <div>
+                            <label htmlFor="deepseek-account-label">Apelido da conta</label>
+                            <Input
+                              id="deepseek-account-label"
+                              value={dsLabel}
+                              onChange={(e) => setDsLabel(e.target.value)}
+                              placeholder="Apelido (ex: pessoal)"
+                              className="h-8 bg-black/40 border-white/10 text-[13px]"
+                            />
+                          </div>
+                          <div>
+                            <label htmlFor="deepseek-account-token">userToken</label>
+                            <Input
+                              id="deepseek-account-token"
+                              type="password"
+                              value={dsToken}
+                              onChange={(e) => setDsToken(e.target.value)}
+                              placeholder="Cole o userToken aqui"
+                              className="h-8 bg-black/40 border-white/10 text-[13px] font-mono"
+                            />
+                          </div>
+                          <Button onClick={handleDsAddToken} size="sm" className="h-8 bg-red-500/25 border border-red-500/40 text-xs font-black hover:bg-red-500/40">
                             Conectar
                           </Button>
                         </div>
-                        {dsError && <p className="text-[10px] text-red-300 font-medium">{dsError}</p>}
+                        {dsError && <p className="text-xs text-red-300 font-medium">{dsError}</p>}
                         {dsTestResult && (
                           <div className={cn(
-                            "flex items-start gap-1.5 p-2 rounded-lg border text-[10px] leading-relaxed",
+                            "flex items-start gap-1.5 p-2 rounded-lg border text-xs leading-relaxed",
                             dsTestResult.ok
                               ? "border-green-500/30 bg-green-500/10 text-green-200"
                               : "border-yellow-500/30 bg-yellow-500/10 text-yellow-200"
@@ -3543,7 +3532,7 @@ export default function ConfiguracoesPage() {
                       {/* Lista de tokens salvos */}
                       {dsTokens.length > 0 && (
                         <div className="space-y-1.5 pt-2 border-t border-white/5">
-                          <p className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Contas Conectadas ({dsTokens.length})</p>
+                          <p className="text-xs font-black uppercase tracking-widest text-muted-foreground">Contas Conectadas ({dsTokens.length})</p>
                           {dsTokens.map((t) => {
                             const draft = dsLabelDraft[t.id];
                             const editing = draft !== undefined;
@@ -3554,24 +3543,25 @@ export default function ConfiguracoesPage() {
                                   {t.paused ? "Pausada" : "Ativa"}
                                 </span>
                                 <Input
+                                  aria-label={`Apelido da conta DeepSeek ${t.label || t.tokenTail}`}
                                   value={editing ? draft : t.label}
                                   onChange={(e) => setDsLabelDraft(m => ({ ...m, [t.id]: e.target.value }))}
-                                  className="h-7 bg-black/40 border-white/10 text-[11px] flex-1"
+                                  className="h-7 bg-black/40 border-white/10 text-[13px] flex-1 basis-40"
                                 />
                                 {editing && (
-                                  <Button onClick={() => handleDsRename(t)} disabled={busy} className="h-7 bg-emerald-500/20 hover:bg-emerald-500/30 text-[10px]">Salvar</Button>
+                                  <Button onClick={() => handleDsRename(t)} disabled={busy} className="h-7 bg-emerald-500/20 hover:bg-emerald-500/30 text-xs">Salvar</Button>
                                 )}
                                 <Button
                                   onClick={() => handleDsTestToken(t)}
                                   disabled={busy || t.paused}
                                   variant="outline"
-                                  className="h-7 text-[10px] bg-blue-500/10 hover:bg-blue-500/20 border-blue-500/30 text-blue-200 gap-1"
+                                  className="h-7 text-xs bg-blue-500/10 hover:bg-blue-500/20 border-blue-500/30 text-blue-200 gap-1"
                                 >
                                   {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
                                   Testar
                                 </Button>
-                                <Button onClick={() => handleDsTogglePause(t)} variant="outline" className="h-7 text-[10px]">{t.paused ? "Retomar" : "Pausar"}</Button>
-                                <Button onClick={() => handleDsDelete(t)} variant="outline" className="h-7 text-[10px] bg-red-500/10 hover:bg-red-500/20 border-red-500/30 text-red-200">Excluir</Button>
+                                <Button onClick={() => handleDsTogglePause(t)} variant="outline" className="h-7 text-xs">{t.paused ? "Retomar" : "Pausar"}</Button>
+                                <Button onClick={() => handleDsDelete(t)} variant="outline" className="h-7 text-xs bg-red-500/10 hover:bg-red-500/20 border-red-500/30 text-red-200">Excluir</Button>
                               </div>
                             );
                           })}
@@ -3601,7 +3591,7 @@ export default function ConfiguracoesPage() {
                     <CardTitle className="text-sm font-black uppercase tracking-widest flex items-center gap-2">
                       <HardDrive className="w-4 h-4 text-orange-400" /> Sistema de Backup Automático
                     </CardTitle>
-                    <p className="text-[10px] text-muted-foreground font-medium">
+                    <p className="text-xs text-muted-foreground font-medium">
                       Backup completo do banco Supabase para Google Drive
                     </p>
                   </CardHeader>
@@ -3610,7 +3600,7 @@ export default function ConfiguracoesPage() {
                       <h3 className="text-xs font-bold text-orange-300 mb-2 flex items-center gap-2">
                         <Database className="w-3.5 h-3.5" /> O que faz?
                       </h3>
-                      <ul className="text-[11px] text-muted-foreground space-y-1.5">
+                      <ul className="text-[13px] text-muted-foreground space-y-1.5">
                         <li>Backup agendado ou manual, com worker habilitado no servidor</li>
                         <li>Pacotes do banco organizados por ano/mês/dia no Google Drive</li>
                         <li>Compressão Gzip; economia varia conforme os dados</li>
@@ -3629,14 +3619,14 @@ export default function ConfiguracoesPage() {
                         Acessar Painel de Backup
                       </Button>
 
-                      <div className="text-[10px] text-muted-foreground text-center">
+                      <div className="text-xs text-muted-foreground text-center">
                         Confira os diagnósticos, conecte Google Drive e acompanhe as cópias enviadas
                       </div>
                     </div>
 
                     <div className="rounded-lg bg-blue-500/10 border border-blue-500/20 p-3">
                       <h3 className="text-xs font-bold text-blue-300 mb-2">📋 Requisitos</h3>
-                      <ul className="text-[10px] text-muted-foreground space-y-1">
+                      <ul className="text-xs text-muted-foreground space-y-1">
                         <li>• Conta Google (para Google Drive)</li>
                         <li>• Credenciais OAuth2 configuradas</li>
                         <li>• PostgreSQL client tools (pg_dump/psql)</li>
@@ -3645,7 +3635,7 @@ export default function ConfiguracoesPage() {
 
                     <div className="rounded-lg bg-amber-500/10 border border-amber-500/20 p-3">
                       <h3 className="text-xs font-bold text-amber-300 mb-2">⚡ Como Funciona</h3>
-                      <p className="text-[10px] text-muted-foreground leading-relaxed">
+                      <p className="text-xs text-muted-foreground leading-relaxed">
                         Com o worker habilitado, o SDR verifica a fila a cada minuto enquanto o servidor está em execução.
                         O backup exporta o banco configurado, valida o pacote e confere tamanho e checksum após o envio.
                         A retenção pode excluir permanentemente cópias antigas do sistema depois de uma nova cópia confirmada.
@@ -3656,6 +3646,7 @@ export default function ConfiguracoesPage() {
                 </Card>
               </div>
             )}
+            </section>
           </div>
         )}
       </main>
@@ -3718,48 +3709,48 @@ function LeadIntelligenceSettings() {
 
   return (
     <Card className="border-cyan-500/20 bg-gradient-to-br from-cyan-500/5 to-purple-500/5 overflow-hidden transition-all duration-300">
-      <CardHeader
-        className="cursor-pointer hover:bg-white/[0.01] transition-all flex flex-row items-center justify-between space-y-0 p-5 select-none"
+      <button type="button" data-slot="card-header" aria-expanded={open}
         onClick={() => setOpen(!open)}
       >
         <div className="flex flex-col gap-1.5">
           <CardTitle className="text-sm font-black uppercase tracking-widest flex items-center gap-2">
             <Bot className="w-4 h-4 text-cyan-400" /> Lead Intelligence — Modelo de IA
           </CardTitle>
-          <p className="text-[10px] text-muted-foreground font-medium">
+          <p className="text-xs text-muted-foreground font-medium">
             {model ? `Modelo ativo: ${model}` : "Nenhum modelo selecionado"}
           </p>
         </div>
         <div className="flex items-center gap-3">
           {model ? (
-            <span className="text-[9px] bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+            <span className="text-xs bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 px-2 py-0.5 rounded-full font-black uppercase">
               Ativo
             </span>
           ) : (
-            <span className="text-[9px] bg-yellow-500/10 text-yellow-400 border border-yellow-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+            <span className="text-xs bg-yellow-500/10 text-yellow-400 border border-yellow-500/20 px-2 py-0.5 rounded-full font-black uppercase">
               Pendente
             </span>
           )}
           <ChevronDown className={cn("w-4 h-4 text-muted-foreground transition-transform duration-300", !open && "-rotate-90")} />
         </div>
-      </CardHeader>
+      </button>
       {open && (
         <CardContent className="space-y-3 p-5 border-t border-cyan-500/10 animate-in fade-in duration-200">
-          <p className="text-[11px] text-muted-foreground leading-relaxed">
+          <p className="text-[13px] text-muted-foreground leading-relaxed">
             Modelo Gemini usado pra analisar cada lead (lê site, busca web, gera briefing estratégico). O briefing é injetado automaticamente em <strong>disparo</strong>, <strong>follow-up</strong> e <strong>agente principal</strong>.
           </p>
           {loading ? (
-            <p className="text-[11px] text-muted-foreground flex items-center gap-2">
+            <p className="text-[13px] text-muted-foreground flex items-center gap-2">
               <Loader2 className="w-3.5 h-3.5 animate-spin" /> Carregando modelos disponíveis...
             </p>
           ) : models.length === 0 ? (
-            <p className="text-[11px] text-amber-300">
+            <p className="text-[13px] text-amber-300">
               ⚠ Nenhum modelo retornado. Salve sua API Key Gemini no card &quot;Organizador IA&quot; acima primeiro.
             </p>
           ) : (
             <>
-              <label className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">Modelo ativo</label>
+              <label htmlFor="lead-intelligence-model" className="text-xs uppercase font-bold tracking-widest text-muted-foreground">Modelo ativo de Lead Intelligence</label>
               <select
+                id="lead-intelligence-model"
                 value={model}
                 onChange={e => save(e.target.value)}
                 disabled={saving}
@@ -3767,7 +3758,7 @@ function LeadIntelligenceSettings() {
               >
                 <ModelOptions models={models as any} />
               </select>
-              <div className="flex items-center justify-between text-[10px]">
+              <div className="flex items-center justify-between text-xs">
                 <p className="text-muted-foreground">
                   {models.length} modelos disponíveis (Gemini + OpenRouter + Gateway/Assinatura).
                 </p>
@@ -3778,9 +3769,9 @@ function LeadIntelligenceSettings() {
               </div>
             </>
           )}
-          {error && <p className="text-[10px] text-red-300">{error}</p>}
+          {error && <p className="text-xs text-red-300">{error}</p>}
 
-          <div className="text-[10px] text-cyan-100/70 leading-relaxed space-y-1 pt-2 border-t border-white/5">
+          <div className="text-xs text-cyan-100/70 leading-relaxed space-y-1 pt-2 border-t border-white/5">
             <p className="font-bold text-cyan-300/90">Recomendações por uso:</p>
             <ul className="space-y-0.5">
               <li>• <strong>gemini-2.5-flash</strong>: padrão recomendado. Custo baixo, qualidade alta. ~R$ 0,002/cliente.</li>
@@ -3854,50 +3845,50 @@ function EmbeddingModelSettings() {
   };
 
   return (
-    <Card className="border-purple-500/20 bg-gradient-to-br from-purple-500/5 to-cyan-500/5 overflow-hidden transition-all duration-300">
-      <CardHeader
-        className="cursor-pointer hover:bg-white/[0.01] transition-all flex flex-row items-center justify-between space-y-0 p-5 select-none"
+    <Card className="border-purple-500/20 overflow-hidden transition-all duration-300">
+      <button type="button" data-slot="card-header" aria-expanded={open}
         onClick={() => setOpen(!open)}
       >
         <div className="flex flex-col gap-1.5">
           <CardTitle className="text-sm font-black uppercase tracking-widest flex items-center gap-2">
             <Database className="w-4 h-4 text-purple-400" /> Modelo de Embeddings (Base de Conhecimento)
           </CardTitle>
-          <p className="text-[10px] text-muted-foreground font-medium">
+          <p className="text-xs text-muted-foreground font-medium">
             {model ? `Modelo ativo: ${model}` : "Nenhum modelo de embeddings selecionado"}
           </p>
         </div>
         <div className="flex items-center gap-3">
           {model ? (
-            <span className="text-[9px] bg-purple-500/10 text-purple-400 border border-purple-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+            <span className="text-xs bg-purple-500/10 text-purple-400 border border-purple-500/20 px-2 py-0.5 rounded-full font-black uppercase">
               Ativo
             </span>
           ) : (
-            <span className="text-[9px] bg-yellow-500/10 text-yellow-400 border border-yellow-500/20 px-2 py-0.5 rounded-full font-black uppercase">
+            <span className="text-xs bg-yellow-500/10 text-yellow-400 border border-yellow-500/20 px-2 py-0.5 rounded-full font-black uppercase">
               Pendente
             </span>
           )}
           <ChevronDown className={cn("w-4 h-4 text-muted-foreground transition-transform duration-300", !open && "-rotate-90")} />
         </div>
-      </CardHeader>
+      </button>
       {open && (
         <CardContent className="space-y-3 p-5 border-t border-purple-500/10 animate-in fade-in duration-200">
-          <p className="text-[11px] text-muted-foreground leading-relaxed">
+          <p className="text-[13px] text-muted-foreground leading-relaxed">
             Modelo que transforma a base de conhecimento em vetores pra busca semântica do agente (RAG).
             Pode ser Gemini OU OpenRouter — sempre em 768 dimensões. Listado em tempo real.
           </p>
           {loading ? (
-            <p className="text-[11px] text-muted-foreground flex items-center gap-2">
+            <p className="text-[13px] text-muted-foreground flex items-center gap-2">
               <Loader2 className="w-3.5 h-3.5 animate-spin" /> Carregando modelos de embedding...
             </p>
           ) : models.length === 0 ? (
-            <p className="text-[11px] text-amber-300">
+            <p className="text-[13px] text-amber-300">
               ⚠ Nenhum modelo de embedding retornado. Configure a API Key do Gemini e/ou OpenRouter acima.
             </p>
           ) : (
             <>
-              <label className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">Modelo ativo</label>
+              <label htmlFor="embedding-model" className="text-xs uppercase font-bold tracking-widest text-muted-foreground">Modelo ativo de embeddings</label>
               <select
+                id="embedding-model"
                 value={model}
                 onChange={e => save(e.target.value)}
                 disabled={saving}
@@ -3916,17 +3907,17 @@ function EmbeddingModelSettings() {
                     </optgroup>
                   ))}
               </select>
-              <div className="flex items-center justify-between text-[10px]">
+              <div className="flex items-center justify-between text-xs">
                 <p className="text-muted-foreground">{models.length} modelos de embedding disponíveis.</p>
                 {savedAt && <span className="text-emerald-400 font-bold">✓ Salvo</span>}
                 {saving && <Loader2 className="w-3 h-3 animate-spin" />}
               </div>
             </>
           )}
-          {error && <p className="text-[10px] text-red-300">{error}</p>}
+          {error && <p className="text-xs text-red-300">{error}</p>}
 
           <div className="rounded-xl bg-amber-500/10 border border-amber-500/30 p-3 space-y-2">
-            <p className="text-[10px] text-amber-200 leading-relaxed">
+            <p className="text-xs text-amber-200 leading-relaxed">
               <strong>⚠ Importante:</strong> ao TROCAR o modelo de embeddings, a base já indexada fica incompatível
               (vetores de modelos diferentes não se comparam). Clique em <strong>Re-indexar</strong> pra recalcular tudo
               com o novo modelo — senão a busca na base perde qualidade.
@@ -3935,13 +3926,13 @@ function EmbeddingModelSettings() {
               <Button
                 onClick={reindex}
                 disabled={reindexing}
-                className="bg-purple-500/20 text-purple-100 border border-purple-500/40 hover:bg-purple-500/30 font-bold text-[11px] uppercase tracking-widest gap-2 h-8"
+                className="bg-purple-500/20 text-purple-100 border border-purple-500/40 hover:bg-purple-500/30 font-bold text-[13px] uppercase tracking-widest gap-2 h-8"
               >
                 {reindexing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
                 Re-indexar base agora
               </Button>
               {reindexResult && (
-                <span className={cn("text-[10px]", reindexResult.ok ? "text-emerald-400" : "text-red-300")}>
+                <span className={cn("text-xs", reindexResult.ok ? "text-emerald-400" : "text-red-300")}>
                   {reindexResult.ok ? "✓ " : "✗ "}{reindexResult.msg}
                 </span>
               )}
