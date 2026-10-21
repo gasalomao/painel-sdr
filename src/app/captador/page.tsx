@@ -139,7 +139,7 @@ interface Lead {
   name: string;
   phones: string;
   fullAddress: string;
-  categories: string;
+  categories: string | string[];
   averageRating: string;
   reviewCount: string;
   website: string;
@@ -572,7 +572,7 @@ export default function CaptadorPage() {
     return leads.filter(l =>
       (l.name && l.name.toLowerCase().includes(q)) ||
       (l.phones && l.phones.includes(q)) ||
-      (l.categories && l.categories.toLowerCase().includes(q)) ||
+      (l.categories && l.categories.toString().toLowerCase().includes(q)) ||
       (l.fullAddress && l.fullAddress.toLowerCase().includes(q)) ||
       (l.website && l.website.toLowerCase().includes(q))
     );
@@ -1367,7 +1367,7 @@ export default function CaptadorPage() {
                                   <span className="text-muted-foreground/40">—</span>
                                 )}
                               </TableCell>
-                              <TableCell className="max-w-[150px] truncate text-muted-foreground" title={lead.categories}>
+                              <TableCell className="max-w-[150px] truncate text-muted-foreground" title={lead.categories?.toString()}>
                                 {lead.categories || "—"}
                               </TableCell>
                               <TableCell className="max-w-[240px] truncate text-muted-foreground" title={lead.fullAddress}>

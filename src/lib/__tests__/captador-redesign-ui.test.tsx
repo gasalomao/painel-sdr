@@ -37,14 +37,20 @@ describe("interface redesenhada do Captador", () => {
     expect(screen.getByText("1 busca programada")).toBeInTheDocument();
   });
 
-  it("filtra sem alterar os leads e informa busca vazia em desktop e mobile", async () => {
+  it.each([
+    { categories: "Dentista", query: "dentista" },
+    { categories: ["Dentista", "Ortodontia"], query: "ortodontia" },
+  ])("filtra categoria $categories sem alterar os leads e informa busca vazia em desktop e mobile", async ({ categories, query }) => {
+    fetchMock.mockResolvedValueOnce(Response.json({ leads: [{ ...lead, categories }] }));
     await openLeads();
     const search = screen.getByRole("textbox", { name: "Buscar leads" });
     fireEvent.change(search, { target: { value: "inexistente" } });
     expect(screen.getAllByText(/Nenhum lead encontrado para o termo/)).toHaveLength(2);
     expect(within(screen.getByRole("table")).queryByText(lead.name)).not.toBeInTheDocument();
     expect(screen.getByText("1 clientes")).toBeInTheDocument();
-    fireEvent.change(search, { target: { value: "Dentista" } });
+    fireEvent.change(search, { target: { value: query } });
+    expect(within(screen.getByRole("table")).getByText(lead.name)).toBeInTheDocument();
+    fireEvent.change(search, { target: { value: "" } });
     expect(within(screen.getByRole("table")).getByText(lead.name)).toBeInTheDocument();
   });
 
