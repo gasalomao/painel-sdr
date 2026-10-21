@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { CheckCircle2, Clock, Pencil, Plus } from "lucide-react";
+import { CheckCircle2, Clock, Pencil, Plus, Trash2 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DashboardTaskForm } from "@/components/dashboard-task-form";
 import { useClientSession } from "@/lib/use-session";
 import { cn } from "@/lib/utils";
@@ -75,12 +76,16 @@ function TaskList(): React.JSX.Element {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [editor, setEditor] = useState<{ task: DashboardTask | null } | null>(null);
+  const [deleting, setDeleting] = useState<{ task: DashboardTask; lead?: never } | { task?: never; lead: LegacyReminder } | null>(null);
   const [now, setNow] = useState(Date.now);
   const alive = useRef(true);
   const saving = useRef(false);
   const request = useRef(0);
   const newButton = useRef<HTMLButtonElement>(null);
   const restoreEditorFocus = useRef(false);
+  const deleteTrigger = useRef<HTMLButtonElement | null>(null);
+  const cancelDelete = useRef<HTMLButtonElement>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
 
   useEffect(() => {
     if (!editor && !busy && restoreEditorFocus.current) {
@@ -99,7 +104,7 @@ function TaskList(): React.JSX.Element {
     let cancelled = false;
     let inFlight = false;
     async function load(): Promise<void> {
-      if (document.visibilityState === "hidden" || saving.current || inFlight) return;
+      if (cancelled || deleting || document.visibilityState === "hidden" || saving.current || inFlight) return;
       inFlight = true;
       const version = ++request.current;
       const current = () => !cancelled && version === request.current;
@@ -141,21 +146,31 @@ function TaskList(): React.JSX.Element {
     const visible = () => { if (document.visibilityState === "visible") void load(); };
     document.addEventListener("visibilitychange", visible);
     return () => { cancelled = true; controller.abort(); clearInterval(interval); document.removeEventListener("visibilitychange", visible); };
-  }, [status, page, revision]);
+  }, [status, page, revision, deleting]);
 
-  const mutate = useCallback(async (url: string, method: "POST" | "PATCH", input: object, success: string, previousTask?: DashboardTask): Promise<boolean> => {
+  const mutate = useCallback(async (url: string, method: "POST" | "PATCH" | "DELETE", input: object | undefined, success: string, previousTask?: DashboardTask): Promise<boolean> => {
     if (saving.current) return false;
     saving.current = true;
     request.current++;
     setBusy(true);
     setActionError("");
     setMessage("");
+    let saved = false;
+    const failure = method === "DELETE" ? "Não foi possível excluir a tarefa" : "Não foi possível salvar a tarefa";
     try {
-      const res = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+      const res = await fetch(url, { method, ...(input === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }) });
       const json = await res.json();
-      if (!res.ok) throw new Error(json.error || "Não foi possível salvar a tarefa");
+      if (!res.ok) throw new Error(json.error || failure);
       if (!alive.current) return false;
-      if (json.task) {
+      if (method === "DELETE" && previousTask) {
+        const before = countTask(data.tasks.find(task => task.id === previousTask.id) ?? previousTask, now);
+        const counts = { ...data.counts };
+        for (const key of Object.keys(counts) as (keyof typeof counts)[]) counts[key] = Math.max(0, counts[key] - before[key]);
+        const total = counts[status];
+        const nextPage = Math.min(page, Math.max(0, Math.ceil(total / PAGE_SIZE) - 1));
+        setData({ tasks: nextPage === page ? data.tasks.filter(task => task.id !== previousTask.id) : [], counts, total });
+        setPage(nextPage);
+      } else if (json.task) {
         const task: DashboardTask = json.task;
         const old = method === "PATCH" ? data.tasks.find(t => t.id === task.id) ?? previousTask : undefined;
         const before = countTask(old, now);
@@ -182,13 +197,14 @@ function TaskList(): React.JSX.Element {
         }));
       }
       setMessage(success);
+      saved = true;
       return true;
     } catch (err) {
-      if (alive.current) setActionError(err instanceof Error ? err.message : "Não foi possível salvar a tarefa");
+      if (alive.current) setActionError(err instanceof Error ? err.message : failure);
       return false;
     } finally {
       saving.current = false;
-      if (alive.current) { setBusy(false); setRevision(r => r + 1); }
+      if (alive.current) { setBusy(false); if (saved) setRevision(r => r + 1); }
     }
   }, [status, page, data, now]);
 
@@ -210,7 +226,7 @@ function TaskList(): React.JSX.Element {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <CheckCircle2 className="size-5 shrink-0 text-primary" aria-hidden="true" />
-            <div><h2 className="text-base font-semibold">Tarefas e lembretes</h2><p className="mt-1 text-xs leading-relaxed text-muted-foreground">Seu próximo passo, no horário certo.</p></div>
+            <div><h2 ref={heading} tabIndex={-1} className="text-base font-semibold focus-visible:outline-2 focus-visible:outline-ring">Tarefas e lembretes</h2><p className="mt-1 text-xs leading-relaxed text-muted-foreground">Seu próximo passo, no horário certo.</p></div>
           </div>
           <Button ref={newButton} size="sm" variant="outline" className="min-h-11 gap-1.5 px-3" disabled={setup !== "ready" || busy || !!editor} onClick={() => { setEditor({ task: null }); setActionError(""); }}>
             <Plus className="size-4" aria-hidden="true" /> Nova tarefa
@@ -219,8 +235,29 @@ function TaskList(): React.JSX.Element {
 
         {setup === "missing" && <p role="status" className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-200 break-words">Para salvar tarefas livres e histórico, execute <code>migrations/017_dashboard_tasks.sql</code> no SQL Editor do Supabase. Os lembretes das fichas continuam disponíveis.</p>}
         {loadError && <div role="alert" className="text-xs text-destructive">{loadError} <Button size="sm" variant="ghost" onClick={() => setRevision(r => r + 1)}>Tentar novamente</Button></div>}
-        {actionError && <p role="alert" className="text-xs text-destructive">{actionError}</p>}
+        {actionError && !deleting && <p role="alert" className="text-xs text-destructive">{actionError}</p>}
         {message && <p role="status" className="text-xs text-emerald-300">{message}</p>}
+        <Dialog open={!!deleting} disablePointerDismissal onOpenChange={open => { if (!open && !saving.current) setDeleting(null); }}>
+          <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" showCloseButton={false} initialFocus={cancelDelete} finalFocus={() => deleteTrigger.current?.isConnected ? deleteTrigger.current : newButton.current?.disabled ? heading.current : newButton.current}>
+            <DialogHeader>
+              <DialogTitle>{deleting?.lead ? "Excluir lembrete?" : "Excluir tarefa?"}</DialogTitle>
+              <DialogDescription className="whitespace-pre-wrap break-words">{deleting?.lead
+                ? `Remover o lembrete “${deleting.lead.lembrete_texto || deleting.lead.observacoes || "Lembrete agendado"}”? O lead e suas anotações serão mantidos.`
+                : `Excluir permanentemente “${deleting?.task?.text ?? ""}”? Esta ação não pode ser desfeita.`}</DialogDescription>
+            </DialogHeader>
+            {actionError && <p role="alert" className="text-sm text-destructive">{actionError}</p>}
+            <DialogFooter>
+              <DialogClose render={<Button ref={cancelDelete} variant="outline" className="min-h-11" disabled={busy} />}>Cancelar</DialogClose>
+              <Button variant="destructive" className="min-h-11" disabled={busy} onClick={async () => {
+                if (!deleting) return;
+                const saved = deleting.lead
+                  ? await mutate(`/api/leads/${deleting.lead.id}/crm`, "PATCH", { next_follow_up: null, lembrete_texto: null }, "Lembrete removido. Lead mantido.")
+                  : await mutate(`/api/tasks/${deleting.task.id}`, "DELETE", undefined, "Tarefa excluída.", deleting.task);
+                if (saved) setDeleting(null);
+              }}>{busy ? "Excluindo…" : deleting?.lead ? "Excluir lembrete" : "Excluir tarefa"}</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
         {editor && <DashboardTaskForm key={editor.task?.id || "new"} task={editor.task} busy={busy} onCancel={closeEditor} onSave={async input => {
           const saved = await mutate(editor.task ? `/api/tasks/${editor.task.id}` : "/api/tasks", editor.task ? "PATCH" : "POST", input, editor.task ? "Tarefa atualizada." : "Tarefa salva.", editor.task ?? undefined);
           if (saved) closeEditor();
@@ -253,7 +290,10 @@ function TaskList(): React.JSX.Element {
                   <p className="text-xs text-muted-foreground"><Clock className="inline size-3 mr-1" aria-hidden="true" /><time dateTime={task.due_at}>{fmtTime(task.due_at)}</time></p>
                   <p className={cn("text-[11px] font-medium", task.completed_at ? "text-emerald-300" : state.color.split(" ")[0])}>{task.completed_at ? `CONCLUÍDA EM ${fmtTime(task.completed_at)}` : state.label}</p>
                 </div>
-                <Button variant="ghost" size="icon" className="size-11 shrink-0" disabled={busy || !!editor} aria-label={`Editar: ${task.text}`} onClick={() => { setEditor({ task }); setActionError(""); }}><Pencil className="size-4" aria-hidden="true" /></Button>
+                <div className="flex shrink-0 flex-col sm:flex-row">
+                  <Button variant="ghost" size="icon" className="size-11" disabled={busy || !!editor || !!deleting} aria-label={`Editar: ${task.text}`} onClick={() => { setEditor({ task }); setActionError(""); }}><Pencil className="size-4" aria-hidden="true" /></Button>
+                  <Button variant="ghost" size="icon" className="size-11 text-destructive" disabled={busy || loading || !!editor || !!deleting} aria-label={`Excluir: ${task.text}`} onClick={event => { deleteTrigger.current = event.currentTarget; setActionError(""); setDeleting({ task }); }}><Trash2 className="size-4" aria-hidden="true" /></Button>
+                </div>
               </li>;
             })}</ul>
           </section>)}
@@ -273,7 +313,8 @@ function TaskList(): React.JSX.Element {
             const state = deadline(lead.next_follow_up, now);
             return <li key={lead.id} className={cn("flex items-start gap-2 rounded-lg border p-2", state.color)}>
               <label className="flex size-11 shrink-0 items-center justify-center cursor-pointer"><input type="checkbox" checked={false} disabled={busy || !!editor} aria-label={`Concluir: ${text}`} onChange={() => { void mutate(`/api/leads/${lead.id}/crm`, "PATCH", { next_follow_up: null }, "Lembrete concluído."); }} className="size-5 accent-cyan-500 focus-visible:outline-2 focus-visible:outline-ring" /></label>
-              <div className="min-w-0 py-1 space-y-1"><p className="text-sm text-foreground whitespace-pre-wrap break-words">{text}</p><Link href={`/leads?openLeadId=${lead.id}`} className="text-xs text-cyan-300 hover:underline break-words">{lead.nome_negocio || `Lead #${lead.id}`}</Link><p className="text-xs text-muted-foreground"><time dateTime={lead.next_follow_up}>{fmtTime(lead.next_follow_up)}</time></p><p className="text-[11px] font-semibold">{state.label}</p></div>
+              <div className="min-w-0 flex-1 py-1 space-y-1"><p className="text-sm text-foreground whitespace-pre-wrap break-words">{text}</p><Link href={`/leads?openLeadId=${lead.id}`} className="text-xs text-cyan-300 hover:underline break-words">{lead.nome_negocio || `Lead #${lead.id}`}</Link><p className="text-xs text-muted-foreground"><time dateTime={lead.next_follow_up}>{fmtTime(lead.next_follow_up)}</time></p><p className="text-[11px] font-semibold">{state.label}</p></div>
+              <Button variant="ghost" size="icon" className="size-11 shrink-0 text-destructive" disabled={busy || !!editor || !!deleting} aria-label={`Excluir lembrete: ${text}`} onClick={event => { deleteTrigger.current = event.currentTarget; setActionError(""); setDeleting({ lead }); }}><Trash2 className="size-4" aria-hidden="true" /></Button>
             </li>;
           })}</ul>
         </section>}

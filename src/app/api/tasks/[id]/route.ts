@@ -5,6 +5,22 @@ import { assertTaskId, findTaskLead, parseTaskInput, TASK_COLUMNS, taskErrorResp
 
 export const dynamic = "force-dynamic";
 
+export async function DELETE(req: NextRequest, context: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  try {
+    const auth = await requireClientId(req);
+    if (!auth.ok) return auth.response;
+    const { id } = await context.params;
+    assertTaskId(id);
+    const { data, error } = await supabaseAdmin.from("dashboard_tasks").delete()
+      .eq("client_id", auth.clientId).eq("id", id).select("id").maybeSingle();
+    if (error) throw error;
+    if (!data) return NextResponse.json({ error: "Tarefa não encontrada" }, { status: 404 });
+    return NextResponse.json({ success: true, id: data.id });
+  } catch (error: unknown) {
+    return taskErrorResponse(error);
+  }
+}
+
 export async function PATCH(req: NextRequest, context: { params: Promise<{ id: string }> }): Promise<NextResponse> {
   try {
     const auth = await requireClientId(req);

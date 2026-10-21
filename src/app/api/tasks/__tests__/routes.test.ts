@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest, NextResponse } from "next/server";
 import { GET, POST } from "../route";
-import { PATCH } from "../[id]/route";
+import { DELETE, PATCH } from "../[id]/route";
 import { GET as searchLeads } from "../leads/route";
 import { requireClientId } from "@/lib/tenant";
 
@@ -38,6 +38,7 @@ class Query implements PromiseLike<{ data: Row[] | Row | null; count: number | n
   select(fields: string, options?: { head?: boolean; count?: string }): this { this.fields = fields; this.head = !!options?.head; return this; }
   insert(payload: Row): this { this.operation = "insert"; this.payload = payload; return this; }
   update(payload: Row): this { this.operation = "update"; this.payload = payload; return this; }
+  delete(): this { this.operation = "delete"; return this; }
   eq(key: string, value: unknown): this { this.filters.push(["eq", key, value]); return this; }
   is(key: string, value: unknown): this { this.filters.push(["is", key, value]); return this; }
   not(key: string, _operator: string, value: unknown): this { this.filters.push(["not", key, value]); return this; }
@@ -75,6 +76,7 @@ class Query implements PromiseLike<{ data: Row[] | Row | null; count: number | n
         if (firstCompletion !== null && this.payload.completed_at != null) row.completed_at = firstCompletion;
         row.updated_at = new Date().toISOString();
       });
+      if (this.operation === "delete") rows[this.table] = rows[this.table].filter(row => !result.includes(row));
       const count = result.length;
       result = [...result].sort((a, b) => {
         for (const [key, ascending] of this.orders) {
@@ -233,6 +235,61 @@ describe("tasks mutations", () => {
     expect((await patch({ completed: true })).status).toBe(404);
     expect(rows.dashboard_tasks[0].text).toBe("Retornar");
     expect(queries.filter((q) => q.table === "dashboard_tasks").every((q) => q.filters.some(([, key, value]) => key === "client_id" && value === tenant))).toBe(true);
+  });
+});
+
+describe("tasks deletion", () => {
+  function remove(taskId = id): Promise<NextResponse> {
+    return DELETE(new NextRequest(`http://localhost/api/tasks/${taskId}`, { method: "DELETE" }), { params: Promise.resolve({ id: taskId }) });
+  }
+
+  it("requires authentication and a valid UUID before touching data", async () => {
+    expect((await remove("invalid-id")).status).toBe(400);
+    expect(queries).toHaveLength(0);
+    vi.mocked(requireClientId).mockResolvedValue({ ok: false, response: NextResponse.json({ error: "Não autenticado" }, { status: 401 }) });
+    expect((await remove()).status).toBe(401);
+    expect(queries).toHaveLength(0);
+  });
+
+  it.each([null, now])("deletes only the requested tenant task (completed_at=%s), never its lead", async completed_at => {
+    rows.dashboard_tasks = [task({ completed_at, lead_id: 1 }), task({ client_id: other }), task({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" })];
+    rows.leads_extraidos = [{ id: 1, client_id: tenant, nome_negocio: "Preservar lead" }];
+    const response = await remove();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ success: true, id });
+    expect(rows.dashboard_tasks).toHaveLength(2);
+    expect(rows.dashboard_tasks.some(row => row.id === id && row.client_id === tenant)).toBe(false);
+    expect(rows.dashboard_tasks.some(row => row.client_id === other)).toBe(true);
+    expect(rows.leads_extraidos).toEqual([{ id: 1, client_id: tenant, nome_negocio: "Preservar lead" }]);
+    expect(queries).toHaveLength(1);
+    expect(queries[0].filters).toContainEqual(["eq", "client_id", tenant]);
+    expect(queries[0].filters).toContainEqual(["eq", "id", id]);
+  });
+
+  it("returns explicit 404 for missing, foreign or concurrently removed tasks", async () => {
+    for (const existing of [[], [task({ client_id: other })]]) {
+      rows.dashboard_tasks = existing;
+      const response = await remove();
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: "Tarefa não encontrada" });
+      expect(rows.dashboard_tasks).toEqual(existing);
+    }
+    rows.dashboard_tasks = [task()];
+    beforeWrite = () => { rows.dashboard_tasks = []; };
+    expect((await remove()).status).toBe(404);
+  });
+
+  it("preserves data and reports database failures, including missing setup", async () => {
+    rows.dashboard_tasks = [task()];
+    failure = { table: "dashboard_tasks", operation: "delete", error: { code: "08006", message: "Falha ao excluir" } };
+    const response = await remove();
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "Falha ao excluir" });
+    expect(rows.dashboard_tasks).toEqual([task()]);
+    failure.error = { code: "42P01", message: 'relation "public.dashboard_tasks" does not exist' };
+    const missing = await remove();
+    expect(missing.status).toBe(503);
+    expect((await missing.json()).code).toBe("TASKS_SETUP_REQUIRED");
   });
 });
 
