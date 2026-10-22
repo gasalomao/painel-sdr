@@ -12,6 +12,16 @@ import {
   History, ArrowRight, Globe, Pencil, Search, FileText, Eye, EyeOff,
 } from "lucide-react";
 import { ModelOptions } from "@/components/ai-module-shared";
+import styles from "./organizador.module.css";
+
+const SECTIONS = [
+  ["config", "Configuração"],
+  ["kanban", "Kanban"],
+  ["suggest", "Sugestões IA"],
+  ["history", "Histórico"],
+  ["effective", "Prompt completo"],
+] as const;
+type Section = typeof SECTIONS[number][0];
 
 /* ============================================================
    TYPES
@@ -83,6 +93,7 @@ const PRESET_COLORS = [
 ];
 
 export default function OrganizadorPage() {
+  const [section, setSection] = useState<Section>("config");
   const [org, setOrg] = useState<OrganizerState | null>(null);
   const [columns, setColumns] = useState<KanbanColumn[]>([]);
   const [history, setHistory] = useState<HistoryItem[]>([]);
@@ -469,26 +480,22 @@ export default function OrganizadorPage() {
     || (org?.executionHour ?? 20) !== hourDraft;
 
   return (
-    <div className="flex flex-col h-[100dvh] bg-background overflow-hidden text-white">
+    <div className={styles.page}>
       <Header />
 
-      <main className="flex-1 overflow-y-auto w-full">
-        <div className="max-w-6xl mx-auto p-4 sm:p-8 space-y-6">
+      <div className={styles.scrollArea}>
+        <div className={styles.content}>
           {/* Header */}
-          <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className={styles.heading}>
             <div>
-              <h1 className="text-2xl font-black tracking-tight flex items-center gap-3">
-                <Bot className="w-7 h-7 text-purple-400" /> Organizador IA
-              </h1>
-              <p className="text-xs text-muted-foreground mt-1">
-                Tudo do Organizador num só lugar: status, prompt, kanban, histórico e sugestão automática pro seu nicho.
-              </p>
+              <h1>Organizador IA</h1>
+              <p>Configure a análise das conversas e a organização automática dos seus leads no Kanban.</p>
             </div>
             <Button
               onClick={runNow}
               disabled={runningNow || loading || !org?.globalEnabled || !enabledDraft}
               title={!org?.globalEnabled ? "Organizador desligado globalmente" : !enabledDraft ? "Ativo desligado pra essa conta" : "Roda agora analisando as conversas de hoje desta conta"}
-              className="bg-emerald-600 hover:bg-emerald-500 text-white text-sm gap-2 h-11 px-4 shrink-0"
+              className={styles.primaryAction}
             >
               {runningNow ? <><Loader2 className="w-4 h-4 animate-spin" /> Executando…</> : <><Power className="w-4 h-4" /> Rodar agora</>}
             </Button>
@@ -496,32 +503,57 @@ export default function OrganizadorPage() {
 
           {/* Feedback */}
           {error && (
-            <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-200 text-xs flex items-start gap-2">
+            <div role="alert" className={cn(styles.notice, styles.errorNotice)}>
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" /> <span>{error}</span>
             </div>
           )}
           {info && (
-            <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-200 text-xs flex items-start gap-2">
+            <div role="status" className={styles.notice}>
               <ClipboardCheck className="w-4 h-4 shrink-0 mt-0.5" /> <span>{info}</span>
             </div>
           )}
 
           {loading ? (
-            <div className="flex items-center gap-2 text-muted-foreground text-sm">
-              <Loader2 className="w-4 h-4 animate-spin" /> Carregando…
+            <div role="status" className={styles.loading}>
+              <Loader2 className="w-4 h-4 animate-spin" /> Carregando organizador…
             </div>
           ) : (
             <>
+              <dl className={styles.overview} aria-label="Resumo da organização">
+                <div>
+                  <dt>Estado da conta</dt>
+                  <dd className={cn(styles.status, org?.globalEnabled && org?.enabled ? styles.active : styles.paused)}>
+                    {!org?.globalEnabled ? "Sistema desligado" : org?.enabled ? "Organização ativa" : "Conta pausada"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Horário salvo</dt>
+                  <dd className={styles.schedule}>Todo dia às {String(org?.executionHour ?? 20).padStart(2, "0")}:00</dd>
+                </div>
+                <div>
+                  <dt>Última execução</dt>
+                  <dd>{org?.lastRun ? new Date(org.lastRun).toLocaleString("pt-BR") : "Ainda não executado"}</dd>
+                </div>
+              </dl>
+
+              <nav className={styles.sectionNav} aria-label="Seções do organizador">
+                {SECTIONS.map(([id, label]) => (
+                  <button key={id} type="button" aria-label={label} aria-pressed={section === id} aria-controls={`organizer-${id}`} onClick={() => setSection(id)}>
+                    {label}{id === "config" && promptDirty && <span className={styles.unsavedDot} aria-label="Alterações não salvas" />}
+                  </button>
+                ))}
+              </nav>
+
               {/* ============= CARD ADMIN (global toggle + modelo) ============= */}
               {org?.isAdmin && (
-                <section className="rounded-2xl border border-purple-500/40 bg-purple-500/[0.06] p-5 space-y-4">
+                <section hidden={section !== "config"} className={cn(styles.panel, styles.adminPanel)} aria-label="Controles globais (admin)">
                   <div className="flex items-center gap-2">
-                    <Globe className="w-4 h-4 text-purple-300" />
-                    <h2 className="text-sm font-bold text-purple-200">Controles globais (admin)</h2>
+                    <Globe className="w-4 h-4 text-emerald-300" />
+                    <h2 className="text-sm font-bold text-emerald-200">Controles globais (admin)</h2>
                   </div>
 
                   {/* Toggle global */}
-                  <div className="flex items-center justify-between gap-3 p-3 rounded-lg bg-black/30">
+                  <div className={styles.globalToggle}>
                     <div>
                       <p className="text-xs font-bold">Organizador IA ativo (todo o sistema)</p>
                       <p className="text-[10px] text-muted-foreground mt-0.5">
@@ -534,31 +566,35 @@ export default function OrganizadorPage() {
                       type="button"
                       onClick={() => saveGlobalToggle(!org.globalEnabled)}
                       disabled={savingGlobal}
-                      className={cn("w-12 h-6 rounded-full p-1 transition shrink-0", org.globalEnabled ? "bg-purple-500" : "bg-white/10", savingGlobal && "opacity-50")}
+                      role="switch"
+                      aria-label="Organizador ativo em todo o sistema"
+                      aria-checked={org.globalEnabled}
+                      className={styles.switch}
                     >
-                      <div className={cn("w-4 h-4 rounded-full bg-white transition-all", org.globalEnabled && "translate-x-6")} />
+                      <span />
                     </button>
                   </div>
 
                   {/* Modelo IA */}
                   <div className="space-y-1">
                     <div className="flex items-center justify-between">
-                      <label className="text-[10px] font-black uppercase tracking-widest text-purple-300">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-emerald-300">
                         Modelo de IA (compartilhado entre clientes)
                       </label>
                       {modelsLoading && <span className="text-[9px] text-muted-foreground flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> modelos…</span>}
                       {!modelsLoading && models.length > 0 && <span className="text-[9px] text-emerald-400">{models.length} modelos (ao vivo)</span>}
                     </div>
                     <select
+                      aria-label="Modelo de IA compartilhado entre clientes"
                       value={org.model}
                       onChange={(e) => saveModel(e.target.value)}
                       disabled={savingModel}
-                      className="w-full bg-black/40 border border-purple-500/20 h-11 rounded-xl text-sm px-3 font-mono disabled:opacity-50"
+                      className="w-full bg-black/40 border border-emerald-500/20 h-11 rounded-xl text-sm px-3 font-mono disabled:opacity-50"
                     >
                       {org.model && !models.some((m) => m.id === org.model) && (
                         <option value={org.model}>{org.model} (salvo)</option>
                       )}
-                      <ModelOptions models={models as any} />
+                      <ModelOptions models={models} />
                       {models.length === 0 && !modelsLoading && <option value={org.model}>{org.model}</option>}
                     </select>
                     <p className="text-[9px] text-muted-foreground italic">
@@ -569,11 +605,11 @@ export default function OrganizadorPage() {
               )}
 
               {/* ============= CARD CLIENTE (status + prompt + modelo readonly) ============= */}
-              <section className="rounded-2xl border border-cyan-500/30 bg-gradient-to-br from-cyan-500/[0.06] to-transparent p-5 space-y-5">
+              <section id="organizer-config" hidden={section !== "config"} className={cn(styles.panel, styles.configuration)} aria-label="Sua configuração">
                 {/* ----- INTRO DIDÁTICO ----- */}
-                <div className="flex items-start justify-between gap-3 flex-wrap">
+                <div className={styles.configHeading}>
                   <div>
-                    <h2 className="text-base font-bold flex items-center gap-2 text-cyan-200">
+                    <h2 className="text-base font-bold flex items-center gap-2 text-emerald-200">
                       <Sparkles className="w-5 h-5" /> Sua configuração
                     </h2>
                     <p className="text-[11px] text-muted-foreground mt-1 leading-relaxed max-w-2xl">
@@ -588,30 +624,35 @@ export default function OrganizadorPage() {
                   </span>
                 </div>
 
-                {/* ----- 1. ATIVAÇÃO ----- */}
-                <div className="rounded-xl bg-black/30 p-4 space-y-2">
+                <div className={styles.configurationGrid}>
+                <div className={styles.settingsColumn}>
+                {/* ----- ATIVAÇÃO ----- */}
+                <div className={styles.settingBlock}>
                   <div className="flex items-center gap-2">
-                    <span className="w-6 h-6 rounded-full bg-cyan-500/20 text-cyan-300 text-[11px] font-black flex items-center justify-center">1</span>
+                    <Power className="w-4 h-4" />
                     <p className="text-xs font-bold text-white">Ligar o Organizador</p>
                   </div>
-                  <label className="flex items-center justify-between gap-3 cursor-pointer pl-8">
+                  <div className={styles.activationRow}>
                     <p className="text-[11px] text-muted-foreground">
                       Quando ligado, a IA analisa as conversas <strong className="text-white">automaticamente todo dia</strong>. Desligue se quiser parar de mexer nos leads dessa conta.
                     </p>
                     <button
                       type="button"
                       onClick={() => setEnabledDraft(!enabledDraft)}
-                      className={cn("w-14 h-7 rounded-full p-1 transition shrink-0", enabledDraft ? "bg-cyan-500" : "bg-white/10")}
+                      role="switch"
+                      aria-label="Ligar o Organizador nesta conta"
+                      aria-checked={enabledDraft}
+                      className={styles.switch}
                     >
-                      <div className={cn("w-5 h-5 rounded-full bg-white transition-all", enabledDraft && "translate-x-7")} />
+                      <span />
                     </button>
-                  </label>
+                  </div>
                 </div>
 
                 {/* ----- 2. HORÁRIO ----- */}
-                <div className="rounded-xl bg-black/30 p-4 space-y-3">
+                <div className={styles.settingBlock}>
                   <div className="flex items-center gap-2">
-                    <span className="w-6 h-6 rounded-full bg-cyan-500/20 text-cyan-300 text-[11px] font-black flex items-center justify-center">2</span>
+                    <History className="w-4 h-4" />
                     <p className="text-xs font-bold text-white">Que horas rodar</p>
                   </div>
                   <div className="pl-8 space-y-2">
@@ -620,9 +661,10 @@ export default function OrganizadorPage() {
                     </p>
                     <div className="flex items-center gap-3 flex-wrap">
                       <select
+                        aria-label="Horário da execução"
                         value={hourDraft}
                         onChange={(e) => setHourDraft(Number(e.target.value))}
-                        className="bg-black/40 border border-cyan-500/20 text-white h-11 rounded-xl text-base font-bold px-4 focus:outline-none focus:border-cyan-400"
+                        className="bg-black/40 border border-emerald-500/20 text-white h-11 rounded-xl text-base font-bold px-4 focus:outline-none focus:border-emerald-400"
                       >
                         {Array.from({ length: 24 }, (_, h) => (
                           <option key={h} value={h} className="bg-neutral-900">
@@ -630,7 +672,7 @@ export default function OrganizadorPage() {
                           </option>
                         ))}
                       </select>
-                      <span className="text-[11px] text-cyan-200">
+                      <span className="text-[11px] text-emerald-200">
                         Todo dia às <strong className="text-white text-sm">{String(hourDraft).padStart(2, "0")}h</strong>
                       </span>
                     </div>
@@ -642,17 +684,17 @@ export default function OrganizadorPage() {
                   </div>
                 </div>
 
-                {/* ----- 3. MODELO (info-only) ----- */}
-                <div className="rounded-xl bg-black/30 p-4 space-y-2">
+                {/* ----- MODELO (info-only) ----- */}
+                <div className={styles.settingBlock}>
                   <div className="flex items-center gap-2">
-                    <span className="w-6 h-6 rounded-full bg-cyan-500/20 text-cyan-300 text-[11px] font-black flex items-center justify-center">3</span>
+                    <Bot className="w-4 h-4" />
                     <p className="text-xs font-bold text-white">Qual IA está pensando por você</p>
                   </div>
                   <div className="pl-8 space-y-1.5">
                     <div className="px-3 py-2 rounded-lg bg-black/40 border border-white/10 text-sm font-mono text-white/90 flex items-center justify-between gap-2">
                       <span>{org?.model}</span>
                       <span className="text-[9px] text-muted-foreground uppercase tracking-widest">
-                        {org?.isAdmin ? "altere no card roxo acima" : "definido pelo admin"}
+                        {org?.isAdmin ? "altere nos controles globais" : "definido pelo admin"}
                       </span>
                     </div>
                     <p className="text-[10px] text-muted-foreground">
@@ -661,20 +703,21 @@ export default function OrganizadorPage() {
                   </div>
                 </div>
 
-                {/* ----- 4. PROMPT — A PARTE MAIS IMPORTANTE ----- */}
-                <div className="rounded-xl bg-black/30 p-4 space-y-3">
+                </div>
+                {/* ----- PROMPT ----- */}
+                <div className={styles.promptColumn}>
                   <div className="flex items-center gap-2">
-                    <span className="w-6 h-6 rounded-full bg-cyan-500/20 text-cyan-300 text-[11px] font-black flex items-center justify-center">4</span>
+                    <FileText className="w-4 h-4" />
                     <p className="text-xs font-bold text-white">Como a IA deve pensar (Prompt)</p>
                   </div>
 
                   <div className="pl-8 space-y-3">
                     {/* Explicação do que é prompt — para iniciantes */}
-                    <div className="rounded-lg bg-cyan-500/[0.08] border border-cyan-500/20 p-3 space-y-1.5">
-                      <p className="text-[11px] text-cyan-100 leading-relaxed">
+                    <div className="rounded-lg bg-emerald-500/[0.08] border border-emerald-500/20 p-3 space-y-1.5">
+                      <p className="text-[11px] text-emerald-100 leading-relaxed">
                         <strong>O que é o prompt?</strong> É o manual que você dá pra IA. Igual a treinar um funcionário novo: você explica o seu negócio, quais critérios usar pra mover um cliente de uma coluna pra outra, e o que NÃO fazer.
                       </p>
-                      <p className="text-[10px] text-cyan-200/80 leading-relaxed">
+                      <p className="text-[10px] text-emerald-200/80 leading-relaxed">
                         <strong>Você não precisa escrever nada</strong> — se deixar vazio, a IA usa o manual padrão (já bom pra qualquer nicho). Mas se quiser personalizar pro SEU negócio (ex.: &quot;se cliente disser que está grávida, não sugerir esmalte tóxico&quot;), escreva aqui.
                       </p>
                     </div>
@@ -699,7 +742,7 @@ export default function OrganizadorPage() {
                         <button
                           type="button"
                           onClick={() => setPromptDraft(org.defaultPrompt)}
-                          className="text-[10px] px-2.5 py-1.5 rounded-lg bg-cyan-500/15 border border-cyan-500/30 text-cyan-200 hover:bg-cyan-500/25 flex items-center gap-1.5"
+                          className="text-[10px] px-2.5 py-1.5 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/25 flex items-center gap-1.5"
                         >
                           <FileText className="w-3 h-3" /> Começar com o manual padrão
                         </button>
@@ -713,13 +756,13 @@ export default function OrganizadorPage() {
                           <RefreshCw className="w-3 h-3" /> Voltar pro manual padrão
                         </button>
                       )}
-                      <span className="text-[10px] text-muted-foreground">
-                        ou role pra baixo até <strong className="text-purple-300">Sugestão automática</strong> pra a IA gerar pra você
-                      </span>
+                      <button type="button" onClick={() => setSection("suggest")} className={styles.textAction}>Personalizar com sugestões IA</button>
                     </div>
 
                     {/* Textarea */}
+                    <label htmlFor="organizer-prompt" className={styles.fieldLabel}>Instruções personalizadas</label>
                     <Textarea
+                      id="organizer-prompt"
                       value={promptDraft}
                       onChange={(e) => setPromptDraft(e.target.value)}
                       placeholder={`Exemplo:
@@ -734,13 +777,14 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                       className="bg-black/40 border-white/10 min-h-[180px] text-xs leading-relaxed"
                     />
                     <p className="text-[10px] text-muted-foreground">
-                      💡 <strong>Dica:</strong> escreva em português normal, como se estivesse explicando pra uma pessoa. A IA entende. Pra ver o texto FINAL completo (seu prompt + regras técnicas + seu kanban), abra o card amarelo &quot;Prompt completo que está rodando&quot; mais abaixo.
+                      <strong>Dica:</strong> escreva em português, como se estivesse explicando para uma pessoa. Consulte o texto final na seção <button type="button" onClick={() => setSection("effective")} className={styles.textAction}>Consultar prompt completo</button>.
                     </p>
                   </div>
                 </div>
 
+                </div>
                 {/* ----- BOTÃO SALVAR ----- */}
-                <div className="flex items-center justify-end gap-3 pt-2 border-t border-cyan-500/10">
+                <div className={styles.saveBar}>
                   {promptDirty && (
                     <span className="text-[11px] text-amber-300 flex items-center gap-1">
                       <AlertCircle className="w-3.5 h-3.5" /> Você tem alterações sem salvar
@@ -749,7 +793,7 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                   <Button
                     onClick={saveOrg}
                     disabled={savingOrg || !promptDirty}
-                    className={cn("text-sm gap-2 px-5 h-10", promptDirty ? "bg-cyan-600 hover:bg-cyan-500 text-white glow-primary" : "bg-white/5 text-muted-foreground")}
+                    className={styles.primaryAction}
                   >
                     {savingOrg ? <><Loader2 className="w-4 h-4 animate-spin" /> Salvando…</> : <><Save className="w-4 h-4" /> Salvar configuração</>}
                   </Button>
@@ -757,7 +801,7 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
               </section>
 
               {/* ============= KANBAN EDITOR ============= */}
-              <section className="glass-card rounded-2xl border-white/10 bg-white/[0.02] p-5 space-y-4">
+              <section id="organizer-kanban" hidden={section !== "kanban"} className={styles.panel} aria-label="Colunas do Kanban">
                 <div>
                   <h2 className="text-sm font-bold">Colunas do Kanban</h2>
                   <p className="text-[10px] text-muted-foreground mt-0.5">
@@ -767,13 +811,14 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
 
                 <div className="space-y-1.5">
                   {columns.map((col, idx) => (
-                    <div key={col.id} className="flex items-center gap-2 p-2 rounded-lg bg-black/30 border border-white/5">
-                      <div className="flex flex-col">
-                        <button type="button" onClick={() => moveColumn(idx, -1)} disabled={idx === 0} className="h-4 w-5 text-muted-foreground hover:text-white disabled:opacity-20 flex items-center justify-center"><ChevronUp className="w-3 h-3" /></button>
-                        <button type="button" onClick={() => moveColumn(idx, 1)} disabled={idx === columns.length - 1} className="h-4 w-5 text-muted-foreground hover:text-white disabled:opacity-20 flex items-center justify-center"><ChevronDown className="w-3 h-3" /></button>
+                    <div key={col.id} className={styles.columnRow}>
+                      <div className={styles.reorder}>
+                        <button type="button" aria-label={`Mover coluna ${col.label} para cima`} onClick={() => moveColumn(idx, -1)} disabled={idx === 0} className="h-4 w-5 text-muted-foreground hover:text-white disabled:opacity-20 flex items-center justify-center"><ChevronUp className="w-3 h-3" /></button>
+                        <button type="button" aria-label={`Mover coluna ${col.label} para baixo`} onClick={() => moveColumn(idx, 1)} disabled={idx === columns.length - 1} className="h-4 w-5 text-muted-foreground hover:text-white disabled:opacity-20 flex items-center justify-center"><ChevronDown className="w-3 h-3" /></button>
                       </div>
                       <input
                         type="color"
+                        aria-label={`Cor da coluna ${col.label}`}
                         value={col.color || DEFAULT_COLOR}
                         onChange={(e) => {
                           const next = columns.map((c) => c.id === col.id ? { ...c, color: e.target.value } : c);
@@ -783,31 +828,32 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                         className="w-8 h-8 rounded cursor-pointer bg-transparent border border-white/10"
                       />
                       <Input
+                        aria-label={`Nome da coluna ${col.label}`}
                         defaultValue={col.label}
                         onBlur={(e) => { if (e.target.value.trim() !== col.label) updateColumn(col.id, { label: e.target.value.trim() }); }}
                         className="flex-1 bg-white/5 border-white/10 h-9 text-sm"
                       />
                       <code className="text-[10px] text-muted-foreground font-mono shrink-0 px-2 py-1 bg-black/40 rounded">{col.status_key}</code>
                       <label className="flex items-center gap-1.5 text-[10px] text-muted-foreground hover:text-white cursor-pointer px-2" title="Leads não saem desta coluna automaticamente">
-                        <input type="checkbox" checked={col.is_terminal} onChange={(e) => updateColumn(col.id, { is_terminal: e.target.checked })} className="accent-purple-500 w-3 h-3" />
+                        <input type="checkbox" checked={col.is_terminal} onChange={(e) => updateColumn(col.id, { is_terminal: e.target.checked })} className="accent-emerald-500 w-3 h-3" />
                         Coluna final
                       </label>
                       {col.is_system && <span className="text-[9px] uppercase font-black tracking-widest text-amber-300 bg-amber-500/10 border border-amber-500/20 px-2 py-1 rounded">sistema</span>}
-                      <Button onClick={() => deleteColumn(col)} disabled={col.is_system} size="icon" variant="ghost" className="h-8 w-8 text-red-400 hover:bg-red-500/10 disabled:opacity-30"><Trash2 className="w-3.5 h-3.5" /></Button>
+                      <Button aria-label={`Apagar coluna ${col.label}`} onClick={() => deleteColumn(col)} disabled={col.is_system} size="icon" variant="ghost" className="h-8 w-8 text-red-400 hover:bg-red-500/10 disabled:opacity-30"><Trash2 className="w-3.5 h-3.5" /></Button>
                     </div>
                   ))}
                 </div>
 
-                <div className="flex items-center gap-2 p-2 rounded-lg bg-cyan-500/5 border border-cyan-500/20">
-                  <input type="color" value={newColColor} onChange={(e) => setNewColColor(e.target.value)} className="w-8 h-8 rounded cursor-pointer bg-transparent border border-white/10" />
-                  <Input value={newColLabel} onChange={(e) => setNewColLabel(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addColumn()} placeholder="Nova coluna (ex: Em negociação)" className="flex-1 bg-white/5 border-white/10 h-9 text-sm" />
+                <div className={styles.newColumn}>
+                  <input type="color" aria-label="Cor da nova coluna" value={newColColor} onChange={(e) => setNewColColor(e.target.value)} className="w-8 h-8 rounded cursor-pointer bg-transparent border border-white/10" />
+                  <Input aria-label="Nome da nova coluna" value={newColLabel} onChange={(e) => setNewColLabel(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addColumn()} placeholder="Nova coluna (ex: Em negociação)" className="flex-1 bg-white/5 border-white/10 h-9 text-sm" />
                   <label className="flex items-center gap-1.5 text-[10px] text-muted-foreground cursor-pointer px-2">
-                    <input type="checkbox" checked={newColTerminal} onChange={(e) => setNewColTerminal(e.target.checked)} className="accent-purple-500 w-3 h-3" />
+                    <input type="checkbox" checked={newColTerminal} onChange={(e) => setNewColTerminal(e.target.checked)} className="accent-emerald-500 w-3 h-3" />
                     Coluna final
                   </label>
-                  <div className="flex gap-0.5">
+                  <div className={styles.swatches}>
                     {PRESET_COLORS.map((c) => (
-                      <button key={c} type="button" onClick={() => setNewColColor(c)} className={cn("w-5 h-5 rounded border-2", newColColor === c ? "border-white" : "border-transparent")} style={{ background: c }} />
+                      <button key={c} type="button" aria-label={`Usar cor ${c}`} aria-pressed={newColColor === c} onClick={() => setNewColColor(c)} className={cn("w-5 h-5 rounded border-2", newColColor === c ? "border-white" : "border-transparent")} style={{ background: c }} />
                     ))}
                   </div>
                   <Button onClick={addColumn} disabled={!newColLabel.trim()} className="text-xs gap-1"><Plus className="w-3 h-3" /> Adicionar</Button>
@@ -815,10 +861,10 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
               </section>
 
               {/* ============= IA SUGGEST ============= */}
-              <section className="glass-card rounded-2xl border-purple-500/30 bg-gradient-to-br from-purple-500/[0.04] to-transparent p-5 space-y-4">
+              <section id="organizer-suggest" hidden={section !== "suggest"} className={styles.panel} aria-label="Sugestão automática (IA)">
                 <div>
                   <h2 className="text-sm font-bold flex items-center gap-2">
-                    <Wand2 className="w-4 h-4 text-purple-400" /> Sugestão automática (IA)
+                    <Wand2 className="w-4 h-4 text-emerald-400" /> Sugestão automática (IA)
                   </h2>
                   <p className="text-[10px] text-muted-foreground mt-0.5">
                     A IA lê o agente escolhido (prompt, função, base de conhecimento), identifica o nicho e gera DOIS pacotes prontos: (1) colunas de Kanban com vocabulário do nicho, (2) prompt completo do Organizador — REESCRITA do template padrão R1-R17 adaptada ao nicho + status_keys reais. Você revisa, edita e aplica.
@@ -828,7 +874,7 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                 {/* Seletor de agente */}
                 {!suggestion && (
                   <div className="space-y-2">
-                    <label className="text-[10px] font-black uppercase tracking-widest text-purple-300">
+                    <label className="text-[10px] font-black uppercase tracking-widest text-emerald-300">
                       Agente IA pra analisar
                     </label>
                     {org?.agents.length === 0 ? (
@@ -837,9 +883,10 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                       </div>
                     ) : (
                       <select
+                        aria-label="Agente IA para analisar"
                         value={suggestAgentId || ""}
                         onChange={(e) => setSuggestAgentId(Number(e.target.value) || null)}
-                        className="w-full bg-black/40 border border-purple-500/20 h-11 rounded-xl text-sm px-3"
+                        className="w-full bg-black/40 border border-emerald-500/20 h-11 rounded-xl text-sm px-3"
                       >
                         {org?.agents.map((a) => (
                           <option key={a.id} value={a.id} className="bg-neutral-900">
@@ -854,14 +901,15 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                 {/* Seletor de modelo IA */}
                 {!suggestion && (
                   <div className="space-y-2">
-                    <label className="text-[10px] font-black uppercase tracking-widest text-purple-300">
+                    <label className="text-[10px] font-black uppercase tracking-widest text-emerald-300">
                       Modelo de IA
                     </label>
                     <select
+                      aria-label="Modelo para a sugestão de Kanban"
                       value={org?.isAdmin ? (suggestModel || defaultAiModel || "") : (defaultAiModel || "")}
                       onChange={(e) => setSuggestModel(e.target.value)}
                       disabled={!org?.isAdmin}
-                      className={`w-full bg-black/40 border border-purple-500/20 h-11 rounded-xl text-sm px-3 font-mono ${!org?.isAdmin ? "opacity-70 cursor-not-allowed" : ""}`}
+                      className={`w-full bg-black/40 border border-emerald-500/20 h-11 rounded-xl text-sm px-3 font-mono ${!org?.isAdmin ? "opacity-70 cursor-not-allowed" : ""}`}
                     >
                       {!org?.isAdmin && defaultAiModel && !models.some(m => m.id === defaultAiModel) && (
                         <option value={defaultAiModel} className="bg-neutral-900">{defaultAiModel}</option>
@@ -874,16 +922,16 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                       )}
                     </select>
                     {!org?.isAdmin && (
-                      <p className="text-[10px] text-purple-300/80 flex items-center gap-1">
-                        <span>🔒 Modelo definido pelo administrador:</span>
-                        <span className="font-mono font-bold bg-purple-500/10 px-1.5 py-0.5 rounded border border-purple-500/20">{defaultAiModel || "Não configurado"}</span>
+                      <p className="text-[10px] text-emerald-300/80 flex items-center gap-1">
+                        <span>Modelo definido pelo administrador:</span>
+                        <span className="font-mono font-bold bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">{defaultAiModel || "Não configurado"}</span>
                       </p>
                     )}
                   </div>
                 )}
 
                 {!suggestion && (
-                  <Button onClick={generateSuggestion} disabled={suggesting || !suggestAgentId} className="bg-purple-600 hover:bg-purple-500 text-white text-xs gap-2">
+                  <Button onClick={generateSuggestion} disabled={suggesting || !suggestAgentId} className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs gap-2">
                     {suggesting ? <><Loader2 className="w-4 h-4 animate-spin" /> Analisando agente…</> : <><Sparkles className="w-4 h-4" /> Gerar sugestão</>}
                   </Button>
                 )}
@@ -891,30 +939,30 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                 {suggestion && (
                   <div className="space-y-4">
                     {/* Negócio identificado */}
-                    <div className="p-3 rounded-xl bg-black/30 border border-purple-500/20">
-                      <p className="text-[10px] uppercase font-black tracking-widest text-purple-300">Negócio identificado</p>
+                    <div className="p-3 rounded-xl bg-black/30 border border-emerald-500/20">
+                      <p className="text-[10px] uppercase font-black tracking-widest text-emerald-300">Negócio identificado</p>
                       <p className="text-sm text-white mt-1">{suggestion.business_type}</p>
                     </div>
 
                     {/* Colunas com edição inline */}
                     <div>
                       <div className="flex items-center justify-between mb-2">
-                        <p className="text-[10px] uppercase font-black tracking-widest text-purple-300">
+                        <p className="text-[10px] uppercase font-black tracking-widest text-emerald-300">
                           Colunas sugeridas ({suggestion.columns.length})
                         </p>
-                        <button onClick={() => setEditingSuggestion(!editingSuggestion)} className="text-[10px] text-purple-300 hover:underline flex items-center gap-1">
+                        <button onClick={() => setEditingSuggestion(!editingSuggestion)} className="text-[10px] text-emerald-300 hover:underline flex items-center gap-1">
                           <Pencil className="w-3 h-3" /> {editingSuggestion ? "Concluir edição" : "Editar antes de aplicar"}
                         </button>
                       </div>
                       <div className="space-y-1.5">
                         {suggestion.columns.map((c, i) => (
-                          <div key={i} className="flex items-center gap-2 p-2 rounded bg-black/20 border border-white/5">
+                          <div key={i} className={styles.suggestionRow}>
                             {editingSuggestion ? (
                               <>
-                                <input type="color" value={c.color} onChange={(e) => editSuggColumn(i, { color: e.target.value })} className="w-7 h-7 rounded bg-transparent border border-white/10 cursor-pointer" />
-                                <Input value={c.label} onChange={(e) => editSuggColumn(i, { label: e.target.value })} className="flex-1 bg-white/5 border-white/10 h-8 text-xs" />
-                                <Input value={c.status_key} onChange={(e) => editSuggColumn(i, { status_key: e.target.value })} className="w-32 bg-black/40 border-white/10 h-8 text-[10px] font-mono" />
-                                <Button onClick={() => removeSuggColumn(i)} size="icon" variant="ghost" className="h-7 w-7 text-red-400 hover:bg-red-500/10"><Trash2 className="w-3 h-3" /></Button>
+                                <input type="color" aria-label={`Cor sugerida ${i + 1}`} value={c.color} onChange={(e) => editSuggColumn(i, { color: e.target.value })} className="w-7 h-7 rounded bg-transparent border border-white/10 cursor-pointer" />
+                                <Input aria-label={`Nome sugerido ${i + 1}`} value={c.label} onChange={(e) => editSuggColumn(i, { label: e.target.value })} className="flex-1 bg-white/5 border-white/10 h-8 text-xs" />
+                                <Input aria-label={`Chave sugerida ${i + 1}`} value={c.status_key} onChange={(e) => editSuggColumn(i, { status_key: e.target.value })} className="w-32 bg-black/40 border-white/10 h-8 text-[10px] font-mono" />
+                                <Button aria-label={`Remover coluna sugerida ${i + 1}`} onClick={() => removeSuggColumn(i)} size="icon" variant="ghost" className="h-7 w-7 text-red-400 hover:bg-red-500/10"><Trash2 className="w-3 h-3" /></Button>
                               </>
                             ) : (
                               <>
@@ -936,22 +984,23 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
 
                     {/* Prompt sugerido (editável) */}
                     <div>
-                      <p className="text-[10px] uppercase font-black tracking-widest text-purple-300 mb-2">Prompt sugerido (editável)</p>
+                      <p className="text-[10px] uppercase font-black tracking-widest text-emerald-300 mb-2">Prompt sugerido (editável)</p>
                       <Textarea
+                        aria-label="Prompt sugerido"
                         value={suggestion.organizer_prompt}
                         onChange={(e) => setSuggestion({ ...suggestion, organizer_prompt: e.target.value })}
                         className="bg-black/40 border-white/10 h-44 text-xs font-mono"
                       />
                     </div>
 
-                    <div className="flex justify-end gap-2 pt-2 border-t border-purple-500/10">
+                    <div className="flex justify-end gap-2 pt-2 border-t border-emerald-500/10">
                       <Button onClick={() => { setSuggestion(null); setEditingSuggestion(false); }} variant="outline" className="text-xs">
                         Descartar
                       </Button>
                       <Button onClick={generateSuggestion} disabled={suggesting} variant="outline" className="text-xs gap-1">
                         <RefreshCw className="w-3 h-3" /> Gerar outra
                       </Button>
-                      <Button onClick={applySuggestion} disabled={suggesting} className="bg-purple-600 hover:bg-purple-500 text-xs gap-1">
+                      <Button onClick={applySuggestion} disabled={suggesting} className="bg-emerald-600 hover:bg-emerald-500 text-xs gap-1">
                         {suggesting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />} Aceitar e aplicar
                       </Button>
                     </div>
@@ -960,7 +1009,7 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
               </section>
 
               {/* ============= HISTÓRICO ============= */}
-              <section className="glass-card rounded-2xl border-white/10 bg-white/[0.02] p-5 space-y-4">
+              <section id="organizer-history" hidden={section !== "history"} className={styles.panel} aria-label="Histórico">
                 <div>
                   <h2 className="text-sm font-bold flex items-center gap-2">
                     <History className="w-4 h-4" /> Histórico
@@ -978,15 +1027,16 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                   ) : (
                     <div className="space-y-1">
                       {runs.slice(0, 8).map((r) => (
-                        <div key={r.id} className="flex items-center gap-2 p-2 rounded bg-black/20 border border-white/5 text-[11px]">
+                        <div key={r.id} className={styles.runRow}>
                           <span className={cn("w-2 h-2 rounded-full shrink-0",
                             r.status === "ok" ? "bg-emerald-500" :
                             r.status === "error" ? "bg-red-500" :
                             r.status === "noop" ? "bg-white/30" : "bg-amber-500"
                           )} />
+                          <span className="sr-only">{r.status === "ok" ? "Concluída" : r.status === "error" ? "Erro" : r.status === "noop" ? "Sem alterações" : r.status}</span>
                           <span className="text-white/80 shrink-0 w-32 truncate">{new Date(r.started_at).toLocaleString("pt-BR")}</span>
                           <span className="text-muted-foreground shrink-0">{r.triggered_by}</span>
-                          <span className="text-cyan-300 shrink-0">{r.chats_analyzed} chats</span>
+                          <span className="text-emerald-300 shrink-0">{r.chats_analyzed} chats</span>
                           <span className="text-emerald-300 shrink-0">{r.leads_moved} movidos</span>
                           <span className="text-muted-foreground truncate flex-1 min-w-0">{r.summary || ""}</span>
                         </div>
@@ -1001,10 +1051,11 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                     <p className="text-[10px] uppercase font-black tracking-widest text-muted-foreground">
                       Movimentações ({filteredHistory.length}{historyQuery && ` de ${history.length}`})
                     </p>
-                    <div className="flex items-center gap-2">
-                      <div className="relative">
+                    <div className={styles.historyFilters}>
+                      <div className={styles.search}>
                         <Search className="w-3 h-3 absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
                         <Input
+                          aria-label="Buscar movimentações"
                           value={historyQuery}
                           onChange={(e) => setHistoryQuery(e.target.value)}
                           placeholder="filtrar (nome, status, razão…)"
@@ -1039,10 +1090,12 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                             <button
                               type="button"
                               onClick={() => setExpandedHistoryId(expanded ? null : h.id)}
-                              className="w-full flex items-start gap-2 p-2 text-left text-[11px] hover:bg-white/[0.03]"
+                              aria-expanded={expanded}
+                              aria-controls={`organizer-history-${h.id}`}
+                              className={styles.historyRow}
                             >
                               <span className={cn("shrink-0 px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-widest",
-                                moved ? "bg-purple-500/20 text-purple-200" : "bg-white/5 text-muted-foreground"
+                                moved ? "bg-emerald-500/20 text-emerald-200" : "bg-white/5 text-muted-foreground"
                               )}>
                                 {moved ? "MOVIDO" : "Mantido"}
                               </span>
@@ -1050,14 +1103,14 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                               <div className="flex items-center gap-1 shrink-0 text-[10px] font-mono">
                                 <code className="px-1 bg-black/40 rounded text-muted-foreground">{h.status_antigo}</code>
                                 <ArrowRight className="w-2.5 h-2.5 text-muted-foreground" />
-                                <code className={cn("px-1 rounded", moved ? "bg-purple-500/20 text-purple-200" : "bg-black/40 text-muted-foreground")}>{h.status_novo}</code>
+                                <code className={cn("px-1 rounded", moved ? "bg-emerald-500/20 text-emerald-200" : "bg-black/40 text-muted-foreground")}>{h.status_novo}</code>
                               </div>
                               <span className="text-muted-foreground italic truncate flex-1 min-w-0">{h.razao}</span>
                               <span className="text-muted-foreground/60 shrink-0 text-[9px]">{new Date(h.created_at).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
                               {expanded ? <ChevronUp className="w-3 h-3 text-muted-foreground shrink-0" /> : <ChevronDown className="w-3 h-3 text-muted-foreground shrink-0" />}
                             </button>
                             {expanded && (
-                              <div className="border-t border-white/5 p-3 space-y-2 bg-black/30 text-[11px]">
+                              <div id={`organizer-history-${h.id}`} className={styles.historyDetails}>
                                 <div className="grid grid-cols-2 gap-2 text-[10px]">
                                   <div><span className="text-muted-foreground">JID:</span> <code className="text-white/80">{h.remote_jid}</code></div>
                                   <div><span className="text-muted-foreground">Data:</span> <span className="text-white/80">{new Date(h.created_at).toLocaleString("pt-BR")}</span></div>
@@ -1091,7 +1144,7 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
               </section>
 
               {/* ============= PROMPT EFETIVO COMPLETO ============= */}
-              <section className="rounded-2xl border border-amber-500/20 bg-gradient-to-br from-amber-500/[0.04] to-transparent p-5 space-y-3">
+              <section id="organizer-effective" hidden={section !== "effective"} className={styles.panel} aria-label="Prompt completo que está rodando">
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <div>
                     <h2 className="text-sm font-bold flex items-center gap-2 text-amber-200">
@@ -1103,6 +1156,8 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                   </div>
                   <Button
                     onClick={() => setEffectiveVisible((v) => !v)}
+                    aria-expanded={effectiveVisible}
+                    aria-controls="organizer-effective-content"
                     variant="outline"
                     className="text-[10px] h-7 px-2 gap-1"
                   >
@@ -1111,12 +1166,12 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                 </div>
 
                 {effectiveVisible && effective && (
-                  <div className="space-y-3">
+                  <div id="organizer-effective-content" className="space-y-3">
                     {/* ----- AÇÃO: GERAR PROMPT SUGERIDO COM IA ----- */}
-                    <div className="rounded-xl bg-purple-500/[0.06] border border-purple-500/20 p-3 space-y-2">
+                    <div className="rounded-xl bg-emerald-500/[0.06] border border-emerald-500/20 p-3 space-y-2">
                       <div className="flex items-start justify-between gap-2 flex-wrap">
                         <div>
-                          <p className="text-[11px] font-bold text-purple-200 flex items-center gap-1.5">
+                          <p className="text-[11px] font-bold text-emerald-200 flex items-center gap-1.5">
                             <Wand2 className="w-3.5 h-3.5" /> Gerar prompt sugerido pra esse kanban
                           </p>
                           <p className="text-[10px] text-muted-foreground mt-0.5 max-w-xl">
@@ -1126,7 +1181,7 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                         <Button
                           onClick={generatePromptSuggestion}
                           disabled={promptSuggesting || columns.length === 0 || (org?.agents?.length || 0) === 0}
-                          className="bg-purple-600 hover:bg-purple-500 text-white text-[11px] h-8 gap-1.5"
+                          className="bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] h-8 gap-1.5"
                         >
                           {promptSuggesting ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Gerando…</> : <><Sparkles className="w-3.5 h-3.5" /> Gerar sugestão</>}
                         </Button>
@@ -1140,14 +1195,15 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                       )}
                       {/* Seletor de modelo IA para prompt sugerido */}
                       <div className="space-y-1.5 pt-1">
-                        <label className="text-[9px] font-black uppercase tracking-widest text-purple-300/70">
+                        <label className="text-[9px] font-black uppercase tracking-widest text-emerald-300/70">
                           Modelo de IA
                         </label>
                         <select
+                          aria-label="Modelo para a sugestão de prompt"
                           value={org?.isAdmin ? (suggestModel || defaultAiModel || "") : (defaultAiModel || "")}
                           onChange={(e) => setSuggestModel(e.target.value)}
                           disabled={!org?.isAdmin}
-                          className={`w-full bg-black/40 border border-purple-500/20 h-9 rounded-lg text-[11px] px-2.5 font-mono ${!org?.isAdmin ? "opacity-70 cursor-not-allowed" : ""}`}
+                          className={`w-full bg-black/40 border border-emerald-500/20 h-9 rounded-lg text-[11px] px-2.5 font-mono ${!org?.isAdmin ? "opacity-70 cursor-not-allowed" : ""}`}
                         >
                           {!org?.isAdmin && defaultAiModel && !models.some(m => m.id === defaultAiModel) && (
                             <option value={defaultAiModel} className="bg-neutral-900">{defaultAiModel}</option>
@@ -1160,9 +1216,9 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                           )}
                         </select>
                         {!org?.isAdmin && (
-                          <p className="text-[9px] text-purple-300/70 flex items-center gap-1">
-                            <span>🔒 Modelo definido pelo administrador:</span>
-                            <span className="font-mono font-bold bg-purple-500/10 px-1 py-0.5 rounded border border-purple-500/20">{defaultAiModel || "Não configurado"}</span>
+                          <p className="text-[9px] text-emerald-300/70 flex items-center gap-1">
+                            <span>Modelo definido pelo administrador:</span>
+                            <span className="font-mono font-bold bg-emerald-500/10 px-1 py-0.5 rounded border border-emerald-500/20">{defaultAiModel || "Não configurado"}</span>
                           </p>
                         )}
                       </div>
@@ -1170,24 +1226,25 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
 
                     {/* Preview da sugestão com aprovação */}
                     {promptSuggestion && (
-                      <div className="rounded-xl border border-purple-500/30 bg-purple-500/[0.05] p-3 space-y-2">
+                      <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/[0.05] p-3 space-y-2">
                         <div className="flex items-center justify-between gap-2 flex-wrap">
-                          <p className="text-[11px] font-bold text-purple-200">
+                          <p className="text-[11px] font-bold text-emerald-200">
                             Sugestão pronta · nicho identificado: <span className="text-white">{promptSuggestion.business_type}</span>
                           </p>
-                          <div className="flex gap-1.5">
+                          <div className="flex flex-wrap gap-1.5">
                             <Button onClick={() => setPromptSuggestion(null)} variant="outline" className="text-[10px] h-7 px-2">
                               Descartar
                             </Button>
                             <Button onClick={generatePromptSuggestion} disabled={promptSuggesting} variant="outline" className="text-[10px] h-7 px-2 gap-1">
                               <RefreshCw className="w-3 h-3" /> Gerar outra
                             </Button>
-                            <Button onClick={applyPromptSuggestion} disabled={savingOrg} className="bg-purple-600 hover:bg-purple-500 text-white text-[10px] h-7 px-2 gap-1">
+                            <Button onClick={applyPromptSuggestion} disabled={savingOrg} className="bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] h-7 px-2 gap-1">
                               {savingOrg ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />} Aplicar como meu prompt
                             </Button>
                           </div>
                         </div>
                         <Textarea
+                          aria-label="Revisar sugestão de prompt para o Kanban atual"
                           value={promptSuggestion.organizer_prompt}
                           onChange={(e) => setPromptSuggestion({ ...promptSuggestion, organizer_prompt: e.target.value })}
                           className="bg-black/40 border-white/10 min-h-[280px] text-[10px] font-mono"
@@ -1202,7 +1259,7 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                     <div>
                       <div className="flex items-center justify-between mb-1">
                         <p className="text-[10px] uppercase font-black tracking-widest text-amber-300">
-                          1. Prompt base — {effective.customPrompt ? "seu customizado (editável no card cyan acima)" : "padrão R1-R17 (editável aqui)"}
+                          1. Prompt base — {effective.customPrompt ? "personalizado (editável em Configuração)" : "padrão R1-R17 (editável aqui)"}
                         </p>
                         {!effective.customPrompt && (
                           <button onClick={() => setEditingDefault((e) => !e)} className="text-[10px] text-amber-300 hover:underline flex items-center gap-1">
@@ -1215,6 +1272,7 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                       ) : editingDefault ? (
                         <div className="space-y-2">
                           <Textarea
+                            aria-label="Editar prompt padrão para esta conta"
                             value={defaultDraft}
                             onChange={(e) => setDefaultDraft(e.target.value)}
                             className="bg-black/40 border-white/10 h-80 text-[10px] font-mono"
@@ -1293,7 +1351,7 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
             </>
           )}
         </div>
-      </main>
+      </div>
     </div>
   );
 }

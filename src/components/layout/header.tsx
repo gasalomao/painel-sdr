@@ -26,6 +26,7 @@ const pageTitles: Record<string, { title: string; description: string; icon: Rea
   "/calendario": { title: "Calendário", description: "Agendamentos dos leads — sincronizado com Google Calendar", icon: CalendarDays },
   "/prospeccao-sites": { title: "Prospecção Sites", description: "Empresas sem site — disparo personalizado", icon: Globe },
   "/tokens": { title: "Tokens IA", description: "Consumo e custos de inteligência artificial", icon: Coins },
+  "/organizador": { title: "Organizador IA", description: "Organização automática dos leads", icon: Bot },
 };
 
 type Session = {
