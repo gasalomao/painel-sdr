@@ -1,0 +1,112 @@
+.surface,
+.dialog {
+  /* ponytail: tema local do painel; unificar quando os tokens globais forem revisados. */
+  --color-background: #101411;
+  --color-foreground: #edf2ee;
+  --color-card: #181e1a;
+  --color-card-foreground: #edf2ee;
+  --color-popover: #181e1a;
+  --color-popover-foreground: #edf2ee;
+  --color-primary: #6ee7b7;
+  --color-primary-foreground: #10251b;
+  --color-secondary: #27332b;
+  --color-secondary-foreground: #edf2ee;
+  --color-muted: #222b25;
+  --color-muted-foreground: #a8b6ac;
+  --color-accent: #27332b;
+  --color-accent-foreground: #edf2ee;
+  --color-destructive: #ff9da9;
+  --color-destructive-foreground: #30141a;
+  --color-border: #344138;
+  --color-input: #405046;
+  --color-ring: #6ee7b7;
+  color: var(--color-foreground);
+  background: var(--color-background);
+  color-scheme: dark;
+  caret-color: var(--color-primary);
+}
+.surface *, .dialog * { border-color: revert-layer; }
+.surface ::selection, .dialog ::selection { background: #6ee7b733; color: #edf2ee; }
+.surface :focus-visible, .dialog :focus-visible { outline: 2px solid #6ee7b7; outline-offset: 3px; }
+.surface, .surface *, .dialog * { scrollbar-width: thin; scrollbar-color: #526b5b #101411; }
+.surface :is(input:not([type='checkbox']), select, textarea), .dialog :is(input:not([type='checkbox']), select, textarea) { min-height: 42px; background-color: #131b16; color: #edf2ee; border-color: #405046; font-size: 13px; }
+.surface :is(input, textarea)::placeholder, .dialog :is(input, textarea)::placeholder { color: #a8b6ac; opacity: 1; }
+.surface :is(select, option, optgroup), .dialog :is(select, option, optgroup) { background-color: #131b16; color: #edf2ee; }
+.surface :is(button, a[data-slot='button']), .dialog :is(button, a[data-slot='button']) { box-shadow: none; }
+.surface [data-slot='button'], .dialog [data-slot='button'] { min-height: 42px; height: auto; white-space: normal; }
+.surface summary, .dialog summary { min-height: 40px; align-content: center; }
+.shellHeader { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; padding: 12px 28px; border-bottom: 1px solid #344138; }
+.brand { display: flex; align-items: center; gap: 10px; min-height: 40px; font-size: 16px; font-weight: 600; }
+.brand svg { color: #6ee7b7; width: 19px; height: 19px; }
+.nav { display: flex; flex-wrap: wrap; gap: 4px; }
+.nav a { display: flex; align-items: center; min-height: 42px; padding: 8px 12px; border-radius: 7px; color: #a8b6ac; font-size: 13px; font-weight: 500; }
+.nav a:hover { color: #edf2ee; background: #222b25; }
+.nav a[aria-current='page'] { color: #a7f3d0; background: #203a2c; }
+.list { width: 100%; max-width: 1480px; margin: auto; padding: 28px; }
+.heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 24px; }
+.heading h1 { font-size: 27px; line-height: 1.3; font-weight: 600; letter-spacing: -.025em; }
+.heading p { margin-top: 7px; color: #a8b6ac; font-size: 14px; line-height: 1.6; max-width: 65ch; }
+.heading > button { flex-shrink: 0; }
+.guide { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; margin-bottom: 24px; padding: 14px 0; border-top: 1px solid #344138; border-bottom: 1px solid #344138; color: #a8b6ac; font-size: 12px; line-height: 1.6; }
+.guide strong { color: #d5e9dd; font-weight: 500; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 20px; }
+.project { min-width: 0; overflow: hidden; border: 1px solid #344138; border-radius: 12px; background: #181e1a; }
+.thumb { position: relative; display: flex; justify-content: center; align-items: center; height: 142px; overflow: hidden; background: #203128; border-bottom: 1px solid #344138; color: #b7d5c2; font-size: 40px; font-weight: 500; }
+.projectContent { padding: 18px; }
+.projectTitle { font-size: 16px; line-height: 1.5; font-weight: 600; overflow-wrap: anywhere; }
+.projectClient { margin-top: 4px; color: #a8b6ac; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.projectMeta { margin-top: 14px; color: #a8b6ac; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.projectFooter { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; padding-top: 14px; border-top: 1px solid #344138; }
+.editLink { display: inline-flex; align-items: center; gap: 7px; min-height: 42px; font-size: 13px; font-weight: 500; color: #9cebc5; }
+.editLink:hover { text-decoration: underline; text-underline-offset: 4px; }
+.deleteButton { display: flex; justify-content: center; align-items: center; min-width: 42px; min-height: 42px; border-radius: 7px; color: #a8b6ac; }
+.deleteButton:hover { color: #ffc3ca; background: #38252a; }
+.empty { padding: 48px 24px; border: 1px dashed #405046; border-radius: 12px; text-align: center; }
+.empty > svg { margin: 0 auto 20px; width: 32px; height: 32px; color: #9cebc5; }
+.empty h2 { font-size: 20px; font-weight: 500; }
+.empty p { max-width: 52ch; margin: 12px auto 24px; font-size: 14px; line-height: 1.7; color: #a8b6ac; }
+.dialog { gap: 0; padding: 0; max-height: 90dvh; overflow: hidden; border-color: #405046; }
+.paddedDialog { padding: 24px; gap: 16px; overflow-y: auto; }
+.dialog label { line-height: 1.6; }
+.dialog :is(input:not([type='checkbox']), select, textarea) { margin-top: 6px; }
+.dialog [data-slot='dialog-description'] { color: #a8b6ac; font-size: 13px; line-height: 1.6; }
+.dialog [data-slot='dialog-footer'] { background: #181e1a; border-color: #344138; }
+.editorHeader { padding: 14px 20px; }
+.editorHeader h1 { flex: 1; font-size: 17px; }
+.editorHelp { margin: 0; padding: 10px 20px; border-bottom: 1px solid #344138; color: #a8b6ac; font-size: 12px; line-height: 1.6; }
+.editorNav { display: flex; flex-shrink: 0; gap: 4px; padding: 0 16px; border-bottom: 1px solid #344138; }
+.editorNav button { min-height: 44px; padding: 10px 14px; font-size: 13px; }
+.previewTabs { display: flex; flex-wrap: wrap; height: auto; min-height: 42px; max-width: calc(100% - 24px); }
+.previewTabs button { min-height: 36px; padding: 8px 12px; font-size: 12px; }
+.chatHeader { display: flex; flex-direction: column; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid #344138; }
+.chatHeader h2 { font-size: 15px; font-weight: 600; line-height: 1.5; }
+.chatHeader p { color: #a8b6ac; font-size: 12px; line-height: 1.6; }
+.chatDesign { display: flex; align-items: center; gap: 8px; }
+.chatDesign > button:first-child { display: inline-flex; align-items: center; gap: 7px; min-height: 36px; padding: 7px 10px; border: 1px solid #405046; border-radius: 7px; color: #c6d7cc; font-size: 12px; }
+.chatDesign > button:first-child[aria-pressed='true'] { background: #203a2c; border-color: #3a664c; color: #a7f3d0; }
+.chatDesign > button:nth-child(2) { display: flex; align-items: center; justify-content: center; min-height: 36px; min-width: 36px; }
+.composer { border: 1px solid #405046; border-radius: 10px; background: #181e1a; }
+.composer:focus-within { border-color: #6ee7b7; }
+.composer label { display: block; padding: 12px 12px 0; font-size: 12px; color: #cedbd1; font-weight: 500; }
+.composer textarea { background: transparent !important; border: 0; font-size: 14px !important; line-height: 1.6; }
+.composer button { min-height: 40px; border-radius: 7px; }
+.composerHelp { margin: 0; padding: 0 12px 10px; color: #a8b6ac; font-size: 11px; line-height: 1.6; }
+@media (min-width: 1024px) and (max-width: 1535px) { .editorNav { justify-content: flex-end; } }
+@media (min-width: 1536px) { .editorNav { display: none; } }
+@media (max-width: 640px) {
+  .shellHeader { gap: 4px; padding: 10px 16px; }
+  .brand { width: 100%; }
+  .nav { width: 100%; justify-content: space-between; }
+  .nav a { padding: 8px; font-size: 12px; }
+  .list { padding: 22px 16px; }
+  .heading { flex-wrap: wrap; }
+  .heading h1 { font-size: 24px; }
+  .guide { gap: 7px; flex-direction: column; align-items: flex-start; }
+  .editorHeader { gap: 8px; padding: 10px 12px; }
+  .editorHeader h1 { font-size: 15px; }
+  .editorHeader > div { width: 100%; margin-left: 0; }
+  .editorHeader > div button { flex: 1; }
+  .editorHelp { padding: 10px 16px; }
+  .editorNav { padding: 0 6px; }
+  .editorNav button { flex: 1; padding: 10px 6px; font-size: 12px; }
+}

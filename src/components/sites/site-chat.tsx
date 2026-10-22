@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { toast } from "sonner";
-import { Bot, Image as ImageIcon, Info, Loader2, Paperclip, Send, Sparkles } from "lucide-react";
+import { Bot, Image as ImageIcon, Info, Loader2, Paperclip, Send, Sparkles, X } from "lucide-react";
+import styles from "@/app/sites/sites.module.css";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { resolveWebsiteUploadPurpose, requestsWebsiteLogo } from "@/lib/sites/asset-intent";
@@ -334,45 +335,39 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
   return (
     <div className="flex h-full min-h-[560px] min-w-0 flex-col gap-3 p-3">
       {/* Top Header Card - Enquadrado & Sem Cortes */}
-      <div className="rounded-xl border border-border/70 bg-card/60 p-2.5 shadow-xs backdrop-blur-xs flex flex-col gap-2">
+      <div className={styles.chatHeader}>
         {/* Linha Superior: Converse com o agente + Toggle Impeccable */}
-        <div className="flex items-center justify-between gap-2 min-w-0">
+        <div className="flex flex-wrap items-center justify-between gap-3 min-w-0">
           <div className="flex items-center gap-2 min-w-0">
             <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 border border-primary/20 text-primary">
               <Bot className="size-4" aria-hidden="true" />
             </div>
             <div className="min-w-0">
-              <h2 className="text-xs font-semibold text-foreground tracking-tight whitespace-nowrap truncate">
-                Converse com o agente
-              </h2>
-              <p className="text-[10px] text-muted-foreground truncate">
-                Assistente de design e código
-              </p>
+              <h2>Conversa com a IA</h2>
+              <p>Descreva, revise e peça ajustes.</p>
             </div>
           </div>
 
           {/* Impeccable Design toggle */}
-          <div className="relative flex items-center gap-1 shrink-0">
+          <div className={`${styles.chatDesign} relative shrink-0`}>
             <button
               type="button"
               id="skills-toggle-btn"
               onClick={() => void toggleImpeccable()}
-              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium transition-all shadow-xs cursor-pointer border whitespace-nowrap ${
-                isImpeccableActive
-                  ? "bg-primary/15 hover:bg-primary/25 border-primary/40 text-primary font-semibold"
-                  : "bg-muted/50 hover:bg-muted border-border/80 text-muted-foreground"
-              }`}
-              title={isImpeccableActive ? "Impeccable Design Ativo (clique para desativar)" : "Impeccable Design Desativado (clique para ativar)"}
+              aria-pressed={isImpeccableActive}
+              disabled={skillsLoading}
+              title={isImpeccableActive ? "Desativar diretrizes Impeccable Design" : "Ativar diretrizes Impeccable Design"}
             >
               <Sparkles className={`size-3 shrink-0 ${isImpeccableActive ? "text-primary" : "text-muted-foreground"}`} aria-hidden="true" />
-              <span>Impeccable: {isImpeccableActive ? "Ativo" : "Off"}</span>
+              <span>Design guiado: {isImpeccableActive ? "ativo" : "inativo"}</span>
             </button>
             <button
               type="button"
               onClick={() => setSkillsOpen((prev) => !prev)}
               className="p-1 text-muted-foreground hover:text-foreground rounded-md hover:bg-muted/80 cursor-pointer transition-colors"
               title="Ver detalhes da diretriz Impeccable Design"
-              aria-label="Ver detalhes da skill"
+              aria-label="Sobre o design guiado"
+              aria-expanded={skillsOpen}
             >
               <Info className="size-3" aria-hidden="true" />
             </button>
@@ -380,12 +375,13 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
             {skillsOpen && (
               <div
                 ref={skillsPopoverRef}
-                className="absolute right-0 top-full mt-2 z-50 w-80 sm:w-96 flex flex-col rounded-xl border border-border bg-popover/95 backdrop-blur-md p-3.5 shadow-2xl text-popover-foreground animate-in fade-in-50 zoom-in-95 duration-100"
+                className="absolute left-0 top-full mt-2 z-50 w-64 max-w-[calc(100vw-56px)] flex flex-col rounded-lg border border-border bg-popover p-4 shadow-lg text-popover-foreground"
+                onKeyDown={(event) => { if (event.key === "Escape") setSkillsOpen(false); }}
               >
                 <div className="flex items-center justify-between pb-2 border-b border-border/60">
                   <div className="flex items-center gap-1.5">
                     <Sparkles className="size-4 text-primary" />
-                    <span className="text-xs font-semibold">Skill Impeccable Design</span>
+                    <span className="text-sm font-semibold">Design guiado</span>
                   </div>
                   <button
                     type="button"
@@ -393,11 +389,11 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
                     className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground text-xs cursor-pointer"
                     aria-label="Fechar"
                   >
-                    ✕
+                    <X className="size-4" aria-hidden="true" />
                   </button>
                 </div>
                 <p className="text-[11px] text-muted-foreground mt-2 leading-relaxed">
-                  Baseada em <strong className="text-foreground">pbakaus/impeccable</strong>: orienta a IA a criar sites com direção de arte premiada, tipografia, cor, composição, imagens, movimento, acessibilidade e revisão visual a partir do briefing. Na criação, carrega os fundamentos oficiais completos; nas edições, preserva a identidade.
+                  As diretrizes <strong className="text-foreground">Impeccable Design</strong> orientam cores, tipografia, organização e acessibilidade. Nas edições, preservam a identidade do site.
                 </p>
                 <div className="mt-3 p-2.5 rounded-lg border border-border/60 bg-accent/20 flex items-center justify-between">
                   <div>
@@ -418,18 +414,14 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
                     {isImpeccableActive ? "Desativar" : "Ativar"}
                   </button>
                 </div>
-                <div className="mt-2.5 text-[10px] text-muted-foreground/90 space-y-1 bg-background/50 p-2 rounded border border-border/40">
-                  <div>✅ <strong>Criação do Zero:</strong> Substitui qualquer template padrão por design exclusivo.</div>
-                  <div>🚫 <strong>Anti-AI Slop:</strong> Proíbe paletas verdes de template, cards repetidos e métricas falsas.</div>
-                  <div>📐 <strong>Tipografia & Ritmo:</strong> Escalas contrastantes e espaçamento assimétrico orgânico.</div>
-                </div>
+                <p className="mt-3 text-xs text-muted-foreground">Essa configuração é compartilhada pelos projetos, não apenas por esta conversa.</p>
               </div>
             )}
           </div>
         </div>
 
         {/* Linha Inferior: Seletor de Modelo enquadrado e com largura total */}
-        <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-[#0b1220]/80 px-2.5 py-1.5 shadow-2xs">
+        <div className="flex items-center gap-2">
           <span className="text-[11px] font-medium text-muted-foreground shrink-0 flex items-center gap-1.5">
             <Bot className="size-3.5 text-primary" aria-hidden="true" />
             <span>Modelo:</span>
@@ -438,7 +430,7 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
             id="chat-model-select"
             aria-label="Modelo de IA para este pedido"
             style={{ colorScheme: "dark" }}
-            className="h-6 flex-1 min-w-0 bg-transparent text-[11px] font-medium text-slate-200 outline-none cursor-pointer truncate pr-1"
+            className="flex-1 min-w-0 rounded-md border border-input px-2 text-sm"
             value={activeModelMode === "manual" ? (activeModelId || "") : activeModelMode}
             disabled={sending || Boolean(activeRun) || project?.status === "archived"}
             onChange={(e) => void switchModel(e.target.value)}
@@ -529,7 +521,7 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
             </div>
             <p className="text-sm font-medium text-foreground">Como posso ajudar com seu site?</p>
             <p className="text-xs text-muted-foreground max-w-sm mx-auto">
-              Peça alterações, anexe logos ou imagens com 📎 ou cole fotos diretamente com Ctrl+V.
+              Peça uma alteração por vez. Use Anexar para enviar sua logo ou fotos; também pode colar imagens com Ctrl+V.
             </p>
           </div>
         ) : null}
@@ -706,11 +698,7 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
 
       {/* Unified Gemini-Style Input Container */}
       <form
-        className={`relative flex flex-col rounded-2xl border transition-all shadow-md ${
-          dragActive
-            ? "border-primary bg-primary/10 ring-2 ring-primary/40"
-            : "border-slate-800/90 bg-[#0f172a]/90 backdrop-blur-md hover:border-slate-700 focus-within:border-primary/60 focus-within:ring-1 focus-within:ring-primary/40"
-        }`}
+        className={`${styles.composer} relative flex flex-col ${dragActive ? "ring-2 ring-primary/40" : ""}`}
         onDragOver={(event) => {
           event.preventDefault();
           setDragActive(true);
@@ -733,7 +721,7 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
         {/* Drag and Drop Overlay */}
         {dragActive && (
           <div className="absolute inset-0 z-30 flex flex-col items-center justify-center rounded-2xl bg-slate-950/95 backdrop-blur-xs border-2 border-dashed border-primary pointer-events-none animate-in fade-in-50 duration-150">
-            <Paperclip className="size-7 text-primary animate-bounce mb-1.5" />
+            <Paperclip className="size-7 text-primary mb-1.5" aria-hidden="true" />
             <span className="text-xs font-semibold text-primary">Solte as imagens aqui para anexar</span>
             <span className="text-[10px] text-muted-foreground">PNG, JPEG ou WEBP (até 8 MB)</span>
           </div>
@@ -794,7 +782,7 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
                     title="Remover anexo"
                     aria-label="Remover anexo"
                   >
-                    ✕
+                    <X className="size-4" aria-hidden="true" />
                   </button>
                 </div>
               ))}
@@ -835,7 +823,7 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
                       title="Remover do pedido"
                       aria-label="Remover anexo"
                     >
-                      ✕
+                      <X className="size-4" aria-hidden="true" />
                     </button>
                   </div>
                 );
@@ -859,10 +847,12 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
         />
 
         {/* Seamless Textarea */}
+        <label htmlFor="site-prompt">Seu pedido para a IA</label>
         <div className="px-3 pt-2">
           <textarea
             id="site-prompt"
-            rows={2}
+            aria-describedby="site-prompt-help"
+            rows={3}
             maxLength={16000}
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
@@ -870,7 +860,7 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
             placeholder={
               staged.length > 0 || selected.length > 0
                 ? "Descreva o que fazer com a imagem (ex: 'essa é a logo, use no topo e adapte as cores')..."
-                : "Descreva o que deseja no site (cole imagens com Ctrl+V ou clique em 📎)..."
+                : "Ex.: troque o título ou adicione uma seção de serviços."
             }
             disabled={sending}
             onKeyDown={(event) => {
@@ -883,13 +873,14 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
           />
         </div>
 
+        <p id="site-prompt-help" className={styles.composerHelp}>Enter envia · Shift+Enter quebra a linha. Imagens: PNG, JPEG ou WEBP, até 8 MB.</p>
         {/* Bottom Toolbar */}
-        <div className="flex flex-wrap items-center justify-between gap-2 px-3 pb-2.5 pt-1 border-t border-slate-800/40">
+        <div className="flex flex-wrap items-center justify-between gap-2 px-3 pb-2.5 pt-2 border-t border-border">
           {blocked && !activeRun && (
             <div className="flex items-center gap-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 px-2 py-1 mb-1 w-full">
               <Info className="size-3.5 text-amber-400 shrink-0" />
               <span className="text-[10px] text-amber-300 font-medium">
-                Há alterações pendentes em Arquivos ou Ajustes. Salve ou descarte antes de enviar.
+                O envio está temporariamente indisponível. Confira os avisos acima; se editou Código ou Ajustes, salve ou descarte as alterações.
               </span>
             </div>
           )}
@@ -899,7 +890,7 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
               type="button"
               onClick={() => inputRef.current?.click()}
               disabled={sending || uploading || Boolean(activeRun) || assets.length + staged.length >= 20}
-              className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium text-slate-300 hover:text-white bg-slate-800/70 hover:bg-slate-700/80 border border-slate-700/60 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shadow-2xs"
+              className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-medium text-foreground bg-secondary hover:bg-accent border border-border cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               title="Anexar imagem (PNG, JPEG ou WEBP, até 8 MB)"
             >
               <Paperclip className="size-3.5 text-primary" aria-hidden="true" />
@@ -930,17 +921,12 @@ export function SiteChat({ draftScope, projectId, project, activeRun, runs, bloc
           </div>
 
           <div className="flex items-center gap-2">
-            {blocked && !activeRun && (
-              <span className="text-[10px] text-amber-400 font-medium mr-2 hidden sm:inline">
-                💾 Há alterações pendentes
-              </span>
-            )}
             <Button
               type="submit"
               size="sm"
               disabled={sending || uploading || Boolean(activeRun) || blocked || (!prompt.trim() && staged.length === 0 && selected.length === 0)}
               className="rounded-full gap-1.5 font-medium px-4 h-8 cursor-pointer shadow-md"
-              title={blocked && !activeRun ? "Salve ou descarte as alterações em Arquivos e Ajustes antes de enviar" : undefined}
+              title={blocked && !activeRun ? "Confira os avisos do projeto antes de enviar" : undefined}
             >
               {sending || uploading ? (
                 <>

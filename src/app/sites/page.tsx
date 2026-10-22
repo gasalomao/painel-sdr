@@ -4,7 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { toast } from "sonner";
-import { ExternalLink, LayoutTemplate, Plus, Trash2 } from "lucide-react";
+import { ArrowRight, ExternalLink, LayoutTemplate, Plus, Trash2 } from "lucide-react";
+import styles from "./sites.module.css";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -31,8 +32,8 @@ function ProjectThumb({ projectId, fallback }: { projectId: string; fallback: st
     observer.observe(node);
     return () => { observer.disconnect(); controller.abort(); };
   }, [projectId]);
-  return <div ref={ref} className="pointer-events-none relative flex h-32 items-center justify-center overflow-hidden bg-gradient-to-br from-primary/25 via-primary/5 to-secondary">
-    {shot ? <Image unoptimized src={shot} alt="" fill sizes="420px" className="object-cover object-top" /> : <span aria-hidden="true" className="text-5xl font-semibold text-primary">{fallback}</span>}
+  return <div ref={ref} className={styles.thumb}>
+    {shot ? <Image unoptimized src={shot} alt="" fill sizes="420px" className="object-cover object-top" /> : <span aria-hidden="true">{fallback}</span>}
   </div>;
 }
 
@@ -74,50 +75,39 @@ export default function SitesPage(): React.JSX.Element {
     }
   }
 
-  return <div className="mx-auto max-w-[1600px] space-y-6 px-3 py-5 sm:px-6">
-    <div className="flex items-start justify-between gap-3">
-      <div><h1 className="text-2xl font-semibold tracking-tight">Meus Sites</h1><p className="mt-1 text-sm text-muted-foreground">Da primeira ideia ao site publicado, com contexto do seu cliente.</p></div>
-      <Button onClick={() => setCreateOpen(true)} className="min-h-10"><Plus aria-hidden="true" />Criar site</Button>
+  return <div className={styles.list}>
+    <div className={styles.heading}>
+      <div><h1>Meus sites</h1><p>Crie sites com IA e continue editando seus projetos por aqui.</p></div>
+      <Button onClick={() => setCreateOpen(true)}><Plus aria-hidden="true" />Criar site</Button>
+    </div>
+    <div className={styles.guide} aria-label="Como funciona">
+      <span><strong>Descreva</strong> o site que precisa.</span>
+      <span><strong>Revise</strong> a prévia e peça ajustes na conversa.</span>
+      <span><strong>Publique</strong> quando estiver pronto.</span>
     </div>
     {error ? <div role="alert" className="space-y-3 rounded-xl border border-destructive/30 p-5"><p>{error}</p><Button variant="outline" onClick={() => void load()}>Tentar novamente</Button></div>
       : projects === null ? <div aria-busy="true" aria-label="Carregando sites" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">{[1, 2, 3].map((id) => <div key={id} className="h-64 animate-pulse rounded-xl bg-muted motion-reduce:animate-none" />)}</div>
-      : projects.length === 0 ? <div className="flex flex-col items-center gap-4 rounded-xl border border-dashed border-border px-6 py-16 text-center"><LayoutTemplate className="size-10 text-primary" aria-hidden="true" /><h2 className="text-lg font-medium">Seu primeiro site começa aqui</h2><p className="max-w-md text-sm text-muted-foreground">Crie um projeto e converse com o agente para transformar informações confirmadas em um site.</p><Button onClick={() => setCreateOpen(true)}>Criar meu primeiro site</Button></div>
-      : <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">{projects.map((project) => {
+      : projects.length === 0 ? <div className={styles.empty}><LayoutTemplate aria-hidden="true" /><h2>Seu primeiro site começa aqui</h2><p>Conte sobre o negócio e o site que precisa. Depois, acompanhe a prévia e peça alterações na conversa com a IA.</p><Button onClick={() => setCreateOpen(true)}>Criar meu primeiro site</Button></div>
+      : <div className={styles.grid}>{projects.map((project) => {
         const url = safeSiteUrl(project.published_url);
-        return <article key={project.id} className="relative overflow-hidden rounded-xl border border-border bg-card transition-colors hover:border-primary/50">
-          <Link href={`/sites/${project.id}`} aria-label={`Editar ${project.name}`} className="absolute inset-0 z-0 rounded-xl focus-visible:outline-2 focus-visible:outline-primary" />
-          <ProjectThumb projectId={project.id} fallback={project.name.trim().charAt(0).toUpperCase() || "?"} />
-          <div className="pointer-events-none space-y-3 p-4">
-            <div className="flex items-start justify-between gap-2">
-              <div className="min-w-0 flex-1">
-                <h2 className="truncate font-semibold">{project.name}</h2>
-                <p className="truncate text-sm text-muted-foreground">{project.client_context.name || "Sem cliente vinculado"}</p>
-              </div>
-              <div className="flex items-center gap-1.5 shrink-0 pointer-events-auto relative z-10">
-                <Badge variant={project.status === "published" ? "default" : "secondary"}>
-                  {projectStatusLabel(project.status)}
-                </Badge>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setProjectToDelete(project);
-                  }}
-                  className="rounded-md p-1.5 text-muted-foreground hover:bg-destructive/15 hover:text-destructive transition-colors cursor-pointer"
-                  title={`Excluir site "${project.name}"`}
-                  aria-label={`Excluir site "${project.name}"`}
-                >
-                  <Trash2 className="size-4" aria-hidden="true" />
-                </button>
-              </div>
-            </div>
-            {url ? <a className="pointer-events-auto relative z-10 flex items-center gap-1 break-all text-xs text-primary hover:underline" href={url} target="_blank" rel="noopener noreferrer"><ExternalLink className="size-3 shrink-0" aria-hidden="true" />{url}</a> : <p className="text-xs text-muted-foreground">Ainda não publicado</p>}
-            <dl className="space-y-1 text-xs text-muted-foreground">
+        return <article key={project.id} className={styles.project}>
+          <Link href={`/sites/${project.id}`} aria-label={`Abrir projeto ${project.name}`} tabIndex={-1}>
+            <ProjectThumb projectId={project.id} fallback={project.name.trim().charAt(0).toUpperCase() || "?"} />
+          </Link>
+          <div className={styles.projectContent}>
+            <Badge variant={project.status === "published" ? "default" : "secondary"}>{projectStatusLabel(project.status)}</Badge>
+            <h2 className={`${styles.projectTitle} mt-3`}>{project.name}</h2>
+            <p className={styles.projectClient}>{project.client_context.name || "Sem cliente vinculado"}</p>
+            <dl className={styles.projectMeta}>
               <div><dt className="inline">Última alteração: </dt><dd className="inline">{formatRelative(project.updated_at)}</dd></div>
-              <div><dt className="inline">Modelo: </dt><dd className="inline break-all">{modelModeLabel(project.model_mode)}{project.model_id ? ` · ${project.model_id}` : ""}</dd></div>
+              <div><dt className="inline">IA: </dt><dd className="inline">{modelModeLabel(project.model_mode)}{project.model_id ? ` · ${project.model_id}` : ""}</dd></div>
               <div><dt className="inline">Última publicação: </dt><dd className="inline">{project.last_published_at ? formatRelative(project.last_published_at) : "Nenhuma"}</dd></div>
             </dl>
+            {url ? <a className="mt-3 inline-flex min-h-9 items-center gap-2 text-xs text-primary hover:underline" href={url} target="_blank" rel="noopener noreferrer"><ExternalLink className="size-3.5 shrink-0" aria-hidden="true" />Ver site publicado</a> : <p className="mt-3 text-xs text-muted-foreground">Ainda não publicado</p>}
+            <div className={styles.projectFooter}>
+              <Link href={`/sites/${project.id}`} aria-label={`Editar ${project.name}`} className={styles.editLink}>Continuar edição<ArrowRight className="size-4" aria-hidden="true" /></Link>
+              <button type="button" onClick={() => setProjectToDelete(project)} className={styles.deleteButton} title={`Excluir site "${project.name}"`} aria-label={`Excluir site "${project.name}"`}><Trash2 className="size-4" aria-hidden="true" /></button>
+            </div>
           </div>
         </article>;
       })}</div>}
@@ -125,7 +115,7 @@ export default function SitesPage(): React.JSX.Element {
 
     {projectToDelete && (
       <Dialog open={Boolean(projectToDelete)} onOpenChange={(open) => { if (!open && !deleting) setProjectToDelete(null); }}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className={`${styles.dialog} ${styles.paddedDialog} sm:max-w-md`}>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-destructive">
               <Trash2 className="size-5 text-destructive" />

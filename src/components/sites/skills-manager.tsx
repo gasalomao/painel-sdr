@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { toast } from "sonner";
+import styles from "@/app/sites/sites.module.css";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -161,7 +162,7 @@ export function SkillsManager(): React.JSX.Element {
         {pendingDelete === skill.id && <div role="alertdialog" aria-label="Confirmar exclusão" className="space-y-2 rounded-lg border border-destructive/40 p-3 text-sm"><p>{isOverrideSkill(skill) ? "Remover o override privado e voltar à skill padrão?" : `Excluir definitivamente "${skill.name}"? Projetos que a usam param de recebê-la.`}</p><div className="flex gap-2"><Button size="sm" variant="destructive" disabled={busy} onClick={() => void remove(skill)}>Confirmar</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => setPendingDelete(null)}>Cancelar</Button></div></div>}
       </article>)}</div>}
     {form && <Dialog open onOpenChange={(next) => { if (!busy && !next) closeForm(); }}>
-      <DialogContent showCloseButton={false} className="max-h-[92dvh] overflow-y-auto sm:max-w-2xl">
+      <DialogContent showCloseButton={false} className={`${styles.dialog} ${styles.paddedDialog} sm:max-w-2xl`}>
         <DialogHeader>
           <DialogTitle>{form.editing ? `Editar "${form.name}"` : "Nova skill"}</DialogTitle>
           <DialogDescription>{builtinForm ? "Você está criando um override privado desta skill padrão. O slug original é preservado e a segurança do agente não é alterada." : "Instruções orientam o agente; elas não ampliam permissões nem substituem as regras de segurança."}</DialogDescription>

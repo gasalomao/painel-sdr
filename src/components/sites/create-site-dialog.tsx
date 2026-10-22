@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Bot, Sparkles } from "lucide-react";
+import { Bot } from "lucide-react";
+import styles from "@/app/sites/sites.module.css";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -123,11 +124,11 @@ export function CreateSiteDialog({ open, onOpenChange }: { open: boolean; onOpen
 
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!creating) onOpenChange(next); }}>
-      <DialogContent showCloseButton={false} className="max-h-[85vh] sm:max-w-xl flex flex-col p-0 gap-0 overflow-hidden shadow-2xl">
+      <DialogContent showCloseButton={false} className={`${styles.dialog} sm:max-w-xl flex flex-col`}>
         <DialogHeader className="px-6 pt-5 pb-3 border-b border-border/40 shrink-0">
           <DialogTitle className="text-lg font-semibold">Criar novo site</DialogTitle>
           <DialogDescription className="text-xs text-muted-foreground">
-            Configure as informações iniciais e o modelo de IA que construirá o site.
+            Conte o que precisa. A IA começa a criar após a confirmação; o site só será publicado quando você decidir.
           </DialogDescription>
         </DialogHeader>
 
@@ -137,7 +138,7 @@ export function CreateSiteDialog({ open, onOpenChange }: { open: boolean; onOpen
               <legend className="sr-only">Dados do novo site</legend>
 
               {/* Origem */}
-              <label className="block space-y-1 text-sm font-medium">Origem
+              <label className="block space-y-1 text-sm font-medium">Como deseja começar?
                 <select className={selectClass} value={mode} onChange={(event) => { setMode(event.target.value); setLeadId(""); setContext({}); setConfirmed([]); }}>
                   <option value="blank">Do zero</option>
                   <option value="lead">A partir de um cliente/lead</option>
@@ -165,9 +166,9 @@ export function CreateSiteDialog({ open, onOpenChange }: { open: boolean; onOpen
                 <label className="space-y-1 text-sm font-medium">Nome do projeto
                   <Input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder="Ex: Padaria Central" />
                 </label>
-                <label className="space-y-1 text-sm font-medium">Slug (opcional)
+                <label className="space-y-1 text-sm font-medium">Endereço do site (opcional)
                   <Input maxLength={80} pattern="[a-z0-9]+(-[a-z0-9]+)*" value={slug} onChange={(event) => setSlug(event.target.value)} placeholder="padaria-central" />
-                  <span className="text-[11px] text-muted-foreground block">Letras minúsculas, números e hífens.</span>
+                  <span className="text-xs text-muted-foreground block">Use minúsculas, números e hífens, ou deixe a geração automática.</span>
                 </label>
               </div>
 
@@ -184,17 +185,13 @@ export function CreateSiteDialog({ open, onOpenChange }: { open: boolean; onOpen
                   onChange={(event) => setBriefing(event.target.value)}
                   placeholder="Descreva o negócio, as páginas, o estilo visual e o que o visitante deve fazer."
                 />
-                <div className="flex flex-wrap items-center justify-between gap-1 text-xs text-muted-foreground">
-                  <p id="create-site-briefing-help">A geração começa após criar o projeto. Use somente informações confirmadas.</p>
-                  <span className="inline-flex items-center gap-1 text-[11px] text-primary font-medium" title="Sites construídos do zero com direção de arte exclusiva (pbakaus/impeccable)">
-                    <Sparkles className="size-3 text-primary" aria-hidden="true" />
-                    Impeccable Design Ativo
-                  </span>
-                </div>
+                <p id="create-site-briefing-help" className="text-xs leading-relaxed text-muted-foreground">Inclua o negócio, as seções e a ação esperada do visitante. Use somente informações confirmadas.</p>
               </div>
 
               {/* Modelo de Inteligência Artificial */}
-              <div className="space-y-3 rounded-lg border border-border/70 bg-card/60 p-3.5">
+              <details className="space-y-3 border-t border-border pt-3">
+                <summary className="cursor-pointer text-sm font-medium">Escolha da IA <span className="text-xs font-normal text-muted-foreground">· {modelMode === "manual" ? selectedModel?.name ?? "Manual" : modelMode === "quality" ? "Qualidade" : modelMode === "economy" ? "Econômico" : "Automática (recomendada)"}</span></summary>
+                <p className="text-xs text-muted-foreground">Não precisa escolher um modelo para começar. Altere apenas se tiver uma preferência.</p>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <label htmlFor="create-site-model-select" className="text-xs font-semibold text-foreground flex items-center gap-1.5">
                     <Bot className="size-4 text-primary" aria-hidden="true" />
@@ -364,7 +361,7 @@ export function CreateSiteDialog({ open, onOpenChange }: { open: boolean; onOpen
                     </p>
                   )}
                 </div>
-              </div>
+              </details>
 
               {/* Contexto confirmado */}
               {(mode === "blank" || leadId) && (
@@ -372,11 +369,10 @@ export function CreateSiteDialog({ open, onOpenChange }: { open: boolean; onOpen
                   open={Boolean(leadId)}
                   className="rounded-lg border border-border/70 p-3 space-y-3 group"
                 >
-                  <summary className="cursor-pointer font-medium text-xs text-foreground flex items-center justify-between select-none">
+                  <summary className="cursor-pointer font-medium text-sm text-foreground select-none">
                     <span>
-                      Contexto confirmado {confirmed.length > 0 && <span className="text-primary font-semibold">({confirmed.length} confirmado{confirmed.length > 1 ? "s" : ""})</span>}
+                      Dados do negócio {confirmed.length > 0 ? <span className="text-primary font-semibold">({confirmed.length} confirmado{confirmed.length > 1 ? "s" : ""})</span> : <span className="text-xs font-normal text-muted-foreground">· opcional</span>}
                     </span>
-                    <span className="text-[11px] text-muted-foreground group-open:hidden">Clique para expandir</span>
                   </summary>
                   <p className="text-xs text-muted-foreground">
                     Confira os valores e marque cada dado autorizado. Dados ausentes podem ser preenchidos; telefone não é presumido como WhatsApp.

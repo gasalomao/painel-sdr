@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { ArrowLeft, CheckCircle2, ExternalLink, Rocket } from "lucide-react";
+import styles from "../sites.module.css";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -33,6 +34,7 @@ function Editor({ projectId, clientId, draftScope }: { projectId: string; client
   const router = useRouter();
   const [snapshot, setSnapshot] = useState<{ project: WebsiteProject; files: WebsiteFiles } | null>(null);
   const [previousFiles, setPreviousFiles] = useState<WebsiteFiles | null>(null);
+  const lastLoadedFiles = useRef<WebsiteFiles | null>(null);
   const [checkpointPreview, setCheckpointPreview] = useState<{ version: string; run_id: string; base_revision_id: string | null; files: WebsiteFiles } | null>(null);
   const checkpointEtag = useRef<{ runId: string; value: string } | null>(null);
   const snapshotRevision = useRef<string | null>(null);
@@ -40,6 +42,14 @@ function Editor({ projectId, clientId, draftScope }: { projectId: string; client
   const [runsReady, setRunsReady] = useState(false);
   const [error, setError] = useState("");
   const [tab, setTab] = useState("chat");
+  const [splitLayout, setSplitLayout] = useState(false);
+  useEffect(() => {
+    const media = window.matchMedia("(min-width: 1024px) and (max-width: 1535px)");
+    const update = () => setSplitLayout(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
   const [previewSubtab, setPreviewSubtab] = useState<"preview" | "files" | "realtime">("preview");
   const [working, setWorking] = useState(false);
   const [operation, setOperation] = useState("");
@@ -70,8 +80,9 @@ function Editor({ projectId, clientId, draftScope }: { projectId: string; client
       if (first.project.client_id !== clientId || latest.project.client_id !== clientId || latest.project.id !== projectId) throw new ApiError("Acesso não permitido.", 403);
       if (first.project.current_revision_id !== latest.project.current_revision_id) continue;
       if (!signal?.aborted && sequence === reloadSequence.current) {
-        // Salva estado anterior para comparação
-        if (snapshot?.files) setPreviousFiles(snapshot.files);
+        // A comparação não pode tornar o carregamento dependente do próprio snapshot.
+        if (lastLoadedFiles.current) setPreviousFiles(lastLoadedFiles.current);
+        lastLoadedFiles.current = files.files;
         snapshotRevision.current = latest.project.current_revision_id;
         setSnapshot({ project: latest.project, files: files.files });
         setCheckpointPreview(null);
@@ -82,7 +93,7 @@ function Editor({ projectId, clientId, draftScope }: { projectId: string; client
       return;
     }
     throw new ApiError("O projeto está sendo alterado. Aguarde e recarregue.", 409);
-  }, [base, clientId, projectId, snapshot]);
+  }, [base, clientId, projectId]);
 
   const receiveRuns = useCallback((next: WebsiteRun[]) => {
     let completedAgentRun = false;
@@ -365,31 +376,34 @@ function Editor({ projectId, clientId, draftScope }: { projectId: string; client
   const url = safeSiteUrl(project.published_url);
   const disabled = working || hasActive || !runsReady || !deploymentsReady || deploymentPending || project.status === "archived";
   const actionDisabled = disabled || hasDraft;
-  const sections = [["chat", "Chat"], ["preview", "Preview"], ["settings", "Ajustes"]] as const;
+  const allSections = [["chat", "Conversa"], ["preview", "Prévia do site"], ["settings", "Ajustes"]] as const;
+  const sections = splitLayout ? allSections.filter(([key]) => key !== "chat") : allSections;
+  const selectedTab = splitLayout && tab === "chat" ? "preview" : tab;
 
   return <div className="flex h-full min-h-0 flex-col">
-    <header className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border px-3 py-3">
+    <header className={`${styles.editorHeader} flex shrink-0 flex-wrap items-center gap-3 border-b border-border`}>
       <Link href="/sites" aria-label="Voltar para Meus Sites" className="rounded p-2 hover:bg-secondary"><ArrowLeft className="size-4" /></Link>
       <h1 className="min-w-0 max-w-full truncate text-lg font-semibold">{project.name}</h1><Badge variant={project.status === "published" ? "default" : "secondary"}>{projectStatusLabel(project.status)}</Badge>
-      <div className="ml-auto flex flex-wrap gap-2"><Button variant="outline" disabled={actionDisabled} onClick={() => void publishOrValidate(false)}><CheckCircle2 aria-hidden="true" />Validar</Button><Button disabled={actionDisabled} onClick={() => void publishOrValidate(true)}><Rocket aria-hidden="true" />Publicar</Button>{url && <a href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 rounded-lg border border-border px-3 text-sm"><ExternalLink className="size-4" aria-hidden="true" />Ver site</a>}</div>
+      <div className="ml-auto flex flex-wrap gap-2"><Button variant="outline" disabled={actionDisabled} onClick={() => void publishOrValidate(false)}><CheckCircle2 aria-hidden="true" />Verificar site</Button><Button disabled={actionDisabled} onClick={() => void publishOrValidate(true)}><Rocket aria-hidden="true" />Publicar</Button>{url && <a href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 rounded-lg border border-border px-3 text-sm"><ExternalLink className="size-4" aria-hidden="true" />Ver site</a>}</div>
     </header>
-    {hasDraft && <p role="status" className="border-b border-border px-4 py-2 text-xs text-muted-foreground">Salve ou descarte as alterações em Arquivos e Ajustes antes de executar o agente ou publicar. Rascunhos ficam nesta aba durante a navegação, mas são perdidos ao recarregar ou trocar de conta.</p>}
+    <p className={styles.editorHelp}>Peça alterações na conversa e confira a prévia. <strong className="font-medium text-foreground">A prévia não é o site publicado.</strong> Use Publicar para colocar a versão aprovada no ar.</p>
+    {hasDraft && <p role="status" className="border-b border-border px-4 py-2 text-xs text-muted-foreground">Salve ou descarte as alterações em Código e Ajustes antes de executar o agente ou publicar. Rascunhos ficam nesta aba durante a navegação, mas são perdidos ao recarregar ou trocar de conta.</p>}
     {error && <div role="alert" className="flex flex-wrap items-center gap-2 px-4 py-2 text-sm"><p>{error}</p><Button variant="outline" onClick={() => void reload(lifecycle.current?.signal).then(() => loadRuns(lifecycle.current?.signal)).catch((err: unknown) => toast.error(errorMessage(err)))}>Recarregar projeto</Button></div>}
     {!working && (deploymentPending || !deploymentsReady) && <div role="status" className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2 text-xs"><p>{deploymentPending ? "Há uma publicação pendente. Novas alterações estão bloqueadas até a confirmação do servidor." : "Verificando publicações pendentes..."}</p><Button size="sm" variant="outline" onClick={() => setRefresh((value) => value + 1)}>Atualizar estado</Button></div>}
     {operation && <p role="status" className="border-b border-border px-4 py-2 text-sm text-primary">{operation} Mantenha esta página aberta.</p>}
     {operationError && <p role="alert" className="border-b border-destructive/30 px-4 py-2 text-sm">{operationError} <Link href="/sites/settings" className="text-primary underline">Configurações</Link></p>}
-    <div role="tablist" aria-label="Áreas do editor" className="flex shrink-0 border-b border-border lg:hidden">{sections.map(([key, label], index) => <button key={key} role="tab" id={`editor-tab-${key}`} aria-controls={`editor-${key}`} aria-selected={tab === key} tabIndex={tab === key ? 0 : -1} className={`min-h-11 flex-1 text-sm ${tab === key ? "border-b-2 border-primary text-primary" : "text-muted-foreground"}`} onClick={() => setTab(key)} onKeyDown={(event) => {
-      const target = event.key === "ArrowRight" ? (index + 1) % 3 : event.key === "ArrowLeft" ? (index + 2) % 3 : event.key === "Home" ? 0 : event.key === "End" ? 2 : -1;
+    <div role="tablist" aria-label="Áreas do editor" className={styles.editorNav}>{sections.map(([key, label], index) => <button key={key} role="tab" id={`editor-tab-${key}`} aria-controls={`editor-${key}`} aria-selected={selectedTab === key} tabIndex={selectedTab === key ? 0 : -1} className={`min-h-11 flex-1 text-sm ${selectedTab === key ? "border-b-2 border-primary text-primary" : "text-muted-foreground"}`} onClick={() => setTab(key)} onKeyDown={(event) => {
+      const target = event.key === "ArrowRight" ? (index + 1) % sections.length : event.key === "ArrowLeft" ? (index + sections.length - 1) % sections.length : event.key === "Home" ? 0 : event.key === "End" ? sections.length - 1 : -1;
       if (target >= 0) { event.preventDefault(); setTab(sections[target][0]); document.getElementById(`editor-tab-${sections[target][0]}`)?.focus(); }
     }}>{label}</button>)}</div>
-    <div className="min-h-0 flex-1 overflow-auto lg:grid lg:grid-cols-[minmax(260px,360px)_minmax(0,1fr)_minmax(280px,380px)] lg:overflow-hidden">
-      <section id="editor-chat" role="tabpanel" tabIndex={0} aria-label="Chat" className={`${tab === "chat" ? "block" : "hidden"} h-full min-h-0 border-r border-border lg:block lg:overflow-auto`}><SiteChat draftScope={draftScope} projectId={projectId} project={project} activeRun={activeRun} runs={runs} blocked={actionDisabled} onQueued={queued} onRunsChanged={loadRuns} onProjectChanged={reload} onMutationStart={beginMutation} onMutationEnd={endMutation} /></section>
-      <section id="editor-preview" role="tabpanel" tabIndex={0} aria-label="Preview e arquivos" className={`${tab === "preview" ? "flex" : "hidden"} flex-col h-full min-h-0 min-w-0 overflow-hidden lg:flex`}>
+    <div className="min-h-0 flex-1 overflow-auto lg:grid lg:grid-cols-[minmax(300px,360px)_minmax(0,1fr)] 2xl:grid-cols-[minmax(300px,360px)_minmax(0,1fr)_minmax(280px,340px)] lg:overflow-hidden">
+      <section id="editor-chat" role="tabpanel" tabIndex={0} aria-label="Conversa com a IA" className={`${tab === "chat" ? "block" : "hidden"} h-full min-h-0 border-r border-border lg:block lg:overflow-auto`}><SiteChat draftScope={draftScope} projectId={projectId} project={project} activeRun={activeRun} runs={runs} blocked={actionDisabled} onQueued={queued} onRunsChanged={loadRuns} onProjectChanged={reload} onMutationStart={beginMutation} onMutationEnd={endMutation} /></section>
+      <section id="editor-preview" role="tabpanel" tabIndex={0} aria-label="Prévia e arquivos" className={`${tab === "preview" ? "flex" : "hidden"} flex-col h-full min-h-0 min-w-0 overflow-hidden ${tab === "settings" ? "lg:hidden 2xl:flex" : "lg:flex"}`}>
         <Tabs value={previewSubtab} onValueChange={(val) => setPreviewSubtab(val as "preview" | "files" | "realtime")} className="flex flex-1 flex-col h-full min-h-0 min-w-0 gap-0 overflow-hidden">
-          <TabsList className="m-3 self-start shrink-0">
-            <TabsTrigger value="preview">Preview</TabsTrigger>
-            <TabsTrigger value="realtime">Arquivos ao Vivo</TabsTrigger>
-            <TabsTrigger value="files">Editor</TabsTrigger>
+          <TabsList className={`${styles.previewTabs} m-3 self-start shrink-0`} aria-label="Visualização do site">
+            <TabsTrigger value="preview">Prévia</TabsTrigger>
+            <TabsTrigger value="realtime">Alterações ao vivo</TabsTrigger>
+            <TabsTrigger value="files">Código</TabsTrigger>
           </TabsList>
           <TabsContent value="preview" keepMounted className="flex flex-1 flex-col min-h-0 min-w-0 overflow-hidden data-[hidden]:hidden">{checkpointPreview && !hasDraft && checkpointPreview.base_revision_id === project.current_revision_id && <p role="status" className="px-4 py-2 text-xs text-muted-foreground">Rascunho confirmado do agente. Build e aprovação visual ainda pendentes; a revisão salva permanece intacta.</p>}<SitePreview files={!hasDraft && checkpointPreview?.base_revision_id === project.current_revision_id ? checkpointPreview.files : snapshot.files} projectScope={project} revisionId={project.current_revision_id} projectSlug={project.slug} projectName={project.name} /></TabsContent>
           <TabsContent value="realtime" keepMounted className="flex-1 min-h-0 min-w-0 overflow-auto data-[hidden]:hidden">
@@ -403,7 +417,7 @@ function Editor({ projectId, clientId, draftScope }: { projectId: string; client
           <TabsContent value="files" keepMounted className="flex-1 min-h-0 min-w-0 overflow-auto data-[hidden]:hidden"><SiteFilesPanel draftScope={draftScope} projectId={projectId} files={snapshot.files} currentRevisionId={project.current_revision_id} onSaved={reload} onDirtyChange={setFilesDirty} onMutationStart={beginMutation} onMutationEnd={endMutation} disabled={disabled} /></TabsContent>
         </Tabs>
       </section>
-      <aside id="editor-settings" role="tabpanel" tabIndex={0} aria-label="Ajustes do projeto" className={`${tab === "settings" ? "block" : "hidden"} h-full min-h-0 overflow-auto border-l border-border lg:block`}><SiteProjectPanel draftScope={draftScope} project={project} runs={runs} disabled={disabled} filesDirty={filesDirty} refresh={refresh} onDirtyChange={setSettingsDirty} onFilesChanged={reload} onMutationStart={beginMutation} onMutationEnd={endMutation} onPublish={() => void publishOrValidate(true)} onRollback={(id) => void rollback(id)} /></aside>
+      <aside id="editor-settings" role="tabpanel" tabIndex={0} aria-label="Ajustes do projeto" className={`${tab === "settings" ? "block" : "hidden"} h-full min-h-0 overflow-auto border-l border-border 2xl:block`}><SiteProjectPanel draftScope={draftScope} project={project} runs={runs} disabled={disabled} filesDirty={filesDirty} refresh={refresh} onDirtyChange={setSettingsDirty} onFilesChanged={reload} onMutationStart={beginMutation} onMutationEnd={endMutation} onPublish={() => void publishOrValidate(true)} onRollback={(id) => void rollback(id)} /></aside>
     </div>
   </div>;
 }
