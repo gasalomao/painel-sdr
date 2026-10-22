@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import {
   LayoutDashboard, Users, MessageSquare, MapPin, Smartphone, History,
   Bot, Zap, Cpu, LogOut, ArrowLeftRight, Loader2, Shield, ChevronDown,
-  CalendarDays, Globe,
+  CalendarDays, Globe, Coins,
 } from "lucide-react";
 import { NgrokQuickConnect } from "@/components/ngrok-quick-connect";
 import { cn } from "@/lib/utils";
@@ -25,6 +25,7 @@ const pageTitles: Record<string, { title: string; description: string; icon: Rea
   "/automacao": { title: "Automação", description: "Captação → disparo → follow-up no piloto automático", icon: Cpu },
   "/calendario": { title: "Calendário", description: "Agendamentos dos leads — sincronizado com Google Calendar", icon: CalendarDays },
   "/prospeccao-sites": { title: "Prospecção Sites", description: "Empresas sem site — disparo personalizado", icon: Globe },
+  "/tokens": { title: "Tokens IA", description: "Consumo e custos de inteligência artificial", icon: Coins },
 };
 
 type Session = {
