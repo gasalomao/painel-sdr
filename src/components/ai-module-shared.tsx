@@ -1,29 +1,18 @@
 "use client";
 
-import { cn } from "@/lib/utils";
 import {
   useGatewayAccounts,
   accountsForFamily,
   accountsLabelSnippet,
-  accountFriendlyName,
 } from "@/hooks/use-gateway-accounts";
 import { groupModels, isFreeModel, type GroupableModel } from "@/lib/model-grouping";
 
 const PROVIDER_LABEL: Record<string, string> = {
+  nvidia: "NVIDIA NIM",
   combo: "⚡ Combos Virtuais (Resilientes)",
   gateway: "Gateway (Assinatura)",
-  nvidia: "NVIDIA NIM",
   openrouter: "OpenRouter",
   gemini: "Google Gemini",
-};
-
-// Cor do cabeçalho de cada grupo de provedor no dropdown.
-const PROVIDER_COLOR: Record<string, string> = {
-  combo: "text-amber-400 font-bold",
-  gateway: "text-emerald-400",
-  nvidia: "text-green-400 font-bold",
-  openrouter: "text-purple-400",
-  gemini: "text-blue-400",
 };
 
 /**
@@ -64,7 +53,9 @@ export function ModelOptions({ models, markNoTools = false }: { models: Groupabl
             {sub.items.map(m => {
               const raw = m.rawId || m.id;
               let label = m.name && m.name !== raw ? `${raw} — ${m.name}` : raw;
-              if (m.provider === "nvidia" && /nemotron/i.test(raw)) {
+              if (m.provider === "nvidia" && m.isFreeEndpoint) {
+                label = `★ [FREE ENDPOINT] ${label}`;
+              } else if (m.provider === "nvidia" && /nemotron/i.test(raw)) {
                 label = `⚡ ${label}`;
               } else if (isFreeModel(m)) {
                 label = `★ [GRÁTIS] ${label}`;

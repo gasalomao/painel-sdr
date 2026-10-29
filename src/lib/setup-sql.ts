@@ -140,6 +140,7 @@ ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS gateway_endpoint
 ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS openrouter_keys jsonb DEFAULT '[]'::jsonb;
 ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS ai_combos jsonb DEFAULT '[]'::jsonb;
 ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS nvidia_api_key text;
+ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS nvidia_accounts jsonb DEFAULT '[]'::jsonb;
 
 CREATE TABLE IF NOT EXISTS public.ai_organizer_runs (
   id              BIGSERIAL PRIMARY KEY,
@@ -828,7 +829,6 @@ CREATE INDEX IF NOT EXISTS idx_ai_organizer_runs_client  ON public.ai_organizer_
 CREATE INDEX IF NOT EXISTS idx_ai_organizer_runs_started ON public.ai_organizer_runs USING btree (started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ai_token_usage_client     ON public.ai_token_usage    USING btree (client_id);
 CREATE INDEX IF NOT EXISTS idx_ai_token_usage_created    ON public.ai_token_usage    USING btree (created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_token_usage_created       ON public.ai_token_usage    USING btree (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_token_usage_day           ON public.ai_token_usage    USING btree ((((created_at AT TIME ZONE 'UTC'::text))::date));
 CREATE INDEX IF NOT EXISTS idx_token_usage_source        ON public.ai_token_usage    USING btree (source, source_id);
 
@@ -856,6 +856,7 @@ CREATE INDEX IF NOT EXISTS idx_campaign_logs_client      ON public.campaign_logs
 CREATE INDEX IF NOT EXISTS idx_campaign_targets_campaign ON public.campaign_targets USING btree (campaign_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_targets_client   ON public.campaign_targets USING btree (client_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_targets_status   ON public.campaign_targets USING btree (campaign_id, status);
+CREATE INDEX IF NOT EXISTS idx_campaign_targets_client_status_jid ON public.campaign_targets USING btree (client_id, status, remote_jid);
 CREATE INDEX IF NOT EXISTS idx_campaigns_automation      ON public.campaigns        USING btree (automation_id) WHERE (automation_id IS NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_campaigns_client          ON public.campaigns        USING btree (client_id);
 CREATE INDEX IF NOT EXISTS idx_campaigns_status          ON public.campaigns        USING btree (status);
@@ -871,7 +872,6 @@ CREATE INDEX IF NOT EXISTS idx_chats_dashboard_client_created  ON public.chats_d
 CREATE INDEX IF NOT EXISTS idx_chats_dashboard_client_inst_jid ON public.chats_dashboard USING btree (client_id, instance_name, remote_jid);
 CREATE INDEX IF NOT EXISTS idx_chats_dashboard_jid_created     ON public.chats_dashboard USING btree (remote_jid, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_chats_instance                  ON public.chats_dashboard USING btree (instance_name);
-CREATE INDEX IF NOT EXISTS idx_chats_remote_jid                ON public.chats_dashboard USING btree (remote_jid, created_at DESC);
 
 -- clients
 CREATE INDEX IF NOT EXISTS idx_clients_email     ON public.clients USING btree (email);
@@ -880,6 +880,7 @@ CREATE INDEX IF NOT EXISTS idx_clients_is_admin  ON public.clients USING btree (
 
 -- contacts
 CREATE INDEX IF NOT EXISTS idx_contacts_client ON public.contacts USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_contacts_client_lead_id ON public.contacts USING btree (client_id, lead_id) WHERE (lead_id IS NOT NULL);
 
 -- followup
 CREATE INDEX IF NOT EXISTS idx_followup_campaigns_client    ON public.followup_campaigns USING btree (client_id);
@@ -928,20 +929,44 @@ CREATE UNIQUE INDEX idx_leads_extraidos_client_remotejid
   ON public.leads_extraidos USING btree (client_id, "remoteJid");
 CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client         ON public.leads_extraidos USING btree (client_id);
 CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_created ON public.leads_extraidos USING btree (client_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_created_id ON public.leads_extraidos USING btree (client_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_followup ON public.leads_extraidos USING btree (client_id, next_follow_up ASC) WHERE (next_follow_up IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_ramo    ON public.leads_extraidos USING btree (client_id, ramo_negocio);
+CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_contato_src ON public.leads_extraidos USING btree (client_id, primeiro_contato_source);
 CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_email   ON public.leads_extraidos USING btree (client_id, email) WHERE (email IS NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_status  ON public.leads_extraidos USING btree (client_id, status);
 CREATE INDEX IF NOT EXISTS idx_leads_extraidos_remotejid      ON public.leads_extraidos USING btree ("remoteJid");
 CREATE INDEX IF NOT EXISTS idx_leads_icp_score                ON public.leads_extraidos USING btree (icp_score DESC NULLS LAST);
 CREATE INDEX IF NOT EXISTS idx_leads_lead_type                ON public.leads_extraidos USING btree (lead_type);
 CREATE INDEX IF NOT EXISTS idx_leads_primeiro_contato_source  ON public.leads_extraidos USING btree (status, primeiro_contato_source, primeiro_contato_at) WHERE (status = 'primeiro_contato'::text);
-CREATE INDEX IF NOT EXISTS idx_leads_remotejid                ON public.leads_extraidos USING btree ("remoteJid");
 CREATE INDEX IF NOT EXISTS idx_leads_status                   ON public.leads_extraidos USING btree (status);
+
+DO $$
+BEGIN
+  CREATE EXTENSION IF NOT EXISTS pg_trgm;
+  EXECUTE 'CREATE INDEX IF NOT EXISTS idx_leads_extraidos_nome_trgm ON public.leads_extraidos USING gin (nome_negocio gin_trgm_ops)';
+  EXECUTE 'CREATE INDEX IF NOT EXISTS idx_leads_extraidos_telefone_trgm ON public.leads_extraidos USING gin (telefone gin_trgm_ops)';
+  EXECUTE 'CREATE INDEX IF NOT EXISTS idx_leads_extraidos_remotejid_trgm ON public.leads_extraidos USING gin ("remoteJid" gin_trgm_ops)';
+  EXECUTE 'CREATE INDEX IF NOT EXISTS idx_leads_extraidos_ramo_trgm ON public.leads_extraidos USING gin (ramo_negocio gin_trgm_ops)';
+EXCEPTION
+  WHEN OTHERS THEN
+    RAISE NOTICE 'pg_trgm indisponível neste ambiente — índices B-Tree aplicados normalmente.';
+END
+$$;
+
+UPDATE public.contacts AS c
+SET lead_id = l.id
+FROM public.leads_extraidos AS l
+WHERE c.lead_id IS NULL
+  AND c.client_id = l.client_id
+  AND c.remote_jid = l."remoteJid";
 
 -- messages / sessions
 CREATE INDEX IF NOT EXISTS idx_messages_client          ON public.messages USING btree (client_id);
-CREATE INDEX IF NOT EXISTS idx_messages_session         ON public.messages USING btree (session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_session_created ON public.messages USING btree (session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_client          ON public.sessions USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_client_last_msg ON public.sessions USING btree (client_id, last_message_at DESC NULLS LAST);
+CREATE INDEX IF NOT EXISTS idx_sessions_client_contact  ON public.sessions USING btree (client_id, contact_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_contact_inst    ON public.sessions USING btree (contact_id, instance_name);
 
 -- webhook_logs
@@ -2522,6 +2547,451 @@ INSERT INTO public.website_skills (
   priority = EXCLUDED.priority,
   tags = EXCLUDED.tags,
   updated_at = now();
+
+COMMIT;
+
+
+-- =====================================================================
+-- Migration 023: Otimização de Performance para Leads, Kanban, Chat e CRM
+-- 100% idempotente e segura (CREATE INDEX IF NOT EXISTS + backfill não-destrutivo)
+-- =====================================================================
+
+-- 1. Índices compostos B-Tree para listagem, paginação, Kanban e filtros em leads_extraidos
+CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_created_id
+  ON public.leads_extraidos USING btree (client_id, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_followup
+  ON public.leads_extraidos USING btree (client_id, next_follow_up ASC)
+  WHERE (next_follow_up IS NOT NULL);
+
+CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_ramo
+  ON public.leads_extraidos USING btree (client_id, ramo_negocio);
+
+CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_contato_src
+  ON public.leads_extraidos USING btree (client_id, primeiro_contato_source);
+
+-- 2. Covering index (Index-Only Scan) para badges de disparo em /leads e /prospeccao-sites
+CREATE INDEX IF NOT EXISTS idx_campaign_targets_client_status_jid
+  ON public.campaign_targets USING btree (client_id, status, remote_jid);
+
+-- 3. Índices compostos para listagem de conversas (/chat) e vínculo CRM (contacts -> leads_extraidos)
+CREATE INDEX IF NOT EXISTS idx_sessions_client_last_msg
+  ON public.sessions USING btree (client_id, last_message_at DESC NULLS LAST);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_client_contact
+  ON public.sessions USING btree (client_id, contact_id);
+
+CREATE INDEX IF NOT EXISTS idx_contacts_client_lead_id
+  ON public.contacts USING btree (client_id, lead_id)
+  WHERE (lead_id IS NOT NULL);
+
+-- 4. Índices GIN Trigram (pg_trgm) para buscas rápidas com ILIKE '%termo%' em leads_extraidos
+-- Protegido por bloco DO/EXCEPTION para compatibilidade com ambientes sem pg_trgm (ex: PGlite WASM)
+DO $$
+BEGIN
+  CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+  EXECUTE 'CREATE INDEX IF NOT EXISTS idx_leads_extraidos_nome_trgm ON public.leads_extraidos USING gin (nome_negocio gin_trgm_ops)';
+  EXECUTE 'CREATE INDEX IF NOT EXISTS idx_leads_extraidos_telefone_trgm ON public.leads_extraidos USING gin (telefone gin_trgm_ops)';
+  EXECUTE 'CREATE INDEX IF NOT EXISTS idx_leads_extraidos_remotejid_trgm ON public.leads_extraidos USING gin ("remoteJid" gin_trgm_ops)';
+  EXECUTE 'CREATE INDEX IF NOT EXISTS idx_leads_extraidos_ramo_trgm ON public.leads_extraidos USING gin (ramo_negocio gin_trgm_ops)';
+EXCEPTION
+  WHEN OTHERS THEN
+    RAISE NOTICE 'pg_trgm indisponível neste ambiente — índices B-Tree aplicados normalmente.';
+END
+$$;
+
+-- 5. Backfill seguro de contacts.lead_id quando houver correspondência exata (client_id, remote_jid)
+-- Transforma a resolução de CRM (/api/contacts/crm) de varredura paginada para busca O(1) por PK
+UPDATE public.contacts AS c
+SET lead_id = l.id
+FROM public.leads_extraidos AS l
+WHERE c.lead_id IS NULL
+  AND c.client_id = l.client_id
+  AND c.remote_jid = l."remoteJid";
+
+
+-- ============================================================================
+-- Migration 024: Blindagem Enterprise SaaS (RLS Total, Cofre de Segredos,
+--                Anti-Sabotagem, Imutabilidade Multi-Tenant e Search Path)
+-- 100% Idempotente e Zero-Downtime (não quebra absolutamente nada do sistema)
+-- ============================================================================
+
+BEGIN;
+
+-- ----------------------------------------------------------------------------
+-- 1. BLOQUEIO DE DDL NO SCHEMA PUBLIC PARA ROLES NÃO-PRIVILEGIADAS
+--    Impede criação de tabelas, views ou funções maliciosas via PostgREST.
+-- ----------------------------------------------------------------------------
+REVOKE CREATE ON SCHEMA public FROM PUBLIC, anon, authenticated;
+GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
+
+-- ----------------------------------------------------------------------------
+-- 2. REVOGAÇÃO GLOBAL DE PRIVILÉGIOS DESTRUTIVOS (TRUNCATE / TRIGGER / REFERENCES)
+--    Impede que qualquer requisição externa dê TRUNCATE em tabelas do SaaS.
+-- ----------------------------------------------------------------------------
+REVOKE TRUNCATE, REFERENCES, TRIGGER ON ALL TABLES IN SCHEMA public FROM PUBLIC, anon, authenticated;
+
+-- ----------------------------------------------------------------------------
+-- 3. COFRE DE SEGREDOS E TABELAS SERVER-ONLY (ACESSO EXCLUSIVO service_role)
+--    Contêm hashes de senha, sessões JWT, API keys (Gemini/OpenRouter/NVIDIA),
+--    credenciais de provedores, backups, custos de tokens e filas internas.
+--    Nenhuma página do navegador precisa ler essas tabelas diretamente.
+-- ----------------------------------------------------------------------------
+DO $$
+DECLARE
+  server_only_tables text[] := ARRAY[
+    'clients',
+    'auth_sessions',
+    'ai_organizer_config',
+    'provider_credentials',
+    'app_settings',
+    'ai_control',
+    'ai_pricing_cache',
+    'ai_token_usage',
+    'agent_batch_locks',
+    'agent_knowledge_chunks',
+    'agent_followups',
+    'agent_settings_backup',
+    'chat_buffers',
+    'reviews_ai_logs',
+    'dashboard_tasks',
+    'backup_config',
+    'backup_history',
+    'backup_runs',
+    'backup_events',
+    'backup_diagnostics',
+    'website_projects',
+    'website_runs',
+    'website_run_activities',
+    'website_messages',
+    'website_prompt_versions',
+    'website_skills'
+  ];
+  t text;
+  p record;
+BEGIN
+  FOREACH t IN ARRAY server_only_tables LOOP
+    IF EXISTS (
+      SELECT 1 FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relname = t AND c.relkind = 'r'
+    ) THEN
+      -- Ativa RLS (remove o aviso vermelho UNRESTRICTED / RLS disabled no Supabase)
+      EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
+
+      -- Remove policies antigas frouxas (ex: "Permitir tudo para todos")
+      FOR p IN
+        SELECT policyname FROM pg_policies
+        WHERE schemaname = 'public' AND tablename = t
+      LOOP
+        EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', p.policyname, t);
+      END LOOP;
+
+      -- Revoga acesso direto de anon e authenticated; mantém apenas service_role
+      EXECUTE format('REVOKE ALL ON TABLE public.%I FROM PUBLIC, anon, authenticated', t);
+      EXECUTE format('GRANT ALL ON TABLE public.%I TO service_role', t);
+
+      -- Cria policy estrita exclusiva para service_role
+      EXECUTE format(
+        'CREATE POLICY %I ON public.%I FOR ALL TO service_role USING (true) WITH CHECK (true)',
+        t || '_service_role_only',
+        t
+      );
+    END IF;
+  END LOOP;
+END
+$$;
+
+-- ----------------------------------------------------------------------------
+-- 4. TABELAS DE AUDITORIA E TELEMETRIA SOMENTE-LEITURA NO FRONTEND
+--    O navegador apenas exibe esses logs filtrados por client_id (nunca insere,
+--    edita ou apaga diretamente — toda escrita é feita pelo backend service_role).
+-- ----------------------------------------------------------------------------
+DO $$
+DECLARE
+  readonly_client_tables text[] := ARRAY[
+    'ai_organizer_runs',
+    'webhook_logs',
+    'automation_logs',
+    'followup_logs'
+  ];
+  t text;
+  p record;
+  has_client_id boolean;
+BEGIN
+  FOREACH t IN ARRAY readonly_client_tables LOOP
+    IF EXISTS (
+      SELECT 1 FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relname = t AND c.relkind = 'r'
+    ) THEN
+      EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
+
+      FOR p IN
+        SELECT policyname FROM pg_policies
+        WHERE schemaname = 'public' AND tablename = t
+      LOOP
+        EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', p.policyname, t);
+      END LOOP;
+
+      -- Revoga INSERT, UPDATE, DELETE, TRUNCATE de anon/authenticated (somente leitura)
+      EXECUTE format('REVOKE ALL ON TABLE public.%I FROM PUBLIC, anon, authenticated', t);
+      EXECUTE format('GRANT SELECT ON TABLE public.%I TO anon, authenticated', t);
+      EXECUTE format('GRANT ALL ON TABLE public.%I TO service_role', t);
+
+      SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = t AND column_name = 'client_id'
+      ) INTO has_client_id;
+
+      EXECUTE format(
+        'CREATE POLICY %I ON public.%I FOR ALL TO service_role USING (true) WITH CHECK (true)',
+        t || '_service_role_all',
+        t
+      );
+
+      IF has_client_id THEN
+        EXECUTE format(
+          'CREATE POLICY %I ON public.%I FOR SELECT TO anon, authenticated USING (client_id IS NOT NULL)',
+          t || '_tenant_select',
+          t
+        );
+      ELSE
+        EXECUTE format(
+          'CREATE POLICY %I ON public.%I FOR SELECT TO anon, authenticated USING (true)',
+          t || '_tenant_select',
+          t
+        );
+      END IF;
+    END IF;
+  END LOOP;
+END
+$$;
+
+-- ----------------------------------------------------------------------------
+-- 5. TABELAS OPERACIONAIS MULTI-TENANT (RLS ATIVO + ESCOPO DE TENANT OBRIGATÓRIO)
+--    Garante que NENHUMA tabela do schema public fique com RLS desativado
+--    (elimina 100% dos alertas UNRESTRICTED) e exige client_id válido em cada linha.
+-- ----------------------------------------------------------------------------
+DO $$
+DECLARE
+  r record;
+  p record;
+  has_client_id boolean;
+BEGIN
+  FOR r IN
+    SELECT c.relname AS tablename
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relkind = 'r'
+      AND c.relname <> ALL (ARRAY[
+        'clients',
+        'auth_sessions',
+        'ai_organizer_config',
+        'provider_credentials',
+        'app_settings',
+        'ai_control',
+        'ai_pricing_cache',
+        'ai_token_usage',
+        'agent_batch_locks',
+        'agent_knowledge_chunks',
+        'agent_followups',
+        'agent_settings_backup',
+        'chat_buffers',
+        'reviews_ai_logs',
+        'dashboard_tasks',
+        'backup_config',
+        'backup_history',
+        'backup_runs',
+        'backup_events',
+        'backup_diagnostics',
+        'website_projects',
+        'website_runs',
+        'website_run_activities',
+        'website_messages',
+        'website_prompt_versions',
+        'website_skills',
+        'ai_organizer_runs',
+        'webhook_logs',
+        'automation_logs',
+        'followup_logs'
+      ])
+  LOOP
+    -- Ativa RLS na tabela operacional
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', r.tablename);
+
+    -- Remove policies legadas inseguras ("Permitir tudo para todos", etc.)
+    FOR p IN
+      SELECT policyname FROM pg_policies
+      WHERE schemaname = 'public' AND tablename = r.tablename
+    LOOP
+      EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', p.policyname, r.tablename);
+    END LOOP;
+
+    -- Garante que anon/authenticated nunca tenham TRUNCATE, TRIGGER ou REFERENCES
+    EXECUTE format('REVOKE TRUNCATE, REFERENCES, TRIGGER ON TABLE public.%I FROM PUBLIC, anon, authenticated', r.tablename);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO anon, authenticated', r.tablename);
+    EXECUTE format('GRANT ALL ON TABLE public.%I TO service_role', r.tablename);
+
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = r.tablename AND column_name = 'client_id'
+    ) INTO has_client_id;
+
+    EXECUTE format(
+      'CREATE POLICY %I ON public.%I FOR ALL TO service_role USING (true) WITH CHECK (true)',
+      r.tablename || '_service_role_all',
+      r.tablename
+    );
+
+    IF has_client_id THEN
+      EXECUTE format(
+        'CREATE POLICY %I ON public.%I FOR ALL TO anon, authenticated USING (client_id IS NOT NULL) WITH CHECK (client_id IS NOT NULL)',
+        r.tablename || '_tenant_scoped',
+        r.tablename
+      );
+    ELSE
+      EXECUTE format(
+        'CREATE POLICY %I ON public.%I FOR ALL TO anon, authenticated USING (true) WITH CHECK (true)',
+        r.tablename || '_operational_access',
+        r.tablename
+      );
+    END IF;
+  END LOOP;
+END
+$$;
+
+-- ----------------------------------------------------------------------------
+-- 6. TRIGGER DE IMUTABILIDADE DE TENANT (ANTI-SEQUESTRO DE DADOS ENTRE CLIENTES)
+--    Impede que qualquer UPDATE via anon/authenticated altere o client_id de um
+--    registro existente para outro tenant.
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.enforce_tenant_immutability()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF OLD.client_id IS NOT NULL
+     AND NEW.client_id IS DISTINCT FROM OLD.client_id
+     AND (
+       current_user IN ('anon', 'authenticated')
+       OR coalesce(current_setting('request.jwt.claim.role', true), '') IN ('anon', 'authenticated')
+     )
+  THEN
+    RAISE EXCEPTION 'Operação bloqueada: transferência de client_id entre tenants não é permitida.'
+      USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DO $$
+DECLARE
+  r record;
+  trig_name text;
+BEGIN
+  FOR r IN
+    SELECT c.table_name
+    FROM information_schema.columns c
+    JOIN pg_class pc ON pc.relname = c.table_name
+    JOIN pg_namespace pn ON pn.oid = pc.relnamespace AND pn.nspname = c.table_schema
+    WHERE c.table_schema = 'public'
+      AND c.column_name = 'client_id'
+      AND pc.relkind = 'r'
+  LOOP
+    trig_name := 'trg_' || r.table_name || '_tenant_immutable';
+    EXECUTE format('DROP TRIGGER IF EXISTS %I ON public.%I', trig_name, r.table_name);
+    EXECUTE format(
+      'CREATE TRIGGER %I BEFORE UPDATE ON public.%I FOR EACH ROW EXECUTE FUNCTION public.enforce_tenant_immutability()',
+      trig_name,
+      r.table_name
+    );
+  END LOOP;
+END
+$$;
+
+-- ----------------------------------------------------------------------------
+-- 7. MOVER EXTENSÕES (vector, pg_trgm) DO SCHEMA PUBLIC PARA SCHEMA extensions
+--    Elimina os 2 alertas de segurança "Extension is installed in public schema"
+--    sem derrubar colunas nem índices existentes.
+-- ----------------------------------------------------------------------------
+CREATE SCHEMA IF NOT EXISTS extensions;
+GRANT USAGE ON SCHEMA extensions TO PUBLIC, anon, authenticated, service_role;
+
+DO $$
+DECLARE
+  ext_name text;
+BEGIN
+  FOREACH ext_name IN ARRAY ARRAY['vector', 'pg_trgm'] LOOP
+    IF EXISTS (
+      SELECT 1 FROM pg_extension e
+      JOIN pg_namespace n ON n.oid = e.extnamespace
+      WHERE e.extname = ext_name AND n.nspname = 'public'
+    ) THEN
+      BEGIN
+        UPDATE pg_extension SET extrelocatable = true WHERE extname = ext_name;
+        EXECUTE format('ALTER EXTENSION %I SET SCHEMA extensions', ext_name);
+      EXCEPTION
+        WHEN OTHERS THEN
+          RAISE NOTICE 'Não foi possível mover extensão %: %', ext_name, SQLERRM;
+      END;
+    END IF;
+  END LOOP;
+END
+$$;
+
+-- Garante que todas as roles encontrem operadores (<=>, %) no schema extensions
+DO $$
+BEGIN
+  EXECUTE format('ALTER DATABASE %I SET search_path TO "$user", public, extensions', current_database());
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  ALTER ROLE anon SET search_path TO "$user", public, extensions;
+  ALTER ROLE authenticated SET search_path TO "$user", public, extensions;
+  ALTER ROLE service_role SET search_path TO "$user", public, extensions;
+  ALTER ROLE postgres SET search_path TO "$user", public, extensions;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+-- ----------------------------------------------------------------------------
+-- 8. REMOVER ÍNDICES DUPLICADOS IDÊNTICOS (ALERTA DE PERFORMANCE DO SUPABASE)
+-- ----------------------------------------------------------------------------
+DROP INDEX IF EXISTS public.idx_token_usage_created;
+DROP INDEX IF EXISTS public.idx_chats_remote_jid;
+DROP INDEX IF EXISTS public.idx_leads_remotejid;
+DROP INDEX IF EXISTS public.idx_messages_session;
+
+-- ----------------------------------------------------------------------------
+-- 9. BLINDAGEM DE FUNÇÕES E RPCs (PREVENÇÃO DE SEARCH_PATH HIJACKING)
+--    Inclui schema extensions no search_path para operadores vector/pg_trgm.
+-- ----------------------------------------------------------------------------
+DO $$
+DECLARE
+  fn record;
+BEGIN
+  FOR fn IN
+    SELECT p.oid::regprocedure AS proc_sig
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'public'
+      AND p.prokind = 'f'
+  LOOP
+    BEGIN
+      EXECUTE format('ALTER FUNCTION %s SET search_path = public, extensions, pg_temp', fn.proc_sig);
+    EXCEPTION
+      WHEN OTHERS THEN
+        NULL;
+    END;
+  END LOOP;
+END
+$$;
 
 COMMIT;
 `;

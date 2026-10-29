@@ -12,7 +12,13 @@ if (!existsSync(sqlPath)) {
   process.exit(1);
 }
 
-const APPENDED_MIGRATIONS = ["016_website_studio.sql", "017_website_studio_completion_guard.sql", "018_enable_impeccable_skill.sql"];
+const APPENDED_MIGRATIONS = [
+  "016_website_studio.sql",
+  "017_website_studio_completion_guard.sql",
+  "018_enable_impeccable_skill.sql",
+  "023_performance_leads_indexes.sql",
+  "024_enterprise_security_hardening.sql",
+];
 
 let sql = readFileSync(sqlPath, "utf8");
 for (const migration of APPENDED_MIGRATIONS) {

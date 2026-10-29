@@ -1,18 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
-import { supabase, supabaseAdmin } from "@/lib/supabase";
 import { requireClientId } from "@/lib/tenant";
 import { listAvailableOpenRouterEmbeddingModels } from "@/lib/openrouter-model-discovery";
 import { formatModelRef } from "@/lib/ai-provider";
+import { getAiKeys } from "@/lib/ai-keys";
 
 export const dynamic = "force-dynamic";
 
-const adminClient = supabaseAdmin || supabase;
-
 type EmbedModel = {
-  id: string;          // valor STORABLE (bare = Gemini; "openrouter:..." = OpenRouter)
+  id: string;          // valor STORABLE (bare = Gemini; "openrouter:..." = OpenRouter; "nvidia:..." = NVIDIA)
   rawId: string;
   name: string;
-  provider: "gemini" | "openrouter";
+  provider: "gemini" | "openrouter" | "nvidia";
 };
 
 /** Modelos Gemini que suportam embedContent (embeddings). */
@@ -36,25 +34,49 @@ async function listGeminiEmbeddingModels(apiKey: string): Promise<EmbedModel[]> 
   }
 }
 
+/** Modelos NVIDIA NIM de embeddings. */
+async function listNvidiaEmbeddingModels(apiKey: string): Promise<EmbedModel[]> {
+  try {
+    const res = await fetch("https://integrate.api.nvidia.com/v1/models", {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+    const json = await res.json();
+    if (!res.ok || !Array.isArray(json?.data)) return [];
+    return json.data
+      .filter((m: any) => /embed/i.test(String(m?.id || "")))
+      .map((m: any) => {
+        const rawId = String(m.id);
+        return {
+          id: formatModelRef("nvidia", rawId),
+          rawId,
+          name: `${rawId} (NVIDIA NIM)`,
+          provider: "nvidia" as const,
+        };
+      });
+  } catch {
+    return [];
+  }
+}
+
 export async function GET(req: NextRequest) {
   try {
     const auth = await requireClientId(req);
     if (!auth.ok) return auth.response;
 
-    const { data: cfg } = await adminClient
-      .from("ai_organizer_config")
-      .select("api_key, openrouter_api_key")
-      .eq("id", 1)
-      .maybeSingle();
-    const geminiKey = cfg?.api_key && String(cfg.api_key).trim() ? String(cfg.api_key).trim() : null;
-    const openrouterKey = (cfg as any)?.openrouter_api_key && String((cfg as any).openrouter_api_key).trim()
-      ? String((cfg as any).openrouter_api_key).trim() : null;
+    const keys = await getAiKeys();
+    const geminiKey = keys.gemini;
+    const openrouterKey = keys.openrouter;
+    const nvidiaKey = keys.nvidia;
 
-    if (!geminiKey && !openrouterKey) {
+    if (!geminiKey && !openrouterKey && !nvidiaKey) {
       return NextResponse.json({ success: false, error: "Nenhuma API Key configurada.", models: [] });
     }
 
-    const [gemini, openrouter] = await Promise.all([
+    const [gemini, openrouter, nvidia] = await Promise.all([
       geminiKey ? listGeminiEmbeddingModels(geminiKey) : Promise.resolve([] as EmbedModel[]),
       openrouterKey
         ? listAvailableOpenRouterEmbeddingModels().then((list) =>
@@ -66,9 +88,10 @@ export async function GET(req: NextRequest) {
             }))
           )
         : Promise.resolve([] as EmbedModel[]),
+      nvidiaKey ? listNvidiaEmbeddingModels(nvidiaKey) : Promise.resolve([] as EmbedModel[]),
     ]);
 
-    return NextResponse.json({ success: true, models: [...gemini, ...openrouter] });
+    return NextResponse.json({ success: true, models: [...nvidia, ...gemini, ...openrouter] });
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err.message, models: [] }, { status: 500 });
   }

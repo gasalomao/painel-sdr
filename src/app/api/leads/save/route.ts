@@ -171,6 +171,20 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Erro ao salvar na base de leads", details: error.message }, { status: 500 });
     }
 
+    // Best-effort: vincula contato existente ao lead salvo para resolução CRM O(1)
+    if (data?.id && remoteJid) {
+      try {
+        await supabase
+          .from("contacts")
+          .update({ lead_id: data.id })
+          .eq("client_id", session.clientId)
+          .eq("remote_jid", remoteJid)
+          .is("lead_id", null);
+      } catch {
+        // ignora falha de vínculo secundário
+      }
+    }
+
     return NextResponse.json({ success: true, data, moved: shouldChangeStatus });
   } catch (err: any) {
     console.error("[SAVE-LEAD] Erro crítico:", err.message);

@@ -136,6 +136,7 @@ ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS gateway_endpoint
 ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS openrouter_keys jsonb DEFAULT '[]'::jsonb;
 ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS ai_combos jsonb DEFAULT '[]'::jsonb;
 ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS nvidia_api_key text;
+ALTER TABLE public.ai_organizer_config ADD COLUMN IF NOT EXISTS nvidia_accounts jsonb DEFAULT '[]'::jsonb;
 
 CREATE TABLE IF NOT EXISTS public.ai_organizer_runs (
   id              BIGSERIAL PRIMARY KEY,
@@ -824,7 +825,6 @@ CREATE INDEX IF NOT EXISTS idx_ai_organizer_runs_client  ON public.ai_organizer_
 CREATE INDEX IF NOT EXISTS idx_ai_organizer_runs_started ON public.ai_organizer_runs USING btree (started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ai_token_usage_client     ON public.ai_token_usage    USING btree (client_id);
 CREATE INDEX IF NOT EXISTS idx_ai_token_usage_created    ON public.ai_token_usage    USING btree (created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_token_usage_created       ON public.ai_token_usage    USING btree (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_token_usage_day           ON public.ai_token_usage    USING btree ((((created_at AT TIME ZONE 'UTC'::text))::date));
 CREATE INDEX IF NOT EXISTS idx_token_usage_source        ON public.ai_token_usage    USING btree (source, source_id);
 
@@ -852,6 +852,7 @@ CREATE INDEX IF NOT EXISTS idx_campaign_logs_client      ON public.campaign_logs
 CREATE INDEX IF NOT EXISTS idx_campaign_targets_campaign ON public.campaign_targets USING btree (campaign_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_targets_client   ON public.campaign_targets USING btree (client_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_targets_status   ON public.campaign_targets USING btree (campaign_id, status);
+CREATE INDEX IF NOT EXISTS idx_campaign_targets_client_status_jid ON public.campaign_targets USING btree (client_id, status, remote_jid);
 CREATE INDEX IF NOT EXISTS idx_campaigns_automation      ON public.campaigns        USING btree (automation_id) WHERE (automation_id IS NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_campaigns_client          ON public.campaigns        USING btree (client_id);
 CREATE INDEX IF NOT EXISTS idx_campaigns_status          ON public.campaigns        USING btree (status);
@@ -867,7 +868,6 @@ CREATE INDEX IF NOT EXISTS idx_chats_dashboard_client_created  ON public.chats_d
 CREATE INDEX IF NOT EXISTS idx_chats_dashboard_client_inst_jid ON public.chats_dashboard USING btree (client_id, instance_name, remote_jid);
 CREATE INDEX IF NOT EXISTS idx_chats_dashboard_jid_created     ON public.chats_dashboard USING btree (remote_jid, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_chats_instance                  ON public.chats_dashboard USING btree (instance_name);
-CREATE INDEX IF NOT EXISTS idx_chats_remote_jid                ON public.chats_dashboard USING btree (remote_jid, created_at DESC);
 
 -- clients
 CREATE INDEX IF NOT EXISTS idx_clients_email     ON public.clients USING btree (email);
@@ -876,6 +876,7 @@ CREATE INDEX IF NOT EXISTS idx_clients_is_admin  ON public.clients USING btree (
 
 -- contacts
 CREATE INDEX IF NOT EXISTS idx_contacts_client ON public.contacts USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_contacts_client_lead_id ON public.contacts USING btree (client_id, lead_id) WHERE (lead_id IS NOT NULL);
 
 -- followup
 CREATE INDEX IF NOT EXISTS idx_followup_campaigns_client    ON public.followup_campaigns USING btree (client_id);
@@ -924,20 +925,44 @@ CREATE UNIQUE INDEX idx_leads_extraidos_client_remotejid
   ON public.leads_extraidos USING btree (client_id, "remoteJid");
 CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client         ON public.leads_extraidos USING btree (client_id);
 CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_created ON public.leads_extraidos USING btree (client_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_created_id ON public.leads_extraidos USING btree (client_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_followup ON public.leads_extraidos USING btree (client_id, next_follow_up ASC) WHERE (next_follow_up IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_ramo    ON public.leads_extraidos USING btree (client_id, ramo_negocio);
+CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_contato_src ON public.leads_extraidos USING btree (client_id, primeiro_contato_source);
 CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_email   ON public.leads_extraidos USING btree (client_id, email) WHERE (email IS NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_leads_extraidos_client_status  ON public.leads_extraidos USING btree (client_id, status);
 CREATE INDEX IF NOT EXISTS idx_leads_extraidos_remotejid      ON public.leads_extraidos USING btree ("remoteJid");
 CREATE INDEX IF NOT EXISTS idx_leads_icp_score                ON public.leads_extraidos USING btree (icp_score DESC NULLS LAST);
 CREATE INDEX IF NOT EXISTS idx_leads_lead_type                ON public.leads_extraidos USING btree (lead_type);
 CREATE INDEX IF NOT EXISTS idx_leads_primeiro_contato_source  ON public.leads_extraidos USING btree (status, primeiro_contato_source, primeiro_contato_at) WHERE (status = 'primeiro_contato'::text);
-CREATE INDEX IF NOT EXISTS idx_leads_remotejid                ON public.leads_extraidos USING btree ("remoteJid");
 CREATE INDEX IF NOT EXISTS idx_leads_status                   ON public.leads_extraidos USING btree (status);
+
+DO $$
+BEGIN
+  CREATE EXTENSION IF NOT EXISTS pg_trgm;
+  EXECUTE 'CREATE INDEX IF NOT EXISTS idx_leads_extraidos_nome_trgm ON public.leads_extraidos USING gin (nome_negocio gin_trgm_ops)';
+  EXECUTE 'CREATE INDEX IF NOT EXISTS idx_leads_extraidos_telefone_trgm ON public.leads_extraidos USING gin (telefone gin_trgm_ops)';
+  EXECUTE 'CREATE INDEX IF NOT EXISTS idx_leads_extraidos_remotejid_trgm ON public.leads_extraidos USING gin ("remoteJid" gin_trgm_ops)';
+  EXECUTE 'CREATE INDEX IF NOT EXISTS idx_leads_extraidos_ramo_trgm ON public.leads_extraidos USING gin (ramo_negocio gin_trgm_ops)';
+EXCEPTION
+  WHEN OTHERS THEN
+    RAISE NOTICE 'pg_trgm indisponível neste ambiente — índices B-Tree aplicados normalmente.';
+END
+$$;
+
+UPDATE public.contacts AS c
+SET lead_id = l.id
+FROM public.leads_extraidos AS l
+WHERE c.lead_id IS NULL
+  AND c.client_id = l.client_id
+  AND c.remote_jid = l."remoteJid";
 
 -- messages / sessions
 CREATE INDEX IF NOT EXISTS idx_messages_client          ON public.messages USING btree (client_id);
-CREATE INDEX IF NOT EXISTS idx_messages_session         ON public.messages USING btree (session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_session_created ON public.messages USING btree (session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_client          ON public.sessions USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_client_last_msg ON public.sessions USING btree (client_id, last_message_at DESC NULLS LAST);
+CREATE INDEX IF NOT EXISTS idx_sessions_client_contact  ON public.sessions USING btree (client_id, contact_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_contact_inst    ON public.sessions USING btree (contact_id, instance_name);
 
 -- webhook_logs

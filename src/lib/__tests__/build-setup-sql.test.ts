@@ -9,6 +9,8 @@ const scriptPath = resolve(process.cwd(), "scripts/build-setup-sql.mjs");
 const websiteSql = readFileSync(resolve(process.cwd(), "migrations/016_website_studio.sql"), "utf8");
 const completionGuardSql = readFileSync(resolve(process.cwd(), "migrations/017_website_studio_completion_guard.sql"), "utf8");
 const impeccableSql = readFileSync(resolve(process.cwd(), "migrations/018_enable_impeccable_skill.sql"), "utf8");
+const performanceLeadsSql = readFileSync(resolve(process.cwd(), "migrations/023_performance_leads_indexes.sql"), "utf8");
+const enterpriseSecuritySql = readFileSync(resolve(process.cwd(), "migrations/024_enterprise_security_hardening.sql"), "utf8");
 const tempDirs: string[] = [];
 
 function makeTempProject(): string {
@@ -30,6 +32,8 @@ describe("scripts/build-setup-sql.mjs", () => {
     writeFileSync(join(cwd, "migrations", "016_website_studio.sql"), websiteSql, "utf8");
     writeFileSync(join(cwd, "migrations", "017_website_studio_completion_guard.sql"), completionGuardSql, "utf8");
     writeFileSync(join(cwd, "migrations", "018_enable_impeccable_skill.sql"), impeccableSql, "utf8");
+    writeFileSync(join(cwd, "migrations", "023_performance_leads_indexes.sql"), performanceLeadsSql, "utf8");
+    writeFileSync(join(cwd, "migrations", "024_enterprise_security_hardening.sql"), enterpriseSecuritySql, "utf8");
 
     const result = spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" });
 
@@ -39,7 +43,7 @@ describe("scripts/build-setup-sql.mjs", () => {
     expect(generated).not.toContain("RAIZ_ERRADA");
     expect(generated).toContain("migrations/SETUP_COMPLETO.sql");
     const sql = runInNewContext(generated.replace("export const SETUP_SQL =", "globalThis.sql =")) as string;
-    expect(sql).toBe(`SELECT 'CANONICA';\n\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n\n\n${impeccableSql.trim()}\n`);
+    expect(sql).toBe(`SELECT 'CANONICA';\n\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n\n\n${impeccableSql.trim()}\n\n\n${performanceLeadsSql.trim()}\n\n\n${enterpriseSecuritySql.trim()}\n`);
     expect(sql).toContain("CREATE OR REPLACE FUNCTION public.website_complete_run");
   });
 
@@ -51,12 +55,14 @@ describe("scripts/build-setup-sql.mjs", () => {
     writeFileSync(join(cwd, "migrations", "016_website_studio.sql"), websiteSql);
     writeFileSync(join(cwd, "migrations", "017_website_studio_completion_guard.sql"), completionGuardSql);
     writeFileSync(join(cwd, "migrations", "018_enable_impeccable_skill.sql"), impeccableSql);
+    writeFileSync(join(cwd, "migrations", "023_performance_leads_indexes.sql"), performanceLeadsSql);
+    writeFileSync(join(cwd, "migrations", "024_enterprise_security_hardening.sql"), enterpriseSecuritySql);
 
     expect(spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" }).status).toBe(0);
     const output = join(cwd, "src", "lib", "setup-sql.ts");
     const generated = readFileSync(output, "utf8");
     const sql = runInNewContext(generated.replace("export const SETUP_SQL =", "globalThis.sql =")) as string;
-    expect(sql).toBe(`${canonical}\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n\n\n${impeccableSql.trim()}\n`);
+    expect(sql).toBe(`${canonical}\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n\n\n${impeccableSql.trim()}\n\n\n${performanceLeadsSql.trim()}\n\n\n${enterpriseSecuritySql.trim()}\n`);
     expect(spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" }).status).toBe(0);
     expect(readFileSync(output, "utf8")).toBe(generated);
   });
@@ -67,6 +73,8 @@ describe("scripts/build-setup-sql.mjs", () => {
     writeFileSync(join(cwd, "migrations", "016_website_studio.sql"), websiteSql);
     writeFileSync(join(cwd, "migrations", "017_website_studio_completion_guard.sql"), completionGuardSql);
     writeFileSync(join(cwd, "migrations", "018_enable_impeccable_skill.sql"), impeccableSql);
+    writeFileSync(join(cwd, "migrations", "023_performance_leads_indexes.sql"), performanceLeadsSql);
+    writeFileSync(join(cwd, "migrations", "024_enterprise_security_hardening.sql"), enterpriseSecuritySql);
     const base = join(cwd, "migrations", "SETUP_COMPLETO.sql");
     writeFileSync(base, websiteSql);
     expect(spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" }).status).toBe(0);
@@ -112,6 +120,7 @@ describe("scripts/build-setup-sql.mjs", () => {
     const canonical = readFileSync(resolve(process.cwd(), "migrations", "SETUP_COMPLETO.sql"), "utf8");
 
     expect(canonical).toMatch(/openrouter_keys\s+jsonb/i);
+    expect(canonical).toMatch(/nvidia_accounts\s+jsonb/i);
     expect(canonical).toMatch(/ai_combos\s+jsonb/i);
     expect(canonical).toMatch(/unique index idx_leads_extraidos_client_remotejid[\s\S]*client_id, "remoteJid"/i);
     expect(canonical).toMatch(/alter column client_id set not null/i);

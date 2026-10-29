@@ -25,7 +25,11 @@ function getSupabase(): SupabaseClient {
       };
       _supabase = new Proxy({}, handler) as unknown as SupabaseClient;
     } else {
-      _supabase = createClient(supabaseUrl, supabaseAnonKey);
+      const effectiveKey =
+        typeof window === 'undefined' && supabaseServiceKey
+          ? supabaseServiceKey
+          : supabaseAnonKey;
+      _supabase = createClient(supabaseUrl, effectiveKey);
     }
   }
   return _supabase;

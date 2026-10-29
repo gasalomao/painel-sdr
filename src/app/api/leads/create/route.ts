@@ -132,5 +132,19 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
 
+  // Best-effort: vincula contato existente ao novo lead para resolução CRM O(1)
+  if (data?.id && jid) {
+    try {
+      await supabaseAdmin
+        .from("contacts")
+        .update({ lead_id: data.id })
+        .eq("client_id", auth.clientId)
+        .eq("remote_jid", jid)
+        .is("lead_id", null);
+    } catch {
+      // ignora falha de vínculo secundário
+    }
+  }
+
   return NextResponse.json({ ok: true, lead: data });
 }

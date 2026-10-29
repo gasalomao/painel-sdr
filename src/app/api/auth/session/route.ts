@@ -14,10 +14,11 @@ export async function GET(req: NextRequest) {
   if (!token) return NextResponse.json({ authenticated: false });
   const claims = await verifySession(token);
   if (!claims) return NextResponse.json({ authenticated: false });
-  const live = await isSessionLiveStrict(claims.sessionId, token);
+  const [live, defaultAiModel] = await Promise.all([
+    isSessionLiveStrict(claims.sessionId, token),
+    resolveModelForClient(claims.clientId),
+  ]);
   if (!live) return NextResponse.json({ authenticated: false, reason: "revoked_or_expired" });
-
-  const defaultAiModel = await resolveModelForClient(claims.clientId);
 
   return NextResponse.json({
     authenticated: true,

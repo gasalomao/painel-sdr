@@ -607,6 +607,152 @@ export interface ControlledOpenRouterOptions {
   allowEmptyContent?: boolean;
 }
 
+export interface ControlledNvidiaOptions {
+  nvidiaApiKey?: string | null;
+  nvidiaAccounts?: import("@/lib/ai-keys").NvidiaAccount[] | null;
+  signal?: AbortSignal;
+  maxAttempts?: number;
+  attemptBudget?: { remaining: number };
+  allowEmptyContent?: boolean;
+}
+
+/**
+ * FAILOVER 9Router-style entre múltiplas contas/chaves da NVIDIA NIM.
+ * Tenta as contas disponíveis sequencialmente (pulando as em cooldown/mortas).
+ * 429/quota/402 → marca cooldown temporário da conta e tenta a PRÓXIMA conta.
+ * 401/403 → marca conta como MORTA (inválida) e tenta a PRÓXIMA conta.
+ * 400 (Bad Request) → relança (erro de payload/modelo, trocar conta não resolve).
+ */
+export async function nvidiaChatWithFailover(
+  body: Record<string, unknown>,
+  opts: ControlledNvidiaOptions = {}
+): Promise<any> {
+  opts.signal?.throwIfAborted();
+  const { markEndpointCooldown, markEndpointDead, isEndpointUnavailable } = await import("@/lib/gateway-cooldown");
+
+  type NvCandidate = { id: string; label: string; apiKey: string };
+  const rawList: NvCandidate[] = [];
+
+  if (Array.isArray(opts.nvidiaAccounts)) {
+    for (const a of opts.nvidiaAccounts) {
+      if (a?.apiKey && !rawList.some((c) => c.apiKey === a.apiKey)) {
+        rawList.push({ id: a.id || `nv_${rawList.length + 1}`, label: a.label || `Conta ${rawList.length + 1}`, apiKey: a.apiKey });
+      }
+    }
+  }
+  if (opts.nvidiaApiKey && !rawList.some((c) => c.apiKey === opts.nvidiaApiKey!.trim())) {
+    rawList.unshift({ id: "custom", label: "NVIDIA NIM", apiKey: opts.nvidiaApiKey.trim() });
+  }
+
+  if (!rawList.length) {
+    try {
+      const { getAiKeys } = await import("@/lib/ai-keys");
+      const keys = await getAiKeys();
+      if (keys?.nvidiaAccounts?.length) {
+        for (const a of keys.nvidiaAccounts) {
+          if (a?.apiKey && !rawList.some((c) => c.apiKey === a.apiKey)) {
+            rawList.push({ id: a.id, label: a.label, apiKey: a.apiKey });
+          }
+        }
+      } else if (keys?.nvidia) {
+        rawList.push({ id: "primary", label: "Principal", apiKey: keys.nvidia.trim() });
+      }
+    } catch {
+      /* segue com o que tiver */
+    }
+  }
+
+  if (!rawList.length) {
+    throw new Error("API Key da NVIDIA NIM não configurada.");
+  }
+
+  const candidates = await Promise.all(
+    rawList.map(async (c) => {
+      const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(c.apiKey));
+      const hashId = `nvidia:${Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("")}`;
+      return {
+        id: hashId,
+        label: c.label || `nv_…${c.apiKey.slice(-4)}`,
+        apiKey: c.apiKey,
+      };
+    })
+  );
+
+  let lastErr: unknown = null;
+  let accumulatedUsage = emptyUsage();
+  const model = String(body?.model || "");
+  let attempts = 0;
+  const maxAttempts = opts.maxAttempts === undefined ? Infinity : Math.max(1, Math.min(3, Math.trunc(opts.maxAttempts) || 1));
+
+  for (const c of candidates) {
+    opts.signal?.throwIfAborted();
+    if (attempts >= maxAttempts || (opts.attemptBudget && opts.attemptBudget.remaining <= 0)) break;
+    const coolId = model ? `${c.id}::${model}` : c.id;
+    const coolLabel = model ? `${c.label}::${model}` : c.label;
+    if (isEndpointUnavailable(c.id) || isEndpointUnavailable(coolId)) continue;
+    try {
+      attempts++;
+      if (opts.attemptBudget) opts.attemptBudget.remaining--;
+      const json = await openAICompatibleChat(
+        NVIDIA_BASE,
+        body,
+        {
+          Authorization: `Bearer ${c.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        "NVIDIA NIM",
+        coolId,
+        opts.signal
+      );
+      return withAccumulatedUsage(
+        opts.allowEmptyContent ? json : requireUsableOpenAIResponse(json, "nvidia", model),
+        accumulatedUsage,
+        "nvidia",
+        model
+      );
+    } catch (err) {
+      if (opts.signal?.aborted) throw attachAiUsage(opts.signal.reason ?? err, accumulatedUsage);
+      lastErr = err;
+      if (err instanceof AiEmptyResponseError) {
+        accumulatedUsage = addAiUsage(accumulatedUsage, err.usage);
+        markEndpointCooldown(coolId);
+        console.warn(`[ai-provider:nvidia] Conta ${coolLabel} retornou resposta vazia. Rotacionando para próxima conta NVIDIA.`);
+        continue;
+      }
+      const failedUsage = aiUsageFromError(err) ?? openRouterResponseUsage(null);
+      accumulatedUsage = addAiUsage(accumulatedUsage, withUsageAttempt(failedUsage, "nvidia", model));
+      if (err instanceof ProviderHttpError) {
+        if (err.status === 401 || err.status === 403) {
+          markEndpointDead(c.id);
+          console.warn(`[ai-provider:nvidia] Conta ${c.label} marcada MORTA (HTTP ${err.status}). Rotacionando para próxima conta NVIDIA.`);
+          continue;
+        }
+        if (
+          err.status === 429 ||
+          err.status === 402 ||
+          isFailoverableStatus(err.status, err.message) ||
+          /credit|quota|insufficient|rate.?limit/i.test(err.message)
+        ) {
+          markEndpointCooldown(coolId);
+          console.warn(`[ai-provider:nvidia] Conta ${coolLabel} em cooldown (${err.message.slice(0, 80)}). Rotacionando para próxima conta NVIDIA.`);
+          continue;
+        }
+        throw accumulatedUsage.attempts?.length ? setAiUsage(err, accumulatedUsage) : err;
+      }
+      console.warn(`[ai-provider:nvidia] Conta ${c.label} falhou (rede/timeout). Rotacionando:`, (err as any)?.message);
+      continue;
+    }
+  }
+
+  if (lastErr instanceof AiEmptyResponseError) {
+    throw new AiEmptyResponseError(lastErr.provider, lastErr.model, accumulatedUsage, lastErr);
+  }
+  const terminalError = lastErr instanceof Error
+    ? lastErr
+    : new ProviderHttpError(429, "Todas as contas da NVIDIA NIM falharam ou estão em cooldown. Tente novamente mais tarde.");
+  throw accumulatedUsage.attempts?.length ? setAiUsage(terminalError, accumulatedUsage) : terminalError;
+}
+
 /**
  * FAILOVER 9Router-style entre múltiplas API keys do OpenRouter.
  * Tenta as chaves disponíveis sequencialmente (pulando as em cooldown/mortas).
@@ -975,8 +1121,10 @@ export interface GenerateTextOpts {
   maxOutputTokens?: number | null;
   /** Chave Gemini (se não vier, o caller deve garantir uma). */
   geminiApiKey?: string | null;
-  /** Chave NVIDIA NIM única. */
+  /** Chave NVIDIA NIM única ou primária. */
   nvidiaApiKey?: string | null;
+  /** Lista opcional de contas NVIDIA NIM com apelido para failover multi-conta. */
+  nvidiaAccounts?: import("@/lib/ai-keys").NvidiaAccount[] | null;
   /** Chave OpenRouter única ou lista/rotação multi-key. */
   openrouterApiKey?: string | null;
   /** Lista opcional de chaves OpenRouter para rotação multi-conta (9Router-style). */
@@ -1088,9 +1236,9 @@ async function buildLadder(requestedRef: string, keys: LadderKeys | null): Promi
     push(best);
   }
 
-  // 3. Provedor NVIDIA NIM (se configurado)
+  // 3. Provedor NVIDIA NIM (se configurado — prioriza o modelo Free Endpoint em alta)
   if (keys?.nvidia) {
-    push("nvidia:meta/llama-3.2-11b-vision-instruct", true);
+    push("nvidia:nvidia/nemotron-3.5-lightning-30b-a3b", true);
   }
 
   // 4. Última rede de segurança: modelo OpenRouter barato e de alta disponibilidade (gpt-4o-mini)
@@ -1196,10 +1344,6 @@ async function generateTextSingle(opts: GenerateTextOpts): Promise<GenerateTextR
   }
 
   if (provider === "nvidia") {
-    const { getAiKeys } = await import("@/lib/ai-keys");
-    const keys = await getAiKeys();
-    const apiKey = opts.nvidiaApiKey || keys?.nvidia;
-    if (!apiKey) throw new Error("API Key da NVIDIA NIM não configurada.");
     const messages: any[] = [];
     if (opts.system) messages.push(buildSystemMessage(opts.system, provider, model));
     messages.push({ role: "user", content: opts.prompt });
@@ -1208,15 +1352,10 @@ async function generateTextSingle(opts: GenerateTextOpts): Promise<GenerateTextR
     body.max_tokens = opts.maxOutputTokens != null ? opts.maxOutputTokens : 4096;
     if (opts.jsonMode) body.response_format = { type: "json_object" };
     applyReasoning(body, resolveReasoningMode(opts.reasoningMode, opts.thinkingBudget), provider, model);
-    const json = await openAICompatibleChat(
-      NVIDIA_BASE,
-      body,
-      {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      "NVIDIA NIM"
-    );
+    const json = await nvidiaChatWithFailover(body, {
+      nvidiaApiKey: opts.nvidiaApiKey,
+      nvidiaAccounts: opts.nvidiaAccounts,
+    });
     const text = String(json?.choices?.[0]?.message?.content || "").trim();
     return { text, usage: openRouterUsage(json, provider, model), provider, modelUsed: model, didFallback: false };
   }
@@ -1389,8 +1528,10 @@ export interface StartAiChatOpts {
   reasoningMode?: 0 | 1 | 2 | 3 | null;
   thinkingBudget?: number | null;
   geminiApiKey?: string | null;
-  /** Chave NVIDIA NIM única. */
+  /** Chave NVIDIA NIM única ou primária. */
   nvidiaApiKey?: string | null;
+  /** Lista opcional de contas NVIDIA NIM com apelido para failover multi-conta. */
+  nvidiaAccounts?: import("@/lib/ai-keys").NvidiaAccount[] | null;
   openrouterApiKey?: string | null;
   /** Lista opcional de chaves OpenRouter para rotação multi-conta (9Router-style). */
   openrouterKeys?: string[] | null;
@@ -1608,22 +1749,13 @@ async function startAiChatSingle(opts: StartAiChatOpts): Promise<AiChatSession> 
   }
 
   if (provider === "nvidia") {
-    const { getAiKeys } = await import("@/lib/ai-keys");
-    const keys = await getAiKeys();
-    const apiKey = opts.nvidiaApiKey || keys?.nvidia;
-    if (!apiKey) throw new Error("API Key da NVIDIA NIM não configurada.");
     return startOpenAICompatibleChat(opts, model, {
       provider: "nvidia",
       post: (body) =>
-        openAICompatibleChat(
-          NVIDIA_BASE,
-          body,
-          {
-            Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
-          },
-          "NVIDIA NIM"
-        ),
+        nvidiaChatWithFailover(body, {
+          nvidiaApiKey: opts.nvidiaApiKey,
+          nvidiaAccounts: opts.nvidiaAccounts,
+        }),
     });
   }
 

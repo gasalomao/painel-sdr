@@ -48,6 +48,10 @@ describe("modelFamily — detecta marca do modelo", () => {
 });
 
 describe("isFreeModel — convenção :free do OpenRouter", () => {
+  it("true quando isFreeEndpoint é true", () => {
+    expect(isFreeModel({ id: "nvidia:nvidia/nemotron-3.5-lightning-30b-a3b", isFreeEndpoint: true })).toBe(true);
+  });
+
   it("true quando id termina em :free", () => {
     expect(isFreeModel({ id: "meta-llama/llama-3.1-70b:free", rawId: "meta-llama/llama-3.1-70b:free" })).toBe(true);
   });
@@ -143,14 +147,14 @@ describe("groupModels — ordem provedor + subgrupos", () => {
     { id: "nvidia:nvidia/nemotron-4-340b-instruct", rawId: "nvidia/nemotron-4-340b-instruct", provider: "nvidia" },
   ];
 
-  it("ordena provedores: gateway → nvidia → openrouter → gemini", () => {
+  it("ordena provedores: nvidia → gateway → openrouter → gemini", () => {
     const groups = groupModels(models);
-    expect(groups.map((g) => g.provider)).toEqual(["gateway", "nvidia", "openrouter", "gemini"]);
+    expect(groups.map((g) => g.provider)).toEqual(["nvidia", "gateway", "openrouter", "gemini"]);
   });
 
-  it("gateway vem primeiro (assinatura priorizada)", () => {
+  it("nvidia vem primeiro (prioridade NIM)", () => {
     const groups = groupModels(models);
-    expect(groups[0].provider).toBe("gateway");
+    expect(groups[0].provider).toBe("nvidia");
   });
 
   it("openrouter: 'Grátis' vem antes de famílias pagas", () => {

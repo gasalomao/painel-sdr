@@ -423,7 +423,7 @@ export default function AgentePage() {
 
     if (!clientId) return;
     (async () => {
-      supabase.from("ai_organizer_config").select("*").eq("id", 1).single().then(({ data }) => {
+      supabase.from("ai_organizer_config").select("app_url").eq("id", 1).single().then(({ data }) => {
         if (data?.app_url) setAppUrl(data.app_url);
       });
 

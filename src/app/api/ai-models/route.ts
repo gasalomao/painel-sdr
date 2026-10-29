@@ -21,6 +21,7 @@ export type UnifiedModel = {
   description?: string;
   provider: "gemini" | "openrouter" | "gateway" | "combo" | "nvidia";
   supportsTools: boolean;
+  isFreeEndpoint?: boolean;
 };
 
 async function listGemini(apiKey: string): Promise<UnifiedModel[]> {
@@ -160,6 +161,7 @@ export async function GET(req: NextRequest) {
               description: m.description || "NVIDIA NIM AI Foundation Endpoint",
               provider: "nvidia",
               supportsTools: m.supportsTools,
+              isFreeEndpoint: m.isFreeEndpoint,
             }))
           )
         : Promise.resolve([] as UnifiedModel[]),
@@ -174,7 +176,8 @@ export async function GET(req: NextRequest) {
       supportsTools: true,
     }));
 
-    const models = [...comboModels, ...gemini, ...openrouter, ...gateway, ...nvidia];
+    // NVIDIA NIM tem prioridade máxima nos seletores, seguido por combo, gateway, openrouter e gemini.
+    const models = [...nvidia, ...comboModels, ...gateway, ...openrouter, ...gemini];
     return NextResponse.json({
       success: true,
       models,

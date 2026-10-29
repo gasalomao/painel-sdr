@@ -24,6 +24,17 @@ export interface GatewayEndpoint {
   apiKey: string | null;
 }
 
+/**
+ * Uma CONTA NVIDIA = uma API key da NVIDIA (build.nvidia.com) com um apelido.
+ * Várias contas podem estar conectadas ao mesmo tempo; quando uma esgota
+ * crédito (429/quota) o roteador tenta a próxima (failover multi-conta).
+ */
+export interface NvidiaAccount {
+  id: string;
+  label: string;
+  apiKey: string;
+}
+
 export interface AiKeys {
   /** Chave Google Gemini (ai_organizer_config.api_key). */
   gemini: string | null;
@@ -58,6 +69,12 @@ export interface AiKeys {
   aiCombos: AiCombo[];
   /** Chave NVIDIA NIM (ai_organizer_config.nvidia_api_key). */
   nvidia: string | null;
+  /**
+   * TODAS as contas NVIDIA (multi-conta, failover 9Router-style quando uma
+   * esgota crédito). Cola: ai_organizer_config.nvidia_accounts (JSON array).
+   * A chave legada (nvidia_api_key) é sempre a primeira da lista.
+   */
+  nvidiaAccounts: NvidiaAccount[];
 }
 
 export const EMPTY_KEYS: AiKeys = {
@@ -70,6 +87,7 @@ export const EMPTY_KEYS: AiKeys = {
   gatewayEndpoints: [],
   aiCombos: [],
   nvidia: null,
+  nvidiaAccounts: [],
 };
 
 /** Normaliza um valor de coluna texto pra string-ou-null (trim, vazio→null). */
@@ -115,6 +133,40 @@ let CACHE: { keys: AiKeys; at: number } | null = null;
 const TTL_MS = 30 * 1000;
 
 /**
+ * Lê a lista de CONTAS NVIDIA (multi-conta) do JSON `nvidia_accounts`.
+ * Aceita array de strings ou de objetos `{ id, label, api_key|apiKey }`,
+ * parseado ou em string JSON. A chave LEGADA (nvidia_api_key) entra como
+ * conta "Principal" quando a lista está vazia (retrocompat).
+ */
+export function parseNvidiaAccounts(raw: unknown, legacyKey: string | null): NvidiaAccount[] {
+  let arr: any[] = [];
+  if (Array.isArray(raw)) arr = raw;
+  else if (typeof raw === "string" && raw.trim()) {
+    try { const p = JSON.parse(raw); if (Array.isArray(p)) arr = p; } catch { /* ignora */ }
+  }
+  const out: NvidiaAccount[] = [];
+  const seen = new Set<string>();
+  for (const e of arr) {
+    const apiKey = typeof e === "string" ? txt(e) : txt(e?.api_key ?? e?.apiKey ?? e?.key);
+    if (!apiKey || seen.has(apiKey)) continue;
+    seen.add(apiKey);
+    const id = typeof e === "string" ? "" : txt(e?.id);
+    const label = typeof e === "string" ? "" : txt(e?.label);
+    out.push({
+      id: id || `nv_${out.length + 1}`,
+      label: label || `Conta ${out.length + 1}`,
+      apiKey,
+    });
+  }
+  // Retrocompat: sem lista, mas com a chave single legada → uma conta só.
+  if (out.length === 0) {
+    const legacy = txt(legacyKey);
+    if (legacy) out.push({ id: "primary", label: "Principal", apiKey: legacy });
+  }
+  return out;
+}
+
+/**
  * Lê a lista de chaves OpenRouter (multi-conta) do JSON `openrouter_keys`.
  * Aceita array de strings ou de objetos `{ key }`, parseado ou em string JSON.
  * A chave LEGADA (openrouter_api_key) entra sempre como primeira (dedup).
@@ -148,11 +200,11 @@ export async function getAiKeys(force = false): Promise<AiKeys> {
     let d: Record<string, unknown>;
     const full = await adminClient
       .from("ai_organizer_config")
-      .select("api_key, openrouter_api_key, openrouter_keys, gateway_base_url, gateway_api_key, gateway_fallback_model, gateway_endpoints, ai_combos, nvidia_api_key")
+      .select("api_key, openrouter_api_key, openrouter_keys, gateway_base_url, gateway_api_key, gateway_fallback_model, gateway_endpoints, ai_combos, nvidia_api_key, nvidia_accounts")
       .eq("id", 1)
       .maybeSingle();
     if (full.error) {
-      // Pode faltar nvidia_api_key ou ai_combos: tenta sem nvidia_api_key
+      // Pode faltar nvidia_api_key / nvidia_accounts / ai_combos: tenta sem eles
       const withCombos = await adminClient
         .from("ai_organizer_config")
         .select("api_key, openrouter_api_key, openrouter_keys, gateway_base_url, gateway_api_key, gateway_fallback_model, gateway_endpoints, ai_combos")
@@ -192,15 +244,17 @@ export async function getAiKeys(force = false): Promise<AiKeys> {
     const gatewayBaseUrl = txt(d.gateway_base_url);
     const gatewayApiKey = txt(d.gateway_api_key);
     const openrouter = txt(d.openrouter_api_key);
-    let nvidiaKey = txt(d.nvidia_api_key) || process.env.NVIDIA_API_KEY || null;
-    if (!nvidiaKey) {
+    let nvidiaLegacy = txt(d.nvidia_api_key) || process.env.NVIDIA_API_KEY || null;
+    if (!nvidiaLegacy) {
       try {
         const appSet = await adminClient.from("app_settings").select("value").eq("key", "nvidia_api_key").maybeSingle();
         if (appSet.data?.value) {
-          nvidiaKey = txt(appSet.data.value);
+          nvidiaLegacy = txt(appSet.data.value);
         }
       } catch { /* fallback */ }
     }
+    const nvidiaAccounts = parseNvidiaAccounts((d as any).nvidia_accounts, nvidiaLegacy);
+    const nvidiaKey = nvidiaAccounts[0]?.apiKey ?? null;
     const keys: AiKeys = {
       gemini: txt(d.api_key),
       openrouter,
@@ -211,6 +265,7 @@ export async function getAiKeys(force = false): Promise<AiKeys> {
       gatewayEndpoints: parseGatewayEndpoints(d.gateway_endpoints, gatewayBaseUrl, gatewayApiKey),
       aiCombos: sanitizeCombos(d.ai_combos),
       nvidia: nvidiaKey,
+      nvidiaAccounts,
     };
     CACHE = { keys, at: Date.now() };
     return keys;

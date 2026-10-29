@@ -3,6 +3,36 @@ import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
 
 type RawEndpoint = { id: string; label: string; base_url: string; api_key: string | null };
+type RawNvidiaAccount = { id: string; label: string; apiKey: string };
+
+/**
+ * Sanitiza a lista de contas NVIDIA vinda da UI e PRESERVA chaves secretas
+ * quando a UI envia sem chave (já que no GET vem mascarado).
+ */
+function sanitizeNvidiaAccounts(
+  incoming: any[],
+  storedById: Map<string, { apiKey: string }>
+): RawNvidiaAccount[] {
+  const out: RawNvidiaAccount[] = [];
+  const usedIds = new Set<string>();
+  for (let i = 0; i < incoming.length; i++) {
+    const e = incoming[i] || {};
+    let id = String(e.id ?? "").trim();
+    if (!id || usedIds.has(id)) {
+      id = (globalThis as any).crypto?.randomUUID?.() || `nv_${Date.now()}_${i}`;
+    }
+    usedIds.add(id);
+    const label = String(e.label ?? "").trim() || `Conta ${out.length + 1}`;
+    const typedKey = (
+      typeof e.api_key === "string" ? e.api_key : typeof e.apiKey === "string" ? e.apiKey : ""
+    ).trim();
+    const apiKey = typedKey || storedById.get(id)?.apiKey || "";
+    if (apiKey) {
+      out.push({ id, label, apiKey });
+    }
+  }
+  return out;
+}
 
 /**
  * Sanitiza a lista de conexões vinda da UI e PRESERVA as chaves secretas: como
@@ -44,24 +74,33 @@ export async function GET() {
     let data: Record<string, any> | null = null;
     const full = await supabase
       .from("ai_organizer_config")
-      .select("enabled, model, provider, execution_hour, last_run, api_key, openrouter_api_key, openrouter_keys, gateway_base_url, gateway_api_key, gateway_fallback_model, gateway_endpoints, nvidia_api_key")
+      .select("enabled, model, provider, execution_hour, last_run, api_key, openrouter_api_key, openrouter_keys, gateway_base_url, gateway_api_key, gateway_fallback_model, gateway_endpoints, nvidia_api_key, nvidia_accounts")
       .eq("id", 1)
       .maybeSingle();
     if (full.error) {
-      const mid = await supabase
+      const mid2 = await supabase
         .from("ai_organizer_config")
-        .select("enabled, model, provider, execution_hour, last_run, api_key, openrouter_api_key, openrouter_keys, gateway_base_url, gateway_api_key, gateway_fallback_model")
+        .select("enabled, model, provider, execution_hour, last_run, api_key, openrouter_api_key, openrouter_keys, gateway_base_url, gateway_api_key, gateway_fallback_model, gateway_endpoints, nvidia_api_key")
         .eq("id", 1)
         .maybeSingle();
-      if (mid.error) {
-        const base = await supabase
+      if (mid2.error) {
+        const mid = await supabase
           .from("ai_organizer_config")
-          .select("enabled, model, provider, execution_hour, last_run, api_key, openrouter_api_key")
+          .select("enabled, model, provider, execution_hour, last_run, api_key, openrouter_api_key, openrouter_keys, gateway_base_url, gateway_api_key, gateway_fallback_model")
           .eq("id", 1)
           .maybeSingle();
-        data = (base.data as any) || null;
+        if (mid.error) {
+          const base = await supabase
+            .from("ai_organizer_config")
+            .select("enabled, model, provider, execution_hour, last_run, api_key, openrouter_api_key")
+            .eq("id", 1)
+            .maybeSingle();
+          data = (base.data as any) || null;
+        } else {
+          data = (mid.data as any) || null;
+        }
       } else {
-        data = (mid.data as any) || null;
+        data = (mid2.data as any) || null;
       }
     } else {
       data = (full.data as any) || null;
@@ -95,6 +134,16 @@ export async function GET() {
       } catch { /* fallback */ }
     }
 
+    const { parseNvidiaAccounts } = await import("@/lib/ai-keys");
+    const nvidiaAccountsList = parseNvidiaAccounts(data?.nvidia_accounts, data?.nvidia_api_key || null);
+    const maskedNvidiaAccounts = nvidiaAccountsList.map((a, idx) => ({
+      id: a.id,
+      label: a.label,
+      has_api_key: !!(a.apiKey && a.apiKey.trim().length > 0),
+      masked: a.apiKey && a.apiKey.length > 10 ? `${a.apiKey.slice(0, 7)}••••${a.apiKey.slice(-4)}` : "••••••••",
+      isPrimary: idx === 0,
+    }));
+
     return NextResponse.json({
       success: true,
       config: {
@@ -104,7 +153,9 @@ export async function GET() {
         execution_hour: typeof data?.execution_hour === "number" ? data.execution_hour : 20,
         last_run: data?.last_run || null,
         has_api_key: !!(data?.api_key && String(data.api_key).trim().length > 0),
-        has_nvidia_key: hasNvidiaKey,
+        has_nvidia_key: hasNvidiaKey || nvidiaAccountsList.length > 0,
+        nvidia_accounts_count: nvidiaAccountsList.length,
+        nvidia_accounts: maskedNvidiaAccounts,
         has_openrouter_key: !!(data?.openrouter_api_key && String(data.openrouter_api_key).trim().length > 0) || openrouterKeysList.length > 0,
         openrouter_keys_count: openrouterKeysList.length,
         openrouter_keys: maskedOpenrouterKeys,
@@ -141,6 +192,9 @@ export async function PATCH(req: NextRequest) {
       || (typeof body.provider === "string" && body.provider.trim())
       || (typeof body.api_key === "string" && body.api_key.trim())
       || (typeof body.nvidia_api_key === "string")
+      || Array.isArray(body.nvidia_accounts)
+      || (typeof body.add_nvidia_account === "object" && body.add_nvidia_account !== null)
+      || (typeof body.remove_nvidia_account_id === "string" && body.remove_nvidia_account_id.trim())
       || (typeof body.openrouter_api_key === "string" && body.openrouter_api_key.trim())
       || Array.isArray(body.openrouter_keys)
       || (typeof body.add_openrouter_key === "string" && body.add_openrouter_key.trim())
@@ -174,6 +228,58 @@ export async function PATCH(req: NextRequest) {
           updated_at: new Date().toISOString(),
         }, { onConflict: "key" });
       } catch { /* fallback */ }
+    }
+
+    if (
+      Array.isArray(body.nvidia_accounts) ||
+      (typeof body.add_nvidia_account === "object" && body.add_nvidia_account !== null) ||
+      (typeof body.remove_nvidia_account_id === "string" && body.remove_nvidia_account_id.trim())
+    ) {
+      nvidiaChanged = true;
+      try {
+        const cur = await supabase
+          .from("ai_organizer_config")
+          .select("nvidia_accounts, nvidia_api_key")
+          .eq("id", 1)
+          .maybeSingle();
+        const { parseNvidiaAccounts } = await import("@/lib/ai-keys");
+        let list = parseNvidiaAccounts(
+          (cur.data as any)?.nvidia_accounts,
+          (cur.data as any)?.nvidia_api_key || null
+        );
+        const storedById = new Map<string, { apiKey: string }>();
+        for (const a of list) storedById.set(a.id, { apiKey: a.apiKey });
+
+        if (Array.isArray(body.nvidia_accounts)) {
+          list = sanitizeNvidiaAccounts(body.nvidia_accounts, storedById);
+        }
+
+        if (typeof body.add_nvidia_account === "object" && body.add_nvidia_account !== null) {
+          const newKey = String(body.add_nvidia_account.apiKey || body.add_nvidia_account.api_key || "").trim();
+          const newLabel = String(body.add_nvidia_account.label || "").trim() || `Conta ${list.length + 1}`;
+          if (newKey) {
+            const newId = (globalThis as any).crypto?.randomUUID?.() || `nv_${Date.now()}`;
+            list.push({ id: newId, label: newLabel, apiKey: newKey });
+          }
+        }
+
+        if (typeof body.remove_nvidia_account_id === "string" && body.remove_nvidia_account_id.trim()) {
+          const remId = body.remove_nvidia_account_id.trim();
+          list = list.filter((a) => a.id !== remId);
+        }
+
+        update.nvidia_accounts = list;
+        update.nvidia_api_key = list[0]?.apiKey || null;
+        try {
+          await supabase.from("app_settings").upsert({
+            key: "nvidia_api_key",
+            value: list[0]?.apiKey || "",
+            updated_at: new Date().toISOString(),
+          }, { onConflict: "key" });
+        } catch { /* fallback */ }
+      } catch {
+        /* fallback silencioso */
+      }
     }
     if (typeof body.openrouter_api_key === "string" && body.openrouter_api_key.trim()) update.openrouter_api_key = body.openrouter_api_key.trim();
 
@@ -298,8 +404,12 @@ export async function PATCH(req: NextRequest) {
       const retryUpdate = { ...update };
       let hadFixableError = false;
 
-      // Se a coluna nvidia_api_key ainda não existe no ai_organizer_config do banco,
+      // Se a coluna nvidia_accounts ou nvidia_api_key ainda não existe no ai_organizer_config do banco,
       // remove ela do payload (já salvamos no app_settings com sucesso acima).
+      if (/nvidia_accounts|column .* does not exist/i.test(error.message || "")) {
+        delete (retryUpdate as any).nvidia_accounts;
+        hadFixableError = true;
+      }
       if (/nvidia_api_key|column .* does not exist/i.test(error.message || "")) {
         delete (retryUpdate as any).nvidia_api_key;
         hadFixableError = true;

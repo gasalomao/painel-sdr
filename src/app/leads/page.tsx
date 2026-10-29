@@ -101,6 +101,43 @@ const KANBAN_COLUMNS = [
 
 const PAGE_SIZE = 15;
 
+// Projeção explícita: exclui dezenas de colunas JSONB pesadas do Google Maps
+// (reviews_detalhes, featured_reviews, photos, opening_hours, attributes, etc.)
+// que não são usadas na listagem, Kanban ou gaveta CRM, reduzindo em até 90%
+// o tráfego de rede e leitura de TOAST no Postgres (especialmente no Kanban de 500 leads).
+const LEAD_LIST_COLUMNS = [
+  "id",
+  '"remoteJid"',
+  "nome_negocio",
+  "telefone",
+  "email",
+  "ramo_negocio",
+  "categoria",
+  "endereco",
+  "avaliacao",
+  "rating",
+  "reviews",
+  "website",
+  "instagram",
+  "facebook",
+  "maps_url",
+  "status",
+  "instance_name",
+  "next_follow_up",
+  "observacoes",
+  "business_details",
+  "justificativa_ia",
+  "resumo_ia",
+  "ia_last_analyzed_at",
+  "created_at",
+  "primeiro_contato_source",
+  "primeiro_contato_at",
+  "intelligence",
+  "intelligence_at",
+  "icp_score",
+  "lead_type",
+].join(", ");
+
 export default function LeadsPage() {
   const { clientId } = useClientSession();
   const [leads, setLeads] = useState<Lead[]>([]);
@@ -120,6 +157,7 @@ export default function LeadsPage() {
   const syncCancelRef = useRef<{ current: boolean }>({ current: false });
   const syncGenerationRef = useRef(0);
   const fetchGenerationRef = useRef<number>(0);
+  const useWildcardSelectRef = useRef<boolean>(false);
 
   // Cancela sincronização e descarta fetch pendente ao desmontar ou trocar tenant
   useEffect(() => {
@@ -328,52 +366,73 @@ export default function LeadsPage() {
     const currentFetchId = ++fetchGenerationRef.current;
     setLoading(true);
     try {
-      // Fetch sent disparo JIDs for badge accuracy (once per fetch cycle)
-      const { data: sentTargets } = await supabase
+      const buildLeadsQuery = (columnsToSelect: string) => {
+        let query = supabase
+          .from("leads_extraidos")
+          .select(columnsToSelect, { count: "exact" })
+          .order("created_at", { ascending: false })
+          .order("id", { ascending: false });
+
+        if (clientId) {
+          query = query.eq("client_id", clientId);
+        }
+
+        if (search) {
+          query = query.or(`nome_negocio.ilike.%${search}%,ramo_negocio.ilike.%${search}%,telefone.ilike.%${search}%`);
+        }
+
+        if (categoryFilter !== "all") {
+          query = query.eq("ramo_negocio", categoryFilter);
+        }
+
+        // Disparo filter: sent = source='disparo' OR in campaign_targets;
+        // pending = everything else
+        if (disparoFilter === "sent") {
+          query = query.eq("primeiro_contato_source", "disparo");
+        } else if (disparoFilter === "pending") {
+          query = query.or("primeiro_contato_source.is.null,primeiro_contato_source.neq.disparo");
+        }
+
+        // Aplica paginação apenas na lista. No kanban traz mais (ex 500)
+        if (viewMode === "list") {
+          query = query.range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
+        } else {
+          query = query.limit(500);
+        }
+
+        return query;
+      };
+
+      // Dispara busca de campaign_targets e leads_extraidos em paralelo (1 RTT ao invés de 2 sequenciais)
+      const sentTargetsPromise = supabase
         .from("campaign_targets")
         .select("remote_jid")
         .eq("status", "sent")
         .eq("client_id", clientId);
+
+      const initialColumns = useWildcardSelectRef.current ? "*" : LEAD_LIST_COLUMNS;
+      const [sentTargetsRes, initialLeadsRes] = await Promise.all([
+        sentTargetsPromise,
+        buildLeadsQuery(initialColumns),
+      ]);
+
       if (currentFetchId !== fetchGenerationRef.current) return;
+
+      const sentTargets = sentTargetsRes?.data as { remote_jid: string }[] | null | undefined;
       if (sentTargets) {
-        setDisparoJids(new Set(sentTargets.map((t: any) => t.remote_jid)));
+        setDisparoJids(new Set(sentTargets.map((t) => t.remote_jid)));
       }
 
-      let query = supabase
-        .from("leads_extraidos")
-        .select("*", { count: "exact" })
-        .order("created_at", { ascending: false })
-        .order("id", { ascending: false });
-
-      if (clientId) {
-        query = query.eq("client_id", clientId);
+      // Fallback automático caso alguma coluna da projeção ainda não exista no banco do tenant
+      let leadsRes = initialLeadsRes;
+      if (leadsRes?.error && !useWildcardSelectRef.current) {
+        useWildcardSelectRef.current = true;
+        leadsRes = await buildLeadsQuery("*");
+        if (currentFetchId !== fetchGenerationRef.current) return;
       }
 
-      if (search) {
-        query = query.or(`nome_negocio.ilike.%${search}%,ramo_negocio.ilike.%${search}%,telefone.ilike.%${search}%`);
-      }
-      
-      if (categoryFilter !== "all") {
-        query = query.eq("ramo_negocio", categoryFilter);
-      }
-
-      // Disparo filter: sent = source='disparo' OR in campaign_targets;
-      // pending = everything else
-      if (disparoFilter === "sent") {
-        query = query.eq("primeiro_contato_source", "disparo");
-      } else if (disparoFilter === "pending") {
-        query = query.or("primeiro_contato_source.is.null,primeiro_contato_source.neq.disparo");
-      }
-
-      // Aplica paginação apenas na lista. No kanban traz mais (ex 500)
-      if (viewMode === "list") {
-          query = query.range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
-      } else {
-          query = query.limit(500);
-      }
-
-      const { data, count } = await query;
-      if (currentFetchId !== fetchGenerationRef.current) return;
+      const data = leadsRes?.data as unknown as Lead[] | null;
+      const count = leadsRes?.count;
       const fetchedList = (data || []) as Lead[];
 
       // Garante remoteJid normalizado para todos os leads (inclusive os extraídos sem conversa prévia)

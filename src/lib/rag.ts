@@ -248,6 +248,29 @@ export async function getRagEmbeddingRef(): Promise<string> {
 
 export function invalidateRagEmbeddingCache() { RAG_MODEL_CACHE = null; }
 
+/** Chamada de embeddings da NVIDIA NIM (OpenAI-compatible), forçando 768 dims. */
+async function nvidiaEmbed(model: string, inputs: string[], apiKey: string): Promise<number[][]> {
+  const res = await fetch("https://integrate.api.nvidia.com/v1/embeddings", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ model, input: inputs, dimensions: EMBEDDING_DIMS, input_type: "passage" }),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = json?.error?.message || json?.error || `NVIDIA embeddings HTTP ${res.status}`;
+    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+  }
+  const data: any[] = Array.isArray(json?.data) ? json.data : [];
+  data.sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+  return data.map((d) => {
+    const v = d.embedding;
+    if (!Array.isArray(v) || v.length !== EMBEDDING_DIMS) {
+      throw new Error(`Embedding NVIDIA com dim errada: esperado ${EMBEDDING_DIMS}, veio ${Array.isArray(v) ? v.length : "?"}. Escolha um modelo que suporte 768 dimensões.`);
+    }
+    return v;
+  });
+}
+
 /** Chamada de embeddings do OpenRouter (OpenAI-compatible), forçando 768 dims. */
 async function openRouterEmbed(model: string, inputs: string[], apiKey: string): Promise<number[][]> {
   const res = await fetch("https://openrouter.ai/api/v1/embeddings", {
@@ -286,6 +309,17 @@ export async function embedTexts(texts: string[], apiKey?: string | null): Promi
   const ref = await getRagEmbeddingRef();
   const { provider, model } = parseModelRef(ref);
   const keys = await getAiKeys();
+
+  if (provider === "nvidia") {
+    const nvKey = keys.nvidia;
+    if (!nvKey) throw new Error("Modelo de embeddings é da NVIDIA mas a chave NVIDIA NIM não está configurada.");
+    const BATCH = 50;
+    const out: number[][] = [];
+    for (let i = 0; i < texts.length; i += BATCH) {
+      out.push(...(await nvidiaEmbed(model, texts.slice(i, i + BATCH), nvKey)));
+    }
+    return out;
+  }
 
   if (provider === "openrouter") {
     const orKey = keys.openrouter;
@@ -337,6 +371,13 @@ export async function embedQuery(text: string, apiKey?: string | null): Promise<
   const ref = await getRagEmbeddingRef();
   const { provider, model } = parseModelRef(ref);
   const keys = await getAiKeys();
+
+  if (provider === "nvidia") {
+    const nvKey = keys.nvidia;
+    if (!nvKey) throw new Error("Modelo de embeddings é da NVIDIA mas a chave NVIDIA NIM não está configurada.");
+    const [v] = await nvidiaEmbed(model, [text], nvKey);
+    return v;
+  }
 
   if (provider === "openrouter") {
     const orKey = keys.openrouter;

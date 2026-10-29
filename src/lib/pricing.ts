@@ -191,7 +191,18 @@ export async function ensurePricing(force = false): Promise<CacheState> {
  */
 export function findPriceFor(map: PricingMap, model: string): ModelPrice | null {
   if (!model) return null;
-  const m = model.toLowerCase().trim();
+  let m = model.toLowerCase().trim();
+
+  // Strip prefixos conhecidos de provedores antes de buscar no mapa de preços
+  if (m.startsWith("nvidia:")) {
+    m = m.slice(7).trim();
+  } else if (m.startsWith("gateway:")) {
+    m = m.slice(8).trim();
+  } else if (m.startsWith("openrouter:")) {
+    m = m.slice(11).trim();
+  } else if (m.startsWith("combo:")) {
+    return { input_per_token: 0, output_per_token: 0 };
+  }
 
   if (map[m]) return map[m];
 

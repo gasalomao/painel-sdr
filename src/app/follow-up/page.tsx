@@ -418,8 +418,7 @@ export default function FollowUpPage(): ReactElement {
         q2 = q2.eq("client_id", session.clientId);
       }
       
-      const { data: a } = await q1;
-      const { data: b } = await q2;
+      const [{ data: a }, { data: b }] = await Promise.all([q1, q2]);
       
       const merged = [...(a || []), ...(b || [])];
       setPickerLeads(merged);

@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { Suspense, useEffect, useState, useRef, useCallback } from "react";
 import { Header } from "@/components/layout/header";
@@ -406,11 +406,27 @@ function ChatPageContent() {
           return;
         }
 
-        // Busca todos os leads do cliente
-        const { data: allLeads, error } = await supabase
+        // Filtra no banco pelos últimos 8 dígitos (incluindo máscara com hífen/espaço) para evitar baixar a tabela inteira
+        const last8 = phoneClean.slice(-8);
+        const maskedLast8 = `${last8.slice(0, 4)}%${last8.slice(4)}`;
+        const baseLeadQuery = supabase
           .from("leads_extraidos")
           .select("maps_url, lat, lng, endereco, telefone, remoteJid, nome_negocio")
           .eq("client_id", clientId);
+
+        const filteredQuery =
+          "or" in baseLeadQuery && typeof baseLeadQuery.or === "function"
+            ? baseLeadQuery.or(
+                `remoteJid.ilike.%${last8}%,telefone.ilike.%${last8}%,telefone.ilike.%${maskedLast8}%`
+              )
+            : baseLeadQuery;
+
+        const limitedQuery =
+          "limit" in filteredQuery && typeof filteredQuery.limit === "function"
+            ? filteredQuery.limit(25)
+            : filteredQuery;
+
+        const { data: allLeads, error } = await limitedQuery;
 
         if (error) {
           console.error('[Maps] Erro:', error);
@@ -418,11 +434,11 @@ function ChatPageContent() {
           return;
         }
 
-        // Compara últimos 8 dígitos do telefone
-        const last8 = phoneClean.slice(-8);
-        const leadData = allLeads?.find(lead => {
+        // Compara últimos 8 dígitos do telefone ou remoteJid
+        const leadData = allLeads?.find((lead) => {
           const leadPhone = lead.telefone ? lead.telefone.replace(/\D/g, "") : "";
-          return leadPhone.includes(last8);
+          const leadJid = lead.remoteJid ? lead.remoteJid.replace(/\D/g, "") : "";
+          return leadPhone.includes(last8) || leadJid.includes(last8);
         }) || null;
 
         console.log('[Maps] Resultado:', leadData?.nome_negocio, leadData?.maps_url ? '✅ HAS MAPS' : '❌ NO MAPS');

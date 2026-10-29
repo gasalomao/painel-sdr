@@ -37,9 +37,11 @@ export default function ConfiguracoesPage() {
   const [orTesting, setOrTesting] = useState(false);
   const [orTestResult, setOrTestResult] = useState<null | { ok: boolean; message: string; count?: number }>(null);
 
-  // NVIDIA NIM API Key (modelos NVIDIA AI Foundation Endpoints / NIM).
+  // NVIDIA NIM API Key (modelos NVIDIA AI Foundation Endpoints / NIM — suporte Multi-Conta com Failover).
   const [nvKey, setNvKey] = useState("");
+  const [nvLabel, setNvLabel] = useState("");
   const [hasNvKey, setHasNvKey] = useState(false);
+  const [nvAccountsList, setNvAccountsList] = useState<Array<{ id: string; label: string; masked: string; isPrimary: boolean; has_api_key: boolean }>>([]);
   const [nvSaving, setNvSaving] = useState(false);
   const [nvTesting, setNvTesting] = useState(false);
   const [nvTestResult, setNvTestResult] = useState<null | { ok: boolean; message: string; count?: number }>(null);
@@ -435,6 +437,9 @@ export default function ConfiguracoesPage() {
           setHasKey(!!d.config.has_api_key);
           setHasOrKey(!!d.config.has_openrouter_key);
           setHasNvKey(!!d.config.has_nvidia_key);
+          if (Array.isArray(d.config.nvidia_accounts)) {
+            setNvAccountsList(d.config.nvidia_accounts);
+          }
           if (Array.isArray(d.config.openrouter_keys)) {
             setOrKeysList(d.config.openrouter_keys);
           }
@@ -573,16 +578,29 @@ export default function ConfiguracoesPage() {
     }
     setNvSaving(true);
     try {
+      const label = nvLabel.trim() || `Conta ${nvAccountsList.length + 1}`;
       const r = await fetch("/api/ai-organize/config", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ nvidia_api_key: nvKey.trim() }),
+        body: JSON.stringify({
+          add_nvidia_account: { label, apiKey: nvKey.trim() },
+        }),
       });
       const d = await r.json();
       if (!d.success) throw new Error(d.error || "Falha ao salvar");
-      setHasNvKey(true);
+
+      const cfgRes = await fetch("/api/ai-organize/config", { cache: "no-store" });
+      const cfgData = await cfgRes.json();
+      if (cfgData.success && cfgData.config) {
+        setHasNvKey(!!cfgData.config.has_nvidia_key);
+        if (Array.isArray(cfgData.config.nvidia_accounts)) {
+          setNvAccountsList(cfgData.config.nvidia_accounts);
+        }
+      }
       setNvKey("");
-      alert("API Key da NVIDIA salva com sucesso! Os modelos NVIDIA NIM agora estão disponíveis em todos os seletores de IA do sistema.");
+      setNvLabel("");
+      setNvTestResult(null);
+      alert(`Conta NVIDIA "${label}" salva com sucesso! Os modelos NVIDIA NIM agora estão disponíveis com failover automático.`);
     } catch (e: any) {
       alert("Erro: " + e.message);
     } finally {
@@ -590,19 +608,24 @@ export default function ConfiguracoesPage() {
     }
   }
 
-  async function handleRemoveNvidia() {
-    if (!confirm("Tem certeza que deseja remover a API Key da NVIDIA?")) return;
+  async function handleRemoveNvidiaAccount(id: string) {
+    if (!confirm("Tem certeza que deseja remover esta conta da NVIDIA?")) return;
     setNvSaving(true);
     try {
       const r = await fetch("/api/ai-organize/config", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ nvidia_api_key: "" }),
+        body: JSON.stringify({ remove_nvidia_account_id: id }),
       });
       const d = await r.json();
-      if (!d.success) throw new Error(d.error || "Falha ao remover");
-      setHasNvKey(false);
-      setNvKey("");
+      if (!d.success) throw new Error(d.error || "Falha ao remover conta");
+
+      const cfgRes = await fetch("/api/ai-organize/config", { cache: "no-store" });
+      const cfgData = await cfgRes.json();
+      if (cfgData.success && cfgData.config) {
+        setHasNvKey(!!cfgData.config.has_nvidia_key);
+        setNvAccountsList(Array.isArray(cfgData.config.nvidia_accounts) ? cfgData.config.nvidia_accounts : []);
+      }
       setNvTestResult(null);
     } catch (e: any) {
       alert("Erro: " + e.message);
@@ -611,9 +634,33 @@ export default function ConfiguracoesPage() {
     }
   }
 
-  async function handleTestNvidia() {
-    if (!nvKey.trim() && !hasNvKey) {
-      setNvTestResult({ ok: false, message: "Cole uma API Key para testar, ou salve primeiro." });
+  async function handleRemoveNvidia() {
+    if (!confirm("Tem certeza que deseja remover todas as contas e chaves da NVIDIA?")) return;
+    setNvSaving(true);
+    try {
+      const r = await fetch("/api/ai-organize/config", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nvidia_api_key: "", nvidia_accounts: [] }),
+      });
+      const d = await r.json();
+      if (!d.success) throw new Error(d.error || "Falha ao remover");
+      setHasNvKey(false);
+      setNvAccountsList([]);
+      setNvKey("");
+      setNvLabel("");
+      setNvTestResult(null);
+    } catch (e: any) {
+      alert("Erro: " + e.message);
+    } finally {
+      setNvSaving(false);
+    }
+  }
+
+  async function handleTestNvidia(keyToTest?: string) {
+    const targetKey = (typeof keyToTest === "string" ? keyToTest : nvKey).trim();
+    if (!targetKey && !hasNvKey) {
+      setNvTestResult({ ok: false, message: "Cole uma API Key para testar, ou salve uma conta primeiro." });
       return;
     }
     setNvTesting(true);
@@ -622,7 +669,7 @@ export default function ConfiguracoesPage() {
       const r = await fetch("/api/nvidia/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey: nvKey.trim() }),
+        body: JSON.stringify({ apiKey: targetKey }),
       });
       const d = await r.json();
       if (!d.success) throw new Error(d.error || "Falha ao validar chave");
@@ -2014,7 +2061,7 @@ export default function ConfiguracoesPage() {
                         ) : hasNvKey ? (
                           <div className="flex items-center gap-3">
                             <span className="text-xs font-black text-green-400 flex items-center gap-1">
-                              <CheckCircle2 className="w-3 h-3" /> Configurada (salva com segurança no banco)
+                              <CheckCircle2 className="w-3 h-3" /> {nvAccountsList.length > 1 ? `${nvAccountsList.length} contas configuradas com failover automático` : "Conta ativa (salva com segurança no banco)"}
                             </span>
                             <Button
                               variant="ghost"
@@ -2023,30 +2070,97 @@ export default function ConfiguracoesPage() {
                               disabled={nvSaving}
                               className="h-6 px-2 text-red-400 hover:text-red-300 hover:bg-red-500/10 text-xs"
                             >
-                              Remover
+                              Remover Todas
                             </Button>
                           </div>
                         ) : (
                           <span className="text-xs font-black text-muted-foreground flex items-center gap-1">
-                            <XCircle className="w-3 h-3" /> Não configurada (adicione sua chave nvapi-... para liberar os modelos)
+                            <XCircle className="w-3 h-3" /> Não configurada (adicione sua conta com chave nvapi-... para liberar os modelos)
                           </span>
                         )}
                       </div>
 
-                      <div className="space-y-2">
-                        <label htmlFor="nvidia-api-key" className="text-xs font-black uppercase tracking-widest text-emerald-400">
-                          {hasNvKey ? "Atualizar API Key da NVIDIA" : "Cole sua API Key da NVIDIA (NIM / AI Foundation)"}
-                        </label>
-                        <Input
-                          id="nvidia-api-key"
-                          type="password"
-                          value={nvKey}
-                          onChange={e => setNvKey(e.target.value)}
-                          placeholder="nvapi-..."
-                          className="bg-black/40 border-white/10 font-mono text-xs text-white focus:border-emerald-400"
-                          autoComplete="off"
-                          spellCheck={false}
-                        />
+                      {nvAccountsList.length > 0 && (
+                        <div className="space-y-2">
+                          <span className="text-xs font-black uppercase tracking-widest text-emerald-400">
+                            Contas NVIDIA Configuradas ({nvAccountsList.length}) — Failover 9Router-style Ativo
+                          </span>
+                          <div className="space-y-2">
+                            {nvAccountsList.map((acc, idx) => (
+                              <div
+                                key={acc.id}
+                                className="flex items-center justify-between p-3 rounded-lg bg-black/40 border border-white/10 hover:border-emerald-500/30 transition-all text-xs"
+                              >
+                                <div className="flex items-center gap-3">
+                                  <div className="w-6 h-6 rounded-md bg-emerald-500/10 text-emerald-400 flex items-center justify-center font-bold text-[11px] border border-emerald-500/20">
+                                    {idx + 1}
+                                  </div>
+                                  <div className="flex flex-col gap-0.5">
+                                    <div className="flex items-center gap-2">
+                                      <span className="font-bold text-white text-[13px]">{acc.label}</span>
+                                      {idx === 0 ? (
+                                        <span className="text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-1.5 py-0.5 rounded font-black uppercase">
+                                          Principal
+                                        </span>
+                                      ) : (
+                                        <span className="text-[10px] bg-zinc-500/20 text-zinc-300 border border-zinc-500/30 px-1.5 py-0.5 rounded font-black uppercase">
+                                          Failover #{idx + 1}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <span className="font-mono text-muted-foreground text-[11px]">
+                                      {acc.masked}
+                                    </span>
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => handleRemoveNvidiaAccount(acc.id)}
+                                    disabled={nvSaving}
+                                    className="h-7 px-2 text-red-400 hover:text-red-300 hover:bg-red-500/10 text-xs"
+                                  >
+                                    Remover
+                                  </Button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                          <div className="space-y-1 md:col-span-1">
+                            <label htmlFor="nvidia-account-label" className="text-xs font-black uppercase tracking-widest text-emerald-400">
+                              Apelido da Conta
+                            </label>
+                            <Input
+                              id="nvidia-account-label"
+                              type="text"
+                              value={nvLabel}
+                              onChange={e => setNvLabel(e.target.value)}
+                              placeholder={`Ex: Conta ${nvAccountsList.length + 1}`}
+                              className="bg-black/40 border-white/10 text-xs text-white focus:border-emerald-400"
+                            />
+                          </div>
+                          <div className="space-y-1 md:col-span-2">
+                            <label htmlFor="nvidia-api-key" className="text-xs font-black uppercase tracking-widest text-emerald-400">
+                              {nvAccountsList.length > 0 ? "Nova API Key da NVIDIA (nvapi-...)" : "API Key da NVIDIA (nvapi-...)"}
+                            </label>
+                            <Input
+                              id="nvidia-api-key"
+                              type="password"
+                              value={nvKey}
+                              onChange={e => setNvKey(e.target.value)}
+                              placeholder="nvapi-..."
+                              className="bg-black/40 border-white/10 font-mono text-xs text-white focus:border-emerald-400"
+                              autoComplete="off"
+                              spellCheck={false}
+                            />
+                          </div>
+                        </div>
                         <p className={cn(styles.fieldHelp, "text-xs text-muted-foreground leading-relaxed")}>
                           <Info aria-hidden="true" className="w-3 h-3" />
                           Obtenha seus créditos e chave em {" "}
@@ -2058,7 +2172,7 @@ export default function ConfiguracoesPage() {
                           >
                             build.nvidia.com
                           </a>
-                          . A NVIDIA oferece 1.000 créditos gratuitos para testar modelos como Nemotron, Llama 3.3, Mistral, DeepSeek e outros. Ao salvar, os modelos aparecem automaticamente em todos os seletores do sistema (Agente SDR, Disparos, Sites IA, Combos, etc.).
+                          . A NVIDIA oferece 1.000 créditos gratuitos por conta para testar modelos como Nemotron 3.5, Llama 3.3, Mistral, DeepSeek e modelos com Free Endpoint sem custo. Conecte múltiplas contas nomeadas: se uma conta esgotar a cota (429/crédito), o sistema rotaciona automaticamente para a próxima conta ativa.
                         </p>
                       </div>
 
@@ -2069,10 +2183,10 @@ export default function ConfiguracoesPage() {
                           className="bg-emerald-500/20 text-emerald-100 border border-emerald-500/40 hover:bg-emerald-500/30 font-bold text-xs uppercase tracking-widest gap-2"
                         >
                           {nvSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                          Salvar
+                          {nvAccountsList.length > 0 ? "Adicionar Conta NVIDIA" : "Salvar Conta"}
                         </Button>
                         <Button
-                          onClick={handleTestNvidia}
+                          onClick={() => handleTestNvidia()}
                           disabled={nvTesting || (!nvKey.trim() && !hasNvKey)}
                           variant="outline"
                           className="bg-white/5 border-white/10 text-white hover:bg-white/10 font-bold text-xs uppercase tracking-widest"

@@ -144,18 +144,33 @@ export async function POST(req: NextRequest) {
       openrouterApiKey = (orCfg as any)?.openrouter_api_key || null;
     }
 
-    // Se o modelo escolhido é um ref do OpenRouter ("openrouter:..."), o provedor
-    // efetivo é OpenRouter — independente do campo legado `provider`.
     const { providerOf } = await import("@/lib/ai-provider");
+    const { getAiKeys } = await import("@/lib/ai-keys");
+    const aiKeys = await getAiKeys();
     const refProvider = providerOf(model);
-    if (refProvider === "openrouter") provider = "OpenRouter";
+    if (refProvider === "nvidia" || provider?.toLowerCase() === "nvidia") provider = "NVIDIA";
+    else if (refProvider === "openrouter" || provider?.toLowerCase() === "openrouter") provider = "OpenRouter";
+    else if (refProvider === "gateway" || provider?.toLowerCase() === "gateway") provider = "Gateway";
+    else if (refProvider === "combo" || provider?.toLowerCase() === "combo") provider = "Combo";
 
-    const needsKey = provider === "OpenRouter" ? openrouterApiKey : apiKey;
-    if (!needsKey) {
-      // Sem API Key: fecha o run com erro pra não ficar "running" pra sempre.
-      await finishRun("error", { error: "API Key não configurada. Salve em Configurações." });
+    let hasValidCredentials = false;
+    if (provider === "NVIDIA") {
+      hasValidCredentials = !!(aiKeys.nvidia || aiKeys.nvidiaAccounts?.length);
+    } else if (provider === "OpenRouter") {
+      hasValidCredentials = !!(openrouterApiKey || aiKeys.openrouter || aiKeys.openrouterKeys?.length);
+    } else if (provider === "Gateway") {
+      hasValidCredentials = !!(aiKeys.gatewayBaseUrl || aiKeys.gatewayEndpoints?.length);
+    } else if (provider === "Combo") {
+      hasValidCredentials = true;
+    } else {
+      hasValidCredentials = !!(apiKey || aiKeys.gemini);
+    }
+
+    if (!hasValidCredentials) {
+      // Sem credenciais: fecha o run com erro pra não ficar "running" pra sempre.
+      await finishRun("error", { error: "Credenciais do provedor não configuradas. Salve em Configurações." });
       return NextResponse.json(
-        { success: false, error: "API Key não configurada. Salve sua chave em Configurações antes de rodar o Organizador IA." },
+        { success: false, error: "Credenciais do provedor de IA não configuradas. Salve em Configurações antes de rodar o Organizador IA." },
         { status: 400 }
       );
     }
@@ -636,6 +651,32 @@ export async function POST(req: NextRequest) {
           });
         } catch (err: any) {
           throw new Error(`Erro na API OpenRouter: ${err?.message || String(err)}`);
+        }
+    }
+    else if (provider === "NVIDIA" || provider === "Gateway" || provider === "Combo") {
+        const { generateText } = await import("@/lib/ai-provider");
+        try {
+          const out = await generateText({
+            modelRef: model,
+            system: systemInstruction,
+            prompt: `CONVERSAS A ANALISAR:\n\n${threadsTexto}`,
+            temperature: 0.2,
+            jsonMode: true,
+          });
+          textResponse = out.text || "{}";
+          await logTokenUsage({
+            source: "organizer",
+            sourceLabel: "Organizador IA",
+            model: out.modelUsed,
+            provider,
+            promptTokens: out.usage.promptTokens,
+            completionTokens: out.usage.completionTokens,
+            totalTokens: out.usage.totalTokens,
+            clientId: clientIdScope || undefined,
+            metadata: { triggered_by: triggerLabel, chats: chatsAnalyzed },
+          });
+        } catch (err: any) {
+          throw new Error(`Erro na API ${provider}: ${err?.message || String(err)}`);
         }
     }
     else if (provider === "OpenAI") {

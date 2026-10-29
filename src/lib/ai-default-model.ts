@@ -23,7 +23,6 @@ import { supabaseAdmin } from "@/lib/supabase_admin";
 import {
   listAvailableGeminiModels,
   pickBestFlashModel,
-  getCachedFlashModel,
 } from "@/lib/gemini-model-discovery";
 import { providerOf } from "@/lib/ai-provider";
 
@@ -32,13 +31,13 @@ import { providerOf } from "@/lib/ai-provider";
  * a lista real (sem await). Só normaliza prefixo "models/" e devolve trimmed.
  * Para validação real contra o que a Google publica AGORA, use `mapModelAsync`.
  */
-// Modelos OpenRouter/Gateway passam intactos — não são Gemini.
+// Modelos OpenRouter/Gateway/NVIDIA/Combo passam intactos — não são Gemini.
 export function mapModel(model: string | null | undefined): string | null {
   if (!model) return null;
   const trimmed = model.trim();
   if (!trimmed) return null;
   const provider = providerOf(trimmed);
-  if (provider === "openrouter" || provider === "gateway") return trimmed;
+  if (provider === "openrouter" || provider === "gateway" || provider === "nvidia" || provider === "combo") return trimmed;
   return trimmed.toLowerCase().startsWith("models/") ? trimmed.substring(7) : trimmed;
 }
 
@@ -54,9 +53,9 @@ export async function mapModelAsync(model: string | null | undefined): Promise<s
   const normalized = mapModel(model);
   if (!normalized) return null;
 
-  // OpenRouter/Gateway: não validamos contra a lista Gemini — devolve o ref como está.
+  // OpenRouter/Gateway/NVIDIA/Combo: não validamos contra a lista Gemini — devolve o ref como está.
   const provider = providerOf(normalized);
-  if (provider === "openrouter" || provider === "gateway") return normalized;
+  if (provider === "openrouter" || provider === "gateway" || provider === "nvidia" || provider === "combo") return normalized;
 
   const available = await listAvailableGeminiModels();
   // Sem descoberta possível (API key vazia ou Google fora) — devolve o pedido

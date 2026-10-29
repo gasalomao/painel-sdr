@@ -96,12 +96,22 @@ async function loadPhotoCache(
   const lookupJids = [...new Set(uniqueJids.flatMap((jid) => getPhotoJidAliases(jid))
     .flatMap((jid) => [jid, jid.replace("@s.whatsapp.net", "@c.us"), jid.split("@")[0]]))];
 
+  const chunks: string[][] = [];
   for (let i = 0; i < lookupJids.length; i += 200) {
-    const { data, error } = await supabaseAdmin
-      .from("contacts")
-      .select("remote_jid, profile_pic_url, profile_pic, profile_pic_fetched_at")
-      .eq("client_id", clientId)
-      .in("remote_jid", lookupJids.slice(i, i + 200));
+    chunks.push(lookupJids.slice(i, i + 200));
+  }
+
+  const chunkResults = await Promise.all(
+    chunks.map((chunk) =>
+      supabaseAdmin
+        .from("contacts")
+        .select("remote_jid, profile_pic_url, profile_pic, profile_pic_fetched_at")
+        .eq("client_id", clientId)
+        .in("remote_jid", chunk)
+    )
+  );
+
+  for (const { data, error } of chunkResults) {
     if (error) throw new PhotoError(error.message, 500);
 
     for (const row of data || []) {

@@ -20,8 +20,9 @@ export type GroupableModel = {
   rawId?: string;
   name?: string;
   description?: string;
-  provider?: string; // "combo" | "gemini" | "openrouter" | "gateway"
+  provider?: string; // "combo" | "nvidia" | "gateway" | "openrouter" | "gemini"
   supportsTools?: boolean;
+  isFreeEndpoint?: boolean;
 };
 
 // Vendor (prefixo antes de "/") → nome amigável da família.
@@ -79,8 +80,9 @@ export function modelFamily(rawIdOrId: string): string {
   return "Outros";
 }
 
-/** Modelo gratuito (OpenRouter ou NVIDIA — convenção: id termina em ":free" ou contém "free"). */
+/** Modelo gratuito (OpenRouter ou NVIDIA — convenção: flag isFreeEndpoint, id termina em ":free" ou contém "free"). */
 export function isFreeModel(m: GroupableModel): boolean {
+  if (m.isFreeEndpoint) return true;
   const raw = (m.rawId || m.id || "").toLowerCase();
   return raw.endsWith(":free") || raw.includes(":free") || /\bfree\b/i.test(raw) || raw.endsWith("/free");
 }
@@ -113,7 +115,14 @@ export function subGroupLabel(m: GroupableModel): string {
   }
 
   if (provider === "nvidia") {
-    if (isFreeModel(m)) return "Grátis";
+    if (isFreeModel(m)) {
+      if (/nemotron/.test(raw)) return "Grátis — Nemotron (NVIDIA)";
+      if (/llama/.test(raw)) return "Grátis — Llama";
+      if (/deepseek/.test(raw)) return "Grátis — DeepSeek";
+      if (/gemma|diffusiongemma/.test(raw)) return "Grátis — Gemma (Google)";
+      if (/gpt/.test(raw)) return "Grátis — GPT OSS (OpenAI)";
+      return "Grátis (Free Endpoint)";
+    }
     if (/nemotron/.test(raw)) return "Nemotron (NVIDIA)";
     if (/deepseek/.test(raw)) return "DeepSeek";
     if (/llama/.test(raw)) return "Llama (Meta)";
@@ -131,7 +140,7 @@ export function subGroupLabel(m: GroupableModel): string {
 export type SubGroup<T extends GroupableModel = GroupableModel> = { label: string; items: T[] };
 export type ProviderGroup<T extends GroupableModel = GroupableModel> = { provider: string; subgroups: SubGroup<T>[] };
 
-const PROVIDER_ORDER = ["combo", "gateway", "nvidia", "openrouter", "gemini"];
+const PROVIDER_ORDER = ["nvidia", "combo", "gateway", "openrouter", "gemini"];
 
 /**
  * Agrupa por provedor (na ordem combo → gateway → nvidia → openrouter → gemini) e, dentro de cada
@@ -193,9 +202,9 @@ export function groupModels<T extends GroupableModel>(models: T[]): ProviderGrou
 
 /** Rótulo amigável de cada provedor (compartilhado entre os seletores). */
 export const PROVIDER_LABEL: Record<string, string> = {
+  nvidia: "NVIDIA NIM",
   combo: "⚡ Combos Virtuais (Resilientes)",
   gateway: "Gateway (Assinatura)",
-  nvidia: "NVIDIA NIM",
   openrouter: "OpenRouter",
   gemini: "Google Gemini",
 };

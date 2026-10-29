@@ -17,12 +17,13 @@
 import { useEffect, useState } from "react";
 
 export type AiModel = {
-  id: string;            // valor salvo (ex: "gemini-2.5-flash", "openrouter:...", "gateway:gpt-5")
+  id: string;            // valor salvo (ex: "gemini-2.5-flash", "openrouter:...", "gateway:gpt-5", "nvidia:...")
   rawId?: string;        // id puro do provedor (exibição)
   name: string;
   description?: string;
   provider?: "gemini" | "openrouter" | "gateway" | "combo" | "nvidia";
   supportsTools?: boolean;
+  isFreeEndpoint?: boolean;
 };
 
 let CACHE: { models: AiModel[]; at: number } | null = null;
