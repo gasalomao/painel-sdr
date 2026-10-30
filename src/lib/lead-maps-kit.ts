@@ -415,8 +415,8 @@ export function mergeMapsKitData(
     typeof s.claimed === "boolean"
       ? s.claimed
       : typeof dbLead.claimed === "boolean"
-      ? dbLead.claimed
-      : null;
+        ? dbLead.claimed
+        : null;
 
   const proprietario =
     asNonEmptyString(s.ownerName) ||
@@ -441,8 +441,8 @@ export function mergeMapsKitData(
     (s.popularTimes && Object.keys(s.popularTimes).length > 0
       ? s.popularTimes
       : bd.popularTimes && typeof bd.popularTimes === "object" && !Array.isArray(bd.popularTimes)
-      ? (bd.popularTimes as Record<string, unknown>)
-      : {});
+        ? (bd.popularTimes as Record<string, unknown>)
+        : {});
 
   const sobre =
     asNonEmptyString(s.about) ||
@@ -568,10 +568,10 @@ export function mergeMapsKitData(
     typeof s.totalPhotoCount === "number" && s.totalPhotoCount > 0
       ? s.totalPhotoCount
       : typeof dbLead.total_photo_count === "number" && dbLead.total_photo_count > 0
-      ? dbLead.total_photo_count
-      : fotosUrls.length > 0
-      ? fotosUrls.length
-      : null;
+        ? dbLead.total_photo_count
+        : fotosUrls.length > 0
+          ? fotosUrls.length
+          : null;
 
   return {
     id: (dbLead.id as string | number) ?? "",
@@ -916,9 +916,8 @@ export function formatLeadKitTxt(
   lines.push(subHr);
   const cidadeUf = [data.addressComponents.cidade, data.addressComponents.estado].filter(Boolean).join(" - ");
   const seoTitle = `${data.nomeNegocio} | ${data.ramoNegocio}${cidadeUf ? ` em ${cidadeUf}` : ""}`;
-  const seoDesc = `${data.nomeNegocio} — ${data.ramoNegocio}${data.endereco ? ` em ${data.endereco}` : ""}. ${
-    data.avaliacao ? `Avaliação ${data.avaliacao} estrelas no Google.` : ""
-  } Entre em contato${data.telefone ? ` pelo telefone/WhatsApp ${data.telefone}` : ""}!`.trim();
+  const seoDesc = `${data.nomeNegocio} — ${data.ramoNegocio}${data.endereco ? ` em ${data.endereco}` : ""}. ${data.avaliacao ? `Avaliação ${data.avaliacao} estrelas no Google.` : ""
+    } Entre em contato${data.telefone ? ` pelo telefone/WhatsApp ${data.telefone}` : ""}!`.trim();
   lines.push(`Título SEO Sugerido (<title>): ${seoTitle}`);
   lines.push(`Meta Description Sugerida: ${seoDesc}`);
   lines.push("");
@@ -943,21 +942,21 @@ export function formatLeadKitTxt(
     },
     ...(data.lat && data.lng
       ? {
-          geo: {
-            "@type": "GeoCoordinates",
-            latitude: Number(data.lat),
-            longitude: Number(data.lng),
-          },
-        }
+        geo: {
+          "@type": "GeoCoordinates",
+          latitude: Number(data.lat),
+          longitude: Number(data.lng),
+        },
+      }
       : {}),
     ...(data.avaliacao && Number(data.avaliacao) > 0
       ? {
-          aggregateRating: {
-            "@type": "AggregateRating",
-            ratingValue: Number(String(data.avaliacao).replace(",", ".")),
-            reviewCount: Math.max(1, parseInt(String(data.totalAvaliacoes || "1").replace(/\D/g, ""), 10) || 1),
-          },
-        }
+        aggregateRating: {
+          "@type": "AggregateRating",
+          ratingValue: Number(String(data.avaliacao).replace(",", ".")),
+          reviewCount: Math.max(1, parseInt(String(data.totalAvaliacoes || "1").replace(/\D/g, ""), 10) || 1),
+        },
+      }
       : {}),
     sameAs: [data.instagram, data.facebook, ...Object.values(data.redesAdicionais)].filter(Boolean),
   };
@@ -1900,7 +1899,7 @@ export async function scrapeGoogleMapsPlaceForKit(input: {
     return null;
   } finally {
     if (browser) {
-      await browser.close().catch(() => {});
+      await browser.close().catch(() => { });
     }
   }
 }
