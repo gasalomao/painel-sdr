@@ -355,13 +355,15 @@ function KanbanColumn({ column, leads, onLeadClick, formatPhone, onRename, onDel
       ref={setNodeRef}
       className={cn(
         "w-[280px] sm:w-[300px] flex flex-col gap-3 shrink-0 self-stretch min-h-[calc(100vh-270px)] rounded-2xl p-1.5 transition-all duration-150",
+        menuOpen ? "relative z-30" : "relative z-0",
         isOver && "bg-white/[0.04] ring-2 ring-primary/40 shadow-lg shadow-primary/10"
       )}
     >
       {/* Header coluna */}
       <div
         className={cn(
-          "px-3 py-2.5 rounded-xl border text-xs font-bold tracking-wide flex items-center justify-between backdrop-blur-md shadow-md transition-colors",
+          "relative z-20 px-3 py-2.5 rounded-xl border text-xs font-bold tracking-wide flex items-center justify-between backdrop-blur-md shadow-md transition-colors",
+          menuOpen && "z-30",
           !isHex && column.color
         )}
         style={hexStyle}
@@ -400,7 +402,7 @@ function KanbanColumn({ column, leads, onLeadClick, formatPhone, onRename, onDel
           <Badge variant="secondary" className="bg-black/40 text-inherit border border-current/20 text-[10px] w-6 h-6 p-0 flex items-center justify-center rounded-full font-black">
             {leads.length}
           </Badge>
-          <div className="relative" ref={menuRef}>
+          <div className={cn("relative", menuOpen && "z-50")} ref={menuRef}>
             <button
               onClick={(e) => { e.stopPropagation(); setMenuOpen(!menuOpen); }}
               className="p-1 rounded-md hover:bg-black/30 text-current/70 hover:text-current transition-colors"
@@ -487,7 +489,7 @@ function KanbanCard({ lead, onClick, isOverlay, formatPhone }: any) {
   const style = {
     transform: CSS.Translate.toString(transform),
     transition,
-    zIndex: isDragging || isOverlay ? 50 : 1,
+    zIndex: isDragging || isOverlay ? 50 : undefined,
     opacity: isDragging ? 0.4 : 1,
   };
 
