@@ -10,7 +10,7 @@ import { getEvolutionConfig } from "@/lib/evolution";
 import { requireClientId } from "@/lib/tenant";
 import { hasInternalSecret } from "@/lib/internal-auth";
 import { maskJid } from "@/lib/pii";
-import { resolveFunnelStage, checkSchedulesSync, resolveAgentOutput, splitMessage } from "@/lib/agent-format";
+import { resolveFunnelStage, checkSchedulesSync, resolveAgentOutput, splitMessage, normalizeSplitIntensity } from "@/lib/agent-format";
 import { parseAgendaDateTime, isDuplicateSlot, hasAgentOverlapConflict } from "@/lib/agenda-logic";
 import { indexKnowledgeDocument } from "@/lib/rag";
 import { getAiKeys } from "@/lib/ai-keys";
@@ -2196,6 +2196,7 @@ ${capturedVariablesPrompt}
     // Import dinâmico pra evitar ciclos.
     const channelMod = await import("@/lib/channel");
     const humanize = agentConfig.options?.humanize_messages ?? false;
+    const splitIntensity = normalizeSplitIntensity(agentConfig.options?.split_intensity);
 
     const testStateUpdate = isTestMode ? {
         variables: currentVariables,
@@ -2208,7 +2209,7 @@ ${capturedVariablesPrompt}
             success: true, 
             ai_responded: true, 
             text: finalAnswer, 
-            chunks: humanize ? splitMessage(finalAnswer) : [finalAnswer],
+            chunks: humanize ? splitMessage(finalAnswer, splitIntensity) : [finalAnswer],
             isTest: true, 
             logs: callLogs,
             testStateUpdate
@@ -2248,8 +2249,8 @@ ${capturedVariablesPrompt}
       } catch { /* gate é best-effort — falha não bloqueia o reply */ }
     }
 
-    const messageChunks = humanize ? splitMessage(finalAnswer) : [finalAnswer];
-    console.log(`[AGENT] Enviando ${messageChunks.length} chunks para ${maskJid(remoteJid)} (Humanize: ${humanize})`);
+    const messageChunks = humanize ? splitMessage(finalAnswer, splitIntensity) : [finalAnswer];
+    console.log(`[AGENT] Enviando ${messageChunks.length} chunks para ${maskJid(remoteJid)} (Humanize: ${humanize}, picote: ${splitIntensity})`);
 
     // ============================================================
     // DEDUP BASEADO EM TEMPO (não mais "pra sempre").

@@ -15,7 +15,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Header } from "@/components/layout/header";
 import { supabase } from "@/lib/supabase";
 import { renderTemplate } from "@/lib/template-vars";
-import { sandboxSuppressionMessage } from "@/lib/agent-format";
+import { sandboxSuppressionMessage, normalizeSplitIntensity, DEFAULT_SPLIT_INTENSITY, type SplitIntensity } from "@/lib/agent-format";
 import { cn } from "@/lib/utils";
 import styles from "./agente.module.css";
 import { useClientSession } from "@/lib/use-session";
@@ -98,6 +98,8 @@ export default function AgentePage() {
   // ============= COMPORTAMENTO =============
   const [messageBufferSeconds, setMessageBufferSeconds] = useState(0);
   const [humanizeMessages, setHumanizeMessages] = useState(false);
+  // Intensidade do picote: 1 = picota pouco · 3 = padrão · 5 = picota muito.
+  const [splitIntensity, setSplitIntensity] = useState<SplitIntensity>(DEFAULT_SPLIT_INTENSITY);
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
   // Modo de raciocínio UNIVERSAL: 0=Econômico, 1=Equilibrado, 2=Intenso, 3=Think Máximo.
   // Funciona em todos os modelos (o ai-provider mapeia pro param de cada um).
@@ -323,6 +325,7 @@ export default function AgentePage() {
         setCustomTools(opts.custom_tools || []);
         setMessageBufferSeconds(opts.message_buffer_seconds || 0);
         setHumanizeMessages(opts.humanize_messages ?? false);
+        setSplitIntensity(normalizeSplitIntensity(opts.split_intensity));
         setWebSearchEnabled(opts.web_search_enabled ?? false);
         // Modo de raciocínio: prefere reasoning_mode (novo); retrocompat thinking_budget.
         if (opts.reasoning_mode === 0 || opts.reasoning_mode === 1 || opts.reasoning_mode === 2 || opts.reasoning_mode === 3) {
@@ -553,6 +556,7 @@ export default function AgentePage() {
         app_url: appUrl,
         message_buffer_seconds: messageBufferSeconds,
         humanize_messages: humanizeMessages,
+        split_intensity: splitIntensity,
         web_search_enabled: webSearchEnabled,
         reasoning_mode: reasoningMode,
         thinking_budget: reasoningMode,
@@ -1124,6 +1128,7 @@ export default function AgentePage() {
                 onSaveVinculo={saveVinculoInstant}
                 messageBufferSeconds={messageBufferSeconds} setMessageBufferSeconds={setMessageBufferSeconds}
                 humanizeMessages={humanizeMessages} setHumanizeMessages={setHumanizeMessages}
+                splitIntensity={splitIntensity} setSplitIntensity={setSplitIntensity}
                 webSearchEnabled={webSearchEnabled} setWebSearchEnabled={setWebSearchEnabled}
                 reasoningMode={reasoningMode} setReasoningMode={setReasoningMode}
                 leadIntelligenceEnabled={leadIntelligenceEnabled} setLeadIntelligenceEnabled={setLeadIntelligenceEnabled}

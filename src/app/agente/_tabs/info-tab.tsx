@@ -19,6 +19,16 @@ import type { PreviewLead, PreviewSample } from "../_components/lead-selector";
 import { ModelOptions } from "@/components/ai-module-shared";
 import type { GroupableModel } from "@/lib/model-grouping";
 import { toast } from "sonner";
+import type { SplitIntensity } from "@/lib/agent-format";
+
+// Rótulos da barra "Intensidade do picote" (1 = picota pouco · 5 = picota muito).
+const SPLIT_INTENSITY_LABELS: Record<SplitIntensity, string> = {
+  1: "Mínimo",
+  2: "Pouco",
+  3: "Normal",
+  4: "Bastante",
+  5: "Máximo",
+};
 
 // Variáveis que aparecem como chips clicáveis no editor de prompt.
 const PROMPT_VARIABLES = [
@@ -128,6 +138,7 @@ export type InfoTabProps = {
   onSaveVinculo: (instanceName: string) => void;
   messageBufferSeconds: number; setMessageBufferSeconds: (n: number) => void;
   humanizeMessages: boolean; setHumanizeMessages: (v: boolean) => void;
+  splitIntensity: SplitIntensity; setSplitIntensity: (n: SplitIntensity) => void;
   webSearchEnabled: boolean; setWebSearchEnabled: (v: boolean) => void;
   reasoningMode: 0 | 1 | 2 | 3; setReasoningMode: (n: 0 | 1 | 2 | 3) => void;
   leadIntelligenceEnabled: boolean; setLeadIntelligenceEnabled: (v: boolean) => void;
@@ -724,6 +735,57 @@ export function InfoTab(p: InfoTabProps) {
             onChange={p.setHumanizeMessages}
             hint="Divide respostas longas em várias mensagens menores e simula tempo de digitação entre elas."
           />
+
+          {/* Intensidade do picote — só faz sentido com Humanizar ligado */}
+          {p.humanizeMessages && (
+            <div className="space-y-2 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.04] p-3">
+              <div className="flex items-center justify-between gap-2">
+                <label htmlFor="split-intensity" className="text-[11px] font-semibold uppercase tracking-wider text-[#00ffcc]">
+                  Intensidade do picote
+                </label>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
+                  {SPLIT_INTENSITY_LABELS[p.splitIntensity]}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  aria-label="Picotar menos"
+                  disabled={p.splitIntensity <= 1}
+                  onClick={() => p.setSplitIntensity(Math.max(1, p.splitIntensity - 1) as SplitIntensity)}
+                  className="h-8 w-8 shrink-0 rounded-lg border border-white/10 bg-white/5 text-white text-base font-bold hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  −
+                </button>
+                <input
+                  id="split-intensity"
+                  type="range"
+                  min={1}
+                  max={5}
+                  step={1}
+                  value={p.splitIntensity}
+                  onChange={(e) => p.setSplitIntensity(Number(e.target.value) as SplitIntensity)}
+                  className="flex-1 accent-emerald-400 cursor-pointer"
+                />
+                <button
+                  type="button"
+                  aria-label="Picotar mais"
+                  disabled={p.splitIntensity >= 5}
+                  onClick={() => p.setSplitIntensity(Math.min(5, p.splitIntensity + 1) as SplitIntensity)}
+                  className="h-8 w-8 shrink-0 rounded-lg border border-white/10 bg-white/5 text-white text-base font-bold hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  +
+                </button>
+              </div>
+              <div className="flex justify-between text-[10px] text-muted-foreground px-10">
+                <span>Menos mensagens</span>
+                <span>Mais mensagens</span>
+              </div>
+              <p className="text-[10px] text-muted-foreground px-1">
+                Menos: junta parágrafos e manda blocos maiores. Mais: quebra por linha e por frase, em várias mensagens curtas. O nível Normal é o comportamento de antes.
+              </p>
+            </div>
+          )}
 
           {/* Web Search MCP */}
           <ToggleRow

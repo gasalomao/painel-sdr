@@ -4,16 +4,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Conversation } from "@/types";
 import { ConversationList } from "./conversation-list";
 
-const mocks = vi.hoisted(() => ({ fetch: vi.fn(), toast: { info: vi.fn(), success: vi.fn(), error: vi.fn() } }));
+const mocks = vi.hoisted(() => ({
+  fetch: vi.fn(),
+  toast: { info: vi.fn(), success: vi.fn(), error: vi.fn() },
+  supabaseData: {} as Record<string, any[]>,
+}));
 vi.mock("sonner", () => ({ toast: mocks.toast }));
 vi.mock("@/components/ui/scroll-area", () => ({ ScrollArea: ({ children }: { children: React.ReactNode }) => <div>{children}</div> }));
 vi.mock("@/lib/supabase", () => ({
-  supabase: { from: () => {
-    const query = new Proxy({}, { get: (_, key) => key === "then"
-      ? (resolve: (result: unknown) => void) => Promise.resolve(resolve({ data: [], error: null }))
-      : () => query });
-    return query;
-  } },
+  supabase: {
+    from: (table: string) => {
+      const data = mocks.supabaseData[table] ?? [];
+      const query = new Proxy({}, {
+        get: (_, key) => key === "then"
+          ? (resolve: (result: unknown) => void) => Promise.resolve(resolve({ data, error: null }))
+          : () => query
+      });
+      return query;
+    }
+  },
 }));
 
 const jid = "5511999990001@s.whatsapp.net";
@@ -28,6 +37,7 @@ const response = (body: unknown, status = 200) => new Response(JSON.stringify(bo
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.supabaseData = {};
   mocks.fetch.mockReset();
   vi.stubGlobal("fetch", mocks.fetch);
 });
@@ -83,5 +93,99 @@ describe("ConversationList sincronização manual de fotos", () => {
     expect(loaded).toHaveBeenCalledWith([expect.objectContaining({ contact: expect.objectContaining({ avatar_url: newPhoto }) })]);
     expect(mocks.toast.success).toHaveBeenCalledWith("Sincronização concluída: 1 fotos atualizadas!");
     expect(mocks.toast.error).not.toHaveBeenCalled();
+  });
+});
+
+describe("ConversationList filtro por coluna do Kanban", () => {
+  it("renderiza o seletor de colunas do Kanban", async () => {
+    render(
+      <ConversationList
+        activeConversationId={null}
+        onSelect={vi.fn()}
+        conversations={[conversation]}
+        onConversationsLoaded={vi.fn()}
+        clientId="a"
+      />
+    );
+    expect(screen.getByRole("button", { name: "Filtrar por coluna do Kanban" })).toBeInTheDocument();
+    expect(screen.getByText("Kanban")).toBeInTheDocument();
+  });
+
+  it("exibe leads da coluna mesmo que nunca tenham conversado e prioriza conversas mais recentes primeiro", async () => {
+    const uncontactedLead = {
+      id: 99,
+      nome_negocio: "Oficina do João (Sem Conversa)",
+      telefone: "5511988887777",
+      remoteJid: "5511988887777@s.whatsapp.net",
+      status: "follow-up",
+      photos: ["https://example.com/foto.jpg"],
+      created_at: "2026-01-02",
+    };
+    const contactedLead = {
+      id: 100,
+      nome_negocio: "Restaurante Silva (Com Conversa)",
+      telefone: "5511999990001",
+      remoteJid: jid,
+      status: "follow-up",
+      photos: null,
+      created_at: "2026-01-01",
+    };
+    mocks.supabaseData = {
+      leads_extraidos: [uncontactedLead, contactedLead],
+    };
+
+    const convWithChat: Conversation = {
+      ...conversation,
+      last_message_at: "2026-01-05T10:00:00Z",
+      last_message_text: "Última mensagem enviada",
+      contact: {
+        ...conversation.contact!,
+        name: "Restaurante Silva (Com Conversa)",
+      },
+    };
+
+    const onSelect = vi.fn();
+    render(
+      <ConversationList
+        activeConversationId={null}
+        onSelect={onSelect}
+        conversations={[convWithChat]}
+        onConversationsLoaded={vi.fn()}
+        clientId="a"
+      />
+    );
+
+    // Abre o dropdown do Kanban e seleciona "Follow-Up"
+    fireEvent.click(screen.getByRole("button", { name: "Filtrar por coluna do Kanban" }));
+    fireEvent.click(screen.getByText("Follow-Up"));
+
+    // Ambos devem aparecer na tela
+    await waitFor(() => {
+      expect(screen.getByText("Restaurante Silva (Com Conversa)")).toBeInTheDocument();
+      expect(screen.getByText("Oficina do João (Sem Conversa)")).toBeInTheDocument();
+    });
+
+    // A conversa com histórico aparece primeiro, o lead sem histórico aparece depois
+    const items = screen.getAllByRole("button");
+    const contactedIdx = items.findIndex((el) => el.textContent?.includes("Restaurante Silva"));
+    const uncontactedIdx = items.findIndex((el) => el.textContent?.includes("Oficina do João"));
+    expect(contactedIdx).toBeLessThan(uncontactedIdx);
+
+    // O lead sem conversa prévia possui o badge "Sem conversa"
+    expect(screen.getByText("Sem conversa")).toBeInTheDocument();
+
+    // Ao clicar no lead sem conversa, dispara onSelect para iniciar chat
+    fireEvent.click(screen.getByText("Oficina do João (Sem Conversa)"));
+    expect(onSelect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "5511988887777@s.whatsapp.net",
+        is_synthetic: true,
+        contact: expect.objectContaining({
+          name: "Oficina do João (Sem Conversa)",
+          phone: "5511988887777",
+          avatar_url: "https://example.com/foto.jpg",
+        }),
+      })
+    );
   });
 });

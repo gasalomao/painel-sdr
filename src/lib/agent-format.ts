@@ -120,33 +120,78 @@ export function checkSchedulesSync(schedulesJSON: any, now: Date = new Date()): 
   return false; // ABERTO
 }
 
-/**
- * Picota uma mensagem longa em pedaços lógicos (humanização). Divide por
- * parágrafos; pedaços > 400 chars são quebrados por frase.
- */
-export function splitMessage(text: string): string[] {
-  if (!text) return [];
+/** Intensidade do picote: 1 = picota pouco (mensagens maiores) · 5 = picota muito. */
+export type SplitIntensity = 1 | 2 | 3 | 4 | 5;
 
-  const initialChunks = text.split(/\n\n+/).map((c) => c.trim()).filter(Boolean);
-  const finalChunks: string[] = [];
+export const DEFAULT_SPLIT_INTENSITY: SplitIntensity = 3;
+
+interface SplitProfile {
+  /** Também quebra em quebra de linha simples (não só parágrafo em branco). */
+  splitOnLineBreak: boolean;
+  /** Tamanho máximo de cada pedaço; acima disso quebra por frase. */
+  maxLen: number;
+  /** Junta pedaços vizinhos enquanto a soma couber nesse limite (0 = não junta). */
+  mergeUpTo: number;
+}
+
+const SPLIT_PROFILES: Record<SplitIntensity, SplitProfile> = {
+  1: { splitOnLineBreak: false, maxLen: 900, mergeUpTo: 700 },
+  2: { splitOnLineBreak: false, maxLen: 600, mergeUpTo: 350 },
+  3: { splitOnLineBreak: false, maxLen: 400, mergeUpTo: 0 },
+  4: { splitOnLineBreak: true, maxLen: 220, mergeUpTo: 0 },
+  5: { splitOnLineBreak: true, maxLen: 110, mergeUpTo: 0 },
+};
+
+/** Normaliza qualquer valor salvo (null, string, fora da faixa) para 1–5. */
+export function normalizeSplitIntensity(value: unknown): SplitIntensity {
+  const n = Math.round(Number(value));
+  if (n >= 1 && n <= 5) return n as SplitIntensity;
+  return DEFAULT_SPLIT_INTENSITY;
+}
+
+/**
+ * Picota uma mensagem longa em pedaços lógicos (humanização).
+ * Nível 3 (padrão) mantém o comportamento original: divide por parágrafos e
+ * quebra por frase os pedaços > 400 chars. Níveis menores juntam parágrafos
+ * (menos mensagens); níveis maiores quebram também por linha e por frase.
+ */
+export function splitMessage(text: string, intensity: SplitIntensity = DEFAULT_SPLIT_INTENSITY): string[] {
+  if (!text) return [];
+  const profile = SPLIT_PROFILES[normalizeSplitIntensity(intensity)];
+
+  const separator = profile.splitOnLineBreak ? /\n+/ : /\n\n+/;
+  const initialChunks = text.split(separator).map((c) => c.trim()).filter(Boolean);
+  const pieces: string[] = [];
 
   for (const chunk of initialChunks) {
-    if (chunk.length > 400) {
+    if (chunk.length > profile.maxLen) {
       const sentences = chunk.split(/(?<=[.!?])\s+|\n/).map((s) => s.trim()).filter(Boolean);
       let temp = "";
       for (const s of sentences) {
-        if ((temp.length + s.length) < 400) {
+        if ((temp.length + s.length) < profile.maxLen) {
           temp += (temp ? " " : "") + s;
         } else {
-          if (temp) finalChunks.push(temp);
+          if (temp) pieces.push(temp);
           temp = s;
         }
       }
-      if (temp) finalChunks.push(temp);
+      if (temp) pieces.push(temp);
     } else {
-      finalChunks.push(chunk);
+      pieces.push(chunk);
     }
   }
 
-  return finalChunks.filter((c) => c.length > 0);
+  if (profile.mergeUpTo <= 0) return pieces.filter((c) => c.length > 0);
+
+  // Picote baixo: junta pedaços vizinhos para enviar menos mensagens.
+  const merged: string[] = [];
+  for (const piece of pieces) {
+    const last = merged[merged.length - 1];
+    if (last && last.length + piece.length + 2 <= profile.mergeUpTo) {
+      merged[merged.length - 1] = `${last}\n\n${piece}`;
+    } else {
+      merged.push(piece);
+    }
+  }
+  return merged.filter((c) => c.length > 0);
 }

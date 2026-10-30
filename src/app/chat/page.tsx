@@ -170,6 +170,7 @@ function ChatPageContent() {
                 last_message_text: preview,
                 last_message_at: msg.created_at || c.last_message_at,
                 unread_count: isCurrent ? 0 : c.unread_count + (senderType === "customer" ? 1 : 0),
+                is_synthetic: false,
               };
             })
           )
@@ -371,9 +372,13 @@ function ChatPageContent() {
       setActiveContact(conv.contact ?? null);
       setMessages([]);
 
-      setConversations((prev) =>
-        prev.map((c) => (c.id === conv.id ? { ...c, unread_count: 0 } : c))
-      );
+      setConversations((prev) => {
+        const exists = prev.some((c) => isSameJid(c.id, conv.id) || c.id === conv.id);
+        if (exists) {
+          return prev.map((c) => (c.id === conv.id || isSameJid(c.id, conv.id) ? { ...c, unread_count: 0 } : c));
+        }
+        return [conv, ...prev];
+      });
 
       autoSelectedForDeepLinkRef.current = conv.id;
       router.replace(`/chat?c=${conv.id}`, { scroll: false });
@@ -481,16 +486,17 @@ function ChatPageContent() {
       return [...prev, msg];
     });
 
-    // Atualiza o texto da Ãºltima mensagem no card do contato E reordena
+    // Atualiza o texto da última mensagem no card do contato E reordena
     // a lista (conversa que recebeu mensagem do agente sobe pro topo).
     setConversations((prev) =>
       sortConversationsByLastMessage(
         prev.map((c) =>
-          c.id === msg.conversation_id
+          c.id === msg.conversation_id || isSameJid(c.id, msg.conversation_id)
             ? {
                 ...c,
                 last_message_text: msg.content_text || c.last_message_text,
                 last_message_at: msg.created_at,
+                is_synthetic: false,
               }
             : c
         )

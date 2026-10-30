@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { resolveFunnelStage, checkSchedulesSync, resolveAgentOutput, sanitizeAgentAnswer, sandboxSuppressionMessage, splitMessage, type FunnelStage } from "../agent-format";
+import { resolveFunnelStage, checkSchedulesSync, resolveAgentOutput, sanitizeAgentAnswer, sandboxSuppressionMessage, splitMessage, normalizeSplitIntensity, type FunnelStage } from "../agent-format";
 
 /* ============================================================
    FUNIL — resolveFunnelStage
@@ -167,5 +167,33 @@ describe("splitMessage", () => {
     expect(r.length).toBeGreaterThan(1);
     // nenhum chunk deve estar absurdamente grande (a quebra é por frase ~<400)
     expect(r.every((c) => c.length < 500)).toBe(true);
+  });
+
+  const sample = "Oi, tudo bem? Aqui é a Sarah.\n\nAchei vocês no Google Maps.\nO perfil está sem site.\n\nPosso preparar uma prévia gratuita para você ver como fica?";
+
+  test("intensidade 1 (mínimo) junta parágrafos curtos em uma mensagem só", () => {
+    expect(splitMessage(sample, 1)).toHaveLength(1);
+  });
+
+  test("intensidade 3 (padrão) é igual ao comportamento sem parâmetro", () => {
+    expect(splitMessage(sample, 3)).toEqual(splitMessage(sample));
+    expect(splitMessage(sample)).toHaveLength(3);
+  });
+
+  test("intensidade 5 (máximo) quebra por linha e por frase", () => {
+    const r = splitMessage(sample, 5);
+    expect(r.length).toBeGreaterThan(splitMessage(sample, 3).length);
+    expect(r.every((c) => c.length <= 120)).toBe(true);
+  });
+
+  test("mais intensidade nunca gera menos mensagens", () => {
+    const counts = ([1, 2, 3, 4, 5] as const).map((lvl) => splitMessage(sample, lvl).length);
+    for (let i = 1; i < counts.length; i++) expect(counts[i]).toBeGreaterThanOrEqual(counts[i - 1]);
+  });
+
+  test("normalizeSplitIntensity cai no padrão para valores inválidos", () => {
+    expect(normalizeSplitIntensity(undefined)).toBe(3);
+    expect(normalizeSplitIntensity("9")).toBe(3);
+    expect(normalizeSplitIntensity("2")).toBe(2);
   });
 });

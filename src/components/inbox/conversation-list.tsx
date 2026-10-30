@@ -8,6 +8,7 @@ import {
   CONVERSATION_SELECT,
   formatLastMessagePreview,
   isSameJid,
+  sortConversationsByLastMessage,
 } from "@/lib/inbox/conversations";
 import { cn } from "@/lib/utils";
 import type { Conversation, ConversationStatus, Tag } from "@/types";
@@ -53,6 +54,68 @@ const STATUS_COLORS: Record<ConversationStatus, string> = {
   pending: "bg-amber-500", // Robô (bot_active)
   closed: "bg-muted-foreground", // Fechado
 };
+
+export interface KanbanColumnSimple {
+  status_key: string;
+  label: string;
+  color: string;
+}
+
+export const DEFAULT_KANBAN_COLUMNS: KanbanColumnSimple[] = [
+  { status_key: "novo",             label: "Lead Extraído",   color: "#3b82f6" },
+  { status_key: "primeiro_contato", label: "Primeiro Contato", color: "#06b6d4" },
+  { status_key: "interessado",      label: "Interessado",      color: "#a855f7" },
+  { status_key: "follow-up",        label: "Follow-Up",        color: "#f59e0b" },
+  { status_key: "agendado",         label: "Agendado",         color: "#f97316" },
+  { status_key: "fechado",          label: "Venda Fechada",    color: "#22c55e" },
+  { status_key: "sem_interesse",    label: "Sem Interesse",    color: "#ef4444" },
+  { status_key: "descartado",       label: "Descartado",       color: "#737373" },
+];
+
+export interface KanbanLeadItem {
+  id: number;
+  remoteJid: string | null;
+  telefone: string | null;
+  nome_negocio: string | null;
+  status: string | null;
+  photos?: any;
+  created_at: string | null;
+}
+
+function extractLeadPhoto(photos: unknown): string | undefined {
+  if (!photos) return undefined;
+  if (Array.isArray(photos) && photos.length > 0 && typeof photos[0] === "string") {
+    return photos[0];
+  }
+  if (typeof photos === "string") {
+    if (photos.startsWith("http")) return photos;
+    try {
+      const parsed = JSON.parse(photos);
+      if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === "string") {
+        return parsed[0];
+      }
+    } catch {}
+  }
+  return undefined;
+}
+
+function cleanDigits(val?: string | null): string {
+  if (!val) return "";
+  return val.replace(/\D/g, "");
+}
+
+function getCanonicalPhoneKey(raw?: string | null): string {
+  if (!raw) return "";
+  let digits = raw.replace(/@.*$/, "").replace(/\D/g, "");
+  if (!digits) return "";
+  if (!digits.startsWith("55") && (digits.length === 10 || digits.length === 11)) {
+    digits = "55" + digits;
+  }
+  if (/^55[1-9]\d9[6-9]\d{7}$/.test(digits)) {
+    digits = digits.slice(0, 4) + digits.slice(5);
+  }
+  return digits;
+}
 
 type InboxFilter = ConversationStatus | "all" | "unread";
 
@@ -132,6 +195,9 @@ export function ConversationList({
 
   const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
   const [selectedCompany, setSelectedCompany] = useState<string | null>(null);
+  const [kanbanCols, setKanbanCols] = useState<KanbanColumnSimple[]>(DEFAULT_KANBAN_COLUMNS);
+  const [kanbanLeads, setKanbanLeads] = useState<KanbanLeadItem[]>([]);
+  const [selectedKanbanColumn, setSelectedKanbanColumn] = useState<string | null>(null);
 
   const onConversationsLoadedRef = useRef(onConversationsLoaded);
   useEffect(() => {
@@ -190,10 +256,9 @@ export function ConversationList({
     let cancelled = false;
 
     (async () => {
-      // Executa as duas consultas EM PARALELO com limites otimizados para máxima velocidade.
-      // Sessões select * é pesado (inclui variables/JSONB) — pedimos só o necessário.
-      // Sem isso, em clientes com 80k+ sessões o chat demorava ~5-10s pra abrir.
-      const [sessionsRes, msgsRes] = await Promise.all([
+      // Executa as consultas EM PARALELO com limites otimizados para máxima velocidade.
+      // Inclui kanban_columns e leads_extraidos para alimentar o filtro de colunas do Kanban.
+      const [sessionsRes, msgsRes, colsRes, leadsRes] = await Promise.all([
         supabase
           .from("sessions")
           .select("id, client_id, contact_id, instance_name, bot_status, resume_at, unread_count, last_message_at, created_at, updated_at, agent_id, contact:contacts(*)")
@@ -206,9 +271,36 @@ export function ConversationList({
           .eq("client_id", clientId)
           .order("created_at", { ascending: false })
           .limit(600),
+        supabase
+          .from("kanban_columns")
+          .select("id, status_key, label, color, order_index")
+          .eq("client_id", clientId)
+          .order("order_index"),
+        supabase
+          .from("leads_extraidos")
+          .select("id, remoteJid, telefone, nome_negocio, status, photos, created_at")
+          .eq("client_id", clientId)
+          .order("created_at", { ascending: false })
+          .limit(2000),
       ]);
 
       if (cancelled) return;
+
+      if (colsRes?.data && Array.isArray(colsRes.data) && colsRes.data.length > 0) {
+        setKanbanCols(
+          colsRes.data.map((c: any) => ({
+            status_key: c.status_key,
+            label: c.label,
+            color: c.color || "#3b82f6",
+          }))
+        );
+      }
+      if (leadsRes?.error) {
+        console.error("[ConversationList] Erro ao carregar leads_extraidos:", leadsRes.error);
+      }
+      if (leadsRes?.data && Array.isArray(leadsRes.data)) {
+        setKanbanLeads(leadsRes.data as KanbanLeadItem[]);
+      }
 
       if (sessionsRes.error) {
         console.error("Falha ao buscar sessões do chat:", sessionsRes.error);
@@ -363,8 +455,169 @@ export function ConversationList({
     return m;
   }, [tags]);
 
+  // Constrói mapas rápidos de busca para correlacionar leads e conversas
+  const { leadByPhoneKey, leadByJid, leadByLast8, leadByName, kanbanCounts, leadsByColumn } = useMemo(() => {
+    const byPhone = new Map<string, KanbanLeadItem>();
+    const byJid = new Map<string, KanbanLeadItem>();
+    const byLast8 = new Map<string, KanbanLeadItem>();
+    const byName = new Map<string, KanbanLeadItem>();
+    const counts: Record<string, number> = {};
+    const byCol = new Map<string, KanbanLeadItem[]>();
+
+    for (const lead of kanbanLeads) {
+      const statusKey = lead.status || "novo";
+      counts[statusKey] = (counts[statusKey] || 0) + 1;
+
+      const list = byCol.get(statusKey) || [];
+      list.push(lead);
+      byCol.set(statusKey, list);
+
+      if (lead.remoteJid) {
+        byJid.set(lead.remoteJid, lead);
+        const k = getCanonicalPhoneKey(lead.remoteJid);
+        if (k) byPhone.set(k, lead);
+        const d = cleanDigits(lead.remoteJid);
+        if (d) {
+          byPhone.set(d, lead);
+          if (d.length >= 8) byLast8.set(d.slice(-8), lead);
+        }
+      }
+      if (lead.telefone) {
+        const k = getCanonicalPhoneKey(lead.telefone);
+        if (k) byPhone.set(k, lead);
+        const d = cleanDigits(lead.telefone);
+        if (d) {
+          byPhone.set(d, lead);
+          if (d.length >= 8) byLast8.set(d.slice(-8), lead);
+        }
+      }
+      if (lead.nome_negocio) {
+        byName.set(lead.nome_negocio.toLowerCase().trim(), lead);
+      }
+    }
+
+    return {
+      leadByPhoneKey: byPhone,
+      leadByJid: byJid,
+      leadByLast8: byLast8,
+      leadByName: byName,
+      kanbanCounts: counts,
+      leadsByColumn: byCol,
+    };
+  }, [kanbanLeads]);
+
+  const getLeadForConv = useCallback((c: Conversation): KanbanLeadItem | undefined => {
+    if (c.id && leadByJid.has(c.id)) return leadByJid.get(c.id);
+    if (c.contact?.remote_jid && leadByJid.has(c.contact.remote_jid)) return leadByJid.get(c.contact.remote_jid);
+
+    const phoneKey = getCanonicalPhoneKey(c.contact?.phone || c.id);
+    if (phoneKey && leadByPhoneKey.has(phoneKey)) return leadByPhoneKey.get(phoneKey);
+
+    const digits = cleanDigits(c.contact?.phone || c.id);
+    if (digits && leadByPhoneKey.has(digits)) return leadByPhoneKey.get(digits);
+
+    if (digits && digits.length >= 8 && leadByLast8.has(digits.slice(-8))) {
+      return leadByLast8.get(digits.slice(-8));
+    }
+
+    const name = c.contact?.name || c.contact?.company;
+    if (name && leadByName.has(name.toLowerCase().trim())) {
+      return leadByName.get(name.toLowerCase().trim());
+    }
+
+    return undefined;
+  }, [leadByJid, leadByPhoneKey, leadByLast8, leadByName]);
+
   const filtered = useMemo(() => {
-    let result = conversations;
+    // 1. Identifica quais conversas existentes pertencem a qual coluna do Kanban
+    const matchedLeadIds = new Set<number>();
+    const enrichedConversations: Conversation[] = [];
+
+    for (const conv of conversations) {
+      const lead = getLeadForConv(conv);
+      if (lead) {
+        matchedLeadIds.add(lead.id);
+        const leadPhoto = extractLeadPhoto(lead.photos);
+        enrichedConversations.push({
+          ...conv,
+          kanban_status: lead.status || undefined,
+          contact: conv.contact
+            ? {
+                ...conv.contact,
+                avatar_url: conv.contact.avatar_url || leadPhoto,
+              }
+            : conv.contact,
+        });
+      } else {
+        enrichedConversations.push(conv);
+      }
+    }
+
+    // 2. Filtra conversas existentes pelo filtro de coluna do Kanban (se ativo)
+    let convList = enrichedConversations;
+    if (selectedKanbanColumn) {
+      convList = convList.filter((c) => c.kanban_status === selectedKanbanColumn);
+    }
+
+    // 3. Monta lista de leads que AINDA NÃO têm conversa iniciada
+    let targetLeads = kanbanLeads.filter((l) => !matchedLeadIds.has(l.id));
+    if (selectedKanbanColumn) {
+      targetLeads = targetLeads.filter((l) => (l.status || "novo") === selectedKanbanColumn);
+    }
+
+    const syntheticConversations: Conversation[] = targetLeads.map((lead) => {
+      const rawPhone = lead.telefone || lead.remoteJid || "";
+      const phoneClean = cleanDigits(rawPhone);
+      const jid = lead.remoteJid && lead.remoteJid.includes("@")
+        ? lead.remoteJid
+        : phoneClean
+        ? `${phoneClean}@s.whatsapp.net`
+        : `lead-${lead.id}`;
+      const displayPhone = lead.telefone || phoneClean;
+      const avatar = extractLeadPhoto(lead.photos);
+      const createdAt = lead.created_at || new Date().toISOString();
+
+      return {
+        id: jid,
+        user_id: clientId || "",
+        contact_id: "",
+        status: "open",
+        unread_count: 0,
+        created_at: createdAt,
+        updated_at: createdAt,
+        last_message_text: "Sem mensagens ainda",
+        last_message_at: createdAt,
+        bot_status: "bot_active",
+        is_synthetic: true,
+        kanban_status: lead.status || undefined,
+        contact: {
+          id: `lead-${lead.id}`,
+          user_id: clientId || "",
+          account_id: clientId || "",
+          phone: displayPhone,
+          name: lead.nome_negocio || displayPhone || "Lead sem nome",
+          company: lead.nome_negocio || "",
+          remote_jid: jid,
+          avatar_url: avatar,
+          created_at: createdAt,
+          updated_at: createdAt,
+          tags: [],
+        },
+      };
+    });
+
+    // 4. Ordenação:
+    // 1º: Conversas ativas com mensagens (ordenadas pela data da última mensagem DESC)
+    const sortedConversations = sortConversationsByLastMessage(convList);
+
+    // 2º: Leads da coluna que ainda não têm conversa (ordenados pelos mais recentes)
+    const sortedSynthetics = syntheticConversations.sort((a, b) => {
+      const timeA = new Date(a.created_at || 0).getTime();
+      const timeB = new Date(b.created_at || 0).getTime();
+      return timeB - timeA;
+    });
+
+    let result = [...sortedConversations, ...sortedSynthetics];
 
     // Filtro por Instância do WhatsApp ativa
     if (activeInstance && activeInstance !== "__all__") {
@@ -373,6 +626,7 @@ export function ConversationList({
       const cleanPhone = rawPhone ? String(rawPhone).replace(/\D/g, "") : "";
 
       result = result.filter((c: any) => {
+        if (c.is_synthetic) return true;
         if (c.last_instance === activeInstance || c.instance_name === activeInstance) return true;
         if (cleanPhone && (c.last_instance === `phone:${cleanPhone}` || c.instance_name === `phone:${cleanPhone}`)) return true;
         if (cleanPhone && c.contact?.phone && String(c.contact.phone).replace(/\D/g, "").includes(cleanPhone)) return true;
@@ -383,6 +637,7 @@ export function ConversationList({
     // Filtro por Agente de IA atribuído
     if (activeAgentId && activeAgentId !== "__all__") {
       result = result.filter((c: any) => {
+        if (c.is_synthetic) return true;
         if (String(c.assigned_agent_id) === String(activeAgentId)) return true;
         if (String(c.agent_id) === String(activeAgentId)) return true;
 
@@ -397,7 +652,7 @@ export function ConversationList({
     if (filter === "unread") {
       result = result.filter((c) => c.unread_count > 0);
     } else if (filter !== "all") {
-      result = result.filter((c) => c.status === filter);
+      result = result.filter((c) => c.status === filter && !c.is_synthetic);
     }
 
     // Filtros baseados em tags e empresas
@@ -415,13 +670,14 @@ export function ConversationList({
       result = result.filter((c) => {
         const name = c.contact?.name?.toLowerCase() ?? "";
         const phone = c.contact?.phone?.toLowerCase() ?? "";
+        const company = c.contact?.company?.toLowerCase() ?? "";
         const lastMsg = c.last_message_text?.toLowerCase() ?? "";
-        return name.includes(q) || phone.includes(q) || lastMsg.includes(q);
+        return name.includes(q) || phone.includes(q) || company.includes(q) || lastMsg.includes(q);
       });
     }
 
     return result;
-  }, [conversations, filter, search, selectedTagIds, selectedCompany, activeInstance, activeAgentId, instances]);
+  }, [conversations, selectedKanbanColumn, kanbanLeads, getLeadForConv, leadsByColumn, filter, search, selectedTagIds, selectedCompany, activeInstance, activeAgentId, instances, clientId]);
 
   const toggleTag = useCallback((id: string) => {
     setSelectedTagIds((prev) =>
@@ -432,9 +688,11 @@ export function ConversationList({
   const clearContactFilters = useCallback(() => {
     setSelectedTagIds([]);
     setSelectedCompany(null);
+    setSelectedKanbanColumn(null);
   }, []);
 
-  const hasContactFilters = selectedTagIds.length > 0 || selectedCompany !== null;
+  const selectedColumnObj = kanbanCols.find((c) => c.status_key === selectedKanbanColumn);
+  const hasContactFilters = selectedTagIds.length > 0 || selectedCompany !== null || selectedKanbanColumn !== null;
 
   const handleSearchChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -623,6 +881,76 @@ export function ConversationList({
             </DropdownMenu>
           )}
 
+          {/* Filtro por Coluna do Kanban */}
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              aria-label="Filtrar por coluna do Kanban"
+              className={cn(
+                "inline-flex max-w-44 items-center justify-center h-7 gap-1 px-2 text-xs rounded-md hover:bg-muted outline-none",
+                selectedKanbanColumn
+                  ? "text-primary font-medium"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {selectedColumnObj ? (
+                <span className="flex items-center gap-1.5 truncate">
+                  <span
+                    className="h-2 w-2 shrink-0 rounded-full"
+                    style={{ backgroundColor: selectedColumnObj.color || "#3b82f6" }}
+                  />
+                  <span className="truncate">{selectedColumnObj.label}</span>
+                </span>
+              ) : (
+                <>
+                  <span>Kanban</span>
+                  <ChevronDown className="h-3 w-3 shrink-0" />
+                </>
+              )}
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="start"
+              className={cn(styles.portal, "max-h-72 w-56 border-border bg-popover z-50")}
+            >
+              <DropdownMenuItem
+                onClick={() => setSelectedKanbanColumn(null)}
+                className={cn(
+                  "text-sm cursor-pointer",
+                  selectedKanbanColumn === null
+                    ? "text-primary font-medium"
+                    : "text-popover-foreground"
+                )}
+              >
+                Todas as colunas
+              </DropdownMenuItem>
+              {kanbanCols.map((col) => {
+                const count = kanbanCounts[col.status_key] ?? 0;
+                return (
+                  <DropdownMenuItem
+                    key={col.status_key}
+                    onClick={() => setSelectedKanbanColumn(col.status_key)}
+                    className={cn(
+                      "text-sm cursor-pointer flex items-center justify-between gap-2",
+                      selectedKanbanColumn === col.status_key
+                        ? "text-primary font-medium"
+                        : "text-popover-foreground"
+                    )}
+                  >
+                    <span className="flex items-center gap-2 truncate">
+                      <span
+                        className="h-2 w-2 shrink-0 rounded-full"
+                        style={{ backgroundColor: col.color || "#3b82f6" }}
+                      />
+                      <span className="truncate">{col.label}</span>
+                    </span>
+                    <span className="text-[10px] text-muted-foreground font-mono tabular-nums">
+                      {count}
+                    </span>
+                  </DropdownMenuItem>
+                );
+              })}
+            </DropdownMenuContent>
+          </DropdownMenu>
+
           {companies.length > 0 && (
             <DropdownMenu>
               <DropdownMenuTrigger
@@ -672,6 +1000,20 @@ export function ConversationList({
 
         {hasContactFilters && (
           <div className="flex flex-wrap items-center gap-1">
+            {selectedColumnObj && (
+              <button
+                key="kanban-chip"
+                onClick={() => setSelectedKanbanColumn(null)}
+                className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] text-foreground hover:bg-muted/70 cursor-pointer"
+              >
+                <span
+                  className="h-1.5 w-1.5 shrink-0 rounded-full"
+                  style={{ backgroundColor: selectedColumnObj.color || "#3b82f6" }}
+                />
+                <span className="max-w-28 truncate">{selectedColumnObj.label}</span>
+                <X className="h-3 w-3" />
+              </button>
+            )}
             {selectedTagIds.map((id) => {
               const tag = tagsById.get(id);
               return (
@@ -878,16 +1220,18 @@ function ConversationItem({
         ) : (
           <span>{initials}</span>
         )}
-        {/* Indicador de status IA vs Humano no avatar */}
-        <span
-          className={cn(
-            "absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full border-2 border-background flex items-center justify-center text-[9px] font-bold text-white shadow-sm",
-            isHumanTakeover ? "bg-amber-500" : "bg-emerald-500"
-          )}
-          title={isHumanTakeover ? "Atendimento Humano (IA Silenciada)" : "Atendimento IA (Robô Ativo)"}
-        >
-          {isHumanTakeover ? <UserRound className="h-2.5 w-2.5" aria-hidden="true" /> : <Bot className="h-2.5 w-2.5" aria-hidden="true" />}
-        </span>
+        {/* Indicador de status IA vs Humano no avatar (apenas para conversas reais) */}
+        {!conversation.is_synthetic && (
+          <span
+            className={cn(
+              "absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full border-2 border-background flex items-center justify-center text-[9px] font-bold text-white shadow-sm",
+              isHumanTakeover ? "bg-amber-500" : "bg-emerald-500"
+            )}
+            title={isHumanTakeover ? "Atendimento Humano (IA Silenciada)" : "Atendimento IA (Robô Ativo)"}
+          >
+            {isHumanTakeover ? <UserRound className="h-2.5 w-2.5" aria-hidden="true" /> : <Bot className="h-2.5 w-2.5" aria-hidden="true" />}
+          </span>
+        )}
       </div>
 
       {/* Detalhes */}
@@ -898,17 +1242,25 @@ function ConversationItem({
               {displayName}
             </span>
             {/* Tag visual de status */}
-            <span
-              className={cn(
-                styles.conversationBadge,
-                "px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0",
-                isHumanTakeover
-                  ? "bg-amber-500/15 text-amber-300 border border-amber-500/30"
-                  : "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
-              )}
-            >
-              {isHumanTakeover ? "Humano" : "IA"}
-            </span>
+            {conversation.is_synthetic ? (
+              <span
+                className="px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0 bg-blue-500/15 text-blue-300 border border-blue-500/30"
+              >
+                Sem conversa
+              </span>
+            ) : (
+              <span
+                className={cn(
+                  styles.conversationBadge,
+                  "px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0",
+                  isHumanTakeover
+                    ? "bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                    : "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                )}
+              >
+                {isHumanTakeover ? "Humano" : "IA"}
+              </span>
+            )}
           </div>
 
           {/* Horário / 3 Pontos no estilo WhatsApp Web */}
@@ -922,7 +1274,7 @@ function ConversationItem({
               {timeAgo}
             </span>
 
-            {onDeleteRequest && (
+            {onDeleteRequest && !conversation.is_synthetic && (
               <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
                 <DropdownMenuTrigger
                   onClick={(e: React.MouseEvent) => e.stopPropagation()}
