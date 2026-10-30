@@ -23,6 +23,7 @@ import { LeadDrawer } from "@/components/leads/lead-drawer";
 import { AddLeadDialog } from "@/components/add-lead-dialog";
 import { LeadAvatar } from "@/components/leads/lead-avatar";
 import { syncLeadPhotosSequentially, type SyncProgressState } from "@/lib/lead-photo-sync";
+import { downloadLeadMapsKit } from "@/lib/lead-maps-kit-client";
 import { supabase } from "@/lib/supabase";
 import { getPhotoJid, safePhotoUrl } from "@/lib/whatsapp-photo-utils";
 import dynamic from "next/dynamic";
@@ -152,6 +153,7 @@ export default function LeadsPage() {
   const [viewMode, setViewMode] = useState<"list" | "kanban">("list");
   const [disparoFilter, setDisparoFilter] = useState<"all" | "pending" | "sent">("all");
   const [disparoJids, setDisparoJids] = useState<Set<string>>(new Set());
+  const [downloadingKitIds, setDownloadingKitIds] = useState<Set<number>>(new Set());
   const [syncProgress, setSyncProgress] = useState<SyncProgressState | null>(null);
   const syncAbortRef = useRef<AbortController | null>(null);
   const syncCancelRef = useRef<{ current: boolean }>({ current: false });
@@ -982,6 +984,33 @@ export default function LeadsPage() {
                                   </Button>
                                   <Button size="icon" variant="ghost" className={styles.rowAction} aria-label={`Ver ${lead.nome_negocio || "cliente"} no Maps`} onClick={(e) => { e.stopPropagation(); window.open(mapsUrlFor(lead), "_blank", "noopener,noreferrer"); }} title="Ver no Maps">
                                       <MapPin className="w-3.5 h-3.5 text-rose-400" />
+                                  </Button>
+                                  <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    className={styles.rowAction}
+                                    disabled={downloadingKitIds.has(lead.id)}
+                                    aria-label={`Baixar kit site de ${lead.nome_negocio || "cliente"}`}
+                                    title="Baixar fotos + TXT completo do Maps para site"
+                                    onClick={async (e) => {
+                                      e.stopPropagation();
+                                      setDownloadingKitIds((prev) => new Set(prev).add(lead.id));
+                                      try {
+                                        await downloadLeadMapsKit({ id: lead.id, nome_negocio: lead.nome_negocio });
+                                      } finally {
+                                        setDownloadingKitIds((prev) => {
+                                          const next = new Set(prev);
+                                          next.delete(lead.id);
+                                          return next;
+                                        });
+                                      }
+                                    }}
+                                  >
+                                    {downloadingKitIds.has(lead.id) ? (
+                                      <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                                    ) : (
+                                      <Download className="w-3.5 h-3.5 text-amber-400" />
+                                    )}
                                   </Button>
                                   <Button size="icon" variant="ghost" className={cn(styles.rowAction, styles.deleteAction)} aria-label={`Excluir ${lead.nome_negocio || "cliente"}`} title="Excluir cliente" onClick={(e) => {
                                       e.stopPropagation();

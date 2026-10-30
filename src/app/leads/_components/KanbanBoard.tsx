@@ -14,11 +14,12 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Phone, Clock, Star, Plus, MoreVertical, Pencil, Trash2, MapPin } from "lucide-react";
+import { Phone, Clock, Star, Plus, MoreVertical, Pencil, Trash2, MapPin, Download, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/lib/supabase";
 import { useClientSession } from "@/lib/use-session";
 import { LeadAvatar } from "@/components/leads/lead-avatar";
+import { downloadLeadMapsKit } from "@/lib/lead-maps-kit-client";
 
 export interface KanbanColumnDef {
   id: string;          // status_key (estável p/ drag)
@@ -476,6 +477,7 @@ function KanbanColumn({ column, leads, onLeadClick, formatPhone, onRename, onDel
 }
 
 function KanbanCard({ lead, onClick, isOverlay, formatPhone }: any) {
+  const [downloadingKit, setDownloadingKit] = useState(false);
   const {
     attributes, listeners, setNodeRef, transform, transition, isDragging,
   } = useSortable({ id: lead?.id || 0 });
@@ -562,7 +564,7 @@ function KanbanCard({ lead, onClick, isOverlay, formatPhone }: any) {
           </div>
         )}
 
-        <div className="mt-2 flex justify-end">
+        <div className="mt-2 flex items-center justify-end gap-1">
           <a
             href={mapsUrlFor(lead)}
             target="_blank"
@@ -578,6 +580,28 @@ function KanbanCard({ lead, onClick, isOverlay, formatPhone }: any) {
             <MapPin className="w-3 h-3" />
             Maps
           </a>
+          <button
+            type="button"
+            disabled={downloadingKit}
+            onClick={async (e) => {
+              e.stopPropagation();
+              setDownloadingKit(true);
+              try {
+                await downloadLeadMapsKit({ id: lead.id, nome_negocio: lead.nome_negocio });
+              } finally {
+                setDownloadingKit(false);
+              }
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+            onTouchStart={(e) => e.stopPropagation()}
+            onKeyDown={(e) => e.stopPropagation()}
+            className="inline-flex items-center gap-1 text-[9px] font-bold text-amber-300/90 hover:text-amber-200 hover:bg-amber-500/15 px-1.5 py-0.5 rounded-md transition-colors disabled:opacity-50"
+            title="Baixar fotos + TXT completo do Maps para site"
+          >
+            {downloadingKit ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
+            Kit Site
+          </button>
         </div>
       </CardContent>
     </Card>

@@ -27,10 +27,12 @@ import {
   Globe,
   Trash2,
   RotateCw,
+  Download,
 } from "lucide-react";
 import { toast } from "sonner";
 import { LeadAvatar } from "@/components/leads/lead-avatar";
 import { getPhotoJid } from "@/lib/whatsapp-photo-utils";
+import { downloadLeadMapsKit } from "@/lib/lead-maps-kit-client";
 
 function formatPhoneNumber(phoneOrJid?: string | null): string {
   if (!phoneOrJid) return "—";
@@ -52,6 +54,7 @@ export interface LeadDrawerData {
   website?: string | null;
   instagram?: string | null;
   facebook?: string | null;
+  maps_url?: string | null;
   avaliacao?: number | null;
   reviews?: number | null;
   status?: string | null;
@@ -91,6 +94,7 @@ export function LeadDrawer({
   const [savingNotes, setSavingNotes] = useState<boolean>(false);
   const [savingReminder, setSavingReminder] = useState<boolean>(false);
   const [syncingPhoto, setSyncingPhoto] = useState<boolean>(false);
+  const [downloadingKit, setDownloadingKit] = useState<boolean>(false);
   const [profilePic, setProfilePic] = useState<string | null>(null);
   const edited = useRef({ notes: false, text: false, due: false });
   const generation = useRef(0);
@@ -114,6 +118,7 @@ export function LeadDrawer({
     setSavingNotes(false);
     setSavingReminder(false);
     setSyncingPhoto(false);
+    setDownloadingKit(false);
     if (lead && open) {
       setObservacoes(lead.observacoes || "");
       setLembreteTexto(lead.next_follow_up ? (lead.lembrete_texto ?? lead.business_details?.lembrete_texto ?? lead.observacoes ?? "") : "");
@@ -410,7 +415,7 @@ export function LeadDrawer({
             </div>
 
             {/* Ações Rápidas de Contato */}
-            <div className="flex items-center gap-2 pt-2 border-t border-zinc-800/80">
+            <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-zinc-800/80">
               {chatUrl ? (
                 <Button
                   size="sm"
@@ -422,16 +427,17 @@ export function LeadDrawer({
                 </Button>
               ) : null}
 
-              {lead.endereco ? (
+              {lead.endereco || lead.maps_url ? (
                 <Button
                   size="sm"
                   variant="outline"
                   className="border-zinc-700 hover:bg-zinc-800 text-zinc-300 gap-1.5"
                   onClick={() =>
                     window.open(
-                      `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-                        `${lead.nome_negocio} ${lead.endereco}`
-                      )}`,
+                      lead.maps_url ||
+                        `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+                          `${lead.nome_negocio} ${lead.endereco || ""}`.trim()
+                        )}`,
                       "_blank"
                     )
                   }
@@ -440,6 +446,32 @@ export function LeadDrawer({
                   Maps
                 </Button>
               ) : null}
+
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={downloadingKit}
+                className="border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 text-amber-200 gap-1.5"
+                onClick={async () => {
+                  const currentGeneration = generation.current;
+                  setDownloadingKit(true);
+                  try {
+                    await downloadLeadMapsKit({ id: lead.id, nome_negocio: lead.nome_negocio });
+                  } finally {
+                    if (generation.current === currentGeneration) {
+                      setDownloadingKit(false);
+                    }
+                  }
+                }}
+                title="Baixar todas as fotos do Google Maps + TXT com todos os dados do negócio para criação de site"
+              >
+                {downloadingKit ? (
+                  <Loader2 className="h-4 w-4 animate-spin text-amber-300" />
+                ) : (
+                  <Download className="h-4 w-4 text-amber-300" />
+                )}
+                {downloadingKit ? "Baixando Kit..." : "Baixar Kit Site"}
+              </Button>
 
               {lead.website ? (
                 <Button
