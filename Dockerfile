@@ -71,6 +71,8 @@ ENV NODE_ENV=production \
     HOSTNAME=0.0.0.0 \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
     PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+    ROUTER_BASE_URL=http://9router:20128/v1 \
+    ROUTER_API_KEY=sk-9router \
     WHISPER_MODEL=${WHISPER_MODEL}
 
 COPY --from=builder --chown=nextjs:nodejs /app/public           ./public
@@ -95,6 +97,35 @@ RUN mkdir -p /app/.whisper/bin && \
     curl -fsSL -o "/app/.whisper/${WHISPER_MODEL}" \
       "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${WHISPER_MODEL}" && \
     chown -R nextjs:nodejs /app/.whisper
+
+# OpenCode CLI + Impeccable (geração autônoma de sites com todas as 253 skills):
+RUN npm install -g @opencode/cli && \
+    mkdir -p /home/nextjs/.config/opencode /root/.config/opencode /app/.opencode
+
+# Copia todo o ecossistema de skills e configurações do OpenCode
+COPY --chown=nextjs:nodejs .opencode /home/nextjs/.config/opencode
+COPY --chown=nextjs:nodejs .opencode /app/.opencode
+COPY .opencode /root/.config/opencode
+
+# O 9Router dentro do container NÃO está em 127.0.0.1 (roda como serviço separado
+# no EasyPanel). Troca as credenciais fixas por variáveis de ambiente.
+RUN for d in /home/nextjs/.config/opencode /app/.opencode /root/.config/opencode; do \
+        if [ -f "$d/opencode.json" ]; then \
+            sed -i \
+                -e 's|http://127\.0\.0\.1:20128/v1|{env:ROUTER_BASE_URL}|g' \
+                -e 's|"apiKey": *"sk-9router"|"apiKey": "{env:ROUTER_API_KEY}"|g' \
+                "$d/opencode.json"; \
+        fi; \
+    done
+
+# Permissões de execução para scripts e binário nativo Linux x64 da Impeccable
+RUN chmod +x /home/nextjs/.config/opencode/skills/impeccable/scripts/impeccable \
+    /home/nextjs/.config/opencode/skills/impeccable/scripts/bin/linux-x64/impeccable \
+    /app/.opencode/skills/impeccable/scripts/impeccable \
+    /app/.opencode/skills/impeccable/scripts/bin/linux-x64/impeccable \
+    /root/.config/opencode/skills/impeccable/scripts/impeccable \
+    /root/.config/opencode/skills/impeccable/scripts/bin/linux-x64/impeccable 2>/dev/null || true && \
+    chown -R nextjs:nodejs /home/nextjs /app/.opencode
 
 USER nextjs
 EXPOSE 3000

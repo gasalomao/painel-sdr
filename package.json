@@ -11,9 +11,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "sites:worker": "tsx scripts/site-studio-worker.ts",
+    "sites:autonomous-worker": "tsx scripts/autonomous-site-worker.ts",
     "sites:test-preview": "playwright test --config scripts/site-preview.playwright.config.ts",
     "sites:test-editor": "playwright test --config scripts/site-editor.playwright.config.ts",
-    "sites:provision-template": "node scripts/provision-site-template.mjs"
+    "sites:provision-template": "node scripts/provision-site-template.mjs",
+    "9router:export": "node scripts/export-9router-for-vps.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",

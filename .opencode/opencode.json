@@ -1,0 +1,93 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "webfetch": "allow",
+    "websearch": "allow",
+    "read": {
+      "~/.config/opencode/get-shit-done/*": "allow"
+    },
+    "external_directory": {
+      "~/.config/opencode/get-shit-done/*": "allow"
+    }
+  },
+  "model": "9router/combo-principal",
+  "small_model": "9router/ag/gemini-3.7-flash-low",
+  "compaction": {
+    "auto": true,
+    "prune": true,
+    "tail_turns": 10,
+    "preserve_recent_tokens": 30000
+  },
+  "provider": {
+    "9router": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "9Router Gateway",
+      "options": {
+        "baseURL": "http://127.0.0.1:20128/v1",
+        "apiKey": "sk-9router"
+      },
+      "models": {
+        "combo-principal": {
+          "name": "Combo Principal (xhigh / max)",
+          "attachment": true,
+          "modalities": { "input": ["text", "image"], "output": ["text"] },
+          "options": { "reasoningEffort": "xhigh" },
+          "limit": { "context": 200000, "output": 65536 }
+        },
+        "teste": {
+          "name": "Combo Teste (Fallback)",
+          "options": { "reasoningEffort": "xhigh" },
+          "limit": { "context": 200000, "output": 65536 }
+        },
+        "glm/glm-5.3": {
+          "name": "GLM 5.3",
+          "limit": { "context": 1000000, "output": 131072 }
+        },
+        "ocg/glm-5.2": {
+          "name": "OCG GLM 5.2",
+          "limit": { "context": 1000000, "output": 131072 }
+        },
+        "nvidia/z-ai/glm-5.2": {
+          "name": "NVIDIA GLM 5.2",
+          "limit": { "context": 1000000, "output": 131072 }
+        },
+        "nvidia/deepseek-ai/deepseek-v4-flash": {
+          "name": "NVIDIA DeepSeek V4 Flash",
+          "limit": { "context": 1048576, "output": 393216 }
+        },
+        "cx/gpt-5.6-terra": {
+          "name": "GPT 5.6 Terra",
+          "limit": { "context": 1050000, "output": 128000 }
+        },
+        "ag/gemini-3.7-flash-high": {
+          "name": "Gemini 3.7 Flash High",
+          "limit": { "context": 1048576, "output": 65536 }
+        },
+        "ag/gemini-3.7-flash-low": {
+          "name": "Gemini 3.7 Flash Low (interno)",
+          "limit": { "context": 1048576, "output": 65536 }
+        },
+        "ag/claude-opus-4-6-thinking": {
+          "name": "Claude Opus 4.6 Thinking",
+          "limit": { "context": 1000000, "output": 128000 }
+        },
+        "gcli/grok-4.6": {
+          "name": "Grok 4.6",
+          "limit": { "context": 500000, "output": 500000 }
+        },
+        "cl/anthropic/claude-opus-4.7": {
+          "name": "Claude Opus 4.7",
+          "limit": { "context": 1000000, "output": 128000 }
+        }
+      }
+    }
+  },
+  "mcp": {
+    "servers": {
+      "vercel": {
+        "type": "remote",
+        "url": "https://mcp.vercel.com"
+      }
+    }
+  }
+}

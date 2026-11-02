@@ -45,6 +45,10 @@ docs
 README.md
 *.md
 !PRODUCTION.md
+!.opencode/**
+.opencode/node_modules
+.opencode/package.json
+.opencode/package-lock.json
 
 # Temporary files
 .claude

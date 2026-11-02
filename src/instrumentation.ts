@@ -18,6 +18,7 @@ declare global {
   var agentFollowupTicking: boolean | undefined;
   var backupTicking: boolean | undefined;
   var sitesWorkerStarted: boolean | undefined;
+  var autonomousSiteWorkerStarted: boolean | undefined;
 }
 
 /**
@@ -362,6 +363,26 @@ export async function register() {
       } catch (err: unknown) {
         globalThis.sitesWorkerStarted = false;
         console.error("[SCHEDULER] Site Studio Worker encerrou:", (err as Error)?.message || err);
+      }
+    })();
+  }
+
+  // ============================================================
+  // PROSPECÇÃO AUTÔNOMA DE SITES — OpenCode + Impeccable + Vercel + QA
+  // ============================================================
+  // Processa a fila de prévias solicitadas com geração headless na VPS
+  if (!globalThis.autonomousSiteWorkerStarted && (process.env.AUTONOMOUS_SITE_WORKER_ENABLED === "true" || process.env.NODE_ENV === "development")) {
+    globalThis.autonomousSiteWorkerStarted = true;
+    process.env.AUTONOMOUS_SITE_WORKER_ENABLED = "true";
+    void (async () => {
+      try {
+        console.log("[SCHEDULER] 🤖 Iniciando Autonomous Site Worker in-process...");
+        const { startAutonomousSiteWorker } = await import("@/lib/sites/autonomous-worker-engine");
+        const workerController = new AbortController();
+        await startAutonomousSiteWorker(workerController.signal);
+      } catch (err: unknown) {
+        globalThis.autonomousSiteWorkerStarted = false;
+        console.error("[SCHEDULER] Autonomous Site Worker encerrou:", (err as Error)?.message || err);
       }
     })();
   }

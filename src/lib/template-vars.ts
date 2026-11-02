@@ -41,6 +41,9 @@ export type TemplateContext = {
   observacoes?: string | null;
   instagram?: string | null;
   facebook?: string | null;
+  /** Link da prévia gerada com OpenCode + Vercel (https://slug.vercel.app) */
+  link_previa?: string | null;
+  site_previa?: string | null;
   // Vars dinâmicas capturadas pelo funil (sessions.variables)
   // — também usado pra injetar dados de agendamento ({hora_agendamento},
   // {data_agendamento}, {servico}, {meet_link}, etc.)
@@ -114,6 +117,8 @@ export function renderTemplate(template: string, ctx: TemplateContext = {}): str
     observacoes:   ctx.observacoes || "",
     instagram:     ctx.instagram || "",
     facebook:      ctx.facebook || "",
+    link_previa:   (ctx as any).link_previa || (ctx as any).site_previa || "",
+    site_previa:   (ctx as any).link_previa || (ctx as any).site_previa || "",
     data:          new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo" }).format(now),
     hora:          new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit" }).format(now),
   };

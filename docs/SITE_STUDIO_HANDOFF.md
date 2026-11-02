@@ -6,6 +6,40 @@ Estado: **EM DESENVOLVIMENTO; 1607 TESTES OFFLINE E 36 JORNADAS DE PREVIEW APROV
 
 O usuário pediu salvar todo o progresso para reabrir Claude Code e dizer **“continue onde estava”**. Nessa situação, retomar Site Studio nesta árvore original, sem pedir que reconte a conversa. Esta seção prevalece sobre TODOs, bloqueios e afirmações históricas abaixo.
 
+### Integração OpenCode CLI + Impeccable (31/10/2026) — Validado em Produção
+
+1. **Sincronização de 253 Skills e Binário Nativo:**
+   - O ecossistema de 253 skills do OpenCode local foi copiado para `.opencode/skills/` na raiz do projeto.
+   - O binário Linux x64 da engine Impeccable v0.1.14 foi baixado em `.opencode/skills/impeccable/scripts/bin/linux-x64/impeccable` para execução nativa e offline na VPS.
+   - `.dockerignore` foi atualizado preservando `!.opencode/**`.
+   - `Dockerfile` atualizado instalando `@opencode/cli` e copiando `.opencode` para os diretórios `/home/nextjs/.config/opencode`, `/app/.opencode` e `/root/.config/opencode` com `chmod +x` nos scripts da Impeccable.
+   - Criada a função `ensureWorkspaceOpencode` em `workspace-provisioner.ts` para conectar o `.opencode` aos workspaces de leads via junction/symlink.
+
+2. **Metodologia Impeccable Oficial & Craft Floor Anti-Slop:**
+   - `PRODUCT.md` estruturado com o schema canônico `<!-- impeccable:product-schema 1 -->` e `## Mode: persuade`.
+   - `DESIGN.md` e prompt de `opencode-runner.ts` impondo as regras estritas do Impeccable Craft Floor: banimento total de kickers/eyebrows acima de títulos, de grids com 3 cards idênticos, de gradiente de texto, de emojis como ícones e de métricas fictícias.
+   - Invocação canônica do runner: `/impeccable design a high-converting, authorial commercial landing page for ... in persuade mode`.
+   - Removida a proibição de bash/ferramentas para permitir que o OpenCode execute a engine nativa da Impeccable.
+
+3. **Deploy Vercel Otimizado & Triple QA:**
+   - Otimizado `vercel-deployer.ts` para empacotar apenas as fotos reais que foram efetivamente citadas no `index.html`.
+   - `qa-inspector.ts` atualizado com `stream: false` no body do 9Router local, viabilizando auditoria visual multimodal com `combo-principal`.
+   - Todos os 525 testes da suíte de sites executados e aprovados (`npx vitest run src/lib/sites/__tests__/`).
+
+4. **Caso Real Validado — Lead #2115 (FÁBRICA DE DIVAS SPA & BRONZE):**
+   - Workspace gerado com 47 fotos reais do Google Maps.
+   - Site autoral completo gerado em `index.html` (122 KB) integrando 15 fotos reais, paleta verde esmeralda e dourada, tipografia editorial e zero clichês de IA.
+   - Deploy realizado com sucesso na Vercel: `https://fabrica-de-divas-spa-bronze-nvsihsk3h-gasalomaos-projects.vercel.app`.
+   - Inspeção DOM Mobile: 27 imagens renderizadas, 0 quebradas, 14 links de WhatsApp, zero overflow horizontal (375px mobile).
+   - Vision QA via 9Router: Score 85/100 ("Interface refinada com excelente direção de arte e apelo comercial para o nicho").
+   - Lead atualizado no Supabase (`link_previa` ativo e `previa_status: PRONTA`).
+
+5. **9Router próprio na VPS + roteamento do OpenCode (31/10/2026):**
+   - `scripts/export-9router-for-vps.mjs` (`npm run 9router:export`) exporta `db/data.sqlite`, `jwt-secret`, `machine-id` e `auth/cli-secret`, limpando telemetria (`VACUUM INTO` + remoção de `usageHistory`/`usageDaily`/`requestDetails`) e gera zip pronto para o volume `9router-data:/app/data`.
+   - `Dockerfile` passa a reescrever o `opencode.json` de `.opencode` para `{env:ROUTER_BASE_URL}` / `{env:ROUTER_API_KEY}` e define `ROUTER_BASE_URL=http://9router:20128/v1` como default da imagem.
+   - `opencode-runner.ts` injeta `ROUTER_BASE_URL`/`ROUTER_API_KEY` no spawn (fallback `http://127.0.0.1:20128/v1` + `sk-9router` para dev local).
+   - Guia completo: `docs/9ROUTER_VPS_DEPLOY.md`. Atenção: `.opencode` tem ~104 MB/4.742 arquivos e está no `.gitignore`, então o build do EasyPanel precisa ser feito localmente (`docker build` + `push`), pois `COPY .opencode` falha num clone do GitHub.
+
 ### Último estado confirmado
 
 - Objetivo: criação/edição confiável, preview incremental, patches rápidos e progresso recuperável entre falhas/modelos, inspirado no Lovable. Não prometer qualquer stack ou código inválido nem “perfeito” sem evidência.

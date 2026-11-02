@@ -17,6 +17,8 @@ scraper Google Maps (Puppeteer + Chromium), Evolution API, organizador IA, etc.
 - Evolution API V2 acessível no Easypanel.
 - Redis acessível no Easypanel.
 - API Key do Gemini (`https://aistudio.google.com/apikey`).
+- 9Router próprio na VPS para o Site Studio (OpenCode CLI) — ver
+  [`docs/9ROUTER_VPS_DEPLOY.md`](./9ROUTER_VPS_DEPLOY.md).
 
 ---
 

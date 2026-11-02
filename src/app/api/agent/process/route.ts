@@ -214,7 +214,7 @@ export async function POST(req: NextRequest) {
        // Lead e contato SÓ do tenant desta sessão (mesma paralelização de antes,
        // agora com clientId já resolvido do channel).
        !isTestMode ? supabase.from("leads_extraidos")
-          .select('"remoteJid", nome_negocio, ramo_negocio, categoria, endereco, website, avaliacao, reviews, telefone, status')
+          .select('"remoteJid", nome_negocio, ramo_negocio, categoria, endereco, website, avaliacao, reviews, telefone, status, id, previa_status, link_previa, previa_ping_enviado_em, previa_link_enviado_em')
           .eq("remoteJid", remoteJid).eq("client_id", clientId).maybeSingle() : Promise.resolve({ data: null }),
        !isTestMode ? supabase.from("contacts").select("push_name, phone_number").eq("remote_jid", remoteJid).eq("client_id", clientId).maybeSingle() : Promise.resolve({ data: null }),
     ]);
@@ -676,7 +676,7 @@ export async function POST(req: NextRequest) {
          const [leadRes, lastCampaignTargetRes, lastFollowupTargetRes] = await Promise.all([
            supabase
             .from("leads_extraidos")
-            .select("nome_negocio, ramo_negocio, categoria, telefone, endereco, website, status, primeiro_contato_source, primeiro_contato_at")
+            .select("id, nome_negocio, ramo_negocio, categoria, telefone, endereco, website, status, primeiro_contato_source, primeiro_contato_at, previa_status, link_previa, previa_ping_enviado_em, previa_link_enviado_em")
             .eq("remoteJid", remoteJid)
             .eq("client_id", clientId)
             .maybeSingle(),
@@ -715,6 +715,36 @@ export async function POST(req: NextRequest) {
           if (lead.primeiro_contato_at) {
             const dias = Math.floor((Date.now() - new Date(lead.primeiro_contato_at).getTime()) / 86400000);
             lines.push(`Primeiro contato: ${new Date(lead.primeiro_contato_at).toLocaleDateString("pt-BR")} (há ${dias} dia${dias === 1 ? "" : "s"})`);
+          }
+          if (lead.previa_status)           lines.push(`Status da Prévia de Site: ${lead.previa_status}`);
+          if (lead.link_previa)             lines.push(`Link da Prévia: ${lead.link_previa}`);
+
+          // DIRETRIZES ESPECÍFICAS DA SARAH SDR & CLOSER PARA PROSPECÇÃO DE SITES
+          if (lead.previa_status === "PREVIA_PRONTA" && lead.link_previa) {
+            const pingEnviado = !!lead.previa_ping_enviado_em;
+            lines.push("");
+            lines.push("# 🎯 MODO SARAH CLOSER ATIVO (PRÉVIA PRONTA NO AR):");
+            lines.push(`- Link da prévia: ${lead.link_previa}`);
+            lines.push(`- Ping de atenção enviado anteriormente: ${pingEnviado ? "SIM" : "NÃO"}`);
+            if (!pingEnviado) {
+              lines.push(`- AÇÃO OBRIGATÓRIA NESTE TURNO: Envie o Ping de Atenção perguntando se está com o celular na mão agora: "Oi! Tudo bem? Acabei de finalizar aqui no computador a prévia do site da ${lead.nome_negocio || "empresa"} e já subi no ar para teste. Você tá com o celular na mão agora para eu te mandar o link e você dar uma olhada rápida?"`);
+            } else {
+              lines.push(`- AÇÃO OBRIGATÓRIA: Se o cliente respondeu ao ping, envie o link (${lead.link_previa}) com a introdução: "Dá uma olhadinha aí no celular! Como é uma prévia inicial, montamos com o que encontramos disponível na internet só para você ter uma ideia de como a estrutura funciona, mas depois deixamos 100% do seu jeito, com as suas fotos e cores preferidas. Me conta: o que achou dessa ideia para a ${lead.nome_negocio || "empresa"}?"`);
+              lines.push(`- MATRIZ DE FECHAMENTO:`);
+              lines.push(`  1. ZERO PREÇO POR TEXTO: Nunca passe valores por mensagem.`);
+              lines.push(`  2. ZERO TERMOS TÉCNICOS: Proibido falar domínio, hospedagem, servidor ou DNS.`);
+              lines.push(`  3. REGRA DO DUPLO VÍNCULO: Sempre proponha 2 horários fechados para a ligação de 5 minutos no WhatsApp.`);
+              lines.push(`  4. Se o cliente concordar com um horário, chame OBRIGATORIAMENTE a tool "agendar_reuniao_fechamento".`);
+            }
+          } else if (lead.previa_status === "PREVIA_SOLICITADA") {
+            lines.push("");
+            lines.push("# 🎯 STATUS DA PRÉVIA: EM PRODUÇÃO NA VPS.");
+            lines.push("- O cliente já confirmou o pedido de prévia e o sistema está gerando o site. Se ele perguntar algo, avise que está sendo finalizado com todo o carinho e que em breve o link de teste será enviado aqui.");
+          } else if (!lead.previa_status) {
+            lines.push("");
+            lines.push("# 🎯 MODO SARAH SDR ATIVO (QUALIFICAÇÃO E TRAVA ANTI-DESPERDÍCIO):");
+            lines.push(`- Se o cliente demonstrar interesse em ver a prévia gratuita, peça o aceite formal (Msg 8.1): "Show, já passei aqui para a nossa equipe montar a prévia da ${lead.nome_negocio || "empresa"}! Como a gente cria algo personalizado pro seu negócio mesmo, leva até 2 dias úteis para ficar pronto. Como o pessoal vai dedicar um tempo exclusivo nisso, quando a gente finalizar e te mandar o link por aqui você consegue dar uma olhadinha rápida para dizer o que achou?"`);
+            lines.push(`- Quando o cliente responder confirmando (Msg 8.2), responda: "Perfeito então, combinado! Assim que ficar pronto a gente já te chama aqui com o link. Bom trabalho por aí!" e chame OBRIGATORIAMENTE a tool "solicitar_previa_site".`);
           }
         }
         if (camp?.rendered_message && camp?.sent_at) {
@@ -1024,6 +1054,43 @@ ${capturedVariablesPrompt}
           },
        });
     }
+
+    // Ferramentas de Prospecção Autônoma e Fechamento de Sites (Sarah SDR / Closer)
+    functionDeclarations.push({
+       name: "solicitar_previa_site",
+       description:
+          "Chame quando o cliente confirmar formalmente que aceita a proposta da prévia gratuita do site da empresa dele e concordar em olhar quando o link for enviado. Dispara o pipeline autônomo na VPS.",
+       parameters: {
+          type: SchemaType.OBJECT,
+          properties: {
+             confirmacao: {
+                type: SchemaType.STRING,
+                description: "A frase ou confirmação dita pelo cliente (ex: 'sim, pode mandar', 'combinado')",
+             },
+          },
+          required: ["confirmacao"],
+       },
+    });
+
+    functionDeclarations.push({
+       name: "agendar_reuniao_fechamento",
+       description:
+          "Chame quando o cliente concordar com um horário para a ligação rápida de 5 minutos no WhatsApp para alinhamento e fechamento do site.",
+       parameters: {
+          type: SchemaType.OBJECT,
+          properties: {
+             horario_confirmado: {
+                type: SchemaType.STRING,
+                description: "O horário exato combinado (ex: 'hoje às 16h30', 'amanhã às 10h')",
+             },
+             resumo_necessidades: {
+                type: SchemaType.STRING,
+                description: "Resumo de ajustes ou preferências mencionadas pelo cliente",
+             },
+          },
+          required: ["horario_confirmado"],
+       },
+    });
 
     // Ferramenta 1.5: Web Search — opt-in pelo agente
     if (webSearchEnabled) {
@@ -1541,6 +1608,82 @@ ${capturedVariablesPrompt}
               functionResultRes = { success: false, error: e.message };
               callLogs.push({ role: "system", content: `[Web Fetch] ${u} | FALHA: ${e.message}` });
            }
+       } else if (call.name === "solicitar_previa_site") {
+          if (isTestMode) {
+             functionResultRes = { success: true, message: "Modo teste: solicitação de prévia simulada com sucesso." };
+             callLogs.push({ role: "system", content: `[Prévia Site] Solicitação simulada no modo teste` });
+          } else {
+             try {
+                await supabase
+                   .from("leads_extraidos")
+                   .update({
+                      previa_status: "PREVIA_SOLICITADA",
+                      status: "PREVIA_SOLICITADA",
+                      previa_solicitada_em: new Date().toISOString(),
+                   })
+                   .eq("client_id", clientId)
+                   .eq("remoteJid", remoteJid);
+
+                functionResultRes = {
+                   success: true,
+                   message: "Prévia registrada como PREVIA_SOLICITADA. O pipeline autônomo na VPS foi acionado.",
+                };
+                callLogs.push({ role: "system", content: `[Prévia Site] Status alterado para PREVIA_SOLICITADA` });
+             } catch (e: any) {
+                functionResultRes = { success: false, error: e?.message };
+             }
+          }
+       } else if (call.name === "agendar_reuniao_fechamento") {
+          const horario = String(callArgs.horario_confirmado || "").trim();
+          const resumo = String(callArgs.resumo_necessidades || "").trim();
+
+          if (isTestMode) {
+             functionResultRes = { success: true, message: `Modo teste: reunião para ${horario} simulada.` };
+             callLogs.push({ role: "system", content: `[Reunião Fechamento] Reunião simulada para ${horario}` });
+          } else {
+             try {
+                await supabase
+                   .from("leads_extraidos")
+                   .update({
+                      previa_status: "REUNIAO_AGENDADA",
+                      status: "REUNIAO_AGENDADA",
+                      reuniao_agendada_em: new Date().toISOString(),
+                      reuniao_horario_confirmado: horario,
+                      reuniao_resumo: resumo,
+                   })
+                   .eq("client_id", clientId)
+                   .eq("remoteJid", remoteJid);
+
+                if (sessionId) {
+                   await supabase
+                      .from("sessions")
+                      .update({
+                         bot_status: "paused",
+                         paused_by: "system_meeting",
+                         paused_at: new Date().toISOString(),
+                      })
+                      .eq("id", sessionId);
+                }
+
+                const adminPhone = process.env.ADMIN_WHATSAPP_PHONE || process.env.OWNER_PHONE;
+                if (adminPhone) {
+                   const adminJid = `${adminPhone.replace(/\D/g, "")}@s.whatsapp.net`;
+                   const notifyMsg = `🎉 *REUNIÃO AGENDADA PELA SARAH!*\n\n🏢 Empresa: ${leadRow?.nome_negocio || "Lead"}\n📱 WhatsApp: ${remoteJid.replace(/@.*$/, "")}\n⏰ Horário: ${horario}\n🔗 Prévia: ${leadRow?.link_previa || "Ver no painel"}\n📝 Resumo: ${resumo || "Sem notas extras"}`;
+                   const { sendMessage } = await import("@/lib/channel");
+                   await sendMessage(adminJid, notifyMsg, instanceName).catch((e: any) =>
+                      console.warn("[Agent/NotifyAdmin] falhou:", e?.message)
+                   );
+                }
+
+                functionResultRes = {
+                   success: true,
+                   message: `Reunião agendada para ${horario}. Bot pausado para atendimento humano e administrador notificado.`,
+                };
+                callLogs.push({ role: "system", content: `[Reunião Fechamento] Agendada para ${horario} | Bot pausado` });
+             } catch (e: any) {
+                functionResultRes = { success: false, error: e?.message };
+             }
+          }
        } else if (call.name === "schedule_google_calendar") {
           // Modo teste NÃO cria eventos reais no Google Calendar nem manda
           // WhatsApp pro dono (acontecia em toda conversa de teste).
@@ -2189,6 +2332,28 @@ ${capturedVariablesPrompt}
     for (const validUrl of validImageUrls) {
       if (finalAnswer.includes(validUrl) && !new RegExp(`\\[(?:IMAGEM|IMAGE|MEDIA|FOTO):\\s*${validUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\]`, "i").test(finalAnswer)) {
         finalAnswer = finalAnswer.replace(validUrl, `\n[IMAGEM: ${validUrl}]\n`);
+      }
+    }
+
+    // Se o lead está em PREVIA_PRONTA, rastreia envio de Ping e Link
+    if (!isTestMode && leadRow?.previa_status === "PREVIA_PRONTA") {
+      const nowIso = new Date().toISOString();
+      const updates: Record<string, any> = {};
+      if (!leadRow.previa_ping_enviado_em) {
+        updates.previa_ping_enviado_em = nowIso;
+      }
+      const cleanLink = leadRow.link_previa?.trim().replace(/\/$/, "");
+      const cleanAnswer = finalAnswer.toLowerCase();
+      const hasLinkInText = !!(
+        cleanLink &&
+        (cleanAnswer.includes(cleanLink.toLowerCase()) ||
+          cleanAnswer.includes(cleanLink.replace(/^https?:\/\//, "").toLowerCase()))
+      );
+      if (hasLinkInText && !leadRow.previa_link_enviado_em) {
+        updates.previa_link_enviado_em = nowIso;
+      }
+      if (Object.keys(updates).length > 0) {
+        supabase.from("leads_extraidos").update(updates).eq("client_id", clientId).eq("remoteJid", remoteJid).then(() => {}, () => {});
       }
     }
 

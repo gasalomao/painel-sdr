@@ -1,3 +1,17 @@
+## Checkpoint de continuidade — 31/10/2026: OpenCode CLI + Metodologia Impeccable (Craft Floor & Modo Persuade)
+
+**Estado atual canônico:** início de `docs/SITE_STUDIO_HANDOFF.md`, seção **RETOMADA AUTOMÁTICA**.
+- **Concluído:**
+  * Catálogo de 253 skills sincronizado em `.opencode/skills/` com binário Linux x64 nativo da Impeccable v0.1.14 para execução offline na VPS.
+  * `Dockerfile` e `.dockerignore` configurados com `@opencode/cli`, permissões de execução e diretórios `/home/nextjs/.config/opencode`, `/app/.opencode` e `/root/.config/opencode`.
+  * `workspace-provisioner.ts` atualizado com `ensureWorkspaceOpencode` conectando o catálogo `.opencode` aos workspaces de leads.
+  * `PRODUCT.md` (`<!-- impeccable:product-schema 1 -->`, `## Mode: persuade`) e `DESIGN.md` (regras estritas do Craft Floor anti-slop).
+  * Prompt de `opencode-runner.ts` invocando `/impeccable design ... in persuade mode` sem proibição rígida de bash/ferramentas.
+  * Otimização no `vercel-deployer.ts` para deploy exclusivo das fotos reais citadas no `index.html`.
+  * `qa-inspector.ts` atualizado com `stream: false` no body do 9Router local (`combo-principal` multimodal).
+  * Todos os 525 testes da suíte de sites executados e aprovados.
+  * Lead #2115 (FÁBRICA DE DIVAS SPA & BRONZE) gerado com 15 fotos reais, 122 KB de código autoral, deploy Vercel ativo em `https://fabrica-de-divas-spa-bronze-nvsihsk3h-gasalomaos-projects.vercel.app`, inspeção DOM Mobile com zero overflow e zero imagens quebradas, Vision QA score 85/100 e Supabase atualizado.
+
 ## Checkpoint de continuidade — 08/10/2026
 
 **Estado atual canônico:** início de `docs/SITE_STUDIO_HANDOFF.md`,seção **RETOMADA AUTOMÁTICA**. Usuário pediu salvar tudo para retomar com “quero continuar de onde parou”. Retomar diretamente,sem pedir que reconte a conversa. Os registros antigos abaixo são históricos,não substituem esse checkpoint.

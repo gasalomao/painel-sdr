@@ -43,7 +43,7 @@ export async function GET(req: NextRequest) {
     sort === "reviews" ? "reviews" :
     "created_at";
 
-  const baseSelect = "id, remoteJid, nome_negocio, telefone, ramo_negocio, endereco, avaliacao, reviews, website, maps_url, place_id, created_at, opt_out, primeiro_contato_source, primeiro_contato_at, resumo_avaliacoes";
+  const baseSelect = "id, remoteJid, nome_negocio, telefone, ramo_negocio, endereco, avaliacao, reviews, website, maps_url, place_id, created_at, opt_out, primeiro_contato_source, primeiro_contato_at, resumo_avaliacoes, previa_status, link_previa, previa_qa_score, previa_error, reuniao_horario_confirmado, reuniao_resumo, previa_pronta_em";
 
   // Disparo status: return set of remote_jids that received a sent disparo
   if (url.searchParams.get("disparo_status")) {
@@ -74,9 +74,16 @@ export async function GET(req: NextRequest) {
   };
 
   let { data, error, count } = await buildQuery(baseSelect);
+  // Se colunas de prévia ainda não foram migradas no banco, retry sem elas
+  if (error && /previa_|reuniao_/.test(error.message)) {
+    const withoutPrevia = baseSelect
+      .replace(", previa_status, link_previa, previa_qa_score, previa_error, reuniao_horario_confirmado, reuniao_resumo, previa_pronta_em", "");
+    const rr = await buildQuery(withoutPrevia);
+    data = rr.data; error = rr.error; count = rr.count;
+  }
   // resumo_avaliacoes é da migração reviews_ai.sql — retry sem ela se ausente
   if (error && /resumo_avaliacoes/.test(error.message)) {
-    const rr = await buildQuery(baseSelect.replace(", resumo_avaliacoes", ""));
+    const rr = await buildQuery(baseSelect.replace(", resumo_avaliacoes", "").replace(", previa_status, link_previa, previa_qa_score, previa_error, reuniao_horario_confirmado, reuniao_resumo, previa_pronta_em", ""));
     data = rr.data; error = rr.error; count = rr.count;
   }
   // ponytail: se coluna maps_url/place_id não existe no DB, retry sem elas

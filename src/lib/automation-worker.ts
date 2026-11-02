@@ -355,11 +355,39 @@ async function startDispatchPhase(
     { metadata: { count: leads.length } }
   );
 
-  // ───────── RESUMO DE AVALIAÇÕES COM IA (reviews-ai) ─────────
-  // Opcional via scrape_filters.reviews_ai {enabled, model, prompt}.
-  // Roda ANTES do disparo pra {{resumo_avaliacoes}} resolver no template.
-  // Best-effort: falha individual não bloqueia o disparo (fica só no log).
+  // ───────── GERAÇÃO AUTÔNOMA DE SITES COM OPENCODE + VERCEL + QA ─────────
   const filters = a.scrape_filters || {};
+  const siteGenCfg = filters.site_generation as { enabled?: boolean; mode?: string; prompt?: string } | undefined;
+  const siteGenEnabled = (a as any).site_generation_enabled ?? siteGenCfg?.enabled ?? (filters._source === "prospeccao-sites");
+  const siteGenMode = (a as any).site_generation_mode || siteGenCfg?.mode || "imediato";
+
+  if (siteGenEnabled) {
+    const leadIds = leads.map(l => l.id).filter(id => Number.isInteger(id));
+    if (siteGenMode === "imediato") {
+      await log(a.id, "previa" as any, "info",
+        `🌐 Geração autônoma de sites ativada para esta automação. Enfileirando ${leadIds.length} lead(s) capturados para OpenCode + Impeccable + Vercel + QA...`,
+        { metadata: { leadCount: leadIds.length, mode: "imediato" } }
+      );
+      if (leadIds.length > 0) {
+        await supabase
+          .from("leads_extraidos")
+          .update({
+            previa_status: "PREVIA_SOLICITADA",
+            status: "PREVIA_SOLICITADA",
+            previa_solicitada_em: new Date().toISOString(),
+            previa_error: null,
+          })
+          .in("id", leadIds);
+      }
+    } else {
+      await log(a.id, "previa" as any, "info",
+        `🎯 Geração de sites sob demanda ativa. As prévias serão geradas automaticamente pelo Sarah Closer quando o lead aceitar no WhatsApp.`,
+        { metadata: { leadCount: leadIds.length, mode: "sob_demanda" } }
+      );
+    }
+  }
+
+  // ───────── RESUMO DE AVALIAÇÕES COM IA (reviews-ai) ─────────
   const reviewsAiCfg = filters.reviews_ai as { enabled?: boolean; model?: string; prompt?: string } | undefined;
   if (reviewsAiCfg?.enabled && reviewsAiCfg.model) {
     // SKIP 1: se NENHUM texto consumidor menciona {{resumo_avaliacoes}}, o

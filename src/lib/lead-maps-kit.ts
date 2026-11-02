@@ -550,7 +550,10 @@ export function mergeMapsKitData(
 
   const rawPhotoCandidates = [
     ...asStringArray(s.photos),
+    ...asStringArray(bd.photos),
+    ...asStringArray(bd.fotos),
     ...asStringArray(dbLead.photos),
+    ...asStringArray(dbLead.fotos),
     ...reviewAttachedPhotos,
   ];
   const seenPhotoKeys = new Set<string>();

@@ -449,6 +449,7 @@ async function processTarget(
     status:       leadFull?.status || null,
     categoria:    (leadFull as any)?.categoria || null,
     resumo_avaliacoes: (leadFull as any)?.resumo_avaliacoes || null,
+    link_previa: (leadFull as any)?.link_previa || null,
   };
 
   // 3. Renderiza template

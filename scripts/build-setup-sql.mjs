@@ -18,6 +18,7 @@ const APPENDED_MIGRATIONS = [
   "018_enable_impeccable_skill.sql",
   "023_performance_leads_indexes.sql",
   "024_enterprise_security_hardening.sql",
+  "025_prospeccao_autonoma_previa.sql",
 ];
 
 let sql = readFileSync(sqlPath, "utf8");

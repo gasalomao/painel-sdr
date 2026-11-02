@@ -706,6 +706,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     status:       leadFull?.status || null,
     categoria:    (leadFull as any)?.categoria || null,
     resumo_avaliacoes: (leadFull as any)?.resumo_avaliacoes || null,
+    link_previa: (leadFull as any)?.link_previa || null,
   };
 
   // Renderiza msg base substituindo variáveis ({{saudacao}}, {{nome_empresa}}, etc)
@@ -1340,6 +1341,7 @@ export async function preGenerateCampaignMessages(campaignId: string): Promise<{
       status: leadFull?.status || null,
       categoria: leadFull?.categoria || null,
       resumo_avaliacoes: leadFull?.resumo_avaliacoes || null,
+      link_previa: (leadFull as any)?.link_previa || null,
     };
 
     const baseText = renderTemplate(c.message_template, renderCtx);

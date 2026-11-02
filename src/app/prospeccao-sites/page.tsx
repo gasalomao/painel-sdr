@@ -17,7 +17,7 @@ import {
   Send, Play, Pause, Square, Loader2, Search, Globe, BarChart3,
   CheckCircle2, XCircle, Star, Ban, RefreshCw,
   Rocket, Terminal, Filter, TrendingUp, Building2, Link2, Link2Off, Trash2, MapPin, ExternalLink,
-  Clock, MessageSquare, ChevronRight, Bot, Smartphone, Zap, Repeat, Plus, Scissors,
+  Clock, MessageSquare, ChevronRight, Bot, Smartphone, Zap, Repeat, Plus, Scissors, Sparkles,
 } from "lucide-react";
 import { renderTemplate, type TemplateContext } from "@/lib/template-vars";
 import { supabase } from "@/lib/supabase";
@@ -43,6 +43,13 @@ type Lead = {
   primeiro_contato_source: string | null;
   primeiro_contato_at: string | null;
   resumo_avaliacoes?: string | null;
+  previa_status?: string | null;
+  link_previa?: string | null;
+  previa_qa_score?: number | null;
+  previa_error?: string | null;
+  reuniao_horario_confirmado?: string | null;
+  reuniao_resumo?: string | null;
+  previa_pronta_em?: string | null;
 };
 
 type Campaign = {
@@ -415,6 +422,30 @@ export default function ProspeccaoSitesPage() {
     }
   };
 
+  const handleGerarPrevia = async (lead: Lead) => {
+    try {
+      const res = await fetch("/api/prospeccao-sites/previa", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ leadId: lead.id, action: "solicitar" }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setLeads((prev) =>
+          prev.map((item) =>
+            item.id === lead.id
+              ? { ...item, previa_status: "PREVIA_SOLICITADA" }
+              : item
+          )
+        );
+      } else {
+        alert("Erro ao solicitar prévia: " + (data.error || "falha desconhecida"));
+      }
+    } catch (e: any) {
+      alert("Erro ao conectar com servidor: " + e.message);
+    }
+  };
+
   // ----- Instâncias + Campaigns -----
   const [template, setTemplate] = useState(DEFAULT_TEMPLATE);
   const [vendedor, setVendedor] = useState(VENDEDOR_DEFAULT);
@@ -504,6 +535,62 @@ export default function ProspeccaoSitesPage() {
   const pendingAutoActionsRef = useRef(new Set<string>());
   const [autoLogs, setAutoLogs] = useState<Record<string, AutoLog[]>>({});
   const [expandedAuto, setExpandedAuto] = useState<string | null>(null);
+  const [enqueuingAll, setEnqueuingAll] = useState(false);
+  const [enqueuingAutoId, setEnqueuingAutoId] = useState<string | null>(null);
+
+  const [autoSiteGenEnabled, setAutoSiteGenEnabled] = useState(true);
+  const [autoSiteGenMode, setAutoSiteGenMode] = useState<"imediato" | "sob_demanda">("imediato");
+  const [autoSiteGenPrompt, setAutoSiteGenPrompt] = useState("");
+
+  const handleEnqueueAllPreviews = async () => {
+    setEnqueuingAll(true);
+    try {
+      const res = await fetch("/api/prospeccao-sites/previa", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "enfileirar_todos",
+          automationId: expandedAuto || automations[0]?.id || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        alert(`🚀 ${data.count} lead(s) enfileirados para geração autônoma de sites! O worker vai executar OpenCode + Vercel + QA e atualizar tudo no terminal.`);
+        if (data.automationId) setExpandedAuto(data.automationId);
+        fetchLeads();
+      } else {
+        alert(`Erro ao enfileirar prévias: ${data.error || "Falha desconhecida"}`);
+      }
+    } catch (e: any) {
+      alert(`Erro na requisição: ${e?.message}`);
+    } finally {
+      setEnqueuingAll(false);
+    }
+  };
+
+  const enqueueAutomationSites = async (autoId: string, autoName: string) => {
+    setEnqueuingAutoId(autoId);
+    try {
+      const res = await fetch("/api/prospeccao-sites/previa", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ automationId: autoId, action: "enfileirar_automacao" }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        alert(`🚀 ${data.count} lead(s) da automação "${autoName}" foram enfileirados para geração autônoma de sites! O progresso aparecerá no terminal abaixo.`);
+        setExpandedAuto(autoId);
+        fetchLeads();
+      } else {
+        alert(`Erro: ${data.error || "Falha ao enfileirar prévias da automação."}`);
+      }
+    } catch (e: any) {
+      alert(`Erro na requisição: ${e?.message}`);
+    } finally {
+      setEnqueuingAutoId(null);
+    }
+  };
+
   const [autoName, setAutoName] = useState("");
   const [autoNiches, setAutoNiches] = useState("");
   const [autoRegions, setAutoRegions] = useState("");
@@ -593,7 +680,15 @@ export default function ProspeccaoSitesPage() {
     try {
       const r = await fetch("/api/automations?source=prospeccao-sites", { cache: "no-store" });
       const j = await r.json();
-      if (j.success) setAutomations(j.automations || []);
+      if (j.success) {
+        const autos = j.automations || [];
+        setAutomations(autos);
+        setExpandedAuto((prev) => {
+          if (prev && autos.some((a: any) => a.id === prev)) return prev;
+          const running = autos.find((a: any) => a.status === "running");
+          return running ? running.id : (autos[0]?.id || null);
+        });
+      }
     } catch (e) { console.error("loadAutomations", e); }
   }, []);
 
@@ -650,10 +745,18 @@ export default function ProspeccaoSitesPage() {
             filterWithInstagram: autoFilterWithInstagram,
             minReviews: minimum,
             captureAllReviews: autoCaptureAllReviews || autoReviewsAi,
+            site_generation: {
+              enabled: autoSiteGenEnabled,
+              mode: autoSiteGenMode,
+              prompt: autoSiteGenPrompt || null,
+            },
             reviews_ai: autoReviewsAi
               ? { enabled: true, model: autoReviewsAiModel || null, prompt: autoReviewsAiPrompt || null }
               : { enabled: false },
           },
+          site_generation_enabled: autoSiteGenEnabled,
+          site_generation_mode: autoSiteGenMode,
+          site_generation_prompt: autoSiteGenPrompt || null,
           scrape_max_leads: autoMaxLeads,
           dispatch_template: autoTemplate,
           dispatch_min_interval: autoMinSec,
@@ -1335,6 +1438,7 @@ export default function ProspeccaoSitesPage() {
                         <th className="p-2 text-left">Avaliações</th>
                         <th className="p-2 text-left">Site</th>
                         <th className="p-2 text-left">Disparo</th>
+                        <th className="p-2 text-left">Prévia IA</th>
                         <th className="p-2 text-left">Maps</th>
                         <th className="p-2 text-left">Descadastro</th>
                         <th className="p-2"></th>
@@ -1397,6 +1501,50 @@ export default function ProspeccaoSitesPage() {
                                 <Badge variant="outline" className="text-emerald-400/60 border-emerald-500/20">
                                   <Clock className="w-3 h-3 mr-1" />Pendente
                                 </Badge>
+                              )}
+                            </td>
+                            <td className="p-2">
+                              {l.previa_status === "REUNIAO_AGENDADA" ? (
+                                <Badge variant="outline" className="text-purple-300 border-purple-500/40 bg-purple-500/10 gap-1" title={l.reuniao_horario_confirmado ? `Reunião: ${l.reuniao_horario_confirmado}` : "Reunião agendada"}>
+                                  <CheckCircle2 className="w-3 h-3 text-purple-400" />
+                                  Reunião Marcada
+                                </Badge>
+                              ) : l.previa_status === "PREVIA_PRONTA" && l.link_previa ? (
+                                <a href={l.link_previa} target="_blank" rel="noopener noreferrer" title={`Nota QA: ${l.previa_qa_score || 85}/100`}>
+                                  <Badge variant="outline" className="text-emerald-300 border-emerald-500/40 bg-emerald-500/10 hover:bg-emerald-500/20 gap-1 transition-colors">
+                                    <Globe className="w-3 h-3 text-emerald-400" />
+                                    Ver Site {l.previa_qa_score ? `(${l.previa_qa_score})` : ""}
+                                    <ExternalLink className="w-2.5 h-2.5 opacity-70" />
+                                  </Badge>
+                                </a>
+                              ) : ["GERANDO_WORKSPACE", "EXECUTANDO_OPENCODE", "FAZENDO_DEPLOY", "INSPECIONANDO_QA"].includes(l.previa_status || "") ? (
+                                <Badge variant="outline" className="text-blue-300 border-blue-500/40 bg-blue-500/10 gap-1 animate-pulse">
+                                  <Loader2 className="w-3 h-3 text-blue-400 animate-spin" />
+                                  {l.previa_status === "GERANDO_WORKSPACE" ? "Fotos Maps..." :
+                                   l.previa_status === "EXECUTANDO_OPENCODE" ? "OpenCode..." :
+                                   l.previa_status === "FAZENDO_DEPLOY" ? "Deploy Vercel..." : "Auditoria QA..."}
+                                </Badge>
+                              ) : l.previa_status === "PREVIA_SOLICITADA" ? (
+                                <Badge variant="outline" className="text-amber-300 border-amber-500/40 bg-amber-500/10 gap-1 animate-pulse">
+                                  <Clock className="w-3 h-3 text-amber-400" />
+                                  Na Fila VPS
+                                </Badge>
+                              ) : l.previa_status === "PREVIA_FALHOU" ? (
+                                <Badge variant="outline" className="text-red-400 border-red-500/30 bg-red-500/5 gap-1" title={l.previa_error || "Falha na geração"}>
+                                  <XCircle className="w-3 h-3" />
+                                  Falhou
+                                </Badge>
+                              ) : (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-6 px-2 text-[11px] text-white/50 hover:text-white hover:bg-white/10 gap-1"
+                                  onClick={() => handleGerarPrevia(l)}
+                                  title="Enfileirar geração autônoma de site na VPS"
+                                >
+                                  <Sparkles className="w-3 h-3 text-purple-400" />
+                                  Gerar
+                                </Button>
                               )}
                             </td>
                             <td className="p-2">
@@ -2150,6 +2298,51 @@ export default function ProspeccaoSitesPage() {
                   )}
                 </div>
 
+                {/* Geração Autônoma de Sites IA (OpenCode + Impeccable + Vercel + QA) */}
+                <div className={cn(
+                  "rounded-lg border p-3 space-y-2 transition-colors",
+                  autoSiteGenEnabled ? "border-amber-400/40 bg-amber-500/5" : "border-white/10 bg-white/[0.02]"
+                )}>
+                  <label className="flex items-center gap-2 text-xs cursor-pointer">
+                    <Switch checked={autoSiteGenEnabled} onCheckedChange={setAutoSiteGenEnabled} />
+                    <Globe className="w-3.5 h-3.5 text-amber-300" />
+                    <span className="font-bold text-amber-200">Geração Autônoma de Sites IA (OpenCode + Vercel + QA)</span>
+                  </label>
+                  <p className="text-[10px] text-white/40 leading-relaxed">
+                    A automação gerencia o ciclo completo dos leads capturados por ela: baixa fotos reais do Maps, programa o site com OpenCode + Skill Impeccable na VPS, publica na Vercel e audita a qualidade com QA Triplo. Todos os eventos são exibidos no terminal ao vivo abaixo.
+                  </p>
+                  {autoSiteGenEnabled && (
+                    <div className="space-y-3 pl-3 border-l-2 border-amber-500/30">
+                      <div>
+                        <label className="text-[10px] uppercase font-bold text-white/40">Modo de Operação do Pipeline</label>
+                        <select
+                          value={autoSiteGenMode}
+                          onChange={(e) => setAutoSiteGenMode(e.target.value as "imediato" | "sob_demanda")}
+                          className="w-full mt-0.5 bg-black/40 border border-white/10 rounded-md px-2 h-8 text-xs text-white"
+                        >
+                          <option value="imediato">⚡ Geração Imediata (gera o site logo após a captura, antes de disparar)</option>
+                          <option value="sob_demanda">🎯 Sob Demanda (gera automaticamente quando o lead responder aceitando a prévia)</option>
+                        </select>
+                        <p className="text-[9px] text-white/30 mt-1">
+                          {autoSiteGenMode === "imediato"
+                            ? "O link estará pronto na variável {{link_previa}} para ser enviado logo na primeira mensagem ou no ping."
+                            : "A Sarah aborda primeiro oferecendo a prévia, e gera o site assim que o lead demonstrar interesse."}
+                        </p>
+                      </div>
+                      <div>
+                        <label className="text-[10px] uppercase font-bold text-white/40">Instruções de Design para o OpenCode (opcional)</label>
+                        <Textarea
+                          rows={2}
+                          value={autoSiteGenPrompt}
+                          onChange={(e) => setAutoSiteGenPrompt(e.target.value)}
+                          placeholder="Ex: Focar em design moderno com destaque para cardápio e botão de WhatsApp flutuante…"
+                          className="bg-black/40 border-white/10 font-mono text-xs"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 {/* Follow-up automático */}
                 <div className={cn(
                   "rounded-xl border p-4 space-y-3 transition-colors",
@@ -2307,6 +2500,51 @@ export default function ProspeccaoSitesPage() {
               </CardContent>
             </Card>
 
+            {/* Banner do Pipeline 100% Autônomo */}
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 space-y-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-amber-400" />
+                  <span className="text-xs font-bold uppercase tracking-wider text-amber-300">
+                    Pipeline 100% Autônomo de Prospecção & Sites IA
+                  </span>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 text-[11px] border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
+                  onClick={handleEnqueueAllPreviews}
+                  disabled={enqueuingAll}
+                >
+                  {enqueuingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" /> : <Globe className="w-3.5 h-3.5 mr-1.5" />}
+                  Gerar Prévias IA de Todos os Leads
+                </Button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-5 gap-2 text-[11px]">
+                <div className="bg-black/40 p-2.5 rounded-lg border border-white/5 space-y-1">
+                  <span className="font-bold text-blue-300 block">1. Captura Maps</span>
+                  <p className="text-white/60 text-[10px]">Minera estabelecimentos sem site, fotos reais, notas e reviews.</p>
+                </div>
+                <div className="bg-black/40 p-2.5 rounded-lg border border-white/5 space-y-1">
+                  <span className="font-bold text-cyan-300 block">2. Abordagem Sarah</span>
+                  <p className="text-white/60 text-[10px]">Oferece prévia sem custo e valida interesse do cliente.</p>
+                </div>
+                <div className="bg-black/40 p-2.5 rounded-lg border border-white/5 space-y-1">
+                  <span className="font-bold text-amber-300 block">3. OpenCode + Impeccable</span>
+                  <p className="text-white/60 text-[10px]">Cria o site na VPS usando fotos reais e regras do negócio.</p>
+                </div>
+                <div className="bg-black/40 p-2.5 rounded-lg border border-white/5 space-y-1">
+                  <span className="font-bold text-emerald-300 block">4. Deploy Vercel & QA</span>
+                  <p className="text-white/60 text-[10px]">Publica na Vercel e audita HTTP, DOM e layout mobile.</p>
+                </div>
+                <div className="bg-black/40 p-2.5 rounded-lg border border-white/5 space-y-1">
+                  <span className="font-bold text-purple-300 block">5. Ping & Fechamento</span>
+                  <p className="text-white/60 text-[10px]">Dispara link, executa follow-up anti-vácuo e agenda call.</p>
+                </div>
+              </div>
+            </div>
+
             {/* Lista de automações */}
             <div className="flex justify-between items-center">
               <div className="text-xs font-bold uppercase tracking-wider text-white/50">Automações ativas</div>
@@ -2347,6 +2585,12 @@ export default function ProspeccaoSitesPage() {
                             <span className={cn("text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-md border", statusColor)}>
                               {statusLabels[a.status] || a.status} · {phaseLabels[a.phase] || a.phase}
                             </span>
+                            {((a as any).site_generation_enabled ?? a.scrape_filters?.site_generation?.enabled ?? true) && (
+                              <Badge className="bg-amber-500/10 text-amber-300 border-amber-500/30 text-[9px] gap-1">
+                                <Sparkles className="w-2.5 h-2.5" />
+                                Sites IA: {(a as any).site_generation_mode || a.scrape_filters?.site_generation?.mode || "imediato"}
+                              </Badge>
+                            )}
                             <Badge className="bg-white/10 text-white/60">{a.scraped_count ?? 0}/{a.scrape_max_leads} leads</Badge>
                           </div>
                         </div>
@@ -2363,15 +2607,36 @@ export default function ProspeccaoSitesPage() {
                             </Button>
                           )}
                           <Button
-                            size="sm" variant="ghost"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => enqueueAutomationSites(a.id, a.name)}
+                            disabled={enqueuingAutoId === a.id}
+                            className="h-7 text-[10px] border-amber-500/40 text-amber-300 hover:bg-amber-500/10"
+                            title="Gera os sites para os leads capturados por esta automação"
+                          >
+                            {enqueuingAutoId === a.id ? (
+                              <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                            ) : (
+                              <Globe className="w-3 h-3 mr-1 text-amber-400" />
+                            )}
+                            Gerar Sites Desta Automação
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant={expandedAuto === a.id ? "default" : "ghost"}
                             onClick={() => {
                               if (expandedAuto === a.id) { setExpandedAuto(null); }
                               else { setExpandedAuto(a.id); loadAutoLogs(a.id); }
                             }}
-                            className="h-7 text-[10px] bg-white/5 hover:bg-white/10"
+                            className={cn(
+                              "h-7 text-[10px]",
+                              expandedAuto === a.id
+                                ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/30"
+                                : "bg-white/5 hover:bg-white/10"
+                            )}
                           >
                             <Terminal className="w-3 h-3 mr-1" />
-                            {expandedAuto === a.id ? "Ocultar logs" : "Ver logs"}
+                            {expandedAuto === a.id ? "Terminal ao vivo (ativo)" : "Ver terminal"}
                           </Button>
                           <Button size="sm" variant="ghost" onClick={() => autoAction(a.id, "delete")} disabled={pendingAutoActions.has(a.id)} aria-label={`Deletar automação ${a.name}`} className="h-7 text-[10px] text-red-400 hover:bg-red-500/10">
                             <Trash2 className="w-3 h-3" />

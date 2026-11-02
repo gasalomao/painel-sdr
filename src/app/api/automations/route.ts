@@ -108,6 +108,9 @@ export async function POST(req: NextRequest) {
       dispatch_media_file_name: body.dispatch_media_file_name || null,
       dispatch_media_mimetype: body.dispatch_media_mimetype || null,
       lead_intelligence_enabled: !!body.lead_intelligence_enabled,
+      site_generation_enabled: body.site_generation_enabled !== undefined ? !!body.site_generation_enabled : true,
+      site_generation_mode: typeof body.site_generation_mode === "string" ? body.site_generation_mode : "imediato",
+      site_generation_prompt: typeof body.site_generation_prompt === "string" ? body.site_generation_prompt : null,
       followup_enabled: body.followup_enabled !== false, // default TRUE; só FALSE se vier explicitamente
       followup_steps: Array.isArray(body.followup_steps) ? body.followup_steps : [],
       followup_min_interval: Number(body.followup_min_interval ?? DEFAULTS.followup_min_interval),
@@ -121,7 +124,25 @@ export async function POST(req: NextRequest) {
       phase: "idle",
     };
 
-    const { data, error } = await supabase.from("automations").insert(row).select().single();
+    let { data, error } = await supabase.from("automations").insert(row).select().single();
+    if (error && (error as any).code === "PGRST204") {
+      const fallbackRow: any = { ...row };
+      delete fallbackRow.site_generation_enabled;
+      delete fallbackRow.site_generation_mode;
+      delete fallbackRow.site_generation_prompt;
+      // Garante que a configuração fique salva no scrape_filters
+      fallbackRow.scrape_filters = {
+        ...(fallbackRow.scrape_filters || {}),
+        site_generation: {
+          enabled: row.site_generation_enabled,
+          mode: row.site_generation_mode,
+          prompt: row.site_generation_prompt,
+        },
+      };
+      const retry = await supabase.from("automations").insert(fallbackRow).select().single();
+      data = retry.data;
+      error = retry.error;
+    }
     if (error) throw error;
     return NextResponse.json({ success: true, automation: data });
   } catch (e: any) {

@@ -3,13 +3,13 @@
 import { useEffect, useLayoutEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
-import { Loader2, MapPin, Zap, Repeat, MessageSquare, AlertTriangle, Activity, Send, ArrowDown, type LucideIcon } from "lucide-react";
+import { Loader2, MapPin, Zap, Repeat, MessageSquare, AlertTriangle, Activity, Send, ArrowDown, Globe, Sparkles, type LucideIcon } from "lucide-react";
 import styles from "./automacao.module.css";
 
 type LogEntry = {
   id: string;
   ts: string;
-  kind: "state" | "scrape" | "dispatch" | "followup" | "reply" | "error";
+  kind: "state" | "scrape" | "dispatch" | "followup" | "reply" | "error" | "previa";
   level: "info" | "success" | "warning" | "error";
   message: string;
   remote_jid?: string | null;
@@ -21,6 +21,7 @@ const KIND_META: Record<LogEntry["kind"], { icon: LucideIcon; color: string; lab
   dispatch: { icon: Zap,             color: "text-cyan-300",   label: "disparo" },
   followup: { icon: Repeat,          color: "text-purple-300", label: "follow-up" },
   reply:    { icon: MessageSquare,   color: "text-emerald-300", label: "resposta" },
+  previa:   { icon: Globe,           color: "text-amber-300",  label: "site ia" },
   error:    { icon: AlertTriangle,   color: "text-red-400",    label: "erro" },
 };
 
@@ -41,6 +42,27 @@ const LEVEL_BG: Record<LogEntry["level"], string> = {
  *
  * Tudo em realtime via Supabase channel — atualiza ao vivo sem F5.
  */
+function renderMessageWithLinks(text: string) {
+  const urlRegex = /(https?:\/\/[^\s]+)/g;
+  const parts = text.split(urlRegex);
+  return parts.map((part, i) => {
+    if (part.match(urlRegex)) {
+      return (
+        <a
+          key={i}
+          href={part}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-amber-300 underline font-semibold hover:text-amber-200 transition-colors inline-flex items-center gap-1"
+        >
+          {part}
+        </a>
+      );
+    }
+    return part;
+  });
+}
+
 export function AutomationLogs({
   automationId,
   campaignId,
@@ -280,6 +302,8 @@ export function AutomationLogs({
         <div className={styles.logCounts}>
           <span><span className="text-blue-300">{scrapeFeed.length}</span> captados</span>
           <span>·</span>
+          <span><span className="text-amber-300">{entries.filter(e => e.kind === "previa").length}</span> sites IA</span>
+          <span>·</span>
           <span><span className="text-emerald-300">{entries.filter(e => e.kind === "reply").length}</span> respostas</span>
         </div>
       </div>
@@ -308,7 +332,9 @@ export function AutomationLogs({
                       <span className="text-cyan-400/70">· {(e.remote_jid || "").replace(/@.*$/, "")}</span>
                     )}
                   </div>
-                  <p className="text-white/85 break-words whitespace-pre-wrap leading-snug">{e.message}</p>
+                  <p className="text-white/85 break-words whitespace-pre-wrap leading-snug">
+                    {renderMessageWithLinks(e.message)}
+                  </p>
                 </div>
               </div>
             );

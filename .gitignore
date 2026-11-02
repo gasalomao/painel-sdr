@@ -54,7 +54,13 @@ Thumbs.db
 .swarm/
 .zcode/
 .openclaude/
-.opencode/
+# .opencode é necessário para o build Docker na VPS (OpenCode CLI + Skills)
+.opencode/node_modules/
+.opencode/package.json
+.opencode/package-lock.json
+.opencode/bun.lock
+__pycache__/
+*.pyc
 .deepseek-chat/
 .mcp.json
 .impeccable/
@@ -67,6 +73,7 @@ AGENTS.md
 ruvector.db
 qr-sdr.png
 scratch/
+storage/
 
 # ==================== Temp / Embedded Repos ====================
 temp_wacrm/
