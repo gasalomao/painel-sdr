@@ -13,6 +13,11 @@ const eslintConfig = defineConfig([
     "build/**",
     "next-env.d.ts",
     ".claude/**",
+    // Tooling de agente (skills/scripts CommonJS) não é fonte do app:
+    ".opencode/**",
+    ".impeccable/**",
+    // Previews gerados em runtime:
+    "storage/**",
     "temp_wacrm/**",
     "scratch/**",
     // Assets vendor minificados e scripts one-off CommonJS não são fonte:
