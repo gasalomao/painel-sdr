@@ -11,6 +11,7 @@ const completionGuardSql = readFileSync(resolve(process.cwd(), "migrations/017_w
 const impeccableSql = readFileSync(resolve(process.cwd(), "migrations/018_enable_impeccable_skill.sql"), "utf8");
 const performanceLeadsSql = readFileSync(resolve(process.cwd(), "migrations/023_performance_leads_indexes.sql"), "utf8");
 const enterpriseSecuritySql = readFileSync(resolve(process.cwd(), "migrations/024_enterprise_security_hardening.sql"), "utf8");
+const previaSql = readFileSync(resolve(process.cwd(), "migrations/025_prospeccao_autonoma_previa.sql"), "utf8");
 const tempDirs: string[] = [];
 
 function makeTempProject(): string {
@@ -34,6 +35,7 @@ describe("scripts/build-setup-sql.mjs", () => {
     writeFileSync(join(cwd, "migrations", "018_enable_impeccable_skill.sql"), impeccableSql, "utf8");
     writeFileSync(join(cwd, "migrations", "023_performance_leads_indexes.sql"), performanceLeadsSql, "utf8");
     writeFileSync(join(cwd, "migrations", "024_enterprise_security_hardening.sql"), enterpriseSecuritySql, "utf8");
+    writeFileSync(join(cwd, "migrations", "025_prospeccao_autonoma_previa.sql"), previaSql, "utf8");
 
     const result = spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" });
 
@@ -43,7 +45,7 @@ describe("scripts/build-setup-sql.mjs", () => {
     expect(generated).not.toContain("RAIZ_ERRADA");
     expect(generated).toContain("migrations/SETUP_COMPLETO.sql");
     const sql = runInNewContext(generated.replace("export const SETUP_SQL =", "globalThis.sql =")) as string;
-    expect(sql).toBe(`SELECT 'CANONICA';\n\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n\n\n${impeccableSql.trim()}\n\n\n${performanceLeadsSql.trim()}\n\n\n${enterpriseSecuritySql.trim()}\n`);
+    expect(sql).toBe(`SELECT 'CANONICA';\n\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n\n\n${impeccableSql.trim()}\n\n\n${performanceLeadsSql.trim()}\n\n\n${enterpriseSecuritySql.trim()}\n\n\n${previaSql.trim()}\n`);
     expect(sql).toContain("CREATE OR REPLACE FUNCTION public.website_complete_run");
   });
 
@@ -57,12 +59,13 @@ describe("scripts/build-setup-sql.mjs", () => {
     writeFileSync(join(cwd, "migrations", "018_enable_impeccable_skill.sql"), impeccableSql);
     writeFileSync(join(cwd, "migrations", "023_performance_leads_indexes.sql"), performanceLeadsSql);
     writeFileSync(join(cwd, "migrations", "024_enterprise_security_hardening.sql"), enterpriseSecuritySql);
+    writeFileSync(join(cwd, "migrations", "025_prospeccao_autonoma_previa.sql"), previaSql);
 
     expect(spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" }).status).toBe(0);
     const output = join(cwd, "src", "lib", "setup-sql.ts");
     const generated = readFileSync(output, "utf8");
     const sql = runInNewContext(generated.replace("export const SETUP_SQL =", "globalThis.sql =")) as string;
-    expect(sql).toBe(`${canonical}\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n\n\n${impeccableSql.trim()}\n\n\n${performanceLeadsSql.trim()}\n\n\n${enterpriseSecuritySql.trim()}\n`);
+    expect(sql).toBe(`${canonical}\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n\n\n${impeccableSql.trim()}\n\n\n${performanceLeadsSql.trim()}\n\n\n${enterpriseSecuritySql.trim()}\n\n\n${previaSql.trim()}\n`);
     expect(spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" }).status).toBe(0);
     expect(readFileSync(output, "utf8")).toBe(generated);
   });
@@ -75,6 +78,7 @@ describe("scripts/build-setup-sql.mjs", () => {
     writeFileSync(join(cwd, "migrations", "018_enable_impeccable_skill.sql"), impeccableSql);
     writeFileSync(join(cwd, "migrations", "023_performance_leads_indexes.sql"), performanceLeadsSql);
     writeFileSync(join(cwd, "migrations", "024_enterprise_security_hardening.sql"), enterpriseSecuritySql);
+    writeFileSync(join(cwd, "migrations", "025_prospeccao_autonoma_previa.sql"), previaSql);
     const base = join(cwd, "migrations", "SETUP_COMPLETO.sql");
     writeFileSync(base, websiteSql);
     expect(spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" }).status).toBe(0);
