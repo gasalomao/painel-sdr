@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { statSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -27,7 +28,7 @@ export function resolveImpeccableBinary(): string | null {
 
   for (const c of candidates) {
     try {
-      const stat = require("node:fs").statSync(c);
+      const stat = statSync(c);
       if (stat.isFile()) return c;
     } catch {}
   }

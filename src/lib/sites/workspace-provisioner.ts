@@ -308,7 +308,7 @@ export function generateDesignMdForLead(data: EnrichedLeadKitData, photosCount: 
   let suggestedAtmosphere = "Atmosfera precisa, magnética, autoral e com contraste refinado.";
   let displayFont = "'Syne', sans-serif";
   let sansFont = "'DM Sans', system-ui, -apple-system, sans-serif";
-  let monoFont = "'JetBrains Mono', monospace";
+  const monoFont = "'JetBrains Mono', monospace";
 
   // Tokens de cor calibrados com espaço OKLCH para cada atmosfera
   let surfaceCanvas = "oklch(12% 0.01 260)";       // #08080A
