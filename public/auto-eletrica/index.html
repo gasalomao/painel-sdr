@@ -1,0 +1,1316 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VoltsCar Auto Elétrica & Diagnóstico Automotivo</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400..700;1,9..40,400..700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-base: #080c14;
+      --bg-surface: #0f1523;
+      --bg-surface-elevated: #162034;
+      --bg-surface-active: #1f2c46;
+      --border-subtle: rgba(255, 255, 255, 0.1);
+      --border-strong: rgba(255, 255, 255, 0.18);
+      --text-main: #f8fafc;
+      --text-muted: #cbd5e1;
+      --text-dim: #94a3b8;
+      --accent: #f59e0b;
+      --accent-hover: #d97706;
+      --accent-text: #090d16;
+      --electric-cyan: #38bdf8;
+      --success: #34d399;
+      --font-display: 'Syne', -apple-system, sans-serif;
+      --font-body: 'DM Sans', -apple-system, sans-serif;
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 16px;
+      --shadow-elevation: 0 16px 36px -8px rgba(0, 0, 0, 0.6);
+      --shadow-card: 0 8px 24px -6px rgba(0, 0, 0, 0.5);
+      --shadow-btn: 0 4px 14px rgba(0, 0, 0, 0.45);
+    }
+
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html {
+      scroll-behavior: smooth;
+      background-color: var(--bg-base);
+      color: var(--text-main);
+      font-family: var(--font-body);
+      font-size: 16px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    ::selection {
+      background-color: var(--accent);
+      color: var(--accent-text);
+    }
+
+    body {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    /* Top Banner de Plantão */
+    .emergency-bar {
+      background-color: var(--accent);
+      color: var(--accent-text);
+      padding: 0.625rem 1.5rem;
+      font-size: 0.875rem;
+      font-weight: 700;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 0.875rem;
+      text-align: center;
+    }
+
+    .emergency-bar a {
+      background-color: #090d16;
+      color: #ffffff;
+      padding: 0.25rem 0.75rem;
+      border-radius: var(--radius-sm);
+      font-size: 0.8125rem;
+      font-weight: 700;
+      transition: background 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+
+    .emergency-bar a:hover {
+      background-color: #1e293b;
+    }
+
+    /* Cabeçalho */
+    header.site-header {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background-color: rgba(8, 12, 20, 0.94);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .header-container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 1.125rem 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1.5rem;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+      font-family: var(--font-display);
+      font-size: 1.35rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      color: #ffffff;
+    }
+
+    .brand-mark {
+      width: 32px;
+      height: 32px;
+      background-color: var(--accent);
+      border-radius: var(--radius-sm);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--accent-text);
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 1.75rem;
+      list-style: none;
+      font-size: 0.9375rem;
+      font-weight: 500;
+      color: var(--text-muted);
+    }
+
+    .nav-links a:hover {
+      color: #ffffff;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .btn-emergency {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background-color: var(--accent);
+      color: var(--accent-text);
+      padding: 0.6875rem 1.25rem;
+      border-radius: var(--radius-sm);
+      font-weight: 700;
+      font-size: 0.9375rem;
+      box-shadow: var(--shadow-btn);
+      transition: background 0.2s ease, transform 0.2s ease;
+    }
+
+    .btn-emergency:hover {
+      background-color: var(--accent-hover);
+      color: #000000;
+      transform: translateY(-1px);
+    }
+
+    /* Container global */
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 1.5rem;
+    }
+
+    /* Hero Section */
+    section.hero-section {
+      padding: 5rem 0 4.5rem;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 3.5rem;
+      align-items: center;
+    }
+
+    .hero-content h1 {
+      font-family: var(--font-display);
+      font-size: clamp(2.4rem, 4.5vw, 3.75rem);
+      font-weight: 800;
+      line-height: 1.1;
+      letter-spacing: -0.03em;
+      color: #ffffff;
+      margin-bottom: 1.25rem;
+    }
+
+    .hero-content p.lead {
+      font-size: 1.1875rem;
+      color: var(--text-muted);
+      margin-bottom: 2rem;
+      max-width: 58ch;
+      line-height: 1.6;
+    }
+
+    .hero-ctas {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 2.5rem;
+    }
+
+    .btn-primary-large {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.625rem;
+      background-color: var(--accent);
+      color: var(--accent-text);
+      font-size: 1.0625rem;
+      font-weight: 800;
+      padding: 0.9375rem 1.75rem;
+      border-radius: var(--radius-sm);
+      box-shadow: var(--shadow-btn);
+      transition: background 0.2s ease, transform 0.2s ease;
+    }
+
+    .btn-primary-large:hover {
+      background-color: var(--accent-hover);
+      color: #000000;
+      transform: translateY(-1px);
+    }
+
+    .btn-secondary-large {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.625rem;
+      background-color: var(--bg-surface-elevated);
+      color: var(--text-main);
+      font-size: 1.0625rem;
+      font-weight: 600;
+      padding: 0.9375rem 1.5rem;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-strong);
+      box-shadow: var(--shadow-btn);
+      transition: background 0.2s ease, border-color 0.2s ease;
+    }
+
+    .btn-secondary-large:hover {
+      background-color: var(--bg-surface-active);
+      border-color: #cbd5e1;
+    }
+
+    .dispatch-guarantees {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1.25rem;
+      padding-top: 2rem;
+      border-top: 1px solid var(--border-subtle);
+    }
+
+    .guarantee-item {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+
+    .guarantee-item strong {
+      font-size: 0.9375rem;
+      color: #ffffff;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .guarantee-item span {
+      font-size: 0.8125rem;
+      color: var(--text-dim);
+    }
+
+    /* Painel Técnico no Hero */
+    .bench-panel {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-lg);
+      padding: 1.75rem;
+      box-shadow: var(--shadow-elevation);
+    }
+
+    .bench-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 1.125rem;
+      border-bottom: 1px solid var(--border-subtle);
+      margin-bottom: 1.25rem;
+    }
+
+    .bench-title {
+      font-family: var(--font-display);
+      font-weight: 700;
+      font-size: 1.0625rem;
+      color: #ffffff;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .bench-badge {
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 0.2rem 0.55rem;
+      background-color: rgba(52, 211, 153, 0.15);
+      color: var(--success);
+      border: 1px solid rgba(52, 211, 153, 0.35);
+      border-radius: 4px;
+      letter-spacing: 0.03em;
+    }
+
+    .diagnostic-readout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .meter-box {
+      background: var(--bg-surface-elevated);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 1rem;
+    }
+
+    .meter-label {
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.35rem;
+      display: block;
+    }
+
+    .meter-value {
+      font-family: var(--font-display);
+      font-size: 1.625rem;
+      font-weight: 800;
+      color: var(--text-main);
+      display: flex;
+      align-items: baseline;
+      gap: 0.25rem;
+    }
+
+    .meter-value small {
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--text-dim);
+    }
+
+    .meter-status {
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: var(--success);
+      margin-top: 0.25rem;
+      display: block;
+    }
+
+    .waveform-visual {
+      background: #04060a;
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 0.875rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .waveform-visual svg {
+      width: 100%;
+      height: 60px;
+      display: block;
+    }
+
+    .quick-dispatch-form {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .quick-dispatch-form input {
+      background: var(--bg-surface-elevated);
+      border: 1px solid var(--border-strong);
+      color: #ffffff;
+      padding: 0.8125rem 1rem;
+      border-radius: var(--radius-sm);
+      font-size: 0.9375rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .quick-dispatch-form input:focus {
+      border-color: var(--accent);
+    }
+
+    .quick-dispatch-form input::placeholder {
+      color: var(--text-dim);
+    }
+
+    /* Seção de Serviços Especializados */
+    section.services-section {
+      padding: 5rem 0;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .section-header {
+      margin-bottom: 3rem;
+      max-width: 68ch;
+    }
+
+    .section-header h2 {
+      font-family: var(--font-display);
+      font-size: clamp(1.85rem, 3.2vw, 2.5rem);
+      font-weight: 800;
+      color: #ffffff;
+      letter-spacing: -0.02em;
+      margin-bottom: 0.75rem;
+    }
+
+    .section-header p {
+      font-size: 1.0625rem;
+      color: var(--text-muted);
+    }
+
+    .services-layout {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1.5rem;
+    }
+
+    .service-block {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 2rem;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+
+    .service-block:hover {
+      transform: translateY(-2px);
+      border-color: var(--border-strong);
+    }
+
+    .service-header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 0.875rem;
+    }
+
+    .service-header svg {
+      color: var(--accent);
+      flex-shrink: 0;
+    }
+
+    .service-block h3 {
+      font-family: var(--font-display);
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: #ffffff;
+      line-height: 1.25;
+    }
+
+    .service-block p {
+      font-size: 0.9375rem;
+      color: var(--text-muted);
+      line-height: 1.6;
+      margin-bottom: 1.25rem;
+    }
+
+    .service-specs {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border-subtle);
+      font-size: 0.8125rem;
+      color: var(--text-dim);
+    }
+
+    .service-specs li {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .service-specs li::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      background: var(--accent);
+      border-radius: 50%;
+    }
+
+    /* Seção de Diagnóstico: Tabela Técnica de Sintomas */
+    section.diagnostic-table-section {
+      padding: 5rem 0;
+      background: #090e18;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .table-container-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-md);
+      padding: 1.5rem;
+      box-shadow: var(--shadow-card);
+    }
+
+    .table-wrapper {
+      overflow-x: auto;
+    }
+
+    table.symptom-matrix {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 0.9375rem;
+    }
+
+    table.symptom-matrix th {
+      background: var(--bg-surface-elevated);
+      padding: 1rem 1.25rem;
+      font-weight: 700;
+      color: #ffffff;
+      font-family: var(--font-display);
+      border-bottom: 1px solid var(--border-strong);
+      letter-spacing: 0.02em;
+    }
+
+    table.symptom-matrix td {
+      padding: 1.125rem 1.25rem;
+      border-bottom: 1px solid var(--border-subtle);
+      color: var(--text-muted);
+      vertical-align: top;
+    }
+
+    table.symptom-matrix tr:last-child td {
+      border-bottom: none;
+    }
+
+    table.symptom-matrix tr:hover td {
+      background-color: rgba(255, 255, 255, 0.03);
+    }
+
+    .tag-critical {
+      display: inline-block;
+      padding: 0.25rem 0.6rem;
+      background: rgba(239, 68, 68, 0.18);
+      color: #fca5a5;
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 700;
+    }
+
+    .tag-warning {
+      display: inline-block;
+      padding: 0.25rem 0.6rem;
+      background: rgba(245, 158, 11, 0.18);
+      color: #fde68a;
+      border: 1px solid rgba(245, 158, 11, 0.3);
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 700;
+    }
+
+    .tag-diagnostic {
+      display: inline-block;
+      padding: 0.25rem 0.6rem;
+      background: rgba(56, 189, 248, 0.18);
+      color: #bae6fd;
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 700;
+    }
+
+    /* Como Funciona o Socorro */
+    section.flow-section {
+      padding: 5rem 0;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .flow-steps {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1.75rem;
+      margin-top: 2rem;
+    }
+
+    .flow-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 1.75rem;
+      position: relative;
+    }
+
+    .flow-ordinal {
+      font-family: var(--font-display);
+      font-size: 2rem;
+      font-weight: 800;
+      color: var(--electric-cyan);
+      line-height: 1;
+      margin-bottom: 1rem;
+    }
+
+    .flow-card h3 {
+      font-size: 1.0625rem;
+      font-weight: 700;
+      color: #ffffff;
+      margin-bottom: 0.5rem;
+    }
+
+    .flow-card p {
+      font-size: 0.875rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+
+    /* Cobertura e Localização */
+    section.location-section {
+      padding: 5rem 0;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .location-box {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-lg);
+      padding: 3rem;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 3rem;
+      align-items: center;
+    }
+
+    .location-info h2 {
+      font-family: var(--font-display);
+      font-size: 2rem;
+      font-weight: 800;
+      color: #ffffff;
+      margin-bottom: 1rem;
+    }
+
+    .location-info p {
+      font-size: 1.0625rem;
+      color: var(--text-muted);
+      margin-bottom: 1.75rem;
+    }
+
+    .info-list {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+
+    .info-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.75rem;
+      color: var(--text-main);
+    }
+
+    .info-item svg {
+      flex-shrink: 0;
+      margin-top: 0.25rem;
+      color: var(--accent);
+    }
+
+    .dispatch-perimeter {
+      background: var(--bg-surface-elevated);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 2.25rem 2rem;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .perimeter-number {
+      font-family: var(--font-display);
+      font-size: 3.5rem;
+      font-weight: 800;
+      color: var(--accent);
+      line-height: 1;
+    }
+
+    .perimeter-label {
+      font-size: 1rem;
+      font-weight: 700;
+      color: #ffffff;
+      margin-top: 0.5rem;
+    }
+
+    .perimeter-desc {
+      font-size: 0.875rem;
+      color: var(--text-dim);
+      margin-top: 0.35rem;
+      max-width: 32ch;
+    }
+
+    /* FAQ Objetiva */
+    section.faq-section {
+      padding: 5rem 0;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .faq-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 2rem;
+      margin-top: 2rem;
+    }
+
+    .faq-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 1.75rem;
+    }
+
+    .faq-card h3 {
+      font-size: 1.0625rem;
+      font-weight: 700;
+      color: #ffffff;
+      margin-bottom: 0.625rem;
+    }
+
+    .faq-card p {
+      font-size: 0.9375rem;
+      color: var(--text-muted);
+      line-height: 1.6;
+    }
+
+    /* CTA Final */
+    section.final-cta {
+      padding: 6rem 0;
+      background: var(--bg-base);
+      text-align: center;
+    }
+
+    .final-cta-content {
+      max-width: 720px;
+      margin: 0 auto;
+    }
+
+    .final-cta h2 {
+      font-family: var(--font-display);
+      font-size: clamp(2rem, 3.8vw, 2.75rem);
+      font-weight: 800;
+      color: #ffffff;
+      margin-bottom: 1rem;
+      letter-spacing: -0.02em;
+    }
+
+    .final-cta p {
+      font-size: 1.125rem;
+      color: var(--text-muted);
+      margin-bottom: 2rem;
+    }
+
+    /* Rodapé */
+    footer.site-footer {
+      background: var(--bg-surface);
+      border-top: 1px solid var(--border-subtle);
+      padding: 3rem 0 2rem;
+      font-size: 0.875rem;
+      color: var(--text-dim);
+    }
+
+    .footer-container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 1.5rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 2rem;
+      flex-wrap: wrap;
+    }
+
+    /* Botão Flutuante de WhatsApp */
+    .whatsapp-float {
+      position: fixed;
+      bottom: 2rem;
+      right: 2rem;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+      background-color: #25d366;
+      color: #042f1a;
+      font-weight: 800;
+      padding: 0.875rem 1.25rem;
+      border-radius: 9999px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+      transition: background 0.2s ease, transform 0.2s ease;
+      font-size: 0.9375rem;
+    }
+
+    .whatsapp-float:hover {
+      background-color: #22c55e;
+      transform: scale(1.03);
+    }
+
+    /* Responsividade */
+    @media (max-width: 960px) {
+      .hero-grid {
+        grid-template-columns: 1fr;
+        gap: 2.5rem;
+      }
+
+      .services-layout {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .flow-steps {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .location-box {
+        grid-template-columns: 1fr;
+        gap: 2rem;
+        padding: 2rem;
+      }
+
+      .faq-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .nav-links {
+        display: none;
+      }
+
+      .dispatch-guarantees {
+        grid-template-columns: 1fr;
+      }
+
+      .services-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .flow-steps {
+        grid-template-columns: 1fr;
+      }
+
+      .footer-container {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Barra de Atendimento Imediato -->
+  <aside class="emergency-bar">
+    <span>Pane na rua ou bateria descarregada? Atendimento móvel com socorro elétrico ativo.</span>
+    <a href="https://wa.me/5511999999999?text=Ol%C3%A1%2C%20preciso%20de%20socorro%20el%C3%A9trico%20agora%20com%20meu%20ve%C3%ADculo." target="_blank" rel="noopener">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+      Chamar Socorro
+    </a>
+  </aside>
+
+  <!-- Cabeçalho Principal -->
+  <header class="site-header">
+    <div class="header-container">
+      <div class="brand">
+        <div class="brand-mark">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        </div>
+        <span>VOLTSCAR</span>
+      </div>
+
+      <nav aria-label="Navegação do site">
+        <ul class="nav-links">
+          <li><a href="#servicos">Especialidades</a></li>
+          <li><a href="#diagnostico">Tabela de Diagnóstico</a></li>
+          <li><a href="#como-funciona">Socorro Rápido</a></li>
+          <li><a href="#localizacao">Oficina & Raio de Ação</a></li>
+          <li><a href="#duvidas">Dúvidas</a></li>
+        </ul>
+      </nav>
+
+      <div class="header-actions">
+        <a href="https://wa.me/5511999999999?text=Ol%C3%A1%2C%20preciso%20de%20or%C3%A7amento%20para%20auto%20el%C3%A9trica." target="_blank" rel="noopener" class="btn-emergency">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+          WhatsApp Plantão
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Hero Section -->
+  <section class="hero-section">
+    <div class="container hero-grid">
+      <div class="hero-content">
+        <h1>Auto elétrica de precisão e socorro rápido para o seu veículo</h1>
+        <p class="lead">Diagnóstico avançado de injeção, alternador, motor de partida, bateria e chicotes elétricos. Atendimento em bancada técnica ou socorro imediato onde seu carro parou.</p>
+        
+        <div class="hero-ctas">
+          <a href="https://wa.me/5511999999999?text=Ol%C3%A1%2C%20estou%20parado%20na%20rua%20e%20preciso%20de%20socorro%20el%C3%A9trico." target="_blank" rel="noopener" class="btn-primary-large">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            Pedir Socorro Imediato
+          </a>
+          <a href="#diagnostico" class="btn-secondary-large">
+            Ver Tabela de Diagnóstico
+          </a>
+        </div>
+
+        <div class="dispatch-guarantees">
+          <div class="guarantee-item">
+            <strong>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              Chegada em até 35 min
+            </strong>
+            <span>Despacho com equipe móvel equipada</span>
+          </div>
+          <div class="guarantee-item">
+            <strong>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+              Garantia de 90 dias
+            </strong>
+            <span>Peças novas e mão de obra com nota</span>
+          </div>
+          <div class="guarantee-item">
+            <strong>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+              Scanner OBD-II Oficial
+            </strong>
+            <span>Leitura precisa de falhas em ECU/TCU</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Leitor de Bancada e Telemetria -->
+      <div class="bench-panel">
+        <div class="bench-header">
+          <div class="bench-title">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>
+            Bancada de Teste Rápido
+          </div>
+          <span class="bench-badge">Equipamentos Calibrados</span>
+        </div>
+
+        <div class="diagnostic-readout">
+          <div class="meter-box">
+            <span class="meter-label">Tensão Bateria (Descanso)</span>
+            <div class="meter-value">12.6 <small>V</small></div>
+            <span class="meter-status">Carga Plena (100%)</span>
+          </div>
+          <div class="meter-box">
+            <span class="meter-label">Carga Alternador (Motor)</span>
+            <div class="meter-value">14.2 <small>V</small></div>
+            <span class="meter-status">Regulador Operacional</span>
+          </div>
+        </div>
+
+        <div class="waveform-visual">
+          <svg viewBox="0 0 300 60" preserveAspectRatio="none">
+            <path d="M 0 30 Q 15 10, 30 30 T 60 30 T 90 30 T 120 30 T 150 30 T 180 30 T 210 30 T 240 30 T 270 30 T 300 30" fill="none" stroke="rgba(255,255,255,0.15)" stroke-width="1.5" />
+            <path d="M 0 30 L 30 30 L 40 10 L 50 50 L 60 20 L 70 38 L 80 30 L 120 30 L 130 8 L 140 52 L 150 18 L 160 35 L 170 30 L 220 30 L 230 12 L 240 48 L 250 22 L 260 30 L 300 30" fill="none" stroke="#f59e0b" stroke-width="2" />
+          </svg>
+        </div>
+
+        <form class="quick-dispatch-form" onsubmit="event.preventDefault(); window.open('https://wa.me/5511999999999?text=' + encodeURIComponent('Olá, preciso de socorro para meu veículo: ' + document.getElementById('car-model').value + ' - Sintoma: ' + document.getElementById('car-symptom').value), '_blank');">
+          <input type="text" id="car-model" placeholder="Modelo do carro (Ex: Onix 1.4, Corolla 2020)" required>
+          <input type="text" id="car-symptom" placeholder="Qual o problema? (Ex: Não dá partida, luz da bateria acesa)" required>
+          <button type="submit" class="btn-primary-large" style="width: 100%;">
+            Chamar Técnico com Diagnóstico Prévio
+          </button>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <!-- Especialidades Técnicas -->
+  <section class="services-section" id="servicos">
+    <div class="container">
+      <div class="section-header">
+        <h2>Serviços elétricos executados com padrão de concessionária</h2>
+        <p>Da troca de lâmpada queimada à reprogramação de módulos de conforto e injeção, com instrumental profissional e bancada para testes de carga real.</p>
+      </div>
+
+      <div class="services-layout">
+        <article class="service-block">
+          <div>
+            <div class="service-header">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+              <h3>Baterias & Teste de Condutância</h3>
+            </div>
+            <p>Substituição imediata com marcas de primeira linha (Moura, Heliar, Zetta). Testamos com equipamento digital CCA para comprovar se a bateria realmente perdeu a retenção antes de condená-la.</p>
+          </div>
+          <ul class="service-specs">
+            <li>Teste de CCA e resistência interna</li>
+            <li>Eliminação de oxidação e polos frouxos</li>
+            <li>Garantia direta de fábrica até 24 meses</li>
+          </ul>
+        </article>
+
+        <article class="service-block">
+          <div>
+            <div class="service-header">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/><path d="m12 2 2 4-4 2 2 4"/><path d="M12 22v-4"/></svg>
+              <h3>Alternadores & Motores de Partida</h3>
+            </div>
+            <p>Reparo de reguladores de voltagem, pontes retificadoras, estator, escovas e rolamentos. Recuperação de motor de arranque (bendix, automático e induzido) com teste sob carga em bancada.</p>
+          </div>
+          <ul class="service-specs">
+            <li>Teste dinâmico de amperagem</li>
+            <li>Troca de polia catraca e rolamentos</li>
+            <li>Recuperação ou substituição completa</li>
+          </ul>
+        </article>
+
+        <article class="service-block">
+          <div>
+            <div class="service-header">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="12" y1="8" x2="12" y2="16"/></svg>
+              <h3>Diagnóstico Eletrônico & Scanner</h3>
+            </div>
+            <p>Rastreamento computadorizado da rede CAN, injeção eletrônica, freios ABS e Airbag. Localização de curto-circuito oculto, consumo parasita de bateria e fios rompidos em chicotes.</p>
+          </div>
+          <ul class="service-specs">
+            <li>Leitura de DTCs e parâmetros em tempo real</li>
+            <li>Mapeamento de corrente parasita (fuga)</li>
+            <li>Osciloscópio para análise de sinal de sensores</li>
+          </ul>
+        </article>
+
+        <article class="service-block">
+          <div>
+            <div class="service-header">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+              <h3>Ar-Condicionado Automotivo</h3>
+            </div>
+            <p>Diagnóstico térmico e elétrico completo: embreagem eletromagnética do compressor, pressostato, relé de ventoinha, teste de estanqueidade com nitrogênio e recarga precisa de gás.</p>
+          </div>
+          <ul class="service-specs">
+            <li>Detecção de microvazamentos</li>
+            <li>Higienização e troca de filtro de cabine</li>
+            <li>Substituição de compressores e válvulas</li>
+          </ul>
+        </article>
+
+        <article class="service-block">
+          <div>
+            <div class="service-header">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+              <h3>Iluminação & Faróis</h3>
+            </div>
+            <p>Regulagem técnica com alinhador óptico, instalação de lâmpadas homologadas (halógenas e LED premium), conserto de lanternas traseiras, setas, break lights e relés de iluminação.</p>
+          </div>
+          <ul class="service-specs">
+            <li>Alinhamento focal para inspeção</li>
+            <li>Restauração e polimento de lentes</li>
+            <li>Correção de aviso de lâmpada no painel</li>
+          </ul>
+        </article>
+
+        <article class="service-block">
+          <div>
+            <div class="service-header">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+              <h3>Travas, Vidros & Acessórios</h3>
+            </div>
+            <p>Manutenção de máquinas de vidro elétrico, módulos de subida inteligente, chicotes de porta rompidos por fadiga, motores de trava central e instalação de centrais multimídia.</p>
+          </div>
+          <ul class="service-specs">
+            <li>Troca de cabos de aço e roldanas</li>
+            <li>Configuração de alarme e sensor de ré</li>
+            <li>Chave de seta e comandos de volante</li>
+          </ul>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- Tabela de Diagnóstico de Sintomas -->
+  <section class="diagnostic-table-section" id="diagnostico">
+    <div class="container">
+      <div class="section-header">
+        <h2>Guia de Sintomas Elétricos Comuns</h2>
+        <p>Identifique o comportamento do seu carro antes de chamar o socorro. Diagnóstico honesto baseado em leitura técnica, sem troca desnecessária de peças.</p>
+      </div>
+
+      <div class="table-container-card">
+        <div class="table-wrapper">
+          <table class="symptom-matrix">
+            <thead>
+              <tr>
+                <th>Sintoma Percebido</th>
+                <th>Causa Mais Provável</th>
+                <th>Gravidade</th>
+                <th>Procedimento Técnico Recomendado</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>O motor gira pesado e não pega, ou faz estalos metálicos ("tec-tec-tec")</strong></td>
+                <td>Tensão da bateria insuficiente (&lt; 10.5V sob arranque) ou automático do motor de partida com contatos carbonizados.</td>
+                <td><span class="tag-critical">Urgente</span></td>
+                <td>Teste de carga CCA na bateria e aferição de queda de tensão no cabo positivo e massa.</td>
+              </tr>
+              <tr>
+                <td><strong>Luz da bateria acesa ou piscando no painel com o motor em funcionamento</strong></td>
+                <td>Alternador sem carregar (regulador de voltagem com defeito, escovas gastas ou correia frouxa/arrebentada).</td>
+                <td><span class="tag-critical">Urgente</span></td>
+                <td>Verificar tensão com multímetro (esperado entre 13.8V e 14.4V). Não rodar até descarregar por completo.</td>
+              </tr>
+              <tr>
+                <td><strong>Bateria descarrega se o carro fica 2 ou 3 dias parado na garagem</strong></td>
+                <td>Fuga de corrente parasita (módulo de som, rastreador com falha, luz de porta-malas acesa ou curto em chicote).</td>
+                <td><span class="tag-warning">Atenção</span></td>
+                <td>Aferição com alicate amperímetro de corrente contínua em repouso (tolerância máxima de 50mA).</td>
+              </tr>
+              <tr>
+                <td><strong>Cheiro de plástico queimado saindo das saídas de ar ou sob o volante</strong></td>
+                <td>Sobrecorrente em fiação, relé superaquecido ou fusível superdimensionado sem proteção correta.</td>
+                <td><span class="tag-critical">Parada Imediata</span></td>
+                <td>Desconectar borne negativo da bateria e guinchar até a oficina para inspeção da caixa de fusíveis.</td>
+              </tr>
+              <tr>
+                <td><strong>Luz de injeção acesa no painel, carro engasgando ou em modo de emergência</strong></td>
+                <td>Sensor de rotação/fase com leitura falha, bobina de ignição em fuga ou tensão instável na ECU.</td>
+                <td><span class="tag-diagnostic">Diagnóstico</span></td>
+                <td>Passagem de Scanner OBD-II com leitura dos códigos de falha memorizados e em tempo real.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Como Funciona o Atendimento -->
+  <section class="flow-section" id="como-funciona">
+    <div class="container">
+      <div class="section-header">
+        <h2>Como funciona o socorro rápido onde você estiver</h2>
+        <p>Desenvolvemos um fluxo direto e sem burocracia para tirar você do sufoco no trânsito ou na garagem da sua casa.</p>
+      </div>
+
+      <div class="flow-steps">
+        <div class="flow-card">
+          <div class="flow-ordinal">01</div>
+          <h3>Envie sua Localização</h3>
+          <p>Clique no botão do WhatsApp e compartilhe a localização exata e os sintomas do veículo com nossa central.</p>
+        </div>
+
+        <div class="flow-card">
+          <div class="flow-ordinal">02</div>
+          <h3>Despacho da Unidade Móvel</h3>
+          <p>O técnico mais próximo é acionado com bateria reserva nova, scanner portátil e ferramental de emergência.</p>
+        </div>
+
+        <div class="flow-card">
+          <div class="flow-ordinal">03</div>
+          <h3>Teste e Resolução no Local</h3>
+          <p>Realizamos teste de partida, medição de carga do alternador ou substituição imediata da bateria na rua.</p>
+        </div>
+
+        <div class="flow-card">
+          <div class="flow-ordinal">04</div>
+          <h3>Garantia e Pagamento Seguro</h3>
+          <p>Você testa o veículo na hora e recebe a nota de garantia de 90 dias. Pagamento em cartão, Pix ou dinheiro.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Cobertura e Localização da Oficina -->
+  <section class="location-section" id="localizacao">
+    <div class="container">
+      <div class="location-box">
+        <div class="location-info">
+          <h2>Oficina estruturada e equipe móvel nas ruas</h2>
+          <p>Contamos com sede física para manutenções pesadas e três frotas de atendimento de resgate rápido prontas para sair.</p>
+          
+          <div class="info-list">
+            <div class="info-item">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+              <div>
+                <strong>Endereço da Oficina Matriz</strong><br>
+                <span style="color: var(--text-muted);">Av. dos Autonomistas, 3.420 - Galpão 02 (Fácil acesso com vagas internas)</span>
+              </div>
+            </div>
+
+            <div class="info-item">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              <div>
+                <strong>Horários de Funcionamento</strong><br>
+                <span style="color: var(--text-muted);">Oficina: Segunda a Sexta das 08h às 18h | Sábado das 08h às 13h<br>Socorro Móvel: Plantão até as 22h</span>
+              </div>
+            </div>
+
+            <div class="info-item">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
+              <div>
+                <strong>Formas de Pagamento Facilitadas</strong><br>
+                <span style="color: var(--text-muted);">Cartões de débito, crédito em até 10x, Pix com desconto e faturamento para frotas.</span>
+              </div>
+            </div>
+          </div>
+
+          <a href="https://wa.me/5511999999999?text=Ol%C3%A1%2C%20gostaria%20de%20saber%20se%20voc%C3%AAs%20atendem%20no%20meu%20bairro." target="_blank" rel="noopener" class="btn-primary-large">
+            Consultar Atendimento na Minha Região
+          </a>
+        </div>
+
+        <div class="dispatch-perimeter">
+          <div class="perimeter-number">25km</div>
+          <div class="perimeter-label">Raio de Cobertura Direta</div>
+          <p class="perimeter-desc">Chegamos com agilidade em domicílio, garagens de condomínio, estacionamentos de shopping e vias públicas.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Dúvidas Frequentes -->
+  <section class="faq-section" id="duvidas">
+    <div class="container">
+      <div class="section-header">
+        <h2>Perguntas frequentes sobre auto elétrica</h2>
+        <p>Esclarecimentos transparentes para você não cair em orçamentos abusivos ou diagnósticos apressados.</p>
+      </div>
+
+      <div class="faq-grid">
+        <div class="faq-card">
+          <h3>Como saber se o problema é a bateria ou o alternador?</h3>
+          <p>Se o carro parou de repente com o motor ligado ou a luz da bateria acendeu antes de morrer, a probabilidade é o alternador. Se o carro desligou e no dia seguinte não deu sinal nenhum de partida, costuma ser bateria descarregada ou fuga de corrente. No local, nosso técnico mede a voltagem com equipamento de precisão e comprova exatamente qual componente falhou.</p>
+        </div>
+
+        <div class="faq-card">
+          <h3>Fazer "chupeta" (ponte de cabos) pode queimar o módulo do carro?</h3>
+          <p>Sim, em veículos modernos com muita eletrônica embarcada, picos de tensão ou inversão acidental de polaridade podem queimar módulos de injeção (ECU), ABS ou o painel digital. Nosso socorro utiliza baterias auxiliares com proteção eletrônica de surto de tensão.</p>
+        </div>
+
+        <div class="faq-card">
+          <h3>Vocês levam a bateria nova até o meu endereço?</h3>
+          <p>Sim. Transportamos baterias originais de primeira linha homologadas pelas montadoras. O técnico retira a bateria velha, limpa os polos, instala a nova, codifica o sistema se necessário (especialmente em veículos Start-Stop com bateria AGM/EFB) e testa a carga do alternador.</p>
+        </div>
+
+        <div class="faq-card">
+          <h3>Vocês emitem nota fiscal e dão garantia nos reparos?</h3>
+          <p>Sim, 100% dos serviços acompanham ordem de serviço e nota fiscal discriminada. A garantia legal para mão de obra e serviços é de 90 dias, e as baterias novas possuem garantia de fábrica de 12 a 24 meses com cobertura nacional.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA de Fechamento -->
+  <section class="final-cta">
+    <div class="container final-cta-content">
+      <h2>Precisa de um diagnóstico elétrico confiável agora?</h2>
+      <p>Converse com nosso chefe de oficina pelo WhatsApp. Descreva o que está acontecendo com o seu carro e receba uma orientação técnica transparente em poucos minutos.</p>
+      <a href="https://wa.me/5511999999999?text=Ol%C3%A1%2C%20gostaria%20de%20um%20diagn%C3%B3stico%20el%C3%A9trico%20para%20meu%20carro." target="_blank" rel="noopener" class="btn-primary-large" style="font-size: 1.125rem; padding: 1.125rem 2.25rem;">
+        Falar com Especialista no WhatsApp
+      </a>
+    </div>
+  </section>
+
+  <!-- Rodapé -->
+  <footer class="site-footer">
+    <div class="footer-container">
+      <div>
+        <p><strong>VOLTSCAR Auto Elétrica & Injeção Eletrônica</strong></p>
+        <p style="color: var(--text-dim);">CNPJ 00.000.000/0001-00 • Oficina credenciada e técnicos certificados ASE/Senai.</p>
+      </div>
+      <div>
+        <p style="color: var(--text-dim);">© 2026 VoltsCar. Todos os direitos reservados. Atendimento emergencial automotivo.</p>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Botão Flutuante de Contato WhatsApp -->
+  <a href="https://wa.me/5511999999999?text=Ol%C3%A1%2C%20preciso%20de%20ajuda%20com%20meu%20ve%C3%ADculo." class="whatsapp-float" target="_blank" rel="noopener" aria-label="Falar com eletricista no WhatsApp">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M12.031 6.172c-3.181 0-5.767 2.586-5.768 5.766-.001 1.298.38 2.27 1.019 3.287l-.582 2.128 2.182-.573c.978.58 1.911.928 3.145.929 3.178 0 5.767-2.587 5.768-5.766.001-3.187-2.575-5.77-5.764-5.771zm3.392 8.244c-.144.405-.837.774-1.17.824-.299.045-.677.063-1.092-.069-.252-.08-.575-.187-.988-.365-1.739-.751-2.874-2.502-2.961-2.617-.087-.116-.708-.94-.708-1.793s.448-1.273.607-1.446c.159-.173.346-.217.462-.217l.332.007c.106.005.249-.04.39.298.144.347.491 1.2.534 1.287.043.087.072.188.014.304-.058.116-.087.188-.173.289l-.26.304c-.087.086-.177.18-.076.354.101.174.449.741.964 1.201.662.591 1.221.774 1.394.86s.275.072.376-.044c.101-.116.433-.506.549-.68.116-.173.231-.145.39-.087s1.011.477 1.184.564.289.13.332.202c.045.072.045.419-.099.824zm-3.423-10.416c-5.522 0-10 4.477-10 10 0 1.761.458 3.418 1.258 4.862l-1.334 4.873 4.992-1.309c1.401.762 3.003 1.196 4.708 1.196 5.523 0 10-4.477 10-10 0-5.522-4.477-10-9.624-10z"/></svg>
+    <span>Plantão WhatsApp</span>
+  </a>
+
+</body>
+</html>

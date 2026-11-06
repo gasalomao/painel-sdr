@@ -15,7 +15,7 @@
 
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import * as channel from "@/lib/channel";
-import { renderTemplate } from "@/lib/template-vars";
+import { leadRowToTemplateContext, renderTemplate } from "@/lib/template-vars";
 import { splitMessage } from "@/lib/agent-format";
 import {
   findOrCreateContactSession,
@@ -407,7 +407,7 @@ async function processTarget(
   let leadFull: any = null;
   {
     const cols = "nome_negocio, ramo_negocio, telefone, endereco, website, instagram, facebook, avaliacao, reviews, status, categoria, resumo_avaliacoes";
-    let res = await supabase.from("leads_extraidos").select(cols).eq("remoteJid", target.remote_jid).eq("client_id", camp.client_id).maybeSingle();
+    let res = await supabase.from("leads_extraidos").select("*").eq("remoteJid", target.remote_jid).eq("client_id", camp.client_id).maybeSingle();
     if (res.error && res.error.code === "PGRST204") {
       res = await supabase
         .from("leads_extraidos")
@@ -434,23 +434,12 @@ async function processTarget(
 
   // Contexto de render — usado no template AGORA e DE NOVO depois da IA
   // (rede de segurança: nenhuma {{variavel}} ou {variavel} pode chegar ao cliente).
-  const renderCtx = {
-    remoteJid:    target.remote_jid,
+  const renderCtx = leadRowToTemplateContext(leadFull, {
+    remoteJid: target.remote_jid,
     nome_negocio: leadFull?.nome_negocio || target.nome_negocio,
     ramo_negocio: leadFull?.ramo_negocio || target.ramo_negocio,
-    push_name:    pushName,
-    telefone:     leadFull?.telefone || null,
-    endereco:     leadFull?.endereco || null,
-    website:      leadFull?.website || null,
-    instagram:    leadFull?.instagram || null,
-    facebook:     leadFull?.facebook || null,
-    avaliacao:    leadFull?.avaliacao ?? null,
-    reviews:      leadFull?.reviews ?? null,
-    status:       leadFull?.status || null,
-    categoria:    (leadFull as any)?.categoria || null,
-    resumo_avaliacoes: (leadFull as any)?.resumo_avaliacoes || null,
-    link_previa: (leadFull as any)?.link_previa || null,
-  };
+    push_name: pushName,
+  });
 
   // 3. Renderiza template
   let text = renderTemplate(step.template, renderCtx);

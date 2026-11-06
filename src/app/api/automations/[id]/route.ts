@@ -4,6 +4,14 @@ import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { isInstanceOwnedByClient, requireClientId } from "@/lib/tenant";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 import { parseMinReviews } from "@/lib/scraper-review-count";
+import {
+  parseGoogleYear,
+  parseMaxReviews,
+  parseRatingBound,
+  validateGoogleYearRange,
+  validateRatingRange,
+  validateReviewCountRange,
+} from "@/lib/scraper-lead-filters";
 
 export const dynamic = "force-dynamic";
 
@@ -85,8 +93,41 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
       if (Object.entries(filters).some(([key, value]) => key.startsWith("_") && !(key === "_source" && value === "prospeccao-sites"))) {
         return NextResponse.json({ success: false, error: "scrape_filters contém marcadores reservados ao servidor." }, { status: 400 });
       }
-      if (parseMinReviews(filters.minReviews) === null) {
+      const minReviews = parseMinReviews(filters.minReviews);
+      if (minReviews === null) {
         return NextResponse.json({ success: false, error: "minReviews deve ser um inteiro entre 0 e 2147483647." }, { status: 400 });
+      }
+      const maxReviews = parseMaxReviews(filters.maxReviews);
+      if (maxReviews === null) {
+        return NextResponse.json({ success: false, error: "maxReviews deve ser um inteiro entre 0 e 2147483647." }, { status: 400 });
+      }
+      const reviewRangeErr = validateReviewCountRange(minReviews, maxReviews);
+      if (reviewRangeErr) {
+        return NextResponse.json({ success: false, error: reviewRangeErr }, { status: 400 });
+      }
+      const minRating = parseRatingBound(filters.minRating);
+      if (minRating === null) {
+        return NextResponse.json({ success: false, error: "minRating deve ser um número entre 0 e 5." }, { status: 400 });
+      }
+      const maxRating = parseRatingBound(filters.maxRating);
+      if (maxRating === null) {
+        return NextResponse.json({ success: false, error: "maxRating deve ser um número entre 0 e 5." }, { status: 400 });
+      }
+      const ratingRangeErr = validateRatingRange(minRating, maxRating);
+      if (ratingRangeErr) {
+        return NextResponse.json({ success: false, error: ratingRangeErr }, { status: 400 });
+      }
+      const googleYearFrom = parseGoogleYear(filters.googleYearFrom);
+      if (googleYearFrom === null) {
+        return NextResponse.json({ success: false, error: "googleYearFrom deve ser um ano válido (ex.: 2019) ou 0." }, { status: 400 });
+      }
+      const googleYearTo = parseGoogleYear(filters.googleYearTo);
+      if (googleYearTo === null) {
+        return NextResponse.json({ success: false, error: "googleYearTo deve ser um ano válido (ex.: 2026) ou 0." }, { status: 400 });
+      }
+      const yearRangeErr = validateGoogleYearRange(googleYearFrom, googleYearTo);
+      if (yearRangeErr) {
+        return NextResponse.json({ success: false, error: yearRangeErr }, { status: 400 });
       }
       if (filters.filterWithInstagram !== undefined && typeof filters.filterWithInstagram !== "boolean") {
         return NextResponse.json({ success: false, error: "filterWithInstagram deve ser um booleano." }, { status: 400 });

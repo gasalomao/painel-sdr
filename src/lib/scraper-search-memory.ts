@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { supabaseAdmin } from "@/lib/supabase";
 import { parseMinReviews } from "@/lib/scraper-review-count";
+import { parseGoogleYear, parseMaxReviews, parseRatingBound } from "@/lib/scraper-lead-filters";
 import { normRegionName } from "@/lib/geo-regions";
 
 const TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -33,6 +34,21 @@ function eligibilityFilters(filters: Record<string, unknown>): Record<string, un
   const minReviews = parseMinReviews(filters.minReviews);
   if (minReviews === null) throw new Error("Mínimo de avaliações inválido.");
   eligibility.minReviews = minReviews;
+  const maxReviews = parseMaxReviews(filters.maxReviews);
+  if (maxReviews === null) throw new Error("Máximo de avaliações inválido.");
+  if (maxReviews > 0) eligibility.maxReviews = maxReviews;
+  const minRating = parseRatingBound(filters.minRating);
+  if (minRating === null) throw new Error("Nota mínima inválida.");
+  if (minRating > 0) eligibility.minRating = minRating;
+  const maxRating = parseRatingBound(filters.maxRating);
+  if (maxRating === null) throw new Error("Nota máxima inválida.");
+  if (maxRating > 0) eligibility.maxRating = maxRating;
+  const googleYearFrom = parseGoogleYear(filters.googleYearFrom);
+  if (googleYearFrom === null) throw new Error("Ano inicial no Google inválido.");
+  if (googleYearFrom > 0) eligibility.googleYearFrom = googleYearFrom;
+  const googleYearTo = parseGoogleYear(filters.googleYearTo);
+  if (googleYearTo === null) throw new Error("Ano final no Google inválido.");
+  if (googleYearTo > 0) eligibility.googleYearTo = googleYearTo;
   return eligibility;
 }
 

@@ -32,7 +32,11 @@ export async function GET(req: NextRequest) {
   const ramo = (url.searchParams.get("ramo") || "").trim();
   const region = (url.searchParams.get("region") || "").trim();
   const ratingMin = parseFloat(url.searchParams.get("ratingMin") || "0") || 0;
+  const ratingMax = parseFloat(url.searchParams.get("ratingMax") || "0") || 0;
   const reviewsMin = parseInt(url.searchParams.get("reviewsMin") || "0", 10) || 0;
+  const reviewsMax = parseInt(url.searchParams.get("reviewsMax") || "0", 10) || 0;
+  const googleYearFrom = parseInt(url.searchParams.get("googleYearFrom") || "0", 10) || 0;
+  const googleYearTo = parseInt(url.searchParams.get("googleYearTo") || "0", 10) || 0;
   const hasWebsite = url.searchParams.get("hasWebsite") || "only_empty";
   const ignoreOptOut = url.searchParams.get("ignore_opt_out") !== "false";
 
@@ -43,7 +47,7 @@ export async function GET(req: NextRequest) {
     sort === "reviews" ? "reviews" :
     "created_at";
 
-  const baseSelect = "id, remoteJid, nome_negocio, telefone, ramo_negocio, endereco, avaliacao, reviews, website, maps_url, place_id, created_at, opt_out, primeiro_contato_source, primeiro_contato_at, resumo_avaliacoes, previa_status, link_previa, previa_qa_score, previa_error, reuniao_horario_confirmado, reuniao_resumo, previa_pronta_em";
+  const baseSelect = "id, remoteJid, nome_negocio, telefone, ramo_negocio, endereco, avaliacao, reviews, website, maps_url, place_id, year_established, created_at, opt_out, primeiro_contato_source, primeiro_contato_at, resumo_avaliacoes, previa_status, link_previa, previa_qa_score, previa_error, reuniao_horario_confirmado, reuniao_resumo, previa_pronta_em";
 
   // Disparo status: return set of remote_jids that received a sent disparo
   if (url.searchParams.get("disparo_status")) {
@@ -58,7 +62,7 @@ export async function GET(req: NextRequest) {
     });
   }
 
-  const buildQuery = (select: string) => {
+  const buildQuery = (select: string, includeYearCol = true) => {
     let qq = supabaseAdmin
       .from("leads_extraidos")
       .select(select, { count: "exact" })
@@ -67,7 +71,11 @@ export async function GET(req: NextRequest) {
     else if (hasWebsite === "only_with") qq = qq.not("website", "is", null).neq("website", "");
     if (ignoreOptOut) qq = qq.eq("opt_out", false);
     if (ratingMin > 0) qq = qq.gte("avaliacao", ratingMin);
+    if (ratingMax > 0) qq = qq.lte("avaliacao", ratingMax);
     if (reviewsMin > 0) qq = qq.gte("reviews", reviewsMin);
+    if (reviewsMax > 0) qq = qq.lte("reviews", reviewsMax);
+    if (includeYearCol && googleYearFrom > 0) qq = qq.gte("year_established", String(googleYearFrom));
+    if (includeYearCol && googleYearTo > 0) qq = qq.lte("year_established", String(googleYearTo));
     if (ramo) qq = qq.ilike("ramo_negocio", `%${ramo}%`);
     if (region) qq = qq.ilike("endereco", `%${region}%`);
     return qq.order(sortCol, { ascending: order === "asc" }).range(offset, offset + limit - 1);
@@ -86,10 +94,10 @@ export async function GET(req: NextRequest) {
     const rr = await buildQuery(baseSelect.replace(", resumo_avaliacoes", "").replace(", previa_status, link_previa, previa_qa_score, previa_error, reuniao_horario_confirmado, reuniao_resumo, previa_pronta_em", ""));
     data = rr.data; error = rr.error; count = rr.count;
   }
-  // ponytail: se coluna maps_url/place_id não existe no DB, retry sem elas
-  if (error && /maps_url|place_id/.test(error.message)) {
+  // ponytail: se coluna maps_url/place_id/year_established não existe no DB, retry sem elas
+  if (error && /maps_url|place_id|year_established/.test(error.message)) {
     const fallbackSelect = "id, remoteJid, nome_negocio, telefone, ramo_negocio, endereco, avaliacao, reviews, website, created_at, opt_out, primeiro_contato_source, primeiro_contato_at";
-    const r2 = await buildQuery(fallbackSelect);
+    const r2 = await buildQuery(fallbackSelect, false);
     data = r2.data; error = r2.error; count = r2.count;
   }
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });

@@ -11,6 +11,14 @@ import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
 import { parseMinReviews } from "@/lib/scraper-review-count";
 import {
+  parseGoogleYear,
+  parseMaxReviews,
+  parseRatingBound,
+  validateGoogleYearRange,
+  validateRatingRange,
+  validateReviewCountRange,
+} from "@/lib/scraper-lead-filters";
+import {
   Play, Pause, Trash2, Plus, Loader2, ChevronDown, ChevronRight, ChevronLeft, X,
   CheckCircle2, XCircle, Bot, MapPin, Zap, Repeat, Clock, Save, AlertTriangle, Pencil,
   Workflow, Sparkles, Target, MessageSquareText, Paperclip, ShieldCheck, LockKeyhole, type LucideIcon,
@@ -142,6 +150,12 @@ export default function AutomacaoPage() {
   const [regionsText, setRegionsText] = useState("");
   const [minReviews, setMinReviews] = useState("0");
   const [minReviewsError, setMinReviewsError] = useState(false);
+  const [maxReviews, setMaxReviews] = useState("0");
+  const [minRating, setMinRating] = useState("0");
+  const [maxRating, setMaxRating] = useState("0");
+  const [googleYearFrom, setGoogleYearFrom] = useState("0");
+  const [googleYearTo, setGoogleYearTo] = useState("0");
+  const [extraFiltersError, setExtraFiltersError] = useState("");
   const [formStep, setFormStep] = useState(0);
   const contentRef = useRef<HTMLElement>(null);
   const editorRef = useRef<HTMLDivElement>(null);
@@ -316,6 +330,12 @@ export default function AutomacaoPage() {
     setRegionsText("");
     setMinReviews("0");
     setMinReviewsError(false);
+    setMaxReviews("0");
+    setMinRating("0");
+    setMaxRating("0");
+    setGoogleYearFrom("0");
+    setGoogleYearTo("0");
+    setExtraFiltersError("");
     setFormStep(0);
     setShowForm(true);
     revealEditor();
@@ -341,6 +361,12 @@ export default function AutomacaoPage() {
     setRegionsText((a.regions || []).join("\n"));
     setMinReviews(String(a.scrape_filters?.minReviews ?? 0));
     setMinReviewsError(false);
+    setMaxReviews(String(a.scrape_filters?.maxReviews ?? 0));
+    setMinRating(String(a.scrape_filters?.minRating ?? 0));
+    setMaxRating(String(a.scrape_filters?.maxRating ?? 0));
+    setGoogleYearFrom(String(a.scrape_filters?.googleYearFrom ?? 0));
+    setGoogleYearTo(String(a.scrape_filters?.googleYearTo ?? 0));
+    setExtraFiltersError("");
     setFormStep(0);
     setShowForm(true);
     revealEditor();
@@ -354,12 +380,44 @@ export default function AutomacaoPage() {
     setRegionsText("");
     setMinReviews("0");
     setMinReviewsError(false);
+    setMaxReviews("0");
+    setMinRating("0");
+    setMaxRating("0");
+    setGoogleYearFrom("0");
+    setGoogleYearTo("0");
+    setExtraFiltersError("");
   }
 
   async function saveAutomation(startImmediately: boolean = false) {
     const minimum = captureLocked ? undefined : parseMinReviews(minReviews.trim() === "" ? null : Number(minReviews));
     setMinReviewsError(minimum === null);
-    if (minimum === null) {
+    const parsedMaxReviews = captureLocked ? 0 : parseMaxReviews(maxReviews);
+    const parsedMinRating = captureLocked ? 0 : parseRatingBound(minRating);
+    const parsedMaxRating = captureLocked ? 0 : parseRatingBound(maxRating);
+    const parsedYearFrom = captureLocked ? 0 : parseGoogleYear(googleYearFrom);
+    const parsedYearTo = captureLocked ? 0 : parseGoogleYear(googleYearTo);
+    let extraErr = "";
+    if (!captureLocked) {
+      if (parsedMaxReviews === null) extraErr = "Máximo de avaliações deve ser um inteiro entre 0 e 2147483647.";
+      else if (minimum !== null && minimum !== undefined) {
+        const revErr = validateReviewCountRange(minimum, parsedMaxReviews);
+        if (revErr) extraErr = revErr;
+      }
+      if (!extraErr && (parsedMinRating === null || parsedMaxRating === null)) {
+        extraErr = "Nota mínima e máxima devem estar entre 0 e 5.";
+      } else if (!extraErr && parsedMinRating !== null && parsedMaxRating !== null) {
+        const ratErr = validateRatingRange(parsedMinRating, parsedMaxRating);
+        if (ratErr) extraErr = ratErr;
+      }
+      if (!extraErr && (parsedYearFrom === null || parsedYearTo === null)) {
+        extraErr = "Informe um ano válido no Google (ex.: 2019) ou 0 para desativar.";
+      } else if (!extraErr && parsedYearFrom !== null && parsedYearTo !== null) {
+        const yrErr = validateGoogleYearRange(parsedYearFrom, parsedYearTo);
+        if (yrErr) extraErr = yrErr;
+      }
+    }
+    setExtraFiltersError(extraErr);
+    if (minimum === null || extraErr) {
       changeStep(1);
       return;
     }
@@ -376,7 +434,19 @@ export default function AutomacaoPage() {
       const scrape_filters = Object.fromEntries(Object.entries(formData.scrape_filters || {}).filter(
         ([key, value]) => !key.startsWith("_") || (key === "_source" && value === "prospeccao-sites"),
       ));
-      if (!captureLocked) scrape_filters.minReviews = minimum;
+      if (!captureLocked) {
+        scrape_filters.minReviews = minimum;
+        if (parsedMaxReviews && parsedMaxReviews > 0) scrape_filters.maxReviews = parsedMaxReviews;
+        else delete scrape_filters.maxReviews;
+        if (parsedMinRating && parsedMinRating > 0) scrape_filters.minRating = parsedMinRating;
+        else delete scrape_filters.minRating;
+        if (parsedMaxRating && parsedMaxRating > 0) scrape_filters.maxRating = parsedMaxRating;
+        else delete scrape_filters.maxRating;
+        if (parsedYearFrom && parsedYearFrom > 0) scrape_filters.googleYearFrom = parsedYearFrom;
+        else delete scrape_filters.googleYearFrom;
+        if (parsedYearTo && parsedYearTo > 0) scrape_filters.googleYearTo = parsedYearTo;
+        else delete scrape_filters.googleYearTo;
+      }
       const payload = { ...formData, niches, regions, scrape_filters };
 
       const url = editingId ? `/api/automations/${editingId}` : "/api/automations";
@@ -593,6 +663,114 @@ export default function AutomacaoPage() {
                     className="bg-black/40 border-white/10 h-8 text-xs" />
                   <p id="automation-min-reviews-help" className={styles.fieldHint}>{MIN_REVIEWS_HELP}</p>
                   {minReviewsError && <p id="automation-min-reviews-error" role="alert" className="text-xs text-red-400">{MIN_REVIEWS_ERROR}</p>}
+                </div>
+                <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="text-xs font-semibold text-white/90 flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-cyan-400" />
+                      Está no Google desde (filtro por ano) & Qualificação
+                    </span>
+                    <div className="flex flex-wrap gap-1" role="radiogroup" aria-label="Período rápido no Google">
+                      {[
+                        { label: "Qualquer ano", from: "0", to: "0" },
+                        { label: "Desde 2019 até hoje", from: "2019", to: String(new Date().getFullYear()) },
+                        { label: "Desde 2020 até hoje", from: "2020", to: String(new Date().getFullYear()) },
+                        { label: "Desde 2022 até hoje", from: "2022", to: String(new Date().getFullYear()) },
+                        { label: "Até 2019", from: "1900", to: "2019" },
+                      ].map(preset => {
+                        const active = googleYearFrom === preset.from && googleYearTo === preset.to;
+                        return (
+                          <span
+                            key={preset.label}
+                            role="radio"
+                            aria-checked={active}
+                            tabIndex={captureLocked ? -1 : 0}
+                            onClick={() => {
+                              if (captureLocked) return;
+                              setGoogleYearFrom(preset.from);
+                              setGoogleYearTo(preset.to);
+                              setExtraFiltersError("");
+                            }}
+                            onKeyDown={e => {
+                              if (captureLocked) return;
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                setGoogleYearFrom(preset.from);
+                                setGoogleYearTo(preset.to);
+                                setExtraFiltersError("");
+                              }
+                            }}
+                            className={cn(
+                              "text-[10px] px-2 py-0.5 rounded border transition-colors cursor-pointer select-none",
+                              active
+                                ? "bg-cyan-500/20 border-cyan-400/50 text-cyan-100 font-medium"
+                                : "bg-black/40 border-white/10 text-zinc-400 hover:text-white",
+                            )}
+                          >
+                            {preset.label}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
+                    <div>
+                      <label htmlFor="automation-google-year-from" className="text-[11px]">No Google desde (ano)</label>
+                      <Input
+                        id="automation-google-year-from"
+                        inputMode="numeric"
+                        value={googleYearFrom}
+                        onChange={e => { setGoogleYearFrom(e.target.value); setExtraFiltersError(""); }}
+                        placeholder="Ex: 2019 (0 = todos)"
+                        className="bg-black/40 border-white/10 h-8 text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="automation-google-year-to" className="text-[11px]">Até o ano (0 = atual)</label>
+                      <Input
+                        id="automation-google-year-to"
+                        inputMode="numeric"
+                        value={googleYearTo}
+                        onChange={e => { setGoogleYearTo(e.target.value); setExtraFiltersError(""); }}
+                        placeholder={`Ex: ${new Date().getFullYear()}`}
+                        className="bg-black/40 border-white/10 h-8 text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="automation-max-reviews" className="text-[11px]">Máximo de avaliações</label>
+                      <Input
+                        id="automation-max-reviews"
+                        inputMode="numeric"
+                        value={maxReviews}
+                        onChange={e => { setMaxReviews(e.target.value); setExtraFiltersError(""); }}
+                        className="bg-black/40 border-white/10 h-8 text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="automation-min-rating" className="text-[11px]">Nota mínima (0 a 5)</label>
+                      <Input
+                        id="automation-min-rating"
+                        inputMode="decimal"
+                        value={minRating}
+                        onChange={e => { setMinRating(e.target.value); setExtraFiltersError(""); }}
+                        className="bg-black/40 border-white/10 h-8 text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="automation-max-rating" className="text-[11px]">Nota máxima (0 a 5)</label>
+                      <Input
+                        id="automation-max-rating"
+                        inputMode="decimal"
+                        value={maxRating}
+                        onChange={e => { setMaxRating(e.target.value); setExtraFiltersError(""); }}
+                        className="bg-black/40 border-white/10 h-8 text-xs"
+                      />
+                    </div>
+                  </div>
+                  <p className={styles.fieldHint}>
+                    Filtra empresas pelo ano em que estão no Google Maps (ex.: desde 2019 até {new Date().getFullYear()}), limite máximo de avaliações e nota. Use 0 para desativar cada campo.
+                  </p>
+                  {extraFiltersError && <p role="alert" className="text-xs text-red-400">{extraFiltersError}</p>}
                 </div>
                 <div className="space-y-1">
                   <label htmlFor="automation-with-instagram" className="flex items-center gap-1.5 text-[11px] cursor-pointer">

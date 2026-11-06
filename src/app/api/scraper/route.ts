@@ -18,6 +18,14 @@ import {
 import { isSessionLiveStrict, SESSION_COOKIE, verifySession } from "@/lib/auth";
 import { cookies } from "next/headers";
 import { parseMinReviews } from "@/lib/scraper-review-count";
+import {
+  parseGoogleYear,
+  parseMaxReviews,
+  parseRatingBound,
+  validateGoogleYearRange,
+  validateRatingRange,
+  validateReviewCountRange,
+} from "@/lib/scraper-lead-filters";
 
 // --- GET: SSE Stream ---
 // AUTH: precisa de sessão. Antes era PÚBLICO — qualquer um no mundo via stream
@@ -72,6 +80,38 @@ export async function POST(req: NextRequest) {
       if (minReviews === null) {
         return NextResponse.json({ error: "minReviews deve ser um inteiro entre 0 e 2147483647." }, { status: 400 });
       }
+      const maxReviews = parseMaxReviews(body.maxReviews);
+      if (maxReviews === null) {
+        return NextResponse.json({ error: "maxReviews deve ser um inteiro entre 0 e 2147483647." }, { status: 400 });
+      }
+      const reviewRangeErr = validateReviewCountRange(minReviews, maxReviews);
+      if (reviewRangeErr) {
+        return NextResponse.json({ error: reviewRangeErr }, { status: 400 });
+      }
+      const minRating = parseRatingBound(body.minRating);
+      if (minRating === null) {
+        return NextResponse.json({ error: "minRating deve ser um número entre 0 e 5." }, { status: 400 });
+      }
+      const maxRating = parseRatingBound(body.maxRating);
+      if (maxRating === null) {
+        return NextResponse.json({ error: "maxRating deve ser um número entre 0 e 5." }, { status: 400 });
+      }
+      const ratingRangeErr = validateRatingRange(minRating, maxRating);
+      if (ratingRangeErr) {
+        return NextResponse.json({ error: ratingRangeErr }, { status: 400 });
+      }
+      const googleYearFrom = parseGoogleYear(body.googleYearFrom);
+      if (googleYearFrom === null) {
+        return NextResponse.json({ error: "googleYearFrom deve ser um ano válido (ex.: 2019) ou 0." }, { status: 400 });
+      }
+      const googleYearTo = parseGoogleYear(body.googleYearTo);
+      if (googleYearTo === null) {
+        return NextResponse.json({ error: "googleYearTo deve ser um ano válido (ex.: 2026) ou 0." }, { status: 400 });
+      }
+      const yearRangeErr = validateGoogleYearRange(googleYearFrom, googleYearTo);
+      if (yearRangeErr) {
+        return NextResponse.json({ error: yearRangeErr }, { status: 400 });
+      }
       if (body.filterWithInstagram !== undefined && typeof body.filterWithInstagram !== "boolean") {
         return NextResponse.json({ error: "filterWithInstagram deve ser um booleano." }, { status: 400 });
       }
@@ -88,6 +128,11 @@ export async function POST(req: NextRequest) {
         filterWithInstagram: body.filterWithInstagram === true,
         captureAllReviews: body.captureAllReviews === true,
         minReviews,
+        maxReviews,
+        minRating,
+        maxRating,
+        googleYearFrom,
+        googleYearTo,
         maxLeads: body.maxLeads,            // /captador também pode passar limite
         client_id: session.clientId,
         reviews_ai: body.reviews_ai,        // resumo automático pós-save (Busca)

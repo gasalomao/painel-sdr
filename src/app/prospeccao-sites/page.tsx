@@ -24,6 +24,14 @@ import { renderTemplate, type TemplateContext } from "@/lib/template-vars";
 import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
 import { parseMinReviews } from "@/lib/scraper-review-count";
+import {
+  parseGoogleYear,
+  parseMaxReviews,
+  parseRatingBound,
+  validateGoogleYearRange,
+  validateRatingRange,
+  validateReviewCountRange,
+} from "@/lib/scraper-lead-filters";
 import { AutomationLogs } from "../automacao/AutomationLogs";
 import styles from "./prospeccao-sites.module.css";
 
@@ -39,6 +47,7 @@ type Lead = {
   website: string | null;
   maps_url: string | null;
   place_id: string | null;
+  year_established?: string | null;
   created_at: string;
   opt_out: boolean;
   primeiro_contato_source: string | null;
@@ -206,6 +215,12 @@ export default function ProspeccaoSitesPage() {
   const [filterWithInstagram, setFilterWithInstagram] = useState(false);
   const [minReviews, setMinReviews] = useState("0");
   const [minReviewsError, setMinReviewsError] = useState(false);
+  const [maxReviews, setMaxReviews] = useState("0");
+  const [minRating, setMinRating] = useState("0");
+  const [maxRating, setMaxRating] = useState("0");
+  const [googleYearFrom, setGoogleYearFrom] = useState("0");
+  const [googleYearTo, setGoogleYearTo] = useState("0");
+  const [extraFiltersError, setExtraFiltersError] = useState("");
   const eventSourceRef = useRef<EventSource | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -246,7 +261,31 @@ export default function ProspeccaoSitesPage() {
   const handleStart = async () => {
     const minimum = parseMinReviews(minReviews.trim() === "" ? null : Number(minReviews));
     setMinReviewsError(minimum === null);
-    if (minimum === null) return;
+    const parsedMaxReviews = parseMaxReviews(maxReviews);
+    const parsedMinRating = parseRatingBound(minRating);
+    const parsedMaxRating = parseRatingBound(maxRating);
+    const parsedYearFrom = parseGoogleYear(googleYearFrom);
+    const parsedYearTo = parseGoogleYear(googleYearTo);
+    let extraErr = "";
+    if (parsedMaxReviews === null) extraErr = "Máximo de avaliações deve ser um inteiro entre 0 e 2147483647.";
+    else if (minimum !== null) {
+      const revErr = validateReviewCountRange(minimum, parsedMaxReviews);
+      if (revErr) extraErr = revErr;
+    }
+    if (!extraErr && (parsedMinRating === null || parsedMaxRating === null)) {
+      extraErr = "Nota mínima e máxima devem estar entre 0 e 5.";
+    } else if (!extraErr && parsedMinRating !== null && parsedMaxRating !== null) {
+      const ratErr = validateRatingRange(parsedMinRating, parsedMaxRating);
+      if (ratErr) extraErr = ratErr;
+    }
+    if (!extraErr && (parsedYearFrom === null || parsedYearTo === null)) {
+      extraErr = "Informe um ano válido no Google (ex.: 2019) ou 0 para desativar.";
+    } else if (!extraErr && parsedYearFrom !== null && parsedYearTo !== null) {
+      const yrErr = validateGoogleYearRange(parsedYearFrom, parsedYearTo);
+      if (yrErr) extraErr = yrErr;
+    }
+    setExtraFiltersError(extraErr);
+    if (minimum === null || extraErr) return;
     const nicheList = niches.split("\n").map((n) => n.trim()).filter(Boolean);
     const regionList = regions.split("\n").map((r) => r.trim()).filter(Boolean);
     if (!nicheList.length || !regionList.length) {
@@ -269,6 +308,11 @@ export default function ProspeccaoSitesPage() {
           filterWithWebsite,
           filterWithInstagram,
           minReviews: minimum,
+          ...(parsedMaxReviews && parsedMaxReviews > 0 ? { maxReviews: parsedMaxReviews } : {}),
+          ...(parsedMinRating && parsedMinRating > 0 ? { minRating: parsedMinRating } : {}),
+          ...(parsedMaxRating && parsedMaxRating > 0 ? { maxRating: parsedMaxRating } : {}),
+          ...(parsedYearFrom && parsedYearFrom > 0 ? { googleYearFrom: parsedYearFrom } : {}),
+          ...(parsedYearTo && parsedYearTo > 0 ? { googleYearTo: parsedYearTo } : {}),
           captureAllReviews,
           reviews_ai: reviewsAiEnabled
             ? { enabled: true, model: reviewsAiModel || null, prompt: reviewsAiPrompt || null }
@@ -310,7 +354,11 @@ export default function ProspeccaoSitesPage() {
   const [ramoFilter, setRamoFilter] = useState("");
   const [regionFilter, setRegionFilter] = useState("");
   const [ratingMin, setRatingMin] = useState("");
+  const [ratingMax, setRatingMax] = useState("");
   const [reviewsMin, setReviewsMin] = useState("");
+  const [reviewsMax, setReviewsMax] = useState("");
+  const [leadYearFrom, setLeadYearFrom] = useState("");
+  const [leadYearTo, setLeadYearTo] = useState("");
   const [hasWebsite, setHasWebsite] = useState<"only_empty" | "all" | "only_with">("only_empty");
   const [showOptOut, setShowOptOut] = useState(false);
   const [disparoFilter, setDisparoFilter] = useState<"all" | "pending" | "sent">("all");
@@ -331,7 +379,11 @@ export default function ProspeccaoSitesPage() {
       if (ramoFilter) params.set("ramo", ramoFilter);
       if (regionFilter) params.set("region", regionFilter);
       if (ratingMin) params.set("ratingMin", ratingMin);
+      if (ratingMax) params.set("ratingMax", ratingMax);
       if (reviewsMin) params.set("reviewsMin", reviewsMin);
+      if (reviewsMax) params.set("reviewsMax", reviewsMax);
+      if (leadYearFrom) params.set("googleYearFrom", leadYearFrom);
+      if (leadYearTo) params.set("googleYearTo", leadYearTo);
       const r = await fetch(`/api/prospeccao-sites/leads?${params}`, { cache: "no-store" });
       const j = await r.json();
       if (j.ok) { setLeads(j.leads); setTotal(j.total); }
@@ -344,7 +396,7 @@ export default function ProspeccaoSitesPage() {
       } catch { /* fallback to primeiro_contato_source */ }
     } catch (e) { console.error("fetchLeads", e); }
     finally { setLoadingLeads(false); }
-  }, [page, limit, sort, order, ramoFilter, regionFilter, showOptOut, hasWebsite, ratingMin, reviewsMin]);
+  }, [page, limit, sort, order, ramoFilter, regionFilter, showOptOut, hasWebsite, ratingMin, ratingMax, reviewsMin, reviewsMax, leadYearFrom, leadYearTo]);
 
   useEffect(() => { fetchLeads(); }, [fetchLeads]);
 
@@ -356,7 +408,7 @@ export default function ProspeccaoSitesPage() {
     }
   }, [isRunning, scraperLeadsCount, tab, fetchLeads]);
 
-  // Filtros client-side p/ hasWebsite + ratingMin + reviewsMin (API não suporta ainda)
+  // Filtros client-side p/ hasWebsite + rating + reviews + ano no Google
   const filteredLeads = useMemo(() => {
     return leads.filter((l) => {
       const isDisparado = l.primeiro_contato_source === "disparo" || disparoJids.has(l.remoteJid);
@@ -369,13 +421,27 @@ export default function ProspeccaoSitesPage() {
         const r = parseFloat(l.rating || "0");
         if (isNaN(r) || r < Number(ratingMin)) return false;
       }
+      if (ratingMax && Number(ratingMax) > 0) {
+        const r = parseFloat(l.rating || "0");
+        if (!isNaN(r) && r > Number(ratingMax)) return false;
+      }
       if (reviewsMin) {
         const rv = parseInt(l.reviews || "0", 10);
         if (isNaN(rv) || rv < Number(reviewsMin)) return false;
       }
+      if (reviewsMax && Number(reviewsMax) > 0) {
+        const rv = parseInt(l.reviews || "0", 10);
+        if (!isNaN(rv) && rv > Number(reviewsMax)) return false;
+      }
+      if ((leadYearFrom && Number(leadYearFrom) > 0) || (leadYearTo && Number(leadYearTo) > 0)) {
+        const yr = parseInt(String(l.year_established || ""), 10);
+        if (isNaN(yr)) return false;
+        if (leadYearFrom && Number(leadYearFrom) > 0 && yr < Number(leadYearFrom)) return false;
+        if (leadYearTo && Number(leadYearTo) > 0 && yr > Number(leadYearTo)) return false;
+      }
       return true;
     });
-  }, [leads, hasWebsite, ratingMin, reviewsMin, disparoFilter, disparoJids]);
+  }, [leads, hasWebsite, ratingMin, ratingMax, reviewsMin, reviewsMax, leadYearFrom, leadYearTo, disparoFilter, disparoJids]);
 
   // Ranking: reviews desc default. Score = reviews * rating (proxy importância)
   const rankedLeads = useMemo(() => {
@@ -567,6 +633,12 @@ export default function ProspeccaoSitesPage() {
   const [autoFilterWithInstagram, setAutoFilterWithInstagram] = useState(false);
   const [autoMinReviews, setAutoMinReviews] = useState("0");
   const [autoMinReviewsError, setAutoMinReviewsError] = useState(false);
+  const [autoMaxReviews, setAutoMaxReviews] = useState("0");
+  const [autoMinRating, setAutoMinRating] = useState("0");
+  const [autoMaxRating, setAutoMaxRating] = useState("0");
+  const [autoGoogleYearFrom, setAutoGoogleYearFrom] = useState("0");
+  const [autoGoogleYearTo, setAutoGoogleYearTo] = useState("0");
+  const [autoExtraFiltersError, setAutoExtraFiltersError] = useState("");
   const [autoSteps, setAutoSteps] = useState<{ day_offset: number; template: string }[]>([
     { day_offset: 2, template: "Olá {{nome_empresa}}, tudo bem? Ainda tem interesse em ter um site profissional para sua empresa {{ramo}}?" },
   ]);
@@ -661,7 +733,31 @@ export default function ProspeccaoSitesPage() {
   const createAutomation = async () => {
     const minimum = parseMinReviews(autoMinReviews.trim() === "" ? null : Number(autoMinReviews));
     setAutoMinReviewsError(minimum === null);
-    if (minimum === null) return;
+    const parsedMaxReviews = parseMaxReviews(autoMaxReviews);
+    const parsedMinRating = parseRatingBound(autoMinRating);
+    const parsedMaxRating = parseRatingBound(autoMaxRating);
+    const parsedYearFrom = parseGoogleYear(autoGoogleYearFrom);
+    const parsedYearTo = parseGoogleYear(autoGoogleYearTo);
+    let extraErr = "";
+    if (parsedMaxReviews === null) extraErr = "Máximo de avaliações deve ser um inteiro entre 0 e 2147483647.";
+    else if (minimum !== null) {
+      const revErr = validateReviewCountRange(minimum, parsedMaxReviews);
+      if (revErr) extraErr = revErr;
+    }
+    if (!extraErr && (parsedMinRating === null || parsedMaxRating === null)) {
+      extraErr = "Nota mínima e máxima devem estar entre 0 e 5.";
+    } else if (!extraErr && parsedMinRating !== null && parsedMaxRating !== null) {
+      const ratErr = validateRatingRange(parsedMinRating, parsedMaxRating);
+      if (ratErr) extraErr = ratErr;
+    }
+    if (!extraErr && (parsedYearFrom === null || parsedYearTo === null)) {
+      extraErr = "Informe um ano válido no Google (ex.: 2019) ou 0 para desativar.";
+    } else if (!extraErr && parsedYearFrom !== null && parsedYearTo !== null) {
+      const yrErr = validateGoogleYearRange(parsedYearFrom, parsedYearTo);
+      if (yrErr) extraErr = yrErr;
+    }
+    setAutoExtraFiltersError(extraErr);
+    if (minimum === null || extraErr) return;
     const nichesArr = autoNiches.split("\n").map(s => s.trim()).filter(Boolean);
     const regionsArr = autoRegions.split("\n").map(s => s.trim()).filter(Boolean);
     if (!autoName.trim() || !autoInstance || !autoTemplate.trim() || nichesArr.length === 0 || regionsArr.length === 0) {
@@ -690,6 +786,11 @@ export default function ProspeccaoSitesPage() {
             filterWithWebsite: autoFilterWithWebsite,
             filterWithInstagram: autoFilterWithInstagram,
             minReviews: minimum,
+            ...(parsedMaxReviews && parsedMaxReviews > 0 ? { maxReviews: parsedMaxReviews } : {}),
+            ...(parsedMinRating && parsedMinRating > 0 ? { minRating: parsedMinRating } : {}),
+            ...(parsedMaxRating && parsedMaxRating > 0 ? { maxRating: parsedMaxRating } : {}),
+            ...(parsedYearFrom && parsedYearFrom > 0 ? { googleYearFrom: parsedYearFrom } : {}),
+            ...(parsedYearTo && parsedYearTo > 0 ? { googleYearTo: parsedYearTo } : {}),
             captureAllReviews: autoCaptureAllReviews || autoReviewsAi,
             reviews_ai: autoReviewsAi
               ? { enabled: true, model: autoReviewsAiModel || null, prompt: autoReviewsAiPrompt || null }
@@ -1100,6 +1201,112 @@ export default function ProspeccaoSitesPage() {
                     {minReviewsError && <p id="ps-min-reviews-error" role="alert" className="text-xs text-red-400">{MIN_REVIEWS_ERROR}</p>}
                   </div>
 
+                  {/* Tempo no Google (Desde o ano até data atual) & Qualificação */}
+                  <div className="rounded-lg border border-white/10 bg-black/20 p-3 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className="text-xs font-semibold text-white/80 flex items-center gap-1.5">
+                        <Clock className="w-3.5 h-3.5 text-primary" />
+                        Está no Google desde (filtro por ano)
+                      </span>
+                      <div className="flex flex-wrap gap-1">
+                        {[
+                          { label: "Qualquer ano", from: "0", to: "0" },
+                          { label: "Desde 2019 até hoje", from: "2019", to: String(new Date().getFullYear()) },
+                          { label: "Desde 2020 até hoje", from: "2020", to: String(new Date().getFullYear()) },
+                          { label: "Desde 2022 até hoje", from: "2022", to: String(new Date().getFullYear()) },
+                          { label: "Até 2019", from: "1900", to: "2019" },
+                        ].map(preset => (
+                          <button
+                            key={preset.label}
+                            type="button"
+                            onClick={() => {
+                              setGoogleYearFrom(preset.from);
+                              setGoogleYearTo(preset.to);
+                              setExtraFiltersError("");
+                            }}
+                            className={cn(
+                              "text-[10px] px-2 py-0.5 rounded border transition-colors cursor-pointer",
+                              googleYearFrom === preset.from && googleYearTo === preset.to
+                                ? "bg-primary/20 border-primary/50 text-white font-medium"
+                                : "bg-black/40 border-white/10 text-white/60 hover:text-white",
+                            )}
+                          >
+                            {preset.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
+                      <div>
+                        <label htmlFor="ps-google-year-from" className="text-xs text-white/60">No Google desde (ano)</label>
+                        <Input
+                          id="ps-google-year-from"
+                          type="number"
+                          min={0}
+                          max={new Date().getFullYear() + 1}
+                          step={1}
+                          value={googleYearFrom}
+                          onChange={(e) => { setGoogleYearFrom(e.target.value); setExtraFiltersError(""); }}
+                          placeholder="Ex: 2019 (0 = todos)"
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="ps-google-year-to" className="text-xs text-white/60">Até o ano (0 = atual)</label>
+                        <Input
+                          id="ps-google-year-to"
+                          type="number"
+                          min={0}
+                          max={new Date().getFullYear() + 1}
+                          step={1}
+                          value={googleYearTo}
+                          onChange={(e) => { setGoogleYearTo(e.target.value); setExtraFiltersError(""); }}
+                          placeholder={`Ex: ${new Date().getFullYear()}`}
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="ps-max-reviews" className="text-xs text-white/60">Máximo de avaliações</label>
+                        <Input
+                          id="ps-max-reviews"
+                          type="number"
+                          min={0}
+                          max={2147483647}
+                          step={1}
+                          value={maxReviews}
+                          onChange={(e) => { setMaxReviews(e.target.value); setExtraFiltersError(""); }}
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="ps-min-rating" className="text-xs text-white/60">Nota mínima (0 a 5)</label>
+                        <Input
+                          id="ps-min-rating"
+                          type="number"
+                          min={0}
+                          max={5}
+                          step={0.1}
+                          value={minRating}
+                          onChange={(e) => { setMinRating(e.target.value); setExtraFiltersError(""); }}
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="ps-max-rating" className="text-xs text-white/60">Nota máxima (0 a 5)</label>
+                        <Input
+                          id="ps-max-rating"
+                          type="number"
+                          min={0}
+                          max={5}
+                          step={0.1}
+                          value={maxRating}
+                          onChange={(e) => { setMaxRating(e.target.value); setExtraFiltersError(""); }}
+                        />
+                      </div>
+                    </div>
+                    <p className="text-[11px] text-white/50">
+                      Filtra empresas pelo ano em que estão no Google Maps (ex.: desde 2019 até {new Date().getFullYear()}), limite de avaliações e nota. Use 0 para desativar.
+                    </p>
+                    {extraFiltersError && <p role="alert" className="text-xs text-red-400">{extraFiltersError}</p>}
+                  </div>
+
                   <div className="space-y-1">
                     <label htmlFor="ps-filter-with-instagram" className="flex items-center justify-between gap-2 p-2 rounded-lg hover:bg-white/5 cursor-pointer">
                       <span className="text-sm text-white/90 select-none flex-1">Somente com Instagram</span>
@@ -1282,7 +1489,11 @@ export default function ProspeccaoSitesPage() {
                   <label>Ramo<Input aria-label="Filtrar por ramo" placeholder="Ex.: pizzaria" value={ramoFilter} onChange={(e) => setRamoFilter(e.target.value)} /></label>
                   <label>Região<Input aria-label="Filtrar por região" placeholder="Cidade ou bairro" value={regionFilter} onChange={(e) => setRegionFilter(e.target.value)} /></label>
                   <label>Nota mínima<Input aria-label="Nota mínima" placeholder="0 a 5" type="number" step="0.1" min="0" max="5" value={ratingMin} onChange={(e) => setRatingMin(e.target.value)} /></label>
+                  <label>Nota máxima<Input aria-label="Nota máxima" placeholder="0 a 5" type="number" step="0.1" min="0" max="5" value={ratingMax} onChange={(e) => setRatingMax(e.target.value)} /></label>
                   <label>Avaliações mínimas<Input aria-label="Mínimo de avaliações dos leads" placeholder="Sem mínimo" type="number" min="0" value={reviewsMin} onChange={(e) => setReviewsMin(e.target.value)} /></label>
+                  <label>Avaliações máximas<Input aria-label="Máximo de avaliações dos leads" placeholder="Sem máximo" type="number" min="0" value={reviewsMax} onChange={(e) => setReviewsMax(e.target.value)} /></label>
+                  <label>No Google desde (ano)<Input aria-label="No Google desde (ano) nos leads" placeholder="Ex.: 2019" type="number" min="1900" max={new Date().getFullYear() + 1} value={leadYearFrom} onChange={(e) => setLeadYearFrom(e.target.value)} /></label>
+                  <label>Até o ano (Google)<Input aria-label="Até o ano no Google nos leads" placeholder={`Ex.: ${new Date().getFullYear()}`} type="number" min="1900" max={new Date().getFullYear() + 1} value={leadYearTo} onChange={(e) => setLeadYearTo(e.target.value)} /></label>
                   <div className={styles.selectField}><span>Presença de site</span><Select value={hasWebsite} onValueChange={(v: string | null) => setHasWebsite((v as any) || "only_empty")}>
                     <SelectTrigger aria-label="Presença de site" className="w-40"><SelectValue placeholder="Presença site">{HAS_WEBSITE_LABELS[hasWebsite] || "Presença site"}</SelectValue></SelectTrigger>
                     <SelectContent>
@@ -1418,6 +1629,11 @@ export default function ProspeccaoSitesPage() {
                               <span className="inline-flex items-center gap-1">
                                 <TrendingUp className="w-3 h-3 text-blue-400" />{parseInt(l.reviews || "0", 10).toLocaleString("pt-BR")}
                               </span>
+                              {l.year_established && (
+                                <span className="block text-[10px] font-medium text-emerald-400/90 mt-0.5">
+                                  Desde {l.year_established}
+                                </span>
+                              )}
                             </td>
                             <td className="p-2">
                               {hasW ? (
@@ -2059,6 +2275,112 @@ export default function ProspeccaoSitesPage() {
                       aria-describedby={`auto-min-reviews-help${autoMinReviewsError ? " auto-min-reviews-error" : ""}`} />
                     <p id="auto-min-reviews-help" className="text-[11px] text-white/50">{MIN_REVIEWS_HELP}</p>
                     {autoMinReviewsError && <p id="auto-min-reviews-error" role="alert" className="text-xs text-red-400">{MIN_REVIEWS_ERROR}</p>}
+                  </div>
+
+                  {/* Tempo no Google (Desde o ano até data atual) & Qualificação da Automação */}
+                  <div className="rounded-lg border border-white/10 bg-black/20 p-3 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className="text-xs font-semibold text-white/80 flex items-center gap-1.5">
+                        <Clock className="w-3.5 h-3.5 text-primary" />
+                        Está no Google desde (filtro por ano)
+                      </span>
+                      <div className="flex flex-wrap gap-1">
+                        {[
+                          { label: "Qualquer ano", from: "0", to: "0" },
+                          { label: "Desde 2019 até hoje", from: "2019", to: String(new Date().getFullYear()) },
+                          { label: "Desde 2020 até hoje", from: "2020", to: String(new Date().getFullYear()) },
+                          { label: "Desde 2022 até hoje", from: "2022", to: String(new Date().getFullYear()) },
+                          { label: "Até 2019", from: "1900", to: "2019" },
+                        ].map(preset => (
+                          <button
+                            key={preset.label}
+                            type="button"
+                            onClick={() => {
+                              setAutoGoogleYearFrom(preset.from);
+                              setAutoGoogleYearTo(preset.to);
+                              setAutoExtraFiltersError("");
+                            }}
+                            className={cn(
+                              "text-[10px] px-2 py-0.5 rounded border transition-colors cursor-pointer",
+                              autoGoogleYearFrom === preset.from && autoGoogleYearTo === preset.to
+                                ? "bg-primary/20 border-primary/50 text-white font-medium"
+                                : "bg-black/40 border-white/10 text-white/60 hover:text-white",
+                            )}
+                          >
+                            {preset.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
+                      <div>
+                        <label htmlFor="auto-google-year-from" className="text-xs text-white/60">No Google desde (ano)</label>
+                        <Input
+                          id="auto-google-year-from"
+                          type="number"
+                          min={0}
+                          max={new Date().getFullYear() + 1}
+                          step={1}
+                          value={autoGoogleYearFrom}
+                          onChange={(e) => { setAutoGoogleYearFrom(e.target.value); setAutoExtraFiltersError(""); }}
+                          placeholder="Ex: 2019 (0 = todos)"
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="auto-google-year-to" className="text-xs text-white/60">Até o ano (0 = atual)</label>
+                        <Input
+                          id="auto-google-year-to"
+                          type="number"
+                          min={0}
+                          max={new Date().getFullYear() + 1}
+                          step={1}
+                          value={autoGoogleYearTo}
+                          onChange={(e) => { setAutoGoogleYearTo(e.target.value); setAutoExtraFiltersError(""); }}
+                          placeholder={`Ex: ${new Date().getFullYear()}`}
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="auto-max-reviews" className="text-xs text-white/60">Máximo de avaliações</label>
+                        <Input
+                          id="auto-max-reviews"
+                          type="number"
+                          min={0}
+                          max={2147483647}
+                          step={1}
+                          value={autoMaxReviews}
+                          onChange={(e) => { setAutoMaxReviews(e.target.value); setAutoExtraFiltersError(""); }}
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="auto-min-rating" className="text-xs text-white/60">Nota mínima (0 a 5)</label>
+                        <Input
+                          id="auto-min-rating"
+                          type="number"
+                          min={0}
+                          max={5}
+                          step={0.1}
+                          value={autoMinRating}
+                          onChange={(e) => { setAutoMinRating(e.target.value); setAutoExtraFiltersError(""); }}
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="auto-max-rating" className="text-xs text-white/60">Nota máxima (0 a 5)</label>
+                        <Input
+                          id="auto-max-rating"
+                          type="number"
+                          min={0}
+                          max={5}
+                          step={0.1}
+                          value={autoMaxRating}
+                          onChange={(e) => { setAutoMaxRating(e.target.value); setAutoExtraFiltersError(""); }}
+                        />
+                      </div>
+                    </div>
+                    <p className="text-[11px] text-white/50">
+                      Filtra empresas na captura da automação pelo ano em que estão no Google Maps (ex.: desde 2019 até {new Date().getFullYear()}), limite máximo de avaliações e nota. Use 0 para desativar.
+                    </p>
+                    {autoExtraFiltersError && <p role="alert" className="text-xs text-red-400">{autoExtraFiltersError}</p>}
                   </div>
 
                   <div className="space-y-1">

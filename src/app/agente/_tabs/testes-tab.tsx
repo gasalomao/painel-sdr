@@ -4,7 +4,7 @@ import { useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { greetingFor, renderTemplate, TEMPLATE_VARIABLES } from "@/lib/template-vars";
+import { greetingFor, leadRowToTemplateContext, renderTemplate, TEMPLATE_VARIABLES } from "@/lib/template-vars";
 import {
   BookOpen,
   Bot,
@@ -133,7 +133,7 @@ export function TestesTab(props: {
   testVariables: Record<string, string>;
 }) {
   const previewSandboxMessage = useMemo(
-    () => renderTemplate(props.sandboxTemplate, props.previewSample as any),
+    () => renderTemplate(props.sandboxTemplate, leadRowToTemplateContext(props.previewSample as Record<string, unknown>)),
     [props.sandboxTemplate, props.previewSample]
   );
 

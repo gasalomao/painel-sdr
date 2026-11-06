@@ -23,6 +23,14 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { parseMinReviews } from "@/lib/scraper-review-count";
+import {
+  parseGoogleYear,
+  parseMaxReviews,
+  parseRatingBound,
+  validateGoogleYearRange,
+  validateRatingRange,
+  validateReviewCountRange,
+} from "@/lib/scraper-lead-filters";
 
 // ponytail: cores locais enquanto o tema global expuser canais HSL; remover após normalizar os tokens globais.
 const CAPTADOR_COLORS = {
@@ -162,6 +170,7 @@ interface Lead {
   placeId?: string;
   distribuicaoEstrelas?: Record<string, number>;
   cep?: string;
+  yearEstablished?: string;
 }
 
 interface LogEntry {
@@ -210,6 +219,12 @@ export default function CaptadorPage() {
   const [filterWithInstagram, setFilterWithInstagram] = useState(false);
   const [minReviews, setMinReviews] = useState("0");
   const [minReviewsError, setMinReviewsError] = useState(false);
+  const [maxReviews, setMaxReviews] = useState("0");
+  const [minRating, setMinRating] = useState("0");
+  const [maxRating, setMaxRating] = useState("0");
+  const [googleYearFrom, setGoogleYearFrom] = useState("0");
+  const [googleYearTo, setGoogleYearTo] = useState("0");
+  const [extraFiltersError, setExtraFiltersError] = useState("");
   const [limitEnabled, setLimitEnabled] = useState(true);
   const [maxLeads, setMaxLeads] = useState("50");
   const [maxLeadsError, setMaxLeadsError] = useState(false);
@@ -312,7 +327,31 @@ export default function CaptadorPage() {
     const invalidGoal = limitEnabled && (maxLeads.trim() === "" || !Number.isInteger(goal) || goal < 1 || goal > 5000);
     setMinReviewsError(minimum === null);
     setMaxLeadsError(invalidGoal);
-    if (minimum === null || invalidGoal) return;
+    const parsedMaxReviews = parseMaxReviews(maxReviews);
+    const parsedMinRating = parseRatingBound(minRating);
+    const parsedMaxRating = parseRatingBound(maxRating);
+    const parsedYearFrom = parseGoogleYear(googleYearFrom);
+    const parsedYearTo = parseGoogleYear(googleYearTo);
+    let extraErr = "";
+    if (parsedMaxReviews === null) extraErr = "Máximo de avaliações deve ser um inteiro entre 0 e 2147483647.";
+    else if (minimum !== null) {
+      const revRangeErr = validateReviewCountRange(minimum, parsedMaxReviews);
+      if (revRangeErr) extraErr = revRangeErr;
+    }
+    if (!extraErr && (parsedMinRating === null || parsedMaxRating === null)) {
+      extraErr = "Nota mínima e máxima devem estar entre 0 e 5.";
+    } else if (!extraErr && parsedMinRating !== null && parsedMaxRating !== null) {
+      const ratRangeErr = validateRatingRange(parsedMinRating, parsedMaxRating);
+      if (ratRangeErr) extraErr = ratRangeErr;
+    }
+    if (!extraErr && (parsedYearFrom === null || parsedYearTo === null)) {
+      extraErr = "Informe um ano válido no Google (ex.: 2019) ou 0 para desativar.";
+    } else if (!extraErr && parsedYearFrom !== null && parsedYearTo !== null) {
+      const yrRangeErr = validateGoogleYearRange(parsedYearFrom, parsedYearTo);
+      if (yrRangeErr) extraErr = yrRangeErr;
+    }
+    setExtraFiltersError(extraErr);
+    if (minimum === null || invalidGoal || extraErr) return;
     if (reviewsAiEnabled && (loadingAiModels || !reviewsAiModel)) {
       addLog("Selecione um modelo de IA para resumir as avaliações.", "error");
       return;
@@ -341,6 +380,11 @@ export default function CaptadorPage() {
           filterWithWebsite,
           filterWithInstagram,
           minReviews: minimum,
+          ...(parsedMaxReviews && parsedMaxReviews > 0 ? { maxReviews: parsedMaxReviews } : {}),
+          ...(parsedMinRating && parsedMinRating > 0 ? { minRating: parsedMinRating } : {}),
+          ...(parsedMaxRating && parsedMaxRating > 0 ? { maxRating: parsedMaxRating } : {}),
+          ...(parsedYearFrom && parsedYearFrom > 0 ? { googleYearFrom: parsedYearFrom } : {}),
+          ...(parsedYearTo && parsedYearTo > 0 ? { googleYearTo: parsedYearTo } : {}),
           maxLeads: goal,
           captureAllReviews,
           reviews_ai: reviewsAiEnabled
@@ -817,6 +861,142 @@ export default function CaptadorPage() {
                       {minReviewsError && (
                         <p id="captador-min-reviews-error" role="alert" className="text-xs text-destructive flex items-center gap-1 pt-1">
                           <AlertCircle className="w-3 h-3" /> Informe um inteiro entre 0 e 2147483647.
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Tempo no Google (Desde o ano até data atual / ano final) + Avaliações máx & Nota */}
+                    <div className="p-3 rounded-lg border border-border/50 bg-secondary/20 space-y-3">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <span className="text-xs font-medium text-foreground flex items-center gap-1.5">
+                          <Clock className="w-3.5 h-3.5 text-primary" />
+                          Está no Google desde (filtro por ano)
+                        </span>
+                        <div className="flex flex-wrap gap-1">
+                          {[
+                            { label: "Qualquer ano", from: "0", to: "0" },
+                            { label: "Desde 2019 até hoje", from: "2019", to: String(new Date().getFullYear()) },
+                            { label: "Desde 2020 até hoje", from: "2020", to: String(new Date().getFullYear()) },
+                            { label: "Desde 2022 até hoje", from: "2022", to: String(new Date().getFullYear()) },
+                            { label: "Até 2019", from: "1900", to: "2019" },
+                          ].map(preset => (
+                            <button
+                              key={preset.label}
+                              type="button"
+                              disabled={isRunning}
+                              onClick={() => {
+                                setGoogleYearFrom(preset.from);
+                                setGoogleYearTo(preset.to);
+                                setExtraFiltersError("");
+                              }}
+                              className={cn(
+                                "text-[10px] px-2 py-0.5 rounded-md border transition-colors disabled:opacity-50 cursor-pointer",
+                                googleYearFrom === preset.from && googleYearTo === preset.to
+                                  ? "bg-primary/20 border-primary/50 text-foreground font-medium"
+                                  : "bg-secondary/50 hover:bg-secondary border-border/50 text-muted-foreground hover:text-foreground",
+                              )}
+                            >
+                              {preset.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <label htmlFor="captador-google-year-from" className="text-xs text-muted-foreground">
+                            No Google desde (ano)
+                          </label>
+                          <Input
+                            id="captador-google-year-from"
+                            disabled={isRunning}
+                            type="number"
+                            min={0}
+                            max={new Date().getFullYear() + 1}
+                            step={1}
+                            placeholder="Ex: 2019 (0 = todos)"
+                            value={googleYearFrom}
+                            onChange={e => { setGoogleYearFrom(e.target.value); setExtraFiltersError(""); }}
+                            className="w-24 h-8 text-right font-mono text-xs bg-background"
+                          />
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
+                          <label htmlFor="captador-google-year-to" className="text-xs text-muted-foreground">
+                            Até o ano (0 = atual)
+                          </label>
+                          <Input
+                            id="captador-google-year-to"
+                            disabled={isRunning}
+                            type="number"
+                            min={0}
+                            max={new Date().getFullYear() + 1}
+                            step={1}
+                            placeholder={`Ex: ${new Date().getFullYear()}`}
+                            value={googleYearTo}
+                            onChange={e => { setGoogleYearTo(e.target.value); setExtraFiltersError(""); }}
+                            className="w-24 h-8 text-right font-mono text-xs bg-background"
+                          />
+                        </div>
+                      </div>
+                      <p className="text-[11px] text-muted-foreground">
+                        Filtra empresas pelo ano em que estão no Google Maps (ex.: desde 2019 até {new Date().getFullYear()}). Use 0 para sem limite.
+                      </p>
+
+                      <Separator className="bg-border/30" />
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div className="space-y-1">
+                          <label htmlFor="captador-max-reviews" className="text-[11px] text-muted-foreground block">
+                            Máximo de avaliações
+                          </label>
+                          <Input
+                            id="captador-max-reviews"
+                            disabled={isRunning}
+                            type="number"
+                            min={0}
+                            step={1}
+                            max={2147483647}
+                            value={maxReviews}
+                            onChange={e => { setMaxReviews(e.target.value); setExtraFiltersError(""); }}
+                            className="h-8 text-right font-mono text-xs bg-background"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label htmlFor="captador-min-rating" className="text-[11px] text-muted-foreground block">
+                            Nota mínima (0 a 5)
+                          </label>
+                          <Input
+                            id="captador-min-rating"
+                            disabled={isRunning}
+                            type="number"
+                            min={0}
+                            max={5}
+                            step={0.1}
+                            value={minRating}
+                            onChange={e => { setMinRating(e.target.value); setExtraFiltersError(""); }}
+                            className="h-8 text-right font-mono text-xs bg-background"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label htmlFor="captador-max-rating" className="text-[11px] text-muted-foreground block">
+                            Nota máxima (0 a 5)
+                          </label>
+                          <Input
+                            id="captador-max-rating"
+                            disabled={isRunning}
+                            type="number"
+                            min={0}
+                            max={5}
+                            step={0.1}
+                            value={maxRating}
+                            onChange={e => { setMaxRating(e.target.value); setExtraFiltersError(""); }}
+                            className="h-8 text-right font-mono text-xs bg-background"
+                          />
+                        </div>
+                      </div>
+                      {extraFiltersError && (
+                        <p role="alert" className="text-xs text-destructive flex items-center gap-1 pt-1">
+                          <AlertCircle className="w-3 h-3" /> {extraFiltersError}
                         </p>
                       )}
                     </div>
@@ -1388,6 +1568,11 @@ export default function CaptadorPage() {
                                 {lead.reviewsDetalhes && lead.reviewsDetalhes.length > 0 && (
                                   <span className="block text-[9px] text-muted-foreground mt-0.5">
                                     {lead.reviewsDetalhes.length} detalhadas
+                                  </span>
+                                )}
+                                {lead.yearEstablished && (
+                                  <span className="block text-[9px] text-emerald-400/90 font-medium mt-0.5">
+                                    Desde {lead.yearEstablished}
                                   </span>
                                 )}
                               </TableCell>

@@ -248,6 +248,11 @@ async function startScrapingPhase(a: AutomationRow): Promise<void> {
       filterWithWebsite: filters.filterWithWebsite === true,
       filterWithInstagram: (filters.filterWithInstagram === undefined ? false : filters.filterWithInstagram) as boolean,
       minReviews: (filters.minReviews === undefined ? 0 : filters.minReviews) as number,
+      ...(filters.maxReviews !== undefined ? { maxReviews: filters.maxReviews as number } : {}),
+      ...(filters.minRating !== undefined ? { minRating: filters.minRating as number } : {}),
+      ...(filters.maxRating !== undefined ? { maxRating: filters.maxRating as number } : {}),
+      ...(filters.googleYearFrom !== undefined ? { googleYearFrom: filters.googleYearFrom as number } : {}),
+      ...(filters.googleYearTo !== undefined ? { googleYearTo: filters.googleYearTo as number } : {}),
       captureAllReviews: filters.captureAllReviews === true,
       webhookEnabled: false,
       maxLeads: captureGoal(row) - validCaptureIds(filters).length,
@@ -355,36 +360,15 @@ async function startDispatchPhase(
     { metadata: { count: leads.length } }
   );
 
-  // ───────── GERAÇÃO AUTÔNOMA DE SITES COM OPENCODE + VERCEL + QA ─────────
+  // ───────── PROSPECÇÃO DE SITES: FLUXO DE EXTRAÇÃO E DISPARO INICIAL ─────────
   const filters = a.scrape_filters || {};
-  const siteGenCfg = filters.site_generation as { enabled?: boolean; mode?: string; prompt?: string } | undefined;
-  const siteGenEnabled = (a as any).site_generation_enabled ?? siteGenCfg?.enabled ?? (filters._source === "prospeccao-sites");
-  const siteGenMode = (a as any).site_generation_mode || siteGenCfg?.mode || "imediato";
+  const isSiteProspecting = (filters._source === "prospeccao-sites") || !!(a as any).site_generation_enabled;
 
-  if (siteGenEnabled) {
-    const leadIds = leads.map(l => l.id).filter(id => Number.isInteger(id));
-    if (siteGenMode === "imediato") {
-      await log(a.id, "previa" as any, "info",
-        `🌐 Geração autônoma de sites ativada para esta automação. Enfileirando ${leadIds.length} lead(s) capturados para OpenCode + Impeccable + Vercel + QA...`,
-        { metadata: { leadCount: leadIds.length, mode: "imediato" } }
-      );
-      if (leadIds.length > 0) {
-        await supabase
-          .from("leads_extraidos")
-          .update({
-            previa_status: "PREVIA_SOLICITADA",
-            status: "PREVIA_SOLICITADA",
-            previa_solicitada_em: new Date().toISOString(),
-            previa_error: null,
-          })
-          .in("id", leadIds);
-      }
-    } else {
-      await log(a.id, "previa" as any, "info",
-        `🎯 Geração de sites sob demanda ativa. As prévias serão geradas automaticamente pelo Sarah Closer quando o lead aceitar no WhatsApp.`,
-        { metadata: { leadCount: leadIds.length, mode: "sob_demanda" } }
-      );
-    }
+  if (isSiteProspecting) {
+    await log(a.id, "previa" as any, "info",
+      `🎯 Prospecção de sites: extração concluída (${leads.length} leads). A automação avança para o envio da mensagem inicial. A criação da prévia de site será avaliada pelo Agente de IA nas respostas recebidas, conforme a configuração 'Geração Automática de Prévia ao Detectar Aceite' ativada no Agente.`,
+      { metadata: { leadCount: leads.length, mode: "avaliado_pelo_agente" } }
+    );
   }
 
   // ───────── RESUMO DE AVALIAÇÕES COM IA (reviews-ai) ─────────

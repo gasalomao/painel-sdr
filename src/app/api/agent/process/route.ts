@@ -4,7 +4,7 @@ import { SchemaType } from "@google/generative-ai";
 import { google } from "googleapis";
 import { getEffectiveStatus } from "@/lib/bot-status";
 import { isGroupJid } from "@/lib/bot-status";
-import { renderTemplate } from "@/lib/template-vars";
+import { leadRowToTemplateContext, renderTemplate } from "@/lib/template-vars";
 import { logTokenUsage } from "@/lib/token-usage";
 import { getEvolutionConfig } from "@/lib/evolution";
 import { requireClientId } from "@/lib/tenant";
@@ -16,6 +16,7 @@ import { indexKnowledgeDocument } from "@/lib/rag";
 import { getAiKeys } from "@/lib/ai-keys";
 import { formatResultsForAI, needsFreshWebSearch, webSearch } from "@/lib/web-search";
 import { addAiUsage, aiUsageFromError, AiEmptyResponseError, parseModelRef, prependAiErrorUsage, providerDisplayName, providerOf, startAiChat, type AiProvider, type AiUsage } from "@/lib/ai-provider";
+import { evaluatePreviewAgreement, DEFAULT_SITE_PREVIEW_EVAL_PROMPT, DEFAULT_SITE_PREVIEW_PING_MESSAGE } from "@/lib/sites/agreement-detector";
 
 export const dynamic = 'force-dynamic';
 
@@ -214,7 +215,7 @@ export async function POST(req: NextRequest) {
        // Lead e contato SÓ do tenant desta sessão (mesma paralelização de antes,
        // agora com clientId já resolvido do channel).
        !isTestMode ? supabase.from("leads_extraidos")
-          .select('"remoteJid", nome_negocio, ramo_negocio, categoria, endereco, website, avaliacao, reviews, telefone, status, id, previa_status, link_previa, previa_ping_enviado_em, previa_link_enviado_em')
+          .select("*")
           .eq("remoteJid", remoteJid).eq("client_id", clientId).maybeSingle() : Promise.resolve({ data: null }),
        !isTestMode ? supabase.from("contacts").select("push_name, phone_number").eq("remote_jid", remoteJid).eq("client_id", clientId).maybeSingle() : Promise.resolve({ data: null }),
     ]);
@@ -225,19 +226,26 @@ export async function POST(req: NextRequest) {
     leadRow = (leadRes as any).data || null;
     contactRow = (contactRes as any).data || null;
 
+    let previaSiteRequestedInTurn = false;
+
     if (isTestMode && testLeadData) {
-        // Shape precisa bater com o select acima — 10 colunas, mesmo que vazias no teste.
         leadRow = {
+            ...testLeadData,
+            id: testLeadData.id || 999999,
             remoteJid: testLeadData.remoteJid || remoteJid,
             nome_negocio: testLeadData.nome_negocio || null,
             ramo_negocio: testLeadData.ramo_negocio || null,
             categoria: testLeadData.categoria || null,
             endereco: testLeadData.endereco || null,
             website: testLeadData.website || null,
-            avaliacao: testLeadData.avaliacao || null,
-            reviews: testLeadData.reviews || null,
+            avaliacao: testLeadData.avaliacao ?? testLeadData.nota ?? null,
+            reviews: testLeadData.reviews ?? testLeadData.avaliacoes ?? null,
             telefone: testLeadData.telefone || null,
-            status: testLeadData.status || null,
+            status: testState?.status || testLeadData.status || null,
+            previa_status: testState?.previa_status || testLeadData.previa_status || null,
+            link_previa: testState?.link_previa || testLeadData.link_previa || null,
+            previa_ping_enviado_em: testState?.previa_ping_enviado_em || testLeadData.previa_ping_enviado_em || null,
+            previa_link_enviado_em: testState?.previa_link_enviado_em || testLeadData.previa_link_enviado_em || null,
         };
         contactRow = {
             push_name: testLeadData.push_name || null,
@@ -482,22 +490,17 @@ export async function POST(req: NextRequest) {
     }
 
     // Render do prompt com TODAS as variáveis vinculadas ao lead/contato/sessão.
-    // Isso garante que {{nome_empresa}}, {{ramo}}, {{nome}}, etc — capturados
+    // Isso garante que {{nome_empresa}}, {{ramo}}, {{nota}}, {{avaliacoes}}, {{ano_google}}, etc — capturados
     // quando o lead foi cadastrado — apareçam efetivamente no prompt.
-    processedMainPrompt = renderTemplate(processedMainPrompt, {
-       remoteJid,
-       nome_negocio: leadRow?.nome_negocio || null,
-       ramo_negocio: leadRow?.ramo_negocio || null,
-       categoria:    leadRow?.categoria    || null,
-       endereco:     leadRow?.endereco     || null,
-       website:      leadRow?.website      || null,
-       avaliacao:    leadRow?.avaliacao    ?? null,
-       reviews:      leadRow?.reviews      ?? null,
-       telefone:     leadRow?.telefone     || contactRow?.phone_number || null,
-       status:       leadRow?.status       || null,
-       push_name:    contactRow?.push_name || null,
-       variables:    currentVariables,
-    });
+    processedMainPrompt = renderTemplate(
+      processedMainPrompt,
+      leadRowToTemplateContext(leadRow, {
+        remoteJid,
+        telefone: leadRow?.telefone || contactRow?.phone_number || null,
+        push_name: contactRow?.push_name || leadRow?.push_name || null,
+        variables: currentVariables,
+      }),
+    );
 
     let activeStage: any = null;
     let funilInstrucao = "";
@@ -722,29 +725,46 @@ export async function POST(req: NextRequest) {
           // DIRETRIZES ESPECÍFICAS DA SARAH SDR & CLOSER PARA PROSPECÇÃO DE SITES
           if (lead.previa_status === "PREVIA_PRONTA" && lead.link_previa) {
             const pingEnviado = !!lead.previa_ping_enviado_em;
+            const confirmBeforeLink = agentConfig?.options?.site_preview_confirm_before_link ?? true;
+            const customPingTemplate = agentConfig?.options?.site_preview_ping_message || DEFAULT_SITE_PREVIEW_PING_MESSAGE;
+            const pingText = renderTemplate(customPingTemplate, { nome_negocio: lead.nome_negocio || "sua empresa" });
+
             lines.push("");
             lines.push("# 🎯 MODO SARAH CLOSER ATIVO (PRÉVIA PRONTA NO AR):");
             lines.push(`- Link da prévia: ${lead.link_previa}`);
-            lines.push(`- Ping de atenção enviado anteriormente: ${pingEnviado ? "SIM" : "NÃO"}`);
-            if (!pingEnviado) {
-              lines.push(`- AÇÃO OBRIGATÓRIA NESTE TURNO: Envie o Ping de Atenção perguntando se está com o celular na mão agora: "Oi! Tudo bem? Acabei de finalizar aqui no computador a prévia do site da ${lead.nome_negocio || "empresa"} e já subi no ar para teste. Você tá com o celular na mão agora para eu te mandar o link e você dar uma olhada rápida?"`);
+            lines.push(`- Estratégia de envio: ${confirmBeforeLink ? "Confirmar disponibilidade antes do link (Duplo Vínculo)" : "Envio direto do link"}`);
+
+            if (confirmBeforeLink) {
+              lines.push(`- Pergunta de disponibilidade enviada anteriormente: ${pingEnviado ? "SIM" : "NÃO"}`);
+              if (!pingEnviado) {
+                lines.push(`- AÇÃO OBRIGATÓRIA NESTE TURNO: Envie a pergunta de disponibilidade perguntando se pode dar uma olhada agora: "${pingText}"`);
+                lines.push(`- REGRA CRÍTICA: NÃO envie o link da prévia neste turno. Aguarde a confirmação de que o cliente pode visualizar agora.`);
+              } else {
+                lines.push(`- AÇÃO OBRIGATÓRIA: O cliente respondeu à pergunta de disponibilidade! Envie agora o link (${lead.link_previa}) com a introdução: "Dá uma olhadinha aí no celular! Como é uma prévia inicial, montamos com o que encontramos disponível na internet só para você ter uma ideia de como a estrutura funciona, mas depois deixamos 100% do seu jeito, com as suas fotos e cores preferidas. Me conta: o que achou dessa ideia para a ${lead.nome_negocio || "empresa"}?"`);
+                lines.push(`- MATRIZ DE FECHAMENTO:`);
+                lines.push(`  1. ZERO PREÇO POR TEXTO: Nunca passe valores por mensagem.`);
+                lines.push(`  2. ZERO TERMOS TÉCNICOS: Proibido falar domínio, hospedagem, servidor ou DNS.`);
+                lines.push(`  3. REGRA DO DUPLO VÍNCULO: Agende uma call rápida de 2 a 5 min no WhatsApp.`);
+                lines.push(`  4. Se o cliente concordar com um horário, chame OBRIGATORIAMENTE a tool "agendar_reuniao_fechamento".`);
+              }
             } else {
-              lines.push(`- AÇÃO OBRIGATÓRIA: Se o cliente respondeu ao ping, envie o link (${lead.link_previa}) com a introdução: "Dá uma olhadinha aí no celular! Como é uma prévia inicial, montamos com o que encontramos disponível na internet só para você ter uma ideia de como a estrutura funciona, mas depois deixamos 100% do seu jeito, com as suas fotos e cores preferidas. Me conta: o que achou dessa ideia para a ${lead.nome_negocio || "empresa"}?"`);
+              lines.push(`- AÇÃO OBRIGATÓRIA NESTE TURNO: Envie o link da prévia (${lead.link_previa}) diretamente para o cliente com a introdução: "Oi! Tudo bem? Finalizei a prévia do site da ${lead.nome_negocio || "sua empresa"} e já subi no ar para teste! Segue o link para dar uma olhadinha: ${lead.link_previa}. Me conta: o que achou dessa estrutura inicial?"`);
               lines.push(`- MATRIZ DE FECHAMENTO:`);
               lines.push(`  1. ZERO PREÇO POR TEXTO: Nunca passe valores por mensagem.`);
               lines.push(`  2. ZERO TERMOS TÉCNICOS: Proibido falar domínio, hospedagem, servidor ou DNS.`);
-              lines.push(`  3. REGRA DO DUPLO VÍNCULO: Sempre proponha 2 horários fechados para a ligação de 5 minutos no WhatsApp.`);
+              lines.push(`  3. REGRA DO DUPLO VÍNCULO: Agende uma call rápida de 2 a 5 min no WhatsApp.`);
               lines.push(`  4. Se o cliente concordar com um horário, chame OBRIGATORIAMENTE a tool "agendar_reuniao_fechamento".`);
             }
           } else if (lead.previa_status === "PREVIA_SOLICITADA") {
             lines.push("");
             lines.push("# 🎯 STATUS DA PRÉVIA: EM PRODUÇÃO NA VPS.");
             lines.push("- O cliente já confirmou o pedido de prévia e o sistema está gerando o site. Se ele perguntar algo, avise que está sendo finalizado com todo o carinho e que em breve o link de teste será enviado aqui.");
-          } else if (!lead.previa_status) {
+          } else if ((!lead.previa_status || lead.previa_status === "PREVIA_FALHOU" || lead.previa_status === "novo") && agentConfig?.options?.site_preview_auto_detect) {
             lines.push("");
             lines.push("# 🎯 MODO SARAH SDR ATIVO (QUALIFICAÇÃO E TRAVA ANTI-DESPERDÍCIO):");
             lines.push(`- Se o cliente demonstrar interesse em ver a prévia gratuita, peça o aceite formal (Msg 8.1): "Show, já passei aqui para a nossa equipe montar a prévia da ${lead.nome_negocio || "empresa"}! Como a gente cria algo personalizado pro seu negócio mesmo, leva até 2 dias úteis para ficar pronto. Como o pessoal vai dedicar um tempo exclusivo nisso, quando a gente finalizar e te mandar o link por aqui você consegue dar uma olhadinha rápida para dizer o que achou?"`);
             lines.push(`- Quando o cliente responder confirmando (Msg 8.2), responda: "Perfeito então, combinado! Assim que ficar pronto a gente já te chama aqui com o link. Bom trabalho por aí!" e chame OBRIGATORIAMENTE a tool "solicitar_previa_site".`);
+            lines.push(`- DETECÇÃO AUTOMÁTICA ATIVA: O sistema possui uma IA avaliadora dedicada em segundo plano. Assim que o cliente concordar com a prévia, o pipeline do OpenCode será acionado automaticamente.`);
           }
         }
         if (camp?.rendered_message && camp?.sent_at) {
@@ -1056,21 +1076,23 @@ ${capturedVariablesPrompt}
     }
 
     // Ferramentas de Prospecção Autônoma e Fechamento de Sites (Sarah SDR / Closer)
-    functionDeclarations.push({
-       name: "solicitar_previa_site",
-       description:
+    if (agentConfig?.options?.site_preview_auto_detect) {
+      functionDeclarations.push({
+        name: "solicitar_previa_site",
+        description:
           "Chame quando o cliente confirmar formalmente que aceita a proposta da prévia gratuita do site da empresa dele e concordar em olhar quando o link for enviado. Dispara o pipeline autônomo na VPS.",
-       parameters: {
+        parameters: {
           type: SchemaType.OBJECT,
           properties: {
-             confirmacao: {
-                type: SchemaType.STRING,
-                description: "A frase ou confirmação dita pelo cliente (ex: 'sim, pode mandar', 'combinado')",
-             },
+            confirmacao: {
+              type: SchemaType.STRING,
+              description: "A frase ou confirmação dita pelo cliente (ex: 'sim, pode mandar', 'combinado')",
+            },
           },
           required: ["confirmacao"],
-       },
-    });
+        },
+      });
+    }
 
     functionDeclarations.push({
        name: "agendar_reuniao_fechamento",
@@ -1609,6 +1631,12 @@ ${capturedVariablesPrompt}
               callLogs.push({ role: "system", content: `[Web Fetch] ${u} | FALHA: ${e.message}` });
            }
        } else if (call.name === "solicitar_previa_site") {
+          previaSiteRequestedInTurn = true;
+          if (!leadRow) {
+             leadRow = { previa_status: "PREVIA_SOLICITADA" };
+          } else {
+             leadRow.previa_status = "PREVIA_SOLICITADA";
+          }
           if (isTestMode) {
              functionResultRes = { success: true, message: "Modo teste: solicitação de prévia simulada com sucesso." };
              callLogs.push({ role: "system", content: `[Prévia Site] Solicitação simulada no modo teste` });
@@ -1638,7 +1666,11 @@ ${capturedVariablesPrompt}
           const resumo = String(callArgs.resumo_necessidades || "").trim();
 
           if (isTestMode) {
-             functionResultRes = { success: true, message: `Modo teste: reunião para ${horario} simulada.` };
+             functionResultRes = {
+                success: true,
+                horario_confirmado: horario,
+                message: `Modo teste: reunião para ${horario} simulada e vinculada ao calendário.`,
+             };
              callLogs.push({ role: "system", content: `[Reunião Fechamento] Reunião simulada para ${horario}` });
           } else {
              try {
@@ -1665,9 +1697,41 @@ ${capturedVariablesPrompt}
                       .eq("id", sessionId);
                 }
 
-                const adminPhone = process.env.ADMIN_WHATSAPP_PHONE || process.env.OWNER_PHONE;
+                // Reaproveitamento central da tabela appointments
+                try {
+                   const parsedDate = parseAgendaDateTime(horario);
+                   const startDt = !isNaN(parsedDate.getTime()) ? parsedDate : new Date(Date.now() + 24 * 60 * 60 * 1000);
+                   const endDt = new Date(startDt.getTime() + 15 * 60 * 1000); // 15 min call rápida
+
+                   await supabase.from("appointments").insert({
+                      client_id: clientId,
+                      agent_id: agentConfig?.id || null,
+                      lead_id: leadRow?.id || null,
+                      remote_jid: remoteJid,
+                      instance_name: instanceName,
+                      calendar_id: "whatsapp",
+                      title: `Reunião Fechamento - ${leadRow?.nome_negocio || "Lead"}`,
+                      description: resumo || `Reunião confirmada pela Sarah: ${horario}`,
+                      service_name: "Fechamento Site / Prévia",
+                      start_at: startDt.toISOString(),
+                      end_at: endDt.toISOString(),
+                      status: "confirmed",
+                      created_by: "ia",
+                      metadata: {
+                         horario_combinado: horario,
+                         link_previa: leadRow?.link_previa || null,
+                         nome_negocio: leadRow?.nome_negocio || null,
+                      },
+                   });
+                } catch (apptErr: any) {
+                   console.warn("[Agent/Appointment] falha ao registrar em appointments (não-fatal):", apptErr?.message);
+                }
+
+                // Reaproveita scheduler_config.owner_phone ou fallback env
+                const sched = (agentConfig?.scheduler_config || {}) as any;
+                const adminPhone = sched.owner_phone || process.env.ADMIN_WHATSAPP_PHONE || process.env.OWNER_PHONE;
                 if (adminPhone) {
-                   const adminJid = `${adminPhone.replace(/\D/g, "")}@s.whatsapp.net`;
+                   const adminJid = `${String(adminPhone).replace(/\D/g, "")}@s.whatsapp.net`;
                    const notifyMsg = `🎉 *REUNIÃO AGENDADA PELA SARAH!*\n\n🏢 Empresa: ${leadRow?.nome_negocio || "Lead"}\n📱 WhatsApp: ${remoteJid.replace(/@.*$/, "")}\n⏰ Horário: ${horario}\n🔗 Prévia: ${leadRow?.link_previa || "Ver no painel"}\n📝 Resumo: ${resumo || "Sem notas extras"}`;
                    const { sendMessage } = await import("@/lib/channel");
                    await sendMessage(adminJid, notifyMsg, instanceName).catch((e: any) =>
@@ -1677,6 +1741,7 @@ ${capturedVariablesPrompt}
 
                 functionResultRes = {
                    success: true,
+                   horario_confirmado: horario,
                    message: `Reunião agendada para ${horario}. Bot pausado para atendimento humano e administrador notificado.`,
                 };
                 callLogs.push({ role: "system", content: `[Reunião Fechamento] Agendada para ${horario} | Bot pausado` });
@@ -2336,11 +2401,12 @@ ${capturedVariablesPrompt}
     }
 
     // Se o lead está em PREVIA_PRONTA, rastreia envio de Ping e Link
-    if (!isTestMode && leadRow?.previa_status === "PREVIA_PRONTA") {
+    if (leadRow?.previa_status === "PREVIA_PRONTA") {
       const nowIso = new Date().toISOString();
       const updates: Record<string, any> = {};
       if (!leadRow.previa_ping_enviado_em) {
         updates.previa_ping_enviado_em = nowIso;
+        leadRow.previa_ping_enviado_em = nowIso;
       }
       const cleanLink = leadRow.link_previa?.trim().replace(/\/$/, "");
       const cleanAnswer = finalAnswer.toLowerCase();
@@ -2351,9 +2417,70 @@ ${capturedVariablesPrompt}
       );
       if (hasLinkInText && !leadRow.previa_link_enviado_em) {
         updates.previa_link_enviado_em = nowIso;
+        leadRow.previa_link_enviado_em = nowIso;
       }
-      if (Object.keys(updates).length > 0) {
+      if (!isTestMode && Object.keys(updates).length > 0) {
         supabase.from("leads_extraidos").update(updates).eq("client_id", clientId).eq("remoteJid", remoteJid).then(() => {}, () => {});
+      }
+    }
+
+    // =========================================================================
+    // DETECÇÃO AUTOMÁTICA DE ACEITE DA PRÉVIA VIA IA AVALIADORA LEVE
+    // =========================================================================
+    const autoDetectEnabled = agentConfig?.options?.site_preview_auto_detect ?? false;
+    if (
+      autoDetectEnabled &&
+      !previaSiteRequestedInTurn &&
+      (!leadRow?.previa_status || leadRow?.previa_status === "PREVIA_FALHOU" || leadRow?.previa_status === "novo")
+    ) {
+      try {
+        const historyForEval = isTestMode
+          ? testHistory.slice(-4).map((h: any) => ({
+              role: (h.role === "user" ? "user" : "agent") as "user" | "agent",
+              content: String(h.content || ""),
+            }))
+          : [...historico].reverse().slice(-4).map((h: any) => ({
+              role: (h.sender_type === "customer" || h.sender === "customer" ? "user" : "agent") as "user" | "agent",
+              content: String(h.content || ""),
+            }));
+
+        const messagesToEval = [
+          ...historyForEval,
+          { role: "user" as const, content: text },
+          { role: "agent" as const, content: finalAnswer },
+        ];
+
+        const evalResult = await evaluatePreviewAgreement({
+          messages: messagesToEval,
+          customPrompt: agentConfig?.options?.site_preview_eval_prompt,
+          modelRef: agentConfig?.options?.site_preview_eval_model || agentConfig?.target_model,
+        });
+
+        if (evalResult.agreed) {
+          previaSiteRequestedInTurn = true;
+          if (!leadRow) {
+            leadRow = { previa_status: "PREVIA_SOLICITADA" };
+          } else {
+            leadRow.previa_status = "PREVIA_SOLICITADA";
+          }
+          callLogs.push({
+            role: "system",
+            content: `[IA Avaliadora de Aceite] Aceite de prévia confirmado (${evalResult.confidence}, ${evalResult.evaluatorMethod}). Motivo: ${evalResult.reason}. Acionando pipeline do OpenCode.`,
+          });
+          if (!isTestMode) {
+            await supabase
+              .from("leads_extraidos")
+              .update({
+                previa_status: "PREVIA_SOLICITADA",
+                status: "PREVIA_SOLICITADA",
+                previa_solicitada_em: new Date().toISOString(),
+              })
+              .eq("client_id", clientId)
+              .eq("remoteJid", remoteJid);
+          }
+        }
+      } catch (evalErr: any) {
+        console.warn("[AGENT] Falha na avaliação automática de aceite de prévia:", evalErr?.message);
       }
     }
 
@@ -2366,7 +2493,11 @@ ${capturedVariablesPrompt}
     const testStateUpdate = isTestMode ? {
         variables: currentVariables,
         currentStageIndex: currentStageIndex,
-        skippedStages: skippedStages
+        skippedStages: skippedStages,
+        previa_status: leadRow?.previa_status,
+        link_previa: leadRow?.link_previa,
+        previa_ping_enviado_em: leadRow?.previa_ping_enviado_em,
+        previa_link_enviado_em: leadRow?.previa_link_enviado_em,
     } : undefined;
 
     if (isTestMode) {

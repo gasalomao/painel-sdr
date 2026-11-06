@@ -16,7 +16,7 @@
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { evolution } from "@/lib/evolution";
 import * as channel from "@/lib/channel";
-import { renderTemplate } from "@/lib/template-vars";
+import { leadRowToTemplateContext, renderTemplate } from "@/lib/template-vars";
 import { webSearch, formatResultsForAI } from "@/lib/web-search";
 import { logTokenUsage } from "@/lib/token-usage";
 import { registerAiSend, registerPendingAutomatedSend } from "@/lib/manual-send-registry";
@@ -664,7 +664,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
   let leadFull: any = null;
   {
     const cols = "nome_negocio, ramo_negocio, telefone, endereco, website, instagram, facebook, avaliacao, reviews, status, categoria, resumo_avaliacoes";
-    const q = supabase.from("leads_extraidos").select(cols).eq("remoteJid", target.remote_jid).eq("client_id", clientId);
+    const q = supabase.from("leads_extraidos").select("*").eq("remoteJid", target.remote_jid).eq("client_id", clientId);
     let res = await q.maybeSingle();
     if (res.error && res.error.code === "PGRST204") {
       res = await supabase
@@ -691,23 +691,12 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
 
   // Contexto de render — usado no template AGORA e DE NOVO depois da IA
   // (rede de segurança: nenhuma {{variavel}} pode chegar ao cliente).
-  const renderCtx = {
-    remoteJid:    sendJid,
+  const renderCtx = leadRowToTemplateContext(leadFull, {
+    remoteJid: sendJid,
     nome_negocio: leadFull?.nome_negocio || target.nome_negocio,
     ramo_negocio: leadFull?.ramo_negocio || target.ramo_negocio,
-    push_name:    pushName,
-    telefone:     leadFull?.telefone || null,
-    endereco:     leadFull?.endereco || null,
-    website:      leadFull?.website || null,
-    instagram:    leadFull?.instagram || null,
-    facebook:     leadFull?.facebook || null,
-    avaliacao:    leadFull?.avaliacao ?? null,
-    reviews:      leadFull?.reviews ?? null,
-    status:       leadFull?.status || null,
-    categoria:    (leadFull as any)?.categoria || null,
-    resumo_avaliacoes: (leadFull as any)?.resumo_avaliacoes || null,
-    link_previa: (leadFull as any)?.link_previa || null,
-  };
+    push_name: pushName,
+  });
 
   // Renderiza msg base substituindo variáveis ({{saudacao}}, {{nome_empresa}}, etc)
   let text = renderTemplate(c.message_template, renderCtx);
@@ -1320,29 +1309,18 @@ export async function preGenerateCampaignMessages(campaignId: string): Promise<{
     const cols = "nome_negocio, ramo_negocio, telefone, endereco, website, instagram, facebook, avaliacao, reviews, status, categoria, resumo_avaliacoes";
     let leadFull: any = null;
     {
-      let res = await supabase.from("leads_extraidos").select(cols).eq("remoteJid", target.remote_jid).eq("client_id", c.client_id).maybeSingle();
+      let res = await supabase.from("leads_extraidos").select("*").eq("remoteJid", target.remote_jid).eq("client_id", c.client_id).maybeSingle();
       if (res.error && res.error.code === "PGRST204") {
         res = await supabase.from("leads_extraidos").select(cols.replace(", resumo_avaliacoes", "")).eq("remoteJid", target.remote_jid).eq("client_id", c.client_id).maybeSingle();
       }
       leadFull = res.data || null;
     }
-    const renderCtx = {
+    const renderCtx = leadRowToTemplateContext(leadFull, {
       remoteJid: target.remote_jid,
       nome_negocio: leadFull?.nome_negocio || target.nome_negocio,
       ramo_negocio: leadFull?.ramo_negocio || target.ramo_negocio,
       push_name: null,
-      telefone: leadFull?.telefone || null,
-      endereco: leadFull?.endereco || null,
-      website: leadFull?.website || null,
-      instagram: leadFull?.instagram || null,
-      facebook: leadFull?.facebook || null,
-      avaliacao: leadFull?.avaliacao ?? null,
-      reviews: leadFull?.reviews ?? null,
-      status: leadFull?.status || null,
-      categoria: leadFull?.categoria || null,
-      resumo_avaliacoes: leadFull?.resumo_avaliacoes || null,
-      link_previa: (leadFull as any)?.link_previa || null,
-    };
+    });
 
     const baseText = renderTemplate(c.message_template, renderCtx);
     let text = baseText;

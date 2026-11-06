@@ -7,7 +7,8 @@ import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { Book, Check, Info, Pencil, Plus, Settings, Trash2, Wrench, X, Image as ImageIcon, Upload, Loader2, Sparkles, Bot, MessageSquare, SlidersHorizontal, CalendarDays, FileText, ChevronDown, ArrowDown } from "lucide-react";
+import { Book, Check, Info, Pencil, Plus, Settings, Trash2, Wrench, X, Image as ImageIcon, Upload, Loader2, Sparkles, Bot, MessageSquare, SlidersHorizontal, CalendarDays, FileText, ChevronDown, ArrowDown, RotateCcw, Globe } from "lucide-react";
+import { DEFAULT_SITE_PREVIEW_EVAL_PROMPT, DEFAULT_SITE_PREVIEW_PING_MESSAGE } from "@/lib/sites/agreement-detector-constants";
 import { SaveButton } from "../_components/save-button";
 import { SectionCard } from "../_components/section-card";
 import { EmptyState } from "../_components/empty-state";
@@ -20,6 +21,7 @@ import { ModelOptions } from "@/components/ai-module-shared";
 import type { GroupableModel } from "@/lib/model-grouping";
 import { toast } from "sonner";
 import type { SplitIntensity } from "@/lib/agent-format";
+import { PROMPT_VARIABLES } from "@/lib/template-vars";
 
 // Rótulos da barra "Intensidade do picote" (1 = picota pouco · 5 = picota muito).
 const SPLIT_INTENSITY_LABELS: Record<SplitIntensity, string> = {
@@ -29,21 +31,6 @@ const SPLIT_INTENSITY_LABELS: Record<SplitIntensity, string> = {
   4: "Bastante",
   5: "Máximo",
 };
-
-// Variáveis que aparecem como chips clicáveis no editor de prompt.
-const PROMPT_VARIABLES = [
-  { key: "saudacao",      label: "Saudação",     hint: "Bom dia/Boa tarde/Boa noite/Boa madrugada (hora SP)" },
-  { key: "nome",          label: "Nome",         hint: "Push name do WhatsApp (com fallback pra empresa)" },
-  { key: "nome_empresa",  label: "Nome empresa", hint: "Do CRM (leads_extraidos.nome_negocio)" },
-  { key: "primeiro_nome", label: "1ª palavra",   hint: "Primeira palavra do nome da empresa" },
-  { key: "ramo",          label: "Ramo",         hint: "Ramo de negócio do CRM" },
-  { key: "categoria",     label: "Categoria",    hint: "Categoria do lead (Google)" },
-  { key: "endereco",      label: "Endereço",     hint: "Endereço do lead" },
-  { key: "website",       label: "Website",      hint: "Site do lead" },
-  { key: "telefone",      label: "Telefone",     hint: "Número limpo do WhatsApp" },
-  { key: "data",          label: "Data",         hint: "Data atual" },
-  { key: "hora",          label: "Hora",         hint: "Hora atual" },
-];
 
 // Apenas perguntas diretas que a IA precisa fazer ao cliente.
 // Telefone vem do JID, empresa/necessidade são inferidas pela IA sem perguntar.
@@ -197,6 +184,13 @@ export type InfoTabProps = {
   previewSelectedLeadId: number | null;
   applyLeadToSample: (l: PreviewLead) => void;
   previewLeadQuery: string; setPreviewLeadQuery: (v: string) => void;
+
+  // Prévias de Sites IA
+  sitePreviewAutoDetect: boolean; setSitePreviewAutoDetect: (v: boolean) => void;
+  sitePreviewConfirmBeforeLink: boolean; setSitePreviewConfirmBeforeLink: (v: boolean) => void;
+  sitePreviewEvalPrompt: string; setSitePreviewEvalPrompt: (v: string) => void;
+  sitePreviewPingMessage: string; setSitePreviewPingMessage: (v: string) => void;
+  sitePreviewEvalModel: string; setSitePreviewEvalModel: (v: string) => void;
 
   // Knowledge base CRUD
   showNovoK: boolean; setShowNovoK: (v: boolean) => void;
@@ -824,6 +818,95 @@ export function InfoTab(p: InfoTabProps) {
             onChange={p.setLeadIntelligenceEnabled}
             hint={<>Antes de cada interação, a IA gera um <strong>briefing do cliente</strong> (dores, abordagem, decisor, alertas) e usa no contexto. Custa tokens extra — ative só nos agentes que precisam de análise profunda.</>}
           />
+
+          {/* Prévias de Sites IA — Pipeline Autônomo */}
+          <div className="pt-3 border-t border-white/5 space-y-4">
+            <div className="flex items-center gap-2">
+              <Globe className="w-4 h-4 text-emerald-400" />
+              <span className="text-xs font-semibold text-white uppercase tracking-wider">Prévias de Sites IA (Pipeline Autônomo)</span>
+            </div>
+
+            <ToggleRow
+              label="Geração Automática de Prévia ao Detectar Aceite"
+              labelColor="text-emerald-400"
+              color="emerald"
+              checked={p.sitePreviewAutoDetect}
+              onChange={p.setSitePreviewAutoDetect}
+              hint={<>Quando o cliente concordar em ver a prévia gratuita, uma <strong>IA avaliadora leve</strong> detecta a concordância nas últimas mensagens e aciona o pipeline do OpenCode na VPS automaticamente, sem precisar de clique manual.</>}
+            />
+
+            <ToggleRow
+              label="Confirmar Disponibilidade Antes do Link (Duplo Vínculo)"
+              labelColor="text-blue-400"
+              color="blue"
+              checked={p.sitePreviewConfirmBeforeLink}
+              onChange={p.setSitePreviewConfirmBeforeLink}
+              hint={<>Quando ativo, após o deploy do site a IA não manda o link imediatamente: ela primeiro pergunta se o cliente está com o celular na mão para ver. Somente após a confirmação do cliente ela envia o link. Se desativado, envia o link pronto diretamente.</>}
+            />
+
+            {p.sitePreviewConfirmBeforeLink && (
+              <div className="space-y-1.5 pl-2 border-l-2 border-blue-500/30">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-medium text-foreground">
+                    Mensagem de Confirmação (Ping de Atenção)
+                  </label>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 text-[11px] text-muted-foreground hover:text-white flex items-center gap-1 px-2"
+                    onClick={() => p.setSitePreviewPingMessage(DEFAULT_SITE_PREVIEW_PING_MESSAGE)}
+                  >
+                    <RotateCcw className="w-3 h-3" /> Restaurar Padrão
+                  </Button>
+                </div>
+                <Textarea
+                  value={p.sitePreviewPingMessage}
+                  onChange={(e) => p.setSitePreviewPingMessage(e.target.value)}
+                  rows={3}
+                  placeholder="Mensagem para perguntar se o cliente pode olhar agora..."
+                  className="text-xs bg-black/40 border-white/10 resize-y"
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  Use a tag <code className="bg-white/10 px-1 py-0.5 rounded text-primary">{"{{nome_negocio}}"}</code> para inserir o nome da empresa do lead.
+                </p>
+              </div>
+            )}
+
+            {p.sitePreviewAutoDetect && (
+              <div className="space-y-1.5 pl-2 border-l-2 border-emerald-500/30">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs font-medium text-foreground">
+                      Prompt da IA Avaliadora de Aceite
+                    </label>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">
+                      ~50 tokens / avaliação
+                    </span>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 text-[11px] text-muted-foreground hover:text-white flex items-center gap-1 px-2"
+                    onClick={() => p.setSitePreviewEvalPrompt(DEFAULT_SITE_PREVIEW_EVAL_PROMPT)}
+                  >
+                    <RotateCcw className="w-3 h-3" /> Restaurar Padrão
+                  </Button>
+                </div>
+                <Textarea
+                  value={p.sitePreviewEvalPrompt}
+                  onChange={(e) => p.setSitePreviewEvalPrompt(e.target.value)}
+                  rows={5}
+                  placeholder="Instruções para o classificador leve de aceite..."
+                  className="text-[11px] font-mono bg-black/40 border-white/10 resize-y"
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  A IA avaliadora processa apenas as últimas mensagens trocadas para verificar com precisão cirúrgica se houve concordância formal, sem gastar tokens com a conversa inteira.
+                </p>
+              </div>
+            )}
+          </div>
         </div>
         </AdvancedSection>
       </SectionCard>

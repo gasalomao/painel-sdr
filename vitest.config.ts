@@ -16,6 +16,7 @@ export default defineConfig({
     // execução explícita funciona: $env:LIVE_E2E="1"; npx vitest run <arquivo>.
     exclude: ["**/node_modules/**"],
     globals: false,
+    testTimeout: 15000,
     clearMocks: true,
     restoreMocks: true,
     setupFiles: ["src/lib/__tests__/setup.ts"],

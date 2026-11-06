@@ -408,4 +408,130 @@ describe("POST /api/agent/process", () => {
       payload: { target_model: "gemini-fallback" },
     }));
   });
+
+  it("detecta aceite de prévia de site automaticamente e atualiza testStateUpdate para PREVIA_SOLICITADA", async () => {
+    state.rows.agent_settings = {
+      ...agentConfig(7, CLIENT_A),
+      options: {
+        site_preview_auto_detect: true,
+      },
+    };
+
+    state.startAiChat.mockResolvedValue({
+      provider: "gemini",
+      modelUsed: () => "gemini-test",
+      sendUser: vi.fn().mockResolvedValue({
+        text: "Perfeito! Já passei para nossa equipe preparar a prévia da sua empresa.",
+        toolCalls: [],
+        usage: { promptTokens: 20, completionTokens: 15, totalTokens: 35 },
+      }),
+      sendToolResults: vi.fn(),
+    });
+
+    const req = new Request("http://localhost/api/agent/process", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-test-agent-id": "7" },
+      body: JSON.stringify({
+        instanceName: "inst-a",
+        remoteJid: REMOTE_JID,
+        text: "Pode sim, pode fazer uma prévia do site pra minha oficina!",
+        isTestMode: true,
+        testHistory: [
+          { role: "agent", content: "Podemos montar uma prévia gratuita do seu site?" },
+        ],
+      }),
+    });
+
+    const response = await POST(req as never);
+    const json = await response.json();
+
+    expect(json.success).toBe(true);
+    expect(json.ai_responded).toBe(true);
+    expect(json.testStateUpdate?.previa_status).toBe("PREVIA_SOLICITADA");
+  });
+
+  it("NÃO detecta e NÃO atualiza para PREVIA_SOLICITADA quando site_preview_auto_detect estiver desativado", async () => {
+    state.rows.agent_settings = {
+      ...agentConfig(7, CLIENT_A),
+      options: {
+        site_preview_auto_detect: false,
+      },
+    };
+
+    state.startAiChat.mockResolvedValue({
+      provider: "gemini",
+      modelUsed: () => "gemini-test",
+      sendUser: vi.fn().mockResolvedValue({
+        text: "Entendido! Como posso te ajudar?",
+        toolCalls: [],
+        usage: { promptTokens: 20, completionTokens: 15, totalTokens: 35 },
+      }),
+      sendToolResults: vi.fn(),
+    });
+
+    const req = new Request("http://localhost/api/agent/process", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-test-agent-id": "7" },
+      body: JSON.stringify({
+        instanceName: "inst-a",
+        remoteJid: REMOTE_JID,
+        text: "Pode sim, pode fazer uma prévia do site pra minha oficina!",
+        isTestMode: true,
+        testHistory: [
+          { role: "agent", content: "Podemos montar uma prévia gratuita do seu site?" },
+        ],
+      }),
+    });
+
+    const response = await POST(req as never);
+    const json = await response.json();
+
+    expect(json.success).toBe(true);
+    expect(json.ai_responded).toBe(true);
+    expect(json.testStateUpdate?.previa_status).toBeUndefined();
+  });
+
+  it("executa a tool agendar_reuniao_fechamento e retorna confirmação simulada em modo teste", async () => {
+    state.startAiChat.mockResolvedValue({
+      provider: "gemini",
+      modelUsed: () => "gemini-test",
+      sendUser: vi.fn().mockResolvedValue({
+        text: "",
+        toolCalls: [
+          {
+            id: "call_reuniao_1",
+            name: "agendar_reuniao_fechamento",
+            args: {
+              horario_confirmado: "Quarta-feira às 14h",
+              resumo_necessidades: "Cliente quer ver como colocar fotos da loja",
+            },
+          },
+        ],
+        usage: { promptTokens: 40, completionTokens: 10, totalTokens: 50 },
+      }),
+      sendToolResults: vi.fn().mockResolvedValue({
+        text: "Excelente! Reunião agendada para Quarta-feira às 14h. Te chamo por aqui!",
+        toolCalls: [],
+        usage: { promptTokens: 30, completionTokens: 15, totalTokens: 45 },
+      }),
+    });
+
+    const req = new Request("http://localhost/api/agent/process", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-test-agent-id": "7" },
+      body: JSON.stringify({
+        instanceName: "inst-a",
+        remoteJid: REMOTE_JID,
+        text: "Combinado, quarta às 14h fica ótimo!",
+        isTestMode: true,
+      }),
+    });
+
+    const response = await POST(req as never);
+    const json = await response.json();
+
+    expect(json.success).toBe(true);
+    expect(json.ai_responded).toBe(true);
+    expect(json.text).toContain("Reunião agendada para Quarta-feira às 14h");
+  });
 });

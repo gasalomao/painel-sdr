@@ -2,9 +2,11 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { provisionLeadWorkspace } from "./workspace-provisioner";
-import { runOpenCodeHeadless } from "./opencode-runner";
+import { generateSiteWithAutoCorrection } from "./site-generation-loop";
 import { deployToVercel } from "./vercel-deployer";
 import { inspectAutonomousSitePreview } from "./qa-inspector";
+import { renderTemplate } from "@/lib/template-vars";
+import { DEFAULT_SITE_PREVIEW_PING_MESSAGE } from "./agreement-detector";
 
 export interface AutonomousWorkerOptions {
   pollIntervalMs?: number;
@@ -176,7 +178,41 @@ export async function sendPingActiveMessage(
     ? lead.nome_negocio.trim()
     : "empresa";
 
-  const pingText = `Oi! Tudo bem? Acabei de finalizar aqui no computador a prévia do site da ${nome} e já subi no ar para teste. Você tá com o celular na mão agora para eu te mandar o link e você dar uma olhada rápida?`;
+  // Busca opções do agente vinculado para saber se envia pergunta de disponibilidade (duplo vínculo) ou o link direto
+  let confirmBeforeLink = true;
+  let customPingTemplate: string | null = null;
+
+  try {
+    const { data: conn } = await supabase
+      .from("channel_connections")
+      .select("agent_id")
+      .eq("instance_name", instanceName)
+      .maybeSingle();
+
+    if (conn?.agent_id) {
+      const { data: ag } = await supabase
+        .from("agent_settings")
+        .select("options")
+        .eq("id", conn.agent_id)
+        .maybeSingle();
+
+      if (ag?.options) {
+        if (typeof ag.options.site_preview_confirm_before_link === "boolean") {
+          confirmBeforeLink = ag.options.site_preview_confirm_before_link;
+        }
+        if (typeof ag.options.site_preview_ping_message === "string" && ag.options.site_preview_ping_message.trim()) {
+          customPingTemplate = ag.options.site_preview_ping_message.trim();
+        }
+      }
+    }
+  } catch (optErr: any) {
+    console.warn(`[autonomous-worker] Aviso ao buscar config do agente para envio de prévia #${leadId}:`, optErr?.message);
+  }
+
+  const link = String(lead.link_previa || "").trim();
+  const pingText = confirmBeforeLink
+    ? renderTemplate(customPingTemplate || DEFAULT_SITE_PREVIEW_PING_MESSAGE, { nome_negocio: nome })
+    : `Oi! Tudo bem? Acabei de finalizar aqui no computador a prévia do site da ${nome} e já subi no ar para teste! Segue o link para dar uma olhadinha: ${link}. Me conta o que achou dessa estrutura inicial!`;
 
   const skipSend = opts?.skipWhatsApp || process.env.SKIP_PREVIEW_PING === "true";
 
@@ -202,9 +238,16 @@ export async function sendPingActiveMessage(
       created_at: nowIso,
     });
 
+    const leadUpdates: Record<string, any> = {
+      previa_ping_enviado_em: nowIso,
+    };
+    if (!confirmBeforeLink && link) {
+      leadUpdates.previa_link_enviado_em = nowIso;
+    }
+
     await supabase
       .from("leads_extraidos")
-      .update({ previa_ping_enviado_em: nowIso })
+      .update(leadUpdates)
       .eq("id", leadId);
 
     console.log(`[autonomous-worker] 🚀 #${leadId} Ping de atenção enviado ativamente via "${instanceName}" para ${remoteJid}`);
@@ -381,17 +424,19 @@ export async function processSingleLeadPreview(lead: Record<string, unknown>): P
       .eq("id", leadId);
 
     console.log(`[autonomous-worker] #${leadId} Executando OpenCode CLI headless...`);
-    await logAutonomousSiteEvent(lead, `[Site IA] 💻 Executando OpenCode CLI headless com Skill Impeccable na VPS...`, "info");
-    const runResult = await runOpenCodeHeadless({
+    await logAutonomousSiteEvent(lead, `[Site IA] 💻 Executando OpenCode CLI headless com Skill Impeccable + gate de layout (Desktop 1440x900 / Mobile 375x812)...`, "info");
+    const generation = await generateSiteWithAutoCorrection({
       workspaceDir: workspace.workspaceDir,
       leadName: nome,
       niche: typeof lead.ramo_negocio === "string" ? lead.ramo_negocio : "Serviços Locais",
-      timeoutMs: 660_000,
+      timeoutMs: 1_500_000,
       onLog: (line) => {
         const trimmed = line.trim();
         if (
           trimmed.startsWith("[OpenCode]") ||
           trimmed.startsWith("[Impeccable Detector]") ||
+          trimmed.startsWith("[CSS Validator]") ||
+          trimmed.startsWith("[Quality Gate]") ||
           trimmed.includes("anti-pattern") ||
           trimmed.includes("clean") ||
           trimmed.includes("error") ||
@@ -400,25 +445,36 @@ export async function processSingleLeadPreview(lead: Record<string, unknown>): P
           trimmed.includes("create") ||
           trimmed.includes("write")
         ) {
-          console.log(`[opencode-log] #${leadId}:`, trimmed.slice(0, 150));
+          console.log(`[opencode-log] #${leadId}:`, trimmed.slice(0, 200));
         }
       },
     });
+    const runResult = generation.run;
 
     if (!runResult.success) {
       throw new Error(`OpenCode falhou: ${runResult.error || "index.html não gerado"}`);
     }
 
-    console.log(`[autonomous-worker] #${leadId} OpenCode concluiu com sucesso (${runResult.generatedFiles.join(", ")}) em ${Math.round(runResult.durationMs / 1000)}s`);
-    await logAutonomousSiteEvent(lead, `[Site IA] 🎨 Código HTML/CSS gerado com sucesso em ${Math.round(runResult.durationMs / 1000)}s (${runResult.generatedFiles.join(", ")})`, "success");
+    console.log(`[autonomous-worker] #${leadId} OpenCode concluiu (${generation.attempts} execução(ões), ${runResult.generatedFiles.join(", ")}) em ${Math.round(runResult.durationMs / 1000)}s`);
+    await logAutonomousSiteEvent(lead, `[Site IA] 🎨 Código gerado em ${generation.attempts} execução(ões) (${runResult.generatedFiles.join(", ") || "index.html"})`, "success");
 
-    if (runResult.detectorReport) {
-      if (runResult.detectorReport.clean) {
+    if (!generation.success) {
+      const summary = generation.violations.slice(0, 8).map((v) => `[${v.code}] ${v.message}`).join(" | ");
+      console.warn(`[autonomous-worker] #${leadId} ❌ Gate de qualidade reprovou o site (deploy bloqueado): ${summary}`);
+      await logAutonomousSiteEvent(lead, `[Site IA] ❌ Gate de CSS/layout reprovou após ${generation.attempts} tentativa(s). Deploy bloqueado: ${summary}`, "error");
+      throw new Error(`Gate de qualidade reprovou o site: ${generation.violations.map((v) => v.code).join(", ")}`);
+    }
+
+    console.log(`[autonomous-worker] #${leadId} ✅ Gate pré-deploy aprovado: CSS válido + geometria Desktop/Mobile + movimento`);
+    await logAutonomousSiteEvent(lead, `[Site IA] ✅ Gate pré-deploy aprovado (CSS válido, geometria Desktop/Mobile e animações presentes)`, "success");
+
+    if (generation.detector) {
+      if (generation.detector.clean) {
         console.log(`[autonomous-worker] #${leadId} 🛡️ Impeccable Detector: 100% LIMPO (Zero anti-patterns detectados)`);
         await logAutonomousSiteEvent(lead, `[Site IA] 🛡️ Detector Oficial Impeccable: 100% LIMPO (Zero anti-patterns detectados)`, "success");
       } else {
-        console.log(`[autonomous-worker] #${leadId} ⚠️ Impeccable Detector: ${runResult.detectorReport.issuesCount} anti-patterns (${runResult.detectorReport.issues.join(", ")})`);
-        await logAutonomousSiteEvent(lead, `[Site IA] ⚠️ Detector Oficial Impeccable: ${runResult.detectorReport.issuesCount} anti-patterns (${runResult.detectorReport.issues.join(", ")})`, "warning");
+        console.log(`[autonomous-worker] #${leadId} ⚠️ Impeccable Detector: ${generation.detector.issuesCount} anti-patterns (${generation.detector.issues.join(", ")})`);
+        await logAutonomousSiteEvent(lead, `[Site IA] ⚠️ Detector Oficial Impeccable: ${generation.detector.issuesCount} anti-patterns (${generation.detector.issues.join(", ")})`, "warning");
       }
     }
 
@@ -498,8 +554,15 @@ export async function processSingleLeadPreview(lead: Record<string, unknown>): P
     } else {
       const issues = [
         !qaReport.http.ok ? "HTTP não retornou 200" : null,
+        !qaReport.css.valid ? `CSS inválido (${qaReport.css.errors.join("; ")})` : null,
         qaReport.dom.brokenImages.length > 0 ? `${qaReport.dom.brokenImages.length} imagens quebradas` : null,
         qaReport.dom.hasHorizontalOverflow ? "Overflow horizontal no mobile" : null,
+        qaReport.geometry.desktop.violations.length > 0
+          ? `Desktop: ${qaReport.geometry.desktop.violations.map((v) => v.code).join(", ")}`
+          : null,
+        qaReport.geometry.mobile.violations.length > 0
+          ? `Mobile: ${qaReport.geometry.mobile.violations.map((v) => v.code).join(", ")}`
+          : null,
         qaReport.score < 75 ? `Score de qualidade insuficiente (${qaReport.score}/100)` : null,
       ].filter(Boolean).join("; ");
 

@@ -19,6 +19,16 @@ import { extractLocation } from "@/lib/lead-intelligence";
 import { isValidCityName, ufFromCep, computeExpansionCandidates, proximitySearchTerm, normRegionName } from "@/lib/geo-regions";
 import { fetchPublicHttpUrl } from "@/lib/safe-url";
 import { extractGoogleReviewCount, parseGoogleReviewCount, parseMinReviews, reviewCountFilterReason } from "@/lib/scraper-review-count";
+import {
+  leadExtraFilterReason,
+  parseGoogleYear,
+  parseMaxReviews,
+  parseRatingBound,
+  resolveLeadGoogleYear,
+  validateGoogleYearRange,
+  validateRatingRange,
+  validateReviewCountRange,
+} from "@/lib/scraper-lead-filters";
 import { normalizeInstagramProfile } from "@/lib/scraper-instagram";
 import { makeSearchKey, loadExhaustedSearches, markSearchExhausted } from "@/lib/scraper-search-memory";
 import os from "os";
@@ -128,6 +138,16 @@ export interface ScraperSettings {
   filterWithInstagram?: boolean;
   /** Total mínimo de pessoas que avaliaram, independente da nota/comentários. 0 desativa. */
   minReviews?: number;
+  /** Total máximo de avaliações no Google (0 desativa). */
+  maxReviews?: number;
+  /** Nota média mínima no Google (0..5, 0 desativa). */
+  minRating?: number;
+  /** Nota média máxima no Google (0..5, 0 desativa). */
+  maxRating?: number;
+  /** Ano inicial em que o negócio está no Google ("No Google desde YYYY"). 0 desativa. */
+  googleYearFrom?: number;
+  /** Ano final em que o negócio está no Google ("até YYYY", 0 = até a data atual). */
+  googleYearTo?: number;
   captureAllReviews?: boolean;
   /** Limite máximo de leads a captar antes de parar. Quando atingido, o scraper
    *  sai do loop limpo, fecha o navegador, e o worker detecta o cap no próximo
@@ -295,6 +315,11 @@ export function evaluateLeadFilters(
   existingLeads: Lead[],
   reviewCount = "",
   instagram = "",
+  extra?: {
+    averageRating?: string;
+    yearEstablished?: string | number | null;
+    cardStage?: boolean;
+  },
 ): { pass: boolean; reason: string } {
   if (settings.filterEmpty && cleanPhone === "") return { pass: false, reason: "Sem telefone" };
   if (settings.filterDuplicates && cleanPhone !== "" && existingLeads.find((l) => l.phones.replace(/\D/g, "") === cleanPhone)) {
@@ -305,6 +330,18 @@ export function evaluateLeadFilters(
   const reviewReason = reviewCountFilterReason(reviewCount, settings.minReviews);
   if (reviewReason) return { pass: false, reason: reviewReason };
   if (settings.filterWithInstagram && !normalizeInstagramProfile(instagram)) return { pass: false, reason: "Sem Instagram" };
+  const extraReason = leadExtraFilterReason({
+    reviewCount,
+    averageRating: extra?.averageRating,
+    yearEstablished: extra?.yearEstablished,
+    maxReviews: settings.maxReviews,
+    minRating: settings.minRating,
+    maxRating: settings.maxRating,
+    googleYearFrom: settings.googleYearFrom,
+    googleYearTo: settings.googleYearTo,
+    cardStage: extra?.cardStage,
+  });
+  if (extraReason) return { pass: false, reason: extraReason };
   return { pass: true, reason: "" };
 }
 
@@ -759,6 +796,11 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
       filterEmpty: settings.filterEmpty === true, filterDuplicates: run.automationId ? true : settings.filterDuplicates === true,
       filterLandlines: settings.filterLandlines === true, filterWithWebsite: settings.filterWithWebsite === true,
       filterWithInstagram: settings.filterWithInstagram === true, minReviews: settings.minReviews || 0,
+      ...(settings.maxReviews && settings.maxReviews > 0 ? { maxReviews: settings.maxReviews } : {}),
+      ...(settings.minRating && settings.minRating > 0 ? { minRating: settings.minRating } : {}),
+      ...(settings.maxRating && settings.maxRating > 0 ? { maxRating: settings.maxRating } : {}),
+      ...(settings.googleYearFrom && settings.googleYearFrom > 0 ? { googleYearFrom: settings.googleYearFrom } : {}),
+      ...(settings.googleYearTo && settings.googleYearTo > 0 ? { googleYearTo: settings.googleYearTo } : {}),
     };
     const exhaustedSearches = await loadExhaustedSearches(run.clientId, effectiveFilters);
     const queue: { niche: string; region: string; proximity?: boolean }[] = [];
@@ -1475,8 +1517,18 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 }
 
                 let yearEstablished = "";
-                const yearMatch = bodyTxt.match(/(?:fundado|aberto|since|desde|established)\s+(?:em\s+|in\s+)?(\d{4})/i);
-                if (yearMatch) yearEstablished = yearMatch[1];
+                const yearMatch = bodyTxt.match(/(?:no\s+google\s+desde|fundad[oa]|abert[oa]|inaugurad[oa]|since|desde|established)\s+(?:em\s+|in\s+)?(19\d{2}|20\d{2})/i);
+                if (yearMatch) {
+                  yearEstablished = yearMatch[1];
+                } else {
+                  const yearsInBizMatch = bodyTxt.match(/(?:h[áa]\s+)?(\d{1,3})\+?\s*(?:anos?\s+no\s+mercado|anos?\s+de\s+atividade|anos?\s+de\s+experi[êe]ncia|years?\s+in\s+business)\b/i);
+                  if (yearsInBizMatch) {
+                    const yrs = parseInt(yearsInBizMatch[1], 10);
+                    if (yrs > 0 && yrs <= 125) {
+                      yearEstablished = String(new Date().getFullYear() - yrs);
+                    }
+                  }
+                }
 
                 let totalPhotoCount: number | null = null;
                 const photoCountMatch = bodyTxt.match(/(\d[\d.]*)\s+(?:fotos?|photos?)/i);
@@ -1614,7 +1666,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
 
                 // ---- Reviews que já vêm renderizadas no painel principal ----
                 // Google coloca as 2-3 mais recentes no topo.
-                const reviewEls0 = Array.from(document.querySelectorAll('div[role="article"][aria-label], div[data-review-id], div[jslog*="review"]'));
+                const reviewEls0 = Array.from(document.querySelectorAll('.jftiEf, div[role="article"][aria-label], div[data-review-id], div[jslog*="review"]'));
                 const reviewsInitial: any[] = [];
                 const reviewSeen = new Set<string>();
                 for (const r of reviewEls0) {
@@ -1627,7 +1679,11 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                   const sig = text.slice(0, 80);
                   if (!text || reviewSeen.has(sig)) continue;
                   reviewSeen.add(sig);
-                  const dateMatch = text.match(/(há\s+\d+\s+\w+|\d+\s+(?:dias?|semanas?|meses|anos?|day|week|month|year)s?\s+ago)/i);
+                  const dateElText = ((r.querySelector('.rsqaWe, .DU9Pgb, .xRkPPb') as HTMLElement | null)?.innerText || "").replace(/\s+/g, " ").trim();
+                  const normalizedText = text.replace(/\s+/g, " ");
+                  const dateMatch =
+                    dateElText.match(/((?:h[áa]\s+(?:\d+|um|uma)\s+(?:anos?|meses|m[êe]s|semanas?|dias?|horas?|minutos?)|(?:\d+|um|uma|a|one)\s+(?:dias?|semanas?|meses|m[êe]s|anos?|day|week|month|year)s?\s+(?:atr[áa]s|ago)))/i) ||
+                    normalizedText.match(/((?:h[áa]\s+(?:\d+|um|uma)\s+(?:anos?|meses|m[êe]s|semanas?|dias?|horas?|minutos?)|(?:\d+|um|uma|a|one)\s+(?:dias?|semanas?|meses|m[êe]s|anos?|day|week|month|year)s?\s+(?:atr[áa]s|ago)))/i);
                   // Foto do reviewer (avatar)
                   const authorImg = r.querySelector('img[src*="googleusercontent"], img[src*="ggpht"]') as HTMLImageElement;
                   const fotoAutor = authorImg ? (authorImg.src.split("=")[0]) : "";
@@ -1720,6 +1776,13 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 if (mainExtracted.claimed) claimed = mainExtracted.claimed;
                 if (mainExtracted.ownerName) ownerName = mainExtracted.ownerName;
                 if (mainExtracted.yearEstablished) yearEstablished = mainExtracted.yearEstablished;
+                const resolvedFromInitial = resolveLeadGoogleYear({
+                  yearEstablished,
+                  reviews: reviewsDetalhes,
+                });
+                if (resolvedFromInitial !== null) {
+                  yearEstablished = String(resolvedFromInitial);
+                }
                 if (mainExtracted.totalPhotoCount != null) totalPhotoCount = mainExtracted.totalPhotoCount;
                 if (mainExtracted.reviewTopics) reviewTopics = mainExtracted.reviewTopics;
                 if (mainExtracted.featuredReviews) featuredReviews = mainExtracted.featuredReviews;
@@ -1743,8 +1806,26 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
               // FILTROS ANTECIPADOS — logo após a FASE 1 (telefone + site já
               // conhecidos). Descarta ANTES da captura profunda de reviews:
               // não gastamos 10-30s de scroll em lead que será descartado.
+              // Se o filtro de ano no Google estiver ativo e o ano ainda não
+              // foi identificado (ou depende de ver avaliações mais antigas na FASE 2),
+              // aguarda a FASE 2 antes de descartar por ano ausente/recente.
               // ============================================================
-              const earlyCheck = evaluateLeadFilters(phoneStr.replace(/\D/g, ""), websiteStr, settings, leadsStore, cardData.reviewCount, instagramStr);
+              const deferYearToPhase2 =
+                Boolean(settings.googleYearFrom || settings.googleYearTo) &&
+                (!yearEstablished || Boolean(settings.googleYearTo && Number(yearEstablished) > settings.googleYearTo));
+              const earlyCheck = evaluateLeadFilters(
+                phoneStr.replace(/\D/g, ""),
+                websiteStr,
+                settings,
+                leadsStore,
+                cardData.reviewCount,
+                instagramStr,
+                {
+                  averageRating: cardData.averageRating,
+                  yearEstablished: deferYearToPhase2 ? undefined : yearEstablished,
+                  cardStage: deferYearToPhase2,
+                },
+              );
               if (!earlyCheck.pass) {
                 discardedByFilters = earlyCheck.reason;
                 sendRunLog(run, `🚫 Descartado (${earlyCheck.reason}): ${lead.name}`, "warning");
@@ -1768,8 +1849,9 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
               // ============================================================
               // FASE 2 — Capturar reviews profundas.
               // ============================================================
-              const reviewLimit = settings.captureAllReviews ? Number.MAX_SAFE_INTEGER : 50;
-              if (!discardedByFilters && (settings.captureAllReviews || reviewsDetalhes.length < reviewLimit)) {
+              const hasYearFilter = Boolean(settings.googleYearFrom || settings.googleYearTo);
+              const reviewLimit = settings.captureAllReviews ? Number.MAX_SAFE_INTEGER : hasYearFilter ? 200 : 50;
+              if (!discardedByFilters && (settings.captureAllReviews || hasYearFilter || reviewsDetalhes.length < reviewLimit)) {
                 try {
                   // ---- Abrir a lista de reviews (UI nova 2025+ do Maps) ----
                   // A UI nova NÃO tem [role="feed"] na aba Avaliações: as
@@ -1831,7 +1913,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
 
                   let semNovidade = 0;
                   let cachedCountAnterior = 0;
-                  const MAX_ROLAGENS = settings.captureAllReviews ? 1000 : 25;
+                  const MAX_ROLAGENS = settings.captureAllReviews ? 1000 : hasYearFilter ? 60 : 25;
                   // "Capturar todas" = paciência maior: o Maps carrega reviews
                   // em lazy chunks; 3 rodadas sem novidade (~3,5s) cortava
                   // listas longas no meio. 6 rodadas (~7s) cobre chunks lentos.
@@ -1862,7 +1944,11 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                         if (!text || cached[signature]) continue;
                         const authorMatch = aria.match(/(?:avaliaç(?:ão)?\s+de|review\s+by)\s+(.+?)(:|\s+\d\s)/i);
                         const ratingMatch = aria.match(/(\d(?:[.,]\d)?)\s*(?:estrela|star)/i) || text.match(/(\d(?:[.,]\d)?)\s*(?:estrela|star)/i);
-                        const dateMatch = text.match(/(há\s+\d+\s+\w+|\d+\s+(?:dias?|semanas?|meses|anos?|day|week|month|year)s?\s+ago)/i);
+                        const dateElText = ((element.querySelector('.rsqaWe, .DU9Pgb, .xRkPPb') as HTMLElement | null)?.innerText || "").replace(/\s+/g, " ").trim();
+                        const normalizedText = text.replace(/\s+/g, " ");
+                        const dateMatch =
+                          dateElText.match(/((?:h[áa]\s+(?:\d+|um|uma)\s+(?:anos?|meses|m[êe]s|semanas?|dias?|horas?|minutos?)|(?:\d+|um|uma|a|one)\s+(?:dias?|semanas?|meses|m[êe]s|anos?|day|week|month|year)s?\s+(?:atr[áa]s|ago)))/i) ||
+                          normalizedText.match(/((?:h[áa]\s+(?:\d+|um|uma)\s+(?:anos?|meses|m[êe]s|semanas?|dias?|horas?|minutos?)|(?:\d+|um|uma|a|one)\s+(?:dias?|semanas?|meses|m[êe]s|anos?|day|week|month|year)s?\s+(?:atr[áa]s|ago)))/i);
                         const authorImage = element.querySelector('img[src*="googleusercontent"], img[src*="ggpht"]') as HTMLImageElement | null;
                         const fotoAutor = authorImage?.src.split("=")[0] || "";
                         const fotos = Array.from(element.querySelectorAll('img[src*="googleusercontent"], img[src*="ggpht"]'))
@@ -1950,7 +2036,11 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                       const sig = text.slice(0, 80);
                       if (!text || seen.has(sig)) continue;
                       seen.add(sig);
-                      const dateMatch = text.match(/(há\s+\d+\s+\w+|\d+\s+(?:dias?|semanas?|meses|anos?|day|week|month|year)s?\s+ago)/i);
+                      const dateElText = ((r.querySelector('.rsqaWe, .DU9Pgb, .xRkPPb') as HTMLElement | null)?.innerText || "").replace(/\s+/g, " ").trim();
+                      const normalizedText = text.replace(/\s+/g, " ");
+                      const dateMatch =
+                        dateElText.match(/((?:h[áa]\s+(?:\d+|um|uma)\s+(?:anos?|meses|m[êe]s|semanas?|dias?|horas?|minutos?)|(?:\d+|um|uma|a|one)\s+(?:dias?|semanas?|meses|m[êe]s|anos?|day|week|month|year)s?\s+(?:atr[áa]s|ago)))/i) ||
+                        normalizedText.match(/((?:h[áa]\s+(?:\d+|um|uma)\s+(?:anos?|meses|m[êe]s|semanas?|dias?|horas?|minutos?)|(?:\d+|um|uma|a|one)\s+(?:dias?|semanas?|meses|m[êe]s|anos?|day|week|month|year)s?\s+(?:atr[áa]s|ago)))/i);
                       // Foto do reviewer (avatar)
                       const authorImg = r.querySelector('img[src*="googleusercontent"], img[src*="ggpht"]') as HTMLImageElement;
                       const fotoAutor = authorImg ? (authorImg.src.split("=")[0]) : "";
@@ -1991,6 +2081,13 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                       merged.set(sig, rv);
                     }
                     reviewsDetalhes = Array.from(merged.values()).slice(0, reviewLimit);
+                    const resolvedFromReviews = resolveLeadGoogleYear({
+                      yearEstablished,
+                      reviews: reviewsDetalhes,
+                    });
+                    if (resolvedFromReviews !== null) {
+                      yearEstablished = String(resolvedFromReviews);
+                    }
                     if (settings.captureAllReviews) {
                       // Cobertura: parseia o total declarado pelo Google
                       // ("1.234", "2,5k") e mostra capturadas vs esperadas —
@@ -2025,7 +2122,10 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
           // já saiu — não repete.
           const finalCheck = discardedByFilters
             ? { pass: false, reason: discardedByFilters }
-            : evaluateLeadFilters(cleanPhone, websiteStr, settings, leadsStore, cardData.reviewCount, instagramStr);
+            : evaluateLeadFilters(cleanPhone, websiteStr, settings, leadsStore, cardData.reviewCount, instagramStr, {
+                averageRating: cardData.averageRating,
+                yearEstablished,
+              });
 
           if (finalCheck.pass) {
             const jid = formatJid(phoneStr);
@@ -2363,6 +2463,16 @@ export interface StartOpts {
   filterWithInstagram?: boolean;
   /** Total mínimo de pessoas que avaliaram, independente da nota/comentários. 0 desativa. */
   minReviews?: number;
+  /** Total máximo de avaliações no Google (0 desativa). */
+  maxReviews?: number;
+  /** Nota média mínima no Google (0..5, 0 desativa). */
+  minRating?: number;
+  /** Nota média máxima no Google (0..5, 0 desativa). */
+  maxRating?: number;
+  /** Ano inicial em que o negócio está no Google ("No Google desde YYYY"). 0 desativa. */
+  googleYearFrom?: number;
+  /** Ano final em que o negócio está no Google ("até YYYY", 0 = até a data atual). */
+  googleYearTo?: number;
   captureAllReviews?: boolean;
   /** Limite de leads — quando atingido o scraper sai limpo. */
   maxLeads?: number;
@@ -2397,6 +2507,22 @@ export function startScraperRun(opts: StartOpts): { ok: boolean; error?: string;
   }
   const minReviews = parseMinReviews(opts.minReviews);
   if (minReviews === null) return { ok: false, error: "Mínimo de avaliações deve ser um inteiro entre 0 e 2147483647." };
+  const maxReviews = parseMaxReviews(opts.maxReviews);
+  if (maxReviews === null) return { ok: false, error: "Máximo de avaliações deve ser um inteiro entre 0 e 2147483647." };
+  const reviewRangeErr = validateReviewCountRange(minReviews, maxReviews);
+  if (reviewRangeErr) return { ok: false, error: reviewRangeErr };
+  const minRating = parseRatingBound(opts.minRating);
+  if (minRating === null) return { ok: false, error: "Nota mínima deve ser um número entre 0 e 5." };
+  const maxRating = parseRatingBound(opts.maxRating);
+  if (maxRating === null) return { ok: false, error: "Nota máxima deve ser um número entre 0 e 5." };
+  const ratingRangeErr = validateRatingRange(minRating, maxRating);
+  if (ratingRangeErr) return { ok: false, error: ratingRangeErr };
+  const googleYearFrom = parseGoogleYear(opts.googleYearFrom);
+  if (googleYearFrom === null) return { ok: false, error: "Ano inicial no Google deve ser um ano válido (ex.: 2019) ou 0 para desativar." };
+  const googleYearTo = parseGoogleYear(opts.googleYearTo);
+  if (googleYearTo === null) return { ok: false, error: "Ano final no Google deve ser um ano válido (ex.: 2026) ou 0 para até a data atual." };
+  const yearRangeErr = validateGoogleYearRange(googleYearFrom, googleYearTo);
+  if (yearRangeErr) return { ok: false, error: yearRangeErr };
   const booleanFilters = [
     ["filterEmpty", "Filtro de telefone"], ["filterDuplicates", "Filtro de duplicatas"],
     ["filterLandlines", "Filtro de telefone fixo"], ["filterWithWebsite", "Filtro de site"],
@@ -2455,6 +2581,11 @@ export function startScraperRun(opts: StartOpts): { ok: boolean; error?: string;
     filterWithWebsite: opts.filterWithWebsite === true,
     filterWithInstagram: opts.filterWithInstagram === true,
     minReviews,
+    maxReviews,
+    minRating,
+    maxRating,
+    googleYearFrom,
+    googleYearTo,
     captureAllReviews: opts.captureAllReviews,
     maxLeads: opts.maxLeads,
     reviews_ai: opts.reviews_ai,

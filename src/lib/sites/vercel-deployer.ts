@@ -102,7 +102,15 @@ export function sanitizeVercelProjectName(name: string): string {
 /**
  * Realiza o deploy do workspace diretamente via REST API da Vercel v13.
  */
-export async function deployToVercel(opts: VercelDeployOptions): Promise<VercelDeployResult> {
+export async function deployToVercel(
+  optsOrDir: VercelDeployOptions | string,
+  maybeProjectName?: string
+): Promise<VercelDeployResult> {
+  const opts: VercelDeployOptions =
+    typeof optsOrDir === "string"
+      ? { workspaceDir: optsOrDir, projectName: maybeProjectName || "preview-site" }
+      : optsOrDir;
+
   const { workspaceDir, projectName } = opts;
   const token = opts.token || process.env.VERCEL_TOKEN;
   const teamId = opts.teamId || process.env.VERCEL_TEAM_ID;

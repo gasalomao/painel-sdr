@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo } from "react";
-import { renderTemplate } from "@/lib/template-vars";
+import { leadRowToTemplateContext, renderTemplate } from "@/lib/template-vars";
 import { cn } from "@/lib/utils";
 import { Sparkles } from "lucide-react";
 import { LeadSelectorUI, type PreviewLead, type PreviewSample } from "./lead-selector";
@@ -18,16 +18,9 @@ import { LeadSelectorUI, type PreviewLead, type PreviewSample } from "./lead-sel
 type Knowledge = { id: string; title: string; content?: string };
 
 function buildSampleCtx(sample: PreviewSample) {
-  return {
+  return leadRowToTemplateContext(sample as Record<string, unknown>, {
     remoteJid: sample.telefone ? `${sample.telefone}@s.whatsapp.net` : undefined,
-    nome_negocio: sample.nome_negocio || null,
-    ramo_negocio: sample.ramo_negocio || null,
-    push_name: sample.push_name || null,
-    telefone: sample.telefone || null,
-    endereco: sample.endereco || null,
-    categoria: sample.categoria || null,
-    website: sample.website || null,
-  };
+  });
 }
 
 // Mesmo texto que o backend injeta em /api/agent/process pra cada KB referenciada.

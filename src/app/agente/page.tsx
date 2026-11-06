@@ -14,7 +14,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Header } from "@/components/layout/header";
 import { supabase } from "@/lib/supabase";
-import { renderTemplate } from "@/lib/template-vars";
+import { leadRowToTemplateContext, renderTemplate } from "@/lib/template-vars";
+import { DEFAULT_SITE_PREVIEW_EVAL_PROMPT, DEFAULT_SITE_PREVIEW_PING_MESSAGE } from "@/lib/sites/agreement-detector-constants";
 import { sandboxSuppressionMessage, normalizeSplitIntensity, DEFAULT_SPLIT_INTENSITY, type SplitIntensity } from "@/lib/agent-format";
 import { cn } from "@/lib/utils";
 import styles from "./agente.module.css";
@@ -22,11 +23,10 @@ import { useClientSession } from "@/lib/use-session";
 import { Activity, FlaskConical, Info, ListTree, Settings, type LucideIcon } from "lucide-react";
 import type { GroupableModel } from "@/lib/model-grouping";
 import type { Stage } from "./_components/sortable-stage";
-import type { TemplateContext } from "@/lib/template-vars";
 import { toast } from "sonner";
 
 import { AgentSwitcher } from "./_components/agent-switcher";
-import type { PreviewLead, PreviewSample } from "./_components/lead-selector";
+import { DEFAULT_PREVIEW_SAMPLE, leadToPreviewSample, type PreviewLead, type PreviewSample } from "./_components/lead-selector";
 import dynamic from "next/dynamic";
 import { AjustesTab, type ScheduleRow } from "./_tabs/ajustes-tab";
 // Tabs pesadas carregam sob demanda — só 1 aba é visível por vez, mas antes
@@ -108,6 +108,13 @@ export default function AgentePage() {
   // Cliente quer ativar só nos agentes que precisam de análise profunda do lead.
   const [leadIntelligenceEnabled, setLeadIntelligenceEnabled] = useState(false);
 
+  // ============= PRÉVIAS DE SITES IA =============
+  const [sitePreviewAutoDetect, setSitePreviewAutoDetect] = useState(true);
+  const [sitePreviewConfirmBeforeLink, setSitePreviewConfirmBeforeLink] = useState(true);
+  const [sitePreviewEvalPrompt, setSitePreviewEvalPrompt] = useState(DEFAULT_SITE_PREVIEW_EVAL_PROMPT);
+  const [sitePreviewPingMessage, setSitePreviewPingMessage] = useState(DEFAULT_SITE_PREVIEW_PING_MESSAGE);
+  const [sitePreviewEvalModel, setSitePreviewEvalModel] = useState("");
+
   // ============= GOOGLE CALENDAR =============
   const [calendarEnabled, setCalendarEnabled] = useState(false);
   const [googleJson, setGoogleJson] = useState("");
@@ -164,15 +171,7 @@ export default function AgentePage() {
 
   // ============= PRÉ-VISUALIZAÇÃO DO PROMPT =============
   const [previewOpen, setPreviewOpen] = useState(true);
-  const [previewSample, setPreviewSample] = useState<PreviewSample>({
-    nome_negocio: "Padaria Centro",
-    ramo_negocio: "Alimentação",
-    push_name:    "João",
-    telefone:     "11999998888",
-    endereco:     "Rua A, 123 - Centro",
-    categoria:    "Padaria",
-    website:      "padariacentro.com.br",
-  });
+  const [previewSample, setPreviewSample] = useState<PreviewSample>(DEFAULT_PREVIEW_SAMPLE);
   const [previewLeads, setPreviewLeads] = useState<PreviewLead[]>([]);
   const [previewLeadsLoading, setPreviewLeadsLoading] = useState(false);
   const [previewSelectedLeadId, setPreviewSelectedLeadId] = useState<number | null>(null);
@@ -338,6 +337,12 @@ export default function AgentePage() {
         // Lead Intelligence vem da coluna dedicada na tabela (não do JSONB options),
         // pra worker/automation conseguirem ler com SELECT simples.
         setLeadIntelligenceEnabled(data.lead_intelligence_enabled ?? false);
+
+        setSitePreviewAutoDetect(opts.site_preview_auto_detect ?? true);
+        setSitePreviewConfirmBeforeLink(opts.site_preview_confirm_before_link ?? true);
+        setSitePreviewEvalPrompt(opts.site_preview_eval_prompt || DEFAULT_SITE_PREVIEW_EVAL_PROMPT);
+        setSitePreviewPingMessage(opts.site_preview_ping_message || DEFAULT_SITE_PREVIEW_PING_MESSAGE);
+        setSitePreviewEvalModel(opts.site_preview_eval_model || "");
       }
       if (kb.data) setKnowledge(kb.data);
       setVinculoInstance(conn.data?.[0]?.instance_name || "");
@@ -560,6 +565,11 @@ export default function AgentePage() {
         web_search_enabled: webSearchEnabled,
         reasoning_mode: reasoningMode,
         thinking_budget: reasoningMode,
+        site_preview_auto_detect: sitePreviewAutoDetect,
+        site_preview_confirm_before_link: sitePreviewConfirmBeforeLink,
+        site_preview_eval_prompt: sitePreviewEvalPrompt,
+        site_preview_ping_message: sitePreviewPingMessage,
+        site_preview_eval_model: sitePreviewEvalModel,
       },
       lead_intelligence_enabled: leadIntelligenceEnabled,
     }).eq("id", activeAgentId).eq("client_id", clientId);
@@ -869,7 +879,7 @@ export default function AgentePage() {
       
       let query = supabase
         .from("leads_extraidos")
-        .select('id, "remoteJid", nome_negocio, ramo_negocio, categoria, endereco, website, telefone')
+        .select("*")
         .order("created_at", { ascending: false })
         .limit(500);
       if (session?.clientId) {
@@ -885,15 +895,7 @@ export default function AgentePage() {
   const applyLeadToSample = (lead: PreviewLead | null) => {
     if (!lead) return;
     setPreviewSelectedLeadId(lead.id);
-    setPreviewSample({
-      nome_negocio: lead.nome_negocio || "",
-      ramo_negocio: lead.ramo_negocio || "",
-      push_name:    "",
-      telefone:     lead.telefone || (lead.remoteJid || "").replace(/@.*$/, "").replace(/\D/g, ""),
-      endereco:     lead.endereco || "",
-      categoria:    lead.categoria || "",
-      website:      lead.website || "",
-    });
+    setPreviewSample(leadToPreviewSample(lead));
   };
 
   /* ====================================================================
@@ -932,7 +934,7 @@ export default function AgentePage() {
     if (!sandboxSimulationEnabled) return;
     setSandboxSimulating(true);
     try {
-      const baseMessage = renderTemplate(sandboxTemplate, previewSample as unknown as TemplateContext);
+      const baseMessage = renderTemplate(sandboxTemplate, leadRowToTemplateContext(previewSample as Record<string, unknown>));
       let finalMessage = baseMessage;
 
       if (sandboxPersonalizeAI) {
@@ -1188,6 +1190,16 @@ export default function AgentePage() {
                 cancelarEdicaoKnowledge={cancelarEdicaoKnowledge}
                 salvarEdicaoKnowledge={salvarEdicaoKnowledge}
                 deletarKnowledge={deletarKnowledge}
+                sitePreviewAutoDetect={sitePreviewAutoDetect}
+                setSitePreviewAutoDetect={setSitePreviewAutoDetect}
+                sitePreviewConfirmBeforeLink={sitePreviewConfirmBeforeLink}
+                setSitePreviewConfirmBeforeLink={setSitePreviewConfirmBeforeLink}
+                sitePreviewEvalPrompt={sitePreviewEvalPrompt}
+                setSitePreviewEvalPrompt={setSitePreviewEvalPrompt}
+                sitePreviewPingMessage={sitePreviewPingMessage}
+                setSitePreviewPingMessage={setSitePreviewPingMessage}
+                sitePreviewEvalModel={sitePreviewEvalModel}
+                setSitePreviewEvalModel={setSitePreviewEvalModel}
               />
             )}
 

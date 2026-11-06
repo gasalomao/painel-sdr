@@ -283,17 +283,46 @@ export function generateAgentsMdForWorkspace(nomeNegocio: string): string {
     `# AGENTS.md — Protocolo de Engenharia & Design: ${nomeNegocio}`,
     "",
     "## Protocolo Obrigatório de Frontend (Impeccable Engine)",
-    "1. **Leitura Prévia**: Antes de criar ou editar qualquer arquivo `.tsx`, `.jsx`, `.html` ou `.css`, leia integralmente o arquivo `DESIGN.md` e `INFORMACOES-DO-NEGOCIO.txt`.",
-    "2. **Zero Valores Mágicos**: Consuma exclusivamente os tokens semânticos definidos em `:root` (`--surface-canvas`, `--surface-elevated`, `--surface-interactive`, `--surface-glass`, `--ink-primary`, `--ink-secondary`, `--ink-muted`, `--ink-on-accent`, `--accent-primary`, `--accent-hover`, `--accent-subtle`, `--border-hairline`, `--border-strong`).",
-    "3. **Invocação Canônica do Impeccable**: Use o comando canônico `/impeccable` para ativar a skill no OpenCode CLI. Nunca use macros inexistentes como `/create`.",
-    "4. **Zero Anti-Patterns do Craft Floor (Detector Oficial Impeccable)**:",
-    "   - PROIBIDO [dark-glow]: Nenhum box-shadow ou text-shadow com glow/halo colorido (#dca64e ou similar) ou blur colorido em fundo escuro. Use sombras de elevação neutras (ex: 0 10px 30px rgba(0,0,0,0.4)) e bordas hairlines.",
+    "1. **Ativação Obrigatória de Skills via Tool Calling**:",
+    "   - Invoque a ferramenta 'skill' para carregar formalmente:",
+    "     * skill({ id: \"impeccable\" })",
+    "     * skill({ id: \"anti-ai-design\" })",
+    "     * skill({ id: \"frontend-design\" })",
+    "     * skill({ id: \"conversion-copy\" })",
+    "   - PROIBIÇÃO HEADLESS: É terminantemente PROIBIDO executar comandos interativos como 'serve-question --wait', 'concept-seed' ou qualquer script que espere por interação humana no navegador.",
+    "2. **Leitura Prévia**: Antes de criar ou editar qualquer arquivo `.tsx`, `.jsx`, `.html` ou `.css`, leia integralmente o arquivo `DESIGN.md` e `INFORMACOES-DO-NEGOCIO.txt`.",
+    "3. **Zero Valores Mágicos**: Consuma exclusivamente os tokens semânticos definidos em `:root` (`--surface-canvas`, `--surface-elevated`, `--surface-interactive`, `--surface-glass`, `--ink-primary`, `--ink-secondary`, `--ink-muted`, `--ink-on-accent`, `--accent-primary`, `--accent-hover`, `--accent-subtle`, `--border-hairline`, `--border-strong`).",
+    "4. **Invocação Canônica do Impeccable**: Use o comando canônico `/impeccable` para ativar a skill no OpenCode CLI.",
+    "5. **Zero Anti-Patterns do Craft Floor (Detector Oficial Impeccable)**:",
+    "   - PROIBIDO [dark-glow]: Nenhum box-shadow ou text-shadow com glow/halo colorido (#dca64e, #f59e0b ou similar) ou blur colorido em fundo escuro. Use sombras de elevação neutras (ex: 0 10px 30px rgba(0,0,0,0.4)) e bordas hairlines.",
+    "   - PROIBIDO [kicker-above-heading]: NUNCA insira nenhuma etiqueta, badge, span, div ou p isolado posicionado imediatamente antes ou acima de tags de cabeçalho (h1 a h6). Se houver códigos, números ou categorias, insira-os DENTRO do título ou DEPOIS do título como badge.",
+    "   - PROIBIDO [pulsing-dot]: NUNCA adicione bolinhas pulsantes com animações infinitas para simular status online. Use indicadores visuais estáticos e honestos.",
     "   - PROIBIDO [icon-tile-stack]: Nunca coloque uma caixinha/tile de ícone quadrada ou arredondada empilhada em cima de um título h3 ou h2. Coloque ícones inline ao lado do título ou integre o texto editorial em fluxo sem caixinhas de ícone.",
     "   - PROIBIDO [italic-serif-display]: Nunca use fonte serifada em itálico em títulos h1/h2 display (Cormorant Garamond, Fraunces ou Playfair em itálico). Use font-style: normal e fontes display fortes (Syne, Outfit, Cinzel roman).",
-    "   - PROIBIDO [cramped-padding]: Garanta espaçamento generoso interno. Toda seção com border-bottom deve ter padding vertical de pelo menos 5rem a 6rem. Todo card com borda ou fundo deve ter padding interno de pelo menos 1.5rem (24px) para que o texto nunca fique colado na borda.",
+    "   - PROIBIDO [cramped-padding]: Garanta espaçamento generoso interno. Toda seção com border-bottom ou fundo deve ter padding vertical de pelo menos 5rem a 7rem. Todo card com borda ou fundo deve ter padding interno de pelo menos 1.5rem (24px) para que o texto nunca fique colado na borda.",
     "   - PROIBIDO [overused-font]: Nunca use Inter, Roboto, Fraunces, Geist, Plus Jakarta Sans ou Space Grotesk. Use DM Sans, Syne, Outfit, Manrope ou Satoshi.",
-    "   - PROIBIDO [nested-cards]: Nunca aninhe um card dentro de outro card. Mantenha a hierarquia plana.",
-    "5. **Critério de Pronto (DoD)**: Só considere a tarefa concluída após o arquivo `index.html` ter sido gerado com 100% de conformidade com o craft floor (zero anti-patterns no detector), usando fotos reais de `./fotos/` e informações de `INFORMACOES-DO-NEGOCIO.txt`.",
+    "   - PROIBIDO [nested-cards]: Nunca aninhe um card dentro de outro card. Mantenha hierarquia plana.",
+    "   - PROIBIDO [side-tab]: Nunca use borda lateral grossa (border-left: 4px) em cards com cantos arredondados.",
+    "   - PROIBIDO [low-contrast]: Todo texto DEVE cumprir a norma WCAG AA (contraste mínimo de 4.5:1). Tons secundários e de legenda devem ter lightness >= 68%.",
+    "   - PROIBIDO [tiny-text]: Nenhum texto de corpo, legenda ou metadado pode ter menos de 12px (mínimo: 0.75rem / 12px; ideal: 0.8125rem / 13px).",
+    "   - PROIBIDO [skipped-heading]: Respeite a ordem hierárquica dos cabeçalhos sem pular níveis (h1 -> h2 -> h3).",
+    "   - PROIBIDO [cream-palette]: Nunca use fundos bege/creme genéricos de IA (#fbf9f4). Use fundos intencionais (branco puro #ffffff ou tons escuros nobres).",
+    "6. **Arquitetura Mandatória de 10 Seções (Padrão Fábrica de Divas #2115)**:",
+    "   - Gere um 'index.html' autoral, rico e completo (tamanho alvo: 80 KB a 120 KB, mais de 1.800 linhas de código sólido e autossuficiente).",
+    "   - Seções: 1. Top Utility Bar & Nav Header | 2. Hero de Alto Impacto | 3. Banner de Métricas Reais do Google Maps | 4. O Espaço / Ambiente Físico | 5. Especialidades & Serviços Detalhados | 6. Destaque de Assinatura | 7. Galeria / Portfólio de Resultados Reais | 8. Depoimentos e Avaliações Reais de Clientes | 9. Localização, Horários e Mapa Tático | 10. CTA Final de Fechamento & Rodapé Completo.",
+    "7. **Critério de Pronto (DoD)**: Só considere a tarefa concluída após o arquivo `index.html` ter sido gerado com 100% de conformidade com o craft floor (zero anti-patterns no detector), usando fotos reais de `./fotos/` e informações de `INFORMACOES-DO-NEGOCIO.txt`.",
+    "8. **Movimento Obrigatório (gate automático reprova se ausente)**:",
+    "   - No mínimo 2 blocos `@keyframes` nomeados e realmente usados.",
+    "   - Revelação por scroll com `new IntersectionObserver(...)` aplicando `.is-visible` em elementos `[data-reveal]` (opacity 0 -> 1, translateY(24px) -> 0).",
+    "   - Curva de movimento `cubic-bezier(0.16, 1, 0.3, 1)` nas transições de entrada.",
+    "   - Obrigatório `@media (prefers-reduced-motion: reduce)` desativando animações e transições.",
+    "   - Proibido pulso infinito em bolinhas de status.",
+    "9. **Contrato de Layout (medido em 1440x900 e 375x812)**:",
+    "   - Reset universal EXATO: `*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }` — padding do reset é SEMPRE 0.",
+    "   - Padding generoso apenas em containers, seções e cards; nunca em `p`, `h1`-`h6`, `span` ou `li` soltos.",
+    "   - `html, body { overflow-x: hidden; width: 100%; }` e `img { max-width: 100%; height: auto; }`.",
+    "   - Botões com padding vertical entre 0.75rem e 1.25rem; controles nunca ficam gigantes.",
+    "   - Zero overflow horizontal em 375px.",
   ].join("\n");
 }
 
@@ -316,8 +345,8 @@ export function generateDesignMdForLead(data: EnrichedLeadKitData, photosCount: 
   let surfaceInteractive = "oklch(20% 0.015 260)"; // #1A1A20
   let surfaceGlass = "oklch(16% 0.01 260 / 0.78)";
   let inkPrimary = "oklch(96% 0.01 90)";           // #F5F3EF
-  let inkSecondary = "oklch(72% 0.01 260)";        // #A3A3AE
-  let inkMuted = "oklch(50% 0.01 260)";            // #686873
+  let inkSecondary = "oklch(80% 0.01 260)";        // Alto contraste WCAG AA (>= 4.5:1)
+  let inkMuted = "oklch(68% 0.01 260)";            // Metadados legíveis e acessíveis (>= 4.5:1)
   let inkOnAccent = "oklch(98% 0.005 90)";
   let accentPrimary = "oklch(58% 0.22 28)";        // rubi / vermelho editorial
   let accentHover = "oklch(64% 0.23 28)";
@@ -335,8 +364,8 @@ export function generateDesignMdForLead(data: EnrichedLeadKitData, photosCount: 
     surfaceInteractive = "oklch(24% 0.03 55)";
     surfaceGlass = "oklch(16% 0.02 55 / 0.82)";
     inkPrimary = "oklch(97% 0.015 80)";
-    inkSecondary = "oklch(78% 0.025 70)";
-    inkMuted = "oklch(58% 0.02 60)";
+    inkSecondary = "oklch(82% 0.02 70)";
+    inkMuted = "oklch(70% 0.015 65)";
     inkOnAccent = "oklch(16% 0.02 55)";
     accentPrimary = "oklch(72% 0.16 75)"; // ouro solar nobre / champagne
     accentHover = "oklch(78% 0.17 75)";
@@ -350,6 +379,9 @@ export function generateDesignMdForLead(data: EnrichedLeadKitData, photosCount: 
     sansFont = "'DM Sans', system-ui, -apple-system, sans-serif";
     surfaceCanvas = "oklch(13% 0.01 60)";
     surfaceElevated = "oklch(17% 0.015 60)";
+    inkPrimary = "oklch(96% 0.01 90)";
+    inkSecondary = "oklch(80% 0.015 60)";
+    inkMuted = "oklch(68% 0.015 60)";
     accentPrimary = "oklch(66% 0.18 52)";
     accentHover = "oklch(72% 0.19 52)";
     accentSubtle = "oklch(66% 0.18 52 / 0.14)";
@@ -361,6 +393,9 @@ export function generateDesignMdForLead(data: EnrichedLeadKitData, photosCount: 
     sansFont = "'DM Sans', system-ui, -apple-system, sans-serif";
     surfaceCanvas = "oklch(13% 0.02 245)";
     surfaceElevated = "oklch(18% 0.025 245)";
+    inkPrimary = "oklch(97% 0.01 245)";
+    inkSecondary = "oklch(82% 0.02 245)";
+    inkMuted = "oklch(70% 0.02 245)";
     accentPrimary = "oklch(65% 0.16 235)";
     accentHover = "oklch(70% 0.17 235)";
     accentSubtle = "oklch(65% 0.16 235 / 0.15)";
@@ -372,6 +407,9 @@ export function generateDesignMdForLead(data: EnrichedLeadKitData, photosCount: 
     sansFont = "'DM Sans', system-ui, -apple-system, sans-serif";
     surfaceCanvas = "oklch(13% 0.02 35)";
     surfaceElevated = "oklch(18% 0.025 35)";
+    inkPrimary = "oklch(97% 0.015 45)";
+    inkSecondary = "oklch(82% 0.02 40)";
+    inkMuted = "oklch(70% 0.02 35)";
     accentPrimary = "oklch(62% 0.22 35)";
     accentHover = "oklch(68% 0.23 35)";
     accentSubtle = "oklch(62% 0.22 35 / 0.15)";
@@ -450,20 +488,27 @@ export function generateDesignMdForLead(data: EnrichedLeadKitData, photosCount: 
     "## 5. Física de Movimento e Interação",
     "- **Curva Padrão (Out-Expo)**: `cubic-bezier(0.16, 1, 0.3, 1)` com duração de 500ms para revelações de layout.",
     "- **Curva Microinteração**: `cubic-bezier(0.22, 1, 0.36, 1)` com duração de 200ms para estados de `:hover` e `:active`.",
-    "- **Regras de Scroll**: Elementos entram com `translateY(24px)` para 0 e `opacity: 0` para 1, escalonados em 60ms por item (`animation-delay: calc(var(--index) * 60ms)`).",
+    "- **Animações Nomeadas**: No mínimo 2 blocos `@keyframes` nomeados e realmente aplicados (ex: `@keyframes reveal-up` e `@keyframes float-in`).",
+    "- **Regras de Scroll**: `new IntersectionObserver(...)` aplica a classe `.is-visible` em elementos `[data-reveal]`, que entram com `translateY(24px)` para 0 e `opacity: 0` para 1, escalonados em 60ms por item (`transition-delay: calc(var(--index) * 60ms)`).",
     "- **Acessibilidade**: Obrigatório `@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }`.",
     "",
     "## 6. Restrições Absolutas do Craft Floor (Zero Anti-Patterns no Detector Oficial Impeccable)",
-    "- **PROIBIDO [dark-glow]**: Nenhum box-shadow ou text-shadow com glow/halo colorido (#dca64e ou similar) ou blur colorido em fundo escuro. Use sombras de elevação neutras (ex: 0 10px 30px rgba(0,0,0,0.4)) e bordas hairlines.",
+    "- **PROIBIDO [dark-glow]**: Nenhum box-shadow ou text-shadow com glow/halo colorido (#dca64e, #f59e0b ou similar) ou blur colorido em fundo escuro. Use sombras de elevação neutras (ex: 0 10px 30px rgba(0,0,0,0.4)) e bordas hairlines.",
+    "- **PROIBIDO [kicker-above-heading]**: NUNCA insira nenhuma etiqueta, badge, span, div ou p isolado posicionado imediatamente antes ou acima de tags de cabeçalho (h1 a h6). Se houver códigos, números ou categorias, insira-os DENTRO do título ou DEPOIS do título como badge.",
+    "- **PROIBIDO [pulsing-dot]**: NUNCA adicione bolinhas pulsantes com animações infinitas para simular status online. Use indicadores visuais estáticos e honestos.",
     "- **PROIBIDO [icon-tile-stack]**: Nunca coloque uma caixinha/tile de ícone quadrada ou arredondada empilhada em cima de um título h3 ou h2. Coloque ícones inline ao lado do título ou integre o texto editorial em fluxo sem caixinhas de ícone.",
     "- **PROIBIDO [italic-serif-display]**: Nunca use fonte serifada em itálico em títulos h1/h2 display (Cormorant Garamond, Fraunces ou Playfair em itálico). Use font-style: normal e fontes display fortes (Syne, Outfit).",
-    "- **PROIBIDO [cramped-padding]**: Garanta espaçamento generoso interno. Toda seção com border-bottom deve ter padding vertical de pelo menos 5rem a 6rem. Todo card com borda ou fundo deve ter padding interno de pelo menos 1.75rem (28px).",
+    "- **PROIBIDO [cramped-padding]**: Garanta espaçamento generoso interno. Toda seção com border-bottom ou fundo deve ter padding vertical de pelo menos 5rem a 7rem. Todo card com borda ou fundo deve ter padding interno de pelo menos 1.5rem (24px) para que o texto nunca fique colado na borda.",
     "- **PROIBIDO [overused-font]**: Inter, Roboto, Fraunces, Geist, Plus Jakarta Sans e Space Grotesk são proibidos. Use DM Sans e Syne.",
-    "- **PROIBIDO [nested-cards]**: Nunca aninhe um card dentro de outro card. Mantenha a hierarquia plana.",
+    "- **PROIBIDO [nested-cards]**: Nunca aninhe um card dentro de outro card. Mantenha hierarquia plana.",
+    "- **PROIBIDO [side-tab]**: Nunca use borda lateral grossa (border-left: 4px) em cards com cantos arredondados.",
+    "- **PROIBIDO [low-contrast]**: Todo texto DEVE cumprir a norma WCAG AA (contraste mínimo de 4.5:1). Em temas escuros use tons com lightness >= 68% para textos secundários e metadados.",
+    "- **PROIBIDO [tiny-text]**: Nenhum texto de corpo, legenda ou metadado pode ter menos de 12px (mínimo: 0.75rem / 12px; ideal: 0.8125rem / 13px).",
+    "- **PROIBIDO [skipped-heading]**: Respeite rigorosamente a ordem hierárquica dos cabeçalhos sem pular níveis (h1 -> h2 -> h3).",
+    "- **PROIBIDO [cream-palette]**: Nunca use fundos bege/creme genéricos de IA (#fbf9f4). Use fundos intencionais (branco puro #ffffff ou tons escuros nobres).",
     "- **PROIBIDO** kickers/eyebrows fracos em caixa alta acima de títulos (ex: nada de '.section-eyebrow' como 'SOBRE NÓS' ou 'NOSSOS DIFERENCIAIS' acima do h2).",
-    "- **PROIBIDO** inventar métricas falsas ('100% Satisfação', '5000+ Clientes'). Use apenas a nota real e total de avaliações do Google Maps catalogados em INFORMACOES-DO-NEGOCIO.txt.",
+    "- **PROIBIDO** inventar métricas falsas ('100% Satisfação', '5000+ Clientes'). Use apenas nota real e total de avaliações do Google Maps catalogados em INFORMACOES-DO-NEGOCIO.txt.",
     "- **PROIBIDO** usar emojis como ícones (✨, 🚀, 📞). Use apenas ícones SVG inline com stroke consistente (1.5px a 2px).",
-    "",
     "",
     "## 7. Curadoria Fotográfica Completa do Kit Site (Uso Mandatório de Todas as Fotos)",
     `- O Kit Site baixou e catalogou ${photosCount} fotos reais autênticas em ./fotos/ (foto-01 até foto-${String(photosCount).padStart(2, "0")}).`,
@@ -475,7 +520,7 @@ export function generateDesignMdForLead(data: EnrichedLeadKitData, photosCount: 
     "  * **Espaço / Ambiente / Biossegurança**: Fotos reais do local físico, bancadas e recepção (ex: fotos/foto-19.jpg em diante).",
     "- Cada tag `<img>` deve ter loading='lazy', width, height e alt descritivo semântico.",
     "- Harmonize as cores da interface com os tons vistos no ambiente físico das fotos.",
-    "- Botões de ação com link wa.me contextualizado e botão flutuante com pulso suave.",
+    "- Botões de ação com link wa.me contextualizado e botão flutuante fixo (sem pulso infinito).",
     "- Zero horizontal overflow: `html, body { overflow-x: hidden; width: 100%; scroll-behavior: smooth; }` e `img { max-width: 100%; height: auto; }`.",
     "",
     "## 8. Detalhes de Superfície & Ergonomia",
