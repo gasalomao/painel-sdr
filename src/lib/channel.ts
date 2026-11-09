@@ -259,7 +259,7 @@ async function ensureBase64(media: MediaData): Promise<MediaData> {
   };
 }
 
-export async function sendMessage(remoteJid: string, text: string, instanceName: string): Promise<SendResult> {
+export async function sendMessage(remoteJid: string, text: string, instanceName: string, options?: { delay?: number }): Promise<SendResult> {
   const ch = await resolveChannel(instanceName);
   if (ch.provider === "whatsapp_cloud") {
     const cfg = ensureCloudConfig(ch);
@@ -267,11 +267,15 @@ export async function sendMessage(remoteJid: string, text: string, instanceName:
   }
 
   const { primary, fallback } = await getProvider(instanceName);
-  const res = await primary.sendText(remoteJid, text, instanceName);
+  const res = options !== undefined
+    ? await primary.sendText(remoteJid, text, instanceName, options)
+    : await primary.sendText(remoteJid, text, instanceName);
   if (res.ok) return res;
 
   if (fallback) {
-    const fallbackRes = await fallback.sendText(remoteJid, text, instanceName);
+    const fallbackRes = options !== undefined
+      ? await fallback.sendText(remoteJid, text, instanceName, options)
+      : await fallback.sendText(remoteJid, text, instanceName);
     if (fallbackRes.ok) return fallbackRes;
   }
 
@@ -282,7 +286,8 @@ export async function sendMedia(
   remoteJid: string,
   caption: string,
   mediaData: MediaData,
-  instanceName: string
+  instanceName: string,
+  options?: { delay?: number }
 ): Promise<SendResult> {
   // GARANTIA ANTI-LINK: baixa a URL server-side e converte pra base64 ANTES
   // de chamar o provider. Sem isso, quando o agente IA envia uma foto de
@@ -304,11 +309,20 @@ export async function sendMedia(
   }
 
   const { primary, fallback } = await getProvider(instanceName);
-  const res = await primary.sendMedia(remoteJid, caption, resolvedMedia, instanceName);
+  const res = options !== undefined
+    ? await primary.sendMedia(remoteJid, caption, resolvedMedia, instanceName, options)
+    : await primary.sendMedia(remoteJid, caption, resolvedMedia, instanceName);
   if (res.ok) return res;
 
   if (fallback) {
-    const fallbackRes = await fallback.sendMedia(remoteJid, caption, resolvedMedia, instanceName);
+    const fallbackRes = options !== undefined
+      ? await fallback.sendMedia(remoteJid, caption, resolvedMedia, instanceName, options)
+      : await fallback.sendMedia(remoteJid, caption, resolvedMedia, instanceName);
+    if (fallbackRes.ok) return fallbackRes;
+  }
+
+  if (fallback) {
+    const fallbackRes = await fallback.sendMedia(remoteJid, caption, resolvedMedia, instanceName, options);
     if (fallbackRes.ok) return fallbackRes;
   }
 

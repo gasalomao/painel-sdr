@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { isTerminalColumn } from "@/lib/organizer-prompt";
 
 export const dynamic = "force-dynamic";
 
@@ -30,6 +31,22 @@ function isStaleDefault(cols: { status_key: string }[]): boolean {
   return STALE_DEFAULT_KEYS.every((k) => set.has(k));
 }
 
+function normalizeColumnRow(r: any) {
+  const inferredTerminal =
+    typeof r?.is_terminal === "boolean"
+      ? r.is_terminal
+      : isTerminalColumn({ status_key: r?.status_key || "", label: r?.label || "" });
+  return {
+    id: r.id,
+    status_key: r.status_key,
+    label: r.label,
+    color: r.color,
+    order_index: r.order_index,
+    is_system: !!r.is_system,
+    is_terminal: inferredTerminal,
+  };
+}
+
 /**
  * GET    /api/kanban-columns         → lista colunas do cliente (order_index)
  * POST   /api/kanban-columns         → cria { status_key, label, color, order_index }
@@ -42,12 +59,11 @@ export async function GET(req: NextRequest) {
   if (!ctx.ok) return ctx.response;
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
 
-  const COLS = "id, status_key, label, color, order_index, is_system" as const;
-  const selectCols = (rows: any[] | null) => (rows || []).map((r) => ({ ...r, is_terminal: !!(r as any).is_terminal }));
+  const selectCols = (rows: any[] | null) => (rows || []).map(normalizeColumnRow);
 
   const { data, error } = await supabaseAdmin
     .from("kanban_columns")
-    .select(COLS)
+    .select("*")
     .eq("client_id", ctx.clientId)
     .order("order_index");
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
@@ -56,11 +72,11 @@ export async function GET(req: NextRequest) {
     const { data: seeded, error: seedErr } = await supabaseAdmin!
       .from("kanban_columns")
       .insert(DEFAULT_KANBAN_COLUMNS.map((c) => ({ ...c, client_id: ctx.clientId })))
-      .select(COLS);
+      .select("*");
     if (seedErr) {
       const { data: reread } = await supabaseAdmin!
         .from("kanban_columns")
-        .select(COLS)
+        .select("*")
         .eq("client_id", ctx.clientId)
         .order("order_index");
       return NextResponse.json({ ok: true, columns: selectCols(reread), seeded: false });
@@ -68,16 +84,10 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ok: true, columns: selectCols(seeded), seeded: true });
   };
 
-  // Auto-seed lazy: tenant sem nenhuma coluna (conta antiga/admin que não passou
-  // pelo seed de criação) recebe o kanban padrão agora — sem isso, dropdowns de
-  // auto-promote e a própria tela de Organizador ficam vazios.
   if (!data || data.length === 0) {
     return seedDefaults();
   }
 
-  // Auto-cura: tenant com o seed ANTIGO/errado (intocado) é migrado pro conjunto
-  // correto que bate com os status reais dos leads (interessado, agendado, etc).
-  // Só dispara na assinatura exata do seed velho — config customizada é preservada.
   if (isStaleDefault(data)) {
     await supabaseAdmin
       .from("kanban_columns")
@@ -101,7 +111,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "status_key e label são obrigatórios" }, { status: 400 });
   }
 
-  // Calcula próximo order_index automaticamente
   const { data: maxRow } = await supabaseAdmin
     .from("kanban_columns")
     .select("order_index")
@@ -111,31 +120,45 @@ export async function POST(req: NextRequest) {
     .maybeSingle();
   const order_index = body.order_index ?? ((maxRow?.order_index ?? -1) + 1);
 
-  const { data, error } = await supabaseAdmin
+  const baseInsert = {
+    client_id: ctx.clientId,
+    status_key,
+    label,
+    color: body.color || "#6b7280",
+    order_index,
+    is_system: !!body.is_system,
+  };
+
+  let { data, error } = await supabaseAdmin
     .from("kanban_columns")
-    .insert({
-      client_id: ctx.clientId,
-      status_key,
-      label,
-      color: body.color || "#6b7280",
-      order_index,
-      is_system: false,
-      is_terminal: !!body.is_terminal,
-    })
+    .insert({ ...baseInsert, is_terminal: !!body.is_terminal })
     .select()
     .single();
+
+  // Fallback se a coluna is_terminal ainda não existir no banco remoto
+  if (error && /is_terminal/i.test(error.message || "")) {
+    const retry = await supabaseAdmin
+      .from("kanban_columns")
+      .insert(baseInsert)
+      .select()
+      .single();
+    data = retry.data;
+    error = retry.error;
+  }
+
   if (error) {
     if (error.code === "23505") return NextResponse.json({ ok: false, error: "Já existe uma coluna com esse status_key" }, { status: 409 });
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
-  return NextResponse.json({ ok: true, column: data });
+  return NextResponse.json({
+    ok: true,
+    column: {
+      ...normalizeColumnRow(data),
+      is_terminal: typeof body.is_terminal === "boolean" ? body.is_terminal : normalizeColumnRow(data).is_terminal,
+    },
+  });
 }
 
-/**
- * PATCH em lote pra reordenar:
- *   body: { columns: [{ id, order_index }, ...] }
- * Útil pra drag-and-drop salvar todas as posições novas de uma vez.
- */
 export async function PATCH(req: NextRequest) {
   const ctx = await requireClientId(req);
   if (!ctx.ok) return ctx.response;
@@ -145,7 +168,6 @@ export async function PATCH(req: NextRequest) {
   const updates: Array<{ id: string; order_index: number }> = Array.isArray(body.columns) ? body.columns : [];
   if (updates.length === 0) return NextResponse.json({ ok: false, error: "columns vazio" }, { status: 400 });
 
-  // Promise.all em paralelo — cada update filtra por client_id pra blindar IDOR
   const results = await Promise.all(
     updates.map((u) =>
       supabaseAdmin

@@ -128,18 +128,22 @@ function formatNumberForGo(remoteJid: string): string {
 export const evolutionGo: WhatsAppProvider = {
   name: "evolution_go",
 
-  async sendText(remoteJid: string, text: string, instanceName: string): Promise<SendResult> {
+  async sendText(remoteJid: string, text: string, instanceName: string, options?: { delay?: number }): Promise<SendResult> {
     try {
       const token = await resolveInstanceToken(instanceName);
       const cleanNumber = formatNumberForGo(remoteJid);
       if (!cleanNumber) {
         return { ok: false, error: `Número de destino inválido: "${remoteJid}"` };
       }
-      const res = await goFetch("/send/text", {
+      const payload: Record<string, any> = {
         instance: instanceName,
         number: cleanNumber,
         text,
-      }, token);
+      };
+      if (options?.delay && options.delay > 0) {
+        payload.delay = options.delay;
+      }
+      const res = await goFetch("/send/text", payload, token);
       const msgId = res?.key?.id || res?.messageId || res?.id;
       return { ok: true, messageId: msgId, status: "sent" };
     } catch (e: any) {
@@ -148,7 +152,7 @@ export const evolutionGo: WhatsAppProvider = {
     }
   },
 
-  async sendMedia(remoteJid: string, caption: string, media: MediaData, instanceName: string): Promise<SendResult> {
+  async sendMedia(remoteJid: string, caption: string, media: MediaData, instanceName: string, options?: { delay?: number }): Promise<SendResult> {
     try {
       const token = await resolveInstanceToken(instanceName);
       const cleanNumber = formatNumberForGo(remoteJid);
@@ -165,10 +169,17 @@ export const evolutionGo: WhatsAppProvider = {
         instance: instanceName,
         number: cleanNumber,
         mediatype: media.type,
-        fileName: media.fileName || `file.${media.type === "image" ? "jpg" : media.type === "audio" ? "mp3" : "bin"}`,
-        mimetype: media.mimetype || "application/octet-stream",
+        fileName: media.fileName || `file.${media.type === "image" ? "jpg" : media.type === "audio" ? "ogg" : "bin"}`,
+        mimetype: media.mimetype || (media.type === "audio" ? "audio/ogg; codecs=opus" : "application/octet-stream"),
         caption: caption || "",
       };
+      if (options?.delay && options.delay > 0) {
+        payload.delay = options.delay;
+      }
+      if (media.type === "audio") {
+        payload.ptt = true;
+        payload.isPtt = true;
+      }
       if (hasBase64) {
         payload.base64 = media.base64!.replace(/^data:[^;]+;base64,/, "");
       } else if (media.mediaUrl || media.url) {

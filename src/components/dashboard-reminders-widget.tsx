@@ -7,6 +7,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DashboardTaskForm } from "@/components/dashboard-task-form";
+import { DashboardGoalTriggerDialog } from "@/components/dashboard-goal-trigger-dialog";
 import { useClientSession } from "@/lib/use-session";
 import { cn } from "@/lib/utils";
 import type { DashboardTask, DashboardTasksResponse } from "@/types/dashboard-tasks";
@@ -228,9 +229,12 @@ function TaskList(): React.JSX.Element {
             <CheckCircle2 className="size-5 shrink-0 text-primary" aria-hidden="true" />
             <div><h2 ref={heading} tabIndex={-1} className="text-base font-semibold focus-visible:outline-2 focus-visible:outline-ring">Tarefas e lembretes</h2><p className="mt-1 text-xs leading-relaxed text-muted-foreground">Seu próximo passo, no horário certo.</p></div>
           </div>
-          <Button ref={newButton} size="sm" variant="outline" className="min-h-11 gap-1.5 px-3" disabled={setup !== "ready" || busy || !!editor} onClick={() => { setEditor({ task: null }); setActionError(""); }}>
-            <Plus className="size-4" aria-hidden="true" /> Nova tarefa
-          </Button>
+          <div className="flex items-center gap-2">
+            <DashboardGoalTriggerDialog disabled={busy} />
+            <Button ref={newButton} size="sm" variant="outline" className="min-h-11 gap-1.5 px-3" disabled={setup !== "ready" || busy || !!editor} onClick={() => { setEditor({ task: null }); setActionError(""); }}>
+              <Plus className="size-4" aria-hidden="true" /> Nova tarefa
+            </Button>
+          </div>
         </div>
 
         {setup === "missing" && <p role="status" className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-200 break-words">Para salvar tarefas livres e histórico, execute <code>migrations/017_dashboard_tasks.sql</code> no SQL Editor do Supabase. Os lembretes das fichas continuam disponíveis.</p>}

@@ -33,7 +33,8 @@ import {
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
 import { isAiSend, isManualSend, isPendingAutomatedSend } from "@/lib/manual-send-registry";
 import { safeSecretEqual, shouldLogOnce } from "@/lib/webhook-security";
-import { shouldSkipGroupActions, getTranscriptionMethod } from "@/lib/bot-status";
+import { shouldSkipGroupActions, resolveTranscriptionConfig } from "@/lib/bot-status";
+import { evolution } from "@/lib/evolution";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -173,14 +174,13 @@ export async function POST(req: NextRequest) {
       ? await findOrCreateSession(contact.id, instanceName, remoteJid, clientId)
       : null;
 
-    // Verifica se grupos estão desativados para este agente.
-    const groupDisabled = session?.agent_id
-      ? await shouldSkipGroupActions(remoteJid, session.agent_id)
-      : false;
+    // Verifica se grupos estão desativados para este agente/cliente.
+    const groupDisabled = await shouldSkipGroupActions(remoteJid, session?.agent_id, clientId);
 
-    const transcriptionMethod = session?.agent_id
-      ? await getTranscriptionMethod(session.agent_id)
-      : "auto";
+    const { method: transcriptionMethod, models: orModels } = await resolveTranscriptionConfig(
+      session?.agent_id,
+      clientId
+    );
 
     // ===== Buscar foto de perfil (fire-and-forget) =====
     // Não bloqueia o processamento da mensagem. Só busca se o contato
@@ -203,36 +203,66 @@ export async function POST(req: NextRequest) {
 
     // ===== MÍDIA: transcrever/descrever ANTES de salvar (o chat só mostra
     // o áudio já transcrito; placeholder apenas se transcrição falhou) =====
-    const base64Media = extractBase64Media(unwrapped);
+    let base64Media = extractBase64Media(unwrapped);
     let enrichedContent: string | null = null;
     let mediaUrl: string | null = null;
     // Provider da transcrição (UI only — badge no chat; nunca vai pro agente).
     let transcribeProvider: string | null = null;
 
-    if (!fromMe && base64Media) {
+    if (sender !== "ai" && msgType === "audio" && !base64Media && messageId) {
+      try {
+        const got = await evolution.getBase64FromMedia(messageId, instanceName, remoteJid, fromMe);
+        base64Media = got?.base64 || got?.data?.base64 || got?.message?.base64 || null;
+        if (!base64Media && fromMe) {
+          await new Promise((r) => setTimeout(r, 800));
+          const retryGot = await evolution.getBase64FromMedia(messageId, instanceName, remoteJid, fromMe);
+          base64Media = retryGot?.base64 || retryGot?.data?.base64 || retryGot?.message?.base64 || null;
+        }
+      } catch (fErr: any) {
+        console.warn("[evo-go-webhook] getBase64FromMedia falhou:", fErr?.message);
+      }
+    }
+
+    if (sender !== "ai" && base64Media) {
       try {
         // Upload da mídia.
         mediaUrl = await uploadMediaBase64(base64Media, remoteJid, sanitizeMimetype(mimetype || "", "application/octet-stream"));
 
-        // Transcrição/descrição baseada no tipo.
+        // Transcrição/descrição baseada no tipo (áudio transcreve inclusive para envio do operador/fromMe).
         if (msgType === "audio" && !groupDisabled && transcriptionMethod !== "disabled") {
-          const det = await transcribeAudioDetailed(base64Media, sanitizeMimetype(mimetype || "", "audio/ogg"), messageId, transcriptionMethod);
-          enrichedContent = det ? `🎤 ${det.text}` : "[🎤 O cliente enviou um áudio que não consegui transcrever]";
+          const det = await transcribeAudioDetailed(
+            base64Media,
+            sanitizeMimetype(mimetype || "", "audio/ogg"),
+            messageId,
+            transcriptionMethod,
+            { models: orModels }
+          );
+          enrichedContent = det
+            ? `🎤 ${det.text}`
+            : (fromMe ? "[🎤 Áudio enviado]" : "[🎤 O cliente enviou um áudio que não consegui transcrever]");
           if (det) transcribeProvider = det.provider;
-        } else if (msgType === "image") {
+        } else if (msgType === "audio" && groupDisabled) {
+          console.log(`[evo-go-webhook] Áudio em grupo ${remoteJid} — transcrição ignorada (grupos desativados)`);
+          enrichedContent = fromMe ? "[🎤 Áudio enviado]" : "[🎤 Áudio recebido]";
+        } else if (!fromMe && msgType === "image") {
           const desc = await describeImage(base64Media, sanitizeMimetype(mimetype || "", "image/jpeg"));
           enrichedContent = desc ? `📷 ${desc}` : null;
-        } else if (msgType === "document") {
+        } else if (!fromMe && msgType === "document") {
           const desc = await describeDocument(base64Media, sanitizeMimetype(mimetype || "", "application/pdf"), fileName);
           enrichedContent = desc ? `📄 ${fileName ? `[${fileName}] ` : ""}${desc}` : null;
         }
       } catch (e: any) {
         console.warn("[evo-go-webhook] processamento de mídia falhou:", e?.message);
-        if (msgType === "audio") enrichedContent = "[🎤 O cliente enviou um áudio que não consegui transcrever]";
+        if (msgType === "audio") {
+          enrichedContent = fromMe ? "[🎤 Áudio enviado]" : "[🎤 O cliente enviou um áudio que não consegui transcrever]";
+        }
       }
-    } else if (!fromMe && msgType === "audio" && !base64Media) {
-      // Sem base64 inline: antes ficava eternamente "[🎤 Áudio — transcrevendo...]".
-      enrichedContent = "[🎤 Áudio recebido — base64 indisponível para transcrição]";
+    } else if (sender !== "ai" && msgType === "audio" && !base64Media) {
+      if (groupDisabled) {
+        enrichedContent = fromMe ? "[🎤 Áudio enviado]" : "[🎤 Áudio recebido]";
+      } else {
+        enrichedContent = fromMe ? "[🎤 Áudio enviado]" : "[🎤 Áudio recebido — base64 indisponível para transcrição]";
+      }
     }
 
     // ===== Salvar mensagem (áudio já transcrito acima) =====
@@ -248,12 +278,15 @@ export async function POST(req: NextRequest) {
       client_id: clientId,
     };
     const { encodeTranscriptionMime } = await import("@/lib/transcription-label");
+    const cleanGoBaseMime = mimetype
+      ? sanitizeMimetype(mimetype, "application/octet-stream")
+      : (msgType === "audio" ? "audio/ogg" : null);
     const goMime = msgType === "audio" && transcribeProvider
-      ? encodeTranscriptionMime(mimetype || "audio/ogg", transcribeProvider)
-      : mimetype;
+      ? encodeTranscriptionMime(cleanGoBaseMime || "audio/ogg", transcribeProvider)
+      : cleanGoBaseMime;
 
     if (mediaUrl) insertData.media_url = mediaUrl;
-    if (goMime) insertData.mimetype = sanitizeMimetype(goMime, "application/octet-stream");
+    if (goMime) insertData.mimetype = goMime;
     if (msgType !== "text" && msgType !== "unknown" && msgType !== "buttons" && msgType !== "reaction") {
       insertData.media_type = msgType;
     }
@@ -271,6 +304,13 @@ export async function POST(req: NextRequest) {
       // Corrida de concorrência: outro request salvou a mesma mensagem
       // primeiro → é duplicata OK, não erro (evita retry infinito do GO).
       if ((insertErr as any).code === "23505") {
+        if (enrichedContent && enrichedContent.startsWith("🎤")) {
+          const enrichUpd: Record<string, any> = { content: enrichedContent };
+          if (goMime) enrichUpd.mimetype = goMime;
+          if (mediaUrl) enrichUpd.media_url = mediaUrl;
+          supabase.from("chats_dashboard").update(enrichUpd).eq("message_id", messageId).eq("client_id", clientId).then(() => {}, () => {});
+          supabase.from("messages").update({ content: enrichedContent, ...(goMime ? { mimetype: goMime } : {}) }).eq("message_id", messageId).eq("client_id", clientId).then(() => {}, () => {});
+        }
         seenMessageIds.add(dedupeKey);
         return NextResponse.json({ ok: true, skipped: true, reason: "db-dup-insert" });
       }
@@ -289,9 +329,9 @@ export async function POST(req: NextRequest) {
           session_id: session.id,
           message_id: messageId,
           sender,
-          content: text || null,
+          content: enrichedContent || text || null,
           media_category: msgType as any,
-          mimetype: mimetype || null,
+          mimetype: goMime || null,
           file_name: fileName || null,
           delivery_status: fromMe ? "sent" : "pending",
           created_at: new Date().toISOString(),
@@ -324,10 +364,9 @@ export async function POST(req: NextRequest) {
         }
         if (!isEchoOfAi) {
           const { getHumanPauseConfig, snoozeSession } = await import("@/lib/bot-status");
-          const hp = await getHumanPauseConfig();
-          if (hp.enabled) {
-            await snoozeSession(session.id, hp.minutes, "human");
-          }
+          const hp = await getHumanPauseConfig().catch(() => ({ enabled: true, minutes: 60 }));
+          const pauseMinutes = hp?.enabled ? hp.minutes : 60;
+          await snoozeSession(session.id, pauseMinutes, "human");
         }
       } catch (e: any) {
         console.warn("[evo-go-webhook] auto-pausa falhou:", e?.message);

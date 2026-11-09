@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { evolution } from "@/lib/evolution";
 import { getEffectiveStatus } from "@/lib/bot-status";
-import { shouldSkipGroupActions, getTranscriptionMethod, getTranscriptionModels } from "@/lib/bot-status";
+import { shouldSkipGroupActions, resolveTranscriptionConfig } from "@/lib/bot-status";
 import { isManualSend, isAiSend, isPendingAutomatedSend } from "@/lib/manual-send-registry";
 import { DEFAULT_CLIENT_ID } from "@/lib/tenant";
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
@@ -475,13 +475,13 @@ async function describeDocumentWithGemini(base64: string, mimetype: string, file
   return null;
 }
 
-// Placeholder textual pra mídias (aparece no chat antes do upload/transcrição terminarem)
+// Placeholder textual pra mídias (usado quando não há transcrição/descrição textual)
 function mediaPlaceholder(msgType: string): string {
   switch (msgType) {
     case "image":    return "[📷 Imagem]";
-    case "audio":    return "[🎤 Áudio — transcrevendo...]";
+    case "audio":    return "[🎤 Áudio]";
     case "video":    return "[🎥 Vídeo]";
-    case "document": return "[📄 Documento — extraindo conteúdo...]";
+    case "document": return "[📄 Documento]";
     case "sticker":  return "[Sticker]";
     case "location": return "[📍 Localização]";
     case "contact":  return "[👤 Contato]";
@@ -860,15 +860,14 @@ export async function POST(req: NextRequest) {
         }).then(() => {}, () => {});
       }
 
-      // Verifica se grupos estão desativados para este agente — se sim,
+      // Verifica se grupos estão desativados para este agente/cliente — se sim,
       // skipa transcrição de áudio e disparo da IA (mensagem ainda é salva).
-      const groupDisabled = session?.agent_id
-        ? await shouldSkipGroupActions(remoteJid, session.agent_id)
-        : false;
+      const groupDisabled = await shouldSkipGroupActions(remoteJid, session?.agent_id, clientId);
 
-      const transcriptionMethod = session?.agent_id
-        ? await getTranscriptionMethod(session.agent_id)
-        : "auto";
+      const { method: transcriptionMethod, models: orModels } = await resolveTranscriptionConfig(
+        session?.agent_id,
+        clientId
+      );
 
       // Determinar sender. Pra mensagens fromMe (saíram do nosso número):
       let sender: 'customer' | 'ai' | 'human' | 'system' = 'customer';
@@ -929,13 +928,19 @@ export async function POST(req: NextRequest) {
       // Provider da transcrição (UI only — badge no chat; nunca vai pro agente).
       let transcribeProvider = "none";
 
-      if (hasMedia && msgType === "audio" && !fromMe && !groupDisabled && transcriptionMethod !== "disabled") {
-        // Resolve base64 (inline ou via Evolution API)
+      if (hasMedia && msgType === "audio" && sender !== "ai" && !groupDisabled && transcriptionMethod !== "disabled") {
+        // Resolve base64 (inline ou via Evolution API — inclusive para áudios enviados pelo operador/fromMe)
         if (!base64Media && finalId) {
           console.log("[Media] Sem base64 inline — buscando via getBase64FromMedia...");
           try {
             const got = await evolution.getBase64FromMedia(finalId, instanceName, remoteJid, fromMe);
             base64Media = got?.base64 || got?.data?.base64 || got?.message?.base64 || null;
+            if (!base64Media && fromMe) {
+              // Em áudios enviados pelo celular, a Evolution API às vezes precisa de alguns milissegundos pra indexar no store
+              await new Promise((r) => setTimeout(r, 800));
+              const retryGot = await evolution.getBase64FromMedia(finalId, instanceName, remoteJid, fromMe);
+              base64Media = retryGot?.base64 || retryGot?.data?.base64 || retryGot?.message?.base64 || null;
+            }
             if (!base64Media && typeof got === "object") {
               console.log("[Media] getBase64FromMedia resposta keys:", Object.keys(got));
             }
@@ -952,9 +957,6 @@ export async function POST(req: NextRequest) {
           // (ordem definida em shared-helpers.transcribeAudioDetailed).
           try {
             const { transcribeAudioDetailed } = await import("@/app/api/webhooks/shared-helpers");
-            const orModels = session?.agent_id
-              ? await getTranscriptionModels(session.agent_id)
-              : [];
             const det = await transcribeAudioDetailed(base64Media, effMimetype, finalId, transcriptionMethod, { models: orModels });
             if (det) {
               transcript = det.text;
@@ -968,7 +970,9 @@ export async function POST(req: NextRequest) {
             enrichedContent = `🎤 ${transcript}`;
             console.log(`[Media] Transcrição (${transcribeProvider}):`, transcript.slice(0, 80));
           } else {
-            enrichedContent = "[🎤 O cliente enviou um áudio que não consegui transcrever]";
+            enrichedContent = fromMe
+              ? "[🎤 Áudio enviado]"
+              : "[🎤 O cliente enviou um áudio que não consegui transcrever]";
             console.warn("[Media] Transcrição falhou — nenhum provedor (whisper/openrouter/gemini) funcionou.");
             // Log detalhado pra diagnóstico no banco
             try {
@@ -1007,8 +1011,13 @@ export async function POST(req: NextRequest) {
           }
         } else {
           console.warn("[Media] Nenhum base64 — ative webhookBase64 na instância Evolution.");
-          enrichedContent = "[🎤 Áudio recebido — base64 indisponível]";
+          enrichedContent = fromMe
+            ? "[🎤 Áudio enviado]"
+            : "[🎤 Áudio recebido — base64 indisponível]";
         }
+      } else if (hasMedia && msgType === "audio" && groupDisabled) {
+        console.log(`[Media] Áudio em grupo ${remoteJid} — transcrição ignorada (grupos desativados)`);
+        enrichedContent = fromMe ? "[🎤 Áudio enviado]" : "[🎤 Áudio recebido]";
       }
 
       // === UPLOAD + DESCRICAO DE IMAGEM/DOCUMENTO/VÍDEO (INLINE) ===
@@ -1088,6 +1097,15 @@ export async function POST(req: NextRequest) {
       if (dashErr) {
         if ((dashErr as any).code === "23505") {
           console.log(">>> [Webhook] chats_dashboard duplicata (msg já salva, abortando fluxo concorrente):", finalId);
+          // Se o webhook transcreveu o áudio (ex.: enviado pelo painel via /api/send-message),
+          // garante que o conteúdo transcrito e o mimetype com provider sejam persistidos.
+          if (enrichedContent && enrichedContent.startsWith("🎤")) {
+            const enrichUpd: Record<string, any> = { content: enrichedContent };
+            if (finalMime) enrichUpd.mimetype = finalMime;
+            if (mediaUrl) enrichUpd.media_url = mediaUrl;
+            supabase.from("chats_dashboard").update(enrichUpd).eq("message_id", finalId).eq("client_id", clientId).then(() => {}, () => {});
+            supabase.from("messages").update({ content: enrichedContent, ...(finalMime ? { mimetype: finalMime } : {}) }).eq("message_id", finalId).eq("client_id", clientId).then(() => {}, () => {});
+          }
           // Mesmo sendo duplicata, atualiza last_message_at na session — antes
           // esse return early pulava o update em mensagens fromMe vindas do
           // painel (/api/send-message já inseriu a dash mas não bumpa sessions).
@@ -1116,7 +1134,7 @@ export async function POST(req: NextRequest) {
         if (mediaUrl || msgType !== 'text' || quotedId) {
           const extras: Record<string, any> = {};
           if (mediaUrl) extras.media_url = mediaUrl;
-          if (mimetype) extras.mimetype = mimetype;
+          if (finalMime) extras.mimetype = finalMime;
           if (['image', 'audio', 'video', 'document'].includes(msgType)) extras.media_type = msgType;
           if (msgType !== 'text') extras.message_type = msgType + 'Message';
           if (quotedId) extras.quoted_id = quotedId;
@@ -1135,7 +1153,7 @@ export async function POST(req: NextRequest) {
           content: enrichedContent || text || null,
           media_category: msgType as any,
           media_url: mediaUrl,
-          mimetype,
+          mimetype: finalMime,
           file_name: fileName,
           file_size: fileSize,
           quoted_msg_id: quotedId,
@@ -1197,13 +1215,11 @@ export async function POST(req: NextRequest) {
           }
           if (!isEchoOfAi) {
             const { getHumanPauseConfig, snoozeSession } = await import("@/lib/bot-status");
-            const hp = await getHumanPauseConfig();
-            if (hp.enabled) {
-              // A auto-pausa de mensagens manuais (do chat ou do celular) agora é sempre temporária (snooze)
-              // com base nos minutos pre-selecionados configurados no sistema.
-              await snoozeSession(session.id, hp.minutes, "human");
-              console.log(`[AUTO-PAUSE] IA pausada ${hp.minutes}min (snooze automático) — humano respondeu ${maskJid(remoteJid)}`);
-            }
+            const hp = await getHumanPauseConfig().catch(() => ({ enabled: true, minutes: 60 }));
+            // A auto-pausa de mensagens manuais (do chat ou do celular) silencia a IA temporariamente (default 60m)
+            const pauseMinutes = hp?.enabled ? hp.minutes : 60;
+            await snoozeSession(session.id, pauseMinutes, "human");
+            console.log(`[AUTO-PAUSE] IA pausada ${pauseMinutes}min (snooze automático) — humano respondeu ${maskJid(remoteJid)}`);
           }
         } catch (e: any) {
           console.warn("[AUTO-PAUSE] falhou:", e?.message);

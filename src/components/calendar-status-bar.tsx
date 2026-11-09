@@ -20,6 +20,8 @@ import styles from "@/app/calendario/calendar.module.css";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import { RadixModelOptions } from "@/components/ai-module-shared";
+import type { GroupableModel } from "@/lib/model-grouping";
 import { cn } from "@/lib/utils";
 
 type Agent = {
@@ -30,7 +32,7 @@ type Agent = {
 };
 
 type Instance = { instance_name: string; agent_id?: number | null; status?: string };
-type ModelOpt = { id: string; name?: string };
+type ModelOpt = GroupableModel;
 
 export function CalendarStatusBar({
   agents,
@@ -124,12 +126,17 @@ export function CalendarStatusBar({
               </SelectTrigger>
               <SelectContent className={cn(styles.popover, "max-h-[50vh]")}>
                 {modelOptions.length === 0 ? (
-                  <div className="text-[10px] text-muted-foreground px-2 py-1">Configure API Key Gemini</div>
-                ) : modelOptions.map(m => (
-                  <SelectItem key={m.id} value={m.id} className="text-xs">
-                    {m.name || m.id}
-                  </SelectItem>
-                ))}
+                  <div className="text-[10px] text-muted-foreground px-2 py-1">Configure a API Key em Configurações</div>
+                ) : (
+                  <>
+                    {currentModel && !modelOptions.some((m) => m.id === currentModel) && (
+                      <SelectItem value={currentModel} className="text-xs font-mono">
+                        {currentModel} (salvo)
+                      </SelectItem>
+                    )}
+                    <RadixModelOptions models={modelOptions} />
+                  </>
+                )}
               </SelectContent>
             </Select>
           ) : (

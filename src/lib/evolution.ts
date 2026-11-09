@@ -409,7 +409,7 @@ export const evolution = {
     return evoFetch(`/message/sendText/${instance}`, "POST", { number, text });
   },
 
-  async sendMessage(number: string, text: string, instance?: string) {
+  async sendMessage(number: string, text: string, instance?: string, options?: { delay?: number }) {
     if (!text) return null;
     instance = await resolveInstance(instance);
 
@@ -421,23 +421,31 @@ export const evolution = {
        target = target + "@s.whatsapp.net";
     }
 
+    const delay = options?.delay && options.delay > 0 ? options.delay : 1200;
+
     // Simular digitação
     try {
       await this.sendPresence(target, "composing", instance);
     } catch {}
 
-    return evoFetch(`/message/sendText/${instance}`, "POST", {
+    const payload: Record<string, any> = {
       number: target,
       text,
       linkPreview: true,
-    });
+    };
+    if (delay > 0) {
+      payload.delay = delay;
+    }
+
+    return evoFetch(`/message/sendText/${instance}`, "POST", payload);
   },
 
   async sendMedia(
     number: string,
     caption: string,
     mediaData: { type: "image" | "video" | "audio" | "document"; base64?: string; url?: string; mediaUrl?: string; fileName?: string; mimetype?: string },
-    instance?: string
+    instance?: string,
+    options?: { delay?: number }
   ) {
     instance = await resolveInstance(instance);
     const cleanNum = number.replace(/^phone:/i, "").trim();
@@ -445,8 +453,9 @@ export const evolution = {
        ? cleanNum
        : cleanNum.replace(/\D/g, "") + "@s.whatsapp.net";
 
-    // Simular digitação
-    await this.sendPresence(targetJid, "composing", instance);
+    // Simular digitação ou gravação de áudio
+    const presenceType = mediaData.type === "audio" ? "recording" : "composing";
+    await this.sendPresence(targetJid, presenceType, instance);
 
     // PREFERÊNCIA DE FONTE DA MÍDIA:
     //   1. base64 (se vier) — sempre funciona. Independente de URL pública,
@@ -462,13 +471,17 @@ export const evolution = {
       : null;
     const mediaSource = cleanBase64 || mediaData.mediaUrl || mediaData.url || mediaData.base64 || "";
 
+    const mediaDelay = options?.delay && options.delay > 0 ? options.delay : (mediaData.type === "audio" ? 2000 : 1500);
+
     if (mediaData.type === "audio") {
       // Áudio always via sendWhatsAppAudio (PTT com player nativo no WhatsApp).
-      // Aceita base64 OU URL (a Evolution baixa a URL pra PTT também).
+      // encoding: true faz a Evolution API transcodificar via ffmpeg para Opus PTT nativo do WhatsApp,
+      // garantindo que saia como áudio gravado na hora (waveform, microfone verde, sem rótulo de encaminhado).
       return evoFetch(`/message/sendWhatsAppAudio/${instance}`, "POST", {
         number: targetJid,
         audio: cleanBase64 || mediaData.mediaUrl || mediaData.url || "",
-        delay: 2000
+        delay: mediaDelay,
+        encoding: true,
       }, 120000);
     }
 
@@ -481,7 +494,7 @@ export const evolution = {
       media: mediaSource,
       fileName: mediaData.fileName || "midia",
       caption: caption || "",
-      delay: 1500
+      delay: mediaDelay,
     }, 120000);
   },
 

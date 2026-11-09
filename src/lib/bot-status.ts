@@ -101,17 +101,36 @@ export async function isGroupDisabled(agentId: number | string): Promise<boolean
 }
 
 /**
- * Combina as duas checagens: só retorna true se for grupo E o agente
+ * Combina as duas checagens: só retorna true se for grupo E o agente/cliente
  * tiver disable_groups ativado. Uso típico nos webhooks antes de
  * transcrever áudio ou disparar a IA.
  */
 export async function shouldSkipGroupActions(
   remoteJid: string | null | undefined,
-  agentId: number | string | null | undefined,
+  agentId?: number | string | null,
+  clientId?: string | null,
 ): Promise<boolean> {
   if (!isGroupJid(remoteJid)) return false;
-  if (!agentId) return false;
-  return isGroupDisabled(agentId);
+  if (agentId) {
+    return isGroupDisabled(agentId);
+  }
+  if (clientId) {
+    return cachedSetting(`gdc:${clientId}`, async () => {
+      try {
+        const { data } = await supabaseAdmin
+          .from("agent_settings")
+          .select("disable_groups")
+          .eq("client_id", clientId)
+          .order("id", { ascending: true })
+          .limit(1)
+          .maybeSingle();
+        return data?.disable_groups === true;
+      } catch {
+        return false;
+      }
+    });
+  }
+  return false;
 }
 
 export type TranscriptionMethod = "auto" | "whisper" | "gemini" | "openrouter" | "disabled";
@@ -132,6 +151,45 @@ export async function getTranscriptionMethod(agentId: number | string | null | u
       return "auto";
     }
   }) as Promise<TranscriptionMethod>;
+}
+
+/**
+ * Resolve o método e a lista de modelos de transcrição, usando o agente ou
+ * caindo pro agente padrão do cliente (client_id).
+ */
+export async function resolveTranscriptionConfig(
+  agentId?: number | string | null,
+  clientId?: string | null,
+): Promise<{ method: TranscriptionMethod; models: string[] }> {
+  if (agentId) {
+    const [method, models] = await Promise.all([
+      getTranscriptionMethod(agentId),
+      getTranscriptionModels(agentId),
+    ]);
+    return { method, models };
+  }
+  if (clientId) {
+    try {
+      const { data } = await supabaseAdmin
+        .from("agent_settings")
+        .select("id, transcription_method, options")
+        .eq("client_id", clientId)
+        .order("id", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      if (data) {
+        const m = data.transcription_method;
+        const method: TranscriptionMethod =
+          m === "whisper" || m === "gemini" || m === "openrouter" || m === "disabled" ? m : "auto";
+        const raw = (data.options as any)?.transcription_models;
+        const models = Array.isArray(raw)
+          ? raw.map((s: unknown) => String(s || "").trim()).filter(Boolean).slice(0, 10)
+          : [];
+        return { method, models };
+      }
+    } catch {}
+  }
+  return { method: "auto", models: [] };
 }
 
 /**

@@ -22,6 +22,7 @@ import { logTokenUsage } from "@/lib/token-usage";
 import { registerAiSend, registerPendingAutomatedSend } from "@/lib/manual-send-registry";
 import { splitMessage } from "@/lib/agent-format";
 import { isInstanceOwnedByClient } from "@/lib/tenant";
+import { calculateTypingDelayMs, DEFAULT_TYPING_DELAY_CONFIG } from "@/lib/agent-delay";
 
 type CampaignRow = {
   id: string;
@@ -788,6 +789,45 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
       console.warn(`[CAMPAIGN ${c.name}] findOrCreateContactSession falhou (best-effort): ${sessErr?.message || sessErr}`);
     }
 
+    // Resolve configuração de delay & presença "digitando..." (Evolution API)
+    // 1. Prioridade: scrape_filters da automação vinculada (c.automation_id)
+    // 2. Fallback: options do agente vinculado (c.agent_id)
+    // 3. Fallback seguro: DEFAULT_TYPING_DELAY_CONFIG (aleatório 5-25s)
+    let typingDelayMs = calculateTypingDelayMs(DEFAULT_TYPING_DELAY_CONFIG);
+    try {
+      if ((c as any).automation_id) {
+        const { data: auto } = await supabase
+          .from("automations")
+          .select("scrape_filters, agent_id")
+          .eq("id", (c as any).automation_id)
+          .maybeSingle();
+        const sf = auto?.scrape_filters;
+        if (sf?.typing_delay_mode || sf?.typing_delay) {
+          typingDelayMs = calculateTypingDelayMs(sf.typing_delay || sf);
+        } else if (auto?.agent_id) {
+          const { data: ag } = await supabase
+            .from("agent_settings")
+            .select("options")
+            .eq("id", auto.agent_id)
+            .maybeSingle();
+          if (ag?.options) {
+            typingDelayMs = calculateTypingDelayMs(ag.options);
+          }
+        }
+      } else if (c.agent_id) {
+        const { data: ag } = await supabase
+          .from("agent_settings")
+          .select("options")
+          .eq("id", c.agent_id)
+          .maybeSingle();
+        if (ag?.options) {
+          typingDelayMs = calculateTypingDelayMs(ag.options);
+        }
+      }
+    } catch (delayErr: any) {
+      console.warn(`[CAMPAIGN ${c.name}] Erro ao resolver typing delay:`, delayErr?.message);
+    }
+
     for (let i = 0; i < chunks.length; i++) {
       const chunkText = chunks[i];
       if (!chunkText) continue;
@@ -802,8 +842,8 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
       // Registra cada chunk anti-echo (webhook pode chegar antes de persistir).
       registerPendingAutomatedSend(c.instance_name, sendJid, chunkText);
 
-      // Envia (sendMessage já faz "composing" presence antes).
-      const result = await channel.sendMessage(sendJid, chunkText, c.instance_name);
+      // Envia com delay de presença "digitando..." configurado para evitar banimento
+      const result = await channel.sendMessage(sendJid, chunkText, c.instance_name, { delay: typingDelayMs });
       if (!result || result.ok === false) {
         throw new Error(result?.error || "Provider recusou o envio da campanha");
       }
@@ -841,6 +881,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
             mimetype: c.media_mimetype || undefined,
           },
           c.instance_name,
+          { delay: typingDelayMs },
         );
         if (!mediaResult || mediaResult.ok === false) {
           throw new Error(mediaResult?.error || "Provider recusou o envio da mídia");

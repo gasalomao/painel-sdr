@@ -161,9 +161,31 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
       const markers = Object.fromEntries(Object.entries(filters).filter(([key]) => key.startsWith("_")));
       update.scrape_filters = { ...filters, ...(update.scrape_filters as Record<string, unknown>), ...markers };
     }
+    const sanitizeScrapeFiltersForCaptureCheck = (obj: Record<string, unknown> | null | undefined) => {
+      const copy = { ...(obj || {}) };
+      delete copy.typing_delay;
+      delete copy.typing_delay_mode;
+      delete copy.typing_delay_seconds;
+      delete copy.typing_delay_min_seconds;
+      delete copy.typing_delay_max_seconds;
+      delete copy.typingDelay;
+      delete copy.typingDelayMode;
+      delete copy.typingDelaySeconds;
+      delete copy.typingDelayMinSeconds;
+      delete copy.typingDelayMaxSeconds;
+      return Object.fromEntries(Object.entries(copy).filter(([k]) => !k.startsWith("_")));
+    };
+
     const captureStarted = Number(current.scraped_count) > 0 || filters._captureSessionId != null;
     if (captureStarted && ["niches", "regions", "scrape_max_leads", "scrape_filters"].some(
-      key => key in update && !isDeepStrictEqual(update[key], key === "scrape_filters" ? filters : current[key]),
+      key => key in update && (
+        key === "scrape_filters"
+          ? !isDeepStrictEqual(
+              sanitizeScrapeFiltersForCaptureCheck(update.scrape_filters as Record<string, unknown>),
+              sanitizeScrapeFiltersForCaptureCheck(filters)
+            )
+          : !isDeepStrictEqual(update[key], current[key])
+      ),
     )) {
       return NextResponse.json({ success: false, error: "A captura já foi iniciada. Crie outra automação para mudar nichos, regiões, filtros ou meta." }, { status: 409 });
     }

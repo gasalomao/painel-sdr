@@ -12,6 +12,8 @@ import {
   Plus, Trash2, Pencil, LogIn, Power, X, Loader2,
   Shield, Users, AlertCircle, Copy, ClipboardCheck, Search, MoreHorizontal, RefreshCw,
 } from "lucide-react";
+import { ModelOptions } from "@/components/ai-module-shared";
+import type { GroupableModel } from "@/lib/model-grouping";
 import styles from "./clientes.module.css";
 
 type Client = {
@@ -73,7 +75,7 @@ Para cada conversa, retorne JSON: { status_novo, razao_curta, resumo }.`;
 const DEFAULT_FEATURES = Object.fromEntries(FEATURE_LIST.map((f) => [f.key, true]));
 const NO_FEATURES = Object.fromEntries(FEATURE_LIST.map((f) => [f.key, false]));
 
-type AiModel = { id: string; name: string; description?: string };
+type AiModel = GroupableModel;
 
 export default function AdminClientesPage(): JSX.Element {
   const [clients, setClients] = useState<Client[]>([]);
@@ -556,9 +558,9 @@ function ClientEditor({
               <div className={styles.field}>
                 <label htmlFor="client-model">Modelo de IA padrão</label>
                 <select id="client-model" value={model} onChange={(e) => setModel(e.target.value)} className={styles.input} aria-describedby="client-model-hint">
-                  {model && !models.some((m) => m.id === model) && <option value={model}>{model} (salvo)</option>}
-                  {!model && !models.length && <option value="">{modelsLoading ? "Carregando modelos..." : "Padrão global"}</option>}
-                  {models.map((m) => <option key={m.id} value={m.id}>{m.name} ({m.id})</option>)}
+                  {model && !models.some((m) => m.id === model) && <option value={model} className="bg-neutral-900">{model} (salvo)</option>}
+                  {!model && !models.length && <option value="" className="bg-neutral-900">{modelsLoading ? "Carregando modelos..." : "Padrão global"}</option>}
+                  <ModelOptions models={models} />
                 </select>
                 <p id="client-model-hint" className={cn(styles.hint, modelsError && styles.warning)}>{modelsLoading ? "Buscando modelos disponíveis..." : modelsError || `${models.length} modelo(s) disponíveis`}</p>
               </div>

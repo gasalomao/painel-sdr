@@ -125,7 +125,7 @@ export function sanitizeMimetype(mt: string | null | undefined, fallback: string
 
 export function mediaPlaceholder(msgType: string): string {
   if (msgType === "image") return "📷 Imagem";
-  if (msgType === "audio") return "[🎤 Áudio — transcrevendo...]";
+  if (msgType === "audio") return "[🎤 Áudio]";
   if (msgType === "video") return "🎥 Vídeo";
   if (msgType === "document") return "📄 Arquivo";
   if (msgType === "sticker") return "🎨 Figurinha";
@@ -270,7 +270,9 @@ export async function transcribeAudioDetailed(
     try {
       const { GoogleGenerativeAI } = await import("@google/generative-ai");
       const cfg = await getOrganizerConfig();
-      const apiKey = cfg?.api_key;
+      const { getAiKeys } = await import("@/lib/ai-keys");
+      const keys = await getAiKeys().catch(() => null);
+      const apiKey = cfg?.api_key || keys?.gemini || process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_API_KEY;
       if (!apiKey) return null;
       const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");
       const tryMimes = Array.from(new Set([sanitizeMimetype(mimetype, "audio/ogg"), "audio/ogg", "audio/mpeg", "audio/wav"]));

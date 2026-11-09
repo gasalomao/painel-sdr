@@ -177,7 +177,7 @@ describe("paridade da captura no Captador Maps", () => {
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Iniciar Captação" })); });
     expect(starts()).toHaveLength(0);
     expect(screen.getByRole("combobox", { name: "Modelo de IA para avaliações" })).toHaveValue("");
-    expect(screen.queryByRole("option", { name: "Modelo teste" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /Modelo teste/i })).not.toBeInTheDocument();
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/ai-models")).toHaveLength(2);
   });
 
@@ -186,7 +186,7 @@ describe("paridade da captura no Captador Maps", () => {
     fillCapture();
     fireEvent.click(screen.getByText("Avaliações completas e análise com IA", { exact: true }));
     fireEvent.click(screen.getByRole("switch", { name: "Resumir avaliações com IA" }));
-    const model = await screen.findByRole("option", { name: "Modelo teste" });
+    const model = await screen.findByRole("option", { name: /Modelo teste/i });
     expect(model).toHaveValue("modelo-teste");
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Modelo de IA para avaliações" })).toHaveValue("modelo-teste"));
     expect(screen.getByRole("switch", { name: "Capturar todas as avaliações" })).toBeChecked();

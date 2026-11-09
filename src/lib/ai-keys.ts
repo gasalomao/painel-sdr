@@ -75,6 +75,8 @@ export interface AiKeys {
    * A chave legada (nvidia_api_key) é sempre a primeira da lista.
    */
   nvidiaAccounts: NvidiaAccount[];
+  /** Modelo padrão configurado em ai_organizer_config.model (opcional). */
+  defaultAiModel?: string | null;
 }
 
 export const EMPTY_KEYS: AiKeys = {
@@ -88,6 +90,7 @@ export const EMPTY_KEYS: AiKeys = {
   aiCombos: [],
   nvidia: null,
   nvidiaAccounts: [],
+  defaultAiModel: null,
 };
 
 /** Normaliza um valor de coluna texto pra string-ou-null (trim, vazio→null). */

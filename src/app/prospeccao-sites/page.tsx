@@ -639,6 +639,11 @@ export default function ProspeccaoSitesPage() {
   const [autoGoogleYearFrom, setAutoGoogleYearFrom] = useState("0");
   const [autoGoogleYearTo, setAutoGoogleYearTo] = useState("0");
   const [autoExtraFiltersError, setAutoExtraFiltersError] = useState("");
+  // Delay & Digitando na Evolution API (anti-banimento)
+  const [autoTypingDelayMode, setAutoTypingDelayMode] = useState<"fixed" | "random">("random");
+  const [autoTypingDelaySeconds, setAutoTypingDelaySeconds] = useState(10);
+  const [autoTypingDelayMinSeconds, setAutoTypingDelayMinSeconds] = useState(5);
+  const [autoTypingDelayMaxSeconds, setAutoTypingDelayMaxSeconds] = useState(25);
   const [autoSteps, setAutoSteps] = useState<{ day_offset: number; template: string }[]>([
     { day_offset: 2, template: "Olá {{nome_empresa}}, tudo bem? Ainda tem interesse em ter um site profissional para sua empresa {{ramo}}?" },
   ]);
@@ -795,6 +800,16 @@ export default function ProspeccaoSitesPage() {
             reviews_ai: autoReviewsAi
               ? { enabled: true, model: autoReviewsAiModel || null, prompt: autoReviewsAiPrompt || null }
               : { enabled: false },
+            typing_delay_mode: autoTypingDelayMode,
+            typing_delay_seconds: autoTypingDelaySeconds,
+            typing_delay_min_seconds: autoTypingDelayMinSeconds,
+            typing_delay_max_seconds: autoTypingDelayMaxSeconds,
+            typing_delay: {
+              mode: autoTypingDelayMode,
+              seconds: autoTypingDelaySeconds,
+              min_seconds: autoTypingDelayMinSeconds,
+              max_seconds: autoTypingDelayMaxSeconds,
+            },
           },
           scrape_max_leads: autoMaxLeads,
           dispatch_template: autoTemplate,
@@ -2457,6 +2472,144 @@ export default function ProspeccaoSitesPage() {
                     <label className="text-xs text-white/60">Intervalo máx. entre disparos (s)</label>
                     <Input aria-label="Intervalo máximo entre disparos em segundos" type="number" value={autoMaxSec} onChange={(e) => setAutoMaxSec(Number(e.target.value))} min={autoMinSec} />
                   </div>
+                </div>
+
+                {/* Delay & Digitando (Evolution API) — Anti-banimento */}
+                <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-3 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="text-xs font-semibold text-cyan-200 flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-cyan-400" />
+                      Delay & Presença &quot;Digitando...&quot; (Evolution API)
+                    </span>
+                    <span className="text-[10px] font-mono text-cyan-300 bg-cyan-500/10 border border-cyan-500/20 px-2 py-0.5 rounded-full">
+                      {autoTypingDelayMode === "fixed" ? `Fixo: ${autoTypingDelaySeconds}s digitando` : `Aleatório: ${autoTypingDelayMinSeconds}s a ${autoTypingDelayMaxSeconds}s`}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-white/60 leading-relaxed">
+                    A Evolution API manterá a presença <strong className="text-cyan-300">&quot;digitando...&quot;</strong> ativa no WhatsApp do lead durante esse tempo antes de entregar a mensagem. Simula presença humana autêntica e previne bloqueios no WhatsApp.
+                  </p>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setAutoTypingDelayMode("fixed")}
+                      className={cn(
+                        "text-xs px-2.5 py-1 rounded-md border font-medium transition cursor-pointer",
+                        autoTypingDelayMode === "fixed"
+                          ? "bg-cyan-500/20 border-cyan-500/50 text-cyan-200 font-semibold shadow-xs"
+                          : "bg-black/40 border-white/10 text-white/60 hover:text-white"
+                      )}
+                    >
+                      Modo Fixo
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAutoTypingDelayMode("random")}
+                      className={cn(
+                        "text-xs px-2.5 py-1 rounded-md border font-medium transition cursor-pointer",
+                        autoTypingDelayMode === "random"
+                          ? "bg-cyan-500/20 border-cyan-500/50 text-cyan-200 font-semibold shadow-xs"
+                          : "bg-black/40 border-white/10 text-white/60 hover:text-white"
+                      )}
+                    >
+                      Modo Aleatório (Faixa Min–Máx)
+                    </button>
+                  </div>
+
+                  {autoTypingDelayMode === "fixed" ? (
+                    <div className="space-y-1.5 pt-1 max-w-md">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-white/60">Tempo digitando por mensagem:</span>
+                        <span className="font-mono text-cyan-300 font-bold">{autoTypingDelaySeconds}s</span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <input
+                          type="range"
+                          min={1}
+                          max={60}
+                          value={autoTypingDelaySeconds}
+                          onChange={(e) => setAutoTypingDelaySeconds(Number(e.target.value))}
+                          className="w-full accent-cyan-400 cursor-pointer"
+                        />
+                        <Input
+                          type="number"
+                          min={1}
+                          max={120}
+                          value={autoTypingDelaySeconds}
+                          onChange={(e) => setAutoTypingDelaySeconds(Math.max(1, Math.min(Number(e.target.value), 120)))}
+                          className="bg-black/40 border-white/10 h-8 w-16 text-xs text-center"
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1 max-w-lg">
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-white/60">Mínimo digitando:</span>
+                          <span className="font-mono text-cyan-300 font-bold">{autoTypingDelayMinSeconds}s</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="range"
+                            min={1}
+                            max={60}
+                            value={autoTypingDelayMinSeconds}
+                            onChange={(e) => {
+                              const val = Number(e.target.value);
+                              setAutoTypingDelayMinSeconds(val);
+                              if (val > autoTypingDelayMaxSeconds) setAutoTypingDelayMaxSeconds(val);
+                            }}
+                            className="w-full accent-cyan-400 cursor-pointer"
+                          />
+                          <Input
+                            type="number"
+                            min={1}
+                            max={120}
+                            value={autoTypingDelayMinSeconds}
+                            onChange={(e) => {
+                              const val = Math.max(1, Math.min(Number(e.target.value), 120));
+                              setAutoTypingDelayMinSeconds(val);
+                              if (val > autoTypingDelayMaxSeconds) setAutoTypingDelayMaxSeconds(val);
+                            }}
+                            className="bg-black/40 border-white/10 h-8 w-16 text-xs text-center"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-white/60">Máximo digitando:</span>
+                          <span className="font-mono text-cyan-300 font-bold">{autoTypingDelayMaxSeconds}s</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="range"
+                            min={1}
+                            max={60}
+                            value={autoTypingDelayMaxSeconds}
+                            onChange={(e) => {
+                              const val = Number(e.target.value);
+                              setAutoTypingDelayMaxSeconds(val);
+                              if (val < autoTypingDelayMinSeconds) setAutoTypingDelayMinSeconds(val);
+                            }}
+                            className="w-full accent-cyan-400 cursor-pointer"
+                          />
+                          <Input
+                            type="number"
+                            min={1}
+                            max={120}
+                            value={autoTypingDelayMaxSeconds}
+                            onChange={(e) => {
+                              const val = Math.max(1, Math.min(Number(e.target.value), 120));
+                              setAutoTypingDelayMaxSeconds(val);
+                              if (val < autoTypingDelayMinSeconds) setAutoTypingDelayMinSeconds(val);
+                            }}
+                            className="bg-black/40 border-white/10 h-8 w-16 text-xs text-center"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* IA personaliza disparo */}

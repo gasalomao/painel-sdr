@@ -177,6 +177,7 @@ export async function POST(req: NextRequest) {
     // === 2. Find or Create Contact & Session — persiste SEMPRE, mesmo se falhou. ===
     let contactId: string | null = null;
     let sessionId: string | null = null;
+    let sessionAgentId: number | null = null;
 
     try {
       const { data: contact } = await supabase
@@ -199,13 +200,14 @@ export async function POST(req: NextRequest) {
       if (contactId) {
         const { data: session } = await supabase
           .from("sessions")
-          .select("id")
+          .select("id, agent_id")
           .eq("contact_id", contactId)
           .eq("instance_name", instanceName)
           .eq("client_id", ctx.clientId)
           .maybeSingle();
         if (session) {
           sessionId = session.id;
+          sessionAgentId = (session as any).agent_id ?? null;
         } else {
           const { data: ns } = await supabase.from("sessions").insert({
             client_id: ctx.clientId,
@@ -220,6 +222,44 @@ export async function POST(req: NextRequest) {
       console.warn("[SEND-MESSAGE] Falha ao resolver contact/session:", persistErr?.message);
     }
 
+    // === 2.5. Transcrição de áudio enviado pelo operador (painel) ===
+    // Garante que o áudio enviado pelo próprio usuário seja transcrito (Whisper/OpenRouter/Gemini)
+    // e nunca fique preso em "[🎤 Áudio — transcrevendo...]" quando o webhook vence a corrida.
+    // Se o destino for um grupo e "Atender grupos" estiver desativado, NUNCA transcreve.
+    let persistedContent: string = text || "";
+    if (media && media.base64 && outMediaType === "audio") {
+      try {
+        const { shouldSkipGroupActions, resolveTranscriptionConfig } = await import("@/lib/bot-status");
+        const skipGroup = await shouldSkipGroupActions(cleanJid, sessionAgentId, ctx.clientId);
+
+        if (!skipGroup) {
+          const { method, models } = await resolveTranscriptionConfig(sessionAgentId, ctx.clientId);
+          if (method !== "disabled") {
+            const { transcribeAudioDetailed } = await import("@/app/api/webhooks/shared-helpers");
+            const det = await transcribeAudioDetailed(
+              media.base64,
+              outMimetype || "audio/ogg",
+              msgId,
+              method,
+              { models },
+            );
+            if (det?.text) {
+              persistedContent = `🎤 ${det.text}`;
+              const { encodeTranscriptionMime } = await import("@/lib/transcription-label");
+              outMimetype = encodeTranscriptionMime(outMimetype || "audio/ogg", det.provider);
+            }
+          }
+        } else {
+          console.log(`[SEND-MESSAGE] Áudio em grupo ${cleanJid} — transcrição ignorada (grupos desativados)`);
+        }
+      } catch (tErr: any) {
+        console.warn("[SEND-MESSAGE] Transcrição de áudio enviado falhou (não-fatal):", tErr?.message);
+      }
+      if (!persistedContent) {
+        persistedContent = "[🎤 Áudio enviado]";
+      }
+    }
+
     // === 3. Salvar no banco — sucesso ou falha, a msg entra no histórico ===
     const now = new Date().toISOString();
     const finalStatus = sendError ? "error" : "sent";
@@ -231,7 +271,7 @@ export async function POST(req: NextRequest) {
         session_id: sessionId,
         message_id: msgId,
         sender: 'human',
-        content: text || "",
+        content: persistedContent,
         media_category: media?.type || 'text',
         delivery_status: finalStatus,
         created_at: now,
@@ -240,11 +280,15 @@ export async function POST(req: NextRequest) {
       if (outMimetype) messagesPayload.mimetype = outMimetype;
       const { error: insertErr } = await supabase.from("messages").insert(messagesPayload);
       if (insertErr?.code === "23505") {
-        // Duplicata — webhook já inseriu (provavelmente como 'ai'). Força pra human.
-        await supabase.from("messages").update({
+        // Duplicata — webhook já inseriu (provavelmente como 'ai' ou sem transcrição). Força pra human + conteúdo.
+        const msgUpd: Record<string, any> = {
           sender: 'human',
           delivery_status: finalStatus,
-        }).eq("message_id", msgId).eq("client_id", ctx.clientId);
+        };
+        if (persistedContent) msgUpd.content = persistedContent;
+        if (outMimetype) msgUpd.mimetype = outMimetype;
+        if (outMediaUrl) msgUpd.media_url = outMediaUrl;
+        await supabase.from("messages").update(msgUpd).eq("message_id", msgId).eq("client_id", ctx.clientId);
       } else if (insertErr) {
         console.warn("[SEND-MESSAGE] messages insert:", insertErr.message);
       }
@@ -257,7 +301,7 @@ export async function POST(req: NextRequest) {
       instance_name: instanceName,
       message_id: msgId,
       sender_type: 'human',
-      content: text || "",
+      content: persistedContent,
       status_envio: finalStatus,
       created_at: now,
     };
@@ -275,7 +319,7 @@ export async function POST(req: NextRequest) {
         instance_name: instanceName,
         message_id: msgId,
         sender_type: 'human',
-        content: text || "",
+        content: persistedContent,
         status_envio: finalStatus,
         created_at: now,
       };
@@ -288,6 +332,7 @@ export async function POST(req: NextRequest) {
 
     if (dashErr?.code === "23505") {
       const upd: Record<string, any> = { sender_type: 'human', status_envio: finalStatus };
+      if (persistedContent) upd.content = persistedContent;
       if (outMediaUrl) upd.media_url = outMediaUrl;
       if (outMediaType) upd.media_type = outMediaType;
       if (outMimetype) upd.mimetype = outMimetype;
@@ -296,15 +341,21 @@ export async function POST(req: NextRequest) {
       console.warn("[SEND-MESSAGE] chats_dashboard insert:", dashErr.message);
     }
 
-    // Bump sessions.last_message_at — sem isso, card da conversa não atualiza
-    // "última mensagem" nem reordena a lista até o webhook echo (fromMe) chegar.
-    // Em Salomao isso causava "mensagem não salva" visível até reabrir a conversa.
+    // Bump sessions.last_message_at e pausa o robô por 60 min (atendimento humano)
+    // ao responder manualmente ou enviar áudio de voz gravado pelo painel.
     if (sessionId) {
       await supabase
         .from("sessions")
-        .update({ last_message_at: now, last_message: text || "" })
+        .update({ last_message_at: now, last_message: persistedContent || text || "" })
         .eq("id", sessionId)
         .eq("client_id", ctx.clientId);
+
+      try {
+        const { snoozeSession } = await import("@/lib/bot-status");
+        await snoozeSession(sessionId, 60);
+      } catch (snzErr: any) {
+        console.warn("[SEND-MESSAGE] Snooze de sessão ao enviar manual falhou (não-fatal):", snzErr?.message);
+      }
     }
 
     // === 4. Resposta ===
@@ -314,7 +365,14 @@ export async function POST(req: NextRequest) {
         { status: 502 }
       );
     }
-    return NextResponse.json({ success: true, msgId, sent: true });
+    return NextResponse.json({
+      success: true,
+      msgId,
+      sent: true,
+      content: persistedContent,
+      mimetype: outMimetype,
+      mediaUrl: outMediaUrl,
+    });
 
   } catch (err: any) {
     console.error("[SEND-MESSAGE] Erro:", err.message);

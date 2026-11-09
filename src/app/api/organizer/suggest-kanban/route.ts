@@ -1,25 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { getAiKeys } from "@/lib/ai-keys";
+import { generateText, providerDisplayName, providerOf } from "@/lib/ai-provider";
 import { logTokenUsage } from "@/lib/token-usage";
-import { DEFAULT_ORGANIZER_BASE_PROMPT } from "@/lib/organizer-prompt";
-import { resolveModel } from "@/lib/ai-default-model";
-import { generateText, providerOf, providerDisplayName } from "@/lib/ai-provider";
+import { extractJsonSafe, isTerminalColumn } from "@/lib/organizer-prompt";
 
 export const dynamic = "force-dynamic";
 
 /**
- * POST /api/organizer/suggest-kanban
+ * POST /api/organizer/suggest-kanban { agentId }
  *
- * Analisa o agente IA principal do cliente (name, role, personality, prompt,
- * knowledge base) e usa Gemini pra sugerir:
- *   - Lista de colunas Kanban adequadas ao negócio
- *   - Prompt customizado pro Organizador IA
+ * Lê o agente escolhido pelo cliente (nome, cargo, prompt, personalidade, tom)
+ * e pede pra IA sugerir:
+ *   1) As colunas ideais do Kanban para aquele negócio/funil (com status_key, label, cor, is_terminal e rationale)
+ *   2) Um prompt de Organizador IA enxuto, cirúrgico e sob medida para aquelas colunas e nicho
  *
- * O cliente pode aceitar (replace) ou rejeitar. Não persiste nada — só
- * retorna a sugestão.
- *
- * Body opcional: { agentId } — se ausente, pega o 1º agente do cliente.
+ * Funciona com TODOS os provedores (OpenCode/Gateway, OpenRouter, NVIDIA NIM, Combos e Gemini).
  */
 export async function POST(req: NextRequest) {
   const ctx = await requireClientId(req);
@@ -27,191 +24,166 @@ export async function POST(req: NextRequest) {
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
 
   const body = await req.json().catch(() => ({}));
+  const agentId = Number(body.agentId);
+  if (!agentId) return NextResponse.json({ ok: false, error: "agentId é obrigatório" }, { status: 400 });
 
-  // 1) Pega API keys centrais (Gemini + OpenRouter)
-  const { data: cfg } = await supabaseAdmin
-    .from("ai_organizer_config")
-    .select("api_key, openrouter_api_key, model")
-    .eq("id", 1)
+  const { data: agent, error: agentErr } = await supabaseAdmin
+    .from("agent_settings")
+    .select("id, name, role, main_prompt, personality, tone, client_id, options")
+    .eq("id", agentId)
+    .eq("client_id", ctx.clientId)
     .maybeSingle();
-  const geminiApiKey = cfg?.api_key && String(cfg.api_key).trim() ? String(cfg.api_key).trim() : null;
-  const openrouterApiKey = (cfg as any)?.openrouter_api_key && String((cfg as any).openrouter_api_key).trim()
-    ? String((cfg as any).openrouter_api_key).trim() : null;
-  if (!geminiApiKey && !openrouterApiKey) {
-    return NextResponse.json({ ok: false, error: "Nenhuma API Key de IA configurada em /configuracoes" }, { status: 400 });
+  if (agentErr || !agent) {
+    return NextResponse.json({ ok: false, error: "Agente não encontrado neste cliente" }, { status: 404 });
   }
 
-  // 2) Pega o agente do cliente (1º se não passou agentId)
-  let agentQ = supabaseAdmin
-    .from("agent_settings")
-    .select("id, name, role, personality, tone, main_prompt")
-    .eq("client_id", ctx.clientId)
-    .order("id", { ascending: true })
-    .limit(1);
-  if (body.agentId) agentQ = supabaseAdmin
-    .from("agent_settings")
-    .select("id, name, role, personality, tone, main_prompt")
-    .eq("client_id", ctx.clientId)
-    .eq("id", body.agentId)
-    .limit(1);
+  const [{ data: cfg }, aiKeys] = await Promise.all([
+    supabaseAdmin
+      .from("ai_organizer_config")
+      .select("api_key, openrouter_api_key, nvidia_api_key, model")
+      .eq("id", 1)
+      .maybeSingle(),
+    getAiKeys(),
+  ]);
 
-  const { data: agents } = await agentQ;
-  const agent = (agents || [])[0];
-  if (!agent) {
-    return NextResponse.json({ ok: false, error: "Nenhum agente IA encontrado pra este cliente. Crie um agente em /agente primeiro." }, { status: 404 });
-  }
+  const geminiKey = (cfg?.api_key || aiKeys.gemini || process.env.GEMINI_API_KEY || "").trim();
+  const openrouterKey = (cfg?.openrouter_api_key || aiKeys.openrouter || process.env.OPENROUTER_API_KEY || "").trim();
+  const nvidiaKey = (cfg?.nvidia_api_key || aiKeys.nvidia || process.env.NVIDIA_API_KEY || "").trim();
 
-  // 3) Pega bases de conhecimento (dá mais contexto sobre o negócio)
-  const { data: kb } = await supabaseAdmin
-    .from("agent_knowledge")
-    .select("title, content")
-    .eq("client_id", ctx.clientId)
-    .eq("agent_id", agent.id)
-    .limit(20);
+  const requestedModel = typeof body.model === "string" ? body.model.trim() : "";
+  const model =
+    (ctx.isAdmin && requestedModel ? requestedModel : "") ||
+    cfg?.model ||
+    aiKeys.defaultAiModel ||
+    "gemini-2.5-flash";
 
-  // 4) Monta o prompt pro Gemini
-  const knowledgeSnippet = (kb || []).slice(0, 10).map((k) =>
-    `- ${k.title}: ${String(k.content || "").slice(0, 200)}`
-  ).join("\n");
+  const customGoal = (agent as any)?.options?.custom_goal_text || "";
 
-  // Detecta agente "vazio/genérico": sem dados suficientes pra identificar nicho.
-  // Nesse caso instruímos o modelo a NÃO inventar nicho aleatório (era a causa de
-  // sugerir "Salão de Beleza" pra um agente sem prompt definido).
-  const mainPrompt = (agent.main_prompt || "").trim();
-  const knowledgeIsEmpty = !knowledgeSnippet;
-  const promptIsThin = mainPrompt.replace(/\s+/g, " ").length < 80;
-  const agentInfoIsThin = promptIsThin && knowledgeIsEmpty
-    && (!agent.role || agent.role.trim().length < 8);
+  const systemPrompt = `
+Você é um especialista sênior em CRM, Funis de Vendas no WhatsApp e Automação Comercial.
+Sua tarefa é analisar o Agente de IA abaixo e desenhar:
+1. A estrutura de colunas do Kanban PERFEITA para o nicho e o fluxo exato desse agente.
+2. As diretrizes do Organizador IA que vão mover os leads automaticamente entre essas colunas analisando as conversas.
 
-  const groundingRule = agentInfoIsThin
-    ? `\n## ⚠ ATENÇÃO — INFORMAÇÃO INSUFICIENTE
-O prompt/função/conhecimento deste agente NÃO descrevem um nicho específico.
-NÃO INVENTE um nicho (não escolha salão, clínica, imobiliária, etc por conta
-própria). Defina business_type EXATAMENTE como
-"Genérico — defina o prompt do agente para personalizar" e gere um kanban
-GENÉRICO de vendas/atendimento com estes status_key: novo, em_contato,
-qualificado, agendado, fechado, perdido. Use vocabulário neutro no prompt
-reescrito (cliente, atendimento, proposta), sem termos de nicho.`
-    : `\nIdentifique o nicho ESTRITAMENTE a partir do que está descrito no agente
-abaixo (função, personalidade, prompt principal, base de conhecimento). É
-PROIBIDO inventar um nicho que não esteja claramente indicado nesses dados —
-na dúvida, prefira um kanban genérico de vendas/atendimento a chutar um ramo.`;
+REGRAS PARA AS COLUNAS ("columns"):
+- Sugira entre 6 e 10 colunas em ordem lógica de avanço no funil (do início ao fechamento/descarte).
+- A PRIMEIRA coluna (index 0) DEVE ter status_key="novo" e is_system=true (leads recém-extraídos/cadastrados sem abordagem).
+- Logo após "novo", inclua etapas que reflitam a jornada real do agente. Exemplo:
+  - Se o agente prospecta empresas e oferece uma PRÉVIA GRATUITA de site antes de agendar ligação: crie colunas para "primeiro_contato", "em_qualificacao", "previa_solicitada", "em_negociacao" (prévia enviada/proposta), "agendado", "follow-up", "fechado", "sem_interesse", "descartado".
+  - Se o agente é de clínica/consultório/estética/advocacia/imobiliária: crie colunas fiéis ao funil desse nicho (ex: "novo", "primeiro_contato", "em_triagem", "orcamento_enviado", "agendado", "follow-up", "fechado", "sem_interesse", "descartado").
+- Cada coluna deve ter:
+  - "status_key": slug curto em snake_case minúsculo sem acentos (ex: "primeiro_contato", "previa_solicitada").
+  - "label": Nome claro em português (máx 26 caracteres).
+  - "color": Cor hex vibrante e distinta (#3b82f6, #06b6d4, #8b5cf6, #a855f7, #ec4899, #f59e0b, #f97316, #22c55e, #ef4444, #737373).
+  - "is_terminal": true APENAS para colunas finais (ex: venda fechada, sem interesse, descartado); false para as demais.
+  - "rationale": 1 frase curta explicando quando o lead entra nessa coluna.
 
-  const prompt = `Você é especialista em CRM e processos de venda multi-nicho.
+REGRAS PARA O PROMPT ("organizer_prompt"):
+- Escreva um prompt objetivo, claro e direto (entre 15 e 25 linhas) instruindo o Organizador IA sobre como classificar as conversas deste nicho usando exatamente os "status_key" das colunas sugeridas.
+- Explique claramente:
+  - Quando mover para cada "status_key" com base no que o CLIENTE respondeu vs. o que o SDR/IA enviou.
+  - Que leads onde só o SDR falou (sem resposta humana real) ficam em "primeiro_contato" (ou "follow-up").
+  - Que URAs/robôs em loop ou números errados vão para "descartado".
+  - Que leads em etapas avançadas não devem regredir de coluna por respostas curtas ("ok", "obrigado", "❤️").
 
-Sua tarefa: a partir EXCLUSIVAMENTE das informações do agente IA abaixo,
-gerar DUAS coisas adequadas ao negócio REAL desse agente:
-${groundingRule}
+FORMATO DE SAÍDA (APENAS JSON VÁLIDO, SEM MARKDOWN):
+{
+  "business_type": "Resumo de 1 linha do nicho e objetivo identificados",
+  "columns": [
+    { "status_key": "novo", "label": "Lead Extraído", "color": "#3b82f6", "is_terminal": false, "rationale": "..." }
+  ],
+  "organizer_prompt": "Texto das diretrizes do organizador adaptado às colunas acima..."
+}
+`.trim();
 
-1. Estrutura de Kanban (5 a 8 colunas) adequada ao negócio do agente.
-2. Prompt customizado pro Organizador IA — REESCRITA do template padrão
-   abaixo, mantendo TODAS as 17 regras (R1-R17) e a estrutura, mas:
-   - Adaptando exemplos e vocabulário ao negócio identificado a partir do agente.
-   - Substituindo nas regras as MENÇÕES de status pelos status_key que VOCÊ
-     vai sugerir no kanban (use os mesmos status_key na lista de colunas E
-     dentro do prompt).
-   - Mantendo as seções "REGRAS DE DECISÃO", "HIERARQUIA", "COMO ESCREVER
-     razao E resumo", "ARMADILHAS", "FORMATO DE RESPOSTA" — todas elas.
-   - Preservando o cabeçalho que explica que recebe conversas de HOJE +
-     contexto histórico + flags ⚑.
+  const userPrompt = `
+DADOS DO AGENTE DE IA DA CONTA:
+Nome: ${agent.name || "(sem nome)"}
+Função/Cargo: ${agent.role || "(não informado)"}
+Objetivo personalizado ativo: ${customGoal || "(não definido)"}
+Personalidade: ${(agent.personality || "").slice(0, 400)}
+Tom de voz: ${(agent.tone || "").slice(0, 300)}
 
-## Agente IA (ÚNICA fonte do nicho)
-- Nome: ${agent.name || "(sem nome)"}
-- Função: ${agent.role || "(não especificada)"}
-- Personalidade: ${agent.personality || "(não especificada)"}
-- Tom de voz: ${agent.tone || "(não especificado)"}
-
-## Prompt principal do agente
-${(mainPrompt || "(vazio)").slice(0, 2000)}
-
-## Base de conhecimento (amostra)
-${knowledgeSnippet || "(vazia)"}
-
-## TEMPLATE OBRIGATÓRIO do prompt do Organizador (reescreva preservando estrutura R1-R17)
-
-${DEFAULT_ORGANIZER_BASE_PROMPT}
-
-## Regras pras colunas do kanban
-- status_key: snake_case, ASCII, sem espaços, coerente com o negócio do agente.
-- label: nome user-friendly em PT-BR.
-- color: hex 7-char (#3b82f6). Azul/ciano pra estágios iniciais, amarelo/laranja
-  pra intermediários, verde pra positivos (fechado/atendido), vermelho pra
-  perdido/cancelado.
-- Sempre inclua coluna inicial ("novo" ou equivalente) e pelo menos UM estágio
-  terminal positivo (ex: "fechado", "atendido", "concluido") + UM terminal
-  negativo (ex: "perdido", "cancelado", "sem_interesse").
-
-## Regras pro prompt reescrito
-- Em PT-BR, instrutivo, claro, MANTENDO a mesma quantidade de regras (R1-R17).
-- USE OS MESMOS status_key que você sugeriu nas colunas, dentro das regras.
-  (Não invente status que não existem no kanban sugerido.)
-- Adapte os EXEMPLOS de cada regra ao nicho real.
-- Saída: somente o texto reescrito (sem markdown extra, sem comentário).`;
-
-  // 5) Chama IA (Gemini OU OpenRouter) pedindo saída JSON estruturada.
-  const modelName = (await resolveModel(body.model || cfg?.model || "gemini-2.5-flash", ctx.clientId)) || "gemini-2.5-flash";
-  const provider = providerOf(modelName);
-  if (provider === "gemini" && !geminiApiKey) {
-    return NextResponse.json({ ok: false, error: "API Key Gemini não configurada." }, { status: 400 });
-  }
-  if (provider === "openrouter" && !openrouterApiKey) {
-    return NextResponse.json({ ok: false, error: "API Key OpenRouter não configurada." }, { status: 400 });
-  }
-
-  // Schema estruturado (só Gemini garante via responseSchema; o prompt já
-  // descreve o formato, então o OpenRouter em json_object também devolve JSON).
-  const geminiResponseSchema = {
-    type: "object",
-    properties: {
-      business_type: { type: "string", description: "Ex: 'SaaS B2B', 'Atendimento e-commerce', 'Clínica médica', etc" },
-      columns: {
-        type: "array",
-        items: {
-          type: "object",
-          properties: {
-            status_key: { type: "string" },
-            label: { type: "string" },
-            color: { type: "string" },
-            rationale: { type: "string", description: "Por que essa coluna existe e quando usar" },
-          },
-          required: ["status_key", "label", "color"],
-        },
-      },
-      organizer_prompt: {
-        type: "string",
-        description: "Reescrita do template R1-R17 adaptada ao nicho + status_keys das colunas sugeridas. Mínimo 2000 chars.",
-      },
-    },
-    required: ["business_type", "columns", "organizer_prompt"],
-  };
+INSTRUÇÕES / ROTEIRO DO AGENTE:
+${(agent.main_prompt || "(vazio)").slice(0, 4500)}
+`.trim();
 
   try {
     const out = await generateText({
-      modelRef: modelName,
-      prompt,
+      model,
+      systemPrompt,
+      userPrompt,
+      temperature: 0.3,
+      maxTokens: 2500,
       jsonMode: true,
-      geminiResponseSchema,
-      geminiApiKey,
-      openrouterApiKey,
+      reasoningMode: 0,
+      geminiApiKey: geminiKey,
+      openrouterApiKey: openrouterKey,
+      nvidiaApiKey: nvidiaKey,
     });
-    const parsed = JSON.parse(out.text);
 
-    // Token tracking
     await logTokenUsage({
       source: "organizer",
-      sourceId: ctx.clientId,
-      sourceLabel: "Sugestão de Kanban",
-      model: out.modelUsed,
-      provider: providerDisplayName(provider),
+      sourceId: agent.id,
+      sourceLabel: `suggest-kanban:${agent.name}`,
+      clientId: ctx.clientId,
+      model: out.model,
+      provider: providerDisplayName(out.provider),
       promptTokens: out.usage.promptTokens,
       completionTokens: out.usage.completionTokens,
       totalTokens: out.usage.totalTokens,
-      clientId: ctx.clientId,
-      metadata: { kind: "suggest_kanban", agentId: agent.id },
+      metadata: { estimated: out.usage.estimated || undefined },
     });
 
-    return NextResponse.json({ ok: true, suggestion: parsed, model: modelName });
+    const parsed = extractJsonSafe<any>(out.text);
+
+    if (!Array.isArray(parsed?.columns) || parsed.columns.length < 3 || typeof parsed.organizer_prompt !== "string") {
+      return NextResponse.json({ ok: false, error: "IA retornou estrutura incompleta. Tente novamente." }, { status: 500 });
+    }
+
+    const sanitizedCols = parsed.columns.slice(0, 12).map((c: any, idx: number) => {
+      const status_key = idx === 0
+        ? "novo"
+        : String(c.status_key || `col_${idx}`)
+            .toLowerCase()
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .replace(/[^a-z0-9_-]/g, "_")
+            .slice(0, 30);
+      const label = String(c.label || status_key).trim().slice(0, 32);
+      const is_terminal =
+        idx === 0
+          ? false
+          : typeof c.is_terminal === "boolean"
+            ? c.is_terminal
+            : isTerminalColumn({ status_key, label });
+      return {
+        status_key,
+        label,
+        color: /^#[0-9a-fA-F]{6}$/.test(String(c.color || "")) ? c.color : "#6b7280",
+        order_index: idx,
+        is_system: idx === 0,
+        is_terminal,
+        rationale: String(c.rationale || "").slice(0, 200),
+      };
+    });
+
+    const suggestionPayload = {
+      business_type: String(parsed.business_type || "Negócio identificado").slice(0, 240),
+      columns: sanitizedCols,
+      organizer_prompt: parsed.organizer_prompt.trim(),
+    };
+
+    return NextResponse.json({
+      ok: true,
+      ...suggestionPayload,
+      suggestion: suggestionPayload,
+    });
   } catch (e: any) {
-    return NextResponse.json({ ok: false, error: "Falha ao gerar sugestão: " + (e?.message || String(e)) }, { status: 500 });
+    console.error("[suggest-kanban] erro:", e?.message);
+    return NextResponse.json(
+      { ok: false, error: `Falha ao gerar sugestão: ${e?.message || "erro desconhecido"}` },
+      { status: 500 }
+    );
   }
 }

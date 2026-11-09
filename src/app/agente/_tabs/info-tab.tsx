@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { Book, Check, Info, Pencil, Plus, Settings, Trash2, Wrench, X, Image as ImageIcon, Upload, Loader2, Sparkles, Bot, MessageSquare, SlidersHorizontal, CalendarDays, FileText, ChevronDown, ArrowDown, RotateCcw, Globe } from "lucide-react";
+import { Book, Check, Info, Pencil, Plus, Settings, Trash2, Wrench, X, Image as ImageIcon, Upload, Loader2, Sparkles, Bot, MessageSquare, SlidersHorizontal, CalendarDays, FileText, ChevronDown, ArrowDown, RotateCcw, Globe, Clock, Target, PauseCircle } from "lucide-react";
 import { DEFAULT_SITE_PREVIEW_EVAL_PROMPT, DEFAULT_SITE_PREVIEW_PING_MESSAGE } from "@/lib/sites/agreement-detector-constants";
 import { SaveButton } from "../_components/save-button";
 import { SectionCard } from "../_components/section-card";
@@ -126,6 +126,14 @@ export type InfoTabProps = {
   messageBufferSeconds: number; setMessageBufferSeconds: (n: number) => void;
   humanizeMessages: boolean; setHumanizeMessages: (v: boolean) => void;
   splitIntensity: SplitIntensity; setSplitIntensity: (n: SplitIntensity) => void;
+  typingDelayMode: "fixed" | "random"; setTypingDelayMode: (v: "fixed" | "random") => void;
+  typingDelaySeconds: number; setTypingDelaySeconds: (n: number) => void;
+  typingDelayMinSeconds: number; setTypingDelayMinSeconds: (n: number) => void;
+  typingDelayMaxSeconds: number; setTypingDelayMaxSeconds: (n: number) => void;
+  customGoalEnabled: boolean; setCustomGoalEnabled: (v: boolean) => void;
+  customGoalText: string; setCustomGoalText: (v: string) => void;
+  customGoalPauseMode: "timed" | "indefinite"; setCustomGoalPauseMode: (v: "timed" | "indefinite") => void;
+  customGoalPauseMinutes: number; setCustomGoalPauseMinutes: (n: number) => void;
   webSearchEnabled: boolean; setWebSearchEnabled: (v: boolean) => void;
   reasoningMode: 0 | 1 | 2 | 3; setReasoningMode: (n: 0 | 1 | 2 | 3) => void;
   leadIntelligenceEnabled: boolean; setLeadIntelligenceEnabled: (v: boolean) => void;
@@ -695,9 +703,206 @@ export function InfoTab(p: InfoTabProps) {
         step={3}
         icon={SlidersHorizontal}
         title="Como a IA conversa"
-        description="Controle o estilo e o ritmo das respostas da sua IA."
+        description="Controle o objetivo de parada automática, o estilo e o ritmo das respostas da sua IA."
         accent="cyan"
       >
+        {/* ========= OBJETIVO PERSONALIZADO & PAUSA AUTOMÁTICA ========= */}
+        <div className="mb-5 overflow-hidden rounded-2xl border border-primary/20 bg-primary/[0.035]">
+          <div className="flex flex-col gap-4 border-b border-white/10 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
+            <div className="flex min-w-0 items-start gap-3">
+              <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-inset ring-primary/20">
+                <Target className="h-4 w-4" aria-hidden="true" />
+              </div>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h4 className="text-sm font-semibold leading-tight text-foreground">
+                    Objetivo Personalizado (Pausa Automática)
+                  </h4>
+                  <span className="inline-flex items-center rounded-full border border-primary/20 bg-background/60 px-2 py-0.5 font-mono text-[10px] text-primary">
+                    Micro-IA · 1 token de saída
+                  </span>
+                </div>
+                <p className="mt-1 max-w-2xl text-xs leading-relaxed text-muted-foreground">
+                  Quando o objetivo for alcançado, a IA pausa automaticamente <strong className="text-foreground/80">apenas para aquele contato</strong>.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex w-full items-center justify-between gap-3 rounded-xl border border-white/10 bg-background/60 px-3 py-2 sm:w-auto">
+              <span className={cn("text-xs font-semibold", p.customGoalEnabled ? "text-primary" : "text-muted-foreground")}>
+                {p.customGoalEnabled ? "Ativado" : "Desativado"}
+              </span>
+              <Toggle
+                checked={p.customGoalEnabled}
+                onCheckedChange={p.setCustomGoalEnabled}
+                color="primary"
+                size="lg"
+                aria-label="Ativar Objetivo Personalizado"
+              />
+            </div>
+          </div>
+
+          {p.customGoalEnabled && (
+            <div className="space-y-5 p-4 sm:p-5">
+              {/* Campo de texto livre do objetivo */}
+              <div className="space-y-2.5">
+                <div>
+                  <label htmlFor="custom-goal-text" className="text-sm font-semibold text-foreground">
+                    Qual é o objetivo deste agente? (texto livre)
+                  </label>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    Escreva qualquer meta para pausar a IA.
+                  </p>
+                </div>
+                <Textarea
+                  id="custom-goal-text"
+                  value={p.customGoalText}
+                  onChange={(e) => p.setCustomGoalText(e.target.value)}
+                  rows={2}
+                  placeholder="Ex: marcar uma reunião, enviar a chave PIX, obter o e-mail do cliente, confirmar pedido..."
+                  className="resize-y rounded-xl border-primary/25 bg-background/60 text-sm focus:border-primary/50 focus:ring-2 focus:ring-primary/20"
+                />
+                {/* Sugestões rápidas clicáveis (preenchem o texto livre, mas o usuário pode editar como quiser) */}
+                <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                  <span className="mr-1 text-[11px] font-medium text-muted-foreground">Exemplos rápidos:</span>
+                  {[
+                    "Marcar uma reunião ou ligação com o cliente",
+                    "Enviar a chave PIX para pagamento",
+                    "Obter o e-mail do cliente",
+                    "Enviar o link da prévia do site e confirmar recebimento",
+                  ].map((sample) => (
+                    <button
+                      key={sample}
+                      type="button"
+                      onClick={() => p.setCustomGoalText(sample)}
+                      className="rounded-lg border border-white/10 bg-background/50 px-2.5 py-1.5 text-left text-[11px] leading-tight text-muted-foreground transition-colors hover:border-primary/35 hover:bg-primary/10 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
+                    >
+                      {sample}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Configuração do Tempo de Pausa */}
+              <section aria-labelledby="custom-goal-pause-heading" className="space-y-4 border-t border-white/10 pt-5">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex items-start gap-2.5">
+                    <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                      <PauseCircle className="h-4 w-4" aria-hidden="true" />
+                    </div>
+                    <div>
+                      <h5 id="custom-goal-pause-heading" className="text-sm font-semibold text-foreground">
+                        Comportamento da pausa
+                      </h5>
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        Defina quando a IA volta a atender este contato.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-1 rounded-xl border border-white/10 bg-background/40 p-1 sm:grid-cols-2" role="group" aria-label="Modo de pausa">
+                    <button
+                      type="button"
+                      onClick={() => p.setCustomGoalPauseMode("timed")}
+                      aria-pressed={p.customGoalPauseMode === "timed"}
+                      className={cn(
+                        "min-h-10 rounded-lg px-3 py-2 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60",
+                        p.customGoalPauseMode === "timed"
+                          ? "bg-primary text-primary-foreground shadow-sm"
+                          : "text-muted-foreground hover:bg-white/[0.05] hover:text-foreground",
+                      )}
+                    >
+                      Tempo determinado
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => p.setCustomGoalPauseMode("indefinite")}
+                      aria-pressed={p.customGoalPauseMode === "indefinite"}
+                      className={cn(
+                        "min-h-10 rounded-lg px-3 py-2 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60",
+                        p.customGoalPauseMode === "indefinite"
+                          ? "bg-primary text-primary-foreground shadow-sm"
+                          : "text-muted-foreground hover:bg-white/[0.05] hover:text-foreground",
+                      )}
+                    >
+                      Tempo indeterminado
+                    </button>
+                  </div>
+                </div>
+
+                {p.customGoalPauseMode === "timed" ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <label htmlFor="custom-goal-pause-minutes" className="text-xs font-medium text-foreground/90">
+                        Tempo de pausa da IA
+                      </label>
+                      <span className="rounded-md border border-primary/20 bg-primary/10 px-2 py-0.5 font-mono text-xs font-semibold text-primary">
+                        {p.customGoalPauseMinutes} min
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <input
+                        id="custom-goal-pause-minutes"
+                        type="range"
+                        min={1}
+                        max={240}
+                        step={1}
+                        value={Math.min(240, p.customGoalPauseMinutes)}
+                        onChange={(e) => p.setCustomGoalPauseMinutes(Number(e.target.value))}
+                        className="min-w-0 flex-1 cursor-pointer accent-primary"
+                        aria-label="Tempo de pausa da IA em minutos"
+                      />
+                      <NumberInput
+                        min={1}
+                        max={43200}
+                        fallback={30}
+                        value={p.customGoalPauseMinutes}
+                        onChange={(n) => p.setCustomGoalPauseMinutes(n)}
+                        aria-label="Tempo de pausa da IA em minutos"
+                        className="h-9 w-24 rounded-lg border-primary/25 bg-background/60 px-2.5 text-center font-mono text-xs text-foreground"
+                      />
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="mr-1 text-[11px] font-medium text-muted-foreground">Atalhos:</span>
+                      {[15, 30, 60, 120, 360, 1440].map((mins) => (
+                        <button
+                          key={mins}
+                          type="button"
+                          onClick={() => p.setCustomGoalPauseMinutes(mins)}
+                          className={cn(
+                            "rounded-lg border px-2 py-1 font-mono text-[10px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60",
+                            p.customGoalPauseMinutes === mins
+                              ? "border-primary/40 bg-primary/15 font-semibold text-primary"
+                              : "border-white/10 bg-background/50 text-muted-foreground hover:border-white/20 hover:text-foreground",
+                          )}
+                        >
+                          {mins === 1440 ? "24h (1440m)" : mins === 360 ? "6h (360m)" : `${mins} min`}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="flex items-start gap-2 rounded-xl border border-primary/15 bg-primary/[0.04] p-3">
+                      <Clock className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+                      <p className="text-xs leading-relaxed text-muted-foreground">
+                        Assim que o objetivo for concluído, a IA fica pausada por <strong className="text-foreground/80">{p.customGoalPauseMinutes} minuto(s)</strong> apenas para aquele contato e volta a atender sozinha quando o tempo acabar. Você também pode reativá-la antes pelo Chat.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-start gap-2 rounded-xl border border-primary/15 bg-primary/[0.04] p-3">
+                    <PauseCircle className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                      Assim que o objetivo for concluído, a IA fica <strong className="text-foreground/80">pausada por tempo indeterminado</strong> apenas para aquele contato até você ou sua equipe clicar em <strong className="text-foreground/80">Reativar IA</strong> manualmente na conversa do Chat.
+                    </p>
+                  </div>
+                )}
+              </section>
+            </div>
+          )}
+        </div>
+
         <AdvancedSection label="Abrir ajustes de conversa (buffer, humanizar, raciocínio…)">
         <div className="space-y-3">
           {/* Buffer de mensagens */}
@@ -780,6 +985,169 @@ export function InfoTab(p: InfoTabProps) {
               </p>
             </div>
           )}
+
+          {/* Simulação de Digitação & Delay Evolution API */}
+          <div className="space-y-3 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.04] p-4">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-2">
+                <div className="p-1.5 rounded-lg bg-emerald-500/15 text-emerald-400">
+                  <Clock className="w-4 h-4" />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold uppercase tracking-wider text-[#00ffcc] block">
+                    Delay & Digitando (Evolution API)
+                  </label>
+                  <p className="text-[11px] text-muted-foreground">
+                    Controla o tempo em que o status &quot;digitando...&quot; aparece no WhatsApp antes do envio.
+                  </p>
+                </div>
+              </div>
+
+              {/* Seletor de Modo: Fixo vs Aleatório */}
+              <div className="inline-flex rounded-lg border border-white/10 bg-black/40 p-1 gap-1">
+                <button
+                  type="button"
+                  onClick={() => p.setTypingDelayMode("fixed")}
+                  className={cn(
+                    "px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer",
+                    p.typingDelayMode === "fixed"
+                      ? "bg-emerald-500 text-black font-semibold shadow-xs"
+                      : "text-muted-foreground hover:text-white"
+                  )}
+                >
+                  Fixo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => p.setTypingDelayMode("random")}
+                  className={cn(
+                    "px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer",
+                    p.typingDelayMode === "random"
+                      ? "bg-emerald-500 text-black font-semibold shadow-xs"
+                      : "text-muted-foreground hover:text-white"
+                  )}
+                >
+                  Aleatório (Faixa Min–Máx)
+                </button>
+              </div>
+            </div>
+
+            {p.typingDelayMode === "fixed" ? (
+              <div className="space-y-2 pt-1">
+                <div className="flex items-center justify-between">
+                  <label htmlFor="typing-delay-fixed" className="text-xs text-foreground/90 font-medium">
+                    Tempo Fixo de Digitação (Segundos)
+                  </label>
+                  <span className="text-xs font-mono font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
+                    {p.typingDelaySeconds}s
+                  </span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <input
+                    id="typing-delay-fixed"
+                    type="range"
+                    min={1}
+                    max={60}
+                    step={1}
+                    value={p.typingDelaySeconds}
+                    onChange={(e) => p.setTypingDelaySeconds(Number(e.target.value))}
+                    className="flex-1 accent-emerald-400 cursor-pointer"
+                  />
+                  <NumberInput
+                    min={1}
+                    max={120}
+                    fallback={10}
+                    value={p.typingDelaySeconds}
+                    onChange={(n) => p.setTypingDelaySeconds(n)}
+                    className="w-20 bg-white/5 border-emerald-500/30 text-white h-9 rounded-lg text-xs px-2.5 text-center"
+                  />
+                </div>
+                <p className="text-[11px] text-muted-foreground/90 bg-black/20 rounded-md p-2 border border-white/5">
+                  ⏱️ O agente simulará digitação por exatamente <strong>{p.typingDelaySeconds} segundos</strong> no WhatsApp antes de disparar cada resposta.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3 pt-1">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <label htmlFor="typing-delay-min" className="text-xs text-foreground/90 font-medium">
+                        Tempo Mínimo (segundos)
+                      </label>
+                      <span className="text-xs font-mono text-emerald-400 font-semibold">{p.typingDelayMinSeconds}s</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        id="typing-delay-min"
+                        type="range"
+                        min={1}
+                        max={Math.min(60, p.typingDelayMaxSeconds)}
+                        step={1}
+                        value={p.typingDelayMinSeconds}
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          p.setTypingDelayMinSeconds(val);
+                          if (val > p.typingDelayMaxSeconds) p.setTypingDelayMaxSeconds(val);
+                        }}
+                        className="flex-1 accent-emerald-400 cursor-pointer"
+                      />
+                      <NumberInput
+                        min={1}
+                        max={p.typingDelayMaxSeconds}
+                        fallback={5}
+                        value={p.typingDelayMinSeconds}
+                        onChange={(n) => {
+                          p.setTypingDelayMinSeconds(n);
+                          if (n > p.typingDelayMaxSeconds) p.setTypingDelayMaxSeconds(n);
+                        }}
+                        className="w-16 bg-white/5 border-emerald-500/30 text-white h-8 rounded-lg text-xs px-2 text-center"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <label htmlFor="typing-delay-max" className="text-xs text-foreground/90 font-medium">
+                        Tempo Máximo (segundos)
+                      </label>
+                      <span className="text-xs font-mono text-emerald-400 font-semibold">{p.typingDelayMaxSeconds}s</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        id="typing-delay-max"
+                        type="range"
+                        min={p.typingDelayMinSeconds}
+                        max={90}
+                        step={1}
+                        value={p.typingDelayMaxSeconds}
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          p.setTypingDelayMaxSeconds(val);
+                          if (val < p.typingDelayMinSeconds) p.setTypingDelayMinSeconds(val);
+                        }}
+                        className="flex-1 accent-emerald-400 cursor-pointer"
+                      />
+                      <NumberInput
+                        min={p.typingDelayMinSeconds}
+                        max={120}
+                        fallback={25}
+                        value={p.typingDelayMaxSeconds}
+                        onChange={(n) => {
+                          p.setTypingDelayMaxSeconds(n);
+                          if (n < p.typingDelayMinSeconds) p.setTypingDelayMinSeconds(n);
+                        }}
+                        className="w-16 bg-white/5 border-emerald-500/30 text-white h-8 rounded-lg text-xs px-2 text-center"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <p className="text-[11px] text-muted-foreground/90 bg-black/20 rounded-md p-2 border border-white/5">
+                  🎲 A cada mensagem, o agente sorteará um tempo aleatório entre <strong>{p.typingDelayMinSeconds}s</strong> e <strong>{p.typingDelayMaxSeconds}s</strong> (ex: {Math.round((p.typingDelayMinSeconds + p.typingDelayMaxSeconds) / 2)}s). Isso humaniza o comportamento no WhatsApp e ajuda a prevenir bloqueios por envios automatizados.
+                </p>
+              </div>
+            )}
+          </div>
 
           {/* Web Search MCP */}
           <ToggleRow

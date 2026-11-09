@@ -539,3 +539,66 @@ describe("ContactSidebar Reunião & Lembretes", () => {
     expect(mocks.toast.success).toHaveBeenCalledWith("Reunião cancelada!");
   });
 });
+
+describe("ContactSidebar Áudio de Voz (Gravado PTT)", () => {
+  it("renderiza a seção com badge PTT e mensagem explicativa", async () => {
+    render(<ContactSidebar contact={contact} clientId="tenant-a" />);
+    expect(await screen.findByText("Áudio de Voz (Gravado)")).toBeDefined();
+    expect(screen.getByText("PTT Nativo")).toBeDefined();
+    expect(screen.getByText("Clique para anexar áudio")).toBeDefined();
+  });
+
+  it("permite anexar áudio, exibe preview e envia via /api/send-message", async () => {
+    mocks.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === "/api/send-message") {
+        return response({ success: true, msgId: "voice-123" });
+      }
+      return found();
+    });
+
+    const { container } = render(<ContactSidebar contact={contact} clientId="tenant-a" instanceName="zap-inst" />);
+    await screen.findByText("Áudio de Voz (Gravado)");
+
+    const fileInput = container.querySelector('input[type="file"][accept*="audio"]') as HTMLInputElement;
+    expect(fileInput).toBeDefined();
+
+    const audioFile = new File(["fake audio binary data"], "mensagem-proposta.mp3", { type: "audio/mp3" });
+    fireEvent.change(fileInput, { target: { files: [audioFile] } });
+
+    // Preview do áudio exibido
+    expect(await screen.findByText("mensagem-proposta.mp3")).toBeDefined();
+    expect(screen.getByText(/Pronto para enviar/)).toBeDefined();
+
+    const sendBtn = screen.getByRole("button", { name: "Enviar como Áudio Gravado" });
+    expect(sendBtn).toBeDefined();
+    fireEvent.click(sendBtn);
+
+    await waitFor(() => {
+      expect(mocks.fetch).toHaveBeenCalledWith(
+        "/api/send-message",
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining('"type":"audio"'),
+        })
+      );
+    });
+    expect(mocks.toast.success).toHaveBeenCalledWith("Áudio enviado como mensagem de voz gravada!");
+  });
+
+  it("permite descartar áudio selecionado antes do envio", async () => {
+    const { container } = render(<ContactSidebar contact={contact} clientId="tenant-a" />);
+    await screen.findByText("Áudio de Voz (Gravado)");
+
+    const fileInput = container.querySelector('input[type="file"][accept*="audio"]') as HTMLInputElement;
+    const audioFile = new File(["fake audio binary data"], "teste-cancelar.mp3", { type: "audio/mp3" });
+    fireEvent.change(fileInput, { target: { files: [audioFile] } });
+
+    expect(await screen.findByText("teste-cancelar.mp3")).toBeDefined();
+
+    const discardBtn = screen.getByRole("button", { name: "Descartar áudio" });
+    fireEvent.click(discardBtn);
+
+    expect(screen.queryByText("teste-cancelar.mp3")).toBeNull();
+    expect(screen.getByText("Clique para anexar áudio")).toBeDefined();
+  });
+});

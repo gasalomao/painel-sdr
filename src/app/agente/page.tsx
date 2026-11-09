@@ -100,6 +100,15 @@ export default function AgentePage() {
   const [humanizeMessages, setHumanizeMessages] = useState(false);
   // Intensidade do picote: 1 = picota pouco · 3 = padrão · 5 = picota muito.
   const [splitIntensity, setSplitIntensity] = useState<SplitIntensity>(DEFAULT_SPLIT_INTENSITY);
+  // Delay de digitação (Evolution API presence / delay)
+  const [typingDelayMode, setTypingDelayMode] = useState<"fixed" | "random">("random");
+  const [typingDelaySeconds, setTypingDelaySeconds] = useState<number>(10);
+  const [typingDelayMinSeconds, setTypingDelayMinSeconds] = useState<number>(5);
+  const [typingDelayMaxSeconds, setTypingDelayMaxSeconds] = useState<number>(25);
+  const [customGoalEnabled, setCustomGoalEnabled] = useState(false);
+  const [customGoalText, setCustomGoalText] = useState("");
+  const [customGoalPauseMode, setCustomGoalPauseMode] = useState<"timed" | "indefinite">("timed");
+  const [customGoalPauseMinutes, setCustomGoalPauseMinutes] = useState<number>(30);
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
   // Modo de raciocínio UNIVERSAL: 0=Econômico, 1=Equilibrado, 2=Intenso, 3=Think Máximo.
   // Funciona em todos os modelos (o ai-provider mapeia pro param de cada um).
@@ -209,9 +218,15 @@ export default function AgentePage() {
   const [testMessages, setTestMessages] = useState<SandboxMsg[]>([]);
   const [testInput, setTestInput] = useState("");
   const [testLoading, setTestLoading] = useState(false);
+  const [testIsTyping, setTestIsTyping] = useState(false);
+  const [testTypingSeconds, setTestTypingSeconds] = useState<number | undefined>(undefined);
   const [testVariables, setTestVariables] = useState<Record<string, string>>({});
   const [testStageIndex, setTestStageIndex] = useState(0);
   const [testSkippedStages, setTestSkippedStages] = useState<number[]>([]);
+  const [testCustomGoalPaused, setTestCustomGoalPaused] = useState(false);
+  const [testCustomGoalPauseMode, setTestCustomGoalPauseMode] = useState<"timed" | "indefinite" | null>(null);
+  const [testCustomGoalPauseMinutes, setTestCustomGoalPauseMinutes] = useState<number | null>(null);
+  const [testCustomGoalResumeAt, setTestCustomGoalResumeAt] = useState<string | null>(null);
   const testBufferTimerRef = useRef<NodeJS.Timeout | null>(null);
   const testMessageBufferRef = useRef<string[]>([]);
   const testMessagesStateRef = useRef<SandboxMsg[]>([]);
@@ -325,6 +340,18 @@ export default function AgentePage() {
         setMessageBufferSeconds(opts.message_buffer_seconds || 0);
         setHumanizeMessages(opts.humanize_messages ?? false);
         setSplitIntensity(normalizeSplitIntensity(opts.split_intensity));
+        setTypingDelayMode(opts.typing_delay_mode === "fixed" ? "fixed" : "random");
+        setTypingDelaySeconds(Number(opts.typing_delay_seconds) || 10);
+        setTypingDelayMinSeconds(Number(opts.typing_delay_min_seconds) || 5);
+        setTypingDelayMaxSeconds(Number(opts.typing_delay_max_seconds) || 25);
+        setCustomGoalEnabled(Boolean(opts.custom_goal_enabled));
+        setCustomGoalText(typeof opts.custom_goal_text === "string" ? opts.custom_goal_text : "");
+        setCustomGoalPauseMode(
+          opts.custom_goal_pause_mode === "indefinite" || opts.custom_goal_pause_mode === "manual"
+            ? "indefinite"
+            : "timed"
+        );
+        setCustomGoalPauseMinutes(Math.max(1, Number(opts.custom_goal_pause_minutes) || 30));
         setWebSearchEnabled(opts.web_search_enabled ?? false);
         // Modo de raciocínio: prefere reasoning_mode (novo); retrocompat thinking_budget.
         if (opts.reasoning_mode === 0 || opts.reasoning_mode === 1 || opts.reasoning_mode === 2 || opts.reasoning_mode === 3) {
@@ -562,6 +589,14 @@ export default function AgentePage() {
         message_buffer_seconds: messageBufferSeconds,
         humanize_messages: humanizeMessages,
         split_intensity: splitIntensity,
+        typing_delay_mode: typingDelayMode,
+        typing_delay_seconds: typingDelaySeconds,
+        typing_delay_min_seconds: typingDelayMinSeconds,
+        typing_delay_max_seconds: typingDelayMaxSeconds,
+        custom_goal_enabled: customGoalEnabled,
+        custom_goal_text: customGoalText,
+        custom_goal_pause_mode: customGoalPauseMode,
+        custom_goal_pause_minutes: customGoalPauseMinutes,
         web_search_enabled: webSearchEnabled,
         reasoning_mode: reasoningMode,
         thinking_budget: reasoningMode,
@@ -957,6 +992,10 @@ export default function AgentePage() {
       setTestVariables({});
       setTestStageIndex(0);
       setTestSkippedStages([]);
+      setTestCustomGoalPaused(false);
+      setTestCustomGoalPauseMode(null);
+      setTestCustomGoalPauseMinutes(null);
+      setTestCustomGoalResumeAt(null);
       try { localStorage.setItem(`sdr_test_messages_${activeAgentId}`, JSON.stringify([agentMessage])); } catch {}
     } catch (e) {
       alert("Erro ao simular: " + (e as Error).message);
@@ -985,7 +1024,15 @@ export default function AgentePage() {
           remoteJid: "sandbox_teste",
           text: consolidatedText,
           testHistory: currentHistory.slice(0, -1),
-          testState: { variables: testVariables, currentStageIndex: testStageIndex, skippedStages: testSkippedStages },
+          testState: {
+            variables: testVariables,
+            currentStageIndex: testStageIndex,
+            skippedStages: testSkippedStages,
+            customGoalPaused: testCustomGoalPaused,
+            customGoalPauseMode: testCustomGoalPauseMode,
+            customGoalPauseMinutes: testCustomGoalPauseMinutes,
+            customGoalResumeAt: testCustomGoalResumeAt,
+          },
           testLeadData: previewSample,
         }),
       });
@@ -1022,6 +1069,12 @@ export default function AgentePage() {
         if (data.testStateUpdate.variables) setTestVariables(data.testStateUpdate.variables);
         if (data.testStateUpdate.currentStageIndex !== undefined) setTestStageIndex(data.testStateUpdate.currentStageIndex);
         if (data.testStateUpdate.skippedStages) setTestSkippedStages(data.testStateUpdate.skippedStages);
+        if (data.testStateUpdate.customGoalPaused) {
+          setTestCustomGoalPaused(true);
+          setTestCustomGoalPauseMode(data.testStateUpdate.customGoalPauseMode || "timed");
+          setTestCustomGoalPauseMinutes(data.testStateUpdate.customGoalPauseMinutes ?? null);
+          setTestCustomGoalResumeAt(data.testStateUpdate.customGoalResumeAt ?? null);
+        }
       }
 
       const chunks: string[] = Array.isArray(data.chunks) && data.chunks.length > 0
@@ -1033,10 +1086,30 @@ export default function AgentePage() {
         ...toolLogs.map((l: { content?: string }) => ({ role: "tool" as const, content: String(l.content ?? JSON.stringify(l)) })),
       ]);
 
+      // Simula o tempo de digitação (digitando...) calculado pelo Evolution API delay
+      const rawDelay = data.typingDelaySeconds;
+      const simulatedDelaySec = typeof rawDelay === "number" && rawDelay > 0
+        ? rawDelay
+        : (typingDelayMode === "fixed"
+            ? typingDelaySeconds
+            : Math.floor(Math.random() * (typingDelayMaxSeconds - typingDelayMinSeconds + 1)) + typingDelayMinSeconds);
+
+      setTestTypingSeconds(simulatedDelaySec);
+      setTestIsTyping(true);
+
+      // Aguarda o delay com animação de "digitando..."
+      await new Promise((r) => setTimeout(r, Math.min(simulatedDelaySec, 30) * 1000));
+      setTestIsTyping(false);
+      setTestTypingSeconds(undefined);
+
       for (let i = 0; i < chunks.length; i++) {
         if (i > 0) {
-          const typingSeconds = Math.min(Math.max(chunks[i].length / 15, 1.5), 4);
-          await new Promise((r) => setTimeout(r, typingSeconds * 1000));
+          const chunkTyping = Math.min(Math.max(chunks[i].length / 15, 1.5), 4);
+          setTestTypingSeconds(Math.round(chunkTyping));
+          setTestIsTyping(true);
+          await new Promise((r) => setTimeout(r, chunkTyping * 1000));
+          setTestIsTyping(false);
+          setTestTypingSeconds(undefined);
         }
         setTestMessages((prev) => [...prev, { role: "agent", content: chunks[i] }]);
       }
@@ -1044,6 +1117,8 @@ export default function AgentePage() {
       setTestMessages((prev) => [...prev, { role: "agent", isError: true, content: `❌ Falha ao contatar servidor: ${(e as Error).message}` }]);
     } finally {
       setTestLoading(false);
+      setTestIsTyping(false);
+      setTestTypingSeconds(undefined);
     }
   };
 
@@ -1080,7 +1155,25 @@ export default function AgentePage() {
     setTestVariables({});
     setTestStageIndex(0);
     setTestSkippedStages([]);
+    setTestCustomGoalPaused(false);
+    setTestCustomGoalPauseMode(null);
+    setTestCustomGoalPauseMinutes(null);
+    setTestCustomGoalResumeAt(null);
     try { localStorage.removeItem(`sdr_test_messages_${activeAgentId}`); } catch {}
+  };
+
+  const resumeTestAi = () => {
+    setTestCustomGoalPaused(false);
+    setTestCustomGoalPauseMode(null);
+    setTestCustomGoalPauseMinutes(null);
+    setTestCustomGoalResumeAt(null);
+    setTestMessages((prev) => [
+      ...prev,
+      {
+        role: "tool",
+        content: "[Objetivo Personalizado] IA reativada manualmente para este contato de teste.",
+      },
+    ]);
   };
 
   /* ====================================================================
@@ -1131,6 +1224,14 @@ export default function AgentePage() {
                 messageBufferSeconds={messageBufferSeconds} setMessageBufferSeconds={setMessageBufferSeconds}
                 humanizeMessages={humanizeMessages} setHumanizeMessages={setHumanizeMessages}
                 splitIntensity={splitIntensity} setSplitIntensity={setSplitIntensity}
+                typingDelayMode={typingDelayMode} setTypingDelayMode={setTypingDelayMode}
+                typingDelaySeconds={typingDelaySeconds} setTypingDelaySeconds={setTypingDelaySeconds}
+                typingDelayMinSeconds={typingDelayMinSeconds} setTypingDelayMinSeconds={setTypingDelayMinSeconds}
+                typingDelayMaxSeconds={typingDelayMaxSeconds} setTypingDelayMaxSeconds={setTypingDelayMaxSeconds}
+                customGoalEnabled={customGoalEnabled} setCustomGoalEnabled={setCustomGoalEnabled}
+                customGoalText={customGoalText} setCustomGoalText={setCustomGoalText}
+                customGoalPauseMode={customGoalPauseMode} setCustomGoalPauseMode={setCustomGoalPauseMode}
+                customGoalPauseMinutes={customGoalPauseMinutes} setCustomGoalPauseMinutes={setCustomGoalPauseMinutes}
                 webSearchEnabled={webSearchEnabled} setWebSearchEnabled={setWebSearchEnabled}
                 reasoningMode={reasoningMode} setReasoningMode={setReasoningMode}
                 leadIntelligenceEnabled={leadIntelligenceEnabled} setLeadIntelligenceEnabled={setLeadIntelligenceEnabled}
@@ -1250,6 +1351,16 @@ export default function AgentePage() {
                 nomeAgente={nomeAgente}
                 humanizeMessages={humanizeMessages}
                 messageBufferSeconds={messageBufferSeconds}
+                typingDelayMode={typingDelayMode}
+                typingDelaySeconds={typingDelaySeconds}
+                typingDelayMinSeconds={typingDelayMinSeconds}
+                typingDelayMaxSeconds={typingDelayMaxSeconds}
+                customGoalEnabled={customGoalEnabled}
+                customGoalText={customGoalText}
+                testCustomGoalPaused={testCustomGoalPaused}
+                onResumeTestAi={resumeTestAi}
+                testIsTyping={testIsTyping}
+                testTypingSeconds={testTypingSeconds}
                 testMessages={testMessages}
                 testInput={testInput} setTestInput={setTestInput}
                 testLoading={testLoading}

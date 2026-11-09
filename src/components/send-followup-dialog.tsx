@@ -23,6 +23,8 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import { RadixModelOptions } from "@/components/ai-module-shared";
+import type { GroupableModel } from "@/lib/model-grouping";
 import { Loader2, Sparkles, Send, Smartphone, ShieldAlert, X, CheckCircle2 } from "lucide-react";
 
 const TEMPLATE_VARS = [
@@ -41,7 +43,7 @@ type Appointment = {
 };
 
 type Instance = { instance_name: string; provider?: string; status?: string };
-type ModelOpt = { id: string; name?: string };
+type ModelOpt = GroupableModel;
 
 export function SendFollowupDialog({
   open,
@@ -286,16 +288,7 @@ export function SendFollowupDialog({
                     <SelectItem value="_default" className="text-xs">
                       <span className="text-muted-foreground italic">Default do organizer (não trocar)</span>
                     </SelectItem>
-                    {modelOptions.map((m) => (
-                      <SelectItem key={m.id} value={m.id} className="text-xs">
-                        <div className="flex flex-col">
-                          <span className="font-mono font-bold">{m.id}</span>
-                          {m.name && m.name !== m.id && (
-                            <span className="text-[9px] text-muted-foreground">{m.name}</span>
-                          )}
-                        </div>
-                      </SelectItem>
-                    ))}
+                    <RadixModelOptions models={modelOptions} />
                   </SelectContent>
                 </Select>
               )}

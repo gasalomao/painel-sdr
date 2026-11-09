@@ -1,11 +1,10 @@
 /**
- * Prompt do Organizador IA — montagem centralizada.
+ * Prompt do Organizador IA — montagem centralizada e auto-adaptativa.
  *
  * Compartilhado entre /api/ai-organize (executa) e
  * /api/organizer/effective-prompt (mostra ao usuário).
  *
- * Retorna 4 pedaços + o systemPrompt final concatenado, pra UI poder
- * mostrar separadamente o que vem do cliente vs. o que é regra fixa.
+ * Retorna pedaços estruturados + o systemPrompt final concatenado e minificado.
  */
 
 export const DEFAULT_ORGANIZER_BASE_PROMPT = `
@@ -22,6 +21,11 @@ Vai receber conversas de HOJE, agrupadas por contato. Cada bloco vem com CONTEXT
 - FLAGS marcados com ⚑
 
 Sua missão: decidir o estágio REAL com base no conteúdo de HOJE + HISTÓRICO + estágio atual + DATA DE HOJE. SEM alucinar, SEM achismo, SEM mover só porque "melhorou o tom".
+
+## COMO LER A CONVERSA SEM ERRO:
+- Mensagens marcadas com "SDR:" foram enviadas pela NOSSA empresa (Agente IA ou vendedor humano).
+- Mensagens marcadas com "CLIENTE:" foram enviadas pelo LEAD.
+- JAMAIS confunda uma oferta ou pergunta feita pelo "SDR:" com algo dito pelo "CLIENTE:".
 
 ## REGRAS DE DECISÃO (ordem de avaliação — pare na primeira que casar):
 
@@ -65,67 +69,98 @@ R15. JÁ AGENDADO — off-topic / confirmação NÃO rebaixa (CRÍTICO):
      - Status atual = agendado + cliente confirma ("tô indo", "confirmado", "tá certo", "obrigada") → MANTÉM status.
      - Status atual = agendado + cliente pede REMARCAR → MANTÉM ou move pra "follow-up" se existir. NUNCA volta pra "interessado"/"primeiro_contato".
      - Status atual = agendado + cliente CANCELA explicitamente ("não vou mais", "desisti", "cancela") → status terminal negativo.
-     - Status atual = agendado + DATA da reunião JÁ PASSOU (compare com DATA DE HOJE no contexto) + cliente agradece/avalia/conta como foi → ATENDIMENTO OCORREU. Sobe pro próximo estágio do kanban DEPOIS de agendado (geralmente "fechado"/"atendido"/"comprou"). NÃO mantém em "agendado" porque já passou.
+     - Status atual = agendado + DATA da reunião JÁ PASSOU (compare com DATA DE HOJE no contexto) + cliente agradece/avalia/conta como foi → suba pra status TERMINAL POSITIVO (fechado/atendido/concluído).
 
-R16. ESTÁGIO AVANÇADO + dúvida operacional única:
-     - Cliente em interessado/follow-up/agendado/fechado + pergunta operacional curta ("qual horário", "tem estacionamento", "atende sábado") sem sinal de compra/desistência.
-     - SEMPRE mantém status. Anota a pergunta em "resumo".
+R16. REAVALIAÇÃO DE TERMINAL (EXCEÇÃO):
+     - Se lead estava em status TERMINAL (descartado/perdido/sem_interesse), mas HOJE ele mandou mensagem com pergunta clara de interesse/compra → RETIRE do terminal e mova pra "interessado" ou status adequado.
+     - Terminal NÃO é prisão eterna se o próprio cliente voltou a procurar.
 
-R17. PÓS-ATENDIMENTO inteligente (qualquer nicho):
-     - Sinais textuais de que o serviço/produto JÁ FOI ENTREGUE: "amei", "ficou ótimo", "adorei", "foi excelente", "obrigada pelo atendimento", "valeu", "show", "recomendo", "voltarei", "perfeito o serviço", "ficou linda", agradecimento + elogio + ausência de pergunta sobre marcar de novo.
-     - Combinado com data agendada já no passado OU status atual = agendado.
-     - Decisão: mover pro estágio TERMINAL POSITIVO do kanban deste cliente (ex: "fechado", "atendido", "concluido"). Se não houver tal estágio, mantém "agendado" e marca lead_type="cliente_ativo".
-     - Se o cliente JÁ PERGUNTOU sobre marcar de novo / outro serviço → também é sinal de pós-atendimento. lead_type="recorrente".
-
-## HIERARQUIA (nunca rebaixe, exceto pra estados terminais):
-
-- Use a ORDEM DAS COLUNAS DO KANBAN (lista no apêndice). Index menor = início do funil; maior = mais avançado.
-- Terminais podem ser aplicados de qualquer estágio com evidência CLARA.
-- Se nada novo aconteceu hoje, REPITA o status atual.
+R17. PÓS-ATENDIMENTO / AGENDAMENTO CONCLUÍDO NO PASSADO:
+     - Se o lead já passou pelo atendimento (data da reunião < DATA DE HOJE) e a conversa mostra que foi atendido com sucesso (ex: agradeceu, elogiou, mandou comprovante) → SUBA para status TERMINAL POSITIVO do kanban ("fechado" / "atendido" / "concluído").
+     - Se faltou/não apareceu → mova pra "follow-up" se existir no kanban, ou mantenha se não houver.
 
 ## COMO ESCREVER "razao" E "resumo":
-
-"razao" (≤ 160 chars): cite a REGRA acionada (R1-R17) e a evidência curta.
-  - "R15: cliente em agendado fez pergunta off-topic ('aceita pix?'). Mantido."
-  - "R17: cliente agradeceu pós-atendimento ('amei o resultado'). Movido pra atendido."
-
-"resumo" (1-3 frases, ≤ 400 chars): descreva O QUE aconteceu HOJE + contexto + próximo passo.
-
-## ARMADILHAS — NÃO CAIA:
-
-- "Ok, obrigado" → NÃO é fechamento, é educação.
-- "Vou ver e te aviso" → "follow-up", NÃO "interessado".
-- Cliente em agendado fazendo pergunta off-topic → JAMAIS volta pra interessado/primeiro_contato.
-- Lead em estágio avançado fazendo dúvida operacional única → mantém status.
+- "razao" (≤ 160 chars): Comece citando a regra aplicada (ex: "R4: agendou corte quinta 15h"). Seja telegráfico, direto ao ponto.
+- "resumo" (1-2 frases, ≤ 350 chars): Visão executiva pro operador humano ler rápido. Ex: "Cliente pediu orçamento de mechas, aceitou quinta 15h com Ana. Sem pendências."
 
 ## FORMATO DE RESPOSTA:
-
-JSON array. Cada item:
-- "jid": string (copie exato do CHAT ID)
-- "status": status_key EXATO do kanban deste cliente (ver apêndice)
+Responda APENAS um JSON array válido. Cada item:
+- "jid": string (exatamente o CHAT ID recebido)
+- "status": string (status_key EXATO do kanban deste cliente — ver apêndice abaixo)
 - "lead_type": "novo" | "cliente_ativo" | "recorrente" | "unica_duvida" | "qualificado" | "frio"
-- "razao": ≤ 160 chars. REGRA + evidência.
-- "resumo": 1-3 frases (≤ 400 chars).
-
-Nada além do JSON. Sem markdown, sem explicação.
+- "razao": string curta (≤ 160 chars, citando R1-R17)
+- "resumo": string executiva (1-2 frases, ≤ 350 chars)
 `.trim();
 
-export type KanbanColLite = { status_key: string; label: string; order_index: number; is_terminal?: boolean };
+export type KanbanColLite = {
+  status_key: string;
+  label: string;
+  order_index?: number;
+  is_terminal?: boolean;
+};
+
+export type AgentContextLite = {
+  name?: string | null;
+  main_prompt?: string | null;
+  role?: string | null;
+};
+
+const isNegativeTerminalKey = (k: string) => /sem_interesse|descartado|perdido|cancelado|recusou/i.test(k);
+
+export function isTerminalColumn(col: Pick<KanbanColLite, "status_key" | "label" | "is_terminal">): boolean {
+  if (col.is_terminal) return true;
+  const combined = `${col.status_key || ""} ${col.label || ""}`.toLowerCase();
+  return /sem_interesse|descartado|perdido|cancelado|recusou|fechado|ganho|contratado|comprou/i.test(combined);
+}
+
+export function inferColumnSemanticGuide(col: { status_key?: string; label?: string; order_index?: number }, totalCols: number = 10): string {
+  const combined = `${col.status_key || ""} ${col.label || ""}`.toLowerCase();
+  if (/novo|lead_novo|inbox|entrada/.test(combined)) {
+    return "Leads recém-extraídos/cadastrados sem nenhuma mensagem enviada ainda.";
+  }
+  if (/primeiro_contato|abordado|disparo|1_contato|contato_inicial|1º contato/.test(combined)) {
+    return "Abordagem inicial enviada pelo SDR/IA, mas o cliente ainda não respondeu (ou só enviou saudação automática única).";
+  }
+  if (/qualifica|triagem|atendimento|conversando|diagnostico|engajado|respondeu/.test(combined)) {
+    return "Cliente humano respondeu e está em conversa/diagnóstico com a IA.";
+  }
+  if (/previa_solicitada|previa_pedida|aceitou_previa|gerar_previa|orcamento_solicitado/.test(combined)) {
+    return "Cliente ACEITOU receber a prévia gratuita, demonstração ou orçamento e aguarda o envio do link.";
+  }
+  if (/em_negociacao|negociacao|previa_enviada|previa_pronta|proposta|orcamento_enviado/.test(combined)) {
+    return "Link da prévia/apresentação já foi enviado na conversa OU proposta de valores já foi apresentada.";
+  }
+  if (/interessado|qualificado|quente|oportunidade/.test(combined)) {
+    return "Cliente demonstrou interesse concreto na solução, pediu detalhes/preço ou avançou positivamente.";
+  }
+  if (/agendad|reuniao|call|consulta|visita|marcado/.test(combined)) {
+    return "Reunião, call ou atendimento agendado com horário combinado.";
+  }
+  if (/follow|nutrir|retornar|aguardando|depois|frio/.test(combined)) {
+    return "Cliente pediu para conversar mais pra frente ou ficou de analisar/retornar depois.";
+  }
+  if (/fechad|ganho|vendid|contratad|comprou|concluid/.test(combined)) {
+    return "[TERMINAL POSITIVO] Venda concluída, pagamento/contrato fechado ou serviço realizado.";
+  }
+  if (/sem_interesse|perdid|recus|nao_quis|cancelad/.test(combined)) {
+    return "[TERMINAL NEGATIVO] Cliente recusou a oferta claramente ou declarou não ter interesse.";
+  }
+  if (/descartad|invalid|errado|robo|ura/.test(combined)) {
+    return "[TERMINAL NEGATIVO] Número inválido/errado ou URA/robô automático em loop.";
+  }
+  return `Estágio do funil "${col.label || col.status_key}".`;
+}
 
 export function buildKanbanAppendix(cols: KanbanColLite[]): { kanbanAppendix: string; terminalKeys: string[] } {
   if (cols.length === 0) {
     return { kanbanAppendix: "", terminalKeys: [] };
   }
-  // TERMINAIS: prioriza o campo is_terminal (marcado pelo usuário). Fallback
-  // pro regex de nome (compat com bancos antigos). Assim QUALQUER kanban
-  // funciona — o usuário marca o que é terminal, não depende de nome fixo.
-  const isTerminalKey = (k: string) => /sem_interesse|descartado|perdido|cancelado|recusou/i.test(k);
-  const terminalKeys = cols.filter(c => c.is_terminal || isTerminalKey(c.status_key)).map(c => c.status_key);
+  const terminalKeys = cols.filter(c => c.is_terminal || isNegativeTerminalKey(c.status_key)).map(c => c.status_key);
 
   const appendix = `
 
 ## ESTÁGIOS DISPONÍVEIS NESTE KANBAN (use SOMENTE estes status_key — index 0 é o início do funil):
-${cols.map((c, i) => `  ${i}. status_key="${c.status_key}"  →  label exibido: "${c.label}"${(c.is_terminal || isTerminalKey(c.status_key)) ? "  [TERMINAL — sem volta]" : ""}`).join("\n")}
+${cols.map((c, i) => `  ${i}. status_key="${c.status_key}"  →  label exibido: "${c.label}"${(c.is_terminal || isNegativeTerminalKey(c.status_key)) ? "  [TERMINAL — sem volta]" : ""}`).join("\n")}
 
 REGRAS ESPECÍFICAS PARA ESTE KANBAN:
 - Use o "status_key" EXATO (minúsculas com underscore) no campo "status". NÃO use o "label".
@@ -136,6 +171,24 @@ REGRAS ESPECÍFICAS PARA ESTE KANBAN:
 - Estágios que casam com "fechado/comprou/contratado/atendido/concluido/realizado" → conclusão positiva. R11 + R17 valem.
 `;
   return { kanbanAppendix: appendix, terminalKeys };
+}
+
+export function buildAgentContextAppendix(agent?: AgentContextLite | null): string {
+  if (!agent || (!agent.main_prompt && !agent.name)) return "";
+  const rawPrompt = (agent.main_prompt || "").trim();
+  const compactExcerpt = rawPrompt
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !l.startsWith("---"))
+    .slice(0, 14)
+    .join(" | ")
+    .slice(0, 750);
+
+  if (!compactExcerpt && !agent.name) return "";
+  return `\n\n## CONTEXTO DO AGENTE DE IA DESTA CONTA:
+Agente: ${agent.name || "Agente Principal"}${agent.role ? ` (${agent.role})` : ""}
+Resumo da operação: ${compactExcerpt}\n`;
 }
 
 export function buildDateContext(now: Date = new Date()): string {
@@ -155,11 +208,6 @@ export type AppointmentLite = {
 /**
  * Constrói bloco de contexto sobre agendamentos REAIS deste lead (vindos da
  * tabela appointments, sincronizada com Google Calendar).
- *
- * Isso TRANSFORMA o raciocínio do organizer de "inferir da conversa" pra
- * "saber de fonte estruturada". R15/R17 passam a ter ground truth: se a IA
- * vê que existe appointment confirmed no futuro, NÃO rebaixa pra interessado.
- * Se vê appointment completed/passado, sobe pra terminal positivo.
  */
 export function buildAppointmentsContext(
   appointments: AppointmentLite[],
@@ -195,15 +243,17 @@ export function buildOrganizerSystemPrompt(
   customPrompt: string | null,
   cols: KanbanColLite[],
   now: Date = new Date(),
-  appointments: AppointmentLite[] = []
+  appointments: AppointmentLite[] = [],
+  agentContext?: AgentContextLite | null
 ) {
   const defaultBasePrompt = DEFAULT_ORGANIZER_BASE_PROMPT;
   const basePrompt = (customPrompt && customPrompt.trim()) ? customPrompt.trim() : defaultBasePrompt;
   const { kanbanAppendix, terminalKeys } = buildKanbanAppendix(cols);
+  const agentAppendix = buildAgentContextAppendix(agentContext);
   const dateContext = buildDateContext(now);
   const appointmentsContext = buildAppointmentsContext(appointments, now);
-  const systemPrompt = minifyPrompt(basePrompt + kanbanAppendix + dateContext + appointmentsContext);
-  return { systemPrompt, defaultBasePrompt, kanbanAppendix, dateContext, appointmentsContext, terminalKeys };
+  const systemPrompt = minifyPrompt(basePrompt + agentAppendix + kanbanAppendix + dateContext + appointmentsContext);
+  return { systemPrompt, defaultBasePrompt, kanbanAppendix, dateContext, appointmentsContext, agentAppendix, terminalKeys };
 }
 
 function minifyPrompt(s: string): string {
@@ -213,4 +263,97 @@ function minifyPrompt(s: string): string {
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+/**
+ * Extrai e faz parse seguro de JSON retornado por qualquer LLM (Gemini, OpenCode/Gateway,
+ * OpenRouter, NVIDIA NIM, Claude, DeepSeek, Llama), tolerando:
+ * - tags de raciocínio <think>...</think>
+ * - cercas markdown ```json ... ```
+ * - texto introdutório/conclusivo fora do JSON
+ * - quebras de linha literais não escapadas dentro de strings JSON
+ * - vírgulas finais sobrando antes de } ou ]
+ */
+export function extractJsonSafe<T = any>(raw: string): T {
+  if (!raw || typeof raw !== "string") {
+    throw new Error("Resposta vazia da IA");
+  }
+
+  let cleaned = raw
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<think>[\s\S]*$/gi, "")
+    .replace(/```json\s*/gi, "")
+    .replace(/```\s*/g, "")
+    .trim();
+
+  try {
+    return JSON.parse(cleaned) as T;
+  } catch {
+    // continua para extração e reparo
+  }
+
+  const firstObj = cleaned.indexOf("{");
+  const firstArr = cleaned.indexOf("[");
+  let start = -1;
+  let isArray = false;
+  if (firstObj !== -1 && (firstArr === -1 || firstObj < firstArr)) {
+    start = firstObj;
+    isArray = false;
+  } else if (firstArr !== -1) {
+    start = firstArr;
+    isArray = true;
+  }
+
+  if (start !== -1) {
+    const end = isArray ? cleaned.lastIndexOf("]") : cleaned.lastIndexOf("}");
+    if (end > start) {
+      cleaned = cleaned.slice(start, end + 1);
+    } else {
+      cleaned = cleaned.slice(start);
+    }
+  }
+
+  const repaired = repairJsonStringLiterals(cleaned).replace(/,\s*([}\]])/g, "$1");
+
+  return JSON.parse(repaired) as T;
+}
+
+function repairJsonStringLiterals(input: string): string {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (escaped) {
+      out += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      out += ch;
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      out += ch;
+      continue;
+    }
+    if (inString) {
+      if (ch === "\n") {
+        out += "\\n";
+        continue;
+      }
+      if (ch === "\r") {
+        continue;
+      }
+      if (ch === "\t") {
+        out += "\\t";
+        continue;
+      }
+    }
+    out += ch;
+  }
+  return out;
 }

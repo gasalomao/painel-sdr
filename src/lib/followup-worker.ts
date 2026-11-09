@@ -26,6 +26,7 @@ import {
 import { logTokenUsage } from "@/lib/token-usage";
 import { registerPendingAutomatedSend } from "@/lib/manual-send-registry";
 import { isInstanceOwnedByClient } from "@/lib/tenant";
+import { calculateTypingDelayMs, DEFAULT_TYPING_DELAY_CONFIG } from "@/lib/agent-delay";
 
 type FollowupStep = {
   day_offset: number;
@@ -511,6 +512,9 @@ async function processTarget(
       target.nome_negocio
     );
 
+    // Delay de presença "digitando..." configurado para simular digitação humana e evitar ban
+    const typingDelayMs = calculateTypingDelayMs(DEFAULT_TYPING_DELAY_CONFIG);
+
     for (let i = 0; i < chunks.length; i++) {
       const chunkText = chunks[i];
       if (!chunkText) continue;
@@ -522,7 +526,7 @@ async function processTarget(
       }
 
       registerPendingAutomatedSend(camp.instance_name, target.remote_jid, chunkText);
-      const result = await channel.sendMessage(target.remote_jid, chunkText, camp.instance_name);
+      const result = await channel.sendMessage(target.remote_jid, chunkText, camp.instance_name, { delay: typingDelayMs });
       if (!result || result.ok === false) {
         throw new Error(result?.error || "Provider recusou o envio do follow-up");
       }
@@ -561,6 +565,7 @@ async function processTarget(
             mimetype: camp.media_mimetype || undefined,
           },
           camp.instance_name,
+          { delay: typingDelayMs },
         );
         if (!mediaResult || mediaResult.ok === false) {
           throw new Error(mediaResult?.error || "Provider recusou o envio da mídia");

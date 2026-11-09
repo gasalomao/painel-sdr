@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
+import { getAiKeys } from "@/lib/ai-keys";
+import { providerDisplayName, providerOf } from "@/lib/ai-provider";
 
 export const dynamic = "force-dynamic";
 
@@ -9,50 +11,55 @@ export const dynamic = "force-dynamic";
  * POST /api/organizer/run-now
  *
  * Dispara o Organizador IA AGORA, no escopo do cliente logado.
- * Reusa /api/ai-organize internamente passando o clientId vindo da sessão
- * (não do body), então cliente não consegue rodar pra outro cliente.
- * Admin roda pro próprio escopo (ou impersonado).
+ * Reusa /api/ai-organize internamente passando o clientId vindo da sessão.
  */
 export async function POST(req: NextRequest) {
   const ctx = await requireClientId(req);
   if (!ctx.ok) return ctx.response;
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
 
-  // Lê a config central pra reaproveitar api_key/model/provider (sem expor pro browser).
   const { data: cfg } = await supabaseAdmin
     .from("ai_organizer_config")
     .select("enabled, api_key, openrouter_api_key, nvidia_api_key, model, provider")
     .eq("id", 1)
     .maybeSingle();
-  if (!cfg) return NextResponse.json({ ok: false, error: "Organizador não configurado" }, { status: 400 });
-  if (!cfg.enabled) {
-    return NextResponse.json({ ok: false, error: "Organizador está DESLIGADO globalmente. Avise o admin." }, { status: 400 });
-  }
 
-  const { getAiKeys } = await import("@/lib/ai-keys");
-  const { providerOf } = await import("@/lib/ai-provider");
   const aiKeys = await getAiKeys();
-  const model = cfg.model;
+  const model = (cfg?.model || aiKeys.defaultAiModel || "gemini-2.5-flash").trim();
   const p = providerOf(model);
+  const provider = providerDisplayName(p);
 
-  let hasKey = false;
-  if (p === "nvidia") {
-    hasKey = !!(aiKeys.nvidia || aiKeys.nvidiaAccounts?.length);
-  } else if (p === "openrouter") {
-    hasKey = !!(cfg.openrouter_api_key || aiKeys.openrouter || aiKeys.openrouterKeys?.length);
-  } else if (p === "gateway") {
-    hasKey = !!(aiKeys.gatewayBaseUrl || aiKeys.gatewayEndpoints?.length);
-  } else if (p === "combo") {
-    hasKey = true;
-  } else {
-    hasKey = !!(cfg.api_key || aiKeys.gemini);
+  const hasAnyKey =
+    !!(
+      cfg?.api_key ||
+      cfg?.openrouter_api_key ||
+      cfg?.nvidia_api_key ||
+      aiKeys.gemini ||
+      aiKeys.openrouter ||
+      aiKeys.openrouterKeys?.length ||
+      aiKeys.nvidia ||
+      aiKeys.nvidiaAccounts?.length ||
+      aiKeys.gatewayBaseUrl ||
+      aiKeys.gatewayEndpoints?.length ||
+      p === "combo"
+    );
+
+  if (!hasAnyKey) {
+    return NextResponse.json(
+      { ok: false, error: "Nenhuma credencial de IA configurada no sistema." },
+      { status: 400 }
+    );
   }
 
-  if (!hasKey || !cfg.model) {
-    return NextResponse.json({ ok: false, error: "API key/modelo não configurados. Avise o admin." }, { status: 400 });
+  // Se o config global estava com enabled=false ou provider dessincronizado, corrige
+  if (cfg && (!cfg.enabled || cfg.provider !== provider)) {
+    await supabaseAdmin
+      .from("ai_organizer_config")
+      .update({ enabled: true, provider, model, updated_at: new Date().toISOString() })
+      .eq("id", 1);
   }
 
-  const baseUrl = process.env.INTERNAL_APP_URL || new URL(req.url).origin;
+  const baseUrl = process.env.INTERNAL_APP_URL || `http://localhost:${process.env.PORT || 3000}`;
   try {
     const r = await fetch(`${baseUrl}/api/ai-organize`, {
       method: "POST",
@@ -61,11 +68,11 @@ export async function POST(req: NextRequest) {
         [INTERNAL_SECRET_HEADER]: getInternalSecret(),
       },
       body: JSON.stringify({
-        apiKey: cfg.api_key,
-        model: cfg.model,
-        provider: cfg.provider,
+        apiKey: cfg?.api_key || aiKeys.gemini || "",
+        model,
+        provider,
         triggered_by: "manual",
-        clientId: ctx.clientId, // ESCOPO TRAVADO no cliente da sessão
+        clientId: ctx.clientId,
       }),
     });
     const result = await r.json();

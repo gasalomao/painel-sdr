@@ -489,23 +489,43 @@ export function MessageThread({
           return;
         }
 
+        const isAudio = payload.kind === "audio";
         const now = new Date().toISOString();
+        const resolvedMime = data.mimetype || payload.mimetype;
+        const resolvedProvider = extractProviderFromMime(resolvedMime);
         const optimisticMsg: Message = {
           id: data.msgId || `temp-${Date.now()}`,
           conversation_id: conversationId,
           sender_type: "agent",
           content_type: type as any,
-          content_text: payload.caption || payload.filename || "Arquivo",
+          content_text:
+            (typeof data.content === "string" && data.content.trim())
+              ? data.content
+              : (isAudio ? "Áudio gravado" : (payload.caption || payload.filename || "Arquivo")),
           status: "sent",
           created_at: now,
           message_id: data.msgId,
-          media_url: payload.base64,
+          media_url: data.mediaUrl || payload.base64,
           base64_content: payload.base64,
+          mimetype: resolvedMime,
+          ...(resolvedProvider ? { transcription_provider: resolvedProvider } : {}),
         } as any;
 
         onNewMessage(optimisticMsg);
-        toast.success("Arquivo enviado!");
+        toast.success(isAudio ? "Áudio enviado como mensagem de voz gravada!" : "Arquivo enviado!");
         scrollToBottom("smooth");
+
+        // Ao enviar mídia manualmente (áudio, foto, etc.), silencia o robô por 60 min para atendimento humano
+        void fetch("/api/agent/control", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "snooze",
+            durationMinutes: 60,
+            remoteJid: conversationId,
+            instanceName: instName,
+          }),
+        }).catch(() => {});
       } catch (err: any) {
         toast.error("Erro ao processar mídia: " + err.message);
       } finally {

@@ -80,7 +80,26 @@ export function chunkText(text: string): string[] {
   }
 
   const chunks: string[] = [];
-  const paragraphs = cleanText.split(/\n\n+/).filter(Boolean);
+  const rawParagraphs = cleanText.split(/\n\n+/).filter(Boolean);
+
+  // Coesão semântica universal (FAQs, scripts de vendas, serviços, políticas, contratos):
+  // Se um parágrafo for apenas um título/cabeçalho curto ("## Objeção X", "Pergunta: ..."),
+  // cola-o ao parágrafo seguinte para nunca deixar o título órfão no fim do chunk anterior.
+  const paragraphs: string[] = [];
+  for (let i = 0; i < rawParagraphs.length; i++) {
+    const p = rawParagraphs[i].trim();
+    const isShortHeader =
+      p.length <= 140 &&
+      !p.includes("\n") &&
+      (/^(?:#{1,4}\s+.+|(?:P|Pergunta|Q|D[úu]vida|Obje[çc][ãa]o|Etapa|Passo|T[óo]pico|Cl[áa]usula)\s*\d*[:.-].+)$/i.test(p) ||
+        p.endsWith("?"));
+    if (isShortHeader && i + 1 < rawParagraphs.length) {
+      paragraphs.push(`${p}\n\n${rawParagraphs[i + 1].trim()}`);
+      i++;
+    } else {
+      paragraphs.push(p);
+    }
+  }
 
   let current = "";
   for (const para of paragraphs) {
@@ -526,11 +545,46 @@ export interface RagMatch {
   similarity: number;
 }
 
+const PT_STOPWORDS = new Set([
+  "qual", "quais", "como", "onde", "quando", "porque", "por", "para", "pelo", "pela",
+  "pelos", "pelas", "sobre", "esse", "essa", "isso", "este", "esta", "isto", "aquele",
+  "aquela", "voces", "voce", "tem", "têm", "quero", "queria", "gostaria", "preciso",
+  "saber", "pode", "poderia", "falar", "dizer", "funciona", "quanto", "custa", "valor",
+  "mais", "menos", "muito", "muita", "todos", "todas", "tudo", "uma", "uns", "umas",
+  "dos", "das", "nos", "nas", "com", "sem", "que", "nao", "não", "sim", "bom", "boa",
+  "dia", "tarde", "noite", "ola", "olá", "fala", "ai", "aí", "me", "te", "se", "ele",
+  "ela", "eles", "elas", "nós", "seu", "sua", "seus", "suas", "meu", "minha", "ter",
+]);
+
+/**
+ * Extrai palavras-chave relevantes de uma query em PT-BR (removendo pontuação e stopwords).
+ * Funciona para qualquer domínio (produtos, serviços, FAQs, políticas, scripts, contratos).
+ */
+export function extractRagKeywords(query: string): string[] {
+  if (!query || !query.trim()) return [];
+  const rawTokens = query
+    .toLowerCase()
+    .replace(/[%_,()[\]{}?!.;:"'`~^/\\|<>+=*]/g, " ")
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 2);
+
+  const filtered = rawTokens.filter((t) => {
+    const norm = t.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    return !PT_STOPWORDS.has(t) && !PT_STOPWORDS.has(norm);
+  });
+
+  // Se todas as palavras eram stopwords (ex.: "como funciona?"), preserva os tokens originais > 2 chars
+  return Array.from(new Set(filtered.length > 0 ? filtered : rawTokens)).slice(0, 6);
+}
+
 /**
  * Busca os top-k chunks mais relevantes pra `query` na KB do agente.
  *
- * Retorna chunks ordenados por similaridade desc. Se nada acima do threshold,
- * retorna []. Caller decide o que fazer com vazio (geralmente fallback ILIKE).
+ * Retorna chunks ordenados por similaridade desc. Se a busca vetorial falhar ou
+ * não cobrir termos específicos da busca, faz fallback híbrido inteligente por
+ * chunks (sem duplicar documentos já encontrados e sem despejar documentos
+ * inteiros gigantes que inflariam os tokens).
  */
 export async function searchKnowledge(opts: {
   query: string;
@@ -545,7 +599,12 @@ export async function searchKnowledge(opts: {
   if (!supabaseAdmin) return [];
 
   const results: RagMatch[] = [];
-  const seenIds = new Set<string>();
+  const seenChunkIds = new Set<string>();
+  const seenDocIds = new Set<string>();
+  const seenContentHashes = new Set<string>();
+
+  const hashContent = (c: string) =>
+    crypto.createHash("sha1").update((c || "").trim()).digest("hex").slice(0, 16);
 
   try {
     const qEmbed = await embedQuery(query.trim(), apiKey);
@@ -560,12 +619,18 @@ export async function searchKnowledge(opts: {
 
     if (!error && Array.isArray(data)) {
       for (const r of data) {
-        if (!seenIds.has(r.id)) {
-          seenIds.add(r.id);
+        const chunkId = String(r.id || "");
+        const docId = String(r.knowledge_id || "");
+        const contentStr = String(r.content || "");
+        const cHash = hashContent(contentStr);
+        if (chunkId && !seenChunkIds.has(chunkId) && !seenContentHashes.has(cHash)) {
+          seenChunkIds.add(chunkId);
+          if (docId) seenDocIds.add(docId);
+          seenContentHashes.add(cHash);
           results.push({
-            knowledgeId: r.knowledge_id,
+            knowledgeId: docId,
             title: r.title,
-            content: r.content,
+            content: contentStr,
             similarity: Number(r.similarity),
           });
         }
@@ -575,37 +640,82 @@ export async function searchKnowledge(opts: {
     console.warn("[RAG] Vector search failed, falling back to hybrid keyword search:", e.message);
   }
 
-  // Hybrid Fallback: Se a busca vetorial retornou poucos resultados, busca por termos/SKUs exatos
-  if (results.length < topK) {
+  // Hybrid Fallback Inteligente:
+  // Só roda se:
+  //   (a) a busca vetorial retornou 0 resultados (ex.: doc ainda não indexado ou provedor sem API de embeddings), OU
+  //   (b) há palavras-chave específicas na query que NÃO apareceram em nenhum chunk retornado pelo vetor.
+  // Isso evita a "bomba de tokens" onde o fallback injetava o documento bruto inteiro mesmo quando o vetor já tinha achado tudo.
+  const keywords = extractRagKeywords(query);
+  const combinedVectorText = results
+    .map((r) => `${r.title || ""} ${r.content || ""}`.toLowerCase())
+    .join(" ");
+  const missingKeywords = keywords.filter((kw) => !combinedVectorText.includes(kw.toLowerCase()));
+
+  const shouldRunFallback =
+    keywords.length > 0 &&
+    results.length < topK &&
+    (results.length === 0 || missingKeywords.length > 0);
+
+  if (shouldRunFallback) {
     try {
-      const cleanTerms = query.trim().split(/\s+/).filter((t) => t.length > 2);
-      if (cleanTerms.length > 0) {
-        let q = supabaseAdmin
-          .from("agent_knowledge")
-          .select("id, title, content")
-          .eq("agent_id", agentId);
+      const searchTerms = (missingKeywords.length > 0 ? missingKeywords : keywords).slice(0, 4);
+      let q = supabaseAdmin
+        .from("agent_knowledge")
+        .select("id, title, content, client_id")
+        .eq("agent_id", agentId);
 
-        // SEC-H4: fallback textual também respeita o tenant (or-groups distintos
-        // são ANDed pelo PostgREST: (título/conteúdo) AND (cliente)).
-        if (clientId) {
-          q = q.or(`client_id.eq.${clientId},client_id.is.null`);
-        }
+      // SEC-H4: fallback textual respeita o tenant
+      if (clientId) {
+        q = q.or(`client_id.eq.${clientId},client_id.is.null`);
+      }
 
-        const firstTerm = cleanTerms[0];
-        q = q.or(`title.ilike.%${firstTerm}%,content.ilike.%${firstTerm}%`);
+      // Busca por qualquer um dos termos significativos no título ou conteúdo
+      const orClauses = searchTerms
+        .map((term) => `title.ilike.%${term}%,content.ilike.%${term}%`)
+        .join(",");
+      q = q.or(orClauses);
 
-        const { data: kwMatches } = await q.limit(topK - results.length);
-        if (kwMatches) {
-          for (const k of kwMatches) {
-            if (!seenIds.has(k.id)) {
-              seenIds.add(k.id);
-              results.push({
-                knowledgeId: k.id,
-                title: k.title,
-                content: k.content || "",
-                similarity: 0.90,
-              });
-            }
+      const { data: kwMatches } = await q.limit(Math.max(3, topK - results.length));
+      if (kwMatches) {
+        for (const k of kwMatches) {
+          if (results.length >= topK) break;
+          const docId = String(k.id || "");
+          const rawDocContent = String(k.content || "");
+          if (!rawDocContent.trim()) continue;
+
+          // Divide o documento em chunks semânticos (~500 tokens) em vez de despejar 50KB inteiros
+          const docChunks = chunkText(rawDocContent);
+          const scoredChunks = docChunks
+            .map((chunk) => {
+              const haystack = `${k.title || ""} ${chunk}`.toLowerCase();
+              let score = 0;
+              for (const kw of keywords) {
+                if (haystack.includes(kw.toLowerCase())) score += 1;
+              }
+              return { chunk, score };
+            })
+            .filter((item) => item.score > 0 || (k.title && searchTerms.some((t) => k.title.toLowerCase().includes(t.toLowerCase()))))
+            .sort((a, b) => b.score - a.score);
+
+          // Se o documento já teve chunks retornados pelo vetor, só adiciona chunks NOVOS que cubram os missingKeywords
+          const candidates = seenDocIds.has(docId)
+            ? scoredChunks.filter((c) =>
+                missingKeywords.some((mk) => c.chunk.toLowerCase().includes(mk.toLowerCase()))
+              )
+            : (scoredChunks.length > 0 ? scoredChunks : docChunks.slice(0, 1).map((chunk) => ({ chunk, score: 1 })));
+
+          for (const cand of candidates) {
+            if (results.length >= topK) break;
+            const cHash = hashContent(cand.chunk);
+            if (seenContentHashes.has(cHash)) continue;
+            seenContentHashes.add(cHash);
+            seenDocIds.add(docId);
+            results.push({
+              knowledgeId: docId,
+              title: k.title,
+              content: cand.chunk,
+              similarity: Math.min(0.88, 0.65 + cand.score * 0.05),
+            });
           }
         }
       }

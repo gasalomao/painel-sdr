@@ -1103,11 +1103,17 @@ export async function gatewayChatWithFailover(
 
 export interface GenerateTextOpts {
   /** modelRef salvo no banco (com ou sem prefixo de provedor). */
-  modelRef: string;
+  modelRef?: string;
+  /** Alias retrocompatível para modelRef */
+  model?: string;
   /** Instruções de sistema (persona/regras). Opcional. */
   system?: string;
+  /** Alias retrocompatível para system */
+  systemPrompt?: string;
   /** Conteúdo do usuário / prompt principal. */
-  prompt: string;
+  prompt?: string;
+  /** Alias retrocompatível para prompt */
+  userPrompt?: string;
   temperature?: number | null;
   /**
    * Modo de raciocínio UNIVERSAL (0=Econômico, 1=Equilibrado, 2=Intenso).
@@ -1119,6 +1125,8 @@ export interface GenerateTextOpts {
   /** Só Gemini: thinking budget (0 desliga "raciocínio" cobrado como saída). */
   thinkingBudget?: number | null;
   maxOutputTokens?: number | null;
+  /** Alias retrocompatível para maxOutputTokens */
+  maxTokens?: number | null;
   /** Chave Gemini (se não vier, o caller deve garantir uma). */
   geminiApiKey?: string | null;
   /** Chave NVIDIA NIM única ou primária. */
@@ -1155,6 +1163,7 @@ export interface GenerateTextResult {
   usage: AiUsage;
   provider: AiProvider;
   modelUsed: string;
+  model: string;
   didFallback: boolean;
 }
 
@@ -1266,7 +1275,18 @@ async function ladderKeys(opts: { geminiApiKey?: string | null; nvidiaApiKey?: s
   }
 }
 
-async function generateTextSingle(opts: GenerateTextOpts): Promise<GenerateTextResult> {
+function normalizeGenerateTextOpts(raw: GenerateTextOpts): GenerateTextOpts & { modelRef: string; prompt: string } {
+  return {
+    ...raw,
+    modelRef: (raw.modelRef || raw.model || "gemini-2.5-flash").trim(),
+    system: raw.system ?? raw.systemPrompt,
+    prompt: raw.prompt ?? raw.userPrompt ?? "",
+    maxOutputTokens: raw.maxOutputTokens ?? raw.maxTokens ?? null,
+  };
+}
+
+async function generateTextSingle(rawOpts: GenerateTextOpts): Promise<GenerateTextResult> {
+  const opts = normalizeGenerateTextOpts(rawOpts);
   const { provider, model } = parseModelRef(opts.modelRef);
 
   if (provider === "combo") {
@@ -1322,7 +1342,7 @@ async function generateTextSingle(opts: GenerateTextOpts): Promise<GenerateTextR
       openrouterKeys: opts.openrouterKeys,
     });
     const text = String(json?.choices?.[0]?.message?.content || "").trim();
-    return { text, usage: openRouterUsage(json, provider, model), provider, modelUsed: model, didFallback: false };
+    return { text, usage: openRouterUsage(json, provider, model), provider, modelUsed: model, model, didFallback: false };
   }
 
   if (provider === "gateway") {
@@ -1340,7 +1360,7 @@ async function generateTextSingle(opts: GenerateTextOpts): Promise<GenerateTextR
     applyReasoning(body, resolveReasoningMode(opts.reasoningMode, opts.thinkingBudget), provider, model);
     const json = await gatewayChatWithFailover(model, body, { baseUrl: creds.baseUrl, apiKey: creds.apiKey, endpointId: creds.endpointId });
     const text = String(json?.choices?.[0]?.message?.content || "").trim();
-    return { text, usage: openRouterUsage(json, provider, model), provider, modelUsed: model, didFallback: false };
+    return { text, usage: openRouterUsage(json, provider, model), provider, modelUsed: model, model, didFallback: false };
   }
 
   if (provider === "nvidia") {
@@ -1357,7 +1377,7 @@ async function generateTextSingle(opts: GenerateTextOpts): Promise<GenerateTextR
       nvidiaAccounts: opts.nvidiaAccounts,
     });
     const text = String(json?.choices?.[0]?.message?.content || "").trim();
-    return { text, usage: openRouterUsage(json, provider, model), provider, modelUsed: model, didFallback: false };
+    return { text, usage: openRouterUsage(json, provider, model), provider, modelUsed: model, model, didFallback: false };
   }
 
   // Gemini
@@ -1398,6 +1418,7 @@ async function generateTextSingle(opts: GenerateTextOpts): Promise<GenerateTextR
       usage,
       provider,
       modelUsed: model,
+      model,
       didFallback: false,
     };
   } catch (err) {
@@ -1414,6 +1435,7 @@ async function generateTextSingle(opts: GenerateTextOpts): Promise<GenerateTextR
       usage,
       provider,
       modelUsed: fallback,
+      model: fallback,
       didFallback: true,
     };
   }
@@ -1426,7 +1448,8 @@ async function generateTextSingle(opts: GenerateTextOpts): Promise<GenerateTextR
  * conta/provider consegue atender — exatamente o contrato do disparo:
  * "IA reescrevendo" não pode cair no template cru por 1 chave morta.
  */
-export async function generateText(opts: GenerateTextOpts): Promise<GenerateTextResult> {
+export async function generateText(rawOpts: GenerateTextOpts): Promise<GenerateTextResult> {
+  const opts = normalizeGenerateTextOpts(rawOpts);
   if (opts.noGatewayFallback) return generateTextSingle(opts);
   try {
     return await generateTextSingle(opts);
@@ -1591,11 +1614,13 @@ export async function startAiChat(opts: StartAiChatOpts): Promise<AiChatSession>
 
   let migrated: AiChatSession | null = null;
   let successfulTurns = 0;
+  let lastUserText = "";
 
   return {
     get provider() { return migrated ? migrated.provider : inner.provider; },
     modelUsed: () => (migrated ? migrated.modelUsed() : inner.modelUsed()),
     async sendUser(text: string) {
+      lastUserText = text;
       if (migrated) return migrated.sendUser(text);
       let accumulatedUsage = emptyUsage();
       try {
@@ -1639,8 +1664,45 @@ export async function startAiChat(opts: StartAiChatOpts): Promise<AiChatSession>
       }
     },
     async sendToolResults(results: AiToolResult[]) {
-      if (migrated) return migrated.sendToolResults(results);
-      return inner.sendToolResults(results);
+      const target = migrated || inner;
+      try {
+        return await target.sendToolResults(results);
+      } catch (err) {
+        if (!isAccountLevelError(err) || !lastUserText) throw err;
+        let accumulatedUsage = emptyUsage();
+        const initialUsage = aiUsageFromError(err);
+        if (initialUsage) accumulatedUsage = addAiUsage(accumulatedUsage, initialUsage);
+        let lastErr: unknown = err;
+        const keys = resolvedKeys || await ladderKeys(opts);
+        const ladder = resolvedLadder || await buildLadder(opts.modelRef, keys);
+        const toolContextBlock = results
+          .map((tr) => `[Resultado da ferramenta "${tr.name}"]:\n${typeof tr.response === "string" ? tr.response : JSON.stringify(tr.response)}`)
+          .join("\n\n");
+        const replayMessage = `${lastUserText}\n\n=== RESULTADOS DAS FERRAMENTAS JÁ EXECUTADAS NESTE TURNO (USE ESTES DADOS PARA RESPONDER AO CLIENTE SEM REPETIR A MESMA CHAMADA) ===\n${toolContextBlock}`;
+
+        for (const rung of ladder.slice(initialRungIndex + 1)) {
+          try {
+            console.warn(`[ai-provider] sendToolResults falhou em "${target.modelUsed()}" (${String((err as any)?.message || err).slice(0, 100)}). Migrando c/ resultados p/ "${rung}".`);
+            const s = await startAiChatSingle({
+              ...opts,
+              modelRef: rung,
+              noGatewayFallback: true,
+              geminiApiKey: opts.geminiApiKey || keys?.gemini || null,
+              nvidiaApiKey: opts.nvidiaApiKey || keys?.nvidia || null,
+              openrouterApiKey: opts.openrouterApiKey || keys?.openrouter || null,
+              openrouterKeys: opts.openrouterKeys || keys?.openrouterKeys || null,
+            });
+            const r = await s.sendUser(replayMessage);
+            migrated = s;
+            return { ...r, usage: addAiUsage(accumulatedUsage, r.usage) };
+          } catch (rungErr) {
+            lastErr = rungErr;
+            const usage = aiUsageFromError(rungErr);
+            if (usage) accumulatedUsage = addAiUsage(accumulatedUsage, usage);
+          }
+        }
+        throw accumulatedUsage.totalTokens > 0 ? setAiUsage(lastErr, accumulatedUsage) : lastErr;
+      }
     },
   };
 }
@@ -1683,11 +1745,13 @@ async function startAiChatSingle(opts: StartAiChatOpts): Promise<AiChatSession> 
     const initialized = await initSessionAtIndex(0);
     activeSession = initialized.session;
     currentIndex = initialized.index;
+    let comboLastUserText = "";
 
     return {
       get provider() { return activeSession ? activeSession.provider : "combo"; },
       modelUsed: () => activeSession ? activeSession.modelUsed() : steps[currentIndex] || model,
       async sendUser(text: string) {
+        comboLastUserText = text;
         let accumulatedUsage = emptyUsage();
         while (true) {
           if (!activeSession) {
@@ -1721,7 +1785,35 @@ async function startAiChatSingle(opts: StartAiChatOpts): Promise<AiChatSession> 
         if (!activeSession) {
           throw new Error("Sessão do combo não inicializada.");
         }
-        return activeSession.sendToolResults(results);
+        try {
+          return await activeSession.sendToolResults(results);
+        } catch (err) {
+          if (currentIndex + 1 >= steps.length || !comboLastUserText) throw err;
+          let accumulatedUsage = emptyUsage();
+          const usage = aiUsageFromError(err);
+          if (usage) accumulatedUsage = addAiUsage(accumulatedUsage, usage);
+          const toolContextBlock = results
+            .map((tr) => `[Resultado da ferramenta "${tr.name}"]:\n${typeof tr.response === "string" ? tr.response : JSON.stringify(tr.response)}`)
+            .join("\n\n");
+          const replayMessage = `${comboLastUserText}\n\n=== RESULTADOS DAS FERRAMENTAS JÁ EXECUTADAS NESTE TURNO (USE ESTES DADOS PARA RESPONDER AO CLIENTE SEM REPETIR A MESMA CHAMADA) ===\n${toolContextBlock}`;
+
+          let lastErr: unknown = err;
+          while (currentIndex + 1 < steps.length) {
+            currentIndex++;
+            try {
+              const nextInit = await initSessionAtIndex(currentIndex);
+              activeSession = nextInit.session;
+              currentIndex = nextInit.index;
+              const res = await activeSession.sendUser(replayMessage);
+              return { ...res, usage: addAiUsage(accumulatedUsage, res.usage) };
+            } catch (nextErr) {
+              lastErr = nextErr;
+              const u = aiUsageFromError(nextErr);
+              if (u) accumulatedUsage = addAiUsage(accumulatedUsage, u);
+            }
+          }
+          throw accumulatedUsage.totalTokens > 0 ? setAiUsage(lastErr, accumulatedUsage) : lastErr;
+        }
       },
     };
   }
@@ -1841,6 +1933,36 @@ interface OACChatDeps {
   post: (body: Record<string, any>) => Promise<any>;
 }
 
+/**
+ * Normaliza recursivamente um schema de parâmetros do formato Gemini (`SchemaType.OBJECT` = `"OBJECT"`,
+ * `SchemaType.STRING` = `"STRING"`, `SchemaType.NUMBER` = `"NUMBER"`) para o padrão JSON Schema
+ * esperado por endpoints OpenAI-compatible (Gateway/OpenCode, OpenRouter, NVIDIA NIM, DeepSeek).
+ * Evita que provedores estritos devolvam HTTP 400 e desativem todas as tools do agente.
+ */
+export function normalizeOpenAiToolSchema(schema: Record<string, any> | null | undefined): Record<string, any> {
+  if (!schema || typeof schema !== "object") {
+    return { type: "object", properties: {} };
+  }
+  const out: Record<string, any> = { ...schema };
+  if (typeof out.type === "string") {
+    out.type = out.type.toLowerCase();
+  } else if (!out.type) {
+    out.type = "object";
+  }
+  if (out.type === "object") {
+    const rawProps = out.properties && typeof out.properties === "object" ? out.properties : {};
+    const normProps: Record<string, any> = {};
+    for (const [k, v] of Object.entries(rawProps)) {
+      normProps[k] = v && typeof v === "object" ? normalizeOpenAiToolSchema(v as Record<string, any>) : v;
+    }
+    out.properties = normProps;
+  }
+  if (out.items && typeof out.items === "object") {
+    out.items = normalizeOpenAiToolSchema(out.items as Record<string, any>);
+  }
+  return out;
+}
+
 function startOpenAICompatibleChat(opts: StartAiChatOpts, model: string, deps: OACChatDeps): AiChatSession {
   const providerLabel = deps.provider === "gateway" ? "Gateway de assinatura" : deps.provider === "nvidia" ? "NVIDIA NIM" : "OpenRouter";
 
@@ -1850,7 +1972,7 @@ function startOpenAICompatibleChat(opts: StartAiChatOpts, model: string, deps: O
         function: {
           name: d.name,
           description: d.description || "",
-          parameters: d.parameters || { type: "object", properties: {} },
+          parameters: normalizeOpenAiToolSchema(d.parameters),
         },
       }))
     : undefined;

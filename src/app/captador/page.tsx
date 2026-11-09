@@ -22,6 +22,8 @@ import {
   SlidersHorizontal, ChevronDown, Globe, MessageCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { ModelOptions } from "@/components/ai-module-shared";
+import type { GroupableModel } from "@/lib/model-grouping";
 import { parseMinReviews } from "@/lib/scraper-review-count";
 import {
   parseGoogleYear,
@@ -231,7 +233,7 @@ export default function CaptadorPage() {
   const [reviewsAiEnabled, setReviewsAiEnabled] = useState(false);
   const [reviewsAiModel, setReviewsAiModel] = useState("");
   const [reviewsAiPrompt, setReviewsAiPrompt] = useState("");
-  const [aiModels, setAiModels] = useState<{ id: string; name?: string }[]>([]);
+  const [aiModels, setAiModels] = useState<GroupableModel[]>([]);
   const [loadingAiModels, setLoadingAiModels] = useState(false);
   const [aiModelsError, setAiModelsError] = useState("");
   const [activeTab, setActiveTab] = useState<"config" | "leads">("config");
@@ -304,8 +306,8 @@ export default function CaptadorPage() {
           throw new Error(data.error || "Não foi possível carregar os modelos de IA.");
         }
         if (controller.signal.aborted) return;
-        const models: { id: string; name?: string }[] = data.models.filter(
-          (model: { id?: unknown } | null) => model && typeof model.id === "string",
+        const models: GroupableModel[] = data.models.filter(
+          (model: any) => model && typeof model.id === "string",
         );
         setAiModels(models);
         setReviewsAiModel(current => models.some(model => model.id === current) ? current : models[0]?.id || "");
@@ -1084,10 +1086,11 @@ export default function CaptadorPage() {
                                 disabled={isRunning || loadingAiModels}
                                 className="w-full min-w-0 rounded-md border border-border bg-secondary/50 px-3 py-1.5 text-xs focus:ring-1 focus:ring-primary"
                               >
-                                {!aiModels.length && <option value="">{loadingAiModels ? "Carregando…" : "Sem modelos disponíveis"}</option>}
-                                {aiModels.map(model => (
-                                  <option key={model.id} value={model.id}>{model.name || model.id}</option>
-                                ))}
+                                {reviewsAiModel && !aiModels.some((m) => m.id === reviewsAiModel) && (
+                                  <option value={reviewsAiModel} className="bg-neutral-900">{reviewsAiModel} (salvo)</option>
+                                )}
+                                {!aiModels.length && <option value="" className="bg-neutral-900">{loadingAiModels ? "Carregando…" : "Sem modelos disponíveis"}</option>}
+                                <ModelOptions models={aiModels} />
                               </select>
                               {aiModelsError && <p role="alert" className="text-xs text-destructive">{aiModelsError}</p>}
                             </div>

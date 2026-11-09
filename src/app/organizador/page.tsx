@@ -12,6 +12,7 @@ import {
   History, ArrowRight, Globe, Pencil, Search, FileText, Eye, EyeOff,
 } from "lucide-react";
 import { ModelOptions } from "@/components/ai-module-shared";
+import type { GroupableModel } from "@/lib/model-grouping";
 import styles from "./organizador.module.css";
 
 const SECTIONS = [
@@ -54,11 +55,11 @@ type KanbanColumn = {
 
 type Suggestion = {
   business_type: string;
-  columns: Array<{ status_key: string; label: string; color: string; rationale?: string }>;
+  columns: Array<{ status_key: string; label: string; color: string; is_terminal?: boolean; rationale?: string }>;
   organizer_prompt: string;
 };
 
-type AiModel = { id: string; name: string };
+type AiModel = GroupableModel;
 
 type HistoryItem = {
   id: number;
@@ -310,7 +311,7 @@ export default function OrganizadorPage() {
       });
       const d = await r.json();
       if (!d.ok) { setError(d.error); return; }
-      setPromptSuggestion(d.suggestion);
+      setPromptSuggestion(d.suggestion || d);
     } finally { setPromptSuggesting(false); }
   };
   const runNow = async () => {
@@ -410,7 +411,7 @@ export default function OrganizadorPage() {
       });
       const d = await r.json();
       if (!d.ok) setError(d.error);
-      else setSuggestion(d.suggestion);
+      else setSuggestion(d.suggestion || d);
     } finally { setSuggesting(false); }
   };
 
@@ -440,7 +441,7 @@ export default function OrganizadorPage() {
           body: JSON.stringify({
             status_key: col.status_key, label: col.label, color: col.color,
             order_index: systemCount + i,
-            is_terminal: false,
+            is_terminal: !!col.is_terminal,
           }),
         });
       }
@@ -906,7 +907,7 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                     </label>
                     <select
                       aria-label="Modelo para a sugestão de Kanban"
-                      value={org?.isAdmin ? (suggestModel || defaultAiModel || "") : (defaultAiModel || "")}
+                      value={org?.isAdmin ? (suggestModel || defaultAiModel || org?.model || "") : (defaultAiModel || org?.model || "")}
                       onChange={(e) => setSuggestModel(e.target.value)}
                       disabled={!org?.isAdmin}
                       className={`w-full bg-black/40 border border-emerald-500/20 h-11 rounded-xl text-sm px-3 font-mono ${!org?.isAdmin ? "opacity-70 cursor-not-allowed" : ""}`}
@@ -914,12 +915,13 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                       {!org?.isAdmin && defaultAiModel && !models.some(m => m.id === defaultAiModel) && (
                         <option value={defaultAiModel} className="bg-neutral-900">{defaultAiModel}</option>
                       )}
-                      {models.map((m) => (
-                        <option key={m.id} value={m.id} className="bg-neutral-900">{m.name} ({m.id})</option>
-                      ))}
-                      {models.length === 0 && !modelsLoading && (
-                        <option value="" className="bg-neutral-900">Carregando modelos…</option>
+                      {org?.isAdmin && suggestModel && !models.some(m => m.id === suggestModel) && (
+                        <option value={suggestModel} className="bg-neutral-900">{suggestModel} (salvo)</option>
                       )}
+                      {models.length === 0 && (
+                        <option value="" className="bg-neutral-900">{modelsLoading ? "Carregando modelos…" : "Nenhum modelo disponível"}</option>
+                      )}
+                      <ModelOptions models={models} />
                     </select>
                     {!org?.isAdmin && (
                       <p className="text-[10px] text-emerald-300/80 flex items-center gap-1">
@@ -1200,7 +1202,7 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                         </label>
                         <select
                           aria-label="Modelo para a sugestão de prompt"
-                          value={org?.isAdmin ? (suggestModel || defaultAiModel || "") : (defaultAiModel || "")}
+                          value={org?.isAdmin ? (suggestModel || defaultAiModel || org?.model || "") : (defaultAiModel || org?.model || "")}
                           onChange={(e) => setSuggestModel(e.target.value)}
                           disabled={!org?.isAdmin}
                           className={`w-full bg-black/40 border border-emerald-500/20 h-9 rounded-lg text-[11px] px-2.5 font-mono ${!org?.isAdmin ? "opacity-70 cursor-not-allowed" : ""}`}
@@ -1208,12 +1210,13 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                           {!org?.isAdmin && defaultAiModel && !models.some(m => m.id === defaultAiModel) && (
                             <option value={defaultAiModel} className="bg-neutral-900">{defaultAiModel}</option>
                           )}
-                          {models.map((m) => (
-                            <option key={m.id} value={m.id} className="bg-neutral-900">{m.name} ({m.id})</option>
-                          ))}
-                          {models.length === 0 && !modelsLoading && (
-                            <option value="" className="bg-neutral-900">Carregando modelos…</option>
+                          {org?.isAdmin && suggestModel && !models.some(m => m.id === suggestModel) && (
+                            <option value={suggestModel} className="bg-neutral-900">{suggestModel} (salvo)</option>
                           )}
+                          {models.length === 0 && (
+                            <option value="" className="bg-neutral-900">{modelsLoading ? "Carregando modelos…" : "Nenhum modelo disponível"}</option>
+                          )}
+                          <ModelOptions models={models} />
                         </select>
                         {!org?.isAdmin && (
                           <p className="text-[9px] text-emerald-300/70 flex items-center gap-1">

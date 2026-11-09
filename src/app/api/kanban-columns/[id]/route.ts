@@ -27,11 +27,20 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   if (typeof body.order_index === "number") patch.order_index = body.order_index;
   if (typeof body.is_terminal === "boolean") patch.is_terminal = body.is_terminal;
 
-  const { error } = await supabaseAdmin
+  let { error } = await supabaseAdmin
     .from("kanban_columns")
     .update(patch)
     .eq("id", id)
     .eq("client_id", ctx.clientId);
+  if (error && /is_terminal/i.test(error.message || "") && "is_terminal" in patch) {
+    const { is_terminal: _ignored, ...restPatch } = patch;
+    const retry = await supabaseAdmin
+      .from("kanban_columns")
+      .update(restPatch)
+      .eq("id", id)
+      .eq("client_id", ctx.clientId);
+    error = retry.error;
+  }
   if (error) {
     if (error.code === "23505") return NextResponse.json({ ok: false, error: "Já existe coluna com esse status_key" }, { status: 409 });
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });

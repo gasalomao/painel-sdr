@@ -135,18 +135,37 @@ function ChatPageContent() {
         if ((msg as any).client_id && clientId && (msg as any).client_id !== clientId) return;
         if (currentActive && isSameJid(msg.remote_jid, currentActive.id)) {
           setMessages((prev) => {
-            // DeduplicaÃ§Ã£o: otimista + webhook podem chegar na mesma msg.
-            if (prev.some((m) =>
+            // Deduplicação: otimista + webhook podem chegar na mesma msg.
+            // Se já existe (otimista), mas o evento do banco trouxe transcrição ou media_url/mimetype, enriquece a mensagem existente.
+            const existingIdx = prev.findIndex((m) =>
               m.id === String(msg.id) ||
               (m.message_id && msg.message_id && m.message_id === msg.message_id)
-            )) return prev;
+            );
+            if (existingIdx !== -1) {
+              const incomingText = msg.content || msg.content_text || "";
+              const existingMsg = prev[existingIdx];
+              const shouldUpdateText = incomingText.startsWith("🎤") && !String(existingMsg.content_text || "").startsWith("🎤");
+              if (!shouldUpdateText && !msg.media_url && !(msg as any).mimetype) return prev;
+              return prev.map((m, idx) =>
+                idx === existingIdx
+                  ? ({
+                      ...m,
+                      content_text: shouldUpdateText ? incomingText : (m.content_text || incomingText),
+                      media_url: msg.media_url || m.media_url,
+                      mimetype: (msg as any).mimetype || (m as any).mimetype,
+                    } as any)
+                  : m
+              );
+            }
             return [...prev, {
               id: String(msg.id),
+              message_id: msg.message_id,
               conversation_id: msg.remote_jid,
               sender_type: senderType,
               content_type: msg.media_type || msg.message_type || "text",
               content_text: msg.content || msg.content_text || "",
               media_url: msg.media_url,
+              mimetype: (msg as any).mimetype,
               status: msg.status_envio || msg.status || "sent",
               created_at: msg.created_at,
               is_ai: senderType === "bot"
@@ -154,7 +173,7 @@ function ChatPageContent() {
           });
         }
 
-        // Atualiza a Ãºltima mensagem da conversa no card lateral E reordena
+        // Atualiza a última mensagem da conversa no card lateral E reordena
         // a lista (igual WhatsApp: conversa com nova mensagem sobe pro topo).
         setConversations((prev) =>
           sortConversationsByLastMessage(
@@ -176,7 +195,7 @@ function ChatPageContent() {
           )
         );
       } else if (event.eventType === "UPDATE") {
-        // Update de status (sent â†’ delivered â†’ read) ou enriquecimento de mÃ­dia.
+        // Update de status (sent → delivered → read) ou enriquecimento de mídia.
         if (currentActive && isSameJid(msg.remote_jid, currentActive.id)) {
           setMessages((prev) =>
             prev.map((m) => {
@@ -186,8 +205,9 @@ function ChatPageContent() {
                 status: msg.status_envio || msg.status || m.status,
                 content_text: msg.content || m.content_text,
                 media_url: msg.media_url || m.media_url,
+                mimetype: (msg as any).mimetype || (m as any).mimetype,
                 content_type: msg.media_type || msg.message_type || m.content_type,
-              };
+              } as any;
             })
           );
         }
@@ -607,6 +627,26 @@ function ChatPageContent() {
     },
     [activeConversation]
   );
+
+  // Escuta eventos globais de pausa/snooze (ex: áudio enviado pelo sidebar ou mensagem rápida)
+  // para atualizar otimisticamente a conversa ativa e o banner de IA sem depender de round-trip.
+  useEffect(() => {
+    const handleSnoozed = (e: any) => {
+      const { remoteJid, durationMinutes = 60 } = e.detail || {};
+      if (!remoteJid) return;
+      const resumeAt = new Date(Date.now() + durationMinutes * 60 * 1000).toISOString();
+      handleStatusChange(remoteJid, "open", { bot_status: "human_takeover", resume_at: resumeAt });
+    };
+    const handleReload = () => {
+      setResyncToken((n) => n + 1);
+    };
+    window.addEventListener("agent-session-snoozed", handleSnoozed);
+    window.addEventListener("chat-reload-messages", handleReload);
+    return () => {
+      window.removeEventListener("agent-session-snoozed", handleSnoozed);
+      window.removeEventListener("chat-reload-messages", handleReload);
+    };
+  }, [handleStatusChange]);
 
   const handleContactUpdate = useCallback(
     (updatedContact: Contact) => {

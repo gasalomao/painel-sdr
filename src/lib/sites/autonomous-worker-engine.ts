@@ -530,7 +530,6 @@ export async function processSingleLeadPreview(lead: Record<string, unknown>): P
         .from("leads_extraidos")
         .update({
           previa_status: "PREVIA_PRONTA",
-          status: "PREVIA_PRONTA",
           link_previa: deployResult.url,
           previa_pronta_em: new Date().toISOString(),
           previa_qa_score: qaReport.score,
@@ -538,6 +537,19 @@ export async function processSingleLeadPreview(lead: Record<string, unknown>): P
           previa_error: null,
         })
         .eq("id", leadId);
+
+      if (lead.client_id && lead.remoteJid) {
+        try {
+          const { promoteLeadBySystemSignal } = await import("@/lib/organizer-realtime");
+          await promoteLeadBySystemSignal({
+            clientId: String(lead.client_id),
+            remoteJid: String(lead.remoteJid),
+            signal: "site_preview_sent",
+            reason: `Prévia do site aprovada no QA (${qaReport.score}/100) e publicada: ${deployResult.url}`,
+            summary: `Prévia publicada no ar (${deployResult.url}) e ping de atenção disparado no WhatsApp.`,
+          });
+        } catch {}
+      }
 
       console.log(`[autonomous-worker] 🎉 #${leadId} Prévia APROVADA e pronta para o Sarah Closer! Link: ${deployResult.url}`);
       await logAutonomousSiteEvent(

@@ -16,7 +16,9 @@ import { indexKnowledgeDocument } from "@/lib/rag";
 import { getAiKeys } from "@/lib/ai-keys";
 import { formatResultsForAI, needsFreshWebSearch, webSearch } from "@/lib/web-search";
 import { addAiUsage, aiUsageFromError, AiEmptyResponseError, parseModelRef, prependAiErrorUsage, providerDisplayName, providerOf, startAiChat, type AiProvider, type AiUsage } from "@/lib/ai-provider";
-import { evaluatePreviewAgreement, DEFAULT_SITE_PREVIEW_EVAL_PROMPT, DEFAULT_SITE_PREVIEW_PING_MESSAGE } from "@/lib/sites/agreement-detector";
+import { evaluatePreviewAgreement, DEFAULT_SITE_PREVIEW_PING_MESSAGE } from "@/lib/sites/agreement-detector";
+import { evaluateCustomGoal, normalizeCustomGoalConfig } from "@/lib/custom-goal-evaluator";
+import { promoteLeadBySystemSignal, scheduleRealtimeLeadEvaluation } from "@/lib/organizer-realtime";
 
 export const dynamic = 'force-dynamic';
 
@@ -128,6 +130,24 @@ export async function POST(req: NextRequest) {
           });
           return NextResponse.json({ success: true, status: "ai_paused", reason: eff.reason });
         }
+      }
+    } else if (isTestMode && testState?.customGoalPaused && !forceActive) {
+      const resumeAtStr = typeof testState.customGoalResumeAt === "string" ? testState.customGoalResumeAt : null;
+      const stillPaused =
+        testState.customGoalPauseMode === "indefinite" ||
+        !resumeAtStr ||
+        new Date(resumeAtStr).getTime() > Date.now();
+      if (stillPaused) {
+        const reasonDesc =
+          testState.customGoalPauseMode === "indefinite"
+            ? "Objetivo personalizado alcançado (pausa por tempo indeterminado até reativar manualmente)"
+            : `Objetivo personalizado alcançado (pausada por ${testState.customGoalPauseMinutes || 30} min)`;
+        return NextResponse.json({
+          success: true,
+          status: "ai_paused",
+          reason: reasonDesc,
+          resumeAt: resumeAtStr,
+        });
       }
     }
 
@@ -612,7 +632,14 @@ export async function POST(req: NextRequest) {
             // Gera com modelo barato + reasoningMode=0, cacheado por conteúdo (hash).
             // Se falhar, cai no placeholder legado como fallback (não-fatal).
             const { summarizeMiddleMessages } = await import("@/lib/history-summary");
-            const summary = await summarizeMiddleMessages(clientId, remoteJid, middle).catch(() => null);
+            const summary = await summarizeMiddleMessages(clientId, remoteJid, middle, {
+              preferredModelRef: (agentConfig?.target_model || "").trim() || null,
+              geminiApiKey,
+              openrouterApiKey,
+              nvidiaApiKey,
+              sessionId: isTestMode ? null : sessionId,
+              sessionVariables: currentVariables,
+            }).catch(() => null);
             const middleContent = summary
               ? `[Resumo de ${skipped} mensagens intermediárias da conversa — a IA deve usar estas informações como contexto]: ${summary}`
               : `[...${skipped} mensagens intermediárias omitidas pra economizar contexto. Resumo: cliente já passou pelo disparo inicial e está em diálogo ativo...]`;
@@ -676,13 +703,15 @@ export async function POST(req: NextRequest) {
     let leadContextBlock = "";
     if (!isTestMode) {
       try {
-         const [leadRes, lastCampaignTargetRes, lastFollowupTargetRes] = await Promise.all([
-           supabase
-            .from("leads_extraidos")
-            .select("id, nome_negocio, ramo_negocio, categoria, telefone, endereco, website, status, primeiro_contato_source, primeiro_contato_at, previa_status, link_previa, previa_ping_enviado_em, previa_link_enviado_em")
-            .eq("remoteJid", remoteJid)
-            .eq("client_id", clientId)
-            .maybeSingle(),
+         const [leadRes2, lastCampaignTargetRes, lastFollowupTargetRes] = await Promise.all([
+           leadRow
+             ? Promise.resolve({ data: leadRow })
+             : supabase
+                 .from("leads_extraidos")
+                 .select("id, nome_negocio, ramo_negocio, categoria, telefone, endereco, website, status, primeiro_contato_source, primeiro_contato_at, previa_status, link_previa, previa_ping_enviado_em, previa_link_enviado_em")
+                 .eq("remoteJid", remoteJid)
+                 .eq("client_id", clientId)
+                 .maybeSingle(),
           supabase
             .from("campaign_targets")
             .select("rendered_message, sent_at, status, campaigns(name)")
@@ -701,7 +730,7 @@ export async function POST(req: NextRequest) {
             .maybeSingle(),
         ]);
 
-        const lead = leadRes.data;
+        const lead = leadRes2.data;
         const camp = lastCampaignTargetRes.data as any;
         const fup  = lastFollowupTargetRes.data as any;
 
@@ -898,44 +927,42 @@ export async function POST(req: NextRequest) {
 
     const antiHallucinationBlock = hasKnowledgeBase ? `
 <anti_hallucination_rules>
-## REGRA DE OURO — ZERO ALUCINAÇÃO EM PRODUTOS/PREÇOS/ESTOQUE
+## REGRA DE OURO — ZERO ALUCINAÇÃO NA BASE DE CONHECIMENTO (SERVIÇOS, PLANOS, FAQs, SCRIPTS, POLÍTICAS E PRODUTOS)
 
-Sua base de conhecimento (tool search_knowledge_base) é a ÚNICA fonte de verdade da empresa. Tudo que você disser sobre produto, preço, estoque, horário, política, garantia, entrega ou especificação TÉCNICA precisa vir DE LÁ — não da sua imaginação.
+Sua base de conhecimento (tool search_knowledge_base) é a ÚNICA fonte de verdade oficial da empresa. Tudo que você disser sobre serviços, planos, pacotes, metodologia, FAQs, argumentos de vendas/objeções, contratos, procedimentos, horários, prazos, garantias, políticas, produtos, preços, estoque ou especificações técnicas precisa vir DE LÁ — não da sua imaginação.
 
 ### QUANDO CONSULTAR OBRIGATORIAMENTE:
-- Cliente pergunta "tem X?" / "vocês vendem Y?" → CONSULTE antes de responder.
-- Cliente pergunta preço, valor, parcelamento, desconto → CONSULTE sempre.
-- Cliente pergunta estoque, tamanho, cor, modelo disponível → CONSULTE sempre.
-- Cliente pergunta horário, endereço, entrega, prazo → CONSULTE sempre.
-- Cliente pergunta garantia, troca, reclamação, política → CONSULTE sempre.
-- Cliente cita um produto/modelo específico → CONSULTE pra confirmar que existe.
+- Cliente pergunta sobre qualquer tópico listado na base de conhecimento, funcionamento de serviço, plano, pacote, metodologia ou procedimento → CONSULTE antes de responder.
+- Cliente traz uma dúvida frequente (FAQ), objeção comercial, regra contratual ou pergunta institucional → CONSULTE sempre.
+- Cliente pergunta "tem X?" / "vocês fazem/vendem Y?" / "como funciona Z?" → CONSULTE antes de responder.
+- Cliente pergunta preço, valor, taxa, mensalidade, parcelamento, desconto → CONSULTE sempre.
+- Cliente pergunta estoque, tamanho, cor, modelo ou disponibilidade → CONSULTE sempre.
+- Cliente pergunta horário, endereço, entrega, prazo, garantia, troca, cancelamento ou política → CONSULTE sempre.
 
 ### PROIBIDO (MESMO QUE PAREÇA INOFENSIVO):
-- INVENTAR preço ("acho que é R$ XX" → NUNCA).
-- INVENTAR produto/modelo/cor que não está na base.
-- INVENTAR estoque ("temos 3 unidades" sem consultar).
-- DAR "estimativa" de preço se a base não tem.
-- CHUTAR especificações técnicas (memória, bateria, dimensões).
-- Sugerir produto parecido em vez de consultar a base.
+- INVENTAR preço, mensalidade ou condição ("acho que é R$ XX" → NUNCA).
+- INVENTAR serviço, plano, regra, produto/modelo/cor ou cláusula que não está na base.
+- INVENTAR estoque ou disponibilidade sem consultar.
+- DAR "estimativa" de valor ou prazo se a base não tem.
+- CHUTAR especificações técnicas ou detalhes operacionais.
 
 ### QUANDO A BASE NÃO TEM A RESPOSTA:
-- Seja honesto: "Vou confirmar isso pra você" / "Esse modelo específico não está no nosso catálogo atual".
-- NUNCA diga "sim, temos" se a busca não retornou o item.
-- NUNCA invente um substituto sem consultar a base antes.
+- Seja honesto: "Vou confirmar essa informação pra você" / "Esse item específico não consta aqui no momento, vou verificar com a equipe".
+- NUNCA confirme algo ("sim, temos/fazemos") se a busca não retornou a informação.
 
 ### EXEMPLOS CERTOS:
+✅ Cliente: "Como funciona o plano / serviço X?" → Consulta KB → Responde fielmente com base nos trechos retornados.
 ✅ Cliente: "Tem iPhone 15 256GB?" → Consulta KB → Se tem: "Sim! R$ X em Y parcelas." → Se NÃO tem: "No momento só temos o iPhone 15 128GB. O de 256GB está sem estoque."
-✅ Cliente: "Qual o preço?" → Sempre consulta KB antes de responder.
-✅ Cliente: "Tem em vermelho?" → Consulta KB → Só confirma se a cor vermelho aparecer no chunk retornado.
+✅ Cliente: "Qual o preço / mensalidade?" → Sempre consulta KB antes de responder.
 
 ### EXEMPLOS ERRADOS (ALUCINAÇÃO):
 ❌ "Acho que é uns R$ 2000" (chute)
-❌ "Sim, temos em outras cores também" (sem confirmar)
-❌ "O de 256GB custa R$ X" (inventando variante)
+❌ "Sim, inclui esse serviço/cor também" (sem confirmar na base)
+❌ "O plano/modelo custa R$ X" (inventando variante)
 
-## FORMATO DE RESPOSTA COM MÚLTIPLOS PRODUTOS (CATÁLOGO):
+## FORMATO DE RESPOSTA COM MÚLTIPLOS PRODUTOS (CATÁLOGO, QUANDO APLICÁVEL):
 
-Quando o cliente perguntar sobre VÁRIOS produtos ("quais iPhones vc tem?", "me mostra os modelos", "catálogo"), siga EXATAMENTE este formato:
+Quando a base contiver um catálogo de produtos e o cliente perguntar sobre VÁRIOS produtos ("quais modelos vc tem?", "me mostra o catálogo"), siga EXATAMENTE este formato:
 
 1. **NÃO liste mais que 6 produtos por mensagem**. Mais que isso cansa o cliente e parece spam. Se tiver mais, ofereça categorias ("temos 12 modelos, quer primeiro os de até R$3000 ou os Pro?").
 2. **Para cada produto**, escreva UM parágrafo curto com: Nome + Variação (cor/storage) + Preço + 1 detalhe relevante. Depois coloque a tag de imagem.
@@ -952,7 +979,7 @@ Quando o cliente perguntar sobre VÁRIOS produtos ("quais iPhones vc tem?", "me 
 7. Se um produto da base NÃO tem foto vinculada, descreva normalmente sem a tag [IMAGEM:].
 8. Termine com uma pergunta de fechamento ("Qual desses te chamou atenção?", "Quer que eu detalhe algum?").
 
-### EXEMPLO DE RESPOSTA IDEAL (use exatamente esse formato):
+### EXEMPLO DE RESPOSTA IDEAL DE CATÁLOGO (use quando listar produtos com foto):
 
 Claro! Temos estes modelos disponíveis:
 
@@ -975,7 +1002,7 @@ Qual te chamou mais a atenção? Quer ver algum com mais detalhes?
 </anti_hallucination_rules>
 ` : `
 <anti_hallucination_rules>
-NÃO INVENTE informações sobre produtos, preços, prazos, horários ou políticas da empresa que não estejam na conversa ou no contexto fornecido. Em dúvida, diga que vai verificar. Nunca chute valores nem prometa o que não pode confirmar.
+NÃO INVENTE informações sobre serviços, planos, produtos, preços, prazos, horários ou políticas da empresa que não estejam na conversa ou no contexto fornecido. Em dúvida, diga que vai verificar. Nunca chute valores nem prometa o que não pode confirmar.
 </anti_hallucination_rules>
 `;
 
@@ -1028,14 +1055,15 @@ ${capturedVariablesPrompt}
        functionDeclarations.push({
           name: "search_knowledge_base",
           description:
-             `Base de conhecimento OFICIAL da empresa (catálogo, preços, estoque, políticas). ` +
+             `Base de conhecimento OFICIAL da empresa (serviços, planos, FAQs, scripts de vendas/objeções, procedimentos, contratos, políticas, catálogo de produtos, preços e estoque). ` +
              `Tópicos disponíveis: ${topicList}. ` +
-             `CHAMADA OBRIGATÓRIA quando o cliente perguntar sobre: PREÇO, VALOR, PARCELAMENTO, DESCONTO, ` +
-             `PRODUTO, MODELO, COR, TAMANHO, ESTOQUE, DISPONIBILIDADE, HORÁRIO, ENDEREÇO, ENTREGA, PRAZO, ` +
-             `GARANTIA, TROCA, RECLAMAÇÃO, POLÍTICA, ESPECIFICAÇÃO TÉCNICA, ou mencionar o nome de qualquer produto. ` +
-             `Também chame quando o cliente disser "tem X?" / "vocês vendem Y?" / "quanto custa" / "faz desconto?". ` +
+             `CHAMADA OBRIGATÓRIA quando o cliente perguntar sobre qualquer um dos tópicos disponíveis ou sobre: ` +
+             `COMO FUNCIONA, SERVIÇO, PLANO, PACOTE, METODOLOGIA, PROCEDIMENTO, DÚVIDA FREQUENTE (FAQ), OBJEÇÃO, CONTRATO, ` +
+             `PREÇO, VALOR, MENSALIDADE, PARCELAMENTO, DESCONTO, PRODUTO, MODELO, COR, TAMANHO, ESTOQUE, DISPONIBILIDADE, ` +
+             `HORÁRIO, ENDEREÇO, ENTREGA, PRAZO, GARANTIA, TROCA, RECLAMAÇÃO, POLÍTICA ou ESPECIFICAÇÃO TÉCNICA. ` +
+             `Também chame quando o cliente disser "tem X?" / "vocês fazem/vendem Y?" / "quanto custa" / "como funciona". ` +
              `PROIBIDO responder sobre esses tópicos SEM chamar esta tool primeiro. ` +
-             `PROIBIDO INVENTAR informações (preço, estoque, especificação) que não vieram no retorno. ` +
+             `PROIBIDO INVENTAR informações que não vieram no retorno. ` +
              `Se a base não retornar resultados, diga ao cliente que vai verificar — nunca chute.`,
           parameters: {
              type: SchemaType.OBJECT,
@@ -1043,10 +1071,10 @@ ${capturedVariablesPrompt}
                  query: {
                     type: SchemaType.STRING,
                     description:
-                       `Termos da busca (3-6 palavras-chave). Use o vocabulário do cliente, ` +
+                       `Termos da busca (3-6 palavras-chave). Use o vocabulário do cliente ou o tema da dúvida, ` +
                        `não precisa bater literal com o título. Exemplos: ` +
-                       `"preço iPhone 15", "estoque camiseta polo G", "horário sábado", ` +
-                       `"política cancelamento", "garantia notebook dell".`,
+                       `"como funciona plano anual", "objeção preço caro", "prazo entrega site", ` +
+                       `"preço iPhone 15", "horário atendimento sábado", "política cancelamento".`,
                  },
              },
              required: ["query"],
@@ -1646,11 +1674,18 @@ ${capturedVariablesPrompt}
                    .from("leads_extraidos")
                    .update({
                       previa_status: "PREVIA_SOLICITADA",
-                      status: "PREVIA_SOLICITADA",
                       previa_solicitada_em: new Date().toISOString(),
                    })
                    .eq("client_id", clientId)
                    .eq("remoteJid", remoteJid);
+
+                await promoteLeadBySystemSignal({
+                   clientId,
+                   remoteJid,
+                   signal: "site_preview_requested",
+                   reason: "Cliente aceitou a proposta de prévia gratuita (tool solicitar_previa_site).",
+                   summary: "Cliente confirmou interesse em receber a prévia gratuita do site.",
+                });
 
                 functionResultRes = {
                    success: true,
@@ -1678,13 +1713,20 @@ ${capturedVariablesPrompt}
                    .from("leads_extraidos")
                    .update({
                       previa_status: "REUNIAO_AGENDADA",
-                      status: "REUNIAO_AGENDADA",
                       reuniao_agendada_em: new Date().toISOString(),
                       reuniao_horario_confirmado: horario,
                       reuniao_resumo: resumo,
                    })
                    .eq("client_id", clientId)
                    .eq("remoteJid", remoteJid);
+
+                await promoteLeadBySystemSignal({
+                   clientId,
+                   remoteJid,
+                   signal: "calendar_scheduled",
+                   reason: `Reunião de fechamento agendada para ${horario}.`,
+                   summary: resumo || `Reunião de fechamento agendada para ${horario}.`,
+                });
 
                 if (sessionId) {
                    await supabase
@@ -2013,6 +2055,14 @@ ${capturedVariablesPrompt}
                    message: `Esse horário acabou de ser ocupado por outro cliente. Chame check_google_calendar_availability e ofereça um horário livre DIFERENTE — não confirme esse.`,
                 };
              } else {
+             await promoteLeadBySystemSignal({
+                clientId,
+                remoteJid,
+                signal: "calendar_scheduled",
+                reason: `Agendamento confirmado no Google Calendar: "${callArgs.summary}" (${callArgs.start_datetime}).`,
+                summary: (callArgs.necessidade as string) || `Reunião agendada para ${callArgs.start_datetime}.`,
+             }).catch(() => {});
+
              // RESUMO IA PRO DONO — lê a conversa, gera um resumo e manda no
              // WhatsApp do dono. Detecta reagendamento: se houve cancelamento
              // recente (≤10min) pro mesmo contato, trata como remarcação.
@@ -2418,6 +2468,15 @@ ${capturedVariablesPrompt}
       if (hasLinkInText && !leadRow.previa_link_enviado_em) {
         updates.previa_link_enviado_em = nowIso;
         leadRow.previa_link_enviado_em = nowIso;
+        if (!isTestMode) {
+          promoteLeadBySystemSignal({
+            clientId,
+            remoteJid,
+            signal: "site_preview_sent",
+            reason: `Link da prévia enviado ao cliente (${leadRow.link_previa}).`,
+            summary: `Prévia do site entregue ao cliente no WhatsApp. Em fase de negociação/fechamento.`,
+          }).catch(() => {});
+        }
       }
       if (!isTestMode && Object.keys(updates).length > 0) {
         supabase.from("leads_extraidos").update(updates).eq("client_id", clientId).eq("remoteJid", remoteJid).then(() => {}, () => {});
@@ -2472,11 +2531,17 @@ ${capturedVariablesPrompt}
               .from("leads_extraidos")
               .update({
                 previa_status: "PREVIA_SOLICITADA",
-                status: "PREVIA_SOLICITADA",
                 previa_solicitada_em: new Date().toISOString(),
               })
               .eq("client_id", clientId)
               .eq("remoteJid", remoteJid);
+            await promoteLeadBySystemSignal({
+              clientId,
+              remoteJid,
+              signal: "site_preview_requested",
+              reason: `Aceite de prévia confirmado (${evalResult.reason}).`,
+              summary: `Cliente autorizou envio da prévia gratuita do site.`,
+            });
           }
         }
       } catch (evalErr: any) {
@@ -2484,9 +2549,91 @@ ${capturedVariablesPrompt}
       }
     }
 
+    // =========================================================================
+    // DETECÇÃO DE OBJETIVO PERSONALIZADO (MICRO-IA AVALIADORA 1-TOKEN)
+    // =========================================================================
+    const customGoalCfg = normalizeCustomGoalConfig(agentConfig?.options);
+    let customGoalAchievedInTurn = false;
+    let customGoalResumeAtIso: string | null = null;
+    let goalMessagesForTask: Array<{ role: "user" | "agent"; content: string }> = [];
+
+    if (customGoalCfg.enabled && customGoalCfg.goalText) {
+      try {
+        const recentHistoryForGoal = isTestMode
+          ? testHistory.slice(-2).map((h: any) => ({
+              role: (h.role === "user" ? "user" : "agent") as "user" | "agent",
+              content: String(h.content || ""),
+            }))
+          : [...historico].reverse().slice(-2).map((h: any) => ({
+              role: (h.sender_type === "customer" || h.sender === "customer" ? "user" : "agent") as "user" | "agent",
+              content: String(h.content || ""),
+            }));
+
+        const goalMessages = [
+          ...recentHistoryForGoal,
+          { role: "user" as const, content: text },
+          { role: "agent" as const, content: finalAnswer },
+        ];
+        goalMessagesForTask = goalMessages;
+
+        const goalEval = await evaluateCustomGoal({
+          goalText: customGoalCfg.goalText,
+          messages: goalMessages,
+          modelRef: agentConfig?.target_model || modelId,
+          geminiApiKey,
+          openrouterApiKey,
+          nvidiaApiKey,
+        });
+
+        if (goalEval.usage && goalEval.usage.totalTokens > 0) {
+          await logAgentUsage(goalEval.usage, {
+            agentId,
+            agentLabel: agentConfig?.name || `Agente #${agentId}`,
+            clientId,
+            fallbackModel: goalEval.modelUsed || session.modelUsed(),
+            fallbackProvider: goalEval.provider || session.provider,
+            remoteJid,
+            instanceName,
+            isTestMode,
+            extraMetadata: { evaluator: "custom_goal", achieved: goalEval.achieved },
+          }).catch(() => {});
+        }
+
+        if (goalEval.achieved) {
+          customGoalAchievedInTurn = true;
+          customGoalResumeAtIso =
+            customGoalCfg.pauseMode === "timed"
+              ? new Date(Date.now() + customGoalCfg.pauseMinutes * 60_000).toISOString()
+              : null;
+
+          const pauseDesc =
+            customGoalCfg.pauseMode === "indefinite"
+              ? "pausada por tempo indeterminado (até reativar manualmente)"
+              : `pausada por ${customGoalCfg.pauseMinutes} minuto(s)`;
+
+          callLogs.push({
+            role: "system",
+            content: `[Objetivo Personalizado] Meta alcançada: "${customGoalCfg.goalText}" (${goalEval.tokensUsed} tokens). IA ${pauseDesc} para este contato.`,
+          });
+        }
+      } catch (goalErr: any) {
+        console.warn("[AGENT] Falha na avaliação de objetivo personalizado:", goalErr?.message);
+      }
+    }
+
     // 9. Envio: roteia pelo provider do canal (Evolution OU WhatsApp Cloud).
     // Import dinâmico pra evitar ciclos.
     const channelMod = await import("@/lib/channel");
+    const { calculateTypingDelaySeconds } = await import("@/lib/agent-delay");
+
+    const typingDelayConfig = {
+      mode: agentConfig.options?.typing_delay_mode,
+      fixedSeconds: agentConfig.options?.typing_delay_seconds,
+      minSeconds: agentConfig.options?.typing_delay_min_seconds,
+      maxSeconds: agentConfig.options?.typing_delay_max_seconds,
+    };
+    const typingDelaySeconds = calculateTypingDelaySeconds(typingDelayConfig);
+
     const humanize = agentConfig.options?.humanize_messages ?? false;
     const splitIntensity = normalizeSplitIntensity(agentConfig.options?.split_intensity);
 
@@ -2498,6 +2645,10 @@ ${capturedVariablesPrompt}
         link_previa: leadRow?.link_previa,
         previa_ping_enviado_em: leadRow?.previa_ping_enviado_em,
         previa_link_enviado_em: leadRow?.previa_link_enviado_em,
+        customGoalPaused: customGoalAchievedInTurn,
+        customGoalPauseMode: customGoalAchievedInTurn ? customGoalCfg.pauseMode : null,
+        customGoalPauseMinutes: customGoalAchievedInTurn && customGoalCfg.pauseMode === "timed" ? customGoalCfg.pauseMinutes : null,
+        customGoalResumeAt: customGoalAchievedInTurn ? customGoalResumeAtIso : null,
     } : undefined;
 
     if (isTestMode) {
@@ -2506,6 +2657,9 @@ ${capturedVariablesPrompt}
             ai_responded: true, 
             text: finalAnswer, 
             chunks: humanize ? splitMessage(finalAnswer, splitIntensity) : [finalAnswer],
+            typingDelaySeconds,
+            typingDelayConfig,
+            customGoalAchieved: customGoalAchievedInTurn,
             isTest: true, 
             logs: callLogs,
             testStateUpdate
@@ -2543,6 +2697,63 @@ ${capturedVariablesPrompt}
           }
         }
       } catch { /* gate é best-effort — falha não bloqueia o reply */ }
+    }
+
+    // PAUSA AUTOMÁTICA POR OBJETIVO PERSONALIZADO (apenas para este contato).
+    // Executada logo após passar pelo Gate Final de Pausa para que a última
+    // resposta da IA seja enviada normalmente no WhatsApp, mas qualquer nova
+    // mensagem futura deste contato já encontre a sessão pausada com 0 tokens.
+    if (!isTestMode && customGoalAchievedInTurn && sessionId) {
+      try {
+        const { pauseSession, snoozeSession } = await import("@/lib/bot-status");
+        if (customGoalCfg.pauseMode === "indefinite") {
+          await pauseSession(sessionId, "system");
+        } else {
+          await snoozeSession(sessionId, customGoalCfg.pauseMinutes, "system");
+        }
+        supabase.from("webhook_logs").insert({
+          instance_name: instanceName,
+          client_id: clientId,
+          event: "AGENT_CUSTOM_GOAL_PAUSED",
+          payload: {
+            remote_jid: maskJid(remoteJid),
+            session_id: sessionId,
+            goal: customGoalCfg.goalText,
+            pause_mode: customGoalCfg.pauseMode,
+            pause_minutes: customGoalCfg.pauseMode === "timed" ? customGoalCfg.pauseMinutes : null,
+            resume_at: customGoalResumeAtIso,
+          },
+          created_at: new Date().toISOString(),
+        }).then(() => {}, () => {});
+        console.log(
+          `[AGENT] Objetivo personalizado alcançado p/ ${maskJid(remoteJid)} — IA pausada (${
+            customGoalCfg.pauseMode === "indefinite" ? "indeterminado" : `${customGoalCfg.pauseMinutes}min`
+          }).`,
+        );
+        await promoteLeadBySystemSignal({
+          clientId,
+          remoteJid,
+          signal: "custom_goal_reached",
+          reason: `Objetivo alcançado: "${customGoalCfg.goalText}".`,
+          summary: `Meta do agente atingida ("${customGoalCfg.goalText}"). Atendimento IA pausado para ação da equipe.`,
+        });
+
+        const { triggerGoalTaskGeneration } = await import("@/lib/goal-task-generator");
+        triggerGoalTaskGeneration({
+          clientId,
+          leadId: leadRow?.id ?? null,
+          remoteJid,
+          goalText: customGoalCfg.goalText,
+          conversationHistory: goalMessagesForTask,
+          contactName: contactRow?.push_name || null,
+          businessName: leadRow?.nome_negocio || null,
+          agentName: agentConfig?.name || null,
+        }).catch((taskErr: any) => {
+          console.warn("[AGENT] Falha na geração automática de tarefa por objetivo:", taskErr?.message);
+        });
+      } catch (pauseErr: any) {
+        console.warn("[AGENT] Falha ao pausar sessão por objetivo personalizado:", pauseErr?.message);
+      }
     }
 
     const messageChunks = humanize ? splitMessage(finalAnswer, splitIntensity) : [finalAnswer];
@@ -2658,15 +2869,16 @@ ${capturedVariablesPrompt}
 
     // Helper pra enviar e PERSISTIR um texto (seja intro, produto, ou closing).
     // Retorna o msgId gerado (ou null em erro).
-    const sendAndPersistText = async (text: string): Promise<string | null> => {
+    const sendAndPersistText = async (text: string, customDelayMs?: number): Promise<string | null> => {
       if (!text.trim()) return null;
+      const effectiveDelayMs = customDelayMs ?? (typingDelaySeconds * 1000);
       try {
         try {
           const { registerPendingAutomatedSend } = await import("@/lib/manual-send-registry");
           registerPendingAutomatedSend(instanceName, remoteJid, text);
         } catch { /* ignore */ }
 
-        let sendResult: any = await channelMod.sendMessage(remoteJid, text, instanceName);
+        let sendResult: any = await channelMod.sendMessage(remoteJid, text, instanceName, { delay: effectiveDelayMs });
 
         const checkInstanceError = (res: any) => {
           if (!res || res.ok === false) {
@@ -2696,7 +2908,7 @@ ${capturedVariablesPrompt}
               registerPendingAutomatedSend(instanceName, remoteJid, text);
             } catch {}
 
-            sendResult = await channelMod.sendMessage(remoteJid, text, instanceName);
+            sendResult = await channelMod.sendMessage(remoteJid, text, instanceName, { delay: effectiveDelayMs });
           }
         }
 
@@ -2755,7 +2967,7 @@ ${capturedVariablesPrompt}
               await supabase.from("sessions").update({ instance_name: altInstance }).eq("id", sessionId);
               instanceName = altInstance;
 
-              const sendResult: any = await channelMod.sendMessage(remoteJid, text, instanceName);
+              const sendResult: any = await channelMod.sendMessage(remoteJid, text, instanceName, { delay: effectiveDelayMs });
               const msgId = sendResult?.key?.id || sendResult?.messageId || `agent-${Date.now()}`;
               // FIX: resend pós-migração não registrava o msgId como envio da IA
               // → eco voltava classificado "human" → bot pausado 30min injustamente.
@@ -2833,8 +3045,10 @@ ${capturedVariablesPrompt}
           if (i > 0) {
             const typingSeconds = Math.min(Math.max(chunkText.length / 15, 2), 5);
             await new Promise(r => setTimeout(r, typingSeconds * 1000));
+            await sendAndPersistText(chunkText, typingSeconds * 1000);
+          } else {
+            await sendAndPersistText(chunkText, typingDelaySeconds * 1000);
           }
-          await sendAndPersistText(chunkText);
           continue;
         }
 
@@ -2918,10 +3132,10 @@ ${capturedVariablesPrompt}
     // ============================================================
     // FOLLOW-UP AUTOMÁTICO: Agenda follow-ups se:
     // 1. Mensagem enviada com sucesso (não é teste, não tem erro)
-    // 2. Agente tem follow-ups habilitados
+    // 2. Agente tem follow-ups habilitados e objetivo ainda não foi concluído
     // 3. Ainda não existe follow-up ativo para este lead
     // ============================================================
-    if (process.env.AGENT_FOLLOWUP_WORKER_ENABLED === "true" && !isTestMode && !anySendError && sessionId && clientId) {
+    if (process.env.AGENT_FOLLOWUP_WORKER_ENABLED === "true" && !isTestMode && !anySendError && !customGoalAchievedInTurn && sessionId && clientId) {
       try {
         const followUpConfig = agentConfig?.options?.follow_up;
 
@@ -2938,6 +3152,11 @@ ${capturedVariablesPrompt}
         // Erro no follow-up não deve quebrar a resposta principal
         console.error("[AGENT] Follow-up não agendado. Verifique configuração e migration 021.");
       }
+    }
+
+    // Avaliação automática em tempo real (debounce de 45s após a conversa estabilizar)
+    if (!isTestMode && !anySendError && clientId && remoteJid && !customGoalAchievedInTurn && !previaSiteRequestedInTurn) {
+      scheduleRealtimeLeadEvaluation(clientId, remoteJid);
     }
 
     return NextResponse.json({ success: true, ai_responded: true, sendResult: lastSendResult, sendError: anySendError, testStateUpdate });

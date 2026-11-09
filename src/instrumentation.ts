@@ -103,8 +103,8 @@ export async function register() {
         return;
       }
       if (!cfg.enabled) return; // kill-switch global do admin
-      if (!cfg.api_key || !cfg.model) {
-        console.warn("[SCHEDULER] Sem api_key/model — disparo abortado.");
+      if (!cfg.model) {
+        console.warn("[SCHEDULER] Sem model configurado — disparo abortado.");
         return;
       }
 

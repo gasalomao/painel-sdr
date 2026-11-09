@@ -8,9 +8,9 @@ import { evolution } from "@/lib/evolution";
 export const evolutionV2: WhatsAppProvider = {
   name: "evolution",
 
-  async sendText(remoteJid: string, text: string, instanceName: string): Promise<SendResult> {
+  async sendText(remoteJid: string, text: string, instanceName: string, options?: { delay?: number }): Promise<SendResult> {
     try {
-      const res = await evolution.sendMessage(remoteJid, text, instanceName);
+      const res = await evolution.sendMessage(remoteJid, text, instanceName, options);
       const msgId = res?.key?.id || res?.messageId || res?.id || res?.data?.key?.id;
       return { ok: true, messageId: msgId, status: "sent" };
     } catch (e: any) {
@@ -18,9 +18,9 @@ export const evolutionV2: WhatsAppProvider = {
     }
   },
 
-  async sendMedia(remoteJid: string, caption: string, media: MediaData, instanceName: string): Promise<SendResult> {
+  async sendMedia(remoteJid: string, caption: string, media: MediaData, instanceName: string, options?: { delay?: number }): Promise<SendResult> {
     try {
-      const res = await evolution.sendMedia(remoteJid, caption, media, instanceName);
+      const res = await evolution.sendMedia(remoteJid, caption, media, instanceName, options);
       const msgId = res?.key?.id || res?.messageId || res?.id || res?.data?.key?.id;
       return { ok: true, messageId: msgId, status: "sent" };
     } catch (e: any) {

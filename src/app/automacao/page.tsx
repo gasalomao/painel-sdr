@@ -156,6 +156,11 @@ export default function AutomacaoPage() {
   const [googleYearFrom, setGoogleYearFrom] = useState("0");
   const [googleYearTo, setGoogleYearTo] = useState("0");
   const [extraFiltersError, setExtraFiltersError] = useState("");
+  // Configurações de delay de presença "digitando..." (Evolution API)
+  const [typingDelayMode, setTypingDelayMode] = useState<"fixed" | "random">("random");
+  const [typingDelaySeconds, setTypingDelaySeconds] = useState(10);
+  const [typingDelayMinSeconds, setTypingDelayMinSeconds] = useState(5);
+  const [typingDelayMaxSeconds, setTypingDelayMaxSeconds] = useState(25);
   const [formStep, setFormStep] = useState(0);
   const contentRef = useRef<HTMLElement>(null);
   const editorRef = useRef<HTMLDivElement>(null);
@@ -336,6 +341,10 @@ export default function AutomacaoPage() {
     setGoogleYearFrom("0");
     setGoogleYearTo("0");
     setExtraFiltersError("");
+    setTypingDelayMode("random");
+    setTypingDelaySeconds(10);
+    setTypingDelayMinSeconds(5);
+    setTypingDelayMaxSeconds(25);
     setFormStep(0);
     setShowForm(true);
     revealEditor();
@@ -343,6 +352,11 @@ export default function AutomacaoPage() {
 
   function openEditForm(a: Automation) {
     setEditingId(a.id);
+    const sf = a.scrape_filters || {};
+    setTypingDelayMode(sf.typing_delay_mode || sf.typing_delay?.mode || "random");
+    setTypingDelaySeconds(Number(sf.typing_delay_seconds || sf.typing_delay?.seconds || 10));
+    setTypingDelayMinSeconds(Number(sf.typing_delay_min_seconds || sf.typing_delay?.min_seconds || 5));
+    setTypingDelayMaxSeconds(Number(sf.typing_delay_max_seconds || sf.typing_delay?.max_seconds || 25));
     setFormData({
       ...a,
       // Não injeta defaults na configuração congelada de uma captura iniciada.
@@ -378,6 +392,10 @@ export default function AutomacaoPage() {
     setFormData(blankAutomation());
     setNichesText("");
     setRegionsText("");
+    setTypingDelayMode("random");
+    setTypingDelaySeconds(10);
+    setTypingDelayMinSeconds(5);
+    setTypingDelayMaxSeconds(25);
     setMinReviews("0");
     setMinReviewsError(false);
     setMaxReviews("0");
@@ -446,6 +464,18 @@ export default function AutomacaoPage() {
         else delete scrape_filters.googleYearFrom;
         if (parsedYearTo && parsedYearTo > 0) scrape_filters.googleYearTo = parsedYearTo;
         else delete scrape_filters.googleYearTo;
+      }
+      if (formData.scrape_filters?.typing_delay || formData.scrape_filters?.typing_delay_mode) {
+        scrape_filters.typing_delay_mode = typingDelayMode;
+        scrape_filters.typing_delay_seconds = typingDelaySeconds;
+        scrape_filters.typing_delay_min_seconds = typingDelayMinSeconds;
+        scrape_filters.typing_delay_max_seconds = typingDelayMaxSeconds;
+        scrape_filters.typing_delay = {
+          mode: typingDelayMode,
+          seconds: typingDelaySeconds,
+          min_seconds: typingDelayMinSeconds,
+          max_seconds: typingDelayMaxSeconds,
+        };
       }
       const payload = { ...formData, niches, regions, scrape_filters };
 
@@ -856,12 +886,12 @@ export default function AutomacaoPage() {
                           })}
                           className="w-full mt-0.5 bg-black/40 border border-white/10 rounded-md px-2 h-8 text-xs"
                         >
-                          {formData.scrape_filters?.reviews_ai?.model && !aiModels.some(m => m.id === formData.scrape_filters.reviews_ai.model) && (
-                            <option value={formData.scrape_filters.reviews_ai.model}>{formData.scrape_filters.reviews_ai.model}</option>
+                          {formData.scrape_filters?.reviews_ai?.model && !aiModels.some(m => m.id === formData.scrape_filters?.reviews_ai?.model) && (
+                            <option value={formData.scrape_filters.reviews_ai.model} className="bg-neutral-900">{formData.scrape_filters.reviews_ai.model} (salvo)</option>
                           )}
-                          {!formData.scrape_filters?.reviews_ai?.model && aiModels.length > 0 && <option value="">(modelo não definido)</option>}
-                          {aiModels.length === 0 && <option value="">{loadingAiModels ? "carregando…" : "(sem modelos — configure API key)"}</option>}
-                          {aiModels.map((m: any) => <option key={m.id} value={m.id}>{m.name || m.id}{m.provider ? ` (${m.provider})` : ""}</option>)}
+                          {!formData.scrape_filters?.reviews_ai?.model && aiModels.length > 0 && <option value="" className="bg-neutral-900">(modelo não definido)</option>}
+                          {aiModels.length === 0 && <option value="" className="bg-neutral-900">{loadingAiModels ? "carregando…" : "(sem modelos — configure API key)"}</option>}
+                          <ModelOptions models={aiModels as any} />
                         </select>
                       </div>
                       <div>
@@ -982,6 +1012,141 @@ export default function AutomacaoPage() {
                     <ShieldCheck aria-hidden="true" className="w-3.5 h-3.5 shrink-0" />
                     <span>Recomendado: <strong>60–180s</strong> (anti-banimento WhatsApp).</span>
                   </p>
+                </div>
+
+                {/* Delay & Digitando (Evolution API) — Anti-banimento */}
+                <div className="border-t border-white/5 pt-3 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="text-[11px] font-bold text-cyan-200 flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-cyan-400" />
+                      Delay & Presença &quot;Digitando...&quot; (Evolution API)
+                    </span>
+                    <span className="text-[10px] font-mono text-cyan-300 bg-cyan-500/10 border border-cyan-500/20 px-2 py-0.5 rounded-full">
+                      {typingDelayMode === "fixed" ? `Fixo: ${typingDelaySeconds}s digitando` : `Aleatório: ${typingDelayMinSeconds}s a ${typingDelayMaxSeconds}s`}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-muted-foreground leading-relaxed">
+                    A Evolution API manterá o status <strong className="text-cyan-300">&quot;digitando...&quot;</strong> ativo no WhatsApp do lead durante esse tempo antes de entregar a mensagem. Simula presença humana autêntica e previne banimentos por disparos mecânicos.
+                  </p>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setTypingDelayMode("fixed")}
+                      className={cn(
+                        "text-xs px-3 py-1.5 rounded-lg border font-medium transition cursor-pointer",
+                        typingDelayMode === "fixed"
+                          ? "bg-cyan-500/20 border-cyan-500/50 text-cyan-200 font-semibold shadow-xs"
+                          : "bg-black/40 border-white/10 text-white/60 hover:text-white"
+                      )}
+                    >
+                      Modo Fixo
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTypingDelayMode("random")}
+                      className={cn(
+                        "text-xs px-3 py-1.5 rounded-lg border font-medium transition cursor-pointer",
+                        typingDelayMode === "random"
+                          ? "bg-cyan-500/20 border-cyan-500/50 text-cyan-200 font-semibold shadow-xs"
+                          : "bg-black/40 border-white/10 text-white/60 hover:text-white"
+                      )}
+                    >
+                      Modo Aleatório (Faixa Min–Máx)
+                    </button>
+                  </div>
+
+                  {typingDelayMode === "fixed" ? (
+                    <div className="space-y-1.5 pt-1 max-w-md">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-muted-foreground">Tempo digitando por mensagem:</span>
+                        <span className="font-mono text-cyan-300 font-bold">{typingDelaySeconds}s</span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <input
+                          type="range"
+                          min={1}
+                          max={60}
+                          value={typingDelaySeconds}
+                          onChange={(e) => setTypingDelaySeconds(Number(e.target.value))}
+                          className="w-full accent-cyan-400 cursor-pointer"
+                        />
+                        <NumberInput
+                          min={1}
+                          fallback={10}
+                          value={typingDelaySeconds}
+                          onChange={(v) => setTypingDelaySeconds(Math.max(1, Math.min(v, 120)))}
+                          className="bg-black/40 border-white/10 h-8 w-16 text-xs"
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1 max-w-lg">
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-muted-foreground">Mínimo digitando:</span>
+                          <span className="font-mono text-cyan-300 font-bold">{typingDelayMinSeconds}s</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="range"
+                            min={1}
+                            max={60}
+                            value={typingDelayMinSeconds}
+                            onChange={(e) => {
+                              const val = Number(e.target.value);
+                              setTypingDelayMinSeconds(val);
+                              if (val > typingDelayMaxSeconds) setTypingDelayMaxSeconds(val);
+                            }}
+                            className="w-full accent-cyan-400 cursor-pointer"
+                          />
+                          <NumberInput
+                            min={1}
+                            fallback={5}
+                            value={typingDelayMinSeconds}
+                            onChange={(v) => {
+                              const val = Math.max(1, Math.min(v, 120));
+                              setTypingDelayMinSeconds(val);
+                              if (val > typingDelayMaxSeconds) setTypingDelayMaxSeconds(val);
+                            }}
+                            className="bg-black/40 border-white/10 h-8 w-16 text-xs"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-muted-foreground">Máximo digitando:</span>
+                          <span className="font-mono text-cyan-300 font-bold">{typingDelayMaxSeconds}s</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="range"
+                            min={1}
+                            max={60}
+                            value={typingDelayMaxSeconds}
+                            onChange={(e) => {
+                              const val = Number(e.target.value);
+                              setTypingDelayMaxSeconds(val);
+                              if (val < typingDelayMinSeconds) setTypingDelayMinSeconds(val);
+                            }}
+                            className="w-full accent-cyan-400 cursor-pointer"
+                          />
+                          <NumberInput
+                            min={1}
+                            fallback={25}
+                            value={typingDelayMaxSeconds}
+                            onChange={(v) => {
+                              const val = Math.max(1, Math.min(v, 120));
+                              setTypingDelayMaxSeconds(val);
+                              if (val < typingDelayMinSeconds) setTypingDelayMinSeconds(val);
+                            }}
+                            className="bg-black/40 border-white/10 h-8 w-16 text-xs"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Personalização por IA — anti-banimento */}
@@ -1352,6 +1517,7 @@ export default function AutomacaoPage() {
                           <Stat icon={MapPin}  label="Regiões"    value={(a.regions || []).join(", ") || "—"} color="text-blue-300" />
                           <Stat icon={Clock}   label="Horário"    value={`${String(a.allowed_start_hour).padStart(2,"0")}h–${String(a.allowed_end_hour).padStart(2,"0")}h`} color="text-amber-300" />
                           <Stat icon={Zap}     label="Disparo"    value={`${a.dispatch_min_interval}–${a.dispatch_max_interval}s${a.dispatch_personalize ? " · IA on" : ""}`} color="text-cyan-300" />
+                          <Stat icon={Clock}   label="Digitando"  value={(a.scrape_filters?.typing_delay_mode || a.scrape_filters?.typing_delay?.mode) === "fixed" ? `${a.scrape_filters?.typing_delay_seconds || a.scrape_filters?.typing_delay?.seconds || 10}s (fixo)` : `${a.scrape_filters?.typing_delay_min_seconds || a.scrape_filters?.typing_delay?.min_seconds || 5}–${a.scrape_filters?.typing_delay_max_seconds || a.scrape_filters?.typing_delay?.max_seconds || 25}s (aleat.)`} color="text-cyan-300" />
                           <Stat icon={Repeat}  label="Follow-up"  value={`${(a.followup_steps || []).length} step(s)${a.followup_ai_enabled ? " · IA on" : ""}`} color="text-purple-300" />
                           <Stat icon={a.campaign_id ? CheckCircle2 : XCircle} label="Campanha disparo" value={a.campaign_id ? a.campaign_id.slice(0,8) : "—"} color={a.campaign_id ? "text-emerald-300" : "text-zinc-500"} />
                           <Stat icon={a.followup_campaign_id ? CheckCircle2 : XCircle} label="Campanha follow-up" value={a.followup_campaign_id ? a.followup_campaign_id.slice(0,8) : "—"} color={a.followup_campaign_id ? "text-emerald-300" : "text-zinc-500"} />

@@ -13,9 +13,11 @@ import {
   FlaskConical,
   Globe,
   Loader2,
+  Play,
   Plug,
   Send,
   Sparkles,
+  Target,
   Trash2,
   Wrench,
 } from "lucide-react";
@@ -27,6 +29,7 @@ type TestMessage = { role: "user" | "agent" | "tool"; content: string; isError?:
 type ToolColor = "purple" | "blue" | "amber" | "gray";
 
 function toolMeta(content: string): { label: string; color: ToolColor; Icon: React.ComponentType<{ className?: string }> } {
+  if (/Objetivo Personalizado/i.test(content)) return { label: "Objetivo Personalizado (Pausa IA)", color: "amber", Icon: Target };
   if (/RAG|search_knowledge_base/i.test(content)) return { label: "Base de conhecimento", color: "purple", Icon: BookOpen };
   if (/Google Calendar|calendar/i.test(content)) return { label: "Google Calendar (MCP)", color: "blue", Icon: Calendar };
   if (/Webhook Custom/i.test(content)) return { label: "Tool customizada", color: "amber", Icon: Plug };
@@ -119,6 +122,16 @@ export function TestesTab(props: {
   nomeAgente: string;
   humanizeMessages: boolean;
   messageBufferSeconds: number;
+  typingDelayMode?: "fixed" | "random";
+  typingDelaySeconds?: number;
+  typingDelayMinSeconds?: number;
+  typingDelayMaxSeconds?: number;
+  customGoalEnabled?: boolean;
+  customGoalText?: string;
+  testCustomGoalPaused?: boolean;
+  onResumeTestAi?: () => void;
+  testIsTyping?: boolean;
+  testTypingSeconds?: number;
   testMessages: TestMessage[];
   testInput: string;
   setTestInput: (v: string) => void;
@@ -327,6 +340,16 @@ export function TestesTab(props: {
                   {props.messageBufferSeconds > 0 && (
                     <span> · Buffer {props.messageBufferSeconds}s</span>
                   )}
+                  <span>
+                    {" · "}
+                    Delay: {props.typingDelayMode === "fixed" ? `${props.typingDelaySeconds || 10}s (Fixo)` : `${props.typingDelayMinSeconds || 5}s a ${props.typingDelayMaxSeconds || 25}s (Aleatório)`}
+                  </span>
+                  {props.customGoalEnabled && props.customGoalText && (
+                    <span className="text-amber-300">
+                      {" · "}
+                      🎯 Objetivo: &quot;{props.customGoalText.slice(0, 40)}{props.customGoalText.length > 40 ? "…" : ""}&quot;
+                    </span>
+                  )}
                 </p>
               </div>
             </div>
@@ -341,6 +364,27 @@ export function TestesTab(props: {
               <Trash2 className="w-4 h-4" />
             </Button>
           </div>
+
+          {props.testCustomGoalPaused && (
+            <div className="px-4 py-2.5 bg-amber-500/15 border-b border-amber-500/30 flex items-center justify-between gap-3 flex-wrap">
+              <div className="flex items-center gap-2 text-xs text-amber-200">
+                <Target className="w-4 h-4 text-amber-400 shrink-0" />
+                <span>
+                  <strong>IA Pausada para este contato:</strong> Objetivo personalizado concluído.
+                </span>
+              </div>
+              {props.onResumeTestAi && (
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={props.onResumeTestAi}
+                  className="h-7 px-3 text-xs font-semibold bg-amber-500 hover:bg-amber-400 text-black rounded-lg gap-1.5"
+                >
+                  <Play className="w-3 h-3" /> Reativar IA Manualmente
+                </Button>
+              )}
+            </div>
+          )}
 
           <div role="log" aria-label="Conversa de teste" className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
             {props.testMessages.length === 0 && (
@@ -383,9 +427,10 @@ export function TestesTab(props: {
                 </div>
               );
             })}
-            {props.testLoading && (
-              <div className="flex items-center gap-2 pl-2 text-xs text-muted-foreground">
-                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Digitando...
+            {(props.testLoading || props.testIsTyping) && (
+              <div className="flex items-center gap-2 pl-2 text-xs text-emerald-400 font-medium">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <span>Digitando... {props.testTypingSeconds ? `(~${props.testTypingSeconds}s)` : ""}</span>
               </div>
             )}
           </div>

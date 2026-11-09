@@ -19,11 +19,15 @@ import {
   Calendar,
   Clock,
   Bell,
-  Trash2
+  Trash2,
+  Mic,
+  Upload,
+  Loader2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { toast } from "sonner";
+import { cn } from "@/lib/utils";
 import styles from "./inbox.module.css";
 
 interface ReminderItem {
@@ -101,6 +105,18 @@ function formatMeetingDateBR(isoString: string): string {
   }
 }
 
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+interface StagedAudio {
+  file: File;
+  previewUrl: string;
+  base64: string;
+}
+
 interface ContactSidebarProps {
   contact: Contact | null;
   clientId: string | null;
@@ -162,6 +178,105 @@ function ContactSidebarContent({ contact, clientId, aiAgents = [], onContactUpda
   const [customMinutes, setCustomMinutes] = useState(15);
   const [savingAppointment, setSavingAppointment] = useState(false);
   const [cancellingAppointmentId, setCancellingAppointmentId] = useState<string | null>(null);
+
+  // Estados para envio de áudio gravado (WhatsApp PTT nativo)
+  const [stagedAudio, setStagedAudio] = useState<StagedAudio | null>(null);
+  const [sendingAudio, setSendingAudio] = useState(false);
+  const [isDraggingAudio, setIsDraggingAudio] = useState(false);
+  const audioInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleAudioFileSelected = useCallback((file: File | undefined) => {
+    if (!file) return;
+    const max = 25 * 1024 * 1024; // 25MB
+    if (file.size > max) {
+      toast.error("O arquivo de áudio excede o limite de 25 MB.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const dataUrl = reader.result as string;
+      const base64 = dataUrl.split(",")[1];
+      setStagedAudio({
+        file,
+        previewUrl: dataUrl,
+        base64,
+      });
+    };
+    reader.onerror = () => {
+      toast.error("Falha ao ler o arquivo de áudio.");
+    };
+    reader.readAsDataURL(file);
+  }, []);
+
+  const handleSendStagedAudio = useCallback(async () => {
+    if (!stagedAudio || !contact || sendingAudio) return;
+    const targetJid = contact.remote_jid || (contact.phone ? `phone:${contact.phone}` : "");
+    if (!targetJid) {
+      toast.error("Contato sem número de WhatsApp cadastrado.");
+      return;
+    }
+
+    setSendingAudio(true);
+    try {
+      const res = await fetch("/api/send-message", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          remoteJid: targetJid,
+          instanceName: instanceName || undefined,
+          media: {
+            type: "audio",
+            base64: stagedAudio.base64,
+            fileName: stagedAudio.file.name,
+            mimetype: stagedAudio.file.type || "audio/mpeg",
+          },
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || "Falha ao enviar áudio gravado.");
+      }
+
+      // Ao enviar áudio de voz gravado manualmente, silencia o robô por 60 min para atendimento humano
+      void fetch("/api/agent/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "snooze",
+          durationMinutes: 60,
+          remoteJid: targetJid,
+          instanceName: instanceName || undefined,
+        }),
+      }).catch(() => {});
+
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("agent-session-snoozed", {
+          detail: { remoteJid: targetJid, instanceName, durationMinutes: 60 },
+        }));
+        window.dispatchEvent(new CustomEvent("chat-reload-messages", {
+          detail: { remoteJid: targetJid },
+        }));
+      }
+
+      toast.success("Áudio enviado como mensagem de voz gravada!");
+      setStagedAudio(null);
+      if (audioInputRef.current) {
+        audioInputRef.current.value = "";
+      }
+    } catch (err: any) {
+      toast.error(err.message || "Erro ao enviar áudio.");
+    } finally {
+      setSendingAudio(false);
+    }
+  }, [stagedAudio, contact, instanceName, sendingAudio]);
+
+  const handleDiscardStagedAudio = useCallback(() => {
+    setStagedAudio(null);
+    if (audioInputRef.current) {
+      audioInputRef.current.value = "";
+    }
+  }, []);
 
   // Estados para anotações (campo notes na tabela contacts)
   const contactNotes = (contact as (Contact & { notes?: string }) | null)?.notes || "";
@@ -1055,6 +1170,128 @@ function ContactSidebarContent({ contact, clientId, aiAgents = [], onContactUpda
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+
+          <hr className="border-border/60" />
+
+          {/* Seção de Envio de Áudio Gravado (Voz WhatsApp PTT) */}
+          <div>
+            <div className="flex items-center justify-between">
+              <div className={styles.contactHeading}>
+                <Mic className="h-3.5 w-3.5 text-emerald-400" />
+                Áudio de Voz (Gravado)
+              </div>
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-400 border border-emerald-500/20">
+                PTT Nativo
+              </span>
+            </div>
+
+            <p className="mt-1 text-[11px] text-muted-foreground leading-snug">
+              Anexe qualquer áudio para enviar como nota de voz gravada na hora, sem etiqueta de encaminhado.
+            </p>
+
+            <div className="mt-2.5">
+              {!stagedAudio ? (
+                <div
+                  onDragOver={(e) => { e.preventDefault(); setIsDraggingAudio(true); }}
+                  onDragLeave={(e) => { e.preventDefault(); setIsDraggingAudio(false); }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setIsDraggingAudio(false);
+                    const file = e.dataTransfer.files?.[0];
+                    if (file) handleAudioFileSelected(file);
+                  }}
+                  onClick={() => audioInputRef.current?.click()}
+                  className={cn(
+                    "rounded-lg border-2 border-dashed p-3 text-center cursor-pointer transition-colors flex flex-col items-center justify-center gap-1.5",
+                    isDraggingAudio
+                      ? "border-emerald-500 bg-emerald-500/10"
+                      : "border-border/80 hover:border-emerald-500/50 hover:bg-muted/40"
+                  )}
+                >
+                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-400">
+                    <Upload className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <p className="text-xs font-medium text-foreground">
+                      Clique para anexar áudio
+                    </p>
+                    <p className="text-[10px] text-muted-foreground">
+                      ou arraste o arquivo aqui (MP3, WAV, M4A, OGG)
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-lg bg-emerald-500/[0.04] border border-emerald-500/25 p-3 space-y-2.5">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-400 shrink-0">
+                        <Mic className="h-3.5 w-3.5" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-foreground truncate max-w-[170px]">
+                          {stagedAudio.file.name}
+                        </p>
+                        <p className="text-[10px] text-muted-foreground">
+                          {formatFileSize(stagedAudio.file.size)} • Pronto para enviar
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={handleDiscardStagedAudio}
+                      disabled={sendingAudio}
+                      aria-label="Descartar áudio"
+                      className="h-7 w-7 p-0 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground cursor-pointer"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+
+                  {/* Player de preview */}
+                  <audio
+                    src={stagedAudio.previewUrl}
+                    controls
+                    className="w-full h-8 rounded outline-none bg-muted/30"
+                  />
+
+                  <div className="flex items-center gap-2 pt-0.5">
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={handleSendStagedAudio}
+                      disabled={sendingAudio || !contact}
+                      className="w-full text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white gap-1.5 cursor-pointer shadow-xs"
+                    >
+                      {sendingAudio ? (
+                        <>
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          Enviando como Gravado...
+                        </>
+                      ) : (
+                        <>
+                          <Mic className="h-3.5 w-3.5" />
+                          Enviar como Áudio Gravado
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              )}
+
+              <input
+                ref={audioInputRef}
+                type="file"
+                accept="audio/*,audio/mpeg,audio/mp3,audio/wav,audio/ogg,audio/x-m4a,audio/m4a,audio/aac,audio/webm"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) handleAudioFileSelected(file);
+                }}
+              />
             </div>
           </div>
 

@@ -20,7 +20,7 @@ function resultFor(query: (typeof mocks.queries)[number]) {
   if (query.operation === "delete") return { data: mocks.deleteData, error: null };
   if (query.operation) return { data: null, error: null };
   const selected = query.calls.find((call) => call.method === "select")?.args[0];
-  if (query.table === "chats_dashboard" && selected === "*") {
+  if (query.table === "chats_dashboard" && (selected === "*" || String(selected).includes("remote_jid"))) {
     return {
       data: [{
         id: 1,
@@ -106,7 +106,11 @@ vi.mock("@/lib/supabase", () => ({
 vi.mock("@/lib/tenant", () => ({ requireClientId: mocks.requireClientId }));
 vi.mock("@/lib/internal-auth", () => ({ hasInternalSecret: mocks.hasInternalSecret }));
 vi.mock("@/lib/token-usage", () => ({ logTokenUsage: vi.fn() }));
-vi.mock("@/lib/ai-provider", () => ({ providerOf: vi.fn(() => "gemini") }));
+vi.mock("@/lib/ai-provider", () => ({
+  providerOf: vi.fn(() => "gemini"),
+  providerDisplayName: vi.fn(() => "Google Gemini"),
+  generateText: vi.fn(async () => ({ text: "[]", provider: "gemini" })),
+}));
 
 import { DELETE, GET } from "@/app/api/organizer/history/route";
 import { POST } from "@/app/api/ai-organize/route";

@@ -15,6 +15,7 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue, SelectGroup, SelectLabel,
 } from "@/components/ui/select";
+import { RadixModelOptions } from "@/components/ai-module-shared";
 import { groupModels, PROVIDER_LABEL } from "@/lib/model-grouping";
 import { useGatewayAccounts, accountsForFamily, accountsLabelSnippet } from "@/hooks/use-gateway-accounts";
 import { Switch } from "@/components/ui/switch";
@@ -1202,30 +1203,7 @@ export default function FollowUpPage(): ReactElement {
                               {defaultAiModel}
                             </SelectItem>
                           )}
-                          {groupModels(aiModels as any).flatMap((group) =>
-                            group.subgroups.map((sub) => (
-                              <SelectGroup key={group.provider + "|" + (sub.label || "_")}>
-                                <SelectLabel className="text-[10px] uppercase tracking-wider opacity-70">
-                                  {(() => {
-                                    const base = (PROVIDER_LABEL[group.provider] || group.provider) + (sub.label ? ` · ${sub.label === "Grátis" ? "★ Grátis" : sub.label}` : "");
-                                    if (group.provider === "gateway") {
-                                      const accs = accountsForFamily(gwAccounts, sub.label);
-                                      if (accs.length) return `${base} — ${accountsLabelSnippet(accs)}`;
-                                    }
-                                    return base;
-                                  })()}
-                                </SelectLabel>
-                                {sub.items.map((m) => {
-                                  const raw = (m as any).rawId || m.id;
-                                  return (
-                                    <SelectItem key={m.id} value={m.id}>
-                                      {m.name && m.name !== raw ? `${raw} — ${m.name}` : raw}
-                                    </SelectItem>
-                                  );
-                                })}
-                              </SelectGroup>
-                            ))
-                          )}
+                          <RadixModelOptions models={aiModels as any} />
                         </SelectContent>
                       </Select>
                     )}

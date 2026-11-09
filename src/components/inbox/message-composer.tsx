@@ -49,11 +49,13 @@ interface ReplyDraft {
   preview: string;
 }
 
-const PICKER_ACCEPT: Record<"image" | "video" | "document", string> = {
+const PICKER_ACCEPT: Record<ComposerMediaKind, string> = {
   image: "image/png,image/jpeg,image/webp",
   video: "video/mp4,video/3gpp",
   document:
     "application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,text/plain",
+  audio:
+    "audio/*,audio/mpeg,audio/mp3,audio/wav,audio/ogg,audio/x-m4a,audio/m4a,audio/aac,audio/webm,audio/opus,audio/flac",
 };
 
 interface MediaDraft {
@@ -160,10 +162,10 @@ export function MessageComposer({
   // ---- Gravação de Mídia para Base64 no Navegador ----
 
   const stageUpload = useCallback(
-    async (kind: "image" | "video" | "document", file: File) => {
-      const max = 16 * 1024 * 1024; // Limite de 16MB
+    async (kind: ComposerMediaKind, file: File) => {
+      const max = 25 * 1024 * 1024; // Limite de 25MB
       if (file.size > max) {
-        toast.error(`O arquivo excede o tamanho limite de 16 MB.`);
+        toast.error(`O arquivo excede o tamanho limite de 25 MB.`);
         return;
       }
 
@@ -178,7 +180,7 @@ export function MessageComposer({
             mediaUrl: result,
             base64: base64Data,
             filename: file.name,
-            mimetype: file.type || undefined,
+            mimetype: file.type || (kind === "audio" ? "audio/mpeg" : undefined),
             caption: "",
           });
         };
@@ -194,7 +196,7 @@ export function MessageComposer({
   );
 
   const handlePicked = useCallback(
-    (kind: "image" | "video" | "document", file: File | undefined) => {
+    (kind: ComposerMediaKind, file: File | undefined) => {
       if (file) void stageUpload(kind, file);
     },
     [stageUpload]
@@ -356,8 +358,8 @@ export function MessageComposer({
             {isImg && <ImageIcon className="h-4 w-4 text-primary shrink-0" />}
             {isVideo && <Video className="h-4 w-4 text-primary shrink-0" />}
             {isDoc && <FileText className="h-4 w-4 text-primary shrink-0" />}
-            {isAudio && <Mic className="h-4 w-4 text-primary shrink-0" />}
-            <span className="truncate max-w-[200px] font-medium">{draft.filename}</span>
+            {isAudio && <Mic className="h-4 w-4 text-emerald-400 shrink-0" />}
+            <span className="truncate max-w-[240px] font-medium">{draft.filename}</span>
             <span className="text-xs text-muted-foreground">Pronto para enviar</span>
           </div>
           <Button
@@ -365,44 +367,69 @@ export function MessageComposer({
             variant="ghost"
             onClick={discardDraft}
             aria-label="Descartar anexo"
-            className="h-9 w-9 p-0 rounded-lg hover:bg-background/80"
+            className="h-9 w-9 p-0 rounded-lg hover:bg-background/80 cursor-pointer"
           >
             <X className="h-4 w-4 text-muted-foreground" />
           </Button>
         </div>
 
         {/* Local Preview */}
-        <div className="flex justify-center bg-background/50 rounded-lg p-2 max-h-48 overflow-hidden relative border border-border/40">
-          {isImg && (
-            <img
-              src={draft.mediaUrl}
-              alt={draft.filename}
-              className="max-h-44 object-contain rounded-md"
-            />
-          )}
-          {isVideo && (
-            <video
-              src={draft.mediaUrl}
-              controls
-              className="max-h-44 object-contain rounded-md"
-            />
-          )}
-          {isAudio && (
+        {isAudio ? (
+          <div className="flex flex-col gap-2.5 rounded-xl border border-emerald-500/30 bg-gradient-to-br from-emerald-500/[0.08] via-emerald-500/[0.03] to-background p-3.5 shadow-xs">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-400">
+                <Mic className="h-3 w-3 text-emerald-400 animate-pulse" />
+                Voz Gravada WhatsApp (PTT)
+              </span>
+              <span className="text-[11px] text-muted-foreground/90">
+                Entregue como gravação na hora • Sem etiqueta de encaminhado
+              </span>
+            </div>
+
+            <div className="flex items-center gap-3 bg-card/90 border border-border/70 rounded-lg p-2.5">
+              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-400 shrink-0">
+                <Mic className="h-5 w-5" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-semibold text-foreground truncate">{draft.filename}</p>
+                <p className="text-[11px] text-muted-foreground">
+                  Player nativo do WhatsApp com microfone verde
+                </p>
+              </div>
+            </div>
+
             <audio
               src={draft.mediaUrl}
               controls
-              className="w-full max-w-[280px]"
+              className="w-full h-9 rounded-md outline-none bg-muted/40"
             />
-          )}
-          {isDoc && (
-            <div className="flex flex-col items-center justify-center p-4 text-center">
-              <FileText className="h-10 w-10 text-muted-foreground mb-1" />
-              <span className="text-xs font-medium text-foreground truncate max-w-xs">
-                {draft.filename}
-              </span>
-            </div>
-          )}
-        </div>
+          </div>
+        ) : (
+          <div className="flex justify-center bg-background/50 rounded-lg p-2 max-h-48 overflow-hidden relative border border-border/40">
+            {isImg && (
+              <img
+                src={draft.mediaUrl}
+                alt={draft.filename}
+                className="max-h-44 object-contain rounded-md"
+              />
+            )}
+            {isVideo && (
+              <video
+                src={draft.mediaUrl}
+                controls
+                className="max-h-44 object-contain rounded-md"
+              />
+            )}
+            {isDoc && (
+              <div className="flex flex-col items-center justify-center p-4 text-center">
+                <FileText className="h-10 w-10 text-muted-foreground mb-1" />
+                <span className="text-xs font-medium text-foreground truncate max-w-xs">
+                  {draft.filename}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Legenda (Opcional - Exceto Áudio) */}
         {!isAudio && (
@@ -421,16 +448,32 @@ export function MessageComposer({
         <div className="flex justify-end gap-2 mt-1">
           <Button
             size="sm"
+            variant="ghost"
+            onClick={discardDraft}
+            disabled={busy}
+            className="text-xs text-muted-foreground hover:text-foreground cursor-pointer"
+          >
+            Cancelar
+          </Button>
+          <Button
+            size="sm"
             onClick={sendDraft}
             disabled={busy}
-            className="bg-primary hover:bg-primary/95 text-primary-foreground gap-1"
+            className={cn(
+              "gap-1.5 cursor-pointer font-medium",
+              isAudio
+                ? "bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm shadow-emerald-950/20"
+                : "bg-primary hover:bg-primary/95 text-primary-foreground"
+            )}
           >
             {busy ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : isAudio ? (
+              <Mic className="h-3.5 w-3.5" />
             ) : (
-              <Send className="h-3 w-3" />
+              <Send className="h-3.5 w-3.5" />
             )}
-            Enviar Anexo
+            {isAudio ? "Enviar como Áudio Gravado" : "Enviar Anexo"}
           </Button>
         </div>
       </div>
@@ -486,19 +529,34 @@ export function MessageComposer({
           <DropdownMenuContent
             align="start"
             side="top"
-            className={`${styles.portal} border-border bg-popover`}
+            className={`${styles.portal} border-border bg-popover min-w-[240px] p-1.5`}
           >
-            <DropdownMenuItem className="cursor-pointer gap-2" onClick={() => triggerFilePicker("image")}>
-              <ImageIcon className="h-4 w-4 text-primary" />
-              Imagens
+            <DropdownMenuItem className="cursor-pointer gap-2.5 py-2 px-2.5 rounded-md focus:bg-accent" onClick={() => triggerFilePicker("audio")}>
+              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-400 shrink-0">
+                <Mic className="h-4 w-4" />
+              </div>
+              <div className="flex flex-col text-left">
+                <span className="text-xs font-semibold text-foreground">Áudio de Voz (Gravado)</span>
+                <span className="text-[10px] text-muted-foreground">Sai como gravado na hora, sem encaminhado</span>
+              </div>
             </DropdownMenuItem>
-            <DropdownMenuItem className="cursor-pointer gap-2" onClick={() => triggerFilePicker("video")}>
-              <Video className="h-4 w-4 text-primary" />
-              Vídeos
+            <DropdownMenuItem className="cursor-pointer gap-2.5 py-2 px-2.5 rounded-md focus:bg-accent" onClick={() => triggerFilePicker("image")}>
+              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/15 text-primary shrink-0">
+                <ImageIcon className="h-4 w-4" />
+              </div>
+              <span className="text-xs font-medium text-foreground">Imagens</span>
             </DropdownMenuItem>
-            <DropdownMenuItem className="cursor-pointer gap-2" onClick={() => triggerFilePicker("document")}>
-              <FileText className="h-4 w-4 text-primary" />
-              Documentos
+            <DropdownMenuItem className="cursor-pointer gap-2.5 py-2 px-2.5 rounded-md focus:bg-accent" onClick={() => triggerFilePicker("video")}>
+              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-sky-500/15 text-sky-400 shrink-0">
+                <Video className="h-4 w-4" />
+              </div>
+              <span className="text-xs font-medium text-foreground">Vídeos</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem className="cursor-pointer gap-2.5 py-2 px-2.5 rounded-md focus:bg-accent" onClick={() => triggerFilePicker("document")}>
+              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-amber-500/15 text-amber-400 shrink-0">
+                <FileText className="h-4 w-4" />
+              </div>
+              <span className="text-xs font-medium text-foreground">Documentos</span>
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -551,6 +609,13 @@ export function MessageComposer({
 
       {/* Inputs File Pickers Escondidos */}
       <input
+        id="composer-picker-audio"
+        type="file"
+        accept={PICKER_ACCEPT.audio}
+        className="hidden"
+        onChange={(e) => handlePicked("audio", e.target.files?.[0])}
+      />
+      <input
         id="composer-picker-image"
         type="file"
         accept={PICKER_ACCEPT.image}
@@ -575,7 +640,7 @@ export function MessageComposer({
   );
 }
 
-function triggerFilePicker(kind: "image" | "video" | "document") {
+function triggerFilePicker(kind: ComposerMediaKind) {
   const el = document.getElementById(`composer-picker-${kind}`) as HTMLInputElement | null;
   if (el) {
     el.value = "";

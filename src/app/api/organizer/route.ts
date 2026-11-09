@@ -96,5 +96,16 @@ export async function PATCH(req: NextRequest) {
 
   const { error } = await supabaseAdmin.from("clients").update(patch).eq("id", ctx.clientId);
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+
+  // Se admin ativou o organizador, garante que o flag global em ai_organizer_config também fique ativo
+  if (ctx.isAdmin && typeof body.enabled === "boolean" && body.enabled) {
+    await supabaseAdmin
+      .from("ai_organizer_config")
+      .update({ enabled: true, updated_at: new Date().toISOString() })
+      .eq("id", 1);
+    const { invalidateOrganizerConfigCache } = await import("@/lib/organizer-config-cache");
+    invalidateOrganizerConfigCache();
+  }
+
   return NextResponse.json({ ok: true });
 }

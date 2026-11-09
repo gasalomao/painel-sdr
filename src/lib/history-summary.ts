@@ -29,69 +29,163 @@ import { createHmac } from "crypto";
 // o que é OK (primeira msg após restart regera uma vez).
 const MEM_CACHE = new Map<string, { hash: string; summary: string; at: number }>();
 const MEM_TTL_MS = 60 * 60 * 1000; // 1h — depois revalida (meio pode ter mudado).
+const BUCKET_SIZE = 8;
+
+export interface SummarizeHistoryOptions {
+  preferredModelRef?: string | null;
+  geminiApiKey?: string | null;
+  openrouterApiKey?: string | null;
+  nvidiaApiKey?: string | null;
+  sessionId?: string | null;
+  sessionVariables?: Record<string, any> | null;
+}
 
 /**
- * Hash estável do conteúdo das mensagens do meio. Se mudou (novas msgs entraram
- * no intervalo), regera; senão, reaproveita o resumo cacheado.
+ * Hash estável do conteúdo das mensagens do bloco. Se mudou (novo bloco de 8
+ * mensagens completou), regera; senão, reaproveita o resumo cacheado.
  */
-function contentHash(msgs: Array<{ sender_type?: string; content?: string }>): string {
-  const text = msgs.map((m) => `${m.sender_type || ""}:${(m.content || "").slice(0, 200)}`).join("|");
+export function contentHash(msgs: Array<{ sender_type?: string; sender?: string; content?: string }>): string {
+  const text = msgs
+    .map((m) => `${m.sender_type || m.sender || ""}:${(m.content || "").slice(0, 200)}`)
+    .join("|");
   return createHmac("sha1", "history-summary").update(text).digest("hex").slice(0, 24);
 }
 
 /**
- * Resolve a modelRef + api key do modelo MAIS BARATO disponível pra gerar o
- * resumo. Prefere Gemini (grátis/flash); fallback OpenRouter; fallback gateway.
- * Nunca usa um modelo de raciocínio (seria contraditório com o objetivo de economizar).
+ * Resolve a modelRef + api keys do modelo mais econômico disponível pra gerar o
+ * resumo em QUALQUER provedor configurado no sistema (Gemini, OpenRouter,
+ * NVIDIA NIM, OpenCode/Gateway de Assinatura ou Combo).
  */
-async function cheapModelForSummary(): Promise<{
+export async function cheapModelForSummary(opts?: SummarizeHistoryOptions): Promise<{
   modelRef: string;
   geminiApiKey?: string | null;
   openrouterApiKey?: string | null;
+  nvidiaApiKey?: string | null;
 } | null> {
   const keys = await getAiKeys().catch(() => null);
-  if (keys?.gemini) {
-    // Gemini 2.5 Flash: rápido, barato, ótimo pra resumo.
-    return { modelRef: "gemini-2.5-flash", geminiApiKey: keys.gemini };
+  const geminiKey = opts?.geminiApiKey || keys?.gemini || null;
+  const openrouterKey = opts?.openrouterApiKey || keys?.openrouter || null;
+  const nvidiaKey = opts?.nvidiaApiKey || keys?.nvidia || null;
+
+  // Se o agente já usa Gateway/OpenCode ou Combo e não tem Gemini key direta,
+  // prioriza o modelo do próprio agente/gateway para não falhar sem API key paga.
+  const pref = (opts?.preferredModelRef || "").trim();
+  if (pref && (pref.startsWith("gateway:") || pref.startsWith("combo:"))) {
+    return {
+      modelRef: pref,
+      geminiApiKey: geminiKey,
+      openrouterApiKey: openrouterKey,
+      nvidiaApiKey: nvidiaKey,
+    };
   }
-  if (keys?.openrouter) {
-    // Modelo leve do OpenRouter (grátis ou barato).
+
+  if (geminiKey) {
+    return { modelRef: "gemini-2.5-flash", geminiApiKey: geminiKey, openrouterApiKey: openrouterKey, nvidiaApiKey: nvidiaKey };
+  }
+  if (openrouterKey) {
     return {
       modelRef: "openrouter:meta-llama/llama-3.1-8b-instruct",
-      openrouterApiKey: keys.openrouter,
+      openrouterApiKey: openrouterKey,
+      nvidiaApiKey: nvidiaKey,
     };
+  }
+  if (nvidiaKey) {
+    return {
+      modelRef: "nvidia:meta/llama-3.1-8b-instruct",
+      nvidiaApiKey: nvidiaKey,
+    };
+  }
+  if (pref) {
+    return {
+      modelRef: pref,
+      geminiApiKey: geminiKey,
+      openrouterApiKey: openrouterKey,
+      nvidiaApiKey: nvidiaKey,
+    };
+  }
+  if (keys?.gatewayEndpoints && keys.gatewayEndpoints.length > 0) {
+    try {
+      const { listAvailableGatewayModels } = await import("@/lib/gateway-model-discovery");
+      const gwModels = await listAvailableGatewayModels();
+      if (gwModels.length > 0) {
+        return { modelRef: `gateway:${gwModels[0].id}` };
+      }
+    } catch {
+      // ignora
+    }
   }
   return null;
 }
 
+function formatRemainderCompact(msgs: Array<{ sender_type?: string; sender?: string; content?: string }>): string {
+  if (!msgs.length) return "";
+  return msgs
+    .map((m) => {
+      const s = m.sender_type || m.sender;
+      const who = s === "customer" ? "Cliente" : "Atendimento";
+      const txt = String(m.content || "[mídia]").replace(/\s+/g, " ").trim().slice(0, 140);
+      return `${who}: ${txt}`;
+    })
+    .join(" / ");
+}
+
 /**
- * Gera o resumo das mensagens do MEIO de uma conversa. Cacheado por conteúdo
- * (hash) + TTL em memória. Retorna o texto do resumo, ou `null` se não houver
- * meio pra resumir / se falhar (o caller cai no placeholder antigo como fallback).
- *
- * @param remoteJid  Identificador do contato (chave do cache).
- * @param middleMsgs Mensagens intermediárias (entre as 3 primeiras e 12 últimas).
+ * Gera o resumo das mensagens do MEIO de uma conversa em blocos estáveis de 8 mensagens.
+ * - Economiza até 87% das chamadas de resumo (recalcula só a cada 8 novas mensagens no meio,
+ *   anexando o restante recente de forma compacta sem gastar chamada de IA).
+ * - Persiste em memória + `sessions.variables._history_summary` para manter 100% do contexto
+ *   mesmo se o admin trocar o modelo/provedor (ex.: Gemini ↔ OpenCode ↔ OpenRouter ↔ NVIDIA)
+ *   no meio do atendimento.
  */
 export async function summarizeMiddleMessages(
   clientId: string,
   remoteJid: string,
-  middleMsgs: Array<{ sender_type?: string; content?: string }>,
+  middleMsgs: Array<{ sender_type?: string; sender?: string; content?: string }>,
+  opts?: SummarizeHistoryOptions,
 ): Promise<string | null> {
   if (!middleMsgs || middleMsgs.length === 0) return null;
 
+  // Divide em bloco estável (múltiplo de BUCKET_SIZE, ou a 1ª mensagem enquanto < BUCKET_SIZE)
+  // + cauda residual (0 a 7 mensagens), evitando recalcular o hash a cada único turno.
+  const stableCount =
+    middleMsgs.length >= BUCKET_SIZE
+      ? Math.floor(middleMsgs.length / BUCKET_SIZE) * BUCKET_SIZE
+      : 1;
+  const stableSlice = middleMsgs.slice(0, stableCount);
+  const remainderSlice = middleMsgs.slice(stableCount);
+
   const cacheKey = `${clientId}:${remoteJid}`;
-  const hash = contentHash(middleMsgs);
+  const hash = contentHash(stableSlice);
+
+  // 1) Checa cache em memória (processo)
   const cached = MEM_CACHE.get(cacheKey);
   if (cached && cached.hash === hash && Date.now() - cached.at < MEM_TTL_MS) {
-    return cached.summary; // cache hit — mesmo conteúdo, reaproveita.
+    const rem = formatRemainderCompact(remainderSlice);
+    return rem ? `${cached.summary} | Contexto adicional: ${rem}` : cached.summary;
   }
 
-  const model = await cheapModelForSummary();
+  // 2) Checa resumo persistido na sessão (sobrevive a restart e troca de modelo)
+  const persistedObj = opts?.sessionVariables?._history_summary;
+  if (
+    persistedObj &&
+    typeof persistedObj === "object" &&
+    persistedObj.hash === hash &&
+    typeof persistedObj.summary === "string" &&
+    persistedObj.summary.trim()
+  ) {
+    const baseSummary = persistedObj.summary.trim();
+    MEM_CACHE.set(cacheKey, { hash, summary: baseSummary, at: Date.now() });
+    const rem = formatRemainderCompact(remainderSlice);
+    return rem ? `${baseSummary} | Contexto adicional: ${rem}` : baseSummary;
+  }
+
+  const model = await cheapModelForSummary(opts);
   if (!model) return null; // sem modelo disponível — caller usa placeholder.
 
-  // Monta o texto das mensagens do meio (cortadas p/ não estourar o prompt).
-  const lines = middleMsgs.slice(0, 60).map((m, i) => {
-    const who = m.sender_type === "customer" ? "Cliente" : "IA";
+  // Monta o texto das mensagens do bloco estável (cortadas p/ não estourar o prompt).
+  const lines = stableSlice.slice(0, 60).map((m, i) => {
+    const s = m.sender_type || m.sender;
+    const who = s === "customer" ? "Cliente" : "IA";
     const content = (m.content || "[mídia]").slice(0, 300);
     return `${i + 1}. ${who}: ${content}`;
   });
@@ -111,12 +205,31 @@ export async function summarizeMiddleMessages(
       reasoningMode: 0,
       geminiApiKey: model.geminiApiKey,
       openrouterApiKey: model.openrouterApiKey,
+      nvidiaApiKey: model.nvidiaApiKey,
       maxOutputTokens: 300,
     });
     const summary = (result.text || "").trim();
     if (!summary) return null;
     MEM_CACHE.set(cacheKey, { hash, summary, at: Date.now() });
-    return summary;
+
+    // Atualiza em memória no objeto de variáveis da sessão e persiste best-effort no banco
+    if (opts?.sessionVariables && typeof opts.sessionVariables === "object") {
+      opts.sessionVariables._history_summary = {
+        hash,
+        summary,
+        updated_at: new Date().toISOString(),
+      };
+      if (opts.sessionId && supabaseAdmin) {
+        supabaseAdmin
+          .from("sessions")
+          .update({ variables: opts.sessionVariables })
+          .eq("id", opts.sessionId)
+          .then(() => {}, () => {});
+      }
+    }
+
+    const rem = formatRemainderCompact(remainderSlice);
+    return rem ? `${summary} | Contexto adicional: ${rem}` : summary;
   } catch (err: any) {
     console.warn("[history-summary] falha gerando resumo do meio (não-fatal):", err?.message);
     return null;
