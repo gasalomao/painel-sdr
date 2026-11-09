@@ -27,6 +27,7 @@ import { logTokenUsage } from "@/lib/token-usage";
 import { registerPendingAutomatedSend } from "@/lib/manual-send-registry";
 import { isInstanceOwnedByClient } from "@/lib/tenant";
 import { calculateTypingDelayMs, DEFAULT_TYPING_DELAY_CONFIG } from "@/lib/agent-delay";
+import { syncGreetingToCurrentHour } from "@/lib/antiban-mixer";
 
 type FollowupStep = {
   day_offset: number;
@@ -495,6 +496,9 @@ async function processTarget(
       .replace(/\s+([.,!?])/g, "$1")         // tira espaço antes de pontuação
       .trim();
   }
+
+  // Garante que a saudação reflita o horário real do envio no WhatsApp
+  text = syncGreetingToCurrentHour(text, new Date());
 
   // 5. Envia via Evolution
   try {

@@ -84,13 +84,14 @@ export default function DisparoPage() {
   // Form de criação
   const [name, setName] = useState("");
   const [instanceName, setInstanceName] = useState("");
-  const [template, setTemplate] = useState("{{saudacao}}, {{nome_empresa}}! Tudo bem? Posso te falar rapidinho sobre…");
+  const [template, setTemplate] = useState("{{saudacao}}! Tudo bem? {{nome_empresa}}?");
   const [minSec, setMinSec] = useState(30);
   const [maxSec, setMaxSec] = useState(60);
   const [startHour, setStartHour] = useState(9);
   const [endHour, setEndHour] = useState(20);
   const [personalizeWithAI, setPersonalizeWithAI] = useState(false);
   const [humanizeMessages, setHumanizeMessages] = useState(false);
+  const [antibanMixer, setAntibanMixer] = useState(true);
   const [useWebSearch, setUseWebSearch] = useState(false);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
   const [mediaType, setMediaType] = useState<string | null>(null);
@@ -442,11 +443,12 @@ export default function DisparoPage() {
     setEditingCampaignId(null);
     setName("");
     setInstanceName("");
-    setTemplate("{{saudacao}}, {{nome_empresa}}! Tudo bem? Posso te falar rapidinho sobre…");
+    setTemplate("{{saudacao}}! Tudo bem? {{nome_empresa}}?");
     setMinSec(30); setMaxSec(60);
     setStartHour(9); setEndHour(20);
     setPersonalizeWithAI(false);
     setHumanizeMessages(false);
+    setAntibanMixer(true);
     setUseWebSearch(false);
     setMediaUrl(null); setMediaType(null); setMediaFileName(null); setMediaMimetype(null); setMediaCaption("");
     // NÃO limpa aiModel — mantém o último escolhido pra próxima campanha
@@ -506,6 +508,7 @@ export default function DisparoPage() {
         personalize_with_ai: personalizeWithAI,
         use_web_search: useWebSearch,
         humanize_messages: humanizeMessages,
+        antiban_mixer: antibanMixer,
         ai_model: personalizeWithAI ? aiModel : null,
         ai_prompt: personalizeWithAI ? (aiPrompt.trim() || null) : null,
         media_url: mediaUrl,
@@ -1016,6 +1019,13 @@ export default function DisparoPage() {
                       <span>
                         <strong>Humanizar disparo</strong>
                         <small id="campaign-humanize-help">Divide o texto em mensagens menores e simula digitação entre elas (2–5s). Também funciona com IA.</small>
+                      </span>
+                    </label>
+                    <label className={styles.option}>
+                      <input type="checkbox" checked={antibanMixer} onChange={e => setAntibanMixer(e.target.checked)} aria-label="Misturador Anti-Ban" aria-describedby="campaign-antiban-help" />
+                      <span>
+                        <strong>Misturador Anti-Ban (Variação de Abordagem)</strong>
+                        <small id="campaign-antiban-help">Alterna a estrutura da saudação e limpa o nome da empresa sem alterar o sentido, evitando mensagens idênticas no WhatsApp.</small>
                       </span>
                     </label>
                     <div className={styles.media}>

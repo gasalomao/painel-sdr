@@ -193,9 +193,9 @@ export default function AutomacaoPage() {
       agent_id: null,
       niches: [],
       regions: [],
-      scrape_filters: { filterEmpty: true, filterDuplicates: true, filterLandlines: true, minReviews: 0, filterWithInstagram: false, filterWithWebsite: false, captureAllReviews: false, reviews_ai: { enabled: false, model: null, prompt: null } },
+      scrape_filters: { filterEmpty: true, filterDuplicates: true, filterLandlines: true, minReviews: 0, filterWithInstagram: false, filterWithWebsite: false, captureAllReviews: false, antiban_mixer: true, reviews_ai: { enabled: false, model: null, prompt: null } },
       scrape_max_leads: 100,
-      dispatch_template: "{{saudacao}} {{nome_empresa}}! Sou da Sarah Tech, vi sua empresa no Maps e queria saber se faz sentido conversarmos sobre [oferta]. Pode ser?",
+      dispatch_template: "{{saudacao}}! Tudo bem? {{nome_empresa}}?",
       // Defaults SEGUROS WhatsApp: 60-180s aleatório (média ~2 min, ~30 envios/h)
       dispatch_min_interval: 60,
       dispatch_max_interval: 180,
@@ -1218,6 +1218,28 @@ export default function AutomacaoPage() {
                   </label>
                   <p className="text-[10px] text-muted-foreground leading-relaxed">
                     Quebra cada mensagem em <strong>várias partes menores</strong> e simula tempo de digitação entre elas (2–5s) — igual ao agente de IA. Funciona com mensagens reescritas por IA também. Reduz padrão robótico no WhatsApp.
+                  </p>
+                </div>
+
+                {/* Misturador Anti-Ban (padrão sóbrio do sistema) */}
+                <div className="border-t border-white/5 pt-3 space-y-1.5">
+                  <label className="flex items-center justify-between gap-3 text-[11px] cursor-pointer">
+                    <span className="font-semibold text-white/80">Misturador Anti-Ban (Variação de Abordagem)</span>
+                    <input
+                      type="checkbox"
+                      aria-label="Misturador Anti-Ban"
+                      checked={formData.scrape_filters?.antiban_mixer !== false}
+                      onChange={e => setFormData({
+                        ...formData,
+                        scrape_filters: {
+                          ...(formData.scrape_filters || {}),
+                          antiban_mixer: e.target.checked,
+                        },
+                      })}
+                    />
+                  </label>
+                  <p className="text-[10px] text-muted-foreground leading-relaxed">
+                    Alterna automaticamente a estrutura da saudação (<code className="bg-black/40 px-1 rounded">{"{{saudacao}}! Tudo bem? {{nome_empresa}}?"}</code>) entre variações naturais e limpa o nome da empresa para evitar padrão repetitivo no WhatsApp.
                   </p>
                 </div>
 

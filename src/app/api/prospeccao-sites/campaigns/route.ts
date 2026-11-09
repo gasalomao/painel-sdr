@@ -44,6 +44,7 @@ export async function POST(req: NextRequest) {
       ai_model = null,
       ai_prompt = null,
       humanize_messages = false,
+      antiban_mixer = true,
       order_by = "reviews",
       order_dir = "desc",
       min_reviews = 0,
@@ -96,6 +97,13 @@ export async function POST(req: NextRequest) {
       cErr = retry.error as any;
     }
     if (cErr || !camp) return NextResponse.json({ success: false, error: cErr?.message || "Falha ao criar" }, { status: 500 });
+
+    // Persiste opção do Misturador Anti-Ban para campanhas manuais
+    try {
+      await supabase
+        .from("system_config")
+        .upsert({ key: `campaign_antiban:${camp.id}`, value: String(Boolean(antiban_mixer)) }, { onConflict: "key" });
+    } catch {}
 
     // Resolve leads → targets (filtra tenant p/ evitar cross-tenant injection)
     const numericLeadIds = (lead_ids || []).map((id: any) => Number(id)).filter((n: number) => !isNaN(n) && n > 0);

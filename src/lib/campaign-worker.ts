@@ -23,6 +23,12 @@ import { registerAiSend, registerPendingAutomatedSend } from "@/lib/manual-send-
 import { splitMessage } from "@/lib/agent-format";
 import { isInstanceOwnedByClient } from "@/lib/tenant";
 import { calculateTypingDelayMs, DEFAULT_TYPING_DELAY_CONFIG } from "@/lib/agent-delay";
+import {
+  applyAntiBanMixer,
+  cleanCompanyNameForApproach,
+  effectiveDateForWindow,
+  syncGreetingToCurrentHour,
+} from "@/lib/antiban-mixer";
 
 type CampaignRow = {
   id: string;
@@ -690,17 +696,63 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     pushName = (contact as any)?.push_name || null;
   }
 
+  // Carrega dados da automação vinculada (se houver) para resolver
+  // Misturador Anti-Ban (antiban_mixer) e Delay de digitação (typing_delay).
+  let linkedAuto: { scrape_filters?: any; agent_id?: number | null } | null = null;
+  let antibanMixerEnabled = false;
+  try {
+    if ((c as any).automation_id) {
+      const { data: auto } = await supabase
+        .from("automations")
+        .select("scrape_filters, agent_id")
+        .eq("id", (c as any).automation_id)
+        .maybeSingle();
+      linkedAuto = auto || null;
+      if (auto?.scrape_filters?.antiban_mixer !== undefined) {
+        antibanMixerEnabled = Boolean(auto.scrape_filters.antiban_mixer);
+      }
+    } else if ((c as any).antiban_mixer !== undefined) {
+      antibanMixerEnabled = Boolean((c as any).antiban_mixer);
+    } else {
+      const { data: sysCfg } = await supabase
+        .from("system_config")
+        .select("value")
+        .eq("key", `campaign_antiban:${c.id}`)
+        .maybeSingle();
+      if (sysCfg?.value !== undefined) {
+        antibanMixerEnabled = sysCfg.value === "true" || sysCfg.value === "1";
+      }
+    }
+  } catch {}
+
+  const rawCompanyName = leadFull?.nome_negocio || target.nome_negocio;
+  const effectiveCompanyName = antibanMixerEnabled
+    ? cleanCompanyNameForApproach(rawCompanyName) || rawCompanyName
+    : rawCompanyName;
+
   // Contexto de render — usado no template AGORA e DE NOVO depois da IA
   // (rede de segurança: nenhuma {{variavel}} pode chegar ao cliente).
   const renderCtx = leadRowToTemplateContext(leadFull, {
     remoteJid: sendJid,
-    nome_negocio: leadFull?.nome_negocio || target.nome_negocio,
+    nome_negocio: effectiveCompanyName,
     ramo_negocio: leadFull?.ramo_negocio || target.ramo_negocio,
     push_name: pushName,
   });
 
   // Renderiza msg base substituindo variáveis ({{saudacao}}, {{nome_empresa}}, etc)
   let text = renderTemplate(c.message_template, renderCtx);
+
+  // Se o Misturador Anti-Ban estiver ativo (variação semântica de abordagem),
+  // aplica a mistura sobre a mensagem base antes da IA ou do envio direto.
+  if (antibanMixerEnabled) {
+    text = applyAntiBanMixer({
+      template: c.message_template,
+      renderedText: text,
+      companyName: effectiveCompanyName,
+      now: new Date(),
+      scopeKey: c.id,
+    });
+  }
 
   // Guarda o texto ANTES da IA — é o que foi enviado pro Gemini. Permite comparar
   // "template" vs "resposta da IA" depois no painel de histórico.
@@ -724,7 +776,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
         baseMessage: text,
         model: c.ai_model || "gemini-1.5-flash",
         customPrompt: c.ai_prompt ? renderTemplate(c.ai_prompt, renderCtx) : null,
-        nomeEmpresa: target.nome_negocio || "",
+        nomeEmpresa: effectiveCompanyName || "",
         ramo: target.ramo_negocio || "",
         useWebSearch: !!c.use_web_search,
         campaignId: c.id,
@@ -764,6 +816,12 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
       .trim();
   }
 
+  // SINCRONIZAÇÃO INTELIGENTE DE HORÁRIO DA SAUDAÇÃO:
+  // Garante que a saudação ("Bom dia", "Boa tarde", "Boa noite", "Boa madrugada")
+  // corresponda EXATAMENTE ao horário real em que o disparo está saindo agora
+  // (corrige textos pré-gerados de madrugada que saem às 8h/9h da manhã).
+  text = syncGreetingToCurrentHour(text, new Date());
+
   try {
     // Picota a mensagem em chunks se humanize_messages estiver ativo
     // (mesma lógica do agente de IA — splitMessage + delay de digitação).
@@ -795,20 +853,15 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     // 3. Fallback seguro: DEFAULT_TYPING_DELAY_CONFIG (aleatório 5-25s)
     let typingDelayMs = calculateTypingDelayMs(DEFAULT_TYPING_DELAY_CONFIG);
     try {
-      if ((c as any).automation_id) {
-        const { data: auto } = await supabase
-          .from("automations")
-          .select("scrape_filters, agent_id")
-          .eq("id", (c as any).automation_id)
-          .maybeSingle();
-        const sf = auto?.scrape_filters;
+      if (linkedAuto) {
+        const sf = linkedAuto.scrape_filters;
         if (sf?.typing_delay_mode || sf?.typing_delay) {
           typingDelayMs = calculateTypingDelayMs(sf.typing_delay || sf);
-        } else if (auto?.agent_id) {
+        } else if (linkedAuto.agent_id) {
           const { data: ag } = await supabase
             .from("agent_settings")
             .select("options")
-            .eq("id", auto.agent_id)
+            .eq("id", linkedAuto.agent_id)
             .maybeSingle();
           if (ag?.options) {
             typingDelayMs = calculateTypingDelayMs(ag.options);
@@ -1356,12 +1409,16 @@ export async function preGenerateCampaignMessages(campaignId: string): Promise<{
       }
       leadFull = res.data || null;
     }
-    const renderCtx = leadRowToTemplateContext(leadFull, {
-      remoteJid: target.remote_jid,
-      nome_negocio: leadFull?.nome_negocio || target.nome_negocio,
-      ramo_negocio: leadFull?.ramo_negocio || target.ramo_negocio,
-      push_name: null,
-    });
+    const windowRefDate = effectiveDateForWindow(new Date(), c.allowed_start_hour, c.allowed_end_hour);
+    const renderCtx = {
+      ...leadRowToTemplateContext(leadFull, {
+        remoteJid: target.remote_jid,
+        nome_negocio: leadFull?.nome_negocio || target.nome_negocio,
+        ramo_negocio: leadFull?.ramo_negocio || target.ramo_negocio,
+        push_name: null,
+      }),
+      now: windowRefDate,
+    };
 
     const baseText = renderTemplate(c.message_template, renderCtx);
     let text = baseText;

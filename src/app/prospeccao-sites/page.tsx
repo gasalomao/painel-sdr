@@ -109,15 +109,7 @@ const TAB_CONTEXT: Record<TabKey, { title: string; description: string }> = {
   automacao: { title: "Organize a prospecção automática", description: "Configure a captura, a primeira mensagem e os retornos. Você controla quando a automação começa." },
 };
 
-const DEFAULT_TEMPLATE = `{{saudacao}}! Tudo bem? Aqui é a Sarah, da Salomão AI.
-
-Achei a {{nome_empresa}} no Google pesquisando sobre {{ramo}} e me chamou muita atenção nota de vocês (nota {{avaliacao}} com {{reviews}} avaliações, parabéns!).
-
-Fui procurar o site de vocês pra ver mais detalhes e vi que ainda não têm um no ar. Hoje em dia muita gente acha o perfil no Google, mas se não vê um site na hora com os serviços, acaba indo pro concorrente.
-
-Por conta disso, já deixei montado um modelo de site pronto pra vocês verem como ficaria na prática.
-
-Você prefere que eu te mande o link aqui por mensagem ou prefere marcar uma reunião rápida para te mostrar como ficou? Qual você prefere? (É totalmente sem compromisso).`;
+const DEFAULT_TEMPLATE = `{{saudacao}}! Tudo bem? {{nome_empresa}}?`;
 
 const VENDEDOR_DEFAULT = "Salomão";
 const MIN_REVIEWS_HELP = "Quantidade de pessoas que deram estrelas, com ou sem comentário. Não filtra pela nota. 0 = sem mínimo.";
@@ -554,6 +546,7 @@ export default function ProspeccaoSitesPage() {
   // ----- IA rewrite (igual automação) -----
   const [personalizeWithAi, setPersonalizeWithAi] = useState(false);
   const [humanizeMessages, setHumanizeMessages] = useState(false);
+  const [antibanMixer, setAntibanMixer] = useState(true);
   const [aiModels, setAiModels] = useState<{ id: string; name?: string; provider?: string }[]>([]);
   const [aiModel, setAiModel] = useState("");
   const [aiPrompt, setAiPrompt] = useState("");
@@ -620,6 +613,7 @@ export default function ProspeccaoSitesPage() {
   const [autoFuMaxSec, setAutoFuMaxSec] = useState(240);
   const [autoPersonalize, setAutoPersonalize] = useState(false);
   const [autoHumanize, setAutoHumanize] = useState(false);
+  const [autoAntibanMixer, setAutoAntibanMixer] = useState(true);
   const [autoAiModel, setAutoAiModel] = useState("");
   const [autoAiPrompt, setAutoAiPrompt] = useState("");
   const [autoCaptureAllReviews, setAutoCaptureAllReviews] = useState(false);
@@ -810,6 +804,7 @@ export default function ProspeccaoSitesPage() {
               min_seconds: autoTypingDelayMinSeconds,
               max_seconds: autoTypingDelayMaxSeconds,
             },
+            antiban_mixer: autoAntibanMixer,
           },
           scrape_max_leads: autoMaxLeads,
           dispatch_template: autoTemplate,
@@ -1043,6 +1038,7 @@ export default function ProspeccaoSitesPage() {
           lead_ids: Array.from(selected.keys()),
           personalize_with_ai: personalizeWithAi,
           humanize_messages: humanizeMessages,
+          antiban_mixer: antibanMixer,
           ai_model: personalizeWithAi ? (aiModel || null) : null,
           ai_prompt: personalizeWithAi ? (aiPrompt || null) : null,
           order_by: sort, order_dir: order,
@@ -1963,6 +1959,16 @@ export default function ProspeccaoSitesPage() {
                     <Switch aria-label="Humanizar mensagens" checked={humanizeMessages} onCheckedChange={setHumanizeMessages} />
                   </div>
                 </div>
+
+                <div className={styles.optionSection}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-bold uppercase tracking-wider text-white/50">Misturador Anti-Ban (Variação de Abordagem)</div>
+                      <div className="text-xs text-white/40">Alterna automaticamente a estrutura da saudação e limpa sufixos do Google Maps no nome da empresa, mantendo o mesmo sentido sem repetir o mesmo texto.</div>
+                    </div>
+                    <Switch aria-label="Misturador Anti-Ban" checked={antibanMixer} onCheckedChange={setAntibanMixer} />
+                  </div>
+                </div>
                 <div className="text-xs text-white/50">
                   <Globe className="w-3.5 h-3.5 inline mr-1" /> {selected.size} leads selecionados
                 </div>
@@ -2667,6 +2673,19 @@ export default function ProspeccaoSitesPage() {
                   <p className="text-[10px] text-white/40 leading-relaxed">
                     Cada disparo chega <strong>dividido em várias mensagens curtas</strong> com pausa de digitação entre elas (2-5s), igual ao Agente de IA — muito mais humano e menos risco de banimento.
                   </p>
+                </div>
+
+                {/* Misturador Anti-Ban (padrão sóbrio do sistema) */}
+                <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3 space-y-1.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-semibold text-white/80">Misturador Anti-Ban (Variação de Abordagem)</div>
+                      <div className="text-[11px] text-white/40 leading-relaxed mt-0.5">
+                        Alterna automaticamente a estrutura de <code className="bg-black/40 px-1 rounded">{"{{saudacao}}! Tudo bem? {{nome_empresa}}?"}</code> entre variações naturais e limpa o nome da empresa para evitar padrão repetitivo no WhatsApp.
+                      </div>
+                    </div>
+                    <Switch aria-label="Misturador Anti-Ban na automação" checked={autoAntibanMixer} onCheckedChange={setAutoAntibanMixer} />
+                  </div>
                 </div>
 
                 {/* Resumo de avaliações com IA (antes do disparo) — reviews-ai */}

@@ -99,6 +99,17 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     .select()
     .single();
   if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+
+  if ("antiban_mixer" in body) {
+    await supabase
+      .from("system_config")
+      .upsert(
+        { key: `campaign_antiban:${id}`, value: body.antiban_mixer !== false ? "true" : "false" },
+        { onConflict: "key" }
+      )
+      .then(() => undefined, () => undefined);
+  }
+
   return NextResponse.json({ success: true, campaign: data });
 }
 

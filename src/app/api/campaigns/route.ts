@@ -50,6 +50,7 @@ export async function POST(req: NextRequest) {
       personalize_with_ai = false,
       use_web_search = false,
       humanize_messages = false,
+      antiban_mixer = true,
       ai_model = null,
       ai_prompt = null,
       media_url = null,
@@ -114,6 +115,12 @@ export async function POST(req: NextRequest) {
       console.warn("[campaigns] coluna ai_model não existe. Rode criar_campaign_logs.sql pra habilitar escolha de modelo por campanha.");
     }
     if (cErr || !camp) return NextResponse.json({ success: false, error: cErr?.message || "Falha ao criar" }, { status: 500 });
+
+    try {
+      await supabase
+        .from("system_config")
+        .upsert({ key: `campaign_antiban:${camp.id}`, value: String(Boolean(antiban_mixer)) }, { onConflict: "key" });
+    } catch {}
 
     // Resolve leads → targets
     const targetsRows: Array<Record<string, unknown>> = selectedLeads
