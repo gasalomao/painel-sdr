@@ -4,13 +4,14 @@ import {
   isSameBrazilDay,
   getBrazilHour,
   generateWarmupMessage,
+  evaluateDailyAutoProgress,
 } from "../warmup-engine";
 import {
   calculateTypingDuration,
   pickFallbackDialogue,
   getRandomReaction,
 } from "../warmup-dialogues";
-import { STAGE_DEFAULTS } from "../warmup-types";
+import { STAGE_DEFAULTS, type WarmupConfig } from "../warmup-types";
 
 describe("Warmup Engine - Operating Hours & Brazil Time", () => {
   it("determines whether a time is within operating hours", () => {
@@ -87,6 +88,140 @@ describe("Warmup Stage Defaults", () => {
 
     // Intervalos diminuem conforme o chip esquenta
     expect(STAGE_DEFAULTS[1].minInterval).toBeGreaterThan(STAGE_DEFAULTS[4].minInterval);
+  });
+});
+
+describe("Piloto Automático de Fases (evaluateDailyAutoProgress)", () => {
+  const baseConfig: WarmupConfig = {
+    client_id: "client-1",
+    instance_name: "inst-1",
+    enabled: true,
+    stage: 1,
+    stage_auto_progress: true,
+    days_active: 1,
+    consecutive_successful_days: 1,
+    health_score: 100,
+    is_quarantined: false,
+    daily_target: 10,
+    sent_today: 10,
+    received_today: 8,
+    error_count_today: 0,
+    last_activity_at: "2026-11-09T14:00:00Z",
+    min_interval_seconds: 90,
+    max_interval_seconds: 300,
+    min_typing_seconds: 3,
+    max_typing_seconds: 8,
+    allowed_start_hour: 8,
+    allowed_end_hour: 21,
+    ai_model: "fallback",
+    ai_theme: "dia_a_dia",
+    enable_typing: true,
+    enable_blue_ticks: true,
+    enable_reactions: true,
+    enable_audio: false,
+    enable_vcard: true,
+    enable_status_posts: true,
+    continuous_warmup: true,
+  };
+
+  it("detects same day and does not advance days or stage", () => {
+    const res = evaluateDailyAutoProgress(baseConfig, "2026-11-09T20:00:00Z");
+    expect(res.isNewDay).toBe(false);
+    expect(res.stagePromoted).toBe(false);
+    expect(res.newStage).toBe(1);
+    expect(res.newDaysActive).toBe(1);
+  });
+
+  it("advances days_active when a new calendar day arrives in Brazil", () => {
+    const res = evaluateDailyAutoProgress(baseConfig, "2026-11-10T14:00:00Z");
+    expect(res.isNewDay).toBe(true);
+    expect(res.newDaysActive).toBe(2);
+    expect(res.newConsecutiveDays).toBe(2);
+    expect(res.stagePromoted).toBe(false);
+    expect(res.newStage).toBe(1);
+  });
+
+  it("promotes from Stage 1 (Frio) to Stage 2 (Morno) on day 4", () => {
+    const cfgDay3: WarmupConfig = {
+      ...baseConfig,
+      days_active: 3,
+      consecutive_successful_days: 3,
+    };
+    const res = evaluateDailyAutoProgress(cfgDay3, "2026-11-10T14:00:00Z");
+    expect(res.isNewDay).toBe(true);
+    expect(res.newDaysActive).toBe(4);
+    expect(res.stagePromoted).toBe(true);
+    expect(res.newStage).toBe(2);
+    expect(res.newDailyTarget).toBe(STAGE_DEFAULTS[2].dailyTarget);
+  });
+
+  it("promotes from Stage 2 (Morno) to Stage 3 (Quente) on day 8", () => {
+    const cfgDay7: WarmupConfig = {
+      ...baseConfig,
+      stage: 2,
+      days_active: 7,
+      consecutive_successful_days: 7,
+    };
+    const res = evaluateDailyAutoProgress(cfgDay7, "2026-11-10T14:00:00Z");
+    expect(res.isNewDay).toBe(true);
+    expect(res.newDaysActive).toBe(8);
+    expect(res.stagePromoted).toBe(true);
+    expect(res.newStage).toBe(3);
+    expect(res.newDailyTarget).toBe(STAGE_DEFAULTS[3].dailyTarget);
+  });
+
+  it("promotes from Stage 3 (Quente) to Stage 4 (Blindado) on day 13", () => {
+    const cfgDay12: WarmupConfig = {
+      ...baseConfig,
+      stage: 3,
+      days_active: 12,
+      consecutive_successful_days: 12,
+    };
+    const res = evaluateDailyAutoProgress(cfgDay12, "2026-11-10T14:00:00Z");
+    expect(res.isNewDay).toBe(true);
+    expect(res.newDaysActive).toBe(13);
+    expect(res.stagePromoted).toBe(true);
+    expect(res.newStage).toBe(4);
+    expect(res.newDailyTarget).toBe(STAGE_DEFAULTS[4].dailyTarget);
+  });
+
+  it("does not promote if stage_auto_progress is false", () => {
+    const cfgManual: WarmupConfig = {
+      ...baseConfig,
+      stage: 1,
+      stage_auto_progress: false,
+      days_active: 5,
+    };
+    const res = evaluateDailyAutoProgress(cfgManual, "2026-11-10T14:00:00Z");
+    expect(res.isNewDay).toBe(true);
+    expect(res.stagePromoted).toBe(false);
+    expect(res.newStage).toBe(1);
+  });
+
+  it("penalizes consecutive days if error occurred today", () => {
+    const cfgError: WarmupConfig = {
+      ...baseConfig,
+      error_count_today: 2,
+      consecutive_successful_days: 5,
+    };
+    const res = evaluateDailyAutoProgress(cfgError, "2026-11-10T14:00:00Z");
+    expect(res.newConsecutiveDays).toBe(4);
+  });
+});
+
+describe("Áudio Real e Comportamentos Avançados de Maturação", () => {
+  it("carrega amostra de áudio Opus real com waveform e cabeçalho Ogg", async () => {
+    const { getRandomWarmupVoiceBase64 } = await import("../warmup-audio");
+    const voiceB64 = getRandomWarmupVoiceBase64();
+
+    expect(typeof voiceB64).toBe("string");
+    expect(voiceB64.length).toBeGreaterThan(1000); // Áudio real tem mais de 1KB de dados de onda
+
+    // Ogg Opus em Base64 sempre começa com 'T2dnUw' ("OggS" em ASCII)
+    expect(voiceB64.startsWith("T2dnUw")).toBe(true);
+
+    const buffer = Buffer.from(voiceB64, "base64");
+    expect(buffer.length).toBeGreaterThan(1000);
   });
 });
 

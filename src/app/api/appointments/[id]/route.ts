@@ -62,6 +62,27 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   if (body.end_at) patch.end_at = new Date(body.end_at).toISOString();
   if (body.metadata && typeof body.metadata === "object") patch.metadata = body.metadata;
 
+  if (body.agent_id !== undefined) {
+    if (body.agent_id === null) {
+      patch.agent_id = null;
+    } else {
+      const nextAgentId = Number(body.agent_id);
+      if (!Number.isInteger(nextAgentId) || nextAgentId <= 0) {
+        return NextResponse.json({ ok: false, error: "agent_id inválido" }, { status: 400 });
+      }
+      const { data: ag } = await supabaseAdmin
+        .from("agent_settings")
+        .select("id")
+        .eq("id", nextAgentId)
+        .eq("client_id", existing.client_id)
+        .maybeSingle();
+      if (!ag) {
+        return NextResponse.json({ ok: false, error: "Agente não pertence a este cliente" }, { status: 403 });
+      }
+      patch.agent_id = nextAgentId;
+    }
+  }
+
   // Campos Google Calendar (espelho)
   if (typeof body.location === "string" || body.location === null) patch.location = body.location;
   if (typeof body.all_day === "boolean") patch.all_day = body.all_day;
@@ -104,6 +125,10 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     return NextResponse.json({ ok: false, error: "Nada pra atualizar" }, { status: 400 });
   }
 
+  // Agente efetivo após a edição. Trocar responsável deve validar e
+  // sincronizar com o novo agente, nunca com o vínculo antigo.
+  const effectiveAgentId = patch.agent_id === undefined ? existing.agent_id : patch.agent_id;
+
   // DISPONIBILIDADE na remarcação: se o horário mudou e o agendamento segue
   // ativo, garante que o novo intervalo NÃO se sobrepõe a outro agendamento
   // do mesmo agente (outro contato). Checa ANTES de mexer no Google pra não
@@ -111,13 +136,13 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   // pegamos sobreposição parcial.
   const newStatus = patch.status ?? existing.status;
   const isActiveAfter = newStatus === "confirmed" || newStatus === "tentative";
-  if ((patch.start_at || patch.end_at) && isActiveAfter && existing.agent_id) {
+  if ((patch.start_at || patch.end_at) && isActiveAfter && effectiveAgentId) {
     const nStart = patch.start_at ?? existing.start_at;
     const nEnd = patch.end_at ?? existing.end_at;
     const { data: busy } = await supabaseAdmin
       .from("appointments")
       .select("id, remote_jid, start_at, end_at")
-      .eq("agent_id", existing.agent_id)
+      .eq("agent_id", effectiveAgentId)
       .in("status", ["confirmed", "tentative"])
       .neq("id", id)
       .lt("start_at", new Date(nEnd).toISOString())
@@ -131,11 +156,11 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   // Sync com Google (best-effort) — propaga TODOS os campos atualizados.
   // Captura o erro pra devolver ao front (antes era silencioso).
   let googleError: string | null = null;
-  if (existing.agent_id && body.sync_google !== false) {
+  if (effectiveAgentId && body.sync_google !== false) {
     try {
       if (patch.status === "cancelled") {
         if (existing.google_event_id) {
-          await cancelCalendarEvent(existing.agent_id, existing.google_event_id, existing.calendar_id);
+          await cancelCalendarEvent(effectiveAgentId, existing.google_event_id, existing.calendar_id);
           patch.google_event_id = null;
         }
       } else if (existing.google_event_id) {
@@ -151,7 +176,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
           // notifique quem já estava convidado (sendUpdates=all).
           const finalAttendees = patch.attendees ?? existing.attendees ?? undefined;
           const ev = await updateCalendarEvent({
-            agentId: existing.agent_id,
+            agentId: effectiveAgentId,
             eventId: existing.google_event_id,
             calendarId: existing.calendar_id,
             title: patch.title,
@@ -174,7 +199,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
         // depois) → cria agora e guarda o google_event_id. Garante "sempre
         // sincronizar": editar um evento órfão o empurra pro Google.
         const ev = await createCalendarEvent({
-          agentId: existing.agent_id,
+          agentId: effectiveAgentId,
           calendarId: existing.calendar_id || "primary",
           title: patch.title ?? existing.title,
           description: patch.description ?? existing.description,
@@ -199,6 +224,8 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     }
   }
 
+  if (body.sync_google !== false) patch.google_error = googleError;
+
   // Helper: tenta o update. Se migration 007 não rodou, retry sem campos novos.
   const updateAppointment = async (payload: Record<string, any>) => {
     const r1 = await supabaseAdmin
@@ -217,7 +244,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     const stripped = { ...payload };
     for (const k of [
       "location", "attendees", "all_day", "visibility", "color_id",
-      "recurrence", "html_link", "conference_data", "organizer_email",
+      "recurrence", "html_link", "conference_data", "organizer_email", "google_error",
     ]) delete stripped[k];
     console.warn(`[appointments PATCH] Migration 007 não aplicada — atualizando sem campos Google`);
     return await supabaseAdmin

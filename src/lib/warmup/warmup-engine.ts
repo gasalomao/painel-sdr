@@ -2,6 +2,7 @@ import { supabaseAdmin } from "@/lib/supabase_admin";
 import { evolution } from "@/lib/evolution";
 import { generateText } from "@/lib/ai-provider";
 import { getAiKeys } from "@/lib/ai-keys";
+import { getRandomWarmupVoiceBase64 } from "./warmup-audio";
 import {
   calculateTypingDuration,
   getRandomReaction,
@@ -11,10 +12,12 @@ import {
   WARMUP_THEMES,
 } from "./warmup-dialogues";
 import {
+  STAGE_DEFAULTS,
   type WarmupConfig,
   type WarmupConversation,
   type WarmupConversationTurn,
   type WarmupLog,
+  type WarmupStage,
 } from "./warmup-types";
 
 // Base64 de um áudio sintético super leve de voz silenciosa/neutra (OPUS) para fallback de PTT
@@ -292,6 +295,75 @@ export async function handleInstanceFailure(
 }
 
 /**
+ * Avalia a progressão de dias e promoção de estágio do piloto automático.
+ */
+export function evaluateDailyAutoProgress(
+  cfg: WarmupConfig,
+  nowIso: string = new Date().toISOString()
+): {
+  isNewDay: boolean;
+  stagePromoted: boolean;
+  newStage: WarmupStage;
+  newDaysActive: number;
+  newConsecutiveDays: number;
+  newDailyTarget: number;
+  stageInfo: (typeof STAGE_DEFAULTS)[WarmupStage];
+} {
+  const isNewDay = cfg.last_activity_at
+    ? !isSameBrazilDay(cfg.last_activity_at, nowIso)
+    : false;
+
+  const curStage = (cfg.stage || 1) as WarmupStage;
+
+  if (!isNewDay) {
+    return {
+      isNewDay: false,
+      stagePromoted: false,
+      newStage: curStage,
+      newDaysActive: cfg.days_active || 1,
+      newConsecutiveDays: cfg.consecutive_successful_days || 0,
+      newDailyTarget: cfg.daily_target || STAGE_DEFAULTS[curStage].dailyTarget,
+      stageInfo: STAGE_DEFAULTS[curStage],
+    };
+  }
+
+  const hadSuccess = (cfg.sent_today || 0) > 0 && (cfg.error_count_today || 0) === 0;
+  const newConsecutiveDays = hadSuccess
+    ? (cfg.consecutive_successful_days || 0) + 1
+    : Math.max(0, (cfg.consecutive_successful_days || 0) - 1);
+  const newDaysActive = (cfg.days_active || 1) + 1;
+
+  let newStage: WarmupStage = curStage;
+  let stagePromoted = false;
+
+  // PILOTO AUTOMÁTICO DE ESCADA DE FASES
+  if (cfg.stage_auto_progress !== false) {
+    if (newStage === 1 && newDaysActive >= 4) {
+      newStage = 2;
+      stagePromoted = true;
+    } else if (newStage === 2 && newDaysActive >= 8) {
+      newStage = 3;
+      stagePromoted = true;
+    } else if (newStage === 3 && newDaysActive >= 13) {
+      newStage = 4;
+      stagePromoted = true;
+    }
+  }
+
+  const stageInfo = STAGE_DEFAULTS[newStage];
+
+  return {
+    isNewDay: true,
+    stagePromoted,
+    newStage,
+    newDaysActive,
+    newConsecutiveDays,
+    newDailyTarget: stageInfo.dailyTarget,
+    stageInfo,
+  };
+}
+
+/**
  * Executa um turno avançado de aquecimento com toda a gama de comportamentos humanos:
  * vCard, Digitação, Texto ou Áudio Opus PTT, Tiques Azuis, Reações e Status.
  */
@@ -301,8 +373,9 @@ export async function executeWarmupTurn(opts: {
   receiverConfig: WarmupConfig;
   conversation: WarmupConversation;
   isManualTrigger?: boolean;
+  forceStatusPost?: boolean;
 }): Promise<{ success: boolean; messageText: string; error?: string }> {
-  const { clientId, senderConfig, receiverConfig, conversation, isManualTrigger } = opts;
+  const { clientId, senderConfig, receiverConfig, conversation, isManualTrigger, forceStatusPost } = opts;
 
   // 1. Checagem de Quarentena (Circuit Breaker)
   if (senderConfig.is_quarantined && !isManualTrigger) {
@@ -351,13 +424,14 @@ export async function executeWarmupTurn(opts: {
         receiver_instance: receiverConfig.instance_name,
         sender_phone: senderPhone,
         receiver_phone: receiverPhone,
-        message_text: `Enviando cartão de contato (vCard) para salvar mútua na agenda...`,
+        message_text: `Enviando cartão de contato (vCard de ${senderConfig.instance_name}) para salvar na agenda de ${receiverConfig.instance_name}...`,
         action_type: "vcard",
       });
 
+      // Envia o cartão de contato do REMETENTE para o destinatário salvar na agenda
       await evolution.sendContact(
         targetJid,
-        [{ fullName: receiverConfig.instance_name, phoneNumber: receiverPhone }],
+        [{ fullName: senderConfig.instance_name, phoneNumber: senderPhone }],
         senderConfig.instance_name
       );
 
@@ -371,8 +445,15 @@ export async function executeWarmupTurn(opts: {
     } catch {}
   }
 
-  // 5. POSTAGEM DE STATUS (WhatsApp Stories) - A cada 48h
-  if (!isManualTrigger && senderConfig.enable_status_posts !== false && (!senderConfig.last_status_post_at || Date.now() - new Date(senderConfig.last_status_post_at).getTime() > 48 * 60 * 60 * 1000)) {
+  // 5. POSTAGEM DE STATUS (WhatsApp Stories) - A cada 48h ou se requisitado no teste manual
+  const shouldPostStatus =
+    (forceStatusPost || !isManualTrigger) &&
+    senderConfig.enable_status_posts !== false &&
+    (Boolean(forceStatusPost) ||
+      !senderConfig.last_status_post_at ||
+      Date.now() - new Date(senderConfig.last_status_post_at).getTime() > 48 * 60 * 60 * 1000);
+
+  if (shouldPostStatus) {
     try {
       const quote = getRandomStatusQuote();
       await evolution.sendStatus(
@@ -449,10 +530,11 @@ export async function executeWarmupTurn(opts: {
   let sendResult: any = null;
   try {
     if (isAudioTurn) {
+      const voiceB64 = getRandomWarmupVoiceBase64() || CASUAL_OPUS_BASE64;
       sendResult = await evolution.sendMedia(
         targetJid,
         "",
-        { type: "audio", base64: CASUAL_OPUS_BASE64 },
+        { type: "audio", base64: voiceB64, mimetype: "audio/ogg; codecs=opus" },
         senderConfig.instance_name,
         { delay: 1500, encoding: false }
       );
@@ -488,23 +570,46 @@ export async function executeWarmupTurn(opts: {
     },
   });
 
-  // 9. Confirmação de Leitura e Tique Azul no Destinatário
-  if (receiverConfig.enable_blue_ticks && senderPhone) {
-    setTimeout(async () => {
+  // 9. Confirmação de Leitura e Tique Azul no Destinatário (com Atraso Humano)
+  if (receiverConfig.enable_blue_ticks !== false && senderPhone) {
+    const senderJid = `${senderPhone}@s.whatsapp.net`;
+    const readDelayMs = 4200;
+
+    const performReadConfirmation = async () => {
       try {
-        const senderJid = `${senderPhone}@s.whatsapp.net`;
         await evolution.markMessageAsRead(
           [{ remoteJid: senderJid, id: messageId, fromMe: false }],
           receiverConfig.instance_name
         );
-      } catch {}
-    }, 4500);
+        await logWarmupAction({
+          client_id: clientId,
+          sender_instance: receiverConfig.instance_name,
+          receiver_instance: senderConfig.instance_name,
+          sender_phone: receiverPhone,
+          receiver_phone: senderPhone,
+          message_text: `Visualizou e confirmou leitura da mensagem (tiques azuis exibidos após ${Math.round(readDelayMs / 1000)}s)`,
+          action_type: "presence",
+          details: { message_id: messageId, delay_ms: readDelayMs, read_receipt: true },
+        });
+      } catch (err: any) {
+        console.error(`[WARMUP] Erro ao marcar como lido em ${receiverConfig.instance_name}:`, err?.message);
+      }
+    };
+
+    if (isManualTrigger) {
+      await new Promise((r) => setTimeout(r, Math.min(readDelayMs, 3500)));
+      await performReadConfirmation();
+    } else {
+      setTimeout(performReadConfirmation, readDelayMs);
+    }
   }
 
-  // 10. Reação de Emoji (probabilidade ~30%)
-  if (receiverConfig.enable_reactions && senderPhone && Math.random() < 0.32) {
+  // 10. Reação de Emoji (probabilidade ~32%)
+  if (receiverConfig.enable_reactions !== false && senderPhone && (isManualTrigger || Math.random() < 0.32)) {
     const reactionEmoji = getRandomReaction();
-    setTimeout(async () => {
+    const reactionDelayMs = isManualTrigger ? 2000 : 7500;
+
+    const performReaction = async () => {
       try {
         const senderJid = `${senderPhone}@s.whatsapp.net`;
         await evolution.sendReaction(
@@ -525,7 +630,14 @@ export async function executeWarmupTurn(opts: {
           details: { reaction: reactionEmoji, target_msg_id: messageId },
         });
       } catch {}
-    }, 7500);
+    };
+
+    if (isManualTrigger) {
+      await new Promise((r) => setTimeout(r, reactionDelayMs));
+      await performReaction();
+    } else {
+      setTimeout(performReaction, reactionDelayMs);
+    }
   }
 
   // 11. Atualização dos contadores diários e pontuação de saúde

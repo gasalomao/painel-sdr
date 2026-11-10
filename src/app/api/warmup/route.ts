@@ -50,7 +50,7 @@ async function saveConfigToDbAndSettings(clientId: string, cfg: WarmupConfig): P
 
   // 1. Tenta salvar em whatsapp_warmup_configs
   try {
-    await supabaseAdmin
+    const { error } = await supabaseAdmin
       .from("whatsapp_warmup_configs")
       .upsert(
         {
@@ -60,7 +60,12 @@ async function saveConfigToDbAndSettings(clientId: string, cfg: WarmupConfig): P
         },
         { onConflict: "client_id,instance_name" }
       );
-  } catch {}
+    if (error) {
+      console.warn(`[WARMUP DB] Erro ao salvar em whatsapp_warmup_configs: ${error.message} (usando fallback app_settings)`);
+    }
+  } catch (err: any) {
+    console.warn(`[WARMUP DB] Exceção em whatsapp_warmup_configs: ${err?.message}`);
+  }
 
   // 2. Persiste em app_settings para garantia e resiliência total
   try {
@@ -77,7 +82,9 @@ async function saveConfigToDbAndSettings(clientId: string, cfg: WarmupConfig): P
         },
         { onConflict: "key" }
       );
-  } catch {}
+  } catch (err: any) {
+    console.error(`[WARMUP DB] Falha ao persistir em app_settings: ${err?.message}`);
+  }
 }
 
 /**
@@ -307,7 +314,8 @@ export async function POST(req: NextRequest) {
 
     // Se for salvamento de configurações globais
     if (body.type === "global_settings") {
-      const { type: _discardType, ...settings } = body;
+      const { type: _unused, ...settings } = body;
+      void _unused;
       await supabaseAdmin
         .from("app_settings")
         .upsert(

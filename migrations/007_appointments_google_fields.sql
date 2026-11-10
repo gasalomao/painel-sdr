@@ -25,7 +25,8 @@ ALTER TABLE public.appointments
   ADD COLUMN IF NOT EXISTS html_link         TEXT,
   ADD COLUMN IF NOT EXISTS conference_data   JSONB,
   ADD COLUMN IF NOT EXISTS recurrence        TEXT[],
-  ADD COLUMN IF NOT EXISTS organizer_email   TEXT;
+  ADD COLUMN IF NOT EXISTS organizer_email   TEXT,
+  ADD COLUMN IF NOT EXISTS google_error      TEXT;
 
 COMMENT ON COLUMN public.appointments.attendees IS
   'Lista de { email, displayName?, responseStatus? } — espelho do attendees do Google Calendar.';

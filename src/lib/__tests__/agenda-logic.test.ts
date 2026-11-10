@@ -63,6 +63,8 @@ import {
   reminderKey,
   rangesOverlap,
   hasAgentOverlapConflict,
+  buildRecurrenceRule,
+  parseRecurrenceRule,
 } from "../agenda-logic";
 import { tickReminders } from "../appointment-worker";
 
@@ -225,6 +227,29 @@ describe("shouldSendReminder", () => {
     const now = new Date("2026-06-01T12:45:00Z").getTime();
     expect(shouldSendReminder({ status: "completed", startMs: start, nowMs: now, offsetMinutes: offset, alreadySent: false })).toBe(false);
     expect(shouldSendReminder({ status: "no_show", startMs: start, nowMs: now, offsetMinutes: offset, alreadySent: false })).toBe(false);
+  });
+});
+
+describe("RRULE do Google Calendar", () => {
+  it("converte recorrência sem repetição em lista vazia", () => {
+    expect(buildRecurrenceRule({ frequency: "NONE", interval: 1, end: { type: "never" } })).toEqual([]);
+  });
+
+  it.each([
+    [{ frequency: "DAILY", interval: 1, end: { type: "never" } as const }, "RRULE:FREQ=DAILY"],
+    [{ frequency: "WEEKLY", interval: 2, end: { type: "count", count: 10 } as const }, "RRULE:FREQ=WEEKLY;INTERVAL=2;COUNT=10"],
+    [{ frequency: "MONTHLY", interval: 3, end: { type: "until", date: "2026-12-31" } as const }, "RRULE:FREQ=MONTHLY;INTERVAL=3;UNTIL=20261231T235959Z"],
+  ])("gera RRULE válido", (spec, expected) => {
+    expect(buildRecurrenceRule(spec)).toEqual([expected]);
+  });
+
+  it("faz round-trip preservando frequência, intervalo e término", () => {
+    const spec = { frequency: "WEEKLY" as const, interval: 2, end: { type: "count" as const, count: 8 } };
+    expect(parseRecurrenceRule(buildRecurrenceRule(spec))).toEqual(spec);
+  });
+
+  it("ignora RRULE com frequência não suportada", () => {
+    expect(parseRecurrenceRule(["RRULE:FREQ=YEARLY"])).toBeNull();
   });
 });
 

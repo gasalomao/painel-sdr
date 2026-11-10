@@ -34,7 +34,7 @@ export async function GET(req: NextRequest) {
   const remoteJid = sp.get("remote_jid");
   const limit = Math.min(Number(sp.get("limit")) || 100, 500);
 
-  const GOOGLE_FIELDS = ", location, attendees, all_day, visibility, color_id, html_link, recurrence, conference_data, organizer_email";
+  const GOOGLE_FIELDS = ", location, attendees, all_day, visibility, color_id, html_link, recurrence, conference_data, organizer_email, google_error";
   const BASE_FIELDS = "id, client_id, agent_id, lead_id, remote_jid, instance_name, google_event_id, calendar_id, title, description, service_name, start_at, end_at, status, reminders_sent, created_by, metadata, cancelled_reason, cancelled_at, completed_at, created_at, updated_at";
 
   const buildQuery = (fields: string) => {
@@ -221,6 +221,7 @@ export async function POST(req: NextRequest) {
     recurrence: recurrence || null,
     html_link: google_html_link,
     conference_data: google_conference_data,
+    google_error,
     google_event_id,
     calendar_id: calendar_id || "primary",
     title: String(title).slice(0, 500),
@@ -253,7 +254,7 @@ export async function POST(req: NextRequest) {
     // Remove TODOS os campos da migration 007 e tenta de novo.
     for (const k of [
       "location", "attendees", "all_day", "visibility", "color_id",
-      "recurrence", "html_link", "conference_data", "organizer_email",
+      "recurrence", "html_link", "conference_data", "organizer_email", "google_error",
     ]) delete stripped[k];
     console.warn(`[appointments POST] Migration 007 não aplicada — gravando sem campos Google: ${msg}`);
     return await supabaseAdmin

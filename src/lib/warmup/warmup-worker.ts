@@ -1,7 +1,7 @@
 import { supabaseAdmin } from "@/lib/supabase_admin";
-import { executeWarmupTurn, isSameBrazilDay, isWithinOperatingHours, logWarmupAction } from "./warmup-engine";
+import { executeWarmupTurn, isWithinOperatingHours, logWarmupAction, evaluateDailyAutoProgress } from "./warmup-engine";
 import { WARMUP_THEMES } from "./warmup-dialogues";
-import { STAGE_DEFAULTS, type WarmupConfig, type WarmupConversation, type WarmupStage } from "./warmup-types";
+import { type WarmupConfig, type WarmupConversation } from "./warmup-types";
 
 const _lastWarningLogged: Record<string, number> = {};
 
@@ -17,19 +17,47 @@ export async function tickWarmupWorker(): Promise<{
   let exchangesCount = 0;
 
   try {
-    // 1. Busca todas as configurações ativas
-    const { data: activeConfigs, error: cfgError } = await supabaseAdmin
-      .from("whatsapp_warmup_configs")
-      .select("*")
-      .eq("enabled", true);
+    // 1. Busca todas as configurações ativas (tabela oficial + fallback app_settings)
+    const activeConfigsList: WarmupConfig[] = [];
 
-    if (cfgError || !activeConfigs || activeConfigs.length === 0) {
+    try {
+      const { data: dbConfigs, error: cfgError } = await supabaseAdmin
+        .from("whatsapp_warmup_configs")
+        .select("*")
+        .eq("enabled", true);
+
+      if (!cfgError && dbConfigs && dbConfigs.length > 0) {
+        activeConfigsList.push(...(dbConfigs as WarmupConfig[]));
+      }
+    } catch {}
+
+    // Fallback: se a tabela estiver vazia, busca em app_settings
+    if (activeConfigsList.length === 0) {
+      try {
+        const { data: appSettingsData } = await supabaseAdmin
+          .from("app_settings")
+          .select("key, value")
+          .like("key", "warmup_configs_%");
+
+        if (appSettingsData && appSettingsData.length > 0) {
+          for (const row of appSettingsData) {
+            try {
+              const parsed = JSON.parse(row.value);
+              const items = Object.values(parsed) as WarmupConfig[];
+              activeConfigsList.push(...items.filter((c) => c.enabled));
+            } catch {}
+          }
+        }
+      } catch {}
+    }
+
+    if (activeConfigsList.length === 0) {
       return { processedTenants, exchangesCount };
     }
 
     // Agrupa por client_id
     const clientMap = new Map<string, WarmupConfig[]>();
-    for (const c of activeConfigs as WarmupConfig[]) {
+    for (const c of activeConfigsList) {
       const list = clientMap.get(c.client_id) || [];
       list.push(c);
       clientMap.set(c.client_id, list);
@@ -67,32 +95,11 @@ export async function tickWarmupWorker(): Promise<{
           });
         }
 
-        // Reset diário de contadores se virou o dia civil no Brasil
-        if (cfg.last_activity_at && !isSameBrazilDay(cfg.last_activity_at, nowIso)) {
-          const hadSuccess = (cfg.sent_today || 0) > 0 && (cfg.error_count_today || 0) === 0;
-          const consecutive = hadSuccess
-            ? (cfg.consecutive_successful_days || 0) + 1
-            : Math.max(0, (cfg.consecutive_successful_days || 0) - 1);
-          const daysActive = (cfg.days_active || 1) + 1;
+        // Reset diário de contadores se virou o dia civil no Brasil (Piloto Automático de Fases)
+        const progress = evaluateDailyAutoProgress(cfg, nowIso);
+        if (progress.isNewDay) {
+          const { stagePromoted, newStage, newDaysActive, newConsecutiveDays, stageInfo } = progress;
 
-          let newStage = cfg.stage;
-          let stagePromoted = false;
-
-          // PILOTO AUTOMÁTICO DE ESCADA DE FASES
-          if (cfg.stage_auto_progress !== false) {
-            if (cfg.stage === 1 && daysActive >= 4) {
-              newStage = 2;
-              stagePromoted = true;
-            } else if (cfg.stage === 2 && daysActive >= 8) {
-              newStage = 3;
-              stagePromoted = true;
-            } else if (cfg.stage === 3 && daysActive >= 13) {
-              newStage = 4;
-              stagePromoted = true;
-            }
-          }
-
-          const stageInfo = STAGE_DEFAULTS[newStage as WarmupStage];
           cfg.stage = newStage;
           cfg.daily_target = stageInfo.dailyTarget;
           cfg.min_interval_seconds = stageInfo.minInterval;
@@ -100,8 +107,8 @@ export async function tickWarmupWorker(): Promise<{
           cfg.sent_today = 0;
           cfg.received_today = 0;
           cfg.error_count_today = 0;
-          cfg.days_active = daysActive;
-          cfg.consecutive_successful_days = consecutive;
+          cfg.days_active = newDaysActive;
+          cfg.consecutive_successful_days = newConsecutiveDays;
 
           await supabaseAdmin
             .from("whatsapp_warmup_configs")
@@ -113,8 +120,8 @@ export async function tickWarmupWorker(): Promise<{
               sent_today: 0,
               received_today: 0,
               error_count_today: 0,
-              days_active: daysActive,
-              consecutive_successful_days: consecutive,
+              days_active: newDaysActive,
+              consecutive_successful_days: newConsecutiveDays,
               updated_at: nowIso,
             })
             .eq("id", cfg.id);
@@ -124,7 +131,7 @@ export async function tickWarmupWorker(): Promise<{
               client_id: clientId,
               sender_instance: cfg.instance_name,
               receiver_instance: "auto_ramp",
-              message_text: `🎉 PILOTO AUTOMÁTICO: Chip ${cfg.instance_name} promovido para a ${stageInfo.name} (${daysActive} dias de maturação). Nova meta: ${stageInfo.dailyTarget} msgs/dia!`,
+              message_text: `🎉 PILOTO AUTOMÁTICO: Chip ${cfg.instance_name} promovido para a ${stageInfo.name} (${newDaysActive} dias de maturação). Nova meta: ${stageInfo.dailyTarget} msgs/dia!`,
               action_type: "system",
             });
           }
@@ -264,7 +271,8 @@ export async function tickWarmupWorker(): Promise<{
 export async function triggerManualWarmup(
   clientId: string,
   instanceA: string,
-  instanceB: string
+  instanceB: string,
+  forceStatusPost: boolean = false
 ): Promise<{ success: boolean; message: string; error?: string }> {
   const { data: configs } = await supabaseAdmin
     .from("whatsapp_warmup_configs")
@@ -328,6 +336,7 @@ export async function triggerManualWarmup(
     receiverConfig: finalB,
     conversation: syntheticConv,
     isManualTrigger: true,
+    forceStatusPost,
   });
 
   if (!res.success) {

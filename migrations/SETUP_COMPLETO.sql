@@ -214,7 +214,8 @@ CREATE TABLE IF NOT EXISTS public.appointments (
   html_link         text,
   conference_data   jsonb,
   recurrence        text[],
-  organizer_email   text
+  organizer_email   text,
+  google_error      text
 );
 
 CREATE TABLE IF NOT EXISTS public.auth_sessions (

@@ -11,7 +11,7 @@ export async function POST(req: NextRequest) {
   const clientId = auth.clientId;
 
   try {
-    const { instanceA, instanceB } = await req.json();
+    const { instanceA, instanceB, testStatusPost } = await req.json();
 
     if (!instanceA || !instanceB) {
       return NextResponse.json(
@@ -27,7 +27,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const result = await triggerManualWarmup(clientId, instanceA, instanceB);
+    const result = await triggerManualWarmup(clientId, instanceA, instanceB, Boolean(testStatusPost));
 
     if (!result.success) {
       return NextResponse.json({ success: false, error: result.error || result.message }, { status: 400 });
