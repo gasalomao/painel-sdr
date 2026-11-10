@@ -813,6 +813,42 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ success: true, ignored: true, reason: "status_broadcast" });
       }
 
+      // === Interceptador de Aquecimento de Chips (Warmup Guard) ===
+      // Mensagens trocadas entre chips do mesmo tenant durante o aquecimento NÃO
+      // devem abrir sessões no CRM nem acionar o agente de vendas da SDR.
+      if (!fromMe && remoteJid && !remoteJid.includes("@g.us")) {
+        try {
+          const cleanPhone = remoteJid.replace(/\D/g, "");
+          if (cleanPhone.length >= 10) {
+            const { data: peerWarmup } = await supabase
+              .from("whatsapp_warmup_configs")
+              .select("instance_name, enabled")
+              .eq("client_id", clientId)
+              .eq("phone_number", cleanPhone)
+              .maybeSingle();
+
+            if (peerWarmup) {
+              console.log(`[WARMUP] 🛑 Mensagem interceptada de chip parceiro (${peerWarmup.instance_name}) -> ignorando CRM/Agente SDR.`);
+              supabase
+                .from("whatsapp_warmup_configs")
+                .update({ last_activity_at: new Date().toISOString() })
+                .eq("instance_name", instanceName)
+                .eq("client_id", clientId)
+                .then(() => {}, () => {});
+
+              return NextResponse.json({
+                success: true,
+                ignored: true,
+                reason: "warmup_peer_traffic",
+                peer_instance: peerWarmup.instance_name,
+              });
+            }
+          }
+        } catch {
+          // Se a tabela ainda não estiver criada, segue fluxo padrão sem falhar
+        }
+      }
+
       // === In-Memory Concurrency Set Guard ===
       if (!(globalThis as any).__processedMessageIds) {
         (globalThis as any).__processedMessageIds = new Set<string>();

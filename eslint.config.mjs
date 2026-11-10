@@ -19,6 +19,7 @@ const eslintConfig = defineConfig([
     // Previews gerados em runtime:
     "storage/**",
     "temp_wacrm/**",
+    "maturador-de-chips-main/**",
     "scratch/**",
     // Assets vendor minificados e scripts one-off CommonJS não são fonte:
     "public/**",

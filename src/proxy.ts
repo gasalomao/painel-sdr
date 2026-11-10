@@ -32,6 +32,7 @@ const PATH_TO_FEATURE: Record<string, string> = {
   "/organizador":  "organizador",
   "/configuracoes": "configuracoes",
   "/sites":        "sites",
+  "/aquecer-chips": "aquecer_chips",
 };
 
 function getFeatureForPath(pathname: string): string | null {

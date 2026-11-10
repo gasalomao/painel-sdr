@@ -34,23 +34,38 @@ export async function GET(req: NextRequest) {
   const remoteJid = sp.get("remote_jid");
   const limit = Math.min(Number(sp.get("limit")) || 100, 500);
 
-  let q = supabaseAdmin
-    .from("appointments")
-    .select(
-      "id, client_id, agent_id, lead_id, remote_jid, instance_name, google_event_id, calendar_id, title, description, service_name, start_at, end_at, status, reminders_sent, created_by, metadata, cancelled_reason, cancelled_at, completed_at, created_at, updated_at"
-    )
-    .order("start_at", { ascending: true })
-    .limit(limit);
+  const GOOGLE_FIELDS = ", location, attendees, all_day, visibility, color_id, html_link, recurrence, conference_data, organizer_email";
+  const BASE_FIELDS = "id, client_id, agent_id, lead_id, remote_jid, instance_name, google_event_id, calendar_id, title, description, service_name, start_at, end_at, status, reminders_sent, created_by, metadata, cancelled_reason, cancelled_at, completed_at, created_at, updated_at";
 
-  if (!auth.isAdmin) q = q.eq("client_id", auth.clientId);
-  if (from) q = q.gte("start_at", new Date(from).toISOString());
-  if (to) q = q.lte("start_at", new Date(to).toISOString());
-  if (status) q = q.eq("status", status);
-  if (agentId) q = q.eq("agent_id", Number(agentId));
-  if (leadId) q = q.eq("lead_id", Number(leadId));
-  if (remoteJid) q = q.eq("remote_jid", remoteJid);
+  const buildQuery = (fields: string) => {
+    let query = supabaseAdmin
+      .from("appointments")
+      .select(fields)
+      .order("start_at", { ascending: true })
+      .limit(limit);
+    if (!auth.isAdmin) query = query.eq("client_id", auth.clientId);
+    if (from) query = query.gte("start_at", new Date(from).toISOString());
+    if (to) query = query.lte("start_at", new Date(to).toISOString());
+    if (status) query = query.eq("status", status);
+    if (agentId) query = query.eq("agent_id", Number(agentId));
+    if (leadId) query = query.eq("lead_id", Number(leadId));
+    if (remoteJid) query = query.eq("remote_jid", remoteJid);
+    return query;
+  };
 
-  const { data, error } = await q;
+  // Inclui os campos espelho do Google (location, attendees, recurrence...)
+  // pra UI abrir a edição com tudo. Se a migration 007 ainda não rodou,
+  // cai pra lista enxuta em vez de quebrar a tela inteira.
+  let { data, error } = await buildQuery(BASE_FIELDS + GOOGLE_FIELDS);
+  if (error) {
+    const msg = String(error.message || "");
+    const isSchemaMiss =
+      error.code === "PGRST204" ||
+      /column .* of 'appointments'/i.test(msg) ||
+      /Could not find the .* column/i.test(msg);
+    if (!isSchemaMiss) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    ({ data, error } = await buildQuery(BASE_FIELDS));
+  }
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   return NextResponse.json({ ok: true, appointments: data || [] });
 }

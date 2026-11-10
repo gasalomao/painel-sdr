@@ -128,6 +128,8 @@ export default function AgentePage() {
   const [calendarEnabled, setCalendarEnabled] = useState(false);
   const [googleJson, setGoogleJson] = useState("");
   const [, setGoogleTokens] = useState<object | null>(null);
+  const [isCalendarConnected, setIsCalendarConnected] = useState(false);
+  const [calendarConnectedEmail, setCalendarConnectedEmail] = useState<string | null>(null);
   const [calendarGenerateMeet, setCalendarGenerateMeet] = useState(false);
   const [calendarSendMeetLink, setCalendarSendMeetLink] = useState(false);
   const [calendarDefaultDuration, setCalendarDefaultDuration] = useState<number>(30);
@@ -310,6 +312,8 @@ export default function AgentePage() {
         setAppUrl(opts.app_url || "");
         setGoogleJson(opts.google_credentials || "");
         setGoogleTokens(opts.google_tokens || null);
+        setIsCalendarConnected(Boolean(opts.google_tokens?.refresh_token));
+        setCalendarConnectedEmail(opts.calendar_connected_email || null);
         setCalendarGenerateMeet(opts.calendar_generate_meet ?? false);
         setCalendarSendMeetLink(opts.calendar_send_meet_link ?? false);
         setCalendarEnabled(opts.calendar_enabled ?? false);
@@ -678,36 +682,67 @@ export default function AgentePage() {
     return !error;
   };
 
-  // Testa + salva a credencial OAuth e abre o fluxo de autorização do Google.
-  // Reusa /api/calendario/connect-google (valida JSON, salva e devolve next_url).
+  // Conecta via 1 clique com as credenciais centrais da plataforma,
+  // ou salva credenciais customizadas se preenchidas no campo avançado.
   const [testingGoogle, setTestingGoogle] = useState(false);
   const testGoogleConnection = async () => {
     if (!activeAgentId) return;
-    if (!googleJson.trim()) { alert("Cole o JSON do OAuth Web Client primeiro."); return; }
     setTestingGoogle(true);
-    // Abre o popup JÁ no clique (gesto do usuário) pra não ser bloqueado pelo
-    // navegador. Depois navegamos ele até a URL real do Google.
+    // Abre o popup JÁ no clique (gesto do usuário) pra não ser bloqueado pelo navegador.
     const popup = window.open("about:blank", "google-oauth", "width=520,height=660");
     try {
-      // 1) Valida + salva a credencial.
+      // 1) Se houver googleJson customizado, salva; senão conecta via plataforma (1 clique)
       const r = await fetch("/api/calendario/connect-google", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent_id: activeAgentId, google_credentials_json: googleJson }),
+        body: JSON.stringify({
+          agent_id: activeAgentId,
+          google_credentials_json: googleJson.trim() ? googleJson.trim() : undefined,
+        }),
       });
       const d = await r.json();
-      if (!d.ok) { popup?.close(); alert("❌ Credencial inválida: " + (d.error || "erro desconhecido")); return; }
+      if (!d.ok) {
+        popup?.close();
+        alert("Não foi possível iniciar a conexão: " + (d.error || "erro desconhecido"));
+        return;
+      }
 
-      // 2) Gera a URL OAuth real do Google e navega o popup pra ela (o endpoint
-      //    devolve JSON { url } — por isso não dá pra abrir ele direto).
+      // 2) Gera a URL OAuth do Google e navega o popup pra ela
       const u = await fetch(`/api/auth/google/url?agentId=${activeAgentId}`, { cache: "no-store" }).then((x) => x.json());
-      if (!u?.url) { popup?.close(); alert("Falha ao gerar a URL do Google: " + (u?.error || "desconhecido")); return; }
+      if (!u?.url) {
+        popup?.close();
+        alert("Falha ao gerar URL do Google: " + (u?.error || "desconhecido"));
+        return;
+      }
       if (popup) popup.location.href = u.url;
-      else window.open(u.url, "_blank"); // fallback se o popup foi bloqueado
+      else window.open(u.url, "_blank");
     } catch (e) {
       popup?.close();
       alert("Erro de rede: " + ((e as Error)?.message || e));
-    } finally { setTestingGoogle(false); }
+    } finally {
+      setTestingGoogle(false);
+    }
+  };
+
+  const disconnectGoogle = async () => {
+    if (!activeAgentId) return;
+    const ok = confirm("Deseja realmente desconectar a conta do Google Calendar deste agente?");
+    if (!ok) return;
+    try {
+      const r = await fetch("/api/calendario/connect-google", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent_id: activeAgentId, action: "disconnect" }),
+      });
+      const d = await r.json();
+      if (!d.ok) throw new Error(d.error || "Erro ao desconectar");
+      setIsCalendarConnected(false);
+      setCalendarConnectedEmail(null);
+      await loadAgent(activeAgentId);
+      alert("Conta Google desconectada com sucesso.");
+    } catch (e: any) {
+      alert("Erro: " + e.message);
+    }
   };
 
   // Recebe o aviso do popup OAuth (postMessage) quando o Google conecta —
@@ -1242,6 +1277,9 @@ export default function AgentePage() {
                 calendarEnabled={calendarEnabled} setCalendarEnabled={setCalendarEnabled}
                 googleJson={googleJson} setGoogleJson={setGoogleJson}
                 onTestGoogle={testGoogleConnection} testingGoogle={testingGoogle}
+                isCalendarConnected={isCalendarConnected}
+                calendarConnectedEmail={calendarConnectedEmail}
+                onDisconnectGoogle={disconnectGoogle}
                 calendarDefaultDuration={calendarDefaultDuration} setCalendarDefaultDuration={setCalendarDefaultDuration}
                 calendarGenerateMeet={calendarGenerateMeet} setCalendarGenerateMeet={setCalendarGenerateMeet}
                 calendarSendMeetLink={calendarSendMeetLink} setCalendarSendMeetLink={setCalendarSendMeetLink}

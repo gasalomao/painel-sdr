@@ -445,7 +445,7 @@ export const evolution = {
     caption: string,
     mediaData: { type: "image" | "video" | "audio" | "document"; base64?: string; url?: string; mediaUrl?: string; fileName?: string; mimetype?: string },
     instance?: string,
-    options?: { delay?: number }
+    options?: { delay?: number; encoding?: boolean }
   ) {
     instance = await resolveInstance(instance);
     const cleanNum = number.replace(/^phone:/i, "").trim();
@@ -465,7 +465,7 @@ export const evolution = {
     //      texto em vez da imagem — é o bug "envia link em vez de imagem".
     //
     // Limpa prefixo data: se vier (defensivo — às vezes o caller já inclui).
-    const hasBase64 = mediaData.base64 && mediaData.base64.length > 100;
+    const hasBase64 = Boolean(mediaData.base64 && mediaData.base64.length > 20);
     const cleanBase64 = hasBase64
       ? mediaData.base64!.replace(/^data:[^;]+;base64,/, "")
       : null;
@@ -481,7 +481,7 @@ export const evolution = {
         number: targetJid,
         audio: cleanBase64 || mediaData.mediaUrl || mediaData.url || "",
         delay: mediaDelay,
-        encoding: true,
+        encoding: options?.encoding !== undefined ? options.encoding : true,
       }, 120000);
     }
 
@@ -503,10 +503,107 @@ export const evolution = {
     if (!instance) return null;
     // Timeout curto: o "digitando" é cosmético. Se a instância estiver lenta/caída,
     // não pode segurar o envio real por 30s — falha rápido (6s) e segue.
-    return evoFetch(`/chat/presence/${instance}`, "POST", {
+    // Evolution API v2 endpoint: /chat/sendPresence/:instance com number, presence e delay.
+    return evoFetch(`/chat/sendPresence/${instance}`, "POST", {
       number,
-      presence
+      presence,
+      delay: 1200,
     }, 6000).catch(() => null); // Ignora erros de presença para não travar o envio
+  },
+
+  /**
+   * Marca mensagens como lidas na Evolution API v2 (tiques azuis).
+   * POST /chat/markMessageAsRead/:instance
+   */
+  async markMessageAsRead(
+    messages: Array<{ remoteJid: string; id: string; fromMe?: boolean }>,
+    instance?: string
+  ) {
+    instance = await resolveInstance(instance).catch(() => "");
+    if (!instance || messages.length === 0) return null;
+    return evoFetch(`/chat/markMessageAsRead/${instance}`, "POST", {
+      readMessages: messages.map((m) => ({
+        remoteJid: m.remoteJid,
+        id: m.id,
+        fromMe: !!m.fromMe,
+      })),
+    }, 6000).catch(() => null);
+  },
+
+  /**
+   * Envia reação de emoji em uma mensagem existente.
+   * POST /message/sendReaction/:instance
+   */
+  async sendReaction(
+    remoteJid: string,
+    messageId: string,
+    reaction: string,
+    instance?: string,
+    fromMe: boolean = false
+  ) {
+    instance = await resolveInstance(instance).catch(() => "");
+    if (!instance) return null;
+    return evoFetch(`/message/sendReaction/${instance}`, "POST", {
+      key: {
+        remoteJid,
+        id: messageId,
+        fromMe,
+      },
+      reaction,
+    }, 8000).catch(() => null);
+  },
+
+  /**
+   * Envia cartão de contato (vCard) na Evolution API v2.
+   * POST /message/sendContact/:instance
+   */
+  async sendContact(
+    number: string,
+    contacts: Array<{ fullName: string; phoneNumber: string; wuid?: string }>,
+    instance?: string
+  ) {
+    instance = await resolveInstance(instance).catch(() => "");
+    if (!instance || contacts.length === 0) return null;
+    let target = number.replace(/\D/g, "");
+    if (!target.includes("@")) target = target + "@s.whatsapp.net";
+
+    return evoFetch(`/message/sendContact/${instance}`, "POST", {
+      number: target,
+      contact: contacts.map((c) => ({
+        fullName: c.fullName,
+        phoneNumber: c.phoneNumber.startsWith("+") ? c.phoneNumber : `+${c.phoneNumber.replace(/\D/g, "")}`,
+        wuid: c.wuid || c.phoneNumber.replace(/\D/g, ""),
+      })),
+    }, 15000).catch(() => null);
+  },
+
+  /**
+   * Envia publicação de Status (Stories do WhatsApp) na Evolution API v2.
+   * POST /message/sendStatus/:instance
+   */
+  async sendStatus(
+    content: string,
+    type: "text" | "image" = "text",
+    instance?: string,
+    statusJidList: string[] = []
+  ) {
+    instance = await resolveInstance(instance).catch(() => "");
+    if (!instance || !content) return null;
+    try {
+      const cleanJidList = statusJidList
+        .map((j) => j.replace(/\D/g, ""))
+        .filter((j) => j.length >= 10);
+
+      return await evoFetch(`/message/sendStatus/${instance}`, "POST", {
+        type,
+        content,
+        statusJidList: cleanJidList,
+        backgroundColor: "#075e54",
+        font: 1,
+      }, 15000);
+    } catch {
+      return null;
+    }
   },
 
   // ================= PROXY =================

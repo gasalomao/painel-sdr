@@ -110,7 +110,7 @@ describe("Teste Completo com Áudio Real (Sara SDR - Prévia de Site)", () => {
 
     // Primeira chamada: Simula gravação ("recording" em vez de "composing")
     const presenceCall = axiosMock.mock.calls[0][0];
-    expect(presenceCall.url).toBe("https://evo.test/chat/presence/inst1");
+    expect(presenceCall.url).toBe("https://evo.test/chat/sendPresence/inst1");
     const presenceBody = typeof presenceCall.data === "string" ? JSON.parse(presenceCall.data) : presenceCall.data;
     expect(presenceBody.number).toBe("5511991702108@s.whatsapp.net");
     expect(presenceBody.presence).toBe("recording");

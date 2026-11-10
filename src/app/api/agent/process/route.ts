@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { SchemaType } from "@google/generative-ai";
 import { google } from "googleapis";
+import { getOAuthClientForAgentOptions } from "@/lib/google-calendar";
 import { getEffectiveStatus } from "@/lib/bot-status";
 import { isGroupJid } from "@/lib/bot-status";
 import { leadRowToTemplateContext, renderTemplate } from "@/lib/template-vars";
@@ -1802,22 +1803,15 @@ ${capturedVariablesPrompt}
           functionResultRes = { scheduled: false, message: "Erro ao agendar no sistema." };
 
           try {
-             const credsObj = typeof agentConfig.options.google_credentials === "string" 
-                 ? JSON.parse(agentConfig.options.google_credentials) 
-                 : agentConfig.options.google_credentials;
-
              const oauthTokens = typeof agentConfig.options.google_tokens === "string"
                  ? JSON.parse(agentConfig.options.google_tokens)
                  : agentConfig.options.google_tokens;
 
-             if (!credsObj || !oauthTokens) {
-                 throw new Error("Agente não está conectado ao Google via OAuth. Autentique primeiro.");
+             if (!oauthTokens?.refresh_token) {
+                 throw new Error("Agente não está conectado ao Google via OAuth. Conecte sua conta do Google Calendar primeiro.");
              }
 
-             const { client_id, client_secret } = credsObj.web || credsObj.installed;
-             const auth = new google.auth.OAuth2(client_id, client_secret);
-             auth.setCredentials(oauthTokens);
-
+             const auth = await getOAuthClientForAgentOptions(agentConfig.id, agentConfig.options);
              const calendar = google.calendar({ version: 'v3', auth });
 
              // TIMEZONE: a IA manda start_datetime "naive" (sem fuso), ex
@@ -2143,15 +2137,11 @@ ${capturedVariablesPrompt}
            functionResultRes = { available: false, message: "Erro ao consultar agenda." };
            
            try {
-               const credsObj = typeof agentConfig.options.google_credentials === "string" 
-                   ? JSON.parse(agentConfig.options.google_credentials) : agentConfig.options.google_credentials;
                const oauthTokens = typeof agentConfig.options.google_tokens === "string"
                    ? JSON.parse(agentConfig.options.google_tokens) : agentConfig.options.google_tokens;
                
-               if (!credsObj || !oauthTokens) throw new Error("Agente não autênticado.");
-               const { client_id, client_secret } = credsObj.web || credsObj.installed;
-               const auth = new google.auth.OAuth2(client_id, client_secret);
-               auth.setCredentials(oauthTokens);
+               if (!oauthTokens?.refresh_token) throw new Error("Agente não autenticado no Google.");
+               const auth = await getOAuthClientForAgentOptions(agentConfig.id, agentConfig.options);
                const calendar = google.calendar({ version: 'v3', auth });
 
                const targetDate = callArgs.date as string;
@@ -2181,14 +2171,10 @@ ${capturedVariablesPrompt}
            console.log("[MCP] Listando eventos do Google Calendar ->", callArgs);
            functionResultRes = { found: false, events: [], message: "Erro ao listar eventos." };
            try {
-               const credsObj = typeof agentConfig.options.google_credentials === "string"
-                   ? JSON.parse(agentConfig.options.google_credentials) : agentConfig.options.google_credentials;
                const oauthTokens = typeof agentConfig.options.google_tokens === "string"
                    ? JSON.parse(agentConfig.options.google_tokens) : agentConfig.options.google_tokens;
-               if (!credsObj || !oauthTokens) throw new Error("Agente não autenticado no Google.");
-               const { client_id, client_secret } = credsObj.web || credsObj.installed;
-               const auth = new google.auth.OAuth2(client_id, client_secret);
-               auth.setCredentials(oauthTokens);
+               if (!oauthTokens?.refresh_token) throw new Error("Agente não autenticado no Google.");
+               const auth = await getOAuthClientForAgentOptions(agentConfig.id, agentConfig.options);
                const calendar = google.calendar({ version: 'v3', auth });
 
                const dFrom = callArgs.date_from as string;
@@ -2225,14 +2211,10 @@ ${capturedVariablesPrompt}
            console.log("[MCP] Cancelando evento do Google Calendar ->", callArgs);
            functionResultRes = { cancelled: false, message: "Erro ao cancelar evento." };
            try {
-               const credsObj = typeof agentConfig.options.google_credentials === "string"
-                   ? JSON.parse(agentConfig.options.google_credentials) : agentConfig.options.google_credentials;
                const oauthTokens = typeof agentConfig.options.google_tokens === "string"
                    ? JSON.parse(agentConfig.options.google_tokens) : agentConfig.options.google_tokens;
-               if (!credsObj || !oauthTokens) throw new Error("Agente não autenticado no Google.");
-               const { client_id, client_secret } = credsObj.web || credsObj.installed;
-               const auth = new google.auth.OAuth2(client_id, client_secret);
-               auth.setCredentials(oauthTokens);
+               if (!oauthTokens?.refresh_token) throw new Error("Agente não autenticado no Google.");
+               const auth = await getOAuthClientForAgentOptions(agentConfig.id, agentConfig.options);
                const calendar = google.calendar({ version: 'v3', auth });
 
                 const eventId = String(callArgs.event_id || "").trim();

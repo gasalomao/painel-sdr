@@ -66,6 +66,78 @@ export function startChanged(oldIso: string, newIso: string): boolean {
   return a !== b;
 }
 
+/* ============================================================
+   RECORRÊNCIA — RRULE do Google Calendar
+   ============================================================ */
+
+export type RecurrenceFrequency = "NONE" | "DAILY" | "WEEKLY" | "MONTHLY";
+
+export type RecurrenceEnd =
+  | { type: "never" }
+  | { type: "count"; count: number }
+  | { type: "until"; date: string }; // YYYY-MM-DD
+
+export type RecurrenceSpec = {
+  frequency: RecurrenceFrequency;
+  interval: number;
+  end: RecurrenceEnd;
+};
+
+export const DEFAULT_RECURRENCE: RecurrenceSpec = {
+  frequency: "NONE",
+  interval: 1,
+  end: { type: "never" },
+};
+
+/**
+ * Converte a spec da UI no array RRULE aceito pelo Google Calendar.
+ * Ex.: { frequency: "WEEKLY", interval: 2, end: { type: "count", count: 10 } }
+ *   → ["RRULE:FREQ=WEEKLY;INTERVAL=2;COUNT=10"]
+ * "NONE" → [] (sem recorrência).
+ */
+export function buildRecurrenceRule(spec: RecurrenceSpec): string[] {
+  if (!spec || spec.frequency === "NONE") return [];
+  const interval = Math.max(1, Math.floor(spec.interval || 1));
+  const parts = [`FREQ=${spec.frequency}`];
+  if (interval > 1) parts.push(`INTERVAL=${interval}`);
+  if (spec.end?.type === "count") {
+    const count = Math.max(1, Math.floor(spec.end.count || 1));
+    parts.push(`COUNT=${count}`);
+  } else if (spec.end?.type === "until" && /^\d{4}-\d{2}-\d{2}$/.test(spec.end.date)) {
+    parts.push(`UNTIL=${spec.end.date.replace(/-/g, "")}T235959Z`);
+  }
+  return [`RRULE:${parts.join(";")}`];
+}
+
+/**
+ * Lê o RRULE gravado (column `recurrence` text[]) de volta pra spec da UI.
+ * Retorna null quando não há RRULE ou quando a frequência não é suportada.
+ */
+export function parseRecurrenceRule(rules: string[] | null | undefined): RecurrenceSpec | null {
+  const rule = (rules || []).find((r) => typeof r === "string" && r.toUpperCase().startsWith("RRULE:"));
+  if (!rule) return null;
+  const map = new Map<string, string>();
+  for (const part of rule.slice(rule.indexOf(":") + 1).split(";")) {
+    const [k, v] = part.split("=");
+    if (k && v) map.set(k.trim().toUpperCase(), v.trim());
+  }
+  const freq = (map.get("FREQ") || "").toUpperCase();
+  if (freq !== "DAILY" && freq !== "WEEKLY" && freq !== "MONTHLY") return null;
+  const rawInterval = Number(map.get("INTERVAL") || 1);
+  let end: RecurrenceEnd = { type: "never" };
+  if (map.get("COUNT")) {
+    end = { type: "count", count: Math.max(1, Math.floor(Number(map.get("COUNT")) || 1)) };
+  } else if (map.get("UNTIL")) {
+    const m = /^(\d{4})(\d{2})(\d{2})/.exec(map.get("UNTIL")!);
+    if (m) end = { type: "until", date: `${m[1]}-${m[2]}-${m[3]}` };
+  }
+  return {
+    frequency: freq as RecurrenceFrequency,
+    interval: Number.isFinite(rawInterval) && rawInterval > 0 ? rawInterval : 1,
+    end,
+  };
+}
+
 /**
  * Decide se um lembrete (offset X min antes) deve disparar AGORA.
  * Espelha 1:1 o gate do worker tickReminders:

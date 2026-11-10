@@ -3,6 +3,7 @@ import { google } from 'googleapis';
 import { supabaseAdmin as supabase } from '@/lib/supabase_admin';
 import { requireClientId } from '@/lib/tenant';
 import { createHmac, randomBytes } from 'node:crypto';
+import { resolveGoogleCredentials } from '@/lib/google-calendar';
 
 export const dynamic = "force-dynamic";
 
@@ -53,36 +54,19 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: "Agent não pertence a este cliente" }, { status: 403 });
     }
 
-    const jsonStr = agent.options?.google_credentials;
-    if (!jsonStr) {
-      return NextResponse.json({ error: "Google credentials not configured" }, { status: 400 });
+    const creds = await resolveGoogleCredentials(agent.options);
+    if (!creds) {
+      return NextResponse.json({
+        error: "Credenciais OAuth do Google não configuradas no servidor (defina GOOGLE_CLIENT_ID e GOOGLE_CLIENT_SECRET) nem no agente.",
+      }, { status: 400 });
     }
 
-    let creds;
-    try {
-      creds = JSON.parse(jsonStr);
-    } catch {
-      return NextResponse.json({ error: "Invalid JSON format in google_credentials" }, { status: 400 });
-    }
-
-    const { client_id, client_secret, redirect_uris } = creds.web || creds.installed;
-
-    if (!client_id || !client_secret || !redirect_uris || !redirect_uris.length) {
-      return NextResponse.json({ error: "Incomplete OAuth credentials in JSON" }, { status: 400 });
-    }
-
-    // Get global config for APP_URL
-    const { data: config } = await supabase.from('ai_organizer_config').select('app_url').eq('id', 1).single();
-    const appUrl = config?.app_url;
-
-    const redirectUri = appUrl
-      ? redirect_uris.find((r: string) => r.startsWith(appUrl.replace(/\/$/, ''))) || redirect_uris[0]
-      : redirect_uris.find((r: string) => r.includes('localhost:3000')) || redirect_uris[0];
+    const { client_id, client_secret, redirect_uri } = creds;
 
     const oauth2Client = new google.auth.OAuth2(
       client_id,
       client_secret,
-      redirectUri
+      redirect_uri
     );
 
     const scopes = [

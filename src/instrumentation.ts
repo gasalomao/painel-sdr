@@ -19,6 +19,8 @@ declare global {
   var backupTicking: boolean | undefined;
   var sitesWorkerStarted: boolean | undefined;
   var autonomousSiteWorkerStarted: boolean | undefined;
+  var warmupTickerId: NodeJS.Timeout | undefined;
+  var warmupTicking: boolean | undefined;
 }
 
 /**
@@ -386,4 +388,21 @@ export async function register() {
       }
     })();
   }
+
+  // ============================================================
+  // AQUECER CHIPS (WARMUP) — Worker de maturação automática
+  // ============================================================
+  if (globalThis.warmupTickerId) clearInterval(globalThis.warmupTickerId);
+  globalThis.warmupTickerId = setInterval(async () => {
+    if (globalThis.warmupTicking) return;
+    globalThis.warmupTicking = true;
+    try {
+      const { tickWarmupWorker } = await import("@/lib/warmup/warmup-worker");
+      await tickWarmupWorker();
+    } catch (e) {
+      console.error("[WARMUP] tick falhou:", (e as Error).message);
+    } finally {
+      globalThis.warmupTicking = false;
+    }
+  }, 1000 * 60); // 1 minuto
 }

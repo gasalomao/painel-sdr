@@ -45,6 +45,7 @@ const FEATURE_LIST = [
   { key: "followup",      label: "Follow-up" },
   { key: "captador",      label: "Captador Maps" },
   { key: "whatsapp",      label: "WhatsApp" },
+  { key: "aquecer_chips", label: "Aquecer Chips" },
   { key: "historico",     label: "Histórico IA" },
   { key: "tokens",        label: "Tokens IA" },
   { key: "organizador",   label: "Organizador IA" },

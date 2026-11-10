@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { google } from 'googleapis';
 import { supabaseAdmin as supabase } from '@/lib/supabase_admin';
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { resolveGoogleCredentials } from '@/lib/google-calendar';
 
 export const dynamic = "force-dynamic";
 
@@ -90,19 +91,16 @@ export async function GET(req: NextRequest) {
       return resultPage(false, "Acesso negado", "Esse agente não pertence à sua conta.");
     }
 
-    const creds = JSON.parse(agent.options.google_credentials);
-    const { client_id, client_secret, redirect_uris } = creds.web || creds.installed;
-    const { data: config } = await supabase.from('ai_organizer_config').select('app_url').eq('id', 1).single();
-    const appUrl = config?.app_url;
-
-    const redirectUri = appUrl
-      ? redirect_uris.find((r: string) => r.startsWith(appUrl.replace(/\/$/, ''))) || redirect_uris[0]
-      : redirect_uris.find((r: string) => r.includes('localhost:3000')) || redirect_uris[0];
+    const creds = await resolveGoogleCredentials(agent.options);
+    if (!creds) {
+      return resultPage(false, "Credenciais ausentes", "Credenciais do Google OAuth não configuradas no servidor nem no agente.");
+    }
+    const { client_id, client_secret, redirect_uri } = creds;
 
     const oauth2Client = new google.auth.OAuth2(
       client_id,
       client_secret,
-      redirectUri
+      redirect_uri
     );
 
     const { tokens } = await oauth2Client.getToken(code);

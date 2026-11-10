@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import {
   LayoutDashboard, Users, MessageSquare, MapPin, Smartphone, History,
   Bot, Zap, Cpu, LogOut, ArrowLeftRight, Loader2, Shield, ChevronDown,
-  CalendarDays, Globe, Coins,
+  CalendarDays, Globe, Coins, Flame,
 } from "lucide-react";
 import { NgrokQuickConnect } from "@/components/ngrok-quick-connect";
 import { cn } from "@/lib/utils";
@@ -20,6 +20,7 @@ const pageTitles: Record<string, { title: string; description: string; icon: Rea
   "/agente": { title: "Agente IA", description: "Configuração de comportamento e conhecimento", icon: Bot },
   "/captador": { title: "Captador Maps", description: "Extração Google Maps", icon: MapPin },
   "/whatsapp": { title: "WhatsApp", description: "Conexão e gerenciamento", icon: Smartphone },
+  "/aquecer-chips": { title: "Aquecer Chips", description: "Maturação automática de WhatsApp via Evolution API", icon: Flame },
   "/historico-ia": { title: "Histórico IA", description: "Logs e decisões da Inteligência Artificial", icon: History },
   "/disparo": { title: "Disparo em Massa", description: "Primeira mensagem automática com intervalo aleatório", icon: Zap },
   "/automacao": { title: "Automação", description: "Captação → disparo → follow-up no piloto automático", icon: Cpu },

@@ -56,11 +56,151 @@ type AgentOptions = {
   app_url?: string;
 };
 
+export type ResolvedGoogleCredentials = {
+  client_id: string;
+  client_secret: string;
+  redirect_uri: string;
+  isCustom: boolean;
+};
+
+/**
+ * Resolve a URL base da aplicação para o redirect_uri do OAuth Google.
+ */
+export async function resolveAppRedirectUri(): Promise<string> {
+  let appUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL;
+  if (!appUrl && supabaseAdmin) {
+    try {
+      const { data: config } = await supabaseAdmin
+        .from("ai_organizer_config")
+        .select("app_url")
+        .eq("id", 1)
+        .maybeSingle();
+      if (config?.app_url) appUrl = config.app_url;
+    } catch {}
+  }
+  if (!appUrl) appUrl = "http://localhost:3000";
+  return `${appUrl.replace(/\/+$/, "")}/api/auth/callback/google`;
+}
+
+/**
+ * Resolve as credenciais do Google OAuth.
+ * Prioridade:
+ *   1. Credenciais customizadas do próprio agente (se o usuário colou JSON).
+ *   2. Variáveis de ambiente globais do servidor (GOOGLE_CLIENT_ID e GOOGLE_CLIENT_SECRET) -> 1 clique sem JSON!
+ *   3. Configuração central em `system_config` no banco de dados.
+ */
+export async function resolveGoogleCredentials(
+  agentOptions?: AgentOptions | null
+): Promise<ResolvedGoogleCredentials | null> {
+  // 1. JSON customizado no agente (compatibilidade total com agentes já existentes)
+  if (agentOptions?.google_credentials) {
+    try {
+      const parsed = typeof agentOptions.google_credentials === "string"
+        ? JSON.parse(agentOptions.google_credentials)
+        : agentOptions.google_credentials;
+      const creds = parsed?.web || parsed?.installed;
+      if (creds?.client_id && creds?.client_secret) {
+        const appUrl = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || "").replace(/\/+$/, "");
+        const redirect_uris: string[] = Array.isArray(creds.redirect_uris) ? creds.redirect_uris : [];
+        const redirect_uri = appUrl
+          ? redirect_uris.find((r) => r.startsWith(appUrl)) || redirect_uris[0] || await resolveAppRedirectUri()
+          : redirect_uris[0] || await resolveAppRedirectUri();
+        return {
+          client_id: creds.client_id,
+          client_secret: creds.client_secret,
+          redirect_uri,
+          isCustom: true,
+        };
+      }
+    } catch {}
+  }
+
+  // 2. Variáveis de ambiente da plataforma (.env / Easypanel)
+  const envClientId = process.env.GOOGLE_CLIENT_ID?.trim();
+  const envClientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim();
+  if (envClientId && envClientSecret) {
+    const redirect_uri = await resolveAppRedirectUri();
+    return {
+      client_id: envClientId,
+      client_secret: envClientSecret,
+      redirect_uri,
+      isCustom: false,
+    };
+  }
+
+  // 3. system_config no banco de dados
+  if (supabaseAdmin) {
+    try {
+      const { data } = await supabaseAdmin
+        .from("system_config")
+        .select("key, value")
+        .in("key", ["google_client_id", "google_client_secret"]);
+      const map: Record<string, string> = {};
+      data?.forEach((row: { key: string; value: string }) => { map[row.key] = row.value; });
+      if (map.google_client_id && map.google_client_secret) {
+        const redirect_uri = await resolveAppRedirectUri();
+        return {
+          client_id: map.google_client_id.trim(),
+          client_secret: map.google_client_secret.trim(),
+          redirect_uri,
+          isCustom: false,
+        };
+      }
+    } catch {}
+  }
+
+  return null;
+}
+
+/**
+ * Cria um OAuth2 client autenticado a partir das opções do agente.
+ * Usado tanto pelas rotas do calendário quanto diretamente pelas ferramentas
+ * MCP da IA (schedule_google_calendar, check_google_calendar_availability, etc).
+ */
+export async function getOAuthClientForAgentOptions(
+  agentId: number | null | undefined,
+  opts: AgentOptions,
+  onTokenUpdate?: (tokens: any) => Promise<void>
+) {
+  if (!opts.google_tokens?.refresh_token) {
+    throw new GoogleCalendarError("Agente ainda não autenticou no Google (sem refresh_token)", "no_tokens");
+  }
+
+  const creds = await resolveGoogleCredentials(opts);
+  if (!creds) {
+    throw new GoogleCalendarError(
+      "Credenciais do Google não configuradas no servidor (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET) nem no agente.",
+      "no_credentials"
+    );
+  }
+
+  const oauth2 = new google.auth.OAuth2(creds.client_id, creds.client_secret, creds.redirect_uri);
+  oauth2.setCredentials(opts.google_tokens);
+
+  oauth2.on("tokens", async (tokens) => {
+    try {
+      const merged = { ...opts.google_tokens, ...tokens };
+      if (agentId && supabaseAdmin) {
+        const newOptions = { ...opts, google_tokens: merged };
+        await supabaseAdmin
+          .from("agent_settings")
+          .update({ options: newOptions })
+          .eq("id", agentId);
+      }
+      if (onTokenUpdate) await onTokenUpdate(tokens);
+    } catch (e) {
+      console.warn(`[google-calendar] falha ao persistir refresh tokens do agente ${agentId}:`, (e as Error).message);
+    }
+  });
+
+  return oauth2;
+}
+
 /**
  * Cria um OAuth2 client autenticado pra esse agente. Persiste tokens novos
  * automaticamente quando o Google emitir refresh.
  */
-async function getOAuthClient(agentId: number) {
+export async function getOAuthClient(agentId: number) {
   if (!supabaseAdmin) throw new GoogleCalendarError("Supabase admin indisponível", "no_credentials");
 
   const { data: agent } = await supabaseAdmin
@@ -72,46 +212,7 @@ async function getOAuthClient(agentId: number) {
   if (!agent) throw new GoogleCalendarError(`Agente ${agentId} não encontrado`, "no_credentials");
 
   const opts = (agent.options || {}) as AgentOptions;
-  if (!opts.google_credentials) {
-    throw new GoogleCalendarError("Google credentials não configuradas pro agente", "no_credentials");
-  }
-  if (!opts.google_tokens?.refresh_token) {
-    throw new GoogleCalendarError("Agente ainda não autenticou no Google (sem refresh_token)", "no_tokens");
-  }
-
-  let creds: any;
-  try {
-    creds = JSON.parse(opts.google_credentials);
-  } catch {
-    throw new GoogleCalendarError("Google credentials JSON inválido", "no_credentials");
-  }
-  const { client_id, client_secret, redirect_uris } = creds.web || creds.installed || {};
-  if (!client_id || !client_secret) {
-    throw new GoogleCalendarError("Google credentials sem client_id/client_secret", "no_credentials");
-  }
-
-  // O redirect_uri não é usado em chamadas de API com refresh — só importa pro
-  // flow inicial de OAuth. Mas a lib exige um valor.
-  const redirectUri = (redirect_uris && redirect_uris[0]) || "http://localhost:3000";
-  const oauth2 = new google.auth.OAuth2(client_id, client_secret, redirectUri);
-  oauth2.setCredentials(opts.google_tokens);
-
-  // Quando a lib refreshar o access_token sozinha (porque expirou), persiste
-  // os novos tokens no banco pra próxima request reaproveitar.
-  oauth2.on("tokens", async (tokens) => {
-    try {
-      const merged = { ...opts.google_tokens, ...tokens };
-      const newOptions = { ...opts, google_tokens: merged };
-      await supabaseAdmin!
-        .from("agent_settings")
-        .update({ options: newOptions })
-        .eq("id", agentId);
-    } catch (e) {
-      console.warn(`[google-calendar] falha persistindo tokens refresh do agente ${agentId}:`, (e as Error).message);
-    }
-  });
-
-  return oauth2;
+  return getOAuthClientForAgentOptions(agentId, opts);
 }
 
 function calendarClient(oauth2: any): calendar_v3.Calendar {
@@ -238,6 +339,8 @@ export type UpdateEventInput = {
   colorId?: string;
   attendees?: Array<string | { email: string; displayName?: string }>;
   recurrence?: string[];
+  /** Cria Google Meet no evento já existente (exige conferenceDataVersion=1) */
+  createMeet?: boolean;
 };
 
 export async function updateCalendarEvent(input: UpdateEventInput): Promise<GoogleCalendarEvent> {
@@ -269,11 +372,23 @@ export async function updateCalendarEvent(input: UpdateEventInput): Promise<Goog
     );
   }
 
+  // Google Meet em evento já existente: o conferenceData só é aplicado se
+  // conferenceDataVersion=1 for enviado no patch.
+  if (input.createMeet) {
+    patch.conferenceData = {
+      createRequest: {
+        requestId: `meet-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        conferenceSolutionKey: { type: "hangoutsMeet" },
+      },
+    };
+  }
+
   try {
     const res = await cal.events.patch({
       calendarId,
       eventId: input.eventId,
-      sendUpdates: patch.attendees ? "all" : "none",
+      sendUpdates: patch.attendees?.length ? "all" : "none",
+      conferenceDataVersion: input.createMeet ? 1 : undefined,
       requestBody: patch,
     });
     return res.data as GoogleCalendarEvent;
@@ -311,7 +426,8 @@ export async function hasCalendarConnected(agentId: number): Promise<{
     .eq("id", agentId)
     .maybeSingle();
   const opts = (agent?.options || {}) as AgentOptions;
-  if (!opts.google_credentials) return { connected: false, reason: "no_credentials" };
   if (!opts.google_tokens?.refresh_token) return { connected: false, reason: "no_tokens" };
+  const creds = await resolveGoogleCredentials(opts);
+  if (!creds) return { connected: false, reason: "no_credentials" };
   return { connected: true, email: opts.calendar_connected_email };
 }

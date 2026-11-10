@@ -76,6 +76,8 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     );
   }
   if (Array.isArray(body.recurrence)) patch.recurrence = body.recurrence;
+  // Criar Google Meet no evento que JÁ existe no Google (antes ignorado no PATCH).
+  if (body.create_meet === true) patch.create_meet = true;
 
   if (body.status && typeof body.status === "string") {
     const allowed = ["confirmed", "tentative", "cancelled", "completed", "no_show"];
@@ -143,9 +145,12 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
           patch.description !== undefined || patch.location !== undefined ||
           patch.all_day !== undefined || patch.visibility !== undefined ||
           patch.color_id !== undefined || patch.attendees !== undefined ||
-          patch.recurrence !== undefined;
+          patch.recurrence !== undefined || patch.create_meet === true;
         if (hasGoogleField) {
-          await updateCalendarEvent({
+          // Convidados são repassados mesmo sem edição pra que o Google
+          // notifique quem já estava convidado (sendUpdates=all).
+          const finalAttendees = patch.attendees ?? existing.attendees ?? undefined;
+          const ev = await updateCalendarEvent({
             agentId: existing.agent_id,
             eventId: existing.google_event_id,
             calendarId: existing.calendar_id,
@@ -157,9 +162,12 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
             allDay: patch.all_day,
             visibility: patch.visibility,
             colorId: patch.color_id,
-            attendees: patch.attendees,
+            attendees: finalAttendees,
             recurrence: patch.recurrence,
+            createMeet: patch.create_meet === true,
           });
+          if (ev.htmlLink) patch.html_link = ev.htmlLink;
+          if (ev.conferenceData) patch.conference_data = ev.conferenceData;
         }
       } else {
         // NÃO existe no Google ainda (criado local-only, ex: agente conectado
@@ -178,9 +186,11 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
           colorId: patch.color_id ?? existing.color_id,
           attendees: patch.attendees ?? existing.attendees,
           recurrence: patch.recurrence ?? existing.recurrence,
+          createMeet: patch.create_meet === true,
         });
         patch.google_event_id = ev.id || null;
         if ((ev as any).htmlLink) patch.html_link = (ev as any).htmlLink;
+        if ((ev as any).conferenceData) patch.conference_data = (ev as any).conferenceData;
       }
     } catch (e) {
       const err = e instanceof GoogleCalendarError ? e : new Error(String(e));
