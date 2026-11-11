@@ -36,6 +36,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { normalizeJid } from "@/lib/jid-utils";
 import { GOOGLE_EVENT_COLORS } from "@/lib/google-calendar-colors";
 import {
   DEFAULT_RECURRENCE,
@@ -256,8 +257,16 @@ export default function AppointmentDialog({
     }
 
     const titleFinal = title.trim() || "(Sem título)";
-    const jidNormalized = remoteJid.trim()
-      ? (remoteJid.includes("@") ? remoteJid : `${remoteJid.replace(/\D/g, "")}@s.whatsapp.net`)
+    const rawRemoteJid = remoteJid.trim();
+    const normalizedRemoteJid = normalizeJid(rawRemoteJid);
+    // Placeholder não normalizável (google:*, manual:*) só vale se continuar
+    // igual ao valor já salvo — o servidor aceita apenas o valor existente.
+    if (rawRemoteJid && !normalizedRemoteJid && rawRemoteJid !== editing?.remote_jid) {
+      onToast({ kind: "err", text: "Contato do WhatsApp inválido." });
+      return;
+    }
+    const jidNormalized = rawRemoteJid
+      ? (normalizedRemoteJid ?? rawRemoteJid)
       : (editing?.remote_jid || `manual:${Date.now()}@local`);
 
     const validReminders = customReminders

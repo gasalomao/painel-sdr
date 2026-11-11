@@ -1,4 +1,5 @@
 export type WarmupStage = 1 | 2 | 3 | 4;
+export type WarmupPurpose = "contingency" | "inbound" | "outbound";
 
 export interface WarmupConfig {
   id?: string;
@@ -14,6 +15,11 @@ export interface WarmupConfig {
   is_quarantined: boolean; // Circuit Breaker ativado (quarentena preventiva)
   quarantine_reason?: string | null;
   quarantine_until?: string | null;
+  purpose?: WarmupPurpose; // Finalidade: Contingência (7-10d), Inbound (15-21d), Outbound (30-60d)
+  profile_hydrated?: boolean; // Se nome, recado e status inicial foram aplicados
+  group_auto_join?: boolean; // Se deve entrar automaticamente nos grupos cadastrados
+  swarm_active?: boolean; // Se participa da malha aberta com todos os chips da colmeia
+  max_groups_per_chip?: number;
   daily_target: number;
   sent_today: number;
   received_today: number;
@@ -40,6 +46,77 @@ export interface WarmupConfig {
   created_at?: string;
   updated_at?: string;
 }
+
+export interface WarmupGroup {
+  id: string;
+  client_id: string;
+  invite_url: string;
+  invite_code: string;
+  group_jid?: string | null;
+  name?: string | null;
+  description?: string | null;
+  member_count: number;
+  status: "pending" | "active" | "invalid" | "full" | "restricted" | "left";
+  last_error?: string | null;
+  total_messages_received: number;
+  total_reactions_sent: number;
+  last_activity_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  members?: WarmupGroupMember[];
+}
+
+export interface WarmupGroupMember {
+  id?: string;
+  client_id: string;
+  group_id: string;
+  instance_name: string;
+  status: "pending" | "joining" | "joined" | "left" | "error";
+  joined_at?: string | null;
+  last_error?: string | null;
+  created_at?: string;
+}
+
+export const PURPOSE_METADATA: Record<
+  WarmupPurpose,
+  {
+    name: string;
+    badge: string;
+    recommendedDays: string;
+    minDays: number;
+    dailyCap: number;
+    description: string;
+    targetUse: string;
+  }
+> = {
+  contingency: {
+    name: "Contingência / Gaveta",
+    badge: "🛡️ Contingência",
+    recommendedDays: "7 a 10 dias",
+    minDays: 7,
+    dailyCap: 20,
+    description: "Chip reserva para troca rápida caso um número principal caia. Foco em grupos passivos e maturação básica.",
+    targetUse: "Ficar pronto como estepe para ativação imediata.",
+  },
+  inbound: {
+    name: "Tráfego Pago / Inbound",
+    badge: "🎯 Tráfego & Leads",
+    recommendedDays: "15 a 21 dias",
+    minDays: 15,
+    dailyCap: 40,
+    description: "Para receber mensagens de campanhas (Meta Ads, Google). Foco em alta taxa de resposta, áudios e agenda.",
+    targetUse: "Receber mensagens de leads desconhecidos sem tomar bloqueio.",
+  },
+  outbound: {
+    name: "Disparo Ativo / Outbound",
+    badge: "🚀 Prospecção Ativa",
+    recommendedDays: "30 a 60 dias",
+    minDays: 30,
+    dailyCap: 70,
+    description: "O aquecimento mais robusto. Para iniciar conversas frias em massa sem ter o número salvo na agenda do lead.",
+    targetUse: "Disparos comerciais, SDR ativo e prospecção em escala.",
+  },
+};
 
 export interface WarmupLog {
   id?: string;

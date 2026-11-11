@@ -10,6 +10,9 @@ const state = vi.hoisted(() => ({
   updateCalendarEvent: vi.fn(),
   cancelCalendarEvent: vi.fn(),
   rows: {} as Record<string, Array<Record<string, unknown>>>,
+  updateFilters: [] as Array<Array<[string, unknown]>>,
+  failNextAppointmentUpdate: false,
+  failNextAppointmentInsert: false,
 }));
 
 vi.mock("@/lib/tenant", () => ({
@@ -69,12 +72,27 @@ class Query implements PromiseLike<{ data: Row | Row[] | null; error: DbError }>
     const filtered = rows.filter((row) => this.filters.every(([key, expected]) => row[key] === expected));
 
     if (this.operation === "insert") {
+      if (this.table === "appointments" && state.failNextAppointmentInsert) {
+        state.failNextAppointmentInsert = false;
+        return {
+          data: null,
+          error: { code: "42703", message: "column appointments.google_error does not exist" },
+        };
+      }
       const row = { id: appointmentId, ...this.payload };
       state.rows[this.table].push(row);
       return { data: this.singleResult ? row : [row], error: null };
     }
 
     if (this.operation === "update") {
+      state.updateFilters.push([...this.filters]);
+      if (this.table === "appointments" && state.failNextAppointmentUpdate) {
+        state.failNextAppointmentUpdate = false;
+        return {
+          data: null,
+          error: { code: "PGRST204", message: "Could not find the 'location' column" },
+        };
+      }
       filtered.forEach((row) => Object.assign(row, this.payload));
       return { data: this.singleResult ? (filtered[0] ?? null) : filtered, error: null };
     }
@@ -95,6 +113,8 @@ beforeEach(() => {
   state.auth.mockResolvedValue({ ok: true, clientId: tenant, isAdmin: false, impersonating: false, claims: {} });
   state.hasCalendarConnected.mockResolvedValue({ connected: false, reason: "no_tokens" });
   state.updateCalendarEvent.mockResolvedValue({ id: "google-1", htmlLink: "https://calendar.google.com/event?eid=google-1" });
+  state.updateFilters = [];
+  state.failNextAppointmentUpdate = false;
   state.rows = {
     appointments: [{
       id: appointmentId,
@@ -139,6 +159,64 @@ describe("agendamentos e Google Calendar", () => {
     expect(body.google_error).toContain("Nenhum agente com Google Calendar conectado");
     const inserted = state.rows.appointments[state.rows.appointments.length - 1];
     expect(inserted.google_error).toBe(body.google_error);
+  });
+
+  it("PATCH persiste contato WhatsApp editado", async () => {
+    const response = await PATCH(
+      request(`/${appointmentId}`, {
+        remote_jid: "5511888888888@s.whatsapp.net",
+        sync_google: false,
+      }),
+      { params: Promise.resolve({ id: appointmentId }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(state.rows.appointments[0].remote_jid).toBe("5511888888888@s.whatsapp.net");
+  });
+
+  it("PATCH rejeita contato WhatsApp inválido", async () => {
+    const response = await PATCH(
+      request(`/${appointmentId}`, { remote_jid: "não é telefone" }),
+      { params: Promise.resolve({ id: appointmentId }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(state.rows.appointments[0].remote_jid).toBe("5511999999999@s.whatsapp.net");
+  });
+
+  it("PATCH mantém placeholder Google de evento importado", async () => {
+    state.rows.appointments[0].remote_jid = "google:event-1";
+    state.rows.appointments[0].google_event_id = "event-1";
+
+    const response = await PATCH(
+      request(`/${appointmentId}`, {
+        remote_jid: "google:event-1",
+        sync_google: false,
+      }),
+      { params: Promise.resolve({ id: appointmentId }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(state.rows.appointments[0].remote_jid).toBe("google:event-1");
+  });
+
+  it("PATCH mantém escopo do tenant no retry sem colunas Google", async () => {
+    state.failNextAppointmentUpdate = true;
+
+    const response = await PATCH(
+      request(`/${appointmentId}`, {
+        location: "Rua Teste",
+        sync_google: false,
+      }),
+      { params: Promise.resolve({ id: appointmentId }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(state.updateFilters).toHaveLength(2);
+    expect(state.updateFilters[1]).toEqual(expect.arrayContaining([
+      ["id", appointmentId],
+      ["client_id", state.rows.appointments[0].client_id],
+    ]));
   });
 
   it("PATCH rejeita agent_id de outro tenant", async () => {
@@ -219,5 +297,75 @@ describe("agendamentos e Google Calendar", () => {
     const body = await response.json();
     expect(body.google_error).toContain("API indisponível");
     expect(state.rows.appointments[0].google_error).toContain("API indisponível");
+  });
+
+  it("POST recupera graciosamente quando appointments.google_error não existe no banco, preservando metadata e campos Google", async () => {
+    state.failNextAppointmentInsert = true;
+    state.hasCalendarConnected.mockResolvedValue({ connected: true, email: "agente@teste.com" });
+    state.createCalendarEvent.mockResolvedValue({
+      id: "google-meet-123",
+      htmlLink: "https://calendar.google.com/event?eid=meet-123",
+      conferenceData: {
+        entryPoints: [{ uri: "https://meet.google.com/abc-def-ghi" }],
+      },
+    });
+
+    const response = await POST(
+      request("", {
+        remote_jid: "5511999999999@s.whatsapp.net",
+        title: "Reunião Google Meet",
+        start_at: startAt,
+        end_at: endAt,
+        agent_id: 7,
+        create_meet: true,
+        sync_google: true,
+      }, "POST"),
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.ok).toBe(true);
+    expect(body.appointment).toBeDefined();
+    // Confirma que o agendamento foi salvo sem a coluna ausente, mas com os outros campos intactos
+    const inserted = state.rows.appointments.at(-1);
+    expect(inserted?.title).toBe("Reunião Google Meet");
+    expect(inserted?.google_event_id).toBe("google-meet-123");
+    expect(inserted?.conference_data).toEqual({
+      entryPoints: [{ uri: "https://meet.google.com/abc-def-ghi" }],
+    });
+  });
+
+  it("POST cria evento no Google com Google Meet e retorna links para a UI", async () => {
+    state.hasCalendarConnected.mockResolvedValue({ connected: true, email: "agente@teste.com" });
+    state.createCalendarEvent.mockResolvedValue({
+      id: "google-meet-999",
+      htmlLink: "https://calendar.google.com/event?eid=meet-999",
+      conferenceData: {
+        entryPoints: [{ uri: "https://meet.google.com/xyz-uvw-rst", entryPointType: "video" }],
+        conferenceId: "xyz-uvw-rst",
+      },
+    });
+
+    const response = await POST(
+      request("", {
+        remote_jid: "5511999999999@s.whatsapp.net",
+        title: "Demo Produto com Meet",
+        start_at: startAt,
+        end_at: endAt,
+        agent_id: 7,
+        create_meet: true,
+        sync_google: true,
+      }, "POST"),
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.ok).toBe(true);
+    expect(body.appointment.html_link).toBe("https://calendar.google.com/event?eid=meet-999");
+    expect(body.appointment.conference_data).toBeDefined();
+    expect(state.createCalendarEvent).toHaveBeenCalledWith(expect.objectContaining({
+      createMeet: true,
+      title: "Demo Produto com Meet",
+    }));
   });
 });

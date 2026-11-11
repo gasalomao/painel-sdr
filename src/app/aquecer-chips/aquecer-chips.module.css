@@ -65,17 +65,12 @@
   margin-bottom: 24px;
 }
 
-.headingTitle {
-  font-size: 26px;
-  line-height: 1.25;
-  font-weight: 600;
-  letter-spacing: -0.025em;
-  color: #edf2ee;
-  text-wrap: balance;
+.statusBlock {
+  min-width: 0;
 }
 
 .headingDescription {
-  margin-top: 8px;
+  margin-top: 6px;
   color: #a5b1a8;
   font-size: 14px;
   line-height: 1.6;
@@ -101,6 +96,10 @@
   color: #10251b;
   font-size: 13px;
   font-weight: 600;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   box-shadow: none;
   cursor: pointer;
   transition: background-color 150ms ease, border-color 150ms ease;
@@ -122,6 +121,10 @@
   color: #c5d2c8;
   font-size: 13px;
   font-weight: 500;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   box-shadow: none;
   cursor: pointer;
   transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
@@ -553,51 +556,114 @@
   gap: 16px;
 }
 
-.explainerGrid {
+.stepsList {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stepItem {
+  display: flex;
+  align-items: flex-start;
   gap: 12px;
 }
 
-.explainerCard {
-  border: 1px solid #263328;
-  border-radius: 10px;
-  background: #181e1a;
-  padding: 14px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  transition: border-color 150ms ease, background-color 150ms ease;
-}
-
-.explainerCard:hover {
-  border-color: #3b483e;
-  background: #1b231d;
-}
-
-.explainerCardIcon {
+.stepNumber {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: rgba(110, 231, 183, 0.1);
-  border: 1px solid rgba(110, 231, 183, 0.2);
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  border: 1px solid rgba(110, 231, 183, 0.25);
+  background: rgba(110, 231, 183, 0.12);
   color: #6ee7b7;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
-.explainerCardTitle {
+.stepTitle {
   font-size: 13px;
   font-weight: 600;
   color: #edf2ee;
   letter-spacing: -0.01em;
 }
 
-.explainerCardDesc {
+.stepDesc {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #a5b1a8;
+  max-width: 70ch;
+}
+
+/* Resumo de estado no cabeçalho */
+.statusLine {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  font-size: 15px;
+  line-height: 1.5;
+  color: #a5b1a8;
+}
+
+.statusPrimary {
+  font-weight: 600;
+  color: #edf2ee;
+}
+
+.statusDetail {
+  font-size: 13px;
+  font-weight: 400;
+  color: #a5b1a8;
+}
+
+.statusDot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  background: #6ee7b7;
+}
+
+/* Ações avançadas */
+.advancedPanel {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid #2a352c;
+  border-radius: 12px;
+  background: #141915;
+}
+
+.advancedRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border: 1px solid #263328;
+  border-radius: 10px;
+  background: #181e1a;
+}
+
+.advancedTitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: #edf2ee;
+}
+
+.advancedDesc {
+  margin-top: 2px;
   font-size: 11px;
   line-height: 1.5;
   color: #a5b1a8;
+  max-width: 62ch;
 }
 
 /* Diagrama do Par de Chips no Modal */
@@ -694,9 +760,6 @@
   .protectionsGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .explainerGrid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 639px) {
@@ -708,24 +771,48 @@
     gap: 16px;
     margin-bottom: 20px;
   }
-  .headingTitle {
-    font-size: 22px;
-  }
   .headingActions {
     width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .headingActions > button:first-child {
+    flex: 1 1 100%;
+  }
+  .headingActions > button:nth-child(2),
+  .headingActions > button:nth-child(3) {
+    flex: 1 1 40%;
+  }
+  .headingActions > button:last-child {
+    flex: 0 0 44px;
   }
   .headingActions button {
-    flex: 1 1 auto;
+    padding-left: 10px;
+    padding-right: 10px;
+    justify-content: center;
   }
   .overviewGrid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 12px;
+  }
+  .overviewValue {
+    font-size: 22px;
+  }
+  .explainerHeader {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  .explainerHeader > div:last-child {
+    align-self: flex-start;
   }
   .protectionsGrid {
     grid-template-columns: 1fr;
   }
-  .explainerGrid {
-    grid-template-columns: 1fr;
+  .advancedRow {
+    flex-direction: column;
+    align-items: stretch;
   }
   .pairDiagram {
     grid-template-columns: 1fr;
@@ -755,6 +842,18 @@
   }
 }
 
+@media (max-width: 360px) {
+  .headingActions {
+    gap: 6px;
+  }
+  .headingActions button {
+    gap: 4px;
+    padding-left: 6px;
+    padding-right: 6px;
+    font-size: 12px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .page *,
   .dialog * {
@@ -762,4 +861,133 @@
     transition: none !important;
   }
 }
+
+/* ========================================================================= */
+/* TABS & NAVEGAÇÃO DA COLMEIA */
+/* ========================================================================= */
+.tabsBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: 12px;
+  margin-bottom: 24px;
+}
+
+.tabButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-muted-foreground);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 140ms ease;
+}
+
+.tabButton:hover {
+  color: var(--color-foreground);
+  background: var(--color-secondary);
+}
+
+.tabButtonActive {
+  color: #6ee7b7;
+  background: #18221b;
+  border-color: #304a37;
+}
+
+.tabBadge {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  padding: 1px 7px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--color-muted-foreground);
+}
+
+.tabBadgeActive {
+  background: rgba(110, 231, 183, 0.15);
+  color: #6ee7b7;
+}
+
+/* ========================================================================= */
+/* SELETOR DE FINALIDADE (PURPOSE) */
+/* ========================================================================= */
+.purposeGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.purposeOption {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: var(--color-card);
+  cursor: pointer;
+  transition: all 140ms ease;
+  text-align: left;
+}
+
+.purposeOption:hover {
+  border-color: #526356;
+}
+
+.purposeOptionActive {
+  border-color: #6ee7b7;
+  background: #111d15;
+}
+
+.purposeTitle {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-foreground);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.purposeDesc {
+  font-size: 10px;
+  color: var(--color-muted-foreground);
+  margin-top: 2px;
+}
+
+/* ========================================================================= */
+/* TABELA DE GRUPOS DE AQUECIMENTO */
+/* ========================================================================= */
+.groupsTable {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12px;
+}
+
+.groupsTable th {
+  text-align: left;
+  padding: 10px 14px;
+  font-weight: 600;
+  color: var(--color-muted-foreground);
+  border-bottom: 1px solid var(--color-border);
+  background: #121713;
+}
+
+.groupsTable td {
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(48, 58, 50, 0.5);
+  vertical-align: middle;
+}
+
+.groupsTable tr:hover td {
+  background: rgba(255, 255, 255, 0.02);
+}
+
 

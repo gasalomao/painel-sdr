@@ -61,6 +61,8 @@ export async function GET(req: NextRequest) {
     const msg = String(error.message || "");
     const isSchemaMiss =
       error.code === "PGRST204" ||
+      error.code === "42703" ||
+      /does not exist/i.test(msg) ||
       /column .* of 'appointments'/i.test(msg) ||
       /Could not find the .* column/i.test(msg);
     if (!isSchemaMiss) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
@@ -234,34 +236,56 @@ export async function POST(req: NextRequest) {
     metadata: metadata || {},
   };
 
-  // Helper: tenta o insert. Se a migration 007 não foi aplicada ainda, retry
-  // sem os campos novos do Google Calendar e avisa no warning.
-  const insertAppointment = async (payload: Record<string, any>) => {
-    const r1 = await supabaseAdmin
-      .from("appointments")
-      .insert(payload)
-      .select()
-      .single();
-    if (!r1.error) return r1;
-    // Erro de schema cache do PostgREST: PGRST204 / coluna não existe.
-    const msg = String(r1.error?.message || "");
-    const isSchemaMiss =
-      r1.error?.code === "PGRST204" ||
-      /column .* of 'appointments'/i.test(msg) ||
-      /Could not find the .* column/i.test(msg);
-    if (!isSchemaMiss) return r1;
-    const stripped = { ...payload };
-    // Remove TODOS os campos da migration 007 e tenta de novo.
-    for (const k of [
-      "location", "attendees", "all_day", "visibility", "color_id",
-      "recurrence", "html_link", "conference_data", "organizer_email", "google_error",
-    ]) delete stripped[k];
-    console.warn(`[appointments POST] Migration 007 não aplicada — gravando sem campos Google: ${msg}`);
-    return await supabaseAdmin
-      .from("appointments")
-      .insert(stripped)
-      .select()
-      .single();
+  // Helper: tenta o insert com retry progressivo e resiliência total a colunas ausentes
+  const insertAppointment = async (initialPayload: Record<string, any>) => {
+    let payload = { ...initialPayload };
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const res = await supabaseAdmin
+        .from("appointments")
+        .insert(payload)
+        .select()
+        .single();
+      if (!res.error) return res;
+
+      const code = String(res.error.code || "");
+      const msg = String(res.error.message || "");
+      const isSchemaMiss =
+        code === "PGRST204" ||
+        code === "42703" ||
+        /does not exist/i.test(msg) ||
+        /column .* of 'appointments'/i.test(msg) ||
+        /Could not find the .* column/i.test(msg);
+
+      if (!isSchemaMiss) return res;
+
+      // Extrai o nome da coluna ausente (ex: google_error)
+      const match =
+        msg.match(/column (?:[a-zA-Z0-9_]+\.)?["']?([a-zA-Z0-9_]+)["']? does not exist/i) ||
+        msg.match(/column ["']?([a-zA-Z0-9_]+)["']? of relation/i) ||
+        msg.match(/Could not find the '([a-zA-Z0-9_]+)' column/i);
+
+      if (match && match[1] && match[1] in payload) {
+        const missingCol = match[1];
+        console.warn(`[appointments POST] Coluna '${missingCol}' ausente em appointments — preservando em metadata.`);
+        payload = {
+          ...payload,
+          metadata: {
+            ...(payload.metadata || {}),
+            [missingCol]: payload[missingCol],
+          },
+        };
+        delete payload[missingCol];
+      } else {
+        console.warn(`[appointments POST] Erro de coluna não mapeada: ${msg} — removendo campos Google legados`);
+        for (const k of [
+          "google_error", "conference_data", "html_link", "recurrence",
+          "attendees", "location", "all_day", "visibility", "color_id", "organizer_email",
+        ]) {
+          delete payload[k];
+        }
+      }
+    }
+    return await supabaseAdmin.from("appointments").insert(payload).select().single();
   };
 
   const { data, error } = await insertAppointment(insertPayload);

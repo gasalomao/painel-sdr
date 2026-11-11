@@ -90,6 +90,8 @@ export async function syncGoogleEventsForAgent(
       .from("appointments")
       .select("id, status, title, start_at, end_at, description, location, all_day, visibility, color_id, attendees, html_link, recurrence, organizer_email")
       .eq("google_event_id", ev.id)
+      .eq("client_id", agent.client_id)
+      .eq("agent_id", agent.id)
       .maybeSingle();
 
     const evStatus = ev.status === "cancelled" ? "cancelled" : "confirmed";
@@ -124,14 +126,25 @@ export async function syncGoogleEventsForAgent(
         "recurrence", "html_link", "conference_data", "organizer_email",
       ]) delete stripped[k];
       if (op === "update" && existingId) {
-        return supabaseAdmin!.from("appointments").update(stripped).eq("id", existingId);
+        return supabaseAdmin!.from("appointments")
+          .update(stripped)
+          .eq("id", existingId)
+          .eq("client_id", agent.client_id)
+          .eq("agent_id", agent.id);
       }
       return supabaseAdmin!.from("appointments").insert(stripped);
     };
-    const isSchemaMiss = (err: any) =>
-      err?.code === "PGRST204" ||
-      /column .* of 'appointments'/i.test(String(err?.message || "")) ||
-      /Could not find the .* column/i.test(String(err?.message || ""));
+    const isSchemaMiss = (err: any) => {
+      const code = String(err?.code || "");
+      const msg = String(err?.message || "");
+      return (
+        code === "PGRST204" ||
+        code === "42703" ||
+        /does not exist/i.test(msg) ||
+        /column .* of 'appointments'/i.test(msg) ||
+        /Could not find the .* column/i.test(msg)
+      );
+    };
 
     if (existing) {
       const changed =
@@ -146,7 +159,12 @@ export async function syncGoogleEventsForAgent(
         new Date(existing.end_at).getTime() !== new Date(patch.end_at).getTime() ||
         JSON.stringify(existing.attendees || []) !== JSON.stringify(patch.attendees);
       if (changed) {
-        const r1 = await supabaseAdmin.from("appointments").update(patch).eq("id", existing.id);
+        const r1 = await supabaseAdmin
+          .from("appointments")
+          .update(patch)
+          .eq("id", existing.id)
+          .eq("client_id", agent.client_id)
+          .eq("agent_id", agent.id);
         if (r1.error && isSchemaMiss(r1.error)) {
           await retryWithoutNewCols("update", patch, existing.id);
         }

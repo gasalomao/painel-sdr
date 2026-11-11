@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireClientId } from "@/lib/tenant";
-import { triggerManualWarmup, triggerMutualWarmup, enablePairAutopilot } from "@/lib/warmup/warmup-worker";
+import {
+  triggerManualWarmup,
+  triggerMutualWarmup,
+  enablePairAutopilot,
+  enableSwarmAutopilot,
+  triggerSwarmCycle,
+} from "@/lib/warmup/warmup-worker";
 
 export const dynamic = "force-dynamic";
 
@@ -11,8 +17,45 @@ export async function POST(req: NextRequest) {
   const clientId = auth.clientId;
 
   try {
-    const { instanceA, instanceB, testStatusPost, mutual, autopilot } = await req.json();
+    const body = await req.json();
+    const {
+      instanceA,
+      instanceB,
+      instanceNames,
+      testStatusPost,
+      mutual,
+      autopilot,
+      swarmAutopilot,
+      swarmCycle,
+    } = body;
 
+    // 1. Ativação da Colmeia Autônoma para N Chips (One-Click)
+    if (swarmAutopilot) {
+      const result = await enableSwarmAutopilot(clientId, instanceNames);
+      if (!result.success) {
+        return NextResponse.json({ success: false, error: result.error || result.message }, { status: 400 });
+      }
+      return NextResponse.json({
+        success: true,
+        message: result.message,
+        chipsActivated: result.chipsActivated,
+      });
+    }
+
+    // 2. Disparo de Rodada Completa na Colmeia (Swarm Cycle)
+    if (swarmCycle) {
+      const result = await triggerSwarmCycle(clientId, instanceNames);
+      if (!result.success) {
+        return NextResponse.json({ success: false, error: result.error || result.message }, { status: 400 });
+      }
+      return NextResponse.json({
+        success: true,
+        message: result.message,
+        roundsExecuted: result.roundsExecuted,
+      });
+    }
+
+    // 3. Validação para operações em pares específicos
     if (!instanceA || !instanceB) {
       return NextResponse.json(
         { success: false, error: "Selecione duas instâncias para a operação de maturação." },
@@ -53,8 +96,10 @@ export async function POST(req: NextRequest) {
     }
 
     return NextResponse.json({ success: true, message: result.message });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ success: false, error: msg }, { status: 500 });
   }
 }
+
 

@@ -539,16 +539,21 @@ export const evolution = {
     messageId: string,
     reaction: string,
     instance?: string,
-    fromMe: boolean = false
+    fromMe: boolean = false,
+    participant?: string
   ) {
     instance = await resolveInstance(instance).catch(() => "");
     if (!instance) return null;
+    const keyPayload: Record<string, unknown> = {
+      remoteJid,
+      id: messageId,
+      fromMe,
+    };
+    if (participant) {
+      keyPayload.participant = participant;
+    }
     return evoFetch(`/message/sendReaction/${instance}`, "POST", {
-      key: {
-        remoteJid,
-        id: messageId,
-        fromMe,
-      },
+      key: keyPayload,
       reaction,
     }, 8000).catch(() => null);
   },
@@ -769,6 +774,116 @@ export const evolution = {
       return map;
     } catch {
       return {};
+    }
+  },
+
+  // ================= GRUPOS & COMUNIDADES (AQUECIMENTO / SWARM) =================
+  /**
+   * Consulta informações de um link de convite de grupo antes de ingressar.
+   * GET /group/inviteInfo/:instance?inviteCode=...
+   */
+  async getGroupInviteInfo(inviteCode: string, instance?: string): Promise<{
+    id?: string;
+    subject?: string;
+    size?: number;
+    desc?: string;
+    creation?: number;
+    owner?: string;
+    restrict?: boolean;
+    announce?: boolean;
+  } | null> {
+    instance = await resolveInstance(instance).catch(() => "");
+    if (!instance || !inviteCode) return null;
+    const cleanCode = inviteCode.replace(/https?:\/\/chat\.whatsapp\.com\//i, "").trim();
+    try {
+      const res = await evoFetch(
+        `/group/inviteInfo/${instance}?inviteCode=${encodeURIComponent(cleanCode)}`,
+        "GET",
+        undefined,
+        12000
+      );
+      return res as any;
+    } catch {
+      return null;
+    }
+  },
+
+  /**
+   * Entra em um grupo pelo código de convite na Evolution API v2.
+   * POST /group/acceptInviteCode/:instance
+   */
+  async acceptGroupInvite(inviteCode: string, instance?: string): Promise<{
+    success: boolean;
+    groupJid?: string;
+    error?: string;
+  }> {
+    instance = await resolveInstance(instance).catch(() => "");
+    if (!instance || !inviteCode) return { success: false, error: "Parâmetros inválidos" };
+    const cleanCode = inviteCode.replace(/https?:\/\/chat\.whatsapp\.com\//i, "").trim();
+    try {
+      const res: any = await evoFetch(
+        `/group/acceptInviteCode/${instance}`,
+        "POST",
+        { inviteCode: cleanCode },
+        20000
+      );
+      const groupJid = res?.groupJid || res?.id || res?.jid || (typeof res === "string" ? res : null);
+      return { success: true, groupJid: groupJid || undefined };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.response?.data?.message || err?.message || "Falha ao entrar no grupo",
+      };
+    }
+  },
+
+  /**
+   * Sai de um grupo de WhatsApp.
+   * DELETE /group/leaveGroup/:instance?groupJid=...
+   */
+  async leaveGroup(groupJid: string, instance?: string): Promise<boolean> {
+    instance = await resolveInstance(instance).catch(() => "");
+    if (!instance || !groupJid) return false;
+    try {
+      await evoFetch(
+        `/group/leaveGroup/${instance}?groupJid=${encodeURIComponent(groupJid)}`,
+        "DELETE",
+        undefined,
+        15000
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
+  /**
+   * Atualiza o nome de perfil da instância no WhatsApp.
+   * POST /chat/updateProfileName/:instance
+   */
+  async updateProfileName(name: string, instance?: string): Promise<boolean> {
+    instance = await resolveInstance(instance).catch(() => "");
+    if (!instance || !name) return false;
+    try {
+      await evoFetch(`/chat/updateProfileName/${instance}`, "POST", { name }, 10000);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
+  /**
+   * Atualiza o recado/status de texto da instância no WhatsApp.
+   * POST /chat/updateProfileStatus/:instance
+   */
+  async updateProfileStatus(status: string, instance?: string): Promise<boolean> {
+    instance = await resolveInstance(instance).catch(() => "");
+    if (!instance || !status) return false;
+    try {
+      await evoFetch(`/chat/updateProfileStatus/${instance}`, "POST", { status }, 10000);
+      return true;
+    } catch {
+      return false;
     }
   },
 };

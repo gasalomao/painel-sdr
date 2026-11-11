@@ -10,6 +10,7 @@ import { maskJid, truncForLog } from "@/lib/pii";
 import { refreshProfilePicIfStale, sanitizeLogPayload } from "../shared-helpers";
 import { getOrganizerConfig } from "@/lib/organizer-config-cache";
 import { safeSecretEqual, shouldLogOnce } from "@/lib/webhook-security";
+import { processIncomingGroupMessage } from "@/lib/warmup/warmup-groups";
 
 export const dynamic = 'force-dynamic';
 
@@ -813,10 +814,46 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ success: true, ignored: true, reason: "status_broadcast" });
       }
 
-      // === Interceptador de Aquecimento de Chips (Warmup Guard) ===
-      // Mensagens trocadas entre chips do mesmo tenant durante o aquecimento NÃO
-      // devem abrir sessões no CRM nem acionar o agente de vendas da SDR.
-      if (!fromMe && remoteJid && !remoteJid.includes("@g.us")) {
+      // === Interceptador de Aquecimento de Chips e Grupos (Warmup Firewall) ===
+      // 1. Mensagens de grupos (@g.us): NUNCA poluem o CRM / leads / SDR.
+      // Se for grupo de aquecimento registrado, processa leitura e reação heurística zero-token.
+      if (remoteJid && remoteJid.includes("@g.us")) {
+        try {
+          const warmupGroupRes = await processIncomingGroupMessage({
+            clientId,
+            instanceName,
+            groupJid: remoteJid,
+            messageId: finalId,
+            messageText: text,
+            participant: data.key?.participant || body.key?.participant,
+            fromMe,
+          });
+
+          if (warmupGroupRes.handled) {
+            console.log(`[WARMUP] 🛑 Grupo de aquecimento (${remoteJid}) interceptado [${warmupGroupRes.action}] -> CRM/SDR blindados.`);
+            return NextResponse.json({
+              success: true,
+              ignored: true,
+              reason: "warmup_group_traffic",
+              action: warmupGroupRes.action,
+            });
+          }
+        } catch (err) {
+          console.error("[WARMUP] Erro no processamento de grupo:", err);
+        }
+
+        // Se for outro grupo qualquer do WhatsApp (não registrado no SDR como contato 1x1):
+        // Ignora CRM e SDR para nunca gerar contatos/leads falsos a partir de grupos públicos.
+        return NextResponse.json({
+          success: true,
+          ignored: true,
+          reason: "group_message_non_crm",
+        });
+      }
+
+      // 2. Mensagens 1x1 trocadas entre chips do mesmo tenant durante o aquecimento:
+      // NÃO devem abrir sessões no CRM nem acionar o agente de vendas da SDR.
+      if (!fromMe && remoteJid) {
         try {
           const cleanPhone = remoteJid.replace(/\D/g, "");
           if (cleanPhone.length >= 10) {
@@ -828,7 +865,7 @@ export async function POST(req: NextRequest) {
               .maybeSingle();
 
             if (peerWarmup) {
-              console.log(`[WARMUP] 🛑 Mensagem interceptada de chip parceiro (${peerWarmup.instance_name}) -> ignorando CRM/Agente SDR.`);
+              console.log(`[WARMUP] 🛑 Mensagem interceptada de chip parceiro (${peerWarmup.instance_name}) -> CRM/SDR blindados.`);
               supabase
                 .from("whatsapp_warmup_configs")
                 .update({ last_activity_at: new Date().toISOString() })

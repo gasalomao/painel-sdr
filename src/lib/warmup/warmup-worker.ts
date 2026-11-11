@@ -2,6 +2,7 @@ import { supabaseAdmin } from "@/lib/supabase_admin";
 import { executeWarmupTurn, isWithinOperatingHours, logWarmupAction, evaluateDailyAutoProgress } from "./warmup-engine";
 import { WARMUP_THEMES } from "./warmup-dialogues";
 import { type WarmupConfig, type WarmupConversation } from "./warmup-types";
+import { syncGroupMembershipForChips, hydrateChipProfile } from "./warmup-groups";
 
 const _lastWarningLogged: Record<string, number> = {};
 
@@ -138,22 +139,36 @@ export async function tickWarmupWorker(): Promise<{
         }
       }
 
-      // Validação: precisa de pelo menos 2 chips ativos para troca mútua
+      // 2.1 Hidratação preventiva de perfis e sincronização de grupos para chips recém-adicionados
+      for (const cfg of configs) {
+        if (!cfg.profile_hydrated) {
+          hydrateChipProfile(clientId, cfg.instance_name).catch(() => {});
+        }
+      }
+
+      // Validação de chips não em quarentena
       const nonQuarantined = configs.filter((c) => !c.is_quarantined);
+
+      // Se temos apenas 1 chip: aquece passivamente via grupos da colmeia
       if (nonQuarantined.length < 2) {
+        syncGroupMembershipForChips(clientId).catch(() => {});
+
         const lastWarn = _lastWarningLogged[clientId] || 0;
-        if (Date.now() - lastWarn > 30 * 60 * 1000) {
+        if (Date.now() - lastWarn > 60 * 60 * 1000) {
           _lastWarningLogged[clientId] = Date.now();
           await logWarmupAction({
             client_id: clientId,
             sender_instance: nonQuarantined[0]?.instance_name || "sistema",
-            receiver_instance: "aguardando_parceiro",
-            message_text: "⚠️ Apenas 1 chip ativo. Para maturação mútua contínua, mantenha pelo menos 2 chips ativos.",
+            receiver_instance: "grupos_colmeia",
+            message_text: "ℹ️ Chip único ativo: aquecendo passivamente via grupos da colmeia e publicação de status. Para trocas mútuas 1x1, adicione outro chip.",
             action_type: "system",
           });
         }
         continue;
       }
+
+      // Sincroniza adesão nos grupos para todos os chips ativos
+      syncGroupMembershipForChips(clientId).catch(() => {});
 
       // Filtra apenas chips que ainda não bateram a meta diária
       const availableChips = nonQuarantined.filter(
@@ -164,7 +179,7 @@ export async function tickWarmupWorker(): Promise<{
         continue;
       }
 
-      // 3. Verifica conversas ativas com turno pendente (next_turn_at <= now())
+      // 3. Processa conversas ativas com turno pendente (next_turn_at <= now())
       const { data: dueConvs } = await supabaseAdmin
         .from("whatsapp_warmup_conversations")
         .select("*")
@@ -172,87 +187,85 @@ export async function tickWarmupWorker(): Promise<{
         .eq("status", "active")
         .lte("next_turn_at", nowIso)
         .order("next_turn_at", { ascending: true })
-        .limit(1);
+        .limit(3);
+
+      const busyChips = new Set<string>();
 
       if (dueConvs && dueConvs.length > 0) {
-        const activeConv = dueConvs[0] as WarmupConversation;
-        const instA = nonQuarantined.find((c) => c.instance_name === activeConv.instance_a);
-        const instB = nonQuarantined.find((c) => c.instance_name === activeConv.instance_b);
+        for (const activeConv of dueConvs as WarmupConversation[]) {
+          const instA = nonQuarantined.find((c) => c.instance_name === activeConv.instance_a);
+          const instB = nonQuarantined.find((c) => c.instance_name === activeConv.instance_b);
 
-        if (instA && instB) {
-          const senderCfg = activeConv.last_sender === instA.instance_name ? instB : instA;
-          const receiverCfg = senderCfg.instance_name === instA.instance_name ? instB : instA;
+          if (instA && instB) {
+            busyChips.add(instA.instance_name);
+            busyChips.add(instB.instance_name);
 
-          if ((senderCfg.sent_today || 0) < (senderCfg.daily_target || 10)) {
-            const turnRes = await executeWarmupTurn({
-              clientId,
-              senderConfig: senderCfg,
-              receiverConfig: receiverCfg,
-              conversation: activeConv,
-            });
-            if (turnRes.success) {
-              exchangesCount++;
+            const senderCfg = activeConv.last_sender === instA.instance_name ? instB : instA;
+            const receiverCfg = senderCfg.instance_name === instA.instance_name ? instB : instA;
+
+            if ((senderCfg.sent_today || 0) < (senderCfg.daily_target || 10)) {
+              const turnRes = await executeWarmupTurn({
+                clientId,
+                senderConfig: senderCfg,
+                receiverConfig: receiverCfg,
+                conversation: activeConv,
+              });
+              if (turnRes.success) {
+                exchangesCount++;
+              }
+            } else {
+              await supabaseAdmin
+                .from("whatsapp_warmup_conversations")
+                .update({ status: "finished", updated_at: nowIso })
+                .eq("id", activeConv.id);
             }
-          } else {
-            await supabaseAdmin
-              .from("whatsapp_warmup_conversations")
-              .update({ status: "finished", updated_at: nowIso })
-              .eq("id", activeConv.id);
           }
         }
-        continue;
       }
 
-      // 4. Se não há conversa ativa pendente, cria uma nova conversa em malha (Mesh Rotation)
-      const { data: anyActive } = await supabaseAdmin
-        .from("whatsapp_warmup_conversations")
-        .select("id")
-        .eq("client_id", clientId)
-        .eq("status", "active")
-        .limit(1);
+      // 4. Se houver chips ociosos disponíveis, cria novas conversas em malha (Mesh Swarm)
+      const idleChips = availableChips.filter((c) => !busyChips.has(c.instance_name));
 
-      if ((!anyActive || anyActive.length === 0) && availableChips.length >= 2) {
-        // Ordena para que o chip mais veterano (maior estágio) inicie
-        const sorted = [...availableChips].sort((a, b) => (b.stage || 1) - (a.stage || 1));
+      if (idleChips.length >= 2) {
+        // Ordena para que o chip mais veterano (maior estágio) inicie a nova conversa
+        const sorted = [...idleChips].sort((a, b) => (b.stage || 1) - (a.stage || 1));
         const initiator = sorted[0];
 
-        // Seleciona parceiro de forma rotativa (embaralha os candidatos restantes)
-        const candidates = availableChips.filter((c) => c.instance_name !== initiator.instance_name);
+        // Seleciona parceiro de forma rotativa entre os ociosos
+        const candidates = sorted.filter((c) => c.instance_name !== initiator.instance_name);
         const partner = candidates[Math.floor(Math.random() * candidates.length)];
 
         if (initiator && partner) {
-          if (!isWithinOperatingHours(initiator.allowed_start_hour ?? 8, initiator.allowed_end_hour ?? 21)) {
-            continue;
-          }
+          if (isWithinOperatingHours(initiator.allowed_start_hour ?? 8, initiator.allowed_end_hour ?? 21)) {
+            const randomTheme = WARMUP_THEMES[Math.floor(Math.random() * WARMUP_THEMES.length)].id;
+            const maxTurns = Math.floor(Math.random() * 4) + 4; // 4 a 7 turnos
 
-          const randomTheme = WARMUP_THEMES[Math.floor(Math.random() * WARMUP_THEMES.length)].id;
-          const maxTurns = Math.floor(Math.random() * 4) + 4; // 4 a 7 turnos
+            const { data: newConvData, error: convErr } = await supabaseAdmin
+              .from("whatsapp_warmup_conversations")
+              .insert({
+                client_id: clientId,
+                instance_a: initiator.instance_name,
+                instance_b: partner.instance_name,
+                topic: initiator.ai_theme || randomTheme,
+                history: [],
+                turn_count: 0,
+                max_turns: maxTurns,
+                status: "active",
+                next_turn_at: nowIso,
+              })
+              .select()
+              .single();
 
-          const { data: newConvData, error: convErr } = await supabaseAdmin
-            .from("whatsapp_warmup_conversations")
-            .insert({
-              client_id: clientId,
-              instance_a: initiator.instance_name,
-              instance_b: partner.instance_name,
-              topic: initiator.ai_theme || randomTheme,
-              history: [],
-              turn_count: 0,
-              max_turns: maxTurns,
-              status: "active",
-              next_turn_at: nowIso,
-            })
-            .select()
-            .single();
-
-          if (!convErr && newConvData) {
-            const turnRes = await executeWarmupTurn({
-              clientId,
-              senderConfig: initiator,
-              receiverConfig: partner,
-              conversation: newConvData as WarmupConversation,
-            });
-            if (turnRes.success) {
-              exchangesCount++;
+            if (!convErr && newConvData) {
+              const turnRes = await executeWarmupTurn({
+                clientId,
+                senderConfig: initiator,
+                receiverConfig: partner,
+                conversation: newConvData as WarmupConversation,
+              });
+              if (turnRes.success) {
+                exchangesCount++;
+              }
             }
           }
         }
@@ -589,4 +602,188 @@ export async function enablePairAutopilot(
     success: true,
     message: `Piloto Automático Mútuo ativado com sucesso para ${instanceA} e ${instanceB}! Ambos estão aquecendo sozinhos 24/7 com proteção máxima.`,
   };
+}
+
+/**
+ * Ativa o Piloto Automático para TODOS os chips (ou lista de chips) na Colmeia:
+ * 1. Habilita todas as proteções anti-ban e modo malha aberta.
+ * 2. Hidrata perfis dos chips (nome comercial, status/recado, Stories iniciais).
+ * 3. Sincroniza adesão nos grupos de aquecimento cadastrados.
+ * 4. Inicia conversas em malha entre os chips disponíveis.
+ */
+export async function enableSwarmAutopilot(
+  clientId: string,
+  instanceNames?: string[]
+): Promise<{ success: boolean; message: string; chipsActivated: number; error?: string }> {
+  try {
+    let targetInstances = instanceNames || [];
+
+    if (targetInstances.length === 0) {
+      const { data: configs } = await supabaseAdmin
+        .from("whatsapp_warmup_configs")
+        .select("instance_name")
+        .eq("client_id", clientId);
+
+      if (configs && configs.length > 0) {
+        targetInstances = configs.map((c) => c.instance_name);
+      }
+    }
+
+    if (targetInstances.length === 0) {
+      return {
+        success: false,
+        chipsActivated: 0,
+        message: "Nenhuma instância encontrada para ativar na colmeia.",
+      };
+    }
+
+    const nowIso = new Date().toISOString();
+
+    for (const instName of targetInstances) {
+      await supabaseAdmin
+        .from("whatsapp_warmup_configs")
+        .upsert(
+          {
+            client_id: clientId,
+            instance_name: instName,
+            enabled: true,
+            swarm_active: true,
+            group_auto_join: true,
+            stage_auto_progress: true,
+            enable_vcard: true,
+            enable_audio: true,
+            enable_blue_ticks: true,
+            enable_reactions: true,
+            enable_status_posts: true,
+            continuous_warmup: true,
+            is_quarantined: false,
+            min_interval_seconds: 90,
+            max_interval_seconds: 240,
+            min_typing_seconds: 3,
+            max_typing_seconds: 8,
+            allowed_start_hour: 8,
+            allowed_end_hour: 21,
+            ai_model: "fallback",
+            ai_theme: "dia_a_dia",
+            updated_at: nowIso,
+          },
+          { onConflict: "client_id,instance_name" }
+        );
+
+      hydrateChipProfile(clientId, instName).catch(() => {});
+    }
+
+    syncGroupMembershipForChips(clientId).catch(() => {});
+
+    if (targetInstances.length >= 2) {
+      const instA = targetInstances[0];
+      const instB = targetInstances[1];
+      try {
+        await supabaseAdmin.from("whatsapp_warmup_conversations").insert({
+          client_id: clientId,
+          instance_a: instA,
+          instance_b: instB,
+          topic: "dia_a_dia",
+          history: [],
+          turn_count: 0,
+          max_turns: 6,
+          status: "active",
+          next_turn_at: nowIso,
+          created_at: nowIso,
+          updated_at: nowIso,
+        });
+      } catch {}
+    }
+
+    await logWarmupAction({
+      client_id: clientId,
+      sender_instance: "swarm_orchestrator",
+      receiver_instance: "colmeia",
+      message_text: `🐝 Colmeia Autônoma ATIVADA para ${targetInstances.length} chips. Rede em malha e grupos ativados.`,
+      action_type: "system",
+    });
+
+    return {
+      success: true,
+      chipsActivated: targetInstances.length,
+      message: `Colmeia Autônoma ativada com sucesso para ${targetInstances.length} chip(s)! Todos estão aquecendo sozinhos com proteção máxima.`,
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, chipsActivated: 0, message: msg, error: msg };
+  }
+}
+
+/**
+ * Dispara uma rodada completa de aquecimento na colmeia inteira:
+ * Executa trocas mútuas entre os pares disponíveis e sincroniza grupos.
+ */
+export async function triggerSwarmCycle(
+  clientId: string,
+  instanceNames?: string[]
+): Promise<{ success: boolean; message: string; roundsExecuted: number; error?: string }> {
+  try {
+    let targetInstances = instanceNames || [];
+
+    if (targetInstances.length === 0) {
+      const { data: configs } = await supabaseAdmin
+        .from("whatsapp_warmup_configs")
+        .select("instance_name")
+        .eq("client_id", clientId)
+        .eq("enabled", true)
+        .eq("is_quarantined", false);
+
+      if (configs && configs.length > 0) {
+        targetInstances = configs.map((c) => c.instance_name);
+      }
+    }
+
+    if (targetInstances.length < 2) {
+      // Se tiver só 1 chip, sincroniza grupos e publica status
+      if (targetInstances.length === 1) {
+        await syncGroupMembershipForChips(clientId);
+        await hydrateChipProfile(clientId, targetInstances[0]);
+        return {
+          success: true,
+          roundsExecuted: 1,
+          message: `Chip ${targetInstances[0]} sincronizado com os grupos da colmeia e perfil hidratado!`,
+        };
+      }
+      return {
+        success: false,
+        roundsExecuted: 0,
+        message: "Necessário ao menos 1 chip ativo para rodada na colmeia.",
+      };
+    }
+
+    let roundsExecuted = 0;
+    // Divide os chips em pares e dispara trocas bilaterais simultâneas
+    for (let i = 0; i < targetInstances.length - 1; i += 2) {
+      const instA = targetInstances[i];
+      const instB = targetInstances[i + 1];
+      const res = await triggerMutualWarmup(clientId, instA, instB);
+      if (res.success) {
+        roundsExecuted++;
+      }
+    }
+
+    // Se sobrou 1 chip ímpar, conecta ele com o primeiro
+    if (targetInstances.length % 2 !== 0 && targetInstances.length >= 3) {
+      const last = targetInstances[targetInstances.length - 1];
+      const first = targetInstances[0];
+      await triggerMutualWarmup(clientId, last, first).catch(() => {});
+      roundsExecuted++;
+    }
+
+    syncGroupMembershipForChips(clientId).catch(() => {});
+
+    return {
+      success: true,
+      roundsExecuted,
+      message: `Rodada da colmeia concluída com sucesso! ${roundsExecuted} pares interagiram mutuamente.`,
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, roundsExecuted: 0, message: msg, error: msg };
+  }
 }

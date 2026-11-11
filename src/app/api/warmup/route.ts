@@ -259,6 +259,11 @@ export async function GET(req: NextRequest) {
         enable_status_posts: existingCfg?.enable_status_posts ?? globalSettings.enable_status_posts,
         continuous_warmup: existingCfg?.continuous_warmup ?? globalSettings.continuous_warmup,
         custom_prompt: existingCfg?.custom_prompt || globalSettings.custom_prompt,
+        purpose: existingCfg?.purpose || "outbound",
+        profile_hydrated: existingCfg?.profile_hydrated ?? false,
+        group_auto_join: existingCfg?.group_auto_join ?? true,
+        swarm_active: existingCfg?.swarm_active ?? true,
+        max_groups_per_chip: existingCfg?.max_groups_per_chip ?? 10,
       };
 
       return {
@@ -284,6 +289,15 @@ export async function GET(req: NextRequest) {
     const totalSentToday = instancesList.reduce((acc, i) => acc + (i.config.sent_today || 0), 0);
     const totalReceivedToday = instancesList.reduce((acc, i) => acc + (i.config.received_today || 0), 0);
 
+    let totalGroups = 0;
+    try {
+      const { count } = await supabaseAdmin
+        .from("whatsapp_warmup_groups")
+        .select("id", { count: "exact", head: true })
+        .eq("client_id", clientId);
+      totalGroups = count || 0;
+    } catch {}
+
     return NextResponse.json({
       success: true,
       data: {
@@ -295,6 +309,7 @@ export async function GET(req: NextRequest) {
           activeWarmup,
           totalSentToday,
           totalReceivedToday,
+          totalGroups,
         },
       },
     });

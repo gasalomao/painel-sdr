@@ -40,11 +40,22 @@ import {
   Settings2,
   Inbox,
   ImageIcon,
+  Users,
+  Trash2,
+  Zap,
+  Target,
   type LucideIcon,
 } from "lucide-react";
 import { ModelOptions } from "@/components/ai-module-shared";
 import type { GroupableModel } from "@/lib/model-grouping";
-import { STAGE_DEFAULTS, type WarmupConfig, type WarmupLog, type WarmupStage } from "@/lib/warmup/warmup-types";
+import {
+  STAGE_DEFAULTS,
+  PURPOSE_METADATA,
+  type WarmupConfig,
+  type WarmupLog,
+  type WarmupStage,
+  type WarmupPurpose,
+} from "@/lib/warmup/warmup-types";
 import { WARMUP_THEMES } from "@/lib/warmup/warmup-dialogues";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -154,8 +165,7 @@ const LOG_TYPE_UI: Record<string, { label: string; icon: LucideIcon; chip: strin
   system: { label: "Sistema", icon: Settings2, chip: "border-white/10 bg-white/5 text-neutral-300" },
 };
 
-const PROTECTIONS: Array<{ key: keyof GlobalSettings; icon: LucideIcon; title: string; description: string }> = [
-  {
+const PROTECTIONS: Array<{ key: keyof GlobalSettings; icon: LucideIcon; title: string; description: string }> = [  {
     key: "enable_vcard",
     icon: Contact,
     title: "Troca de contatos (vCard)",
@@ -165,7 +175,7 @@ const PROTECTIONS: Array<{ key: keyof GlobalSettings; icon: LucideIcon; title: s
     key: "enable_audio",
     icon: Volume2,
     title: "Áudio gravado na hora",
-    description: "Envia mensagens de voz Opus com waveform para variar as conversas.",
+    description: "Envia mensagens de voz curtas para variar as conversas.",
   },
   {
     key: "enable_status_posts",
@@ -192,6 +202,19 @@ const PROTECTIONS: Array<{ key: keyof GlobalSettings; icon: LucideIcon; title: s
     description: "Evolui o chip de fase sozinho conforme acumula dias sem qualquer erro.",
   },
 ];
+
+const STAGE_HINT: Record<WarmupStage, string> = {
+  1: "Número novo: recebe mais do que envia e conversa devagar.",
+  2: "Já tem histórico: começa a mandar áudios e a reagir às mensagens.",
+  3: "Mais confiança: pode enviar até 50 mensagens por dia.",
+  4: "Blindado: pronto para campanhas e disparos em escala.",
+};
+
+const PURPOSE_SHORT: Record<WarmupPurpose, string> = {
+  contingency: "Reserva",
+  inbound: "Receber leads",
+  outbound: "Prospecção",
+};
 
 function healthTone(score: number) {
   if (score >= 80) {
@@ -249,16 +272,29 @@ export default function AquecerChipsPage() {
     activeWarmup: 0,
     totalSentToday: 0,
     totalReceivedToday: 0,
+    totalGroups: 0,
   });
   const [aiModels, setAiModels] = useState<GroupableModel[]>([]);
   const [savingGlobal, setSavingGlobal] = useState(false);
   const [savingMap, setSavingMap] = useState<Record<string, boolean>>({});
   const [bulkBusy, setBulkBusy] = useState(false);
 
+  // Tabs do Módulo
+  const [activeTab, setActiveTab] = useState<"chips" | "groups" | "logs">("chips");
+
+  // Grupos e Swarm
+  const [groups, setGroups] = useState<any[]>([]);
+  const [groupsLoading, setGroupsLoading] = useState(false);
+  const [importLinksInput, setImportLinksInput] = useState("");
+  const [importingGroups, setImportingGroups] = useState(false);
+  const [syncingGroups, setSyncingGroups] = useState(false);
+  const [swarmActivating, setSwarmActivating] = useState(false);
+  const [swarmCycleLoading, setSwarmCycleLoading] = useState(false);
+
   // Configurações Gerais
   const [globalSettings, setGlobalSettings] = useState<GlobalSettings>(DEFAULT_GLOBAL_SETTINGS);
   const [savedGlobalSettings, setSavedGlobalSettings] = useState<GlobalSettings>(DEFAULT_GLOBAL_SETTINGS);
-  const [settingsOpen, setSettingsOpen] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Modal de teste imediato
   const [testModalOpen, setTestModalOpen] = useState(false);
@@ -276,7 +312,10 @@ export default function AquecerChipsPage() {
   const [mutualStatusPost, setMutualStatusPost] = useState(true);
 
   // Guia explicativo de funcionamento
-  const [explainerOpen, setExplainerOpen] = useState(true);
+  const [explainerOpen, setExplainerOpen] = useState(false);
+
+  // Ações avançadas (colmeia, rodada manual, teste)
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   // Auto-refresh de logs
   const [autoRefreshLogs, setAutoRefreshLogs] = useState(true);
@@ -333,10 +372,142 @@ export default function AquecerChipsPage() {
     }
   }, []);
 
+  const loadGroups = useCallback(async () => {
+    setGroupsLoading(true);
+    try {
+      const res = await fetch("/api/warmup/groups", { cache: "no-store" });
+      const data = await res.json();
+      if (data.success && Array.isArray(data.groups)) {
+        setGroups(data.groups);
+      }
+    } catch {
+      // silencioso
+    } finally {
+      setGroupsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     loadData();
     loadModels();
-  }, [loadData, loadModels]);
+    loadGroups();
+  }, [loadData, loadModels, loadGroups]);
+
+  const handleImportGroups = async () => {
+    if (!importLinksInput.trim()) {
+      toast.error("Cole ao menos um link de grupo do WhatsApp.");
+      return;
+    }
+    setImportingGroups(true);
+    try {
+      const activeInstance = instances.find((i) => i.connection_status === "open")?.instance_name;
+      const res = await fetch("/api/warmup/groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          links: importLinksInput,
+          preferredInstance: activeInstance,
+          autoSync: true,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast.success(data.message || `${data.added} grupo(s) adicionado(s) com sucesso!`);
+        setImportLinksInput("");
+        await loadGroups();
+        await loadData(true);
+      } else {
+        toast.error(data.error || "Falha ao importar grupos.");
+      }
+    } catch (err: any) {
+      toast.error("Erro na importação: " + err.message);
+    } finally {
+      setImportingGroups(false);
+    }
+  };
+
+  const handleSyncGroupMembers = async () => {
+    setSyncingGroups(true);
+    try {
+      const res = await fetch("/api/warmup/groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "sync_members" }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast.success(data.message || "Chips sincronizados nos grupos!");
+        await loadGroups();
+      } else {
+        toast.error(data.error || "Falha na sincronização.");
+      }
+    } catch (err: any) {
+      toast.error("Erro: " + err.message);
+    } finally {
+      setSyncingGroups(false);
+    }
+  };
+
+  const handleDeleteGroup = async (groupId: string) => {
+    try {
+      const res = await fetch(`/api/warmup/groups?id=${groupId}`, { method: "DELETE" });
+      const data = await res.json();
+      if (data.success) {
+        toast.success("Grupo removido.");
+        setGroups((prev) => prev.filter((g) => g.id !== groupId));
+      } else {
+        toast.error(data.error || "Falha ao remover grupo.");
+      }
+    } catch (err: any) {
+      toast.error("Erro: " + err.message);
+    }
+  };
+
+  const handleActivateSwarm = async () => {
+    setSwarmActivating(true);
+    try {
+      const res = await fetch("/api/warmup/trigger", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ swarmAutopilot: true }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast.success(data.message || "Colmeia Autônoma ativada para todos os chips!");
+        await loadData();
+        await loadGroups();
+      } else {
+        toast.error(data.error || "Falha ao ativar colmeia.");
+      }
+    } catch (err: any) {
+      toast.error("Erro: " + err.message);
+    } finally {
+      setSwarmActivating(false);
+    }
+  };
+
+  const handleTriggerSwarmCycle = async () => {
+    setSwarmCycleLoading(true);
+    try {
+      const res = await fetch("/api/warmup/trigger", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ swarmCycle: true }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast.success(data.message || "Rodada da colmeia executada com sucesso!");
+        await loadData(true);
+        await loadGroups();
+      } else {
+        toast.error(data.error || "Falha ao executar rodada da colmeia.");
+      }
+    } catch (err: any) {
+      toast.error("Erro: " + err.message);
+    } finally {
+      setSwarmCycleLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (!autoRefreshLogs) return;
@@ -594,93 +765,163 @@ export default function AquecerChipsPage() {
           ? "Escolha chips diferentes para enviar e receber."
           : null;
 
+  const connectedCount = instances.filter(
+    (i) => i.connection_status === "open" || i.connection_status === "connected"
+  ).length;
+  const quarantinedCount = instances.filter((i) => i.config?.is_quarantined).length;
+  const activeChipCount = instances.filter(
+    (i) => i.config?.enabled && !i.config?.is_quarantined
+  ).length;
+  const hasActiveChips = activeChipCount > 0;
+
+  const statusPrimary =
+    instances.length === 0
+      ? "Nenhum número conectado ainda"
+      : !hasActiveChips
+        ? `Aquecimento pausado nos ${instances.length} números`
+        : `Aquecendo ${activeChipCount} de ${instances.length} números`;
+
+  const statusDetail = [
+    instances.length === 0
+      ? "Conecte dois para começar"
+      : totalDailyTarget > 0
+        ? `${stats.totalSentToday} de ${totalDailyTarget} mensagens hoje`
+        : null,
+    instances.length === 0
+      ? null
+      : `janela ${formatHour(globalSettings.allowed_start_hour)} às ${formatHour(globalSettings.allowed_end_hour)}`,
+    quarantinedCount > 0 ? `${quarantinedCount} em quarentena` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   return (
     <div className={cn("h-[100dvh] max-h-[100dvh] flex flex-col overflow-hidden", styles.page)}>
       <Header />
 
-      <main className={styles.content}>
+      <div className={styles.content}>
         <div className="max-w-7xl mx-auto space-y-7 pb-16">
           {/* Cabeçalho da página */}
           <div className={styles.heading}>
-            <div className="flex items-start gap-3.5">
-              <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 shrink-0">
-                <Flame className="w-6 h-6" />
-              </div>
-              <div>
-                <div className="flex flex-wrap items-center gap-2.5">
-                  <h1 className={styles.headingTitle}>Aquecer Chips</h1>
-                  <Badge
-                    variant="outline"
-                    className={
-                      globalSettings.stage_auto_progress
-                        ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300 text-[11px] font-medium"
-                        : "border-white/15 bg-white/5 text-neutral-300 text-[11px] font-medium"
-                    }
-                  >
-                    {globalSettings.stage_auto_progress ? "Piloto automático ativo" : "Piloto automático desligado"}
-                  </Badge>
-                </div>
-                <p className={styles.headingDescription}>
-                  Seus chips conversam entre si para ganhar reputação e blindar os números contra bloqueios antes de entrar nas campanhas ativas.
-                </p>
-              </div>
+            <div className={styles.statusBlock}>
+              <p className={styles.statusLine} aria-live="polite">
+                <span className={styles.statusDot} aria-hidden="true" />
+                <span className={styles.statusPrimary}>{statusPrimary}</span>
+                {statusDetail && <span className={styles.statusDetail}>{statusDetail}</span>}
+              </p>
+              <p className={styles.headingDescription}>
+                Seus números conversam entre si sozinhos para ganhar confiança no WhatsApp antes de entrar nas campanhas.
+              </p>
             </div>
 
             <div className={styles.headingActions}>
               <button
                 type="button"
                 onClick={() => openPairModal()}
+                disabled={instances.length === 0}
                 className={cn(styles.primaryAction, "bg-emerald-400 hover:bg-emerald-300 text-neutral-950 font-semibold shadow-sm flex items-center gap-2")}
+                title={instances.length === 0 ? "Conecte um número primeiro" : "Escolhe dois números e deixa o sistema cuidar do resto"}
               >
-                <Sparkles className="w-4 h-4 text-neutral-950" />
-                Aquecer Dois Chips (Automático)
+                <Flame className="w-4 h-4 text-neutral-950" />
+                Aquecer dois chips
               </button>
               <button
                 type="button"
-                onClick={() => handleToggleBulk("enable_all")}
-                disabled={bulkBusy}
+                onClick={() => handleToggleBulk(hasActiveChips ? "pause_all" : "enable_all")}
+                disabled={bulkBusy || instances.length === 0}
                 className={styles.secondaryAction}
+                title={hasActiveChips ? "Pausa o aquecimento em todos os números" : "Liga o aquecimento em todos os números"}
               >
-                <Play className="w-3.5 h-3.5" />
-                Ativar todos
+                {hasActiveChips ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+                {bulkBusy ? "Aplicando..." : hasActiveChips ? "Pausar tudo" : "Ativar tudo"}
               </button>
               <button
                 type="button"
-                onClick={() => handleToggleBulk("pause_all")}
-                disabled={bulkBusy}
+                onClick={() => setAdvancedOpen((v) => !v)}
+                aria-expanded={advancedOpen}
+                aria-controls="acoes-avancadas"
                 className={styles.secondaryAction}
               >
-                <Pause className="w-3.5 h-3.5" />
-                Pausar todos
+                <Settings2 className="w-3.5 h-3.5" />
+                Mais ações
+                <ChevronDown className={`w-3.5 h-3.5 transition-transform ${advancedOpen ? "rotate-180" : ""}`} />
               </button>
               <button
                 type="button"
                 onClick={() => {
-                  if (instances.length >= 2) {
-                    setTestSender(instances[0].instance_name);
-                    setTestReceiver(instances[1].instance_name);
-                  } else if (instances.length === 1) {
-                    setTestSender(instances[0].instance_name);
-                  }
-                  setTestModalOpen(true);
+                  loadData();
+                  loadGroups();
                 }}
-                className={styles.secondaryAction}
-              >
-                <Send className="w-3.5 h-3.5" />
-                Testar disparo
-              </button>
-              <button
-                type="button"
-                onClick={() => loadData()}
-                disabled={refreshing}
+                disabled={refreshing || groupsLoading}
                 className={styles.iconAction}
                 title="Atualizar dados"
                 aria-label="Atualizar dados"
               >
-                <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
+                <RefreshCw className={`w-4 h-4 ${refreshing || groupsLoading ? "animate-spin" : ""}`} />
               </button>
             </div>
           </div>
+
+          {/* Ações avançadas */}
+          {advancedOpen && (
+            <div id="acoes-avancadas" className={styles.advancedPanel}>
+              <div className={styles.advancedRow}>
+                <div>
+                  <p className={styles.advancedTitle}>Ativar colmeia autônoma</p>
+                  <p className={styles.advancedDesc}>Liga o piloto automático em todos os números e sincroniza os grupos de uma vez.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleActivateSwarm}
+                  disabled={swarmActivating || instances.length === 0}
+                  className={styles.secondaryAction}
+                >
+                  <Zap className="w-3.5 h-3.5 text-emerald-400" />
+                  {swarmActivating ? "Ativando..." : "Ativar colmeia"}
+                </button>
+              </div>
+
+              <div className={styles.advancedRow}>
+                <div>
+                  <p className={styles.advancedTitle}>Rodada manual agora</p>
+                  <p className={styles.advancedDesc}>Dispara uma rodada de conversa em todos os números neste instante, sem esperar o próximo horário.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleTriggerSwarmCycle}
+                  disabled={swarmCycleLoading || instances.length === 0}
+                  className={styles.secondaryAction}
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                  {swarmCycleLoading ? "Executando..." : "Rodar agora"}
+                </button>
+              </div>
+
+              <div className={styles.advancedRow}>
+                <div>
+                  <p className={styles.advancedTitle}>Testar uma conversa</p>
+                  <p className={styles.advancedDesc}>Escolhe dois números e envia uma mensagem de teste, igual ao aquecimento automático.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (instances.length >= 2) {
+                      setTestSender(instances[0].instance_name);
+                      setTestReceiver(instances[1].instance_name);
+                    } else if (instances.length === 1) {
+                      setTestSender(instances[0].instance_name);
+                    }
+                    setTestModalOpen(true);
+                  }}
+                  disabled={instances.length === 0}
+                  className={styles.secondaryAction}
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  Abrir teste
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* ========================================================================= */}
           {/* GUIA EXPLICATIVO: COMO FUNCIONA O AQUECIMENTO AUTOMÁTICO */}
@@ -693,10 +934,10 @@ export default function AquecerChipsPage() {
                 </div>
                 <div>
                   <h2 className="text-sm font-semibold text-white flex items-center gap-2">
-                    Como o Aquecedor de Chips opera 100% sozinho
+                    Como funciona, em 4 passos
                   </h2>
                   <p className="text-xs text-neutral-400 mt-0.5 leading-relaxed">
-                    Os chips conversam entre si, gravam notas de voz reais e salvam contatos mutuamente para criar autoridade máxima nos servidores do WhatsApp.
+                    O sistema age como duas pessoas que se conhecem. Você não precisa fazer nada depois de ligar.
                   </p>
                 </div>
               </div>
@@ -704,75 +945,48 @@ export default function AquecerChipsPage() {
               <div className="flex items-center gap-2 shrink-0">
                 <button
                   type="button"
-                  onClick={() => openPairModal()}
-                  className={cn(styles.primaryAction, "h-9 py-1.5 px-3 text-xs bg-emerald-400 hover:bg-emerald-300 text-neutral-950 font-semibold")}
-                >
-                  <Sparkles className="w-3.5 h-3.5 text-neutral-950" />
-                  Aquecer dois chips agora
-                </button>
-                <button
-                  type="button"
                   onClick={() => setExplainerOpen((v) => !v)}
+                  aria-expanded={explainerOpen}
+                  aria-controls="explicacao-aquecimento"
                   className={styles.secondaryAction}
-                  style={{ minHeight: "36px", height: "36px", padding: "6px 10px" }}
-                  title={explainerOpen ? "Ocultar explicação" : "Ver explicação"}
                 >
                   <ChevronDown className={`w-3.5 h-3.5 transition-transform ${explainerOpen ? "rotate-180" : ""}`} />
-                  <span className="text-xs">{explainerOpen ? "Ocultar" : "Entender"}</span>
+                  <span className="text-xs">{explainerOpen ? "Ocultar" : "Ver passos"}</span>
                 </button>
               </div>
             </div>
 
             {explainerOpen && (
-              <div className={styles.explainerGrid}>
-                <div className={styles.explainerCard}>
-                  <div className="flex items-center gap-2">
-                    <div className={styles.explainerCardIcon}>
-                      <Contact className="w-4 h-4" />
-                    </div>
-                    <span className={styles.explainerCardTitle}>1. Agenda & vCard Real</span>
+              <ol id="explicacao-aquecimento" className={styles.stepsList}>
+                <li className={styles.stepItem}>
+                  <span className={styles.stepNumber} aria-hidden="true">1</span>
+                  <div>
+                    <p className={styles.stepTitle}>Salvam o contato um do outro</p>
+                    <p className={styles.stepDesc}>Antes de conversar, os números trocam contato. O WhatsApp entende que são pessoas que se conhecem.</p>
                   </div>
-                  <p className={styles.explainerCardDesc}>
-                    Os dois chips trocam seus contatos reais. O WhatsApp identifica que ambos têm os números salvos na agenda do celular (fator anti-ban nº 1).
-                  </p>
-                </div>
-
-                <div className={styles.explainerCard}>
-                  <div className="flex items-center gap-2">
-                    <div className={styles.explainerCardIcon}>
-                      <Volume2 className="w-4 h-4" />
-                    </div>
-                    <span className={styles.explainerCardTitle}>2. Áudio Opus & Tiques Azuis</span>
+                </li>
+                <li className={styles.stepItem}>
+                  <span className={styles.stepNumber} aria-hidden="true">2</span>
+                  <div>
+                    <p className={styles.stepTitle}>Conversam como gente</p>
+                    <p className={styles.stepDesc}>Mensagens curtas, áudios, reações e o &quot;digitando...&quot; antes de responder.</p>
                   </div>
-                  <p className={styles.explainerCardDesc}>
-                    Envio de mensagens de voz humanas (48kHz mono) e simulação de leitura na tela, acendendo os dois tiques azuis antes de responder.
-                  </p>
-                </div>
-
-                <div className={styles.explainerCard}>
-                  <div className="flex items-center gap-2">
-                    <div className={styles.explainerCardIcon}>
-                      <Activity className="w-4 h-4" />
-                    </div>
-                    <span className={styles.explainerCardTitle}>3. Piloto em 4 Fases</span>
+                </li>
+                <li className={styles.stepItem}>
+                  <span className={styles.stepNumber} aria-hidden="true">3</span>
+                  <div>
+                    <p className={styles.stepTitle}>Ganham confiança aos poucos</p>
+                    <p className={styles.stepDesc}>Começam com poucas mensagens por dia e sobem de fase sozinhos conforme os dias passam sem erro.</p>
                   </div>
-                  <p className={styles.explainerCardDesc}>
-                    Avança sozinho: Fase 1 (10 msgs/dia) → Fase 2 (25 msgs/dia) → Fase 3 (50 msgs/dia) → Fase 4 (Blindado para vendas) conforme os dias ativos.
-                  </p>
-                </div>
-
-                <div className={styles.explainerCard}>
-                  <div className="flex items-center gap-2">
-                    <div className={styles.explainerCardIcon}>
-                      <ShieldAlert className="w-4 h-4" />
-                    </div>
-                    <span className={styles.explainerCardTitle}>4. Quarentena & Stories</span>
+                </li>
+                <li className={styles.stepItem}>
+                  <span className={styles.stepNumber} aria-hidden="true">4</span>
+                  <div>
+                    <p className={styles.stepTitle}>Param sozinhos se algo der errado</p>
+                    <p className={styles.stepDesc}>Ao primeiro sinal de instabilidade o número entra em quarentena por 24 horas, em vez de arriscar o bloqueio.</p>
                   </div>
-                  <p className={styles.explainerCardDesc}>
-                    Se houver instabilidade ou erro de rede, o chip pausa preventivamente (Circuit Breaker). Além disso, posta Stories automáticos no Status.
-                  </p>
-                </div>
-              </div>
+                </li>
+              </ol>
             )}
           </div>
 
@@ -780,47 +994,109 @@ export default function AquecerChipsPage() {
           <div className={styles.overviewGrid}>
             <div className={styles.overviewCard}>
               <span className={styles.overviewLabel}>
-                <Smartphone className="w-3.5 h-3.5 text-neutral-400" />
-                Chips conectados
-              </span>
-              <span className={styles.overviewValue}>{stats.totalChips}</span>
-              <span className={styles.overviewSubtext}>números sincronizados</span>
-            </div>
-
-            <div className={styles.overviewCard}>
-              <span className={styles.overviewLabel}>
                 <Flame className="w-3.5 h-3.5 text-emerald-400" />
                 Aquecendo agora
               </span>
-              <span className={cn(styles.overviewValue, "text-emerald-300")}>{stats.activeWarmup}</span>
-              <span className={styles.overviewSubtext}>de {stats.totalChips} conectados</span>
+              <span className={cn(styles.overviewValue, "text-emerald-300")}>
+                {activeChipCount}
+                <span className="text-base font-medium text-neutral-500"> de {instances.length}</span>
+              </span>
+              <span className={styles.overviewSubtext}>
+                {quarantinedCount > 0
+                  ? `${quarantinedCount} em quarentena`
+                  : `${connectedCount} conectado(s) ao WhatsApp`}
+              </span>
             </div>
 
             <div className={styles.overviewCard}>
               <span className={styles.overviewLabel}>
                 <Send className="w-3.5 h-3.5 text-neutral-400" />
-                Enviadas hoje
+                Mensagens hoje
               </span>
-              <span className={styles.overviewValue}>{stats.totalSentToday}</span>
+              <span className={styles.overviewValue}>
+                {stats.totalSentToday}
+                {totalDailyTarget > 0 && (
+                  <span className="text-base font-medium text-neutral-500"> de {totalDailyTarget}</span>
+                )}
+              </span>
               <span className={styles.overviewSubtext}>
-                {totalDailyTarget > 0 ? `de ${totalDailyTarget} previstas` : "mensagens disparadas"}
+                {totalDailyTarget > 0
+                  ? stats.totalSentToday >= totalDailyTarget
+                    ? "meta do dia concluída"
+                    : `faltam ${totalDailyTarget - stats.totalSentToday} para a meta`
+                  : "enviadas pelos números"}
               </span>
             </div>
 
             <div className={styles.overviewCard}>
               <span className={styles.overviewLabel}>
                 <MessageSquare className="w-3.5 h-3.5 text-neutral-400" />
-                Recebidas hoje
+                Respostas recebidas
               </span>
               <span className={styles.overviewValue}>{stats.totalReceivedToday}</span>
-              <span className={styles.overviewSubtext}>respostas dos parceiros</span>
+              <span className={styles.overviewSubtext}>mensagens que os parceiros devolveram</span>
+            </div>
+
+            <div className={styles.overviewCard}>
+              <span className={styles.overviewLabel}>
+                <Users className="w-3.5 h-3.5 text-blue-400" />
+                Grupos de aquecimento
+              </span>
+              <span className={cn(styles.overviewValue, "text-blue-300")}>{groups.length}</span>
+              <span className={styles.overviewSubtext}>
+                {groups.length === 0 ? "nenhum grupo adicionado" : "onde os números ganham atividade"}
+              </span>
             </div>
           </div>
 
           {/* ========================================================================= */}
-          {/* AJUSTES GERAIS: COMO AS CONVERSAS ACONTECEM */}
+          {/* TABS DE NAVEGAÇÃO DA COLMEIA */}
           {/* ========================================================================= */}
-          <div className={styles.panel}>
+          <div className={styles.tabsBar}>
+            <button
+              type="button"
+              onClick={() => setActiveTab("chips")}
+              className={cn(styles.tabButton, activeTab === "chips" && styles.tabButtonActive)}
+            >
+              <Smartphone className="w-4 h-4" />
+              <span>Meus chips</span>
+              <span className={cn(styles.tabBadge, activeTab === "chips" && styles.tabBadgeActive)}>
+                {instances.length}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("groups")}
+              className={cn(styles.tabButton, activeTab === "groups" && styles.tabButtonActive)}
+            >
+              <Users className="w-4 h-4" />
+              <span>Grupos</span>
+              <span className={cn(styles.tabBadge, activeTab === "groups" && styles.tabBadgeActive)}>
+                {groups.length}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("logs")}
+              className={cn(styles.tabButton, activeTab === "logs" && styles.tabButtonActive)}
+            >
+              <Clock className="w-4 h-4" />
+              <span>Atividade</span>
+              <span className={cn(styles.tabBadge, activeTab === "logs" && styles.tabBadgeActive)}>
+                {logs.length}
+              </span>
+            </button>
+          </div>
+
+          {/* ========================================================================= */}
+          {/* ABA 1: MEUS CHIPS & COLMEIA */}
+          {/* ========================================================================= */}
+          {activeTab === "chips" && (
+            <div className="space-y-6">
+              {/* AJUSTES GERAIS: COMO AS CONVERSAS ACONTECEM */}
+              <div className={styles.panel}>
             <div className={styles.panelHeader}>
               <div className="flex items-start gap-3">
                 <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 shrink-0">
@@ -829,7 +1105,7 @@ export default function AquecerChipsPage() {
                 <div>
                   <h2 className={styles.panelTitle}>Como as conversas acontecem</h2>
                   <p className={styles.panelDescription}>
-                    Ajustes globais do maturador. Modelo: <strong className="text-neutral-200">{selectedModelLabel}</strong> · Tema: <strong className="text-neutral-200">{selectedThemeLabel}</strong> · Horário: <strong className="text-neutral-200">{formatHour(globalSettings.allowed_start_hour)} às {formatHour(globalSettings.allowed_end_hour)}</strong>
+                    Modelo: <strong className="text-neutral-200">{selectedModelLabel}</strong> · Assunto: <strong className="text-neutral-200">{selectedThemeLabel}</strong> · Horário: <strong className="text-neutral-200">{formatHour(globalSettings.allowed_start_hour)} às {formatHour(globalSettings.allowed_end_hour)}</strong>
                   </p>
                 </div>
               </div>
@@ -896,7 +1172,7 @@ export default function AquecerChipsPage() {
                           <ModelOptions models={aiModels} />
                         </select>
                         <p className={styles.fieldHint}>
-                          Compatível com Gemini, OpenRouter, NVIDIA NIM e combos ({aiModels.length} modelos). A opção grátis usa frases humanas prontas em português.
+                          Assunto que as conversas automáticas vão usar. A opção grátis usa frases prontas em português ({aiModels.length} modelos disponíveis).
                         </p>
                       </div>
 
@@ -918,7 +1194,7 @@ export default function AquecerChipsPage() {
                           ))}
                         </select>
                         <p className={styles.fieldHint}>
-                          Tema dinâmico utilizado para criar diálogos realistas e contextuais entre os números.
+                          Tema usado para criar diálogos realistas entre os números.
                         </p>
                       </div>
                     </div>
@@ -1046,7 +1322,7 @@ export default function AquecerChipsPage() {
                   <section className="space-y-3 border-t border-[#2a352c] pt-5">
                     <div className="flex items-center gap-2">
                       <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                      <h3 className="text-sm font-semibold text-white">Proteções Anti-bloqueio</h3>
+                      <h3 className="text-sm font-semibold text-white">Proteções contra bloqueio</h3>
                     </div>
 
                     <div className={styles.protectionsGrid}>
@@ -1089,7 +1365,7 @@ export default function AquecerChipsPage() {
                   Seus chips
                 </h2>
                 <p className="text-xs text-neutral-400 mt-0.5">
-                  Cada chip sobe uma fase quando acumula dias sem erro. A meta diária sobe de forma segura.
+                  Cada número sobe de fase sozinho. Quanto mais dias sem erro, mais mensagens ele envia por dia.
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-3 text-[11px] text-neutral-400">
@@ -1125,9 +1401,9 @@ export default function AquecerChipsPage() {
             ) : instances.length === 0 ? (
               <Card className="bg-[#181d19] border-[#303a32] p-8 text-center space-y-3">
                 <Smartphone className="w-10 h-10 text-neutral-600 mx-auto" />
-                <h3 className="text-base font-medium text-white">Nenhum WhatsApp conectado</h3>
+                <h3 className="text-base font-medium text-white">Nenhum número conectado ainda</h3>
                 <p className="text-xs text-neutral-400 max-w-md mx-auto leading-relaxed">
-                  Conecte ao menos dois números na área WhatsApp. Eles aparecem aqui automaticamente, já prontos para aquecer.
+                  Conecte dois números do WhatsApp. Eles aparecem aqui automaticamente, prontos para aquecer.
                 </p>
                 <Button
                   variant="outline"
@@ -1135,7 +1411,7 @@ export default function AquecerChipsPage() {
                   onClick={() => (window.location.href = "/whatsapp")}
                   className="border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10"
                 >
-                  Ir para conexão de WhatsApp
+                  Conectar um número
                 </Button>
               </Card>
             ) : (
@@ -1166,6 +1442,8 @@ export default function AquecerChipsPage() {
                     const isDirty = JSON.stringify(savedConfigs[instName]) !== JSON.stringify(cfg);
                     const dailyTarget = cfg.daily_target || 10;
                     const remainingToday = Math.max(0, dailyTarget - (cfg.sent_today || 0));
+                    const purposeKey = (cfg.purpose || "outbound") as WarmupPurpose;
+                    const purposeMeta = PURPOSE_METADATA[purposeKey];
 
                     const progressPercent = Math.min(
                       Math.round(((cfg.sent_today || 0) / dailyTarget) * 100),
@@ -1223,30 +1501,6 @@ export default function AquecerChipsPage() {
                         </div>
 
                         <div className={styles.chipCardBody}>
-                          {/* Saúde e contexto */}
-                          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px]">
-                            <div className="flex items-center gap-2">
-                              <span className="text-neutral-400">Saúde:</span>
-                              <div className="h-1.5 w-16 rounded-full bg-[#202b23] overflow-hidden">
-                                <div className={`h-full rounded-full ${healthUI.bar}`} style={{ width: `${health}%` }} />
-                              </div>
-                              <span className={`font-medium ${healthUI.text}`}>
-                                {health}% · {healthUI.label}
-                              </span>
-                            </div>
-
-                            <span className="text-neutral-400">
-                              Última atividade: <span className="text-neutral-300">{formatRelativeTime(cfg.last_activity_at)}</span>
-                            </span>
-
-                            <a
-                              href="/whatsapp"
-                              className="ml-auto inline-flex items-center gap-1 text-neutral-400 hover:text-emerald-300 transition-colors rounded"
-                            >
-                              Configurar proxy <ExternalLink className="w-3 h-3" />
-                            </a>
-                          </div>
-
                           {/* Quarentena */}
                           {isQuarantined && (
                             <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 space-y-1">
@@ -1255,18 +1509,55 @@ export default function AquecerChipsPage() {
                                 Aquecimento pausado por segurança
                               </p>
                               <p className="text-[11px] text-red-200/90 leading-relaxed">
-                                {cfg.quarantine_reason || "O sistema detectou erros seguidos e colocou este chip em quarentena por 24 horas."}
+                                {cfg.quarantine_reason || "O sistema detectou erros seguidos e pausou este número por 24 horas."}
                                 {cfg.quarantine_until ? ` Volta automaticamente em ${new Date(cfg.quarantine_until).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}.` : ""}
                               </p>
                             </div>
                           )}
+
+                          {/* O que está acontecendo agora */}
+                          <div className={styles.progressContainer}>
+                            <div className="flex flex-wrap items-baseline justify-between gap-2 text-xs">
+                              <span className="text-neutral-300 font-medium">
+                                {isQuarantined ? "Pausado por segurança" : !cfg.enabled ? "Aquecimento pausado" : "Mensagens de hoje"}
+                              </span>
+                              <span className="text-neutral-400 tabular-nums">
+                                <strong className="text-white font-semibold">{cfg.sent_today || 0}</strong> de {dailyTarget} enviadas
+                              </span>
+                            </div>
+                            <div
+                              className={styles.progressTrack}
+                              role="progressbar"
+                              aria-valuemin={0}
+                              aria-valuemax={100}
+                              aria-valuenow={progressPercent}
+                              aria-label={`Meta de mensagens de ${instName}`}
+                            >
+                              <div
+                                className={cn(
+                                  styles.progressBar,
+                                  isQuarantined ? "bg-red-500" : progressPercent >= 100 ? "bg-emerald-400" : stageUI.bar
+                                )}
+                                style={{ width: `${progressPercent}%` }}
+                              />
+                            </div>
+                            <p className="text-[11px] text-neutral-400">
+                              {isQuarantined
+                                ? "Nada é enviado até a quarentena terminar."
+                                : !cfg.enabled
+                                  ? "Ligue o aquecimento para este número voltar a conversar."
+                                  : progressPercent >= 100
+                                    ? `Meta de hoje concluída · ${cfg.received_today || 0} respostas recebidas.`
+                                    : `Faltam ${remainingToday} mensagens hoje · ${cfg.received_today || 0} respostas recebidas.`}
+                            </p>
+                          </div>
 
                           {/* Fase */}
                           <div className="space-y-2">
                             <div className="flex flex-wrap items-baseline justify-between gap-2">
                               <span className="text-xs font-medium text-neutral-300">Fase de aquecimento</span>
                               <span className="text-[11px] text-neutral-400">
-                                Recomendado: {stageInfo.recommendedDays} · até {stageInfo.dailyTarget} msgs/dia
+                                {stageInfo.recommendedDays} · até {stageInfo.dailyTarget} mensagens por dia
                               </span>
                             </div>
 
@@ -1295,32 +1586,63 @@ export default function AquecerChipsPage() {
                               })}
                             </div>
 
-                            <p className="text-[11px] text-neutral-400 leading-relaxed">{stageInfo.description}</p>
+                            <p className="text-[11px] text-neutral-400 leading-relaxed">{STAGE_HINT[stage]}</p>
                           </div>
 
-                          {/* Progresso do dia */}
-                          <div className={styles.progressContainer}>
-                            <div className="flex flex-wrap items-baseline justify-between gap-2 text-xs">
-                              <span className="text-neutral-300 font-medium">Meta do Dia</span>
-                              <span className="text-neutral-400 tabular-nums">
-                                <strong className="text-white font-semibold">{cfg.sent_today || 0}</strong> de {dailyTarget} enviadas ·{" "}
-                                {cfg.received_today || 0} recebidas
+                          {/* Para que serve */}
+                          <div className="space-y-1.5">
+                            <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                              <span className="font-medium text-neutral-300 flex items-center gap-1.5">
+                                <Target className="w-3.5 h-3.5 text-emerald-400" />
+                                Para que este número vai servir
+                              </span>
+                              <span className="text-[11px] text-neutral-400">Preparo: {purposeMeta.recommendedDays}</span>
+                            </div>
+
+                            <div className={styles.purposeGrid}>
+                              {(["contingency", "inbound", "outbound"] as WarmupPurpose[]).map((pKey) => {
+                                const meta = PURPOSE_METADATA[pKey];
+                                const isSelected = purposeKey === pKey;
+                                return (
+                                  <button
+                                    key={pKey}
+                                    type="button"
+                                    onClick={() => handleUpdateConfigField(instName, "purpose", pKey)}
+                                    aria-pressed={isSelected}
+                                    className={cn(styles.purposeOption, isSelected && styles.purposeOptionActive)}
+                                  >
+                                    <span className={styles.purposeTitle}>{PURPOSE_SHORT[pKey]}</span>
+                                    <span className={styles.purposeDesc}>{meta.recommendedDays}</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+
+                            <p className="text-[11px] text-neutral-400 leading-relaxed">{purposeMeta.targetUse}</p>
+                          </div>
+
+                          {/* Saúde e contexto */}
+                          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px]">
+                            <div className="flex items-center gap-2">
+                              <span className="text-neutral-400">Saúde do número:</span>
+                              <div className="h-1.5 w-16 rounded-full bg-[#202b23] overflow-hidden">
+                                <div className={`h-full rounded-full ${healthUI.bar}`} style={{ width: `${health}%` }} />
+                              </div>
+                              <span className={`font-medium ${healthUI.text}`}>
+                                {health}% · {healthUI.label}
                               </span>
                             </div>
-                            <div className={styles.progressTrack}>
-                              <div
-                                className={cn(
-                                  styles.progressBar,
-                                  isQuarantined ? "bg-red-500" : progressPercent >= 100 ? "bg-emerald-400" : stageUI.bar
-                                )}
-                                style={{ width: `${progressPercent}%` }}
-                              />
-                            </div>
-                            <p className="text-[11px] text-neutral-400">
-                              {progressPercent >= 100
-                                ? "Meta do dia concluída. O chip volta a conversar amanhã."
-                                : `Faltam ${remainingToday} mensagens para bater a meta de hoje.`}
-                            </p>
+
+                            <span className="text-neutral-400">
+                              Última atividade: <span className="text-neutral-300">{formatRelativeTime(cfg.last_activity_at)}</span>
+                            </span>
+
+                            <a
+                              href="/whatsapp"
+                              className="ml-auto inline-flex items-center gap-1 text-neutral-400 hover:text-emerald-300 transition-colors rounded"
+                            >
+                              Configurar proxy <ExternalLink className="w-3 h-3" />
+                            </a>
                           </div>
 
                           {/* Ações */}
@@ -1342,7 +1664,7 @@ export default function AquecerChipsPage() {
                                 }}
                                 className={styles.secondaryAction}
                               >
-                                <Send className="w-3 h-3" /> Testar disparo
+                                <Send className="w-3 h-3" /> Testar conversa
                               </button>
                             </div>
 
@@ -1380,93 +1702,299 @@ export default function AquecerChipsPage() {
               </div>
             )}
           </div>
+        </div>
+      )}
 
-          {/* ========================================================================= */}
-          {/* ATIVIDADE AO VIVO */}
-          {/* ========================================================================= */}
+      {/* ========================================================================= */}
+      {/* ABA 2: GRUPOS DE AQUECIMENTO DA COLMEIA */}
+      {/* ========================================================================= */}
+      {activeTab === "groups" && (
+        <div className="space-y-6">
+          {/* Card de Importação em Lote */}
           <div className={styles.panel}>
             <div className={styles.panelHeader}>
-              <div className="flex items-center gap-2.5">
-                <span className={`w-2 h-2 rounded-full ${autoRefreshLogs ? "bg-emerald-400 animate-pulse motion-reduce:animate-none" : "bg-neutral-600"}`} />
-                <h3 className={styles.panelTitle}>Atividade ao vivo</h3>
-                <Badge variant="outline" className="border-white/10 text-neutral-400 text-[11px]">
-                  {logs.length} interações
-                </Badge>
+              <div className="flex items-start gap-3">
+                <div className="p-2 rounded-lg bg-blue-500/10 border border-blue-500/20 text-blue-400 shrink-0">
+                  <Users className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className={styles.panelTitle}>Grupos de aquecimento</h2>
+                  <p className={styles.panelDescription}>
+                    Cole os links dos grupos do WhatsApp, um por linha. Seus números entram aos poucos e reagem às conversas para parecerem pessoas ativas.
+                  </p>
+                </div>
               </div>
 
               <div className="flex items-center gap-2">
-                <label className="text-xs text-neutral-400 flex items-center gap-1.5 cursor-pointer">
-                  <span>Atualizar sozinho</span>
-                  <Switch checked={autoRefreshLogs} onCheckedChange={setAutoRefreshLogs} size="sm" aria-label="Atualizar atividade automaticamente" />
-                </label>
                 <button
                   type="button"
-                  onClick={() => loadData(true)}
+                  onClick={handleSyncGroupMembers}
+                  disabled={syncingGroups || groups.length === 0}
                   className={styles.secondaryAction}
                 >
-                  <RefreshCw className="w-3 h-3" /> Atualizar
+                  <RefreshCw className={cn("w-3.5 h-3.5", syncingGroups && "animate-spin")} />
+                  {syncingGroups ? "Sincronizando..." : "Colocar números nos grupos"}
                 </button>
               </div>
             </div>
 
             <div className={styles.panelBody}>
-              <div
-                ref={logsContainerRef}
-                role="log"
-                aria-live="polite"
-                aria-label="Atividade recente dos chips"
-                className={styles.terminalContainer}
-              >
-                {logs.length === 0 ? (
-                  <div className="text-center py-8 space-y-2">
-                    <Inbox className="w-6 h-6 text-neutral-600 mx-auto" />
-                    <p className="text-neutral-400 font-sans">
-                      Nada por aqui ainda. Quando dois chips conversarem, as mensagens aparecem nesta lista.
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => setTestModalOpen(true)}
-                      className={cn(styles.secondaryAction, "mx-auto font-sans")}
-                    >
-                      <Send className="w-3 h-3 mr-1.5" /> Ver a primeira conversa
-                    </button>
+              <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <label htmlFor="group-links-input" className="text-xs font-semibold text-neutral-300">
+                    Links dos grupos (um por linha)
+                  </label>
+                  <textarea
+                    id="group-links-input"
+                    rows={4}
+                    value={importLinksInput}
+                    onChange={(e) => setImportLinksInput(e.target.value)}
+                    placeholder="https://chat.whatsapp.com/G34A1B2C3D4E5F&#10;https://chat.whatsapp.com/L99Z8Y7X6W5V4U&#10;chat.whatsapp.com/M55P4Q3R2S1T0U"
+                    className={cn(
+                      styles.fieldInput,
+                      "h-auto font-mono text-xs leading-relaxed py-2.5 resize-y"
+                    )}
+                  />
+                </div>
+
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
+                  <div className="flex items-center gap-2 text-xs text-neutral-400">
+                    <Sparkles className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>
+                      As reações são escolhidas por regras simples (👍, ❤️, 😂), sem gastar créditos de IA.
+                    </span>
                   </div>
-                ) : (
-                  logs.map((log) => {
-                    const time = log.created_at
-                      ? new Date(log.created_at).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
-                      : "--:--:--";
-                    const typeUI = LOG_TYPE_UI[log.action_type] || LOG_TYPE_UI.text;
-                    const TypeIcon = typeUI.icon;
 
-                    return (
-                      <div
-                        key={log.id || `${log.created_at}-${log.sender_instance}`}
-                        className={styles.terminalItem}
-                      >
-                        <span className={styles.terminalTime}>{time}</span>
-                        <div className={styles.terminalBadges}>
-                          <Badge variant="outline" className={`text-[11px] flex items-center gap-1 ${typeUI.chip}`}>
-                            <TypeIcon className="w-3 h-3" />
-                            {typeUI.label}
-                          </Badge>
-                          <span className="flex items-center gap-1.5 text-xs text-neutral-200">
-                            <span className="font-medium">{log.sender_instance}</span>
-                            <ArrowRight className="w-3 h-3 text-neutral-600 shrink-0" aria-hidden="true" />
-                            <span className="font-medium">{log.receiver_instance}</span>
-                          </span>
-                        </div>
-
-                        <div className={styles.terminalText}>
-                          {log.message_text}
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
+                  <button
+                    type="button"
+                    onClick={handleImportGroups}
+                    disabled={importingGroups || !importLinksInput.trim()}
+                    className={cn(styles.primaryAction, "bg-emerald-400 hover:bg-emerald-300 text-neutral-950 font-semibold")}
+                  >
+                    {importingGroups ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        Entrando nos grupos...
+                      </>
+                    ) : (
+                      <>
+                        <Users className="w-3.5 h-3.5" />
+                        Adicionar grupos
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
+
+          {/* Tabela de Grupos Monitorados */}
+          <div className="space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <h3 className="text-base font-semibold text-white flex items-center gap-2">
+                <Users className="w-4 h-4 text-blue-400" />
+                Grupos cadastrados ({groups.length})
+              </h3>
+              <span className="text-xs text-neutral-400">
+                As mensagens destes grupos não entram no seu atendimento.
+              </span>
+            </div>
+
+            {groupsLoading ? (
+              <div className="p-8 text-center text-xs text-neutral-400">Carregando grupos...</div>
+            ) : groups.length === 0 ? (
+              <Card className="bg-[#181d19] border-[#303a32] p-8 text-center space-y-3">
+                <Users className="w-10 h-10 text-neutral-600 mx-auto" />
+                <h4 className="text-base font-medium text-white">Nenhum grupo cadastrado ainda</h4>
+                <p className="text-xs text-neutral-400 max-w-md mx-auto leading-relaxed">
+                  Adicione links de grupos acima. Seus números entram sozinhos e passam a interagir com as conversas.
+                </p>
+              </Card>
+            ) : (
+              <div className="overflow-x-auto rounded-xl border border-[#303a32] bg-[#181d19]">
+                <table className={styles.groupsTable}>
+                  <thead>
+                    <tr>
+                      <th>Grupo</th>
+                      <th>Código / Link</th>
+                      <th>Membros</th>
+                      <th>Números no grupo</th>
+                      <th>Mensagens lidas</th>
+                      <th>Reações</th>
+                      <th>Status</th>
+                      <th className="text-right">Ação</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {groups.map((g) => {
+                      const membersList = g.members || [];
+                      return (
+                        <tr key={g.id}>
+                          <td className="font-medium text-white max-w-[200px] truncate">
+                            {g.name || "Grupo sem título"}
+                          </td>
+                          <td className="font-mono text-[11px] text-neutral-400 max-w-[140px] truncate">
+                            {g.invite_code}
+                          </td>
+                          <td className="text-neutral-300">
+                            {g.member_count > 0 ? `${g.member_count} membros` : "Não detectado"}
+                          </td>
+                          <td>
+                            <div className="flex flex-wrap gap-1 max-w-[180px]">
+                              {membersList.length === 0 ? (
+                                <span className="text-neutral-500 text-[11px]">Nenhum chip</span>
+                              ) : (
+                                membersList.map((m: any) => (
+                                  <Badge
+                                    key={m.instance_name}
+                                    variant="outline"
+                                    className="text-[10px] border-emerald-500/30 bg-emerald-500/10 text-emerald-300 py-0"
+                                  >
+                                    {m.instance_name}
+                                  </Badge>
+                                ))
+                              )}
+                            </div>
+                          </td>
+                          <td className="text-neutral-300 tabular-nums font-mono text-[11px]">
+                            {g.total_messages_received || 0}
+                          </td>
+                          <td className="text-neutral-300 tabular-nums font-mono text-[11px]">
+                            {g.total_reactions_sent || 0}
+                          </td>
+                          <td>
+                            <Badge
+                              variant="outline"
+                              className={cn(
+                                "text-[10px] font-semibold",
+                                g.status === "active"
+                                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                                  : g.status === "full"
+                                  ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
+                                  : "border-neutral-500/30 bg-neutral-500/10 text-neutral-300"
+                              )}
+                            >
+                              {g.status === "active" ? "Ativo" : g.status === "full" ? "Lotado" : g.status}
+                            </Badge>
+                          </td>
+                          <td className="text-right">
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteGroup(g.id)}
+                              className="text-neutral-500 hover:text-red-400 p-1 rounded transition-colors"
+                              title="Remover grupo"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* ABA 3: ATIVIDADE AO VIVO & LOGS */}
+      {/* ========================================================================= */}
+      {activeTab === "logs" && (
+        <div className={styles.panel}>
+          <div className={styles.panelHeader}>
+            <div className="flex items-center gap-2.5">
+              <span className={`w-2 h-2 rounded-full ${autoRefreshLogs ? "bg-emerald-400 animate-pulse motion-reduce:animate-none" : "bg-neutral-600"}`} />
+              <h3 className={styles.panelTitle}>Atividade ao vivo</h3>
+              <Badge variant="outline" className="border-white/10 text-neutral-400 text-[11px]">
+                {logs.length} interações
+              </Badge>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-neutral-400 flex items-center gap-1.5 cursor-pointer">
+                <span>Atualizar sozinho</span>
+                <Switch checked={autoRefreshLogs} onCheckedChange={setAutoRefreshLogs} size="sm" aria-label="Atualizar atividade automaticamente" />
+              </label>
+              <button
+                type="button"
+                onClick={() => loadData(true)}
+                className={styles.secondaryAction}
+              >
+                <RefreshCw className="w-3 h-3" /> Atualizar
+              </button>
+            </div>
+          </div>
+
+          <div className={styles.panelBody}>
+            <div
+              ref={logsContainerRef}
+              role="log"
+              aria-live="polite"
+              aria-label="Atividade recente dos chips"
+              className={styles.terminalContainer}
+            >
+              {logs.length === 0 ? (
+                <div className="text-center py-8 space-y-2">
+                  <Inbox className="w-6 h-6 text-neutral-600 mx-auto" />
+                  <p className="text-neutral-400 font-sans">
+                    Nada por aqui ainda. Quando dois números conversarem, cada mensagem aparece nesta lista.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (instances.length >= 2) {
+                        setTestSender(instances[0].instance_name);
+                        setTestReceiver(instances[1].instance_name);
+                      } else if (instances.length === 1) {
+                        setTestSender(instances[0].instance_name);
+                      }
+                      setTestModalOpen(true);
+                    }}
+                    disabled={instances.length === 0}
+                    className={cn(styles.secondaryAction, "mx-auto font-sans")}
+                  >
+                    <Send className="w-3 h-3 mr-1.5" /> Ver a primeira conversa
+                  </button>
+                </div>
+              ) : (
+                logs.map((log) => {
+                  const time = log.created_at
+                    ? new Date(log.created_at).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+                    : "--:--:--";
+                  const typeUI = LOG_TYPE_UI[log.action_type] || LOG_TYPE_UI.text;
+                  const TypeIcon = typeUI.icon;
+
+                  return (
+                    <div
+                      key={log.id || `${log.created_at}-${log.sender_instance}`}
+                      className={styles.terminalItem}
+                    >
+                      <span className={styles.terminalTime}>{time}</span>
+                      <div className={styles.terminalBadges}>
+                        <Badge variant="outline" className={`text-[11px] flex items-center gap-1 ${typeUI.chip}`}>
+                          <TypeIcon className="w-3 h-3" />
+                          {typeUI.label}
+                        </Badge>
+                        <span className="flex items-center gap-1.5 text-xs text-neutral-200">
+                          <span className="font-medium">{log.sender_instance}</span>
+                          <ArrowRight className="w-3 h-3 text-neutral-600 shrink-0" aria-hidden="true" />
+                          <span className="font-medium">{log.receiver_instance}</span>
+                        </span>
+                      </div>
+
+                      <div className={styles.terminalText}>
+                        {log.message_text}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
           {/* Dialog de Teste Imediato */}
           <Dialog open={testModalOpen} onOpenChange={setTestModalOpen}>
@@ -1475,10 +2003,10 @@ export default function AquecerChipsPage() {
                 <Flame className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
                 <div>
                   <DialogTitle className="text-lg font-bold text-white">
-                    Testar uma conversa agora
+                    Testar uma conversa
                   </DialogTitle>
                   <DialogDescription className="text-xs text-neutral-400 mt-1">
-                    O sistema faz uma troca de mensagem imediata entre os chips escolhidos, exatamente igual ao aquecimento automático.
+                    Escolha quem envia e quem recebe. A mensagem sai igual ao aquecimento automático, mas agora.
                   </DialogDescription>
                 </div>
               </div>
@@ -1486,7 +2014,7 @@ export default function AquecerChipsPage() {
               <div className={styles.dialogBody}>
                 <div className={styles.fieldGroup}>
                   <label htmlFor="test-sender" className={styles.fieldLabel}>
-                    Quem envia
+                    Número que envia
                   </label>
                   <select
                     id="test-sender"
@@ -1494,7 +2022,7 @@ export default function AquecerChipsPage() {
                     onChange={(e) => setTestSender(e.target.value)}
                     className={styles.fieldSelect}
                   >
-                    <option value="">Selecione o chip remetente</option>
+                    <option value="">Selecione o número</option>
                     {instances.map((i) => (
                       <option key={i.instance_name} value={i.instance_name}>
                         {i.instance_name} {i.phone_number ? `(+${i.phone_number})` : ""}
@@ -1505,7 +2033,7 @@ export default function AquecerChipsPage() {
 
                 <div className={styles.fieldGroup}>
                   <label htmlFor="test-receiver" className={styles.fieldLabel}>
-                    Quem recebe
+                    Número que recebe
                   </label>
                   <select
                     id="test-receiver"
@@ -1513,7 +2041,7 @@ export default function AquecerChipsPage() {
                     onChange={(e) => setTestReceiver(e.target.value)}
                     className={styles.fieldSelect}
                   >
-                    <option value="">Selecione o chip destinatário</option>
+                    <option value="">Selecione o número</option>
                     {instances.map((i) => (
                       <option key={i.instance_name} value={i.instance_name}>
                         {i.instance_name} {i.phone_number ? ` (+${i.phone_number})` : ""}
@@ -1526,9 +2054,9 @@ export default function AquecerChipsPage() {
                   <div>
                     <span className="text-xs font-semibold text-white flex items-center gap-1.5">
                       <Radio className="w-3.5 h-3.5 text-emerald-400" />
-                      Postar também Story no Status
+                      Postar um Story também
                     </span>
-                    <p className="text-[11px] text-neutral-400">Publica um status do WhatsApp no chip remetente.</p>
+                    <p className="text-[11px] text-neutral-400">O número que envia publica um status no WhatsApp.</p>
                   </div>
                   <Switch
                     checked={testStatusPost}
@@ -1538,11 +2066,11 @@ export default function AquecerChipsPage() {
                 </div>
 
                 <div className="p-3.5 rounded-lg bg-emerald-950/20 border border-emerald-500/20 text-neutral-300 text-[11px] space-y-1">
-                  <p className="font-semibold text-emerald-300">O que vai acontecer no teste:</p>
-                  <p>1. O chip remetente simula presença humana digitando pelo tempo configurado.</p>
-                  <p>2. A mensagem é enviada usando o modelo configurado ou os diálogos nativos.</p>
-                  <p>3. O destinatário confirma a leitura com tiques azuis reais após atraso humano.</p>
-                  {testStatusPost && <p>4. Um Story no WhatsApp Status é publicado pelo remetente.</p>}
+                  <p className="font-semibold text-emerald-300">O que vai acontecer:</p>
+                  <p>1. O número que envia fica &quot;digitando...&quot; pelo tempo configurado.</p>
+                  <p>2. A mensagem é escrita pelo modelo escolhido ou pelas frases prontas.</p>
+                  <p>3. O número que recebe lê e responde, como uma pessoa faria.</p>
+                  {testStatusPost && <p>4. Um Story é publicado no Status do número que envia.</p>}
                 </div>
 
                 {testBlockedReason && (
@@ -1572,7 +2100,7 @@ export default function AquecerChipsPage() {
                         Executando...
                       </>
                     ) : (
-                      "Disparar teste agora"
+                      "Enviar teste agora"
                     )}
                   </button>
                 </div>
@@ -1589,10 +2117,10 @@ export default function AquecerChipsPage() {
                 </div>
                 <div>
                   <DialogTitle className="text-base font-bold text-white">
-                    Aquecimento Mútuo Automático (Dois Chips)
+                    Aquecer dois chips
                   </DialogTitle>
                   <DialogDescription className="text-xs text-neutral-400 mt-1">
-                    Escolha dois números para maturação cruzada simultânea. O sistema cuida de tudo sozinho com as tecnologias anti-ban de 2026.
+                    Escolha dois números. Eles vão conversar entre si e o sistema cuida do resto.
                   </DialogDescription>
                 </div>
               </div>
@@ -1602,7 +2130,7 @@ export default function AquecerChipsPage() {
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className={styles.fieldGroup}>
                     <label htmlFor="pair-chip-a" className={styles.fieldLabel}>
-                      Primeiro Chip (Chip A)
+                      Primeiro número
                     </label>
                     <select
                       id="pair-chip-a"
@@ -1610,7 +2138,7 @@ export default function AquecerChipsPage() {
                       onChange={(e) => setPairChipA(e.target.value)}
                       className={styles.fieldSelect}
                     >
-                      <option value="">Selecione o Chip A</option>
+                      <option value="">Selecione o primeiro número</option>
                       {instances.map((i) => (
                         <option key={i.instance_name} value={i.instance_name}>
                           {i.instance_name} {i.phone_number ? `(+${i.phone_number})` : ""} · {STAGE_UI[i.config?.stage as WarmupStage || 1]?.name}
@@ -1621,7 +2149,7 @@ export default function AquecerChipsPage() {
 
                   <div className={styles.fieldGroup}>
                     <label htmlFor="pair-chip-b" className={styles.fieldLabel}>
-                      Segundo Chip (Chip B)
+                      Segundo número
                     </label>
                     <select
                       id="pair-chip-b"
@@ -1629,7 +2157,7 @@ export default function AquecerChipsPage() {
                       onChange={(e) => setPairChipB(e.target.value)}
                       className={styles.fieldSelect}
                     >
-                      <option value="">Selecione o Chip B</option>
+                      <option value="">Selecione o segundo número</option>
                       {instances.map((i) => (
                         <option key={i.instance_name} value={i.instance_name}>
                           {i.instance_name} {i.phone_number ? `(+${i.phone_number})` : ""} · {STAGE_UI[i.config?.stage as WarmupStage || 1]?.name}
@@ -1669,7 +2197,7 @@ export default function AquecerChipsPage() {
                         <ArrowRightLeft className="w-4 h-4" />
                       </div>
                       <span className="text-[10px] font-semibold text-emerald-400 uppercase tracking-wider text-center">
-                        Mútuo ⇄ 2 Vias
+                        Conversa nos dois sentidos
                       </span>
                     </div>
 
@@ -1700,32 +2228,32 @@ export default function AquecerChipsPage() {
                 <div className="space-y-2">
                   <span className="text-xs font-semibold text-white flex items-center gap-1.5">
                     <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                    O que é executado 100% automático neste par:
+                    O que acontece sozinho neste par:
                   </span>
                   <div className={styles.pairFeaturesList}>
                     <div className={styles.pairFeatureItem}>
                       <Contact className={styles.pairFeatureIcon} />
-                      <span>Troca mútua de contato na agenda (vCard)</span>
+                      <span>Salvam o contato um do outro</span>
                     </div>
                     <div className={styles.pairFeatureItem}>
                       <Volume2 className={styles.pairFeatureIcon} />
-                      <span>Áudios reais Ogg Opus (microfone azul)</span>
+                      <span>Mandam áudios curtos de voz</span>
                     </div>
                     <div className={styles.pairFeatureItem}>
                       <CheckCheck className={styles.pairFeatureIcon} />
-                      <span>Confirmação de leitura humana (tiques azuis)</span>
+                      <span>Leem e respondem com atraso humano</span>
                     </div>
                     <div className={styles.pairFeatureItem}>
                       <Eye className={styles.pairFeatureIcon} />
-                      <span>Presença realista (&quot;digitando...&quot;)</span>
+                      <span>Ficam &quot;digitando...&quot; antes de enviar</span>
                     </div>
                     <div className={styles.pairFeatureItem}>
                       <Activity className={styles.pairFeatureIcon} />
-                      <span>Piloto automático de fases (Frio ao Blindado)</span>
+                      <span>Sobem de fase automaticamente</span>
                     </div>
                     <div className={styles.pairFeatureItem}>
                       <ShieldAlert className={styles.pairFeatureIcon} />
-                      <span>Quarentena preventiva Circuit Breaker</span>
+                      <span>Pausam sozinhos se algo falhar</span>
                     </div>
                   </div>
                 </div>
@@ -1735,10 +2263,10 @@ export default function AquecerChipsPage() {
                   <div>
                     <span className="text-xs font-semibold text-white flex items-center gap-1.5">
                       <Radio className="w-3.5 h-3.5 text-emerald-400" />
-                      Postar também Stories no Status
+                      Postar Stories no Status
                     </span>
                     <p className="text-[11px] text-neutral-400">
-                      Publica atualizações de status nos números para simular uso social diário.
+                      Os dois números publicam status para parecerem ativos no dia a dia.
                     </p>
                   </div>
                   <Switch
@@ -1752,12 +2280,12 @@ export default function AquecerChipsPage() {
                 {instances.length < 2 ? (
                   <p className="text-[11px] text-amber-300 flex items-start gap-1.5 p-2 rounded bg-amber-500/10 border border-amber-500/20">
                     <Info className="w-4 h-4 shrink-0 mt-0.5" />
-                    Conecte ao menos dois chips na área WhatsApp para maturação em par.
+                    Conecte dois números na área WhatsApp para aquecer em par.
                   </p>
                 ) : pairChipA === pairChipB && pairChipA ? (
                   <p className="text-[11px] text-amber-300 flex items-start gap-1.5 p-2 rounded bg-amber-500/10 border border-amber-500/20">
                     <Info className="w-4 h-4 shrink-0 mt-0.5" />
-                    Selecione chips diferentes para Chip A e Chip B.
+                    Escolha dois números diferentes.
                   </p>
                 ) : null}
 
@@ -1781,12 +2309,12 @@ export default function AquecerChipsPage() {
                     {mutualLoading ? (
                       <>
                         <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                        Executando troca mútua...
+                        Aquecendo agora...
                       </>
                     ) : (
                       <>
                         <Send className="w-3.5 h-3.5 text-emerald-400" />
-                        Disparar rodada simultânea agora
+                        Aquecer agora, uma vez
                       </>
                     )}
                   </button>
@@ -1806,7 +2334,7 @@ export default function AquecerChipsPage() {
                     ) : (
                       <>
                         <Sparkles className="w-3.5 h-3.5 text-neutral-950" />
-                        Ativar Piloto Automático do Par (24/7)
+                        Deixar aquecendo sozinho (24/7)
                       </>
                     )}
                   </button>
@@ -1815,7 +2343,7 @@ export default function AquecerChipsPage() {
             </DialogContent>
           </Dialog>
         </div>
-      </main>
+      </div>
     </div>
   );
 }

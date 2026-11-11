@@ -76,15 +76,15 @@ ALTER TABLE public.whatsapp_warmup_conversations ENABLE ROW LEVEL SECURITY;
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'warmup_configs_tenant') THEN
     CREATE POLICY warmup_configs_tenant ON public.whatsapp_warmup_configs
-      FOR ALL USING (client_id = auth.uid() OR current_setting('role', true) = 'service_role');
+      FOR ALL USING (client_id = (SELECT auth.uid()) OR (SELECT current_setting('role', true)) = 'service_role');
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'warmup_logs_tenant') THEN
     CREATE POLICY warmup_logs_tenant ON public.whatsapp_warmup_logs
-      FOR ALL USING (client_id = auth.uid() OR current_setting('role', true) = 'service_role');
+      FOR ALL USING (client_id = (SELECT auth.uid()) OR (SELECT current_setting('role', true)) = 'service_role');
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'warmup_convs_tenant') THEN
     CREATE POLICY warmup_convs_tenant ON public.whatsapp_warmup_conversations
-      FOR ALL USING (client_id = auth.uid() OR current_setting('role', true) = 'service_role');
+      FOR ALL USING (client_id = (SELECT auth.uid()) OR (SELECT current_setting('role', true)) = 'service_role');
   END IF;
 END $$;
 

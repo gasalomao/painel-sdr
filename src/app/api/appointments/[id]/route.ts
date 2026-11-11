@@ -12,6 +12,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { normalizeJid } from "@/lib/jid-utils";
 import {
   createCalendarEvent,
   updateCalendarEvent,
@@ -61,6 +62,18 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   if (body.start_at) patch.start_at = new Date(body.start_at).toISOString();
   if (body.end_at) patch.end_at = new Date(body.end_at).toISOString();
   if (body.metadata && typeof body.metadata === "object") patch.metadata = body.metadata;
+  if (body.remote_jid !== undefined) {
+    const rawRemoteJid = typeof body.remote_jid === "string" ? body.remote_jid.trim() : "";
+    if (rawRemoteJid.startsWith("google:") && rawRemoteJid === existing.remote_jid) {
+      patch.remote_jid = rawRemoteJid;
+    } else {
+      const remoteJid = normalizeJid(body.remote_jid);
+      if (!remoteJid) {
+        return NextResponse.json({ ok: false, error: "Contato do WhatsApp inválido" }, { status: 400 });
+      }
+      patch.remote_jid = remoteJid;
+    }
+  }
 
   if (body.agent_id !== undefined) {
     if (body.agent_id === null) {
@@ -235,31 +248,54 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
 
   if (body.sync_google !== false) patch.google_error = googleError;
 
-  // Helper: tenta o update. Se migration 007 não rodou, retry sem campos novos.
-  const updateAppointment = async (payload: Record<string, any>) => {
-    const r1 = await supabaseAdmin
-      .from("appointments")
-      .update(payload)
-      .eq("id", id)
-      .select()
-      .single();
-    if (!r1.error) return r1;
-    const msg = String(r1.error?.message || "");
-    const isSchemaMiss =
-      r1.error?.code === "PGRST204" ||
-      /column .* of 'appointments'/i.test(msg) ||
-      /Could not find the .* column/i.test(msg);
-    if (!isSchemaMiss) return r1;
-    const stripped = { ...payload };
-    for (const k of [
-      "location", "attendees", "all_day", "visibility", "color_id",
-      "recurrence", "html_link", "conference_data", "organizer_email", "google_error",
-    ]) delete stripped[k];
-    console.warn(`[appointments PATCH] Migration 007 não aplicada — atualizando sem campos Google`);
+  // Helper: tenta o update com retry progressivo e resiliência total a colunas ausentes
+  const updateAppointment = async (initialPayload: Record<string, any>) => {
+    const currentPayload = { ...initialPayload };
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const res = await supabaseAdmin
+        .from("appointments")
+        .update(currentPayload)
+        .eq("id", id)
+        .eq("client_id", existing.client_id)
+        .select()
+        .single();
+      if (!res.error) return res;
+
+      const code = String(res.error.code || "");
+      const msg = String(res.error.message || "");
+      const isSchemaMiss =
+        code === "PGRST204" ||
+        code === "42703" ||
+        /does not exist/i.test(msg) ||
+        /column .* of 'appointments'/i.test(msg) ||
+        /Could not find the .* column/i.test(msg);
+
+      if (!isSchemaMiss) return res;
+
+      const match =
+        msg.match(/column (?:[a-zA-Z0-9_]+\.)?["']?([a-zA-Z0-9_]+)["']? does not exist/i) ||
+        msg.match(/column ["']?([a-zA-Z0-9_]+)["']? of relation/i) ||
+        msg.match(/Could not find the '([a-zA-Z0-9_]+)' column/i);
+
+      if (match && match[1] && match[1] in currentPayload) {
+        const missingCol = match[1];
+        console.warn(`[appointments PATCH] Coluna '${missingCol}' ausente em appointments — removendo do update.`);
+        delete currentPayload[missingCol];
+      } else {
+        console.warn(`[appointments PATCH] Erro de coluna em appointments: ${msg} — removendo campos Google legados`);
+        for (const k of [
+          "google_error", "conference_data", "html_link", "recurrence",
+          "attendees", "location", "all_day", "visibility", "color_id", "organizer_email",
+        ]) {
+          delete currentPayload[k];
+        }
+      }
+    }
     return await supabaseAdmin
       .from("appointments")
-      .update(stripped)
+      .update(currentPayload)
       .eq("id", id)
+      .eq("client_id", existing.client_id)
       .select()
       .single();
   };
