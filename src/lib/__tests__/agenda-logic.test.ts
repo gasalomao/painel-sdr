@@ -65,6 +65,7 @@ import {
   hasAgentOverlapConflict,
   buildRecurrenceRule,
   parseRecurrenceRule,
+  calculateFreeSlots,
 } from "../agenda-logic";
 import { tickReminders } from "../appointment-worker";
 
@@ -358,5 +359,106 @@ describe("hasAgentOverlapConflict (remarcação sem conflito)", () => {
 
   it("datas inválidas são ignoradas", () => {
     expect(hasAgentOverlapConflict([{ remote_jid: other, start_at: "x", end_at: "y" }], nStart, nEnd, me)).toBe(false);
+  });
+});
+
+/* ============================================================
+   CÁLCULO DE HORÁRIOS LIVRES — calculateFreeSlots
+   ============================================================ */
+describe("calculateFreeSlots", () => {
+  const targetDate = "2026-11-20"; // Uma data futura
+
+  it("sem compromissos: gera todos os slots comerciais das 08:00 às 17:30 (passo 30min)", () => {
+    const slots = calculateFreeSlots({
+      targetDate,
+      busyRanges: [],
+      durationMinutes: 30,
+      startHour: 8,
+      endHour: 18,
+      stepMinutes: 30,
+      nowDate: new Date("2026-11-19T10:00:00-03:00"),
+    });
+
+    expect(slots.length).toBe(20); // 8h às 18h com 30min = 20 slots (08:00 até 17:30)
+    expect(slots[0]).toBe("08:00");
+    expect(slots[slots.length - 1]).toBe("17:30");
+    expect(slots).toContain("10:00");
+    expect(slots).toContain("14:30");
+  });
+
+  it("exclui slots que colidem com intervalos ocupados do Google/DB", () => {
+    // Ocupado das 10:00 às 11:00 (10:00 e 10:30 ocupados) e das 15:00 às 15:30
+    const busyRanges = [
+      { start: "2026-11-20T10:00:00-03:00", end: "2026-11-20T11:00:00-03:00" },
+      { start: "2026-11-20T15:00:00-03:00", end: "2026-11-20T15:30:00-03:00" },
+    ];
+
+    const slots = calculateFreeSlots({
+      targetDate,
+      busyRanges,
+      durationMinutes: 30,
+      startHour: 8,
+      endHour: 18,
+      stepMinutes: 30,
+      nowDate: new Date("2026-11-19T10:00:00-03:00"),
+    });
+
+    expect(slots).not.toContain("10:00");
+    expect(slots).not.toContain("10:30");
+    expect(slots).not.toContain("15:00");
+    expect(slots).toContain("09:30");
+    expect(slots).toContain("11:00");
+    expect(slots).toContain("14:30");
+    expect(slots).toContain("15:30");
+  });
+
+  it("para reunião de 60 minutos, só aceita se houver janela completa de 1h livre", () => {
+    // Ocupado 10:30 às 11:00
+    // O slot de 10:00 (que iria até 11:00) deve ser BLOQUEADO
+    const busyRanges = [
+      { start: "2026-11-20T10:30:00-03:00", end: "2026-11-20T11:00:00-03:00" },
+    ];
+
+    const slots = calculateFreeSlots({
+      targetDate,
+      busyRanges,
+      durationMinutes: 60,
+      startHour: 8,
+      endHour: 18,
+      stepMinutes: 30,
+      nowDate: new Date("2026-11-19T10:00:00-03:00"),
+    });
+
+    expect(slots).not.toContain("10:00");
+    expect(slots).not.toContain("10:30");
+    expect(slots).toContain("09:30"); // 09:30 - 10:30 livre
+    expect(slots).toContain("11:00"); // 11:00 - 12:00 livre
+  });
+
+  it("filtra horários que já passaram se a data for hoje", () => {
+    // Agora é 14:10 em Brasília. Com buffer de 30min, primeiro slot possível deve ser >= 14:40
+    const nowToday = new Date("2026-11-20T14:10:00-03:00");
+
+    const slots = calculateFreeSlots({
+      targetDate,
+      busyRanges: [],
+      durationMinutes: 30,
+      startHour: 8,
+      endHour: 18,
+      stepMinutes: 30,
+      nowDate: nowToday,
+      minBufferMinutes: 30,
+    });
+
+    expect(slots).not.toContain("08:00");
+    expect(slots).not.toContain("14:00");
+    expect(slots).not.toContain("14:30"); // 14:30 < 14:40 (14:10 + 30min)
+    expect(slots).toContain("15:00");
+    expect(slots).toContain("17:30");
+  });
+
+  it("retorna array vazio para data inválida", () => {
+    expect(calculateFreeSlots({ targetDate: "invalid-date" })).toEqual([]);
+    expect(calculateFreeSlots({ targetDate: "" })).toEqual([]);
   });
 });

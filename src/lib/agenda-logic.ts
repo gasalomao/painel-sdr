@@ -195,3 +195,100 @@ export function hasAgentOverlapConflict(
     return rangesOverlap(startMs, endMs, s, e);
   });
 }
+
+export type FreeSlotsOptions = {
+  /** Data no formato YYYY-MM-DD */
+  targetDate: string;
+  /** Intervalos ocupados (do Google Calendar e/ou appointments do banco) */
+  busyRanges?: Array<{ start: Date | string | number; end: Date | string | number }>;
+  /** Duração da reunião em minutos (padrão: 30) */
+  durationMinutes?: number;
+  /** Início do expediente (hora cheia, padrão: 8 -> 08:00) */
+  startHour?: number;
+  /** Fim do expediente (hora cheia, padrão: 18 -> 18:00) */
+  endHour?: number;
+  /** Passo entre horários sugeridos em minutos (padrão: 30) */
+  stepMinutes?: number;
+  /** Data de referência atual para filtrar horários do passado se targetDate for hoje */
+  nowDate?: Date;
+  /** Margem mínima de antecedência em minutos para agendar no mesmo dia (padrão: 30) */
+  minBufferMinutes?: number;
+};
+
+/**
+ * Calcula os horários livres num determinado dia a partir dos intervalos ocupados
+ * (Google Calendar freebusy + appointments do banco).
+ *
+ * Retorna array de strings de horários livres no fuso de Brasília (ex: ["09:00", "09:30", "14:00"]).
+ * Reduz enormemente o consumo de tokens e elimina erros de timezone da IA.
+ */
+export function calculateFreeSlots(options: FreeSlotsOptions): string[] {
+  const {
+    targetDate,
+    busyRanges = [],
+    durationMinutes = 30,
+    startHour = 8,
+    endHour = 18,
+    stepMinutes = 30,
+    nowDate = new Date(),
+    minBufferMinutes = 30,
+  } = options;
+
+  if (!targetDate || !/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) {
+    return [];
+  }
+
+  const durationMs = Math.max(15, durationMinutes) * 60_000;
+  const stepMs = Math.max(15, stepMinutes) * 60_000;
+  const nowThresholdMs = nowDate.getTime() + Math.max(0, minBufferMinutes) * 60_000;
+
+  // Limite final do expediente na data (no fuso de Brasília, -03:00)
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const businessEnd = new Date(`${targetDate}T${pad(endHour)}:00:00-03:00`);
+  const businessEndMs = businessEnd.getTime();
+  if (isNaN(businessEndMs)) return [];
+
+  const parsedBusy = (busyRanges || [])
+    .map((b) => ({
+      start: new Date(b.start).getTime(),
+      end: new Date(b.end).getTime(),
+    }))
+    .filter((b) => Number.isFinite(b.start) && Number.isFinite(b.end) && b.start < b.end);
+
+  const freeSlots: string[] = [];
+
+  // Itera minuto a minuto do expediente
+  const startDay = new Date(`${targetDate}T${pad(startHour)}:00:00-03:00`);
+  let currentStartMs = startDay.getTime();
+  if (isNaN(currentStartMs)) return [];
+
+  while (currentStartMs + durationMs <= businessEndMs) {
+    const currentEndMs = currentStartMs + durationMs;
+
+    // Se o slot estiver no passado ou muito próximo de agora (no mesmo dia)
+    const isPast = currentStartMs < nowThresholdMs;
+
+    if (!isPast) {
+      // Checa sobreposição com qualquer intervalo ocupado
+      const hasConflict = parsedBusy.some((busy) =>
+        rangesOverlap(currentStartMs, currentEndMs, busy.start, busy.end)
+      );
+
+      if (!hasConflict) {
+        // Converte o currentStartMs para HH:MM em America/Sao_Paulo
+        const slotDate = new Date(currentStartMs);
+        const timeStr = slotDate.toLocaleTimeString("pt-BR", {
+          hour: "2-digit",
+          minute: "2-digit",
+          timeZone: "America/Sao_Paulo",
+          hour12: false,
+        });
+        freeSlots.push(timeStr);
+      }
+    }
+
+    currentStartMs += stepMs;
+  }
+
+  return freeSlots;
+}

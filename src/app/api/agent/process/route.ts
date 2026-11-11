@@ -12,7 +12,7 @@ import { requireClientId } from "@/lib/tenant";
 import { hasInternalSecret } from "@/lib/internal-auth";
 import { maskJid } from "@/lib/pii";
 import { resolveFunnelStage, checkSchedulesSync, resolveAgentOutput, splitMessage, normalizeSplitIntensity } from "@/lib/agent-format";
-import { parseAgendaDateTime, isDuplicateSlot, hasAgentOverlapConflict } from "@/lib/agenda-logic";
+import { parseAgendaDateTime, isDuplicateSlot, hasAgentOverlapConflict, calculateFreeSlots } from "@/lib/agenda-logic";
 import { indexKnowledgeDocument } from "@/lib/rag";
 import { getAiKeys } from "@/lib/ai-keys";
 import { formatResultsForAI, needsFreshWebSearch, webSearch } from "@/lib/web-search";
@@ -1872,16 +1872,40 @@ ${capturedVariablesPrompt}
                 slotConflict = hasAgentOverlapConflict(slotRows as any, startDt.getTime(), endDt.getTime(), remoteJid);
              }
 
-             // Descrição: respeita os toggles de captura automática
-             const descLines = ["Agendado via Assistente IA SDR."];
-             if (callArgs.nome)  descLines.push(`Nome: ${callArgs.nome}`);
-             if (callArgs.email) descLines.push(`E-mail: ${callArgs.email}`);
+             // Busca contexto do lead no CRM para enriquecer título, descrição e convidados
+             const { data: leadRow } = await supabase
+                .from("leads_extraidos")
+                .select("id, nome_negocio, ramo_negocio, website, email")
+                .eq("client_id", clientId)
+                .eq("remoteJid", remoteJid)
+                .maybeSingle();
+
+             const phoneFromJid = remoteJid.replace(/@.*$/, "").replace(/\D/g, "");
+             const clientName = (callArgs.nome as string) || (leadRow?.nome_negocio as string) || phoneFromJid;
+             const companyName = (callArgs.empresa as string) || (leadRow?.nome_negocio as string) || null;
+             const attendeeEmail = String(callArgs.email || leadRow?.email || "").trim();
+
+             // Descrição estruturada profissional pro Google Calendar do vendedor
+             const descLines = [
+               `📅 AGENDAMENTO SDR — ${agentConfig.name || "Assistente IA"}`,
+               `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+               `👤 Convidado: ${callArgs.nome || clientName || "Não informado"}`,
+             ];
              if (calendarAutoCapture.telefone) {
-               const phoneFromJid = remoteJid.replace(/@.*$/, "").replace(/\D/g, "");
-               descLines.push(`Telefone (WhatsApp): ${phoneFromJid}`);
+               descLines.push(`📱 WhatsApp: ${phoneFromJid}`);
              }
-             if (calendarAutoCapture.empresa     && callArgs.empresa)     descLines.push(`Empresa: ${callArgs.empresa}`);
-             if (calendarAutoCapture.necessidade && callArgs.necessidade) descLines.push(`${necessidadeLabel}: ${callArgs.necessidade}`);
+             if (attendeeEmail) {
+               descLines.push(`✉️ E-mail: ${attendeeEmail}`);
+             }
+             if (companyName) {
+               descLines.push(`🏢 Empresa: ${companyName}${leadRow?.ramo_negocio ? ` (${leadRow.ramo_negocio})` : ""}`);
+             }
+             if (calendarAutoCapture.necessidade && (callArgs.necessidade || callArgs.summary)) {
+               descLines.push(`🎯 ${necessidadeLabel}: ${callArgs.necessidade || callArgs.summary}`);
+             }
+             if (leadRow?.website) {
+               descLines.push(`🌐 Website: ${leadRow.website}`);
+             }
 
              if (dup) {
                 console.log(`[Agent/Schedule] Duplicado evitado (appt ${dup.id}) — NÃO recria.`);
@@ -1904,22 +1928,31 @@ ${capturedVariablesPrompt}
              // índice único (agent_id,start_at) barra o 2º insert (23505); aí
              // desfazemos o evento no Google pra não sobrar órfão.
              let raceConflict = false;
+             const baseSummary = (callArgs.summary as string) || "Reunião";
+             const eventSummary = companyName && callArgs.nome
+                 ? `${baseSummary} — ${callArgs.nome} (${companyName})`
+                 : `${baseSummary} — ${clientName}`;
+
              const eventBody: any = {
-                 summary: (callArgs.summary as string) + (callArgs.nome ? ` — ${callArgs.nome}` : ` - ${remoteJid.split("@")[0]}`),
+                 summary: eventSummary,
                  start: { dateTime: startDt.toISOString(), timeZone: "America/Sao_Paulo" },
                  end: { dateTime: endDt.toISOString(), timeZone: "America/Sao_Paulo" },
                  description: descLines.join("\n"),
              };
 
-             // Se o cliente passou e-mail, vira convidado oficial
-             if (callArgs.email) {
-                 eventBody.attendees = [{ email: String(callArgs.email) }];
+             // Se o cliente passou e-mail, vira convidado oficial no Google Calendar
+             if (attendeeEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(attendeeEmail)) {
+                 eventBody.attendees = [{
+                     email: attendeeEmail,
+                     displayName: (callArgs.nome as string) || clientName || undefined,
+                 }];
              }
 
-             if (agentConfig.options?.calendar_generate_meet) {
+             const shouldGenerateMeet = !!agentConfig.options?.calendar_generate_meet;
+             if (shouldGenerateMeet) {
                  eventBody.conferenceData = {
                      createRequest: {
-                         requestId: "meeting-" + Date.now(),
+                         requestId: `meet-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                          conferenceSolutionKey: { type: "hangoutsMeet" }
                      }
                  };
@@ -1927,16 +1960,16 @@ ${capturedVariablesPrompt}
 
              const instRes = await calendar.events.insert({
                  calendarId: 'primary',
-                 conferenceDataVersion: 1,
-                 sendUpdates: 'all',
+                 conferenceDataVersion: shouldGenerateMeet ? 1 : 0,
+                 sendUpdates: (eventBody.attendees && eventBody.attendees.length > 0) ? 'all' : 'none',
                  requestBody: eventBody
              });
 
-             let meetLinkStr = "";
-             if (instRes.data.conferenceData?.entryPoints) {
-                 const meet = instRes.data.conferenceData.entryPoints.find((e: any) => e.entryPointType === 'video');
-                 if (meet) meetLinkStr = ` Link do Meet gerado Automático: ${meet.uri}`;
-             }
+             const evId = instRes.data.id || null;
+             const meetUri = instRes.data.conferenceData?.entryPoints?.find((e: any) => e.entryPointType === 'video')?.uri
+                 || (instRes.data as any).hangoutLink
+                 || null;
+             const meetLinkStr = meetUri ? ` Link do Google Meet: ${meetUri}` : "";
 
              // Notifica o dono se configurado em scheduler_config.notify_owner.
              // Best-effort: se falhar, segue normal.
@@ -1944,8 +1977,28 @@ ${capturedVariablesPrompt}
                  const sched = (agentConfig.scheduler_config || {}) as any;
                  if (sched.notify_owner && sched.owner_phone) {
                      const ownerJid = `${String(sched.owner_phone).replace(/\D/g, "")}@s.whatsapp.net`;
-                     const startBR = startDt.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
-                     const ownerMsg = `📅 Novo agendamento via IA:\n"${callArgs.summary}"\n${startBR}\nContato: ${remoteJid.replace(/@.*$/, "")}`;
+                     const startBR = startDt.toLocaleString("pt-BR", {
+                         weekday: "short",
+                         day: "2-digit",
+                         month: "2-digit",
+                         year: "numeric",
+                         hour: "2-digit",
+                         minute: "2-digit",
+                         timeZone: "America/Sao_Paulo",
+                     });
+                     const ownerLines = [
+                         `📅 *Novo Agendamento Confirmado via IA!*`,
+                         `━━━━━━━━━━━━━━━━━━━━━━━━━`,
+                         `👤 *Cliente:* ${callArgs.nome || clientName || "Não informado"}`,
+                         `📱 *WhatsApp:* ${phoneFromJid}`,
+                         attendeeEmail ? `✉️ *E-mail:* ${attendeeEmail}` : "",
+                         companyName ? `🏢 *Empresa:* ${companyName}` : "",
+                         `🕒 *Data/Hora:* ${startBR} (${duration} min)`,
+                         `🎯 *Pauta:* ${callArgs.necessidade || callArgs.summary || "Reunião Comercial"}`,
+                         meetUri ? `🎥 *Google Meet:* ${meetUri}` : "",
+                         `🤖 *Agente:* ${agentConfig.name || "IA"}`,
+                     ].filter(Boolean);
+                     const ownerMsg = ownerLines.join("\n");
                      const { sendMessage } = await import("@/lib/channel");
                      await sendMessage(ownerJid, ownerMsg, instanceName).catch((e: any) =>
                          console.warn("[Agent/NotifyOwner] falhou:", e?.message)
@@ -1957,19 +2010,9 @@ ${capturedVariablesPrompt}
 
              // Persiste em public.appointments pra alimentar /calendario, worker
              // de lembrete, e organizer auto-promote do kanban pós-horário.
-             // Best-effort: se falhar, não derruba a confirmação ao cliente —
-             // o Google já tem o evento, isso é só metadata extra do painel.
              try {
-                 const evId = instRes.data.id || null;
                  if (evId) {
-                    // Procura lead_id linkado a esse remote_jid no client correto
-                    const { data: leadRow } = await supabase
-                       .from("leads_extraidos")
-                       .select("id")
-                       .eq("client_id", clientId)
-                       .eq("remoteJid", remoteJid)
-                       .maybeSingle();
-                    const { error: apptInsErr } = await supabase.from("appointments").insert({
+                    const insertPayload: any = {
                        client_id: clientId,
                        agent_id: agentConfig.id || null,
                        lead_id: leadRow?.id || null,
@@ -1984,15 +2027,40 @@ ${capturedVariablesPrompt}
                        end_at: endDt.toISOString(),
                        status: "confirmed",
                        created_by: "ia",
+                       // Colunas espelho do Google Calendar
+                       html_link: instRes.data.htmlLink || null,
+                       conference_data: instRes.data.conferenceData || null,
+                       location: instRes.data.location || meetUri || null,
+                       attendees: attendeeEmail ? [{ email: attendeeEmail, displayName: (callArgs.nome as string) || clientName }] : [],
+                       organizer_email: instRes.data.organizer?.email || null,
                        metadata: {
-                          // Nome capturado pelo agente no agendamento ("nome completo").
-                          // É o que o lembrete usa como {nome} — sem isso o worker cairia
-                          // no nome_negocio (empresa), errando o tratamento do cliente.
                           attendee_name: (callArgs.nome as string) || null,
-                          attendee_email: callArgs.email || null,
-                          meet_link: meetLinkStr ? meetLinkStr.match(/https?:\/\/\S+/)?.[0] || null : null,
+                          attendee_email: attendeeEmail || null,
+                          meet_link: meetUri,
                        },
-                    });
+                    };
+
+                    let { error: apptInsErr } = await supabase.from("appointments").insert(insertPayload);
+                    if (apptInsErr) {
+                       const msg = String(apptInsErr.message || "");
+                       const isSchemaMiss =
+                          (apptInsErr as any).code === "PGRST204" ||
+                          (apptInsErr as any).code === "42703" ||
+                          /does not exist/i.test(msg) ||
+                          /column .* of 'appointments'/i.test(msg) ||
+                          /Could not find the .* column/i.test(msg);
+
+                       if (isSchemaMiss) {
+                          // Fallback resiliente: remove colunas que podem não existir em bancos legados
+                          const fallbackPayload = { ...insertPayload };
+                          delete fallbackPayload.html_link;
+                          delete fallbackPayload.conference_data;
+                          delete fallbackPayload.location;
+                          delete fallbackPayload.attendees;
+                          delete fallbackPayload.organizer_email;
+                          ({ error: apptInsErr } = await supabase.from("appointments").insert(fallbackPayload));
+                       }
+                    }
                     if (apptInsErr) {
                        // 23505 = índice único (agent_id,start_at): outro contato
                        // pegou o MESMO slot numa corrida. Desfaz o evento no
@@ -2115,15 +2183,35 @@ ${capturedVariablesPrompt}
                  }
              } catch { /* não-fatal — o agendamento já está salvo */ }
 
-             // Se o operador ligou "Enviar link do Meet ao cliente", a IA é
-             // OBRIGADA a incluir o link na resposta. Senão, só informa que foi
-             // gerado (comportamento antigo).
-             const sendMeet = !!agentConfig.options?.calendar_send_meet_link;
-             const meetUrl = meetLinkStr ? (meetLinkStr.match(/https?:\/\/\S+/)?.[0] || "") : "";
-             const meetDirective = (sendMeet && meetUrl)
-                ? ` OBRIGATÓRIO: inclua ESTE link do Google Meet na sua próxima mensagem ao cliente, de forma natural (não invente outro, não omita): ${meetUrl}`
-                : meetLinkStr;
-             functionResultRes = { scheduled: true, message: `O evento "${callArgs.summary}" foi adicionado com sucesso para ${callArgs.start_datetime}. Avise o cliente.${meetDirective}` };
+             const startBRFormatted = startDt.toLocaleDateString("pt-BR", {
+                 weekday: "long",
+                 day: "2-digit",
+                 month: "long",
+                 timeZone: "America/Sao_Paulo",
+             });
+             const timeBRFormatted = startDt.toLocaleTimeString("pt-BR", {
+                 hour: "2-digit",
+                 minute: "2-digit",
+                 timeZone: "America/Sao_Paulo",
+             });
+
+             const meetUrl = meetUri || (meetLinkStr ? (meetLinkStr.match(/https?:\/\/\S+/)?.[0] || "") : "");
+             const meetDirective = meetUrl
+                ? ` Link do Google Meet gerado: ${meetUrl}. OBRIGATÓRIO: inclua este link na sua mensagem de confirmação para o cliente.`
+                : "";
+             const emailDirective = attendeeEmail
+                ? ` Convite oficial do Google Calendar enviado para o e-mail: ${attendeeEmail}.`
+                : "";
+
+             functionResultRes = {
+                 scheduled: true,
+                 event_id: evId,
+                 meet_link: meetUrl || null,
+                 start_datetime: callArgs.start_datetime,
+                 date_formatted: startBRFormatted,
+                 time_formatted: timeBRFormatted,
+                 message: `Agendamento CONFIRMADO com sucesso para ${startBRFormatted} às ${timeBRFormatted}.${meetDirective}${emailDirective} Confirme com o cliente com simpatia e informe os detalhes.`
+             };
              } // fim do if(!raceConflict)
              } // fim do else (não-duplicado)
           } catch (mcpErr: any) {
@@ -2144,10 +2232,12 @@ ${capturedVariablesPrompt}
                const auth = await getOAuthClientForAgentOptions(agentConfig.id, agentConfig.options);
                const calendar = google.calendar({ version: 'v3', auth });
 
-               const targetDate = callArgs.date as string;
+               const rawDate = String(callArgs.date || "").trim();
+               const targetDate = rawDate.slice(0, 10);
                const timeMin = new Date(`${targetDate}T08:00:00-03:00`).toISOString();
                const timeMax = new Date(`${targetDate}T18:00:00-03:00`).toISOString();
 
+               // 1. Consulta ocupação no Google Calendar
                const freeBusyRes = await calendar.freebusy.query({
                    requestBody: {
                        timeMin,
@@ -2155,13 +2245,49 @@ ${capturedVariablesPrompt}
                        items: [{ id: 'primary' }]
                    }
                });
-               
-               const busySlots = freeBusyRes.data.calendars?.['primary']?.busy || [];
-               
-               functionResultRes = {
-                   available: true,
-                   message: `Na data ${targetDate}, os seguintes blocos já ESTÃO OCUPADOS: ${JSON.stringify(busySlots)}. O restante do tempo comercial (08 as 18h) está livre. Sugira até 2 horários livres ao cliente baseando-se nesses espaços ociosos.`
-               };
+               const googleBusy = freeBusyRes.data.calendars?.['primary']?.busy || [];
+
+               // 2. Consulta também agendamentos ativos na tabela appointments do sistema
+               const { data: dbAppointments } = await supabase
+                   .from("appointments")
+                   .select("start_at, end_at")
+                   .eq("agent_id", agentConfig.id)
+                   .in("status", ["confirmed", "tentative"])
+                   .gte("start_at", `${targetDate}T00:00:00-03:00`)
+                   .lte("start_at", `${targetDate}T23:59:59-03:00`);
+
+               // 3. Unifica intervalos ocupados (Google + DB local)
+               const allBusy = [
+                   ...googleBusy.map((b: any) => ({ start: b.start, end: b.end })),
+                   ...(dbAppointments || []).map((a: any) => ({ start: a.start_at, end: a.end_at })),
+               ];
+
+               // 4. Calcula os horários livres com precisão no fuso de Brasília (economiza tokens e zera alucinações)
+               const freeSlots = calculateFreeSlots({
+                   targetDate,
+                   busyRanges: allBusy,
+                   durationMinutes: calendarDuration,
+                   startHour: 8,
+                   endHour: 18,
+                   stepMinutes: 30,
+                   nowDate: new Date(),
+                   minBufferMinutes: 30,
+               });
+
+               if (freeSlots.length > 0) {
+                   const suggested = freeSlots.slice(0, 8).join(", ");
+                   functionResultRes = {
+                       available: true,
+                       free_slots: freeSlots,
+                       message: `Na data ${targetDate}, os seguintes horários estão LIVRES para reunião de ${calendarDuration} min: ${suggested}. Sugira 2 opções destes horários livres ao cliente com simpatia.`
+                   };
+               } else {
+                   functionResultRes = {
+                       available: false,
+                       free_slots: [],
+                       message: `Na data ${targetDate}, a agenda está sem horários livres no expediente comercial (08h às 18h). Pergunte se o cliente prefere outro dia (como no dia seguinte ou na semana seguinte).`
+                   };
+               }
            } catch (mcpErr: any) {
                console.error("[MCP FreeBusy Error]:", mcpErr);
                functionResultRes = { available: false, message: `Falha na consulta de tempo: ${mcpErr.message}` };
