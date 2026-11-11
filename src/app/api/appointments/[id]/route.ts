@@ -64,7 +64,9 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   if (body.metadata && typeof body.metadata === "object") patch.metadata = body.metadata;
   if (body.remote_jid !== undefined) {
     const rawRemoteJid = typeof body.remote_jid === "string" ? body.remote_jid.trim() : "";
-    if (rawRemoteJid.startsWith("google:") && rawRemoteJid === existing.remote_jid) {
+    // Contato inalterado é preservado como está (placeholders google:*/manual:*).
+    // Qualquer valor novo precisa passar pelo normalizeJid.
+    if (rawRemoteJid && rawRemoteJid === existing.remote_jid) {
       patch.remote_jid = rawRemoteJid;
     } else {
       const remoteJid = normalizeJid(body.remote_jid);

@@ -275,6 +275,7 @@ export default function AquecerChipsPage() {
     totalGroups: 0,
   });
   const [aiModels, setAiModels] = useState<GroupableModel[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
   const [savingGlobal, setSavingGlobal] = useState(false);
   const [savingMap, setSavingMap] = useState<Record<string, boolean>>({});
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -361,14 +362,17 @@ export default function AquecerChipsPage() {
   }, []);
 
   const loadModels = useCallback(async () => {
+    setModelsLoading(true);
     try {
-      const res = await fetch("/api/ai/models");
+      const res = await fetch("/api/ai-models", { cache: "no-store" });
       const data = await res.json();
-      if (Array.isArray(data)) {
-        setAiModels(data);
+      if (data?.success && Array.isArray(data.models)) {
+        setAiModels(data.models);
       }
-    } catch {
-      // Ignora falhas nos modelos de IA
+    } catch (err) {
+      console.warn("[AQUECEDOR] Falha ao carregar modelos:", err);
+    } finally {
+      setModelsLoading(false);
     }
   }, []);
 
@@ -1156,10 +1160,21 @@ export default function AquecerChipsPage() {
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div className={styles.fieldGroup}>
-                        <label htmlFor="ai-model" className={styles.fieldLabel}>
-                          <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
-                          Modelo de IA
-                        </label>
+                        <div className="flex items-center justify-between gap-2">
+                          <label htmlFor="ai-model" className={styles.fieldLabel}>
+                            <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                            Modelo de IA
+                          </label>
+                          {modelsLoading ? (
+                            <span className="text-[11px] text-neutral-400 font-mono animate-pulse">
+                              Carregando modelos...
+                            </span>
+                          ) : aiModels.length > 0 ? (
+                            <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
+                              {aiModels.length} modelos de IA disponíveis
+                            </span>
+                          ) : null}
+                        </div>
                         <select
                           id="ai-model"
                           value={globalSettings.ai_model}
@@ -1169,10 +1184,30 @@ export default function AquecerChipsPage() {
                           <option value="fallback" className="bg-[#181d19] text-emerald-400 font-semibold">
                             ★ [GRÁTIS] Diálogos Nativos pt-BR (Zero Consumo de Tokens)
                           </option>
+                          {globalSettings.ai_model &&
+                            globalSettings.ai_model !== "fallback" &&
+                            !aiModels.some((m) => m.id === globalSettings.ai_model) && (
+                              <option key={globalSettings.ai_model} value={globalSettings.ai_model} className="bg-[#181d19] text-white">
+                                {globalSettings.ai_model} (salvo)
+                              </option>
+                            )}
+                          {modelsLoading && aiModels.length === 0 && (
+                            <option value="" disabled className="bg-[#181d19] text-muted-foreground">
+                              Carregando modelos de IA...
+                            </option>
+                          )}
                           <ModelOptions models={aiModels} />
                         </select>
                         <p className={styles.fieldHint}>
-                          Assunto que as conversas automáticas vão usar. A opção grátis usa frases prontas em português ({aiModels.length} modelos disponíveis).
+                          {globalSettings.ai_model === "fallback" ? (
+                            <>
+                              <strong className="text-emerald-400 font-medium">Modo Grátis ativado:</strong> usa o banco de diálogos humanos pt-BR nativo sem consumir tokens de APIs externas.
+                            </>
+                          ) : (
+                            <>
+                              <strong className="text-emerald-400 font-medium">{selectedModelLabel}:</strong> modelo ativo para gerar diálogos inteligentes e contextuais pelo chip.
+                            </>
+                          )}
                         </p>
                       </div>
 

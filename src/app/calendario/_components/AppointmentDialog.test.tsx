@@ -81,4 +81,95 @@ describe("AppointmentDialog", () => {
       sync_google: true,
     });
   });
+
+  it("preserva placeholder google:* ao editar evento importado", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true, appointment: { ...appointment, remote_jid: "google:event-1" } }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <AppointmentDialog
+        open
+        onOpenChange={vi.fn()}
+        editing={{ ...appointment, remote_jid: "google:event-1" }}
+        agents={[{ id: 7, name: "Agente 7", is_scheduler: true, google_connected: true }]}
+        onSaved={vi.fn()}
+        onToast={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByLabelText("Título do agendamento")).toHaveFocus());
+    fireEvent.click(screen.getByRole("button", { name: "Salvar alterações" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [, request] = fetchMock.mock.calls[0];
+    expect(request.method).toBe("PATCH");
+    expect(JSON.parse(request.body)).toMatchObject({ remote_jid: "google:event-1" });
+  });
+
+  it("normaliza telefone digitado", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true, appointment }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <AppointmentDialog
+        open
+        onOpenChange={vi.fn()}
+        editing={appointment}
+        agents={[{ id: 7, name: "Agente 7", is_scheduler: true, google_connected: true }]}
+        onSaved={vi.fn()}
+        onToast={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByLabelText("Título do agendamento")).toHaveFocus());
+
+    fireEvent.change(screen.getByLabelText("Contato do WhatsApp"), {
+      target: { value: "(11) 99999-8888" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Salvar alterações" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+      remote_jid: "5511999998888@s.whatsapp.net",
+    });
+  });
+
+  it("bloqueia contato inválido sem chamar a API", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const onToast = vi.fn();
+
+    render(
+      <AppointmentDialog
+        open
+        onOpenChange={vi.fn()}
+        editing={appointment}
+        agents={[{ id: 7, name: "Agente 7", is_scheduler: true, google_connected: true }]}
+        onSaved={vi.fn()}
+        onToast={onToast}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByLabelText("Título do agendamento")).toHaveFocus());
+
+    fireEvent.change(screen.getByLabelText("Contato do WhatsApp"), {
+      target: { value: "não é telefone" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Salvar alterações" }));
+
+    await waitFor(() => expect(onToast).toHaveBeenCalledWith({
+      kind: "err",
+      text: "Contato do WhatsApp inválido.",
+    }));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
