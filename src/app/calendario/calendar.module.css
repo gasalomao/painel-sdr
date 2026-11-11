@@ -68,8 +68,94 @@
 .agendaActions { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
 .agendaActions > button { min-width: 34px; min-height: 34px; }
 .appointmentDialog { border: 1px solid #3b483e; background: #181d19; }
+.appointmentDialogWide {
+  display: flex;
+  width: min(880px, calc(100vw - 32px));
+  max-width: min(880px, calc(100vw - 32px));
+  max-height: min(900px, calc(100dvh - 32px));
+  flex-direction: column;
+  gap: 0;
+  overflow: hidden;
+  padding: 0;
+}
+.dialogHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 20px 24px 16px; border-bottom: 1px solid #303a32; }
+.dialogTitle { margin: 0; color: #edf2ee; font-size: 18px; font-weight: 650; line-height: 1.35; }
+.dialogDescription { margin-top: 4px; color: #a5b1a8; font-size: 12px; line-height: 1.5; }
+.dialogBody { min-height: 0; overflow-y: auto; padding: 20px 24px 28px; scrollbar-width: thin; scrollbar-color: #425447 #181d19; }
+.dialogTitleField { margin-bottom: 20px; }
+.dialogTitleInput { height: 46px; font-size: 17px; font-weight: 600; }
+.dialogColumns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; gap: 32px; }
+.dialogColumn { display: flex; min-width: 0; flex-direction: column; gap: 24px; }
+.dialogSection { padding-bottom: 24px; border-bottom: 1px solid #303a32; }
+.dialogColumn .dialogSection:last-child { padding-bottom: 0; border-bottom: 0; }
+.sectionHeading { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; color: #edf2ee; }
+.sectionHeading svg { width: 16px; height: 16px; color: #8db39a; }
+.sectionHeading h3 { margin: 0; font-size: 13px; font-weight: 650; line-height: 1.4; }
+.field { display: grid; gap: 6px; margin: 0; padding: 0; border: 0; }
+.field + .field { margin-top: 12px; }
+.field > label, .field > legend { color: #c5d2c8; font-size: 12px; font-weight: 500; }
+.dateFields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.checkRow { display: flex; min-height: 36px; align-items: center; gap: 10px; cursor: pointer; color: #c5d2c8; font-size: 12px; }
+.checkRow input { width: 24px; height: 24px; flex: 0 0 auto; }
+.recurrenceFields { display: grid; gap: 12px; margin-top: 12px; }
+.inlineInput { display: flex; align-items: center; gap: 8px; }
+.inlineInput input { width: 84px; }
+.inlineInput span { color: #a5b1a8; font-size: 12px; }
+.dialogSelect { width: 100%; }
+.inlineLink { display: inline-flex; min-height: 36px; align-items: center; gap: 6px; color: #6ee7b7; font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
+.inlineLink svg { width: 14px; height: 14px; }
+.guestInput { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.fieldHint { margin: 0; color: #a5b1a8; font-size: 11px; line-height: 1.5; }
+.guestList { display: grid; gap: 6px; margin: 12px 0 0; padding: 0; list-style: none; }
+.guestList li { display: flex; min-height: 36px; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px 6px 10px; border-radius: 7px; background: #222a24; color: #d5dfd8; font-size: 12px; }
+.guestList button { display: grid; width: 28px; height: 28px; flex: 0 0 auto; place-items: center; border-radius: 6px; color: #a5b1a8; }
+.guestList button:hover { background: #303a32; color: #edf2ee; }
+.guestList svg { width: 14px; height: 14px; }
+.meetStatus { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: 8px; background: #222a24; color: #c5d2c8; font-size: 12px; }
+.meetStatus span, .meetStatus a { display: inline-flex; align-items: center; gap: 6px; }
+.meetStatus svg { width: 14px; height: 14px; }
+.meetStatus a { color: #6ee7b7; text-decoration: underline; text-underline-offset: 3px; }
+.colorList { display: flex; flex-wrap: wrap; gap: 10px; }
+.colorButton { width: 30px; height: 30px; border: 2px solid transparent; border-radius: 999px; box-shadow: 0 0 0 1px #3b483e; }
+.colorButton:hover { box-shadow: 0 0 0 2px #a5b1a8; }
+.colorButtonSelected { border-color: #edf2ee; box-shadow: 0 0 0 2px #181d19, 0 0 0 4px #6ee7b7; }
+.googleError { display: flex; align-items: flex-start; gap: 10px; padding: 11px 12px; border: 1px solid #7f3f47; border-radius: 8px; background: #2a1b1d; color: #f0b7be; }
+.googleError > svg { width: 16px; height: 16px; margin-top: 1px; flex: 0 0 auto; }
+.googleError > div { display: grid; gap: 2px; font-size: 12px; line-height: 1.45; }
+.googleError strong { color: #ffd2d7; font-weight: 650; }
+.reminderList { display: grid; gap: 12px; margin-top: 12px; }
+.emptyHint { margin: 0; color: #a5b1a8; font-size: 12px; }
+.reminderItem { display: grid; gap: 8px; padding-top: 12px; border-top: 1px solid #303a32; }
+.reminderHeader { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.reminderActions { display: flex; flex-wrap: wrap; gap: 8px; }
+.dialogFooter { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 24px; border-top: 1px solid #303a32; background: #181d19; }
+.footerActions { display: flex; gap: 8px; }
+.deleteButton { color: #edb0b9; }
 .appointmentDialog input::placeholder, .appointmentDialog textarea::placeholder { color: #a5b1a8; }
 .appointmentDialog input[type="checkbox"] { accent-color: #6ee7b7; }
+@media (max-width: 720px) {
+  .appointmentDialogWide { width: calc(100vw - 16px); max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); }
+  .dialogHeader { padding: 16px; }
+  .dialogHeader > a { display: none; }
+  .dialogBody { padding: 16px; }
+  .dialogColumns { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+  .dialogColumn { gap: 24px; }
+  .dateFields { grid-template-columns: minmax(0, 1fr); }
+  .checkRow { min-height: 44px; }
+  .guestInput { grid-template-columns: minmax(0, 1fr); }
+  .guestInput button { width: 100%; min-height: 40px; }
+  .colorButton { width: 36px; height: 36px; }
+  .guestList button { width: 40px; height: 40px; }
+  .reminderHeader { align-items: flex-start; }
+  .reminderHeader .inlineInput { align-items: flex-start; flex-direction: column; }
+  .dialogFooter { align-items: stretch; flex-direction: column-reverse; padding: 12px 16px; }
+  .footerActions { display: grid; grid-template-columns: 1fr 1fr; }
+  .footerActions button { min-height: 40px; }
+  .deleteButton { align-self: flex-start; min-height: 40px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .appointmentDialog * { scroll-behavior: auto; }
+}
 @media (max-width: 1023px) {
   .content { padding: 16px 16px calc(5rem + env(safe-area-inset-bottom, 0px)); }
   .period h2 { font-size: 22px; }

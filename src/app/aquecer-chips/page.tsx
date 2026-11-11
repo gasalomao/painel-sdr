@@ -23,6 +23,7 @@ import {
   MessageSquare,
   CheckCircle2,
   ArrowRight,
+  ArrowRightLeft,
   ExternalLink,
   Smile,
   Eye,
@@ -266,6 +267,17 @@ export default function AquecerChipsPage() {
   const [testLoading, setTestLoading] = useState(false);
   const [testStatusPost, setTestStatusPost] = useState(false);
 
+  // Modal de Aquecimento Mútuo Automático (Dois Chips)
+  const [mutualModalOpen, setMutualModalOpen] = useState(false);
+  const [pairChipA, setPairChipA] = useState("");
+  const [pairChipB, setPairChipB] = useState("");
+  const [mutualLoading, setMutualLoading] = useState(false);
+  const [autopilotLoading, setAutopilotLoading] = useState(false);
+  const [mutualStatusPost, setMutualStatusPost] = useState(true);
+
+  // Guia explicativo de funcionamento
+  const [explainerOpen, setExplainerOpen] = useState(true);
+
   // Auto-refresh de logs
   const [autoRefreshLogs, setAutoRefreshLogs] = useState(true);
   const logsContainerRef = useRef<HTMLDivElement>(null);
@@ -483,6 +495,96 @@ export default function AquecerChipsPage() {
     }
   };
 
+  const openPairModal = (chipA?: string, chipB?: string) => {
+    if (chipA) {
+      setPairChipA(chipA);
+      if (chipB) {
+        setPairChipB(chipB);
+      } else {
+        const other = instances.find((i) => i.instance_name !== chipA);
+        if (other) setPairChipB(other.instance_name);
+      }
+    } else if (instances.length >= 2) {
+      setPairChipA(instances[0].instance_name);
+      setPairChipB(instances[1].instance_name);
+    } else if (instances.length === 1) {
+      setPairChipA(instances[0].instance_name);
+    }
+    setMutualModalOpen(true);
+  };
+
+  const handleRunMutualWarmup = async () => {
+    if (!pairChipA || !pairChipB) {
+      toast.error("Selecione os dois chips para o aquecimento mútuo.");
+      return;
+    }
+    if (pairChipA === pairChipB) {
+      toast.error("Escolha dois chips diferentes para a troca mútua.");
+      return;
+    }
+
+    setMutualLoading(true);
+    try {
+      const res = await fetch("/api/warmup/trigger", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instanceA: pairChipA,
+          instanceB: pairChipB,
+          mutual: true,
+          testStatusPost: mutualStatusPost,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast.success(data.message || "Aquecimento mútuo executado com sucesso!");
+        await loadData(true);
+      } else {
+        toast.error(data.error || "Falha ao executar aquecimento mútuo.");
+      }
+    } catch (err: any) {
+      toast.error("Erro na execução: " + err.message);
+    } finally {
+      setMutualLoading(false);
+    }
+  };
+
+  const handleEnablePairAutopilot = async () => {
+    if (!pairChipA || !pairChipB) {
+      toast.error("Selecione os dois chips para ativar o piloto automático.");
+      return;
+    }
+    if (pairChipA === pairChipB) {
+      toast.error("Escolha dois chips diferentes.");
+      return;
+    }
+
+    setAutopilotLoading(true);
+    try {
+      const res = await fetch("/api/warmup/trigger", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instanceA: pairChipA,
+          instanceB: pairChipB,
+          autopilot: true,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast.success(data.message || "Piloto Automático ativado com sucesso para o par!");
+        setMutualModalOpen(false);
+        await loadData(true);
+      } else {
+        toast.error(data.error || "Falha ao ativar piloto automático.");
+      }
+    } catch (err: any) {
+      toast.error("Erro: " + err.message);
+    } finally {
+      setAutopilotLoading(false);
+    }
+  };
+
   const testBlockedReason =
     instances.length < 2
       ? "Conecte um segundo chip para testar a conversa entre dois números."
@@ -527,6 +629,14 @@ export default function AquecerChipsPage() {
             <div className={styles.headingActions}>
               <button
                 type="button"
+                onClick={() => openPairModal()}
+                className={cn(styles.primaryAction, "bg-emerald-400 hover:bg-emerald-300 text-neutral-950 font-semibold shadow-sm flex items-center gap-2")}
+              >
+                <Sparkles className="w-4 h-4 text-neutral-950" />
+                Aquecer Dois Chips (Automático)
+              </button>
+              <button
+                type="button"
                 onClick={() => handleToggleBulk("enable_all")}
                 disabled={bulkBusy}
                 className={styles.secondaryAction}
@@ -554,7 +664,7 @@ export default function AquecerChipsPage() {
                   }
                   setTestModalOpen(true);
                 }}
-                className={styles.primaryAction}
+                className={styles.secondaryAction}
               >
                 <Send className="w-3.5 h-3.5" />
                 Testar disparo
@@ -570,6 +680,100 @@ export default function AquecerChipsPage() {
                 <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
               </button>
             </div>
+          </div>
+
+          {/* ========================================================================= */}
+          {/* GUIA EXPLICATIVO: COMO FUNCIONA O AQUECIMENTO AUTOMÁTICO */}
+          {/* ========================================================================= */}
+          <div className={styles.explainerBanner}>
+            <div className={styles.explainerHeader}>
+              <div className="flex items-start gap-3">
+                <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 shrink-0">
+                  <ShieldCheck className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+                    Como o Aquecedor de Chips opera 100% sozinho
+                  </h2>
+                  <p className="text-xs text-neutral-400 mt-0.5 leading-relaxed">
+                    Os chips conversam entre si, gravam notas de voz reais e salvam contatos mutuamente para criar autoridade máxima nos servidores do WhatsApp.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => openPairModal()}
+                  className={cn(styles.primaryAction, "h-9 py-1.5 px-3 text-xs bg-emerald-400 hover:bg-emerald-300 text-neutral-950 font-semibold")}
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-neutral-950" />
+                  Aquecer dois chips agora
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setExplainerOpen((v) => !v)}
+                  className={styles.secondaryAction}
+                  style={{ minHeight: "36px", height: "36px", padding: "6px 10px" }}
+                  title={explainerOpen ? "Ocultar explicação" : "Ver explicação"}
+                >
+                  <ChevronDown className={`w-3.5 h-3.5 transition-transform ${explainerOpen ? "rotate-180" : ""}`} />
+                  <span className="text-xs">{explainerOpen ? "Ocultar" : "Entender"}</span>
+                </button>
+              </div>
+            </div>
+
+            {explainerOpen && (
+              <div className={styles.explainerGrid}>
+                <div className={styles.explainerCard}>
+                  <div className="flex items-center gap-2">
+                    <div className={styles.explainerCardIcon}>
+                      <Contact className="w-4 h-4" />
+                    </div>
+                    <span className={styles.explainerCardTitle}>1. Agenda & vCard Real</span>
+                  </div>
+                  <p className={styles.explainerCardDesc}>
+                    Os dois chips trocam seus contatos reais. O WhatsApp identifica que ambos têm os números salvos na agenda do celular (fator anti-ban nº 1).
+                  </p>
+                </div>
+
+                <div className={styles.explainerCard}>
+                  <div className="flex items-center gap-2">
+                    <div className={styles.explainerCardIcon}>
+                      <Volume2 className="w-4 h-4" />
+                    </div>
+                    <span className={styles.explainerCardTitle}>2. Áudio Opus & Tiques Azuis</span>
+                  </div>
+                  <p className={styles.explainerCardDesc}>
+                    Envio de mensagens de voz humanas (48kHz mono) e simulação de leitura na tela, acendendo os dois tiques azuis antes de responder.
+                  </p>
+                </div>
+
+                <div className={styles.explainerCard}>
+                  <div className="flex items-center gap-2">
+                    <div className={styles.explainerCardIcon}>
+                      <Activity className="w-4 h-4" />
+                    </div>
+                    <span className={styles.explainerCardTitle}>3. Piloto em 4 Fases</span>
+                  </div>
+                  <p className={styles.explainerCardDesc}>
+                    Avança sozinho: Fase 1 (10 msgs/dia) → Fase 2 (25 msgs/dia) → Fase 3 (50 msgs/dia) → Fase 4 (Blindado para vendas) conforme os dias ativos.
+                  </p>
+                </div>
+
+                <div className={styles.explainerCard}>
+                  <div className="flex items-center gap-2">
+                    <div className={styles.explainerCardIcon}>
+                      <ShieldAlert className="w-4 h-4" />
+                    </div>
+                    <span className={styles.explainerCardTitle}>4. Quarentena & Stories</span>
+                  </div>
+                  <p className={styles.explainerCardDesc}>
+                    Se houver instabilidade ou erro de rede, o chip pausa preventivamente (Circuit Breaker). Além disso, posta Stories automáticos no Status.
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Resumo do dia / Métricas Rápidas */}
@@ -1121,16 +1325,26 @@ export default function AquecerChipsPage() {
 
                           {/* Ações */}
                           <div className="flex flex-col-reverse gap-2 pt-1 sm:flex-row sm:items-center sm:justify-between">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setTestSender(instName);
-                                setTestModalOpen(true);
-                              }}
-                              className={styles.secondaryAction}
-                            >
-                              <Send className="w-3 h-3" /> Testar este chip
-                            </button>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => openPairModal(instName)}
+                                className={cn(styles.secondaryAction, "border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10")}
+                                title="Aquecer em par com outro chip de forma simultânea"
+                              >
+                                <ArrowRightLeft className="w-3 h-3 text-emerald-400" /> Aquecer em par
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setTestSender(instName);
+                                  setTestModalOpen(true);
+                                }}
+                                className={styles.secondaryAction}
+                              >
+                                <Send className="w-3 h-3" /> Testar disparo
+                              </button>
+                            </div>
 
                             <div className="flex items-center gap-3 w-full sm:w-auto justify-between sm:justify-end">
                               {isDirty && (
@@ -1359,6 +1573,241 @@ export default function AquecerChipsPage() {
                       </>
                     ) : (
                       "Disparar teste agora"
+                    )}
+                  </button>
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
+
+          {/* Modal de Aquecimento Mútuo Automático (Dois Chips Simultâneos) */}
+          <Dialog open={mutualModalOpen} onOpenChange={setMutualModalOpen}>
+            <DialogContent className={styles.dialog}>
+              <div className={styles.dialogHeader}>
+                <div className="p-2 rounded-lg bg-emerald-500/15 border border-emerald-500/25 text-emerald-300 shrink-0">
+                  <Sparkles className="w-5 h-5" />
+                </div>
+                <div>
+                  <DialogTitle className="text-base font-bold text-white">
+                    Aquecimento Mútuo Automático (Dois Chips)
+                  </DialogTitle>
+                  <DialogDescription className="text-xs text-neutral-400 mt-1">
+                    Escolha dois números para maturação cruzada simultânea. O sistema cuida de tudo sozinho com as tecnologias anti-ban de 2026.
+                  </DialogDescription>
+                </div>
+              </div>
+
+              <div className={styles.dialogBody}>
+                {/* Seletor dos Chips */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className={styles.fieldGroup}>
+                    <label htmlFor="pair-chip-a" className={styles.fieldLabel}>
+                      Primeiro Chip (Chip A)
+                    </label>
+                    <select
+                      id="pair-chip-a"
+                      value={pairChipA}
+                      onChange={(e) => setPairChipA(e.target.value)}
+                      className={styles.fieldSelect}
+                    >
+                      <option value="">Selecione o Chip A</option>
+                      {instances.map((i) => (
+                        <option key={i.instance_name} value={i.instance_name}>
+                          {i.instance_name} {i.phone_number ? `(+${i.phone_number})` : ""} · {STAGE_UI[i.config?.stage as WarmupStage || 1]?.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className={styles.fieldGroup}>
+                    <label htmlFor="pair-chip-b" className={styles.fieldLabel}>
+                      Segundo Chip (Chip B)
+                    </label>
+                    <select
+                      id="pair-chip-b"
+                      value={pairChipB}
+                      onChange={(e) => setPairChipB(e.target.value)}
+                      className={styles.fieldSelect}
+                    >
+                      <option value="">Selecione o Chip B</option>
+                      {instances.map((i) => (
+                        <option key={i.instance_name} value={i.instance_name}>
+                          {i.instance_name} {i.phone_number ? `(+${i.phone_number})` : ""} · {STAGE_UI[i.config?.stage as WarmupStage || 1]?.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* Diagrama de Conexão Mútua */}
+                {pairChipA && pairChipB && pairChipA !== pairChipB && (
+                  <div className={styles.pairDiagram}>
+                    {/* Node A */}
+                    {(() => {
+                      const instA = instances.find((i) => i.instance_name === pairChipA);
+                      const stA = (instA?.config?.stage || 1) as WarmupStage;
+                      const isConnA = instA?.connection_status === "open" || instA?.connection_status === "connected";
+                      return (
+                        <div className={styles.pairNode}>
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="text-xs font-semibold text-white truncate">{pairChipA}</span>
+                            <span className={`w-2 h-2 rounded-full ${isConnA ? "bg-emerald-400" : "bg-red-400"}`} />
+                          </div>
+                          <span className="text-[11px] text-neutral-400 truncate">
+                            {instA?.phone_number ? `+${instA.phone_number}` : "Sem telefone"}
+                          </span>
+                          <span className={`text-[10px] font-medium mt-1 ${STAGE_UI[stA]?.text}`}>
+                            Fase {stA} · {STAGE_UI[stA]?.name}
+                          </span>
+                        </div>
+                      );
+                    })()}
+
+                    {/* Conector Central */}
+                    <div className={styles.pairConnector}>
+                      <div className="p-2 rounded-full bg-emerald-500/10 border border-emerald-500/25 text-emerald-300">
+                        <ArrowRightLeft className="w-4 h-4" />
+                      </div>
+                      <span className="text-[10px] font-semibold text-emerald-400 uppercase tracking-wider text-center">
+                        Mútuo ⇄ 2 Vias
+                      </span>
+                    </div>
+
+                    {/* Node B */}
+                    {(() => {
+                      const instB = instances.find((i) => i.instance_name === pairChipB);
+                      const stB = (instB?.config?.stage || 1) as WarmupStage;
+                      const isConnB = instB?.connection_status === "open" || instB?.connection_status === "connected";
+                      return (
+                        <div className={styles.pairNode}>
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="text-xs font-semibold text-white truncate">{pairChipB}</span>
+                            <span className={`w-2 h-2 rounded-full ${isConnB ? "bg-emerald-400" : "bg-red-400"}`} />
+                          </div>
+                          <span className="text-[11px] text-neutral-400 truncate">
+                            {instB?.phone_number ? `+${instB.phone_number}` : "Sem telefone"}
+                          </span>
+                          <span className={`text-[10px] font-medium mt-1 ${STAGE_UI[stB]?.text}`}>
+                            Fase {stB} · {STAGE_UI[stB]?.name}
+                          </span>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+
+                {/* Lista de Recursos Ativados */}
+                <div className="space-y-2">
+                  <span className="text-xs font-semibold text-white flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    O que é executado 100% automático neste par:
+                  </span>
+                  <div className={styles.pairFeaturesList}>
+                    <div className={styles.pairFeatureItem}>
+                      <Contact className={styles.pairFeatureIcon} />
+                      <span>Troca mútua de contato na agenda (vCard)</span>
+                    </div>
+                    <div className={styles.pairFeatureItem}>
+                      <Volume2 className={styles.pairFeatureIcon} />
+                      <span>Áudios reais Ogg Opus (microfone azul)</span>
+                    </div>
+                    <div className={styles.pairFeatureItem}>
+                      <CheckCheck className={styles.pairFeatureIcon} />
+                      <span>Confirmação de leitura humana (tiques azuis)</span>
+                    </div>
+                    <div className={styles.pairFeatureItem}>
+                      <Eye className={styles.pairFeatureIcon} />
+                      <span>Presença realista (&quot;digitando...&quot;)</span>
+                    </div>
+                    <div className={styles.pairFeatureItem}>
+                      <Activity className={styles.pairFeatureIcon} />
+                      <span>Piloto automático de fases (Frio ao Blindado)</span>
+                    </div>
+                    <div className={styles.pairFeatureItem}>
+                      <ShieldAlert className={styles.pairFeatureIcon} />
+                      <span>Quarentena preventiva Circuit Breaker</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Opções extras */}
+                <div className="flex items-center justify-between p-3 rounded-lg border border-[#2a352c] bg-[#141b16]">
+                  <div>
+                    <span className="text-xs font-semibold text-white flex items-center gap-1.5">
+                      <Radio className="w-3.5 h-3.5 text-emerald-400" />
+                      Postar também Stories no Status
+                    </span>
+                    <p className="text-[11px] text-neutral-400">
+                      Publica atualizações de status nos números para simular uso social diário.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={mutualStatusPost}
+                    onCheckedChange={setMutualStatusPost}
+                    aria-label="Ativar postagem de status"
+                  />
+                </div>
+
+                {/* Validação de Bloqueio */}
+                {instances.length < 2 ? (
+                  <p className="text-[11px] text-amber-300 flex items-start gap-1.5 p-2 rounded bg-amber-500/10 border border-amber-500/20">
+                    <Info className="w-4 h-4 shrink-0 mt-0.5" />
+                    Conecte ao menos dois chips na área WhatsApp para maturação em par.
+                  </p>
+                ) : pairChipA === pairChipB && pairChipA ? (
+                  <p className="text-[11px] text-amber-300 flex items-start gap-1.5 p-2 rounded bg-amber-500/10 border border-amber-500/20">
+                    <Info className="w-4 h-4 shrink-0 mt-0.5" />
+                    Selecione chips diferentes para Chip A e Chip B.
+                  </p>
+                ) : null}
+
+                {/* Ações do Modal */}
+                <div className="pt-2 flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-end border-t border-[#2a352c]">
+                  <button
+                    type="button"
+                    onClick={() => setMutualModalOpen(false)}
+                    className={styles.secondaryAction}
+                  >
+                    Fechar
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleRunMutualWarmup}
+                    disabled={mutualLoading || autopilotLoading || !pairChipA || !pairChipB || pairChipA === pairChipB}
+                    className={styles.secondaryAction}
+                    title="Dispara uma troca imediata nos dois sentidos para ver o resultado"
+                  >
+                    {mutualLoading ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        Executando troca mútua...
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-3.5 h-3.5 text-emerald-400" />
+                        Disparar rodada simultânea agora
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleEnablePairAutopilot}
+                    disabled={mutualLoading || autopilotLoading || !pairChipA || !pairChipB || pairChipA === pairChipB}
+                    className={cn(styles.primaryAction, "bg-emerald-400 hover:bg-emerald-300 text-neutral-950 font-semibold")}
+                    title="Configura tudo e deixa os dois chips se aquecendo sozinhos em segundo plano"
+                  >
+                    {autopilotLoading ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        Ativando...
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-3.5 h-3.5 text-neutral-950" />
+                        Ativar Piloto Automático do Par (24/7)
+                      </>
                     )}
                   </button>
                 </div>

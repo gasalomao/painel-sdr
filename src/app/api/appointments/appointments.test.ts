@@ -6,7 +6,9 @@ const state = vi.hoisted(() => ({
   auth: vi.fn(),
   from: vi.fn(),
   hasCalendarConnected: vi.fn(),
+  createCalendarEvent: vi.fn(),
   updateCalendarEvent: vi.fn(),
+  cancelCalendarEvent: vi.fn(),
   rows: {} as Record<string, Array<Record<string, unknown>>>,
 }));
 
@@ -17,9 +19,9 @@ vi.mock("@/lib/tenant", () => ({
 vi.mock("@/lib/supabase_admin", () => ({ supabaseAdmin: { from: state.from } }));
 vi.mock("@/lib/google-calendar", () => ({
   GoogleCalendarError: class GoogleCalendarError extends Error {},
-  createCalendarEvent: vi.fn(),
+  createCalendarEvent: state.createCalendarEvent,
   updateCalendarEvent: state.updateCalendarEvent,
-  cancelCalendarEvent: vi.fn(),
+  cancelCalendarEvent: state.cancelCalendarEvent,
   hasCalendarConnected: state.hasCalendarConnected,
 }));
 
@@ -150,6 +152,59 @@ describe("agendamentos e Google Calendar", () => {
     expect(response.status).toBe(403);
     expect((await response.json()).error).toContain("Agente não pertence");
     expect(state.rows.appointments[0].agent_id).toBe(7);
+  });
+
+  it("PATCH troca agente recriando evento no novo Google em vez de atualizar o evento antigo", async () => {
+    state.rows.agent_settings = [
+      { id: 7, client_id: tenant },
+      { id: 8, client_id: tenant },
+    ];
+    state.createCalendarEvent.mockResolvedValue({
+      id: "google-2",
+      htmlLink: "https://calendar.google.com/event?eid=google-2",
+    });
+
+    const response = await PATCH(
+      request(`/${appointmentId}`, { agent_id: 8 }),
+      { params: Promise.resolve({ id: appointmentId }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(state.updateCalendarEvent).not.toHaveBeenCalled();
+    expect(state.createCalendarEvent).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: 8,
+      title: "Consulta",
+      startAt: startAt,
+      endAt: endAt,
+    }));
+    expect(state.rows.appointments[0]).toMatchObject({
+      agent_id: 8,
+      google_event_id: "google-2",
+      html_link: "https://calendar.google.com/event?eid=google-2",
+    });
+  });
+
+  it("PATCH troca agente sem deixar vínculo Google antigo quando criação falha", async () => {
+    state.rows.agent_settings = [
+      { id: 7, client_id: tenant },
+      { id: 8, client_id: tenant },
+    ];
+    state.createCalendarEvent.mockRejectedValue(new Error("API indisponível"));
+
+    const response = await PATCH(
+      request(`/${appointmentId}`, { agent_id: 8 }),
+      { params: Promise.resolve({ id: appointmentId }) },
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.google_error).toContain("API indisponível");
+    expect(state.rows.appointments[0]).toMatchObject({
+      agent_id: 8,
+      google_event_id: null,
+      html_link: null,
+    });
+    expect(state.rows.appointments[0].google_error).toContain("API indisponível");
   });
 
   it("PATCH persiste google_error quando atualização Google falha", async () => {

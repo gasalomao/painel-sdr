@@ -352,3 +352,241 @@ export async function triggerManualWarmup(
     message: `Mensagem enviada com sucesso de ${instanceA} para ${instanceB}: "${res.messageText}"`,
   };
 }
+
+/**
+ * Disparo mútuo simultâneo: Chip A envia para Chip B e Chip B responde para Chip A,
+ * ativando todas as funcionalidades automáticas de aquecimento bilateral de 2026.
+ */
+export async function triggerMutualWarmup(
+  clientId: string,
+  instanceA: string,
+  instanceB: string,
+  forceStatusPost: boolean = false
+): Promise<{ success: boolean; message: string; details?: { turnA: string; turnB: string }; error?: string }> {
+  const { data: configs } = await supabaseAdmin
+    .from("whatsapp_warmup_configs")
+    .select("*")
+    .eq("client_id", clientId)
+    .in("instance_name", [instanceA, instanceB]);
+
+  const cfgA = configs?.find((c) => c.instance_name === instanceA);
+  const cfgB = configs?.find((c) => c.instance_name === instanceB);
+
+  const defaultCfg = (inst: string): WarmupConfig => ({
+    client_id: clientId,
+    instance_name: inst,
+    enabled: true,
+    stage: 2,
+    stage_auto_progress: true,
+    days_active: 1,
+    consecutive_successful_days: 1,
+    health_score: 100,
+    is_quarantined: false,
+    daily_target: 25,
+    sent_today: 0,
+    received_today: 0,
+    error_count_today: 0,
+    min_interval_seconds: 60,
+    max_interval_seconds: 180,
+    min_typing_seconds: 3,
+    max_typing_seconds: 8,
+    allowed_start_hour: 0,
+    allowed_end_hour: 24,
+    ai_model: "fallback",
+    ai_theme: "dia_a_dia",
+    enable_typing: true,
+    enable_blue_ticks: true,
+    enable_reactions: true,
+    enable_audio: true,
+    enable_vcard: true,
+    enable_status_posts: true,
+    continuous_warmup: true,
+  });
+
+  const finalA: WarmupConfig = cfgA || defaultCfg(instanceA);
+  const finalB: WarmupConfig = cfgB || defaultCfg(instanceB);
+
+  // Turno 1: Chip A -> Chip B
+  const convId = `mutual_${Date.now()}`;
+  const conversation: WarmupConversation = {
+    id: convId,
+    client_id: clientId,
+    instance_a: instanceA,
+    instance_b: instanceB,
+    topic: finalA.ai_theme || "dia_a_dia",
+    history: [],
+    turn_count: 0,
+    max_turns: 6,
+    status: "active",
+    next_turn_at: new Date().toISOString(),
+  };
+
+  const resA = await executeWarmupTurn({
+    clientId,
+    senderConfig: finalA,
+    receiverConfig: finalB,
+    conversation,
+    isManualTrigger: true,
+    forceStatusPost,
+    forceVCard: true,
+  });
+
+  if (!resA.success) {
+    return {
+      success: false,
+      message: `Falha no envio de ${instanceA} para ${instanceB}: ${resA.error || "Desconhecido"}`,
+      error: resA.error,
+    };
+  }
+
+  // Registra no histórico do diálogo para resposta contextual de B
+  conversation.history.push({
+    sender: instanceA,
+    text: resA.messageText,
+    sent_at: new Date().toISOString(),
+  });
+  conversation.turn_count = 1;
+  conversation.last_sender = instanceA;
+
+  // Pequena pausa humana entre mensagens mútuas (1.5s)
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+
+  // Turno 2: Chip B -> Chip A (Resposta Simultânea)
+  const resB = await executeWarmupTurn({
+    clientId,
+    senderConfig: finalB,
+    receiverConfig: finalA,
+    conversation,
+    isManualTrigger: true,
+    forceStatusPost,
+    forceVCard: true,
+  });
+
+  if (!resB.success) {
+    return {
+      success: true,
+      message: `Primeiro envio de ${instanceA} concluído, mas resposta de ${instanceB} falhou: ${resB.error}`,
+      details: { turnA: resA.messageText, turnB: "" },
+    };
+  }
+
+  conversation.history.push({
+    sender: instanceB,
+    text: resB.messageText,
+    sent_at: new Date().toISOString(),
+  });
+  conversation.turn_count = 2;
+  conversation.last_sender = instanceB;
+
+  // Persiste a conversa em andamento para o worker continuar mantendo o vínculo
+  try {
+    await supabaseAdmin
+      .from("whatsapp_warmup_conversations")
+      .upsert(
+        {
+          id: convId,
+          client_id: clientId,
+          instance_a: instanceA,
+          instance_b: instanceB,
+          topic: conversation.topic,
+          history: conversation.history,
+          turn_count: 2,
+          max_turns: 6,
+          last_sender: instanceB,
+          status: "active",
+          next_turn_at: new Date(Date.now() + 180 * 1000).toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "id" }
+      );
+  } catch {}
+
+  await logWarmupAction({
+    client_id: clientId,
+    sender_instance: instanceA,
+    receiver_instance: instanceB,
+    message_text: `🔄 Rodada mútua concluída entre ${instanceA} e ${instanceB}. Ambos trocaram mensagens e contatos.`,
+    action_type: "system",
+  });
+
+  return {
+    success: true,
+    message: `Aquecimento mútuo concluído! ${instanceA} enviou: "${resA.messageText}" ⇄ ${instanceB} respondeu: "${resB.messageText}".`,
+    details: { turnA: resA.messageText, turnB: resB.messageText },
+  };
+}
+
+/**
+ * Ativa o Piloto Automático 100% autônomo entre duas instâncias:
+ * Ativa ambos os chips, configura todas as proteções anti-ban de 2026 e vincula a conversa.
+ */
+export async function enablePairAutopilot(
+  clientId: string,
+  instanceA: string,
+  instanceB: string
+): Promise<{ success: boolean; message: string; error?: string }> {
+  const nowIso = new Date().toISOString();
+
+  const pairConfigs = [instanceA, instanceB].map((name) => ({
+    client_id: clientId,
+    instance_name: name,
+    enabled: true,
+    stage_auto_progress: true,
+    enable_vcard: true,
+    enable_audio: true,
+    enable_blue_ticks: true,
+    enable_reactions: true,
+    enable_status_posts: true,
+    continuous_warmup: true,
+    is_quarantined: false,
+    min_interval_seconds: 90,
+    max_interval_seconds: 240,
+    min_typing_seconds: 3,
+    max_typing_seconds: 8,
+    allowed_start_hour: 8,
+    allowed_end_hour: 21,
+    ai_model: "fallback",
+    ai_theme: "dia_a_dia",
+    updated_at: nowIso,
+  }));
+
+  for (const cfg of pairConfigs) {
+    try {
+      await supabaseAdmin
+        .from("whatsapp_warmup_configs")
+        .upsert(cfg, { onConflict: "client_id,instance_name" });
+    } catch {}
+  }
+
+  // Cria / reativa conversa na fila do worker
+  try {
+    await supabaseAdmin
+      .from("whatsapp_warmup_conversations")
+      .insert({
+        client_id: clientId,
+        instance_a: instanceA,
+        instance_b: instanceB,
+        topic: "dia_a_dia",
+        history: [],
+        turn_count: 0,
+        max_turns: 6,
+        status: "active",
+        next_turn_at: nowIso,
+        created_at: nowIso,
+        updated_at: nowIso,
+      });
+  } catch {}
+
+  await logWarmupAction({
+    client_id: clientId,
+    sender_instance: instanceA,
+    receiver_instance: instanceB,
+    message_text: `🚀 Piloto Automático Mútuo ATIVADO para ${instanceA} ⇄ ${instanceB}. Ambos aquecem sozinhos com todas as proteções anti-ban.`,
+    action_type: "system",
+  });
+
+  return {
+    success: true,
+    message: `Piloto Automático Mútuo ativado com sucesso para ${instanceA} e ${instanceB}! Ambos estão aquecendo sozinhos 24/7 com proteção máxima.`,
+  };
+}

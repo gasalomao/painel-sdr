@@ -223,5 +223,11 @@ describe("Áudio Real e Comportamentos Avançados de Maturação", () => {
     const buffer = Buffer.from(voiceB64, "base64");
     expect(buffer.length).toBeGreaterThan(1000);
   });
+
+  it("exporta triggerMutualWarmup e enablePairAutopilot para aquecimento mútuo automático", async () => {
+    const worker = await import("../warmup-worker");
+    expect(typeof worker.triggerMutualWarmup).toBe("function");
+    expect(typeof worker.enablePairAutopilot).toBe("function");
+  });
 });
 

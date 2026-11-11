@@ -9,6 +9,7 @@ import "react-big-calendar/lib/css/react-big-calendar.css";
 import "react-big-calendar/lib/addons/dragAndDrop/styles.css";
 import "../calendar-theme.css";
 import { colorForAppointment } from "@/lib/google-calendar-colors";
+import type { Appointment } from "../types";
 
 // Localizer date-fns em pt-BR (semana começa domingo, como o Google BR).
 const rbcLocalizer = dateFnsLocalizer({
@@ -19,34 +20,6 @@ const rbcLocalizer = dateFnsLocalizer({
   locales: { "pt-BR": ptBR },
 });
 const DnDCalendar = withDragAndDrop(Calendar as any);
-
-type Appointment = {
-  id: string;
-  client_id: string;
-  agent_id: number | null;
-  lead_id: number | null;
-  remote_jid: string;
-  instance_name: string | null;
-  google_event_id: string | null;
-  title: string;
-  description: string | null;
-  service_name: string | null;
-  start_at: string;
-  end_at: string;
-  status: "confirmed" | "tentative" | "cancelled" | "completed" | "no_show";
-  created_by: "ia" | "manual" | "google_sync";
-  cancelled_reason: string | null;
-  location?: string | null;
-  attendees?: { email: string; displayName?: string; responseStatus?: string }[] | null;
-  all_day?: boolean;
-  visibility?: "default" | "public" | "private" | "confidential";
-  color_id?: string | null;
-  html_link?: string | null;
-  recurrence?: string[] | null;
-  conference_data?: any;
-  organizer_email?: string | null;
-  metadata?: Record<string, any> | null;
-};
 
 const RBC_MESSAGES = {
   date: "Data", time: "Hora", event: "Evento", allDay: "Dia todo",

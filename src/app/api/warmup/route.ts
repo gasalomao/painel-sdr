@@ -312,6 +312,17 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
+    // Se for ação em massa (ativar/pausar todos)
+    if (body.action === "enable_all" || body.action === "pause_all") {
+      const enabled = body.action === "enable_all";
+      const cfgMap = await getConfigsFromDbOrSettings(clientId);
+      for (const key of Object.keys(cfgMap)) {
+        cfgMap[key].enabled = enabled;
+        await saveConfigToDbAndSettings(clientId, cfgMap[key]);
+      }
+      return NextResponse.json({ success: true, enabled });
+    }
+
     // Se for salvamento de configurações globais
     if (body.type === "global_settings") {
       const { type: _unused, ...settings } = body;

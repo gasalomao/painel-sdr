@@ -525,7 +525,7 @@
 .dialog {
   display: block;
   width: calc(100% - 32px);
-  max-width: 540px;
+  max-width: 620px;
   padding: 0;
   overflow: hidden;
   border: 1px solid #3b483e;
@@ -533,6 +533,126 @@
   background: #181d19;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
   color: #edf2ee;
+}
+
+/* Guia explicativo / Banner de funcionamento */
+.explainerBanner {
+  border: 1px solid #2a352c;
+  border-radius: 12px;
+  background: #141915;
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.explainerHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.explainerGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.explainerCard {
+  border: 1px solid #263328;
+  border-radius: 10px;
+  background: #181e1a;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 150ms ease, background-color 150ms ease;
+}
+
+.explainerCard:hover {
+  border-color: #3b483e;
+  background: #1b231d;
+}
+
+.explainerCardIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: rgba(110, 231, 183, 0.1);
+  border: 1px solid rgba(110, 231, 183, 0.2);
+  color: #6ee7b7;
+}
+
+.explainerCardTitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: #edf2ee;
+  letter-spacing: -0.01em;
+}
+
+.explainerCardDesc {
+  font-size: 11px;
+  line-height: 1.5;
+  color: #a5b1a8;
+}
+
+/* Diagrama do Par de Chips no Modal */
+.pairDiagram {
+  border: 1px solid #2a352c;
+  border-radius: 12px;
+  background: #131915;
+  padding: 16px;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 12px;
+}
+
+.pairNode {
+  border: 1px solid #303a32;
+  border-radius: 10px;
+  background: #181f1b;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pairConnector {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  color: #6ee7b7;
+}
+
+.pairFeaturesList {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid #222d25;
+  border-radius: 10px;
+  background: #131a15;
+}
+
+.pairFeatureItem {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: #c5d2c8;
+}
+
+.pairFeatureIcon {
+  color: #6ee7b7;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
 }
 
 .dialogHeader {
@@ -574,6 +694,9 @@
   .protectionsGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  .explainerGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 639px) {
@@ -599,6 +722,16 @@
     gap: 12px;
   }
   .protectionsGrid {
+    grid-template-columns: 1fr;
+  }
+  .explainerGrid {
+    grid-template-columns: 1fr;
+  }
+  .pairDiagram {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .pairFeaturesList {
     grid-template-columns: 1fr;
   }
   .panelHeader {

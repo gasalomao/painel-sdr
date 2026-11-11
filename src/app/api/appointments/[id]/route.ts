@@ -156,6 +156,15 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   // Sync com Google (best-effort) — propaga TODOS os campos atualizados.
   // Captura o erro pra devolver ao front (antes era silencioso).
   let googleError: string | null = null;
+  const agentChanged = effectiveAgentId !== existing.agent_id;
+  if (agentChanged) {
+    // O evento existente pertence ao agente anterior. Invalidate o vínculo
+    // antes de sincronizar: se a criação no novo agente falhar, não deve
+    // sobrar google_event_id antigo para uma edição futura tentar atualizar
+    // com credenciais do agente novo.
+    patch.google_event_id = null;
+    patch.html_link = null;
+  }
   if (effectiveAgentId && body.sync_google !== false) {
     try {
       if (patch.status === "cancelled") {
@@ -163,7 +172,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
           await cancelCalendarEvent(effectiveAgentId, existing.google_event_id, existing.calendar_id);
           patch.google_event_id = null;
         }
-      } else if (existing.google_event_id) {
+      } else if (existing.google_event_id && !agentChanged) {
         // Já existe no Google → atualiza (mover data, cor, título, etc).
         const hasGoogleField =
           patch.start_at || patch.end_at || patch.title !== undefined ||
@@ -195,12 +204,12 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
           if (ev.conferenceData) patch.conference_data = ev.conferenceData;
         }
       } else {
-        // NÃO existe no Google ainda (criado local-only, ex: agente conectado
-        // depois) → cria agora e guarda o google_event_id. Garante "sempre
-        // sincronizar": editar um evento órfão o empurra pro Google.
+        // Evento local sem Google, ou troca de agente: cria no calendário do
+        // agente efetivo. O google_event_id antigo pertence ao agente anterior,
+        // portanto não pode ser atualizado com as credenciais do novo.
         const ev = await createCalendarEvent({
           agentId: effectiveAgentId,
-          calendarId: existing.calendar_id || "primary",
+          calendarId: agentChanged ? "primary" : (existing.calendar_id || "primary"),
           title: patch.title ?? existing.title,
           description: patch.description ?? existing.description,
           startAt: patch.start_at ?? existing.start_at,

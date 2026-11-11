@@ -374,8 +374,9 @@ export async function executeWarmupTurn(opts: {
   conversation: WarmupConversation;
   isManualTrigger?: boolean;
   forceStatusPost?: boolean;
+  forceVCard?: boolean;
 }): Promise<{ success: boolean; messageText: string; error?: string }> {
-  const { clientId, senderConfig, receiverConfig, conversation, isManualTrigger, forceStatusPost } = opts;
+  const { clientId, senderConfig, receiverConfig, conversation, isManualTrigger, forceStatusPost, forceVCard } = opts;
 
   // 1. Checagem de Quarentena (Circuit Breaker)
   if (senderConfig.is_quarantined && !isManualTrigger) {
@@ -416,7 +417,13 @@ export async function executeWarmupTurn(opts: {
 
   // 4. TROCA DE vCARD (Cartão de Contato na Agenda) - Realizada no primeiro turno entre os dois chips
   const vcardPeers = senderConfig.vcard_exchanged_peers || [];
-  if (!isManualTrigger && senderConfig.enable_vcard !== false && !vcardPeers.includes(receiverConfig.instance_name) && senderPhone) {
+  const shouldExchangeVCard =
+    (forceVCard || !isManualTrigger) &&
+    senderConfig.enable_vcard !== false &&
+    !vcardPeers.includes(receiverConfig.instance_name) &&
+    Boolean(senderPhone);
+
+  if (shouldExchangeVCard && senderPhone) {
     try {
       await logWarmupAction({
         client_id: clientId,
