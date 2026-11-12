@@ -19,6 +19,9 @@ const APPENDED_MIGRATIONS = [
   "023_performance_leads_indexes.sql",
   "024_enterprise_security_hardening.sql",
   "025_prospeccao_autonoma_previa.sql",
+  "026_whatsapp_warmup.sql",
+  "027_whatsapp_warmup_schema_fix.sql",
+  "028_whatsapp_warmup_swarm_groups.sql",
 ];
 
 let sql = readFileSync(sqlPath, "utf8");

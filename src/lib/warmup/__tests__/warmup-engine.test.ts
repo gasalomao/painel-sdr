@@ -3,6 +3,7 @@ import {
   isWithinOperatingHours,
   isSameBrazilDay,
   getBrazilHour,
+  getBrazilDayKey,
   generateWarmupMessage,
   evaluateDailyAutoProgress,
 } from "../warmup-engine";
@@ -206,6 +207,116 @@ describe("Piloto Automático de Fases (evaluateDailyAutoProgress)", () => {
     };
     const res = evaluateDailyAutoProgress(cfgError, "2026-11-10T14:00:00Z");
     expect(res.newConsecutiveDays).toBe(4);
+  });
+});
+
+describe("Reset diário idempotente e progressão segura", () => {
+  function dailyConfig(overrides: Partial<WarmupConfig> = {}): WarmupConfig {
+    return {
+      client_id: "client-1",
+      instance_name: "inst-1",
+      enabled: true,
+      stage: 1,
+      stage_auto_progress: true,
+      days_active: 1,
+      consecutive_successful_days: 1,
+      health_score: 100,
+      is_quarantined: false,
+      daily_target: 10,
+      sent_today: 5,
+      received_today: 3,
+      error_count_today: 0,
+      last_activity_at: "2026-11-09T14:00:00Z",
+      min_interval_seconds: 180,
+      max_interval_seconds: 360,
+      min_typing_seconds: 3,
+      max_typing_seconds: 8,
+      allowed_start_hour: 8,
+      allowed_end_hour: 21,
+      ai_model: "fallback",
+      ai_theme: "dia_a_dia",
+      enable_typing: true,
+      enable_blue_ticks: true,
+      enable_reactions: true,
+      enable_audio: false,
+      enable_vcard: true,
+      enable_status_posts: true,
+      continuous_warmup: true,
+      ...overrides,
+    };
+  }
+
+  const nowIso = "2026-11-10T14:00:00Z";
+  const todayKey = getBrazilDayKey(nowIso);
+
+  it("não reseta de novo no mesmo dia, mesmo com last_activity_at antigo", () => {
+    const res = evaluateDailyAutoProgress(dailyConfig(), nowIso, todayKey);
+
+    expect(res.isNewDay).toBe(false);
+    expect(res.stagePromoted).toBe(false);
+    expect(res.newDaysActive).toBe(1);
+  });
+
+  it("reseta uma única vez quando a chave do dia muda", () => {
+    const res = evaluateDailyAutoProgress(dailyConfig(), nowIso, "2026-11-09");
+
+    expect(res.isNewDay).toBe(true);
+    expect(res.newConsecutiveDays).toBe(2);
+  });
+
+  it("calcula days_active pelos dias civis desde a criação", () => {
+    const res = evaluateDailyAutoProgress(
+      dailyConfig({ created_at: "2026-11-05T15:00:00Z", days_active: 624 }),
+      nowIso,
+      "2026-11-09"
+    );
+
+    expect(res.newDaysActive).toBe(6);
+  });
+
+  it("não promove fase sem dias consecutivos saudáveis", () => {
+    const res = evaluateDailyAutoProgress(
+      dailyConfig({
+        stage: 1,
+        days_active: 20,
+        created_at: "2026-10-01T15:00:00Z",
+        consecutive_successful_days: 0,
+        sent_today: 0,
+      }),
+      nowIso,
+      "2026-11-09"
+    );
+
+    expect(res.newConsecutiveDays).toBe(0);
+    expect(res.stagePromoted).toBe(false);
+    expect(res.newStage).toBe(1);
+  });
+
+  it("promove quando há dias suficientes e 2 dias consecutivos saudáveis", () => {
+    const res = evaluateDailyAutoProgress(
+      dailyConfig({
+        created_at: "2026-11-05T15:00:00Z",
+        consecutive_successful_days: 1,
+        sent_today: 5,
+      }),
+      nowIso,
+      "2026-11-09"
+    );
+
+    expect(res.newConsecutiveDays).toBe(2);
+    expect(res.stagePromoted).toBe(true);
+    expect(res.newStage).toBe(2);
+  });
+
+  it("preserva meta personalizada quando o piloto automático está desligado", () => {
+    const res = evaluateDailyAutoProgress(
+      dailyConfig({ stage_auto_progress: false, daily_target: 33 }),
+      nowIso,
+      "2026-11-09"
+    );
+
+    expect(res.stagePromoted).toBe(false);
+    expect(res.newDailyTarget).toBe(33);
   });
 });
 

@@ -3042,4 +3042,208 @@ COMMENT ON COLUMN public.leads_extraidos.link_previa IS 'URL pública da prévia
 COMMENT ON COLUMN public.leads_extraidos.previa_qa_score IS 'Nota estética e técnica atribuída pelo QA triplo (0 a 100)';
 COMMENT ON COLUMN public.leads_extraidos.previa_qa_report IS 'Relatório detalhado das 3 camadas de inspeção (HTTP, Puppeteer mobile e LLM Vision)';
 COMMENT ON COLUMN public.leads_extraidos.previa_whatsapp_insights IS 'Insights minerados da conversa no WhatsApp (regras de PIX, links de agenda externa, etc.)';
+
+
+-- ============================================================
+-- MIGRATION 026: AQUECER CHIPS (WHATSAPP WARMUP VIA EVOLUTION API)
+-- Permite maturação automática e mútua de números de WhatsApp
+-- com escada de aquecimento, IA, presença humana e isolamento do CRM.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS public.whatsapp_warmup_configs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id UUID NOT NULL,
+  instance_name TEXT NOT NULL,
+  phone_number TEXT,
+  enabled BOOLEAN NOT NULL DEFAULT false,
+  stage INT NOT NULL DEFAULT 1, -- 1: Frio, 2: Morno, 3: Quente, 4: Blindado
+  daily_target INT NOT NULL DEFAULT 10,
+  sent_today INT NOT NULL DEFAULT 0,
+  received_today INT NOT NULL DEFAULT 0,
+  last_activity_at TIMESTAMPTZ,
+  min_interval_seconds INT NOT NULL DEFAULT 90,
+  max_interval_seconds INT NOT NULL DEFAULT 300,
+  allowed_start_hour INT NOT NULL DEFAULT 8,
+  allowed_end_hour INT NOT NULL DEFAULT 21,
+  ai_model TEXT NOT NULL DEFAULT 'fallback', -- 'fallback' (grátis) ou modelo de ai_models
+  ai_theme TEXT NOT NULL DEFAULT 'dia_a_dia',
+  enable_typing BOOLEAN NOT NULL DEFAULT true,
+  enable_blue_ticks BOOLEAN NOT NULL DEFAULT true,
+  enable_reactions BOOLEAN NOT NULL DEFAULT true,
+  enable_audio BOOLEAN NOT NULL DEFAULT false,
+  custom_prompt TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT uq_warmup_client_instance UNIQUE (client_id, instance_name)
+);
+
+CREATE TABLE IF NOT EXISTS public.whatsapp_warmup_logs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id UUID NOT NULL,
+  sender_instance TEXT NOT NULL,
+  receiver_instance TEXT NOT NULL,
+  sender_phone TEXT,
+  receiver_phone TEXT,
+  message_text TEXT NOT NULL,
+  action_type TEXT NOT NULL DEFAULT 'text', -- 'text', 'reaction', 'audio', 'presence', 'system'
+  details JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.whatsapp_warmup_conversations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id UUID NOT NULL,
+  instance_a TEXT NOT NULL,
+  instance_b TEXT NOT NULL,
+  topic TEXT NOT NULL DEFAULT 'dia_a_dia',
+  history JSONB NOT NULL DEFAULT '[]'::jsonb,
+  turn_count INT NOT NULL DEFAULT 0,
+  max_turns INT NOT NULL DEFAULT 6,
+  last_sender TEXT,
+  status TEXT NOT NULL DEFAULT 'active', -- 'active', 'finished'
+  next_turn_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_warmup_configs_client_enabled 
+  ON public.whatsapp_warmup_configs (client_id, enabled);
+
+CREATE INDEX IF NOT EXISTS idx_warmup_logs_client_created 
+  ON public.whatsapp_warmup_logs (client_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_warmup_convs_status 
+  ON public.whatsapp_warmup_conversations (client_id, status, next_turn_at);
+
+ALTER TABLE public.whatsapp_warmup_configs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.whatsapp_warmup_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.whatsapp_warmup_conversations ENABLE ROW LEVEL SECURITY;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'warmup_configs_tenant') THEN
+    CREATE POLICY warmup_configs_tenant ON public.whatsapp_warmup_configs
+      FOR ALL USING (client_id = (SELECT auth.uid()) OR (SELECT current_setting('role', true)) = 'service_role');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'warmup_logs_tenant') THEN
+    CREATE POLICY warmup_logs_tenant ON public.whatsapp_warmup_logs
+      FOR ALL USING (client_id = (SELECT auth.uid()) OR (SELECT current_setting('role', true)) = 'service_role');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'warmup_convs_tenant') THEN
+    CREATE POLICY warmup_convs_tenant ON public.whatsapp_warmup_conversations
+      FOR ALL USING (client_id = (SELECT auth.uid()) OR (SELECT current_setting('role', true)) = 'service_role');
+  END IF;
+END $$;
+
+
+-- ============================================================
+-- MIGRATION 027: AQUECER CHIPS - SCHEMA FIX & COLUNAS AVANÇADAS
+-- Adiciona colunas para piloto automático, saúde do chip, quarentena preventiva,
+-- postagem de status e sincronização de vCard à tabela whatsapp_warmup_configs.
+-- ============================================================
+
+ALTER TABLE public.whatsapp_warmup_configs
+  ADD COLUMN IF NOT EXISTS stage_auto_progress BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS days_active INT NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS consecutive_successful_days INT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS health_score INT NOT NULL DEFAULT 100,
+  ADD COLUMN IF NOT EXISTS is_quarantined BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS quarantine_reason TEXT,
+  ADD COLUMN IF NOT EXISTS quarantine_until TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS error_count_today INT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS last_status_post_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS vcard_exchanged_peers JSONB NOT NULL DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS min_typing_seconds INT NOT NULL DEFAULT 3,
+  ADD COLUMN IF NOT EXISTS max_typing_seconds INT NOT NULL DEFAULT 8,
+  ADD COLUMN IF NOT EXISTS enable_vcard BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS enable_status_posts BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS continuous_warmup BOOLEAN NOT NULL DEFAULT true;
+
+-- Índices complementares de busca rápida para o worker e dashboard
+CREATE INDEX IF NOT EXISTS idx_warmup_configs_client_quarantine
+  ON public.whatsapp_warmup_configs (client_id, is_quarantined);
+
+CREATE INDEX IF NOT EXISTS idx_warmup_configs_last_activity
+  ON public.whatsapp_warmup_configs (client_id, last_activity_at DESC);
+
+
+-- ============================================================
+-- MIGRATION 028: AQUECER CHIPS - SWARM N-CHIPS & GRUPOS DE AQUECIMENTO
+-- Habilita rede em malha para N números, importação em lote de grupos,
+-- heurística zero-token de reações e calibração por finalidade (Contingência, Inbound, Outbound).
+-- ============================================================
+
+-- 1. Grupos de Aquecimento do WhatsApp
+CREATE TABLE IF NOT EXISTS public.whatsapp_warmup_groups (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id UUID NOT NULL,
+  invite_url TEXT NOT NULL,
+  invite_code TEXT NOT NULL,
+  group_jid TEXT,
+  name TEXT,
+  description TEXT,
+  member_count INT NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending', -- 'pending', 'active', 'invalid', 'full', 'restricted', 'left'
+  last_error TEXT,
+  total_messages_received INT NOT NULL DEFAULT 0,
+  total_reactions_sent INT NOT NULL DEFAULT 0,
+  last_activity_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT uq_warmup_groups_client_code UNIQUE (client_id, invite_code)
+);
+
+-- 2. Associação de Membros da Colmeia aos Grupos
+CREATE TABLE IF NOT EXISTS public.whatsapp_warmup_group_members (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id UUID NOT NULL,
+  group_id UUID NOT NULL REFERENCES public.whatsapp_warmup_groups(id) ON DELETE CASCADE,
+  instance_name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending', -- 'pending', 'joining', 'joined', 'left', 'error'
+  joined_at TIMESTAMPTZ,
+  last_error TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT uq_warmup_group_members UNIQUE (group_id, instance_name)
+);
+
+-- 3. Atualização da tabela de configurações com Finalidade e Colmeia
+ALTER TABLE public.whatsapp_warmup_configs
+  ADD COLUMN IF NOT EXISTS purpose TEXT NOT NULL DEFAULT 'outbound', -- 'contingency', 'inbound', 'outbound'
+  ADD COLUMN IF NOT EXISTS profile_hydrated BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS group_auto_join BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS swarm_active BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS max_groups_per_chip INT NOT NULL DEFAULT 10;
+
+-- 4. Índices para consultas de alta performance no Webhook e Workers
+CREATE INDEX IF NOT EXISTS idx_warmup_groups_client_status
+  ON public.whatsapp_warmup_groups (client_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_warmup_groups_jid
+  ON public.whatsapp_warmup_groups (group_jid)
+  WHERE group_jid IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_warmup_group_members_instance
+  ON public.whatsapp_warmup_group_members (instance_name, status);
+
+CREATE INDEX IF NOT EXISTS idx_warmup_configs_swarm
+  ON public.whatsapp_warmup_configs (client_id, swarm_active, enabled);
+
+-- 5. RLS (Row Level Security)
+ALTER TABLE public.whatsapp_warmup_groups ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.whatsapp_warmup_group_members ENABLE ROW LEVEL SECURITY;
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE tablename = 'whatsapp_warmup_groups' AND policyname = 'tenant_isolation_warmup_groups'
+  ) THEN
+    CREATE POLICY tenant_isolation_warmup_groups ON public.whatsapp_warmup_groups
+      FOR ALL USING (client_id = (SELECT auth.uid()) OR (SELECT current_setting('role', true)) = 'service_role');
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE tablename = 'whatsapp_warmup_group_members' AND policyname = 'tenant_isolation_warmup_group_members'
+  ) THEN
+    CREATE POLICY tenant_isolation_warmup_group_members ON public.whatsapp_warmup_group_members
+      FOR ALL USING (client_id = (SELECT auth.uid()) OR (SELECT current_setting('role', true)) = 'service_role');
+  END IF;
+END $$;
 `;

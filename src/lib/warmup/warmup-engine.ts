@@ -2,7 +2,9 @@ import { supabaseAdmin } from "@/lib/supabase_admin";
 import { evolution } from "@/lib/evolution";
 import { generateText } from "@/lib/ai-provider";
 import { getAiKeys } from "@/lib/ai-keys";
+import { registerWarmupSend } from "@/lib/manual-send-registry";
 import { getRandomWarmupVoiceBase64 } from "./warmup-audio";
+import { invalidateWarmupFirewallCache, persistResolvedChipPhone } from "./warmup-firewall";
 import {
   calculateTypingDuration,
   getRandomReaction,
@@ -49,6 +51,23 @@ export function isWithinOperatingHours(
     return currentHour >= startHour && currentHour < endHour;
   }
   return currentHour >= startHour || currentHour < endHour;
+}
+
+/**
+ * Chave do dia civil brasileiro (YYYY-MM-DD), usada para reset diário idempotente.
+ */
+export function getBrazilDayKey(date: Date | string = new Date()): string {
+  try {
+    const value = typeof date === "string" ? new Date(date) : date;
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Sao_Paulo",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(value);
+  } catch {
+    return "";
+  }
 }
 
 /**
@@ -107,8 +126,12 @@ export async function resolveInstancePhone(
     const candidate = pConfig?.owner_phone || pConfig?.owner_jid || null;
 
     if (candidate) {
-      const clean = String(candidate).replace(/\D/g, "");
-      if (clean.length >= 10) return clean;
+      const clean = String(candidate).replace(/@.*$/, "").replace(/\D/g, "");
+      if (clean.length >= 10) {
+        persistResolvedChipPhone(clientId, instanceName, clean).catch(() => {});
+        invalidateWarmupFirewallCache(clientId);
+        return clean;
+      }
     }
   } catch {}
 
@@ -122,8 +145,12 @@ export async function resolveInstancePhone(
       (st?.data as any)?.instance?.ownerJid ||
       null;
     if (owner) {
-      const clean = String(owner).replace(/\D/g, "");
-      if (clean.length >= 10) return clean;
+      const clean = String(owner).replace(/@.*$/, "").replace(/\D/g, "");
+      if (clean.length >= 10) {
+        persistResolvedChipPhone(clientId, instanceName, clean).catch(() => {});
+        invalidateWarmupFirewallCache(clientId);
+        return clean;
+      }
     }
   } catch {}
 
@@ -296,10 +323,15 @@ export async function handleInstanceFailure(
 
 /**
  * Avalia a progressão de dias e promoção de estágio do piloto automático.
+ *
+ * `lastResetDay` (YYYY-MM-DD, fuso Brasil) evita reset a cada tick quando o
+ * chip não envia nada: sem ele, `last_activity_at` antigo marcava "novo dia"
+ * a cada 60s e inflava `days_active` (bug observado: 624 dias).
  */
 export function evaluateDailyAutoProgress(
   cfg: WarmupConfig,
-  nowIso: string = new Date().toISOString()
+  nowIso: string = new Date().toISOString(),
+  lastResetDay?: string | null
 ): {
   isNewDay: boolean;
   stagePromoted: boolean;
@@ -309,9 +341,12 @@ export function evaluateDailyAutoProgress(
   newDailyTarget: number;
   stageInfo: (typeof STAGE_DEFAULTS)[WarmupStage];
 } {
-  const isNewDay = cfg.last_activity_at
-    ? !isSameBrazilDay(cfg.last_activity_at, nowIso)
-    : false;
+  const todayKey = getBrazilDayKey(nowIso);
+  const isNewDay = lastResetDay
+    ? lastResetDay !== todayKey
+    : cfg.last_activity_at
+      ? !isSameBrazilDay(cfg.last_activity_at, nowIso)
+      : false;
 
   const curStage = (cfg.stage || 1) as WarmupStage;
 
@@ -331,13 +366,26 @@ export function evaluateDailyAutoProgress(
   const newConsecutiveDays = hadSuccess
     ? (cfg.consecutive_successful_days || 0) + 1
     : Math.max(0, (cfg.consecutive_successful_days || 0) - 1);
-  const newDaysActive = (cfg.days_active || 1) + 1;
+
+  // Dias ativos = dias civis desde a criação do chip (fonte real), com fallback
+  // para o contador incremental quando created_at não estiver disponível.
+  let newDaysActive = (cfg.days_active || 1) + 1;
+  if (cfg.created_at) {
+    const createdKey = getBrazilDayKey(cfg.created_at);
+    if (createdKey && todayKey) {
+      const createdDate = new Date(`${createdKey}T12:00:00Z`);
+      const todayDate = new Date(`${todayKey}T12:00:00Z`);
+      const elapsed = Math.floor((todayDate.getTime() - createdDate.getTime()) / 86_400_000) + 1;
+      if (Number.isFinite(elapsed) && elapsed >= 1) newDaysActive = elapsed;
+    }
+  }
 
   let newStage: WarmupStage = curStage;
   let stagePromoted = false;
 
   // PILOTO AUTOMÁTICO DE ESCADA DE FASES
-  if (cfg.stage_auto_progress !== false) {
+  // Só promove com dias suficientes E pelo menos 2 dias consecutivos saudáveis.
+  if (cfg.stage_auto_progress !== false && newConsecutiveDays >= 2) {
     if (newStage === 1 && newDaysActive >= 4) {
       newStage = 2;
       stagePromoted = true;
@@ -358,7 +406,9 @@ export function evaluateDailyAutoProgress(
     newStage,
     newDaysActive,
     newConsecutiveDays,
-    newDailyTarget: stageInfo.dailyTarget,
+    newDailyTarget: stagePromoted
+      ? stageInfo.dailyTarget
+      : cfg.daily_target || stageInfo.dailyTarget,
     stageInfo,
   };
 }
@@ -409,7 +459,27 @@ export async function executeWarmupTurn(opts: {
 
   if (!receiverPhone) {
     const errorMsg = `Telefone do chip destinatário (${receiverConfig.instance_name}) não encontrado.`;
-    await handleInstanceFailure(clientId, senderConfig, errorMsg);
+    // Falha de cadastro do destinatário NÃO é falha de reputação do remetente.
+    // Por isso não passa pelo circuit breaker.
+    await logWarmupAction({
+      client_id: clientId,
+      sender_instance: senderConfig.instance_name,
+      receiver_instance: receiverConfig.instance_name,
+      message_text: `⚠️ Turno ignorado: ${errorMsg} Nenhum envio foi feito e a saúde do remetente foi preservada.`,
+      action_type: "system",
+    });
+    return { success: false, messageText: "", error: errorMsg };
+  }
+
+  if (senderPhone && senderPhone === receiverPhone) {
+    const errorMsg = `Remetente e destinatário apontam para o mesmo telefone (${receiverPhone}).`;
+    await logWarmupAction({
+      client_id: clientId,
+      sender_instance: senderConfig.instance_name,
+      receiver_instance: receiverConfig.instance_name,
+      message_text: `⚠️ Turno ignorado: ${errorMsg} Configure o número correto do chip para evitar autoenvio.`,
+      action_type: "system",
+    });
     return { success: false, messageText: "", error: errorMsg };
   }
 
@@ -436,11 +506,12 @@ export async function executeWarmupTurn(opts: {
       });
 
       // Envia o cartão de contato do REMETENTE para o destinatário salvar na agenda
-      await evolution.sendContact(
+      const vcardRes: any = await evolution.sendContact(
         targetJid,
         [{ fullName: senderConfig.instance_name, phoneNumber: senderPhone }],
         senderConfig.instance_name
       );
+      registerWarmupSend(vcardRes?.key?.id || vcardRes?.data?.key?.id || vcardRes?.id);
 
       // Marca como trocado em ambos os lados
       const updatedPeers = [...vcardPeers, receiverConfig.instance_name];
@@ -486,7 +557,8 @@ export async function executeWarmupTurn(opts: {
   }
 
   // 6. Geração da Mensagem (Texto ou Áudio)
-  const isAudioTurn = (senderConfig.enable_audio || senderConfig.stage >= 2) && Math.random() < 0.18; // ~18% de turnos viram áudio
+  const isAudioTurn =
+    senderConfig.enable_audio !== false && senderConfig.stage >= 2 && Math.random() < 0.18; // ~18% de turnos viram áudio
   let messageText = "";
   let genResult = { provider: "native", modelUsed: "dialogue_bank" };
 
@@ -559,6 +631,7 @@ export async function executeWarmupTurn(opts: {
     sendResult?.id ||
     sendResult?.data?.key?.id ||
     `wup_${Date.now()}`;
+  registerWarmupSend(messageId);
 
   // Log do Envio com Sucesso
   await logWarmupAction({
@@ -619,13 +692,14 @@ export async function executeWarmupTurn(opts: {
     const performReaction = async () => {
       try {
         const senderJid = `${senderPhone}@s.whatsapp.net`;
-        await evolution.sendReaction(
+        const reactRes: any = await evolution.sendReaction(
           senderJid,
           messageId,
           reactionEmoji,
           receiverConfig.instance_name,
           false
         );
+        registerWarmupSend(reactRes?.key?.id || reactRes?.data?.key?.id || reactRes?.id);
         await logWarmupAction({
           client_id: clientId,
           sender_instance: receiverConfig.instance_name,

@@ -11,6 +11,7 @@ import { refreshProfilePicIfStale, sanitizeLogPayload } from "../shared-helpers"
 import { getOrganizerConfig } from "@/lib/organizer-config-cache";
 import { safeSecretEqual, shouldLogOnce } from "@/lib/webhook-security";
 import { processIncomingGroupMessage } from "@/lib/warmup/warmup-groups";
+import { detectWarmupPeerTraffic } from "@/lib/warmup/warmup-firewall";
 
 export const dynamic = 'force-dynamic';
 
@@ -851,38 +852,36 @@ export async function POST(req: NextRequest) {
         });
       }
 
-      // 2. Mensagens 1x1 trocadas entre chips do mesmo tenant durante o aquecimento:
-      // NÃO devem abrir sessões no CRM nem acionar o agente de vendas da SDR.
-      if (!fromMe && remoteJid) {
-        try {
-          const cleanPhone = remoteJid.replace(/\D/g, "");
-          if (cleanPhone.length >= 10) {
-            const { data: peerWarmup } = await supabase
-              .from("whatsapp_warmup_configs")
-              .select("instance_name, enabled")
-              .eq("client_id", clientId)
-              .eq("phone_number", cleanPhone)
-              .maybeSingle();
+      // 2. Mensagens 1x1 trocadas entre chips do mesmo tenant durante o aquecimento
+      // (tanto recebidas quanto enviadas via fromMe=true, textos, áudios, vCards ou reações):
+      // NÃO devem abrir sessões no CRM, poluir o chat nem acionar o agente de IA.
+      if (remoteJid) {
+        const remoteJidAlt = data.key?.remoteJidAlt || body.key?.remoteJidAlt || data.key?.senderPn || body.key?.senderPn || null;
+        const warmupCheck = await detectWarmupPeerTraffic({
+          clientId,
+          instanceName,
+          messageId: finalId,
+          remoteJid,
+          remoteJidAlt,
+        });
 
-            if (peerWarmup) {
-              console.log(`[WARMUP] 🛑 Mensagem interceptada de chip parceiro (${peerWarmup.instance_name}) -> CRM/SDR blindados.`);
-              supabase
-                .from("whatsapp_warmup_configs")
-                .update({ last_activity_at: new Date().toISOString() })
-                .eq("instance_name", instanceName)
-                .eq("client_id", clientId)
-                .then(() => {}, () => {});
+        if (warmupCheck.blocked) {
+          console.log(
+            `[WARMUP] 🛑 Mensagem 1x1 de aquecimento interceptada (${warmupCheck.reason}${warmupCheck.peerInstance ? ` · peer=${warmupCheck.peerInstance}` : ""}) -> CRM/SDR blindados.`
+          );
+          supabase
+            .from("whatsapp_warmup_configs")
+            .update({ last_activity_at: new Date().toISOString() })
+            .eq("instance_name", instanceName)
+            .eq("client_id", clientId)
+            .then(() => {}, () => {});
 
-              return NextResponse.json({
-                success: true,
-                ignored: true,
-                reason: "warmup_peer_traffic",
-                peer_instance: peerWarmup.instance_name,
-              });
-            }
-          }
-        } catch {
-          // Se a tabela ainda não estiver criada, segue fluxo padrão sem falhar
+          return NextResponse.json({
+            success: true,
+            ignored: true,
+            reason: warmupCheck.reason || "warmup_peer_traffic",
+            peer_instance: warmupCheck.peerInstance || null,
+          });
         }
       }
 
@@ -1299,9 +1298,18 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // === Disparar IA (texto OU áudio transcrito) ===
+      // === Disparar IA (texto OU áudio transcrito; reações de emoji ficam salvas no chat mas NÃO disparam IA) ===
       const agentText = text || enrichedContent;
-      if (!fromMe && agentText && session?.id && !groupDisabled) {
+      if (!fromMe && msgType === "reaction" && session?.id) {
+        console.log(`[Webhook] Reação de emoji (${truncForLog(agentText, 24)}) salva no chat sem acionar IA:`, maskJid(remoteJid));
+        supabase.from("webhook_logs").insert({
+          instance_name: instanceName,
+          client_id: clientId,
+          event: "AGENT_SKIP_REACTION",
+          payload: { remote_jid: maskJid(remoteJid), text: truncForLog(agentText, 40) },
+          created_at: new Date().toISOString(),
+        }).then(() => {}, () => {});
+      } else if (!fromMe && msgType !== "reaction" && agentText && session?.id && !groupDisabled) {
         const effectiveActive = (session as any)._effective_active ?? (session.bot_status === 'bot_active');
         if (effectiveActive) {
           console.log("🤖 DISPARANDO AGENTE DE IA PARA:", maskJid(remoteJid));

@@ -12,6 +12,9 @@ const impeccableSql = readFileSync(resolve(process.cwd(), "migrations/018_enable
 const performanceLeadsSql = readFileSync(resolve(process.cwd(), "migrations/023_performance_leads_indexes.sql"), "utf8");
 const enterpriseSecuritySql = readFileSync(resolve(process.cwd(), "migrations/024_enterprise_security_hardening.sql"), "utf8");
 const previaSql = readFileSync(resolve(process.cwd(), "migrations/025_prospeccao_autonoma_previa.sql"), "utf8");
+const warmupSql = readFileSync(resolve(process.cwd(), "migrations/026_whatsapp_warmup.sql"), "utf8");
+const warmupFixSql = readFileSync(resolve(process.cwd(), "migrations/027_whatsapp_warmup_schema_fix.sql"), "utf8");
+const warmupSwarmSql = readFileSync(resolve(process.cwd(), "migrations/028_whatsapp_warmup_swarm_groups.sql"), "utf8");
 const tempDirs: string[] = [];
 
 function makeTempProject(): string {
@@ -36,6 +39,9 @@ describe("scripts/build-setup-sql.mjs", () => {
     writeFileSync(join(cwd, "migrations", "023_performance_leads_indexes.sql"), performanceLeadsSql, "utf8");
     writeFileSync(join(cwd, "migrations", "024_enterprise_security_hardening.sql"), enterpriseSecuritySql, "utf8");
     writeFileSync(join(cwd, "migrations", "025_prospeccao_autonoma_previa.sql"), previaSql, "utf8");
+    writeFileSync(join(cwd, "migrations", "026_whatsapp_warmup.sql"), warmupSql, "utf8");
+    writeFileSync(join(cwd, "migrations", "027_whatsapp_warmup_schema_fix.sql"), warmupFixSql, "utf8");
+    writeFileSync(join(cwd, "migrations", "028_whatsapp_warmup_swarm_groups.sql"), warmupSwarmSql, "utf8");
 
     const result = spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" });
 
@@ -45,7 +51,7 @@ describe("scripts/build-setup-sql.mjs", () => {
     expect(generated).not.toContain("RAIZ_ERRADA");
     expect(generated).toContain("migrations/SETUP_COMPLETO.sql");
     const sql = runInNewContext(generated.replace("export const SETUP_SQL =", "globalThis.sql =")) as string;
-    expect(sql).toBe(`SELECT 'CANONICA';\n\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n\n\n${impeccableSql.trim()}\n\n\n${performanceLeadsSql.trim()}\n\n\n${enterpriseSecuritySql.trim()}\n\n\n${previaSql.trim()}\n`);
+    expect(sql).toBe(`SELECT 'CANONICA';\n\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n\n\n${impeccableSql.trim()}\n\n\n${performanceLeadsSql.trim()}\n\n\n${enterpriseSecuritySql.trim()}\n\n\n${previaSql.trim()}\n\n\n${warmupSql.trim()}\n\n\n${warmupFixSql.trim()}\n\n\n${warmupSwarmSql.trim()}\n`);
     expect(sql).toContain("CREATE OR REPLACE FUNCTION public.website_complete_run");
   });
 
@@ -60,12 +66,15 @@ describe("scripts/build-setup-sql.mjs", () => {
     writeFileSync(join(cwd, "migrations", "023_performance_leads_indexes.sql"), performanceLeadsSql);
     writeFileSync(join(cwd, "migrations", "024_enterprise_security_hardening.sql"), enterpriseSecuritySql);
     writeFileSync(join(cwd, "migrations", "025_prospeccao_autonoma_previa.sql"), previaSql);
+    writeFileSync(join(cwd, "migrations", "026_whatsapp_warmup.sql"), warmupSql);
+    writeFileSync(join(cwd, "migrations", "027_whatsapp_warmup_schema_fix.sql"), warmupFixSql);
+    writeFileSync(join(cwd, "migrations", "028_whatsapp_warmup_swarm_groups.sql"), warmupSwarmSql);
 
     expect(spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" }).status).toBe(0);
     const output = join(cwd, "src", "lib", "setup-sql.ts");
     const generated = readFileSync(output, "utf8");
     const sql = runInNewContext(generated.replace("export const SETUP_SQL =", "globalThis.sql =")) as string;
-    expect(sql).toBe(`${canonical}\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n\n\n${impeccableSql.trim()}\n\n\n${performanceLeadsSql.trim()}\n\n\n${enterpriseSecuritySql.trim()}\n\n\n${previaSql.trim()}\n`);
+    expect(sql).toBe(`${canonical}\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n\n\n${impeccableSql.trim()}\n\n\n${performanceLeadsSql.trim()}\n\n\n${enterpriseSecuritySql.trim()}\n\n\n${previaSql.trim()}\n\n\n${warmupSql.trim()}\n\n\n${warmupFixSql.trim()}\n\n\n${warmupSwarmSql.trim()}\n`);
     expect(spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" }).status).toBe(0);
     expect(readFileSync(output, "utf8")).toBe(generated);
   });
@@ -79,6 +88,9 @@ describe("scripts/build-setup-sql.mjs", () => {
     writeFileSync(join(cwd, "migrations", "023_performance_leads_indexes.sql"), performanceLeadsSql);
     writeFileSync(join(cwd, "migrations", "024_enterprise_security_hardening.sql"), enterpriseSecuritySql);
     writeFileSync(join(cwd, "migrations", "025_prospeccao_autonoma_previa.sql"), previaSql);
+    writeFileSync(join(cwd, "migrations", "026_whatsapp_warmup.sql"), warmupSql);
+    writeFileSync(join(cwd, "migrations", "027_whatsapp_warmup_schema_fix.sql"), warmupFixSql);
+    writeFileSync(join(cwd, "migrations", "028_whatsapp_warmup_swarm_groups.sql"), warmupSwarmSql);
     const base = join(cwd, "migrations", "SETUP_COMPLETO.sql");
     writeFileSync(base, websiteSql);
     expect(spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" }).status).toBe(0);
@@ -117,6 +129,27 @@ describe("scripts/build-setup-sql.mjs", () => {
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("018_enable_impeccable_skill.sql não encontrado");
+    expect(readFileSync(output, "utf8")).toBe("ANTIGO");
+  });
+
+  it("aborta sem a migration de warmup e preserva a saída existente", () => {
+    const cwd = makeTempProject();
+    mkdirSync(join(cwd, "migrations"));
+    mkdirSync(join(cwd, "src", "lib"), { recursive: true });
+    writeFileSync(join(cwd, "migrations", "SETUP_COMPLETO.sql"), "SELECT 1;");
+    writeFileSync(join(cwd, "migrations", "016_website_studio.sql"), websiteSql);
+    writeFileSync(join(cwd, "migrations", "017_website_studio_completion_guard.sql"), completionGuardSql);
+    writeFileSync(join(cwd, "migrations", "018_enable_impeccable_skill.sql"), impeccableSql);
+    writeFileSync(join(cwd, "migrations", "023_performance_leads_indexes.sql"), performanceLeadsSql);
+    writeFileSync(join(cwd, "migrations", "024_enterprise_security_hardening.sql"), enterpriseSecuritySql);
+    writeFileSync(join(cwd, "migrations", "025_prospeccao_autonoma_previa.sql"), previaSql);
+    const output = join(cwd, "src", "lib", "setup-sql.ts");
+    writeFileSync(output, "ANTIGO");
+
+    const result = spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("026_whatsapp_warmup.sql não encontrado");
     expect(readFileSync(output, "utf8")).toBe("ANTIGO");
   });
 

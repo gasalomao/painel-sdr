@@ -91,6 +91,7 @@ type GlobalSettings = {
   enable_status_posts: boolean;
   stage_auto_progress: boolean;
   continuous_warmup: boolean;
+  auto_warmup_new_chips: boolean;
   custom_prompt: string;
 };
 
@@ -111,6 +112,7 @@ const DEFAULT_GLOBAL_SETTINGS: GlobalSettings = {
   enable_status_posts: true,
   stage_auto_progress: true,
   continuous_warmup: true,
+  auto_warmup_new_chips: true,
   custom_prompt: "",
 };
 
@@ -201,6 +203,12 @@ const PROTECTIONS: Array<{ key: keyof GlobalSettings; icon: LucideIcon; title: s
     title: "Piloto automático de fases",
     description: "Evolui o chip de fase sozinho conforme acumula dias sem qualquer erro.",
   },
+  {
+    key: "auto_warmup_new_chips",
+    icon: Smartphone,
+    title: "Aquecer número novo automaticamente",
+    description: "Todo número conectado entra no aquecimento na fase 1, sem precisar ativar manualmente.",
+  },
 ];
 
 const STAGE_HINT: Record<WarmupStage, string> = {
@@ -277,6 +285,7 @@ export default function AquecerChipsPage() {
   const [aiModels, setAiModels] = useState<GroupableModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [savingGlobal, setSavingGlobal] = useState(false);
+  const [applyGlobalToAll, setApplyGlobalToAll] = useState(false);
   const [savingMap, setSavingMap] = useState<Record<string, boolean>>({});
   const [bulkBusy, setBulkBusy] = useState(false);
 
@@ -592,6 +601,7 @@ export default function AquecerChipsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           type: "global_settings",
+          applyToAll: applyGlobalToAll,
           ...globalSettings,
         }),
       });
@@ -599,6 +609,7 @@ export default function AquecerChipsPage() {
       if (data.success) {
         toast.success("Ajustes gerais do aquecedor atualizados.");
         setSavedGlobalSettings(globalSettings);
+        setApplyGlobalToAll(false);
       } else {
         toast.error(`Falha ao salvar: ${data.error}`);
       }
@@ -1128,8 +1139,8 @@ export default function AquecerChipsPage() {
                 <button
                   type="button"
                   onClick={handleSaveGlobalSettings}
-                  disabled={savingGlobal || !globalDirty}
-                  className={globalDirty ? styles.primaryAction : styles.secondaryAction}
+                  disabled={savingGlobal || (!globalDirty && !applyGlobalToAll)}
+                  className={globalDirty || applyGlobalToAll ? styles.primaryAction : styles.secondaryAction}
                 >
                   {savingGlobal ? (
                     <>
@@ -1383,6 +1394,18 @@ export default function AquecerChipsPage() {
                         );
                       })}
                     </div>
+
+                    <label className="flex items-center justify-between gap-3 rounded-lg border border-[#2a352c] bg-[#151a16] px-3 py-2.5">
+                      <span className="text-[11px] leading-relaxed text-neutral-400">
+                        Aplicar estas proteções também aos chips já configurados
+                      </span>
+                      <Switch
+                        checked={applyGlobalToAll}
+                        onCheckedChange={setApplyGlobalToAll}
+                        aria-label="Aplicar proteções aos chips já configurados"
+                        className="mt-0.5"
+                      />
+                    </label>
                   </section>
                 </div>
               </div>

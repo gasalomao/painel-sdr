@@ -127,3 +127,37 @@ export function isPendingAutomatedSend(instanceName: string, remoteJid: string, 
   return false;
 }
 
+/* ============================================================
+   REGISTRO DE ENVIOS DO AQUECEDOR (Warmup)
+   ------------------------------------------------------------
+   Garante que mensagens, áudios, vCards e reações disparados pelo
+   motor de aquecimento sejam reconhecidos imediatamente no webhook
+   mesmo que o chip ainda não tenha phone_number persistido no DB.
+   ============================================================ */
+declare global {
+  var __warmupSendRegistry: Map<string, number> | undefined;
+}
+
+const WARMUP_TTL_MS = 10 * 60 * 1000;
+
+function getWarmupStore(): Map<string, number> {
+  if (!globalThis.__warmupSendRegistry) {
+    globalThis.__warmupSendRegistry = new Map();
+  }
+  return globalThis.__warmupSendRegistry;
+}
+
+export function registerWarmupSend(msgId?: string | null): void {
+  if (!msgId) return;
+  const store = getWarmupStore();
+  prune(store);
+  store.set(msgId, Date.now() + WARMUP_TTL_MS);
+}
+
+export function isWarmupSend(msgId?: string | null): boolean {
+  if (!msgId) return false;
+  const store = getWarmupStore();
+  prune(store);
+  return store.has(msgId);
+}
+

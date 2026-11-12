@@ -24,3 +24,23 @@ export function extractDigits(jidOrPhone?: string | null): string {
   if (!jidOrPhone) return "";
   return String(jidOrPhone).replace(/@.*$/, "").replace(/\D/g, "");
 }
+
+/**
+ * Retorna os dígitos do telefone e, para celulares brasileiros (DDI 55),
+ * também a variação com/sem o 9º dígito após o DDD.
+ */
+export function getBrazilPhoneVariants(jidOrPhone?: string | null): string[] {
+  const raw = extractDigits(jidOrPhone);
+  if (raw.length < 8) return raw ? [raw] : [];
+
+  const withCountry = (raw.length === 10 || raw.length === 11) ? `55${raw}` : raw;
+  const variants = new Set<string>([raw, withCountry]);
+
+  if (/^55[1-9]\d9[6-9]\d{7}$/.test(withCountry)) {
+    variants.add(withCountry.slice(0, 4) + withCountry.slice(5));
+  } else if (/^55[1-9]\d[6-9]\d{7}$/.test(withCountry)) {
+    variants.add(`${withCountry.slice(0, 4)}9${withCountry.slice(4)}`);
+  }
+
+  return Array.from(variants);
+}

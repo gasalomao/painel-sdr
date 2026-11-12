@@ -1,10 +1,54 @@
 import { supabaseAdmin } from "@/lib/supabase_admin";
-import { executeWarmupTurn, isWithinOperatingHours, logWarmupAction, evaluateDailyAutoProgress } from "./warmup-engine";
+import {
+  executeWarmupTurn,
+  isWithinOperatingHours,
+  logWarmupAction,
+  evaluateDailyAutoProgress,
+  getBrazilDayKey,
+} from "./warmup-engine";
 import { WARMUP_THEMES } from "./warmup-dialogues";
 import { type WarmupConfig, type WarmupConversation } from "./warmup-types";
 import { syncGroupMembershipForChips, hydrateChipProfile } from "./warmup-groups";
+import {
+  ensureWarmupConfigsForTenant,
+  listWarmupTenantIds,
+  readTenantWarmupConfigs,
+  isConnectedStatus,
+  getEffectiveDailyTarget,
+  readDailyResetState,
+  writeDailyResetState,
+  acquireWarmupTickLock,
+  releaseWarmupTickLock,
+  type TenantConnection,
+} from "./warmup-config-service";
 
 const _lastWarningLogged: Record<string, number> = {};
+
+// A entrada em grupos é custosa e sensível a banimento: no máximo 1 sincronização
+// por tenant a cada 10 minutos, sem chamadas concorrentes.
+const GROUP_SYNC_INTERVAL_MS = 10 * 60 * 1000;
+const _lastGroupSyncAt: Record<string, number> = {};
+const _groupSyncInFlight = new Set<string>();
+
+function scheduleGroupSync(clientId: string): void {
+  const last = _lastGroupSyncAt[clientId] || 0;
+  if (Date.now() - last < GROUP_SYNC_INTERVAL_MS) return;
+  if (_groupSyncInFlight.has(clientId)) return;
+
+  _lastGroupSyncAt[clientId] = Date.now();
+  _groupSyncInFlight.add(clientId);
+  syncGroupMembershipForChips(clientId)
+    .catch(() => {})
+    .finally(() => _groupSyncInFlight.delete(clientId));
+}
+
+// Máximo de turnos por chip dentro do mesmo tick, para não gerar rajada.
+const MAX_TURNS_PER_CHIP_PER_TICK = 1;
+
+function effectiveTarget(config: WarmupConfig): number {
+  return getEffectiveDailyTarget(config);
+}
+
 
 /**
  * Agendador principal de maturação.
@@ -18,130 +62,151 @@ export async function tickWarmupWorker(): Promise<{
   let exchangesCount = 0;
 
   try {
-    // 1. Busca todas as configurações ativas (tabela oficial + fallback app_settings)
-    const activeConfigsList: WarmupConfig[] = [];
-
-    try {
-      const { data: dbConfigs, error: cfgError } = await supabaseAdmin
-        .from("whatsapp_warmup_configs")
-        .select("*")
-        .eq("enabled", true);
-
-      if (!cfgError && dbConfigs && dbConfigs.length > 0) {
-        activeConfigsList.push(...(dbConfigs as WarmupConfig[]));
-      }
-    } catch {}
-
-    // Fallback: se a tabela estiver vazia, busca em app_settings
-    if (activeConfigsList.length === 0) {
-      try {
-        const { data: appSettingsData } = await supabaseAdmin
-          .from("app_settings")
-          .select("key, value")
-          .like("key", "warmup_configs_%");
-
-        if (appSettingsData && appSettingsData.length > 0) {
-          for (const row of appSettingsData) {
-            try {
-              const parsed = JSON.parse(row.value);
-              const items = Object.values(parsed) as WarmupConfig[];
-              activeConfigsList.push(...items.filter((c) => c.enabled));
-            } catch {}
-          }
-        }
-      } catch {}
-    }
-
-    if (activeConfigsList.length === 0) {
-      return { processedTenants, exchangesCount };
-    }
-
-    // Agrupa por client_id
-    const clientMap = new Map<string, WarmupConfig[]>();
-    for (const c of activeConfigsList) {
-      const list = clientMap.get(c.client_id) || [];
-      list.push(c);
-      clientMap.set(c.client_id, list);
-    }
-
+    // 1. Lista tenants com configuração de warmup ou conexão WhatsApp.
+    const tenantIds = await listWarmupTenantIds();
     const now = new Date();
     const nowIso = now.toISOString();
 
-    for (const [clientId, configs] of clientMap.entries()) {
+    if (tenantIds.length === 0) {
+      return { processedTenants, exchangesCount };
+    }
+
+    const lockOwner = `warmup-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
+
+    for (const clientId of tenantIds) {
       processedTenants++;
 
-      // 2. Avaliação de Quarentena & Reset Diário com Piloto Automático de Fases
-      for (const cfg of configs) {
-        // Recuperação automática de quarentena pós-24h
-        if (cfg.is_quarantined && cfg.quarantine_until && new Date(cfg.quarantine_until) <= now) {
-          cfg.is_quarantined = false;
-          cfg.quarantine_reason = null;
-          cfg.health_score = 75;
-          await supabaseAdmin
-            .from("whatsapp_warmup_configs")
-            .update({
-              is_quarantined: false,
-              quarantine_reason: null,
-              health_score: 75,
-              updated_at: nowIso,
-            })
-            .eq("id", cfg.id);
+      // Lock por tenant: evita dois processos enviando no mesmo minuto.
+      const locked = await acquireWarmupTickLock(clientId, lockOwner);
+      if (!locked) {
+        console.log(`[WarmupWorker] Tenant ${clientId} já está sendo processado por outro processo. Pulando tick.`);
+        continue;
+      }
 
+      try {
+        // 2. Cadastro automático de chip conectado + leitura com precedência tabela > settings
+        const ensured = await ensureWarmupConfigsForTenant(clientId);
+        const connections: TenantConnection[] = ensured.connections;
+        const { configs: configMap } = await readTenantWarmupConfigs(clientId);
+
+        if (ensured.created.length > 0) {
           await logWarmupAction({
             client_id: clientId,
-            sender_instance: cfg.instance_name,
-            receiver_instance: "circuit_breaker",
-            message_text: `✅ Quarentena preventiva de 24h concluída para o Chip ${cfg.instance_name}. Tráfego reativado gradualmente.`,
-            action_type: "circuit_breaker",
+            sender_instance: "swarm_orchestrator",
+            receiver_instance: "auto_enroll",
+            message_text: `🆕 ${ensured.created.length} chip(s) conectado(s) cadastrado(s) automaticamente no aquecimento: ${ensured.created.join(", ")}.`,
+            action_type: "system",
           });
         }
 
-        // Reset diário de contadores se virou o dia civil no Brasil (Piloto Automático de Fases)
-        const progress = evaluateDailyAutoProgress(cfg, nowIso);
-        if (progress.isNewDay) {
-          const { stagePromoted, newStage, newDaysActive, newConsecutiveDays, stageInfo } = progress;
+        const enabledConfigs = Object.values(configMap).filter((c) => c.enabled);
+        if (enabledConfigs.length === 0) continue;
 
-          cfg.stage = newStage;
-          cfg.daily_target = stageInfo.dailyTarget;
-          cfg.min_interval_seconds = stageInfo.minInterval;
-          cfg.max_interval_seconds = stageInfo.maxInterval;
+        // Chip desconectado não recebe envio. Config sem linha de conexão mantém
+        // comportamento legado (evita parar tenants antigos sem channel_connections).
+        const statusByInstance = new Map(connections.map((c) => [c.instance_name, c.status]));
+        const configs = enabledConfigs.filter((c) => {
+          const status = statusByInstance.get(c.instance_name);
+          return status ? isConnectedStatus(status) : true;
+        });
+        if (configs.length === 0) continue;
+
+        // 2.1 Quarentena + reset diário idempotente (uma vez por dia civil)
+        const dailyState = await readDailyResetState(clientId);
+        const nextDailyState = { ...dailyState };
+        let dailyStateDirty = false;
+
+        for (const cfg of configs) {
+          // Recuperação automática de quarentena pós-24h
+          if (cfg.is_quarantined && cfg.quarantine_until && new Date(cfg.quarantine_until) <= now) {
+            cfg.is_quarantined = false;
+            cfg.quarantine_reason = null;
+            cfg.health_score = 75;
+            cfg.error_count_today = 0;
+            await supabaseAdmin
+              .from("whatsapp_warmup_configs")
+              .update({
+                is_quarantined: false,
+                quarantine_reason: null,
+                health_score: 75,
+                error_count_today: 0,
+                updated_at: nowIso,
+              })
+              .eq("id", cfg.id)
+              .eq("client_id", clientId);
+
+            await logWarmupAction({
+              client_id: clientId,
+              sender_instance: cfg.instance_name,
+              receiver_instance: "circuit_breaker",
+              message_text: `✅ Quarentena preventiva de 24h concluída para o Chip ${cfg.instance_name}. Tráfego reativado gradualmente.`,
+              action_type: "circuit_breaker",
+            });
+          }
+
+          const progress = evaluateDailyAutoProgress(
+            cfg,
+            nowIso,
+            dailyState[cfg.instance_name] ?? null
+          );
+          if (!progress.isNewDay) continue;
+
+          const { stagePromoted, newStage, newDaysActive, newConsecutiveDays, newDailyTarget } = progress;
+
+          const update: Record<string, unknown> = {
+            sent_today: 0,
+            received_today: 0,
+            error_count_today: 0,
+            days_active: newDaysActive,
+            consecutive_successful_days: newConsecutiveDays,
+            updated_at: nowIso,
+          };
+
           cfg.sent_today = 0;
           cfg.received_today = 0;
           cfg.error_count_today = 0;
           cfg.days_active = newDaysActive;
           cfg.consecutive_successful_days = newConsecutiveDays;
 
+          if (stagePromoted) {
+            update.stage = newStage;
+            update.daily_target = newDailyTarget;
+            update.min_interval_seconds = progress.stageInfo.minInterval;
+            update.max_interval_seconds = progress.stageInfo.maxInterval;
+
+            cfg.stage = newStage;
+            cfg.daily_target = newDailyTarget;
+            cfg.min_interval_seconds = progress.stageInfo.minInterval;
+            cfg.max_interval_seconds = progress.stageInfo.maxInterval;
+          }
+
           await supabaseAdmin
             .from("whatsapp_warmup_configs")
-            .update({
-              stage: newStage,
-              daily_target: stageInfo.dailyTarget,
-              min_interval_seconds: stageInfo.minInterval,
-              max_interval_seconds: stageInfo.maxInterval,
-              sent_today: 0,
-              received_today: 0,
-              error_count_today: 0,
-              days_active: newDaysActive,
-              consecutive_successful_days: newConsecutiveDays,
-              updated_at: nowIso,
-            })
-            .eq("id", cfg.id);
+            .update(update)
+            .eq("id", cfg.id)
+            .eq("client_id", clientId);
+
+          nextDailyState[cfg.instance_name] = getBrazilDayKey(nowIso);
+          dailyStateDirty = true;
 
           if (stagePromoted) {
             await logWarmupAction({
               client_id: clientId,
               sender_instance: cfg.instance_name,
               receiver_instance: "auto_ramp",
-              message_text: `🎉 PILOTO AUTOMÁTICO: Chip ${cfg.instance_name} promovido para a ${stageInfo.name} (${newDaysActive} dias de maturação). Nova meta: ${stageInfo.dailyTarget} msgs/dia!`,
+              message_text: `🎉 PILOTO AUTOMÁTICO: Chip ${cfg.instance_name} promovido para a ${progress.stageInfo.name} (${newDaysActive} dias de maturação). Nova meta: ${newDailyTarget} msgs/dia!`,
               action_type: "system",
             });
           }
         }
-      }
 
-      // 2.1 Hidratação preventiva de perfis e sincronização de grupos para chips recém-adicionados
+        if (dailyStateDirty) {
+          await writeDailyResetState(clientId, nextDailyState);
+        }
+
+      // 2.2 Hidratação preventiva de perfis e sincronização de grupos
       for (const cfg of configs) {
-        if (!cfg.profile_hydrated) {
+        if (!cfg.profile_hydrated && !cfg.is_quarantined) {
           hydrateChipProfile(clientId, cfg.instance_name).catch(() => {});
         }
       }
@@ -151,7 +216,7 @@ export async function tickWarmupWorker(): Promise<{
 
       // Se temos apenas 1 chip: aquece passivamente via grupos da colmeia
       if (nonQuarantined.length < 2) {
-        syncGroupMembershipForChips(clientId).catch(() => {});
+        scheduleGroupSync(clientId);
 
         const lastWarn = _lastWarningLogged[clientId] || 0;
         if (Date.now() - lastWarn > 60 * 60 * 1000) {
@@ -167,19 +232,50 @@ export async function tickWarmupWorker(): Promise<{
         continue;
       }
 
-      // Sincroniza adesão nos grupos para todos os chips ativos
-      syncGroupMembershipForChips(clientId).catch(() => {});
+      // Sincroniza adesão nos grupos (com throttle anti-flood)
+      scheduleGroupSync(clientId);
 
-      // Filtra apenas chips que ainda não bateram a meta diária
+      // Filtra chips que ainda não bateram a meta diária efetiva
+      // (menor valor entre meta da fase e teto da finalidade do chip).
       const availableChips = nonQuarantined.filter(
-        (c) => (c.sent_today || 0) < (c.daily_target || 10)
+        (c) => (c.sent_today || 0) < effectiveTarget(c)
       );
 
       if (availableChips.length === 0) {
         continue;
       }
 
-      // 3. Processa conversas ativas com turno pendente (next_turn_at <= now())
+      // 3. Consolida conversas ativas duplicadas do mesmo par (legado do bug de
+      // criação por tick). Mantém a mais antiga e encerra as demais.
+      let activePairs = new Set<string>();
+      try {
+        const { data: activeAll } = await supabaseAdmin
+          .from("whatsapp_warmup_conversations")
+          .select("id, instance_a, instance_b")
+          .eq("client_id", clientId)
+          .eq("status", "active")
+          .order("created_at", { ascending: true });
+
+        const keptPairs = new Set<string>();
+        const duplicateIds: string[] = [];
+        for (const conv of activeAll || []) {
+          const pairKey = [conv.instance_a, conv.instance_b].filter(Boolean).sort().join("::");
+          if (!pairKey) continue;
+          if (keptPairs.has(pairKey)) duplicateIds.push(conv.id);
+          else keptPairs.add(pairKey);
+        }
+
+        if (duplicateIds.length > 0) {
+          await supabaseAdmin
+            .from("whatsapp_warmup_conversations")
+            .update({ status: "finished", updated_at: nowIso })
+            .in("id", duplicateIds);
+        }
+
+        activePairs = keptPairs;
+      } catch {}
+
+      // 4. Processa conversas ativas com turno pendente (next_turn_at <= now())
       const { data: dueConvs } = await supabaseAdmin
         .from("whatsapp_warmup_conversations")
         .select("*")
@@ -190,6 +286,7 @@ export async function tickWarmupWorker(): Promise<{
         .limit(3);
 
       const busyChips = new Set<string>();
+      const sentThisTick = new Map<string, number>();
 
       if (dueConvs && dueConvs.length > 0) {
         for (const activeConv of dueConvs as WarmupConversation[]) {
@@ -203,7 +300,23 @@ export async function tickWarmupWorker(): Promise<{
             const senderCfg = activeConv.last_sender === instA.instance_name ? instB : instA;
             const receiverCfg = senderCfg.instance_name === instA.instance_name ? instB : instA;
 
-            if ((senderCfg.sent_today || 0) < (senderCfg.daily_target || 10)) {
+            // Anti-rajada: no máximo 1 turno por chip dentro do mesmo tick.
+            if ((sentThisTick.get(senderCfg.instance_name) || 0) >= MAX_TURNS_PER_CHIP_PER_TICK) {
+              continue;
+            }
+
+            // Fora da janela do chip remetente: não chama o motor (evita log repetido
+            // a cada tick e mantém o turno agendado para quando abrir a janela).
+            if (
+              !isWithinOperatingHours(
+                senderCfg.allowed_start_hour ?? 8,
+                senderCfg.allowed_end_hour ?? 21
+              )
+            ) {
+              continue;
+            }
+
+            if ((senderCfg.sent_today || 0) < effectiveTarget(senderCfg)) {
               const turnRes = await executeWarmupTurn({
                 clientId,
                 senderConfig: senderCfg,
@@ -212,6 +325,13 @@ export async function tickWarmupWorker(): Promise<{
               });
               if (turnRes.success) {
                 exchangesCount++;
+                // Mantém a cópia em memória em sincronia para não estourar a meta no mesmo tick.
+                senderCfg.sent_today = (senderCfg.sent_today || 0) + 1;
+                receiverCfg.received_today = (receiverCfg.received_today || 0) + 1;
+                sentThisTick.set(
+                  senderCfg.instance_name,
+                  (sentThisTick.get(senderCfg.instance_name) || 0) + 1
+                );
               }
             } else {
               await supabaseAdmin
@@ -224,15 +344,24 @@ export async function tickWarmupWorker(): Promise<{
       }
 
       // 4. Se houver chips ociosos disponíveis, cria novas conversas em malha (Mesh Swarm)
-      const idleChips = availableChips.filter((c) => !busyChips.has(c.instance_name));
+      const idleChips = availableChips.filter(
+        (c) => !busyChips.has(c.instance_name) && !sentThisTick.has(c.instance_name)
+      );
+
+      // Não abre conversa nova para um par que já tem conversa ativa.
+      // `activePairs` foi consolidado no passo 3.
 
       if (idleChips.length >= 2) {
         // Ordena para que o chip mais veterano (maior estágio) inicie a nova conversa
         const sorted = [...idleChips].sort((a, b) => (b.stage || 1) - (a.stage || 1));
         const initiator = sorted[0];
 
-        // Seleciona parceiro de forma rotativa entre os ociosos
-        const candidates = sorted.filter((c) => c.instance_name !== initiator.instance_name);
+        // Seleciona parceiro de forma rotativa entre os ociosos, evitando par já ativo
+        const candidates = sorted.filter(
+          (c) =>
+            c.instance_name !== initiator.instance_name &&
+            !activePairs.has([initiator.instance_name, c.instance_name].sort().join("::"))
+        );
         const partner = candidates[Math.floor(Math.random() * candidates.length)];
 
         if (initiator && partner) {
@@ -265,10 +394,19 @@ export async function tickWarmupWorker(): Promise<{
               });
               if (turnRes.success) {
                 exchangesCount++;
+                initiator.sent_today = (initiator.sent_today || 0) + 1;
+                partner.received_today = (partner.received_today || 0) + 1;
+                sentThisTick.set(initiator.instance_name, 1);
               }
             }
           }
         }
+      }
+      } catch (tenantErr) {
+        const message = tenantErr instanceof Error ? tenantErr.message : String(tenantErr);
+        console.error(`[WarmupWorker] Falha no tenant ${clientId}:`, message);
+      } finally {
+        await releaseWarmupTickLock(clientId, lockOwner);
       }
     }
   } catch (err: any) {
