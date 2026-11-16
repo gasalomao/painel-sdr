@@ -342,23 +342,80 @@ describe("POST /api/agent/process", () => {
       ai_responded: false,
       suppressed: "tool_loop_exhausted",
     });
-    // OTIMIZAÇÃO: MAX_TOOL_ROUNDS reduzido de 5 para 3 (velocidade + economia)
+    // OTIMIZAÇÃO: MAX_TOOL_ROUNDS = 3 + 1 turno final forçado com tools: []
     expect(sendToolResults).toHaveBeenCalledTimes(3);
+    expect(state.startAiChat).toHaveBeenCalledTimes(2);
+    expect(state.startAiChat.mock.calls[1][0]).toMatchObject({ tools: [], reasoningMode: 0 });
     expect(webhookEvents()).toContain("AGENT_TOOL_LOOP_EXHAUSTED");
     expect(webhookEvents()).not.toContain("AGENT_EMPTY_OUTPUT");
     expect(webhookEvents()).not.toContain("AGENT_SEND_SUCCESS");
     expect(state.sendMessage).not.toHaveBeenCalled();
     expect(state.sendMedia).not.toHaveBeenCalled();
     expect(state.logTokenUsage).toHaveBeenCalledTimes(1);
-    // OTIMIZAÇÃO: Com 3 rounds em vez de 5, tokens reduzem proporcionalmente
+    // 1 inicial + 3 tool rounds + 1 síntese final sem tools (também vazia) = 5 turnos
     expect(state.logTokenUsage).toHaveBeenCalledWith(expect.objectContaining({
-      promptTokens: 40,
-      completionTokens: 8,
-      totalTokens: 48,
+      promptTokens: 50,
+      completionTokens: 10,
+      totalTokens: 60,
     }));
     expect(state.writes.find((write) => write.payload.event === "AGENT_TOOL_LOOP_EXHAUSTED")?.payload).toMatchObject({
       payload: { tool_iterations: 3, pending_tool_calls: 1 },
     });
+  });
+
+  it("sintetiza resposta final com turno forçado sem tools quando MAX_TOOL_ROUNDS esgota com pendência", async () => {
+    state.rows.agent_settings = agentConfig({
+      custom_tools: [{ name: "noop", description: "Teste", webhook_url: "https://example.com/noop" }],
+    });
+    const usage = { promptTokens: 10, completionTokens: 2, totalTokens: 12 };
+    const pendingTurn = (index: number) => ({
+      text: "",
+      toolCalls: [{ id: `call-${index}`, name: "noop", args: { query: "continue" } }],
+      usage,
+    });
+    const sendToolResults = vi.fn();
+    for (let index = 1; index <= 3; index++) {
+      sendToolResults.mockResolvedValueOnce(pendingTurn(index));
+    }
+    state.startAiChat
+      .mockResolvedValueOnce({
+        provider: "gemini",
+        modelUsed: () => "gemini-test",
+        sendUser: vi.fn().mockResolvedValue(pendingTurn(0)),
+        sendToolResults,
+      })
+      .mockResolvedValueOnce({
+        provider: "gemini",
+        modelUsed: () => "gemini-test",
+        sendUser: vi.fn().mockResolvedValue({
+          text: "Conferi aqui e já tenho os dados prontos para você.",
+          toolCalls: [],
+          usage: { promptTokens: 15, completionTokens: 6, totalTokens: 21 },
+        }),
+        sendToolResults: vi.fn(),
+      });
+
+    const req = new Request("http://localhost/api/agent/process", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-test-agent-id": "7" },
+      body: JSON.stringify({ instanceName: "inst-a", remoteJid: REMOTE_JID, text: "oi", isTestMode: false }),
+    });
+    const response = await POST(req as never);
+    const json = await response.json();
+
+    expect(json).toMatchObject({
+      success: true,
+      ai_responded: true,
+    });
+    expect(state.startAiChat).toHaveBeenCalledTimes(2);
+    expect(state.startAiChat.mock.calls[1][0]).toMatchObject({ tools: [], reasoningMode: 0 });
+    expect(state.sendMessage).toHaveBeenCalledWith(
+      REMOTE_JID,
+      expect.stringContaining("Conferi aqui e já tenho os dados prontos para você."),
+      "inst-a",
+      expect.any(Object),
+    );
+    expect(webhookEvents()).not.toContain("AGENT_TOOL_LOOP_EXHAUSTED");
   });
 
   it.each([true, false])("bloqueia classificação de segurança antes de enviar (sandbox=%s)", async (isTestMode) => {

@@ -12,6 +12,7 @@ import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
 import { indexKnowledgeDocument, getRagEmbeddingRef } from "@/lib/rag";
 import { getAiKeys } from "@/lib/ai-keys";
+import { invalidateAgentConfigCache } from "@/lib/agent-config-cache";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -57,6 +58,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    invalidateAgentConfigCache();
     return NextResponse.json({ success: true, model, total: all.length, reindexed: ok, failed, chunks: totalChunks, errors: errors.slice(0, 10) });
   } catch (e: any) {
     return NextResponse.json({ success: false, error: e?.message || String(e) }, { status: 500 });

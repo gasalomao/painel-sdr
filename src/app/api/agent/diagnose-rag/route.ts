@@ -48,12 +48,15 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "Agente não pertence a este cliente" }, { status: 403 });
   }
 
-  // 2) Documentos do agente
-  const { data: docs } = await supabaseAdmin
+  // 2) Documentos do agente (calcula tamanho em JS; PostgREST não aceita SQL length() em select)
+  const { data: docs, error: docsErr } = await supabaseAdmin
     .from("agent_knowledge")
-    .select("id, title, length(content) as content_len, content")
+    .select("id, title, content")
     .eq("agent_id", agentId)
     .order("title");
+  if (docsErr) {
+    console.warn("[diagnose-rag] erro lendo docs:", docsErr.message);
+  }
 
   // 3) Chunks indexados (vetorial)
   const { data: chunksAgg } = await supabaseAdmin
@@ -76,23 +79,28 @@ export async function GET(req: NextRequest) {
   let rpcError: string | null = null;
   try {
     const zeroVec = new Array(768).fill(0);
-    await supabaseAdmin.rpc("match_knowledge_chunks", {
+    const { error: rpcCallErr } = await supabaseAdmin.rpc("match_knowledge_chunks", {
       query_embedding: zeroVec as any,
       p_agent_id: agentId,
       p_client_id: agent.client_id || auth.clientId,
       match_count: 1,
       min_similarity: 0.99, // impossível → só pra validar que a RPC executa
     });
+    if (rpcCallErr) {
+      rpcOk = false;
+      rpcError = rpcCallErr.message || String(rpcCallErr);
+    }
   } catch (e: any) {
     rpcOk = false;
     rpcError = e?.message || String(e);
   }
 
-  // 7) Últimos erros de RAG no log
+  // 7) Últimos erros de RAG no log (escopados por tenant)
   const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
   const { data: ragLogs } = await supabaseAdmin
     .from("webhook_logs")
     .select("event, payload, created_at")
+    .eq("client_id", agent.client_id || auth.clientId)
     .or(eventFilter(), undefined as any)
     .gte("created_at", since)
     .order("created_at", { ascending: false })
@@ -164,7 +172,7 @@ export async function GET(req: NextRequest) {
     documents: (docs || []).map((d: any) => ({
       id: d.id,
       title: d.title,
-      content_chars: d.content_len,
+      content_chars: (d.content || "").length,
       has_image_tag: /\[IMAGEM:|FOTO:/i.test(d.content || ""),
       has_product_block: /\n#{2,3}\s+PRODUTO:/.test(d.content || ""),
     })),

@@ -268,11 +268,17 @@ export async function getRagEmbeddingRef(): Promise<string> {
 export function invalidateRagEmbeddingCache() { RAG_MODEL_CACHE = null; }
 
 /** Chamada de embeddings da NVIDIA NIM (OpenAI-compatible), forçando 768 dims. */
-async function nvidiaEmbed(model: string, inputs: string[], apiKey: string): Promise<number[][]> {
+async function nvidiaEmbed(
+  model: string,
+  inputs: string[],
+  apiKey: string,
+  inputType: "passage" | "query" = "passage"
+): Promise<number[][]> {
   const res = await fetch("https://integrate.api.nvidia.com/v1/embeddings", {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model, input: inputs, dimensions: EMBEDDING_DIMS, input_type: "passage" }),
+    body: JSON.stringify({ model, input: inputs, dimensions: EMBEDDING_DIMS, input_type: inputType }),
+    signal: AbortSignal.timeout(15_000),
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -296,6 +302,7 @@ async function openRouterEmbed(model: string, inputs: string[], apiKey: string):
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({ model, input: inputs, dimensions: EMBEDDING_DIMS }),
+    signal: AbortSignal.timeout(15_000),
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -394,7 +401,7 @@ export async function embedQuery(text: string, apiKey?: string | null): Promise<
   if (provider === "nvidia") {
     const nvKey = keys.nvidia;
     if (!nvKey) throw new Error("Modelo de embeddings é da NVIDIA mas a chave NVIDIA NIM não está configurada.");
-    const [v] = await nvidiaEmbed(model, [text], nvKey);
+    const [v] = await nvidiaEmbed(model, [text], nvKey, "query");
     return v;
   }
 

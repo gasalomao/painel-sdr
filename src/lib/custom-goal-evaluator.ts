@@ -154,10 +154,23 @@ export async function evaluateCustomGoal(opts: {
 
   const prompt = `OBJETIVO: ${cleanGoal}\n\nDIALOGO:\n${formattedDialogue}\n\nCumprido? (SIM/NAO):`;
 
-  const targetModel =
+  let targetModel =
     opts.modelRef && opts.modelRef.trim().length > 0
       ? opts.modelRef.trim()
-      : process.env.DEFAULT_FAST_MODEL || "gemini-2.0-flash";
+      : process.env.DEFAULT_FAST_MODEL || "";
+  if (!targetModel) {
+    try {
+      const { cheapModelForSummary } = await import("@/lib/history-summary");
+      const cheap = await cheapModelForSummary({
+        geminiApiKey: opts.geminiApiKey,
+        openrouterApiKey: opts.openrouterApiKey,
+        nvidiaApiKey: opts.nvidiaApiKey,
+      });
+      targetModel = cheap?.modelRef || "gemini-2.0-flash";
+    } catch {
+      targetModel = "gemini-2.0-flash";
+    }
+  }
 
   try {
     const { generateText } = await import("@/lib/ai-provider");

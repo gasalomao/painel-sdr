@@ -318,10 +318,12 @@ export async function POST(req: NextRequest) {
       // Provider da transcrição (UI only — badge no chat; nunca vai pro agente).
       let transcribeProvider: string | null = null;
 
-      // ===== Mídia: baixar + transcrever ANTES de salvar (o chat só mostra
-      // o áudio já transcrito; placeholder apenas se transcrição falhou) =====
-      if (!content && m.mediaId) {
-        if (m.type === "audio" && !groupDisabled && transcriptionMethod !== "disabled") {
+      // ===== Mídia: baixar + transcrever/descrever ANTES de salvar (o chat só mostra
+      // o áudio já transcrito ou imagem/doc descrito; placeholder apenas se falhou) =====
+      if (m.mediaId && !groupDisabled && (m.type === "audio" || m.type === "image" || m.type === "document" || m.type === "video")) {
+        if (m.type === "audio" && transcriptionMethod === "disabled") {
+          if (!content) content = "[🎤 Áudio]";
+        } else {
           try {
             const ch = await resolveChannel(instanceName);
             if (ch.cloud) {
@@ -338,28 +340,65 @@ export async function POST(req: NextRequest) {
               } catch (upErr: any) {
                 console.warn("[Cloud Media] upload falhou:", upErr?.message);
               }
-              const { transcribeAudioDetailed } = await import("@/app/api/webhooks/shared-helpers");
-              const orModels = sessionRow?.agent_id ? await getTranscriptionModels(sessionRow.agent_id) : [];
-              const det = await transcribeAudioDetailed(base64, fMime || "audio/ogg", m.messageId, transcriptionMethod, { models: orModels });
-              content = det ? `🎤 ${det.text}` : "[🎤 O cliente enviou um áudio que não consegui transcrever]";
-              if (det) transcribeProvider = det.provider;
-            } else {
-              content = "[🎤 O cliente enviou um áudio que não consegui transcrever]";
+              const {
+                transcribeAudioDetailed,
+                describeImage,
+                describeDocument,
+              } = await import("@/app/api/webhooks/shared-helpers");
+              if (m.type === "audio") {
+                const orModels = sessionRow?.agent_id ? await getTranscriptionModels(sessionRow.agent_id) : [];
+                const det = await transcribeAudioDetailed(base64, fMime || "audio/ogg", m.messageId, transcriptionMethod, { models: orModels, clientId });
+                content = det ? `🎤 ${det.text}` : "[🎤 O cliente enviou um áudio que não consegui transcrever]";
+                if (det) transcribeProvider = det.provider;
+              } else if (m.type === "image") {
+                const desc = await describeImage(base64, fMime || "image/jpeg", clientId);
+                if (desc) {
+                  content = content ? `${content}\n📷 ${desc}` : `📷 ${desc}`;
+                } else if (!content) {
+                  content = "[📷 Imagem]";
+                }
+              } else if (m.type === "document") {
+                const desc = await describeDocument(base64, fMime || "application/pdf", m.fileName || null, clientId);
+                if (desc) {
+                  const docLine = `📄 ${m.fileName ? `[${m.fileName}] ` : ""}${desc}`;
+                  content = content ? `${content}\n${docLine}` : docLine;
+                } else if (!content) {
+                  content = m.fileName ? `[📄 ${m.fileName}]` : "[📄 Documento]";
+                }
+              } else if (!content) {
+                content = "[🎥 Vídeo]";
+              }
+            } else if (!content) {
+              content = m.type === "audio"
+                ? "[🎤 O cliente enviou um áudio que não consegui transcrever]"
+                : m.type === "image"
+                  ? "[📷 Imagem]"
+                  : m.type === "document"
+                    ? (m.fileName ? `[📄 ${m.fileName}]` : "[📄 Documento]")
+                    : "[🎥 Vídeo]";
             }
           } catch (mErr: any) {
-            console.warn("[Cloud Media] transcrição falhou:", mErr?.message);
-            content = "[🎤 O cliente enviou um áudio que não consegui transcrever]";
+            console.warn("[Cloud Media] processamento falhou:", mErr?.message);
+            if (!content) {
+              content = m.type === "audio"
+                ? "[🎤 O cliente enviou um áudio que não consegui transcrever]"
+                : m.type === "image"
+                  ? "[📷 Imagem]"
+                  : m.type === "document"
+                    ? (m.fileName ? `[📄 ${m.fileName}]` : "[📄 Documento]")
+                    : "[🎥 Vídeo]";
+            }
           }
-        } else {
-          const placeholders: Record<string, string> = {
-            image: "[📷 Imagem]",
-            audio: "[🎤 Áudio]",
-            video: "[🎥 Vídeo]",
-            document: m.fileName ? `[📄 ${m.fileName}]` : "[📄 Documento]",
-            sticker: "[Sticker]",
-          };
-          content = placeholders[m.type] || "[Mídia]";
         }
+      } else if (!content && m.mediaId) {
+        const placeholders: Record<string, string> = {
+          image: "[📷 Imagem]",
+          audio: "[🎤 Áudio]",
+          video: "[🎥 Vídeo]",
+          document: m.fileName ? `[📄 ${m.fileName}]` : "[📄 Documento]",
+          sticker: "[Sticker]",
+        };
+        content = placeholders[m.type] || "[Mídia]";
       }
 
       // Insert chats_dashboard (UI lê isso). Duplicata (23505) = Meta reentregou
@@ -423,7 +462,7 @@ export async function POST(req: NextRequest) {
       if (msgDup) {
         return NextResponse.json({ ok: true, skipped: true, reason: "duplicata-messages" });
       }
-      if (content && (m.text || m.caption || m.type === "audio") && sessionRow?.id && !groupDisabled) {
+      if (content && (m.text || m.caption || m.type === "audio" || m.type === "image" || m.type === "document") && sessionRow?.id && !groupDisabled) {
         const eff = await getEffectiveStatus(sessionRow as any);
         if (eff.isActive) {
           // Precondição: sem secret interno o /api/agent/process responde 401
@@ -449,7 +488,7 @@ export async function POST(req: NextRequest) {
                 "Content-Type": "application/json",
                 [INTERNAL_SECRET_HEADER]: getInternalSecret(),
               },
-              body: JSON.stringify({ instanceName, remoteJid: m.remoteJid, text: m.text || m.caption || content, sessionId: sessionRow.id }),
+              body: JSON.stringify({ instanceName, remoteJid: m.remoteJid, text: content || m.text || m.caption, sessionId: sessionRow.id }),
             });
             // Invoca agent/process diretamente — serialização e buffer são gerenciados internamente
             await agentMod.POST(fakeReq);

@@ -319,6 +319,11 @@ export async function personalizeFollowupWithAI(opts: {
   const prompt = `${opts.customPrompt || "Você é um SDR profissional e cordial que faz follow-up de forma natural, sem ser insistente."}
 
 ${intelContext}`;
+  // Cap de segurança do histórico no prompt para evitar explosão de tokens em chats muito longos
+  const trimmedHistory = opts.history && opts.history.length > 3500
+    ? "...[início omitido]...\n" + opts.history.slice(-3500)
+    : opts.history;
+
   const fullPrompt = prompt + `
 
 # DADOS DO LEAD
@@ -327,7 +332,7 @@ ${intelContext}`;
 - Este é o follow-up número ${opts.stepNumber}.
 
 # HISTÓRICO COMPLETO DA CONVERSA (antigo → recente)
-${opts.history}
+${trimmedHistory}
 
 # MENSAGEM-BASE (escrita pelo operador — adapte mas não copie literal)
 """
@@ -356,9 +361,7 @@ Antes de escrever, faça essa análise mental (não devolva, é só pra você):
 - NÃO invente dados (preço, prazo, condições) que não estão no histórico.
 - Devolva APENAS a mensagem final. Sem aspas, sem markdown, sem explicação, sem rótulo.`;
 
-  // thinkingBudget=0: geração one-shot de follow-up não precisa de raciocínio
-  // em cadeia (cobrado como saída). Economiza tokens sem perder qualidade.
-  // Roteia Gemini OU OpenRouter conforme o modelo escolhido (modelRef).
+  // thinkingBudget=0 + maxOutputTokens=280: follow-up curto economiza tokens de saída em todos os provedores.
   const { generateText, providerOf } = await import("@/lib/ai-provider");
   const { getAiKeys } = await import("@/lib/ai-keys");
   const keys = await getAiKeys();
@@ -366,20 +369,35 @@ Antes de escrever, faça essa análise mental (não devolva, é só pra você):
     modelRef: modelId,
     prompt: fullPrompt,
     temperature: 0.6,
+    reasoningMode: 0,
     thinkingBudget: 0,
+    maxOutputTokens: 280,
     geminiApiKey: opts.apiKey || keys.gemini,
     openrouterApiKey: keys.openrouter,
+    nvidiaApiKey: keys.nvidia,
   });
+
+  const resolvedProv = out.provider || providerOf(modelId);
+  const provLabel =
+    resolvedProv === "openrouter"
+      ? "OpenRouter"
+      : resolvedProv === "nvidia"
+        ? "NVIDIA NIM"
+        : resolvedProv === "gateway"
+          ? "OpenCode Gateway"
+          : "Gemini";
 
   logTokenUsage({
     source: "followup",
     sourceId: opts.campaignId || null,
     sourceLabel: opts.campaignName || "Follow-up",
     model: out.modelUsed,
-    provider: providerOf(modelId) === "openrouter" ? "OpenRouter" : "Gemini",
+    provider: provLabel,
     promptTokens: out.usage.promptTokens,
     completionTokens: out.usage.completionTokens,
     totalTokens: out.usage.totalTokens,
+    cachedTokens: out.usage.cachedTokens,
+    costUsd: out.usage.costUsd,
     clientId: opts.clientId,
     metadata: { stepNumber: opts.stepNumber, nome_empresa: opts.nome_empresa },
   });
@@ -695,6 +713,9 @@ async function processTarget(
       // Persiste cada chunk no chat (pra IA ter contexto de todas as partes).
       const chunkMsgId = (result as any)?.messageId || (result as any)?.key?.id || (result as any)?.data?.key?.id || `followup-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`;
       msgId = chunkMsgId;
+      import("@/lib/manual-send-registry")
+        .then((m: any) => m.registerAiSend?.(chunkMsgId))
+        .catch(() => {});
       try {
         await persistOutgoingMessage({
           sessionId: sess?.sessionId || null,
@@ -716,6 +737,9 @@ async function processTarget(
     if (isLastStep && camp.media_url && camp.media_type) {
       try {
         await new Promise((r) => setTimeout(r, 1500));
+        if (camp.media_caption) {
+          registerPendingAutomatedSend(sendInstanceName, target.remote_jid, camp.media_caption);
+        }
         const mediaResult = await channel.sendMedia(
           target.remote_jid,
           camp.media_caption || "",
@@ -732,6 +756,9 @@ async function processTarget(
           throw new Error(mediaResult?.error || "Provider recusou o envio da mídia");
         }
         const mediaMsgId = (mediaResult as any)?.messageId || (mediaResult as any)?.key?.id || `media-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        import("@/lib/manual-send-registry")
+          .then((m: any) => m.registerAiSend?.(mediaMsgId))
+          .catch(() => {});
         await addFollowupLog(camp.id, camp.client_id, `📎 Mídia enviada → ${target.nome_negocio || target.remote_jid}`, "info");
         try {
           await persistOutgoingMessage({

@@ -239,7 +239,7 @@ export async function transcribeAudioDetailed(
   mimetype: string,
   debugMessageId?: string,
   method: TranscriptionMethodValue = "auto",
-  extra?: { models?: string[] },
+  extra?: { models?: string[]; clientId?: string | null },
 ): Promise<{ text: string; provider: string } | null> {
   if (method === "disabled") return null;
   void debugMessageId;
@@ -281,7 +281,11 @@ export async function transcribeAudioDetailed(
       if (!chain.length) return null;
       const genAI = new GoogleGenerativeAI(apiKey);
       for (const modelName of chain) {
-        const model = genAI.getGenerativeModel({ model: modelName });
+        // Thinking desligado (thinkingBudget: 0) para transcrição — evita gastar tokens caros de saída.
+        const model = genAI.getGenerativeModel({
+          model: modelName,
+          generationConfig: { thinkingConfig: { thinkingBudget: 0 } } as any,
+        });
         for (const tryMime of tryMimes) {
           try {
             const result = await model.generateContent([
@@ -289,7 +293,26 @@ export async function transcribeAudioDetailed(
               { text: "Transcreva esse áudio em Português (BR). Devolva APENAS o texto transcrito." },
             ]);
             const text = result.response.text().trim();
-            if (text) return text;
+            if (text) {
+              import("@/lib/token-usage")
+                .then(({ logTokenUsage, extractGeminiUsage }) => {
+                  const u = extractGeminiUsage(result);
+                  if (u.totalTokens > 0) {
+                    return logTokenUsage({
+                      source: "other",
+                      sourceLabel: "Transcrição de áudio",
+                      model: modelName,
+                      promptTokens: u.promptTokens,
+                      completionTokens: u.completionTokens,
+                      totalTokens: u.totalTokens,
+                      clientId: extra?.clientId || undefined,
+                      metadata: { kind: "audio_transcription", mime: tryMime },
+                    });
+                  }
+                })
+                .catch(() => {});
+              return text;
+            }
           } catch {}
         }
       }
@@ -319,32 +342,62 @@ export async function transcribeAudio(
   mimetype: string,
   debugMessageId?: string,
   method: TranscriptionMethodValue = "auto",
-  extra?: { models?: string[] },
+  extra?: { models?: string[]; clientId?: string | null },
 ): Promise<string | null> {
   const r = await transcribeAudioDetailed(base64, mimetype, debugMessageId, method, extra);
   return r?.text ?? null;
 }
 
-export async function describeImage(base64: string, mimetype: string): Promise<string | null> {
+export async function describeImage(
+  base64: string,
+  mimetype: string,
+  clientId?: string | null,
+): Promise<string | null> {
   try {
     const { GoogleGenerativeAI } = await import("@google/generative-ai");
     const cfg = await getOrganizerConfig();
     const apiKey = cfg?.api_key;
     if (!apiKey) return null;
     const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");
+    const effMime = sanitizeMimetype(mimetype, "image/jpeg");
     const { buildFallbackChain } = await import("@/lib/gemini-model-discovery");
     const chain = await buildFallbackChain();
     const genAI = new GoogleGenerativeAI(apiKey);
     for (const modelName of chain) {
       try {
-        const model = genAI.getGenerativeModel({ model: modelName });
+        const model = genAI.getGenerativeModel({
+          model: modelName,
+          generationConfig: { thinkingConfig: { thinkingBudget: 0 } } as any,
+        });
         const result = await model.generateContent([
-          { inlineData: { data: cleanBase64, mimeType: sanitizeMimetype(mimetype, "image/jpeg") } },
-          { text: "Descreva esta imagem em Português (BR) em 1-2 frases. Foque no que é relevante para atendimento comercial." },
+          { inlineData: { data: cleanBase64, mimeType: effMime } },
+          { text: "Descreva brevemente (1-2 frases, PT-BR) o que aparece nesta imagem. Se for um documento/print com texto, extraia o texto principal. Sem prefixo nem explicação." },
         ]);
         const text = result.response.text().trim();
-        if (text) return text;
-      } catch {}
+        if (text) {
+          import("@/lib/token-usage")
+            .then(({ logTokenUsage, extractGeminiUsage }) => {
+              const u = extractGeminiUsage(result);
+              if (u.totalTokens > 0) {
+                return logTokenUsage({
+                  source: "other",
+                  sourceLabel: "Descrição de imagem",
+                  model: modelName,
+                  promptTokens: u.promptTokens,
+                  completionTokens: u.completionTokens,
+                  totalTokens: u.totalTokens,
+                  clientId: clientId || undefined,
+                  metadata: { kind: "image_description", mime: effMime },
+                });
+              }
+            })
+            .catch(() => {});
+          return text;
+        }
+      } catch (err: any) {
+        const msg = String(err?.message || err);
+        if (/API key|invalid.*key|unauthorized|401|403.*api/i.test(msg) && !/model/i.test(msg)) return null;
+      }
     }
     return null;
   } catch {
@@ -352,26 +405,70 @@ export async function describeImage(base64: string, mimetype: string): Promise<s
   }
 }
 
-export async function describeDocument(base64: string, mimetype: string, fileName: string | null): Promise<string | null> {
+export async function describeDocument(
+  base64: string,
+  mimetype: string,
+  fileName: string | null,
+  clientId?: string | null,
+): Promise<string | null> {
   try {
     const { GoogleGenerativeAI } = await import("@google/generative-ai");
     const cfg = await getOrganizerConfig();
     const apiKey = cfg?.api_key;
     if (!apiKey) return null;
+    const cleanMime = sanitizeMimetype(mimetype, "application/pdf");
+    const supportedDocs = /^(application\/pdf|text\/|application\/(json|rtf|x-javascript|x-python-code|x-typescript))/i;
+    if (!supportedDocs.test(cleanMime)) return null;
+
     const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");
+    const sizeBytes = Math.ceil(cleanBase64.length * 0.75);
+    if (sizeBytes > 20 * 1024 * 1024) return null;
+
     const { buildFallbackChain } = await import("@/lib/gemini-model-discovery");
     const chain = await buildFallbackChain();
     const genAI = new GoogleGenerativeAI(apiKey);
+    const filenameHint = fileName ? ` (arquivo: ${fileName})` : "";
     for (const modelName of chain) {
       try {
-        const model = genAI.getGenerativeModel({ model: modelName });
+        const model = genAI.getGenerativeModel({
+          model: modelName,
+          generationConfig: { thinkingConfig: { thinkingBudget: 0 } } as any,
+        });
         const result = await model.generateContent([
-          { inlineData: { data: cleanBase64, mimeType: sanitizeMimetype(mimetype, "application/pdf") } },
-          { text: `Extraia o conteúdo principal deste documento (${fileName || "sem nome"}). Resuma em Português (BR) em 2-3 frases.` },
+          { inlineData: { data: cleanBase64, mimeType: cleanMime } },
+          {
+            text:
+              `Você recebeu um documento${filenameHint}. ` +
+              "Gere um resumo executivo em PT-BR (até 4 frases) do conteúdo principal. " +
+              "Se o documento tiver dados estruturados (tabela, contrato, NF, currículo, proposta), " +
+              "liste os pontos-chave em bullets curtos. Sem preâmbulo, sem 'aqui está o resumo'.",
+          },
         ]);
         const text = result.response.text().trim();
-        if (text) return text;
-      } catch {}
+        if (text) {
+          import("@/lib/token-usage")
+            .then(({ logTokenUsage, extractGeminiUsage }) => {
+              const u = extractGeminiUsage(result);
+              if (u.totalTokens > 0) {
+                return logTokenUsage({
+                  source: "other",
+                  sourceLabel: "Extração de documento",
+                  model: modelName,
+                  promptTokens: u.promptTokens,
+                  completionTokens: u.completionTokens,
+                  totalTokens: u.totalTokens,
+                  clientId: clientId || undefined,
+                  metadata: { kind: "document_extraction", mime: cleanMime, fileName, sizeBytes },
+                });
+              }
+            })
+            .catch(() => {});
+          return text;
+        }
+      } catch (err: any) {
+        const msg = String(err?.message || err);
+        if (/API key|invalid.*key|unauthorized|401|403.*api/i.test(msg) && !/model/i.test(msg)) return null;
+      }
     }
     return null;
   } catch {
@@ -455,7 +552,6 @@ export async function findOrCreateSession(contactId: string, instanceName: strin
         instance_name: instanceName,
         client_id: clientId,
         bot_status: "bot_active",
-        remote_jid: remoteJid,
       })
       .select("id, bot_status, agent_id, unread_count, instance_name, resume_at")
       .single();

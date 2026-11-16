@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
 import { indexKnowledgeDocument } from "@/lib/rag";
+import { getAiKeys } from "@/lib/ai-keys";
+import { invalidateAgentConfigCache } from "@/lib/agent-config-cache";
 
 export const dynamic = "force-dynamic";
 
@@ -54,9 +56,10 @@ export async function POST(req: NextRequest) {
       }
 
       // Re-indexa no RAG vetorial (pgvector + HNSW)
-      const { data: org } = await supabaseAdmin.from("ai_organizer_config").select("api_key").eq("id", 1).maybeSingle();
-      const apiKey = org?.api_key || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
+      const aiKeys = await getAiKeys().catch(() => null);
+      const apiKey = aiKeys?.gemini || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
 
+      invalidateAgentConfigCache(numAgentId);
       indexKnowledgeDocument({
         knowledgeId: data.id,
         agentId: numAgentId,
@@ -93,9 +96,10 @@ export async function POST(req: NextRequest) {
       }
 
       // Re-indexa no RAG vetorial
-      const { data: org } = await supabaseAdmin.from("ai_organizer_config").select("api_key").eq("id", 1).maybeSingle();
-      const apiKey = org?.api_key || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
+      const aiKeys = await getAiKeys().catch(() => null);
+      const apiKey = aiKeys?.gemini || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
 
+      invalidateAgentConfigCache(data.agent_id);
       // Reindexa com o agent_id REAL da row (o do body poderia apontar pra
       // agente de outro tenant mesmo com o update escopado por client_id).
       indexKnowledgeDocument({
@@ -122,7 +126,7 @@ export async function POST(req: NextRequest) {
         .delete()
         .eq("id", id)
         .eq("client_id", auth.clientId)
-        .select("id")
+        .select("id, agent_id")
         .maybeSingle();
       if (error) {
         return NextResponse.json({ success: false, error: error.message }, { status: 500 });
@@ -131,6 +135,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ success: false, error: "Documento não encontrado." }, { status: 404 });
       }
 
+      invalidateAgentConfigCache((data as { agent_id?: number | null }).agent_id ?? null);
       return NextResponse.json({ success: true });
     }
 

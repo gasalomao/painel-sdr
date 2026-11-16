@@ -285,7 +285,7 @@ export async function POST(req: NextRequest) {
             sanitizeMimetype(mimetype || "", "audio/ogg"),
             messageId,
             transcriptionMethod,
-            { models: orModels }
+            { models: orModels, clientId }
           );
           enrichedContent = det
             ? `🎤 ${det.text}`
@@ -294,11 +294,11 @@ export async function POST(req: NextRequest) {
         } else if (msgType === "audio" && groupDisabled) {
           console.log(`[evo-go-webhook] Áudio em grupo ${remoteJid} — transcrição ignorada (grupos desativados)`);
           enrichedContent = fromMe ? "[🎤 Áudio enviado]" : "[🎤 Áudio recebido]";
-        } else if (!fromMe && msgType === "image") {
-          const desc = await describeImage(base64Media, sanitizeMimetype(mimetype || "", "image/jpeg"));
+        } else if (!fromMe && !groupDisabled && msgType === "image") {
+          const desc = await describeImage(base64Media, sanitizeMimetype(mimetype || "", "image/jpeg"), clientId);
           enrichedContent = desc ? `📷 ${desc}` : null;
-        } else if (!fromMe && msgType === "document") {
-          const desc = await describeDocument(base64Media, sanitizeMimetype(mimetype || "", "application/pdf"), fileName);
+        } else if (!fromMe && !groupDisabled && msgType === "document") {
+          const desc = await describeDocument(base64Media, sanitizeMimetype(mimetype || "", "application/pdf"), fileName, clientId);
           enrichedContent = desc ? `📄 ${fileName ? `[${fileName}] ` : ""}${desc}` : null;
         }
       } catch (e: any) {
@@ -413,10 +413,8 @@ export async function POST(req: NextRequest) {
           isEchoOfAi = !!(recentAi && recentAi.length > 0);
         }
         if (!isEchoOfAi) {
-          const { getHumanPauseConfig, snoozeSession } = await import("@/lib/bot-status");
-          const hp = await getHumanPauseConfig().catch(() => ({ enabled: true, minutes: 60 }));
-          const pauseMinutes = hp?.enabled ? hp.minutes : 60;
-          await snoozeSession(session.id, pauseMinutes, "human");
+          const { applyHumanAutoPause } = await import("@/lib/bot-status");
+          await applyHumanAutoPause(session.id, clientId);
         }
       } catch (e: any) {
         console.warn("[evo-go-webhook] auto-pausa falhou:", e?.message);

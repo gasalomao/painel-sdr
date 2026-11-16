@@ -68,23 +68,57 @@ async function processClaim(row: ClaimedFollowUp): Promise<void> {
       await rpc("release_agent_followup", { ...ownership(row), p_status: "cancelled", p_error: "Lead solicitou opt-out." });
       return;
     }
-    const config = await getEvolutionConfig();
-    const endpoint = new URL(`${config.url.replace(/\/$/, "")}/message/sendText/${encodeURIComponent(row.instance_name)}`);
-    if (!["http:", "https:"].includes(endpoint.protocol) || !config.apiKey) throw new Error("Transporte de follow-up inválido.");
     const attempt = randomUUID();
     // Após tentar persistir intenção, uma resposta perdida também é ambígua.
     hasIntent = true;
     const prepared = await rpc("prepare_agent_followup", { ...ownership(row), p_attempt: attempt, p_content: message }) as { action?: string } | null;
     if (prepared?.action === "cancelled" || prepared?.action === "skipped") return;
     if (prepared?.action !== "send") throw new Error("Intenção de follow-up não confirmada.");
-    const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json", apikey: config.apiKey }, body: JSON.stringify({ number: row.remote_jid, text: message }), signal: AbortSignal.timeout(30_000) });
-    if (!response.ok) {
-      reportFollowupDeliveryFeedback(row.client_id, row.instance_name, "error");
-      throw new Error("Resultado de follow-up não confirmado pelo provider.");
+
+    // Registra envio pendente para evitar auto-pausa falsa quando o echo chegar no webhook
+    try {
+      const { registerPendingAutomatedSend } = await import("@/lib/manual-send-registry");
+      registerPendingAutomatedSend(row.instance_name, row.remote_jid, message);
+    } catch { /* ignore */ }
+
+    let connProvider: string | null = null;
+    try {
+      const { data: conn } = await supabaseAdmin!
+        .from("channel_connections")
+        .select("provider")
+        .eq("instance_name", row.instance_name)
+        .eq("client_id", row.client_id)
+        .maybeSingle();
+      connProvider = conn?.provider || null;
+    } catch { /* fallback para Evolution HTTP */ }
+
+    let providerId: unknown = null;
+    if (connProvider === "whatsapp_cloud" || connProvider === "evolution_go") {
+      const { sendMessage } = await import("@/lib/channel");
+      const sendRes = await sendMessage(row.remote_jid, message, row.instance_name);
+      if (!sendRes.ok) {
+        reportFollowupDeliveryFeedback(row.client_id, row.instance_name, "error");
+        throw new Error(sendRes.error || "Resultado de follow-up não confirmado pelo provider.");
+      }
+      providerId = sendRes.messageId || null;
+    } else {
+      const config = await getEvolutionConfig();
+      const endpoint = new URL(`${config.url.replace(/\/$/, "")}/message/sendText/${encodeURIComponent(row.instance_name)}`);
+      if (!["http:", "https:"].includes(endpoint.protocol) || !config.apiKey) throw new Error("Transporte de follow-up inválido.");
+      const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json", apikey: config.apiKey }, body: JSON.stringify({ number: row.remote_jid, text: message }), signal: AbortSignal.timeout(30_000) });
+      if (!response.ok) {
+        reportFollowupDeliveryFeedback(row.client_id, row.instance_name, "error");
+        throw new Error("Resultado de follow-up não confirmado pelo provider.");
+      }
+      const result: unknown = await response.json();
+      providerId = result && typeof result === "object" && "key" in result && result.key && typeof result.key === "object" && "id" in result.key ? result.key.id : null;
     }
-    const result: unknown = await response.json();
-    const providerId = result && typeof result === "object" && "key" in result && result.key && typeof result.key === "object" && "id" in result.key ? result.key.id : null;
+
     if (typeof providerId !== "string" || !providerId.trim() || providerId.length > 500) throw new Error("Envio de follow-up sem identificação confirmada.");
+    try {
+      const { registerAiSend } = await import("@/lib/manual-send-registry");
+      registerAiSend(providerId);
+    } catch { /* ignore */ }
     const finalized = await rpc("finish_agent_followup", { ...ownership(row), p_attempt: attempt, p_provider_id: providerId });
     if (!finalized) throw new Error("Conclusão de follow-up não confirmada.");
     reportFollowupDeliveryFeedback(row.client_id, row.instance_name, "delivered");

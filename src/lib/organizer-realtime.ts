@@ -162,8 +162,9 @@ export function scheduleRealtimeLeadEvaluation(
 
       if (cli?.organizer_enabled === false) return;
 
-      const baseUrl = process.env.INTERNAL_APP_URL || `http://localhost:${process.env.PORT || 3000}`;
-      await fetch(`${baseUrl}/api/ai-organize`, {
+      const { NextRequest } = await import("next/server");
+      const { POST: runAiOrganize } = await import("@/app/api/ai-organize/route");
+      const internalReq = new NextRequest("http://internal/api/ai-organize", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -175,6 +176,7 @@ export function scheduleRealtimeLeadEvaluation(
           triggered_by: "realtime",
         }),
       });
+      await runAiOrganize(internalReq);
     } catch (err: any) {
       console.warn("[organizer-realtime] falha na avaliação pós-conversa:", err?.message);
     }

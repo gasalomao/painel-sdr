@@ -1392,7 +1392,9 @@ async function generateTextSingle(rawOpts: GenerateTextOpts): Promise<GenerateTe
     generationConfig.thinkingConfig = { thinkingBudget: reasoningModeToThinkingBudget(rMode) };
   }
   if (opts.temperature != null && Number.isFinite(opts.temperature)) generationConfig.temperature = opts.temperature;
-  if (opts.maxOutputTokens != null) generationConfig.maxOutputTokens = opts.maxOutputTokens;
+  if (opts.maxOutputTokens != null && Number.isFinite(opts.maxOutputTokens) && opts.maxOutputTokens > 0) {
+    generationConfig.maxOutputTokens = Math.floor(opts.maxOutputTokens);
+  }
   if (opts.jsonMode || opts.geminiResponseSchema) {
     generationConfig.responseMimeType = "application/json";
     if (opts.geminiResponseSchema) generationConfig.responseSchema = opts.geminiResponseSchema;
@@ -1867,6 +1869,9 @@ function startGeminiChat(opts: StartAiChatOpts, requestedModel: string): AiChatS
     generationConfig.thinkingConfig = { thinkingBudget: reasoningModeToThinkingBudget(rMode) };
   }
   if (opts.temperature != null && Number.isFinite(opts.temperature)) generationConfig.temperature = opts.temperature;
+  if (opts.maxOutputTokens != null && Number.isFinite(opts.maxOutputTokens) && opts.maxOutputTokens > 0) {
+    generationConfig.maxOutputTokens = Math.floor(opts.maxOutputTokens);
+  }
 
   const toolsConfig = opts.tools.length > 0 ? [{ functionDeclarations: opts.tools }] : undefined;
   const history = opts.history.map((m) => ({ role: m.role, parts: [{ text: m.text }] }));
@@ -2009,12 +2014,23 @@ function startOpenAICompatibleChat(opts: StartAiChatOpts, model: string, deps: O
       json = await deps.post(body);
     } catch (err: any) {
       const emsg = String(err?.message || err);
-      // Erro relacionado a ferramentas → tenta de novo sem ferramentas.
-      if (tools && !toolsDisabled && /tool|function|not support/i.test(emsg)) {
+      const isToolError = /tool|function/i.test(emsg);
+      const isReasoningError = /reason|thinking/i.test(emsg);
+      // Erro relacionado a reasoning/thinking sem erro de ferramenta → retenta COM tools e SEM applyReasoning.
+      if (isReasoningError && !isToolError && rMode > 0) {
+        console.warn(`[ai-provider] Modelo ${providerLabel} "${model}" recusou parâmetro de raciocínio (${emsg}). Reenviando sem reasoning.`);
+        const bodyNoReason: Record<string, any> = { model, messages };
+        if (tools && !toolsDisabled) { bodyNoReason.tools = tools; bodyNoReason.tool_choice = "auto"; }
+        if (temp !== undefined) bodyNoReason.temperature = temp;
+        if (body.max_tokens !== undefined) bodyNoReason.max_tokens = body.max_tokens;
+        json = await deps.post(bodyNoReason);
+      } else if (tools && !toolsDisabled && /tool|function|not support/i.test(emsg)) {
+        // Erro relacionado a ferramentas → tenta de novo sem ferramentas (preservando max_tokens).
         console.warn(`[ai-provider] Modelo ${providerLabel} "${model}" recusou ferramentas (${emsg}). Reenviando sem tools.`);
         toolsDisabled = true;
         const body2: Record<string, any> = { model, messages };
         if (temp !== undefined) body2.temperature = temp;
+        if (body.max_tokens !== undefined) body2.max_tokens = body.max_tokens;
         applyReasoning(body2, rMode, deps.provider, model);
         json = await deps.post(body2);
       } else {

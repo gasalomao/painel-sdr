@@ -572,11 +572,14 @@ export async function processPassiveOrganicGroupMessage(params: {
       ? 10
       : 2500 + Math.floor(Math.random() * 6000);
 
-  setTimeout(() => {
-    evolution
-      .markMessageAsRead([{ remoteJid: groupJid, id: messageId, fromMe: false }], instanceName)
-      .catch(() => {});
+  const readTimer = setTimeout(() => {
+    Promise.resolve(
+      evolution.markMessageAsRead([{ remoteJid: groupJid, id: messageId, fromMe: false }], instanceName),
+    ).catch(() => {});
   }, delayMs);
+  if (typeof (readTimer as { unref?: () => void }).unref === "function") {
+    (readTimer as { unref: () => void }).unref();
+  }
 
   // Atualiza last_activity_at no máximo a cada 3 minutos por chip para não sobrecarregar o banco
   const lastTouch = _lastPassiveTouchPerChip.get(cacheKey) || 0;

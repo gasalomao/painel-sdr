@@ -113,12 +113,15 @@ export default function AgentePage() {
   // Modo de raciocínio UNIVERSAL: 0=Econômico, 1=Equilibrado, 2=Intenso, 3=Think Máximo.
   // Funciona em todos os modelos (o ai-provider mapeia pro param de cada um).
   const [reasoningMode, setReasoningMode] = useState<0 | 1 | 2 | 3>(0);
+  // Controle avançado de tokens e temperatura (vazio = padrão automático do provedor)
+  const [maxOutputTokens, setMaxOutputTokens] = useState<string>("");
+  const [temperature, setTemperature] = useState<string>("");
   // Lead Intelligence é POR AGENTE — não é mais um flag global da campanha/automação.
   // Cliente quer ativar só nos agentes que precisam de análise profunda do lead.
   const [leadIntelligenceEnabled, setLeadIntelligenceEnabled] = useState(false);
 
   // ============= PRÉVIAS DE SITES IA =============
-  const [sitePreviewAutoDetect, setSitePreviewAutoDetect] = useState(true);
+  const [sitePreviewAutoDetect, setSitePreviewAutoDetect] = useState(false);
   const [sitePreviewConfirmBeforeLink, setSitePreviewConfirmBeforeLink] = useState(true);
   const [sitePreviewEvalPrompt, setSitePreviewEvalPrompt] = useState(DEFAULT_SITE_PREVIEW_EVAL_PROMPT);
   const [sitePreviewPingMessage, setSitePreviewPingMessage] = useState(DEFAULT_SITE_PREVIEW_PING_MESSAGE);
@@ -127,7 +130,6 @@ export default function AgentePage() {
   // ============= GOOGLE CALENDAR =============
   const [calendarEnabled, setCalendarEnabled] = useState(false);
   const [googleJson, setGoogleJson] = useState("");
-  const [, setGoogleTokens] = useState<object | null>(null);
   const [isCalendarConnected, setIsCalendarConnected] = useState(false);
   const [calendarConnectedEmail, setCalendarConnectedEmail] = useState<string | null>(null);
   const [calendarGenerateMeet, setCalendarGenerateMeet] = useState(false);
@@ -212,8 +214,8 @@ export default function AgentePage() {
   const [novoStagePrompt, setNovoStagePrompt] = useState("");
   const [showNovoStage, setShowNovoStage] = useState(false);
 
-  // ============= CUSTOM TOOLS (loaded; UI ainda não exposta nessa refatoração) =============
-  const [, setCustomTools] = useState<unknown[]>([]);
+  // ============= CUSTOM TOOLS (webhooks N8N/Make por agente) =============
+  const [customTools, setCustomTools] = useState<{ name: string; description: string; webhook_url: string }[]>([]);
 
   // ============= TESTES (SANDBOX) =============
   type SandboxMsg = { role: "user" | "agent" | "tool"; content: string; isError?: boolean };
@@ -229,6 +231,10 @@ export default function AgentePage() {
   const [testCustomGoalPauseMode, setTestCustomGoalPauseMode] = useState<"timed" | "indefinite" | null>(null);
   const [testCustomGoalPauseMinutes, setTestCustomGoalPauseMinutes] = useState<number | null>(null);
   const [testCustomGoalResumeAt, setTestCustomGoalResumeAt] = useState<string | null>(null);
+  const [testPreviaStatus, setTestPreviaStatus] = useState<string | null>(null);
+  const [testLinkPrevia, setTestLinkPrevia] = useState<string | null>(null);
+  const [testPreviaPingAt, setTestPreviaPingAt] = useState<string | null>(null);
+  const [testPreviaLinkAt, setTestPreviaLinkAt] = useState<string | null>(null);
   const testBufferTimerRef = useRef<NodeJS.Timeout | null>(null);
   const testMessageBufferRef = useRef<string[]>([]);
   const testMessagesStateRef = useRef<SandboxMsg[]>([]);
@@ -266,143 +272,157 @@ export default function AgentePage() {
   );
 
   /* ====================================================================
-     LOAD AGENTE — pega tudo que pertence ao agente atual num só lugar.
+     LOAD AGENTE — via BFF `/api/agent/settings` (sem expor segredos ao browser).
   ==================================================================== */
-  const loadAgent = useCallback(async (id: number) => {
-    setLoadingConfig(true);
-    // As 4 queries não dependem entre si — paralelizamos com Promise.all e
-    // limpamos o spinner no finally pra não ter race do `setLoadingConfig(false)`
-    // disparar antes da última callback (bug do código original).
-    if (!clientId) return;
-    try {
-      const [settings, kb, conn, stagesRes] = await Promise.all([
-        supabase.from("agent_settings").select("*").eq("id", id).eq("client_id", clientId).single(),
-        supabase.from("agent_knowledge").select("*").eq("agent_id", id).order("created_at"),
-        supabase.from("channel_connections")
-          .select("instance_name, created_at")
-          .eq("agent_id", id)
-          .eq("client_id", clientId)
-          .order("created_at", { ascending: true })
-          .limit(1),
-        supabase.from("agent_stages").select("*").eq("agent_id", id).eq("client_id", clientId).order("order_index"),
-      ]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const applyAgentBundle = useCallback((payload: { agent?: any; knowledge?: any[]; stages?: any[]; vinculoInstance?: string }) => {
+    const data = payload?.agent;
+    if (data) {
+      setNomeAgente(data.name || "");
+      setFuncaoAgente(data.role || "");
+      setPersonalidadeAgente(data.personality || "");
+      setTomAgente(data.tone || "");
+      setPrompt(data.main_prompt || "");
+      // schedules: se DB devolver [] ou null (agente nunca configurou),
+      // popula com os 7 dias defaults pra UI não ficar vazia quando o
+      // usuário desligar o "24h". Sem isso a tabela some inteira.
+      const loaded = Array.isArray(data.schedules) && data.schedules.length === 7
+        ? data.schedules
+        : DAYS.map((day) => ({ day, active: day !== "Domingo", start: "08:00", end: "18:00" }));
+      setSchedules(loaded);
+      setTargetModel(data.target_model || "");
+      setIsActiveAgente(data.is_active ?? true);
+      setIs24h(data.is_24h ?? false);
+      setAwayMessage(data.away_message || "");
+      setDisableGroups(data.disable_groups ?? false);
+      setTranscriptionMethod(data.transcription_method || "auto");
 
-      if (settings.data) {
-        const data = settings.data;
-        setNomeAgente(data.name || "");
-        setFuncaoAgente(data.role || "");
-        setPersonalidadeAgente(data.personality || "");
-        setTomAgente(data.tone || "");
-        setPrompt(data.main_prompt || "");
-        // schedules: se DB devolver [] ou null (agente nunca configurou),
-        // popula com os 7 dias defaults pra UI não ficar vazia quando o
-        // usuário desligar o "24h". Sem isso a tabela some inteira.
-        const loaded = Array.isArray(data.schedules) && data.schedules.length === 7
-          ? data.schedules
-          : DAYS.map((day) => ({ day, active: day !== "Domingo", start: "08:00", end: "18:00" }));
-        setSchedules(loaded);
-        setTargetModel(data.target_model || "");
-        setIsActiveAgente(data.is_active ?? true);
-        setIs24h(data.is_24h ?? false);
-        setAwayMessage(data.away_message || "");
-        setDisableGroups(data.disable_groups ?? false);
-        setTranscriptionMethod(data.transcription_method || "auto");
-
-        const opts = data.options || {};
-        setAppUrl(opts.app_url || "");
-        setGoogleJson(opts.google_credentials || "");
-        setGoogleTokens(opts.google_tokens || null);
-        setIsCalendarConnected(Boolean(opts.google_tokens?.refresh_token));
-        setCalendarConnectedEmail(opts.calendar_connected_email || null);
-        setCalendarGenerateMeet(opts.calendar_generate_meet ?? false);
-        setCalendarSendMeetLink(opts.calendar_send_meet_link ?? false);
-        setCalendarEnabled(opts.calendar_enabled ?? false);
-        setCalendarDefaultDuration(Number(opts.calendar_default_duration) || 30);
-        setCalendarOptionalFields(opts.calendar_optional_fields || {});
-        // Scheduler (lembretes + auto-promote) — vem das colunas novas da migration 006
-        const isSched = !!data.is_scheduler;
-        const schedCfg = data.scheduler_config || {};
-        setIsScheduler(isSched);
-        if (Array.isArray(schedCfg.reminders)) setReminders(schedCfg.reminders);
-        if (typeof schedCfg.auto_promote_kanban_after_minutes === "number") setAutoPromoteAfter(schedCfg.auto_promote_kanban_after_minutes);
-        setNotifyOwner(!!schedCfg.notify_owner);
-        if (typeof schedCfg.pause_after_schedule_minutes === "number") setPauseAfterSchedule(schedCfg.pause_after_schedule_minutes);
-        setOwnerPhone(schedCfg.owner_phone || "");
-        setOwnerSummaryEnabled(!!schedCfg.owner_summary_enabled);
-        setOwnerSummaryPrompt(schedCfg.owner_summary_prompt || "");
-        setOwnerSummaryModel(schedCfg.owner_summary_model || "");
-        setAutoPromoteFrom(schedCfg.auto_promote_from_status || "");
-        setAutoPromoteTo(schedCfg.auto_promote_to_status || "");
-        setAutoPromoteDisabled(!!schedCfg.auto_promote_disabled);
-        setCalendarAutoCapture({
-          telefone:          opts.calendar_auto_capture?.telefone    ?? true,
-          empresa:           opts.calendar_auto_capture?.empresa     ?? true,
-          necessidade:       opts.calendar_auto_capture?.necessidade ?? true,
-          necessidade_label: opts.calendar_auto_capture?.necessidade_label || "",
-        });
-        setCustomTools(opts.custom_tools || []);
-        setMessageBufferSeconds(opts.message_buffer_seconds || 0);
-        setHumanizeMessages(opts.humanize_messages ?? false);
-        setSplitIntensity(normalizeSplitIntensity(opts.split_intensity));
-        setTypingDelayMode(opts.typing_delay_mode === "fixed" ? "fixed" : "random");
-        setTypingDelaySeconds(Number(opts.typing_delay_seconds) || 10);
-        setTypingDelayMinSeconds(Number(opts.typing_delay_min_seconds) || 5);
-        setTypingDelayMaxSeconds(Number(opts.typing_delay_max_seconds) || 25);
-        setCustomGoalEnabled(Boolean(opts.custom_goal_enabled));
-        setCustomGoalText(typeof opts.custom_goal_text === "string" ? opts.custom_goal_text : "");
-        setCustomGoalPauseMode(
-          opts.custom_goal_pause_mode === "indefinite" || opts.custom_goal_pause_mode === "manual"
-            ? "indefinite"
-            : "timed"
-        );
-        setCustomGoalPauseMinutes(Math.max(1, Number(opts.custom_goal_pause_minutes) || 30));
-        setWebSearchEnabled(opts.web_search_enabled ?? false);
-        // Modo de raciocínio: prefere reasoning_mode (novo); retrocompat thinking_budget.
-        if (opts.reasoning_mode === 0 || opts.reasoning_mode === 1 || opts.reasoning_mode === 2 || opts.reasoning_mode === 3) {
-          setReasoningMode(opts.reasoning_mode);
-        } else if (opts.thinking_budget !== undefined && opts.thinking_budget !== null && opts.thinking_budget !== "") {
-          setReasoningMode(Number(opts.thinking_budget) < 0 ? 2 : Number(opts.thinking_budget) > 0 ? 1 : 0);
-        } else {
-          setReasoningMode(0);
-        }
-        // Lead Intelligence vem da coluna dedicada na tabela (não do JSONB options),
-        // pra worker/automation conseguirem ler com SELECT simples.
-        setLeadIntelligenceEnabled(data.lead_intelligence_enabled ?? false);
-
-        setSitePreviewAutoDetect(opts.site_preview_auto_detect ?? true);
-        setSitePreviewConfirmBeforeLink(opts.site_preview_confirm_before_link ?? true);
-        setSitePreviewEvalPrompt(opts.site_preview_eval_prompt || DEFAULT_SITE_PREVIEW_EVAL_PROMPT);
-        setSitePreviewPingMessage(opts.site_preview_ping_message || DEFAULT_SITE_PREVIEW_PING_MESSAGE);
-        setSitePreviewEvalModel(opts.site_preview_eval_model || "");
+      const opts = data.options || {};
+      setAppUrl(opts.app_url || "");
+      // Segredos não retornam do BFF — campo fica vazio para digitar apenas se quiser substituir.
+      setGoogleJson("");
+      setIsCalendarConnected(Boolean(opts.google_connected ?? opts.google_tokens?.refresh_token));
+      setCalendarConnectedEmail(opts.calendar_connected_email || null);
+      setCalendarGenerateMeet(opts.calendar_generate_meet ?? false);
+      setCalendarSendMeetLink(opts.calendar_send_meet_link ?? false);
+      setCalendarEnabled(opts.calendar_enabled ?? false);
+      setCalendarDefaultDuration(Number(opts.calendar_default_duration) || 30);
+      setCalendarOptionalFields(opts.calendar_optional_fields || {});
+      // Scheduler (lembretes + auto-promote) — vem das colunas novas da migration 006
+      const isSched = !!data.is_scheduler;
+      const schedCfg = data.scheduler_config || {};
+      setIsScheduler(isSched);
+      if (Array.isArray(schedCfg.reminders)) setReminders(schedCfg.reminders);
+      if (typeof schedCfg.auto_promote_kanban_after_minutes === "number") setAutoPromoteAfter(schedCfg.auto_promote_kanban_after_minutes);
+      setNotifyOwner(!!schedCfg.notify_owner);
+      if (typeof schedCfg.pause_after_schedule_minutes === "number") setPauseAfterSchedule(schedCfg.pause_after_schedule_minutes);
+      setOwnerPhone(schedCfg.owner_phone || "");
+      setOwnerSummaryEnabled(!!schedCfg.owner_summary_enabled);
+      setOwnerSummaryPrompt(schedCfg.owner_summary_prompt || "");
+      setOwnerSummaryModel(schedCfg.owner_summary_model || "");
+      setAutoPromoteFrom(schedCfg.auto_promote_from_status || "");
+      setAutoPromoteTo(schedCfg.auto_promote_to_status || "");
+      setAutoPromoteDisabled(!!schedCfg.auto_promote_disabled);
+      setCalendarAutoCapture({
+        telefone:          opts.calendar_auto_capture?.telefone    ?? true,
+        empresa:           opts.calendar_auto_capture?.empresa     ?? true,
+        necessidade:       opts.calendar_auto_capture?.necessidade ?? true,
+        necessidade_label: opts.calendar_auto_capture?.necessidade_label || "",
+      });
+      setCustomTools(Array.isArray(opts.custom_tools) ? opts.custom_tools : []);
+      setMessageBufferSeconds(opts.message_buffer_seconds || 0);
+      setHumanizeMessages(opts.humanize_messages ?? false);
+      setSplitIntensity(normalizeSplitIntensity(opts.split_intensity));
+      setTypingDelayMode(opts.typing_delay_mode === "fixed" ? "fixed" : "random");
+      setTypingDelaySeconds(Number(opts.typing_delay_seconds) || 10);
+      setTypingDelayMinSeconds(Number(opts.typing_delay_min_seconds) || 5);
+      setTypingDelayMaxSeconds(Number(opts.typing_delay_max_seconds) || 25);
+      setCustomGoalEnabled(Boolean(opts.custom_goal_enabled));
+      setCustomGoalText(typeof opts.custom_goal_text === "string" ? opts.custom_goal_text : "");
+      setCustomGoalPauseMode(
+        opts.custom_goal_pause_mode === "indefinite" || opts.custom_goal_pause_mode === "manual"
+          ? "indefinite"
+          : "timed"
+      );
+      setCustomGoalPauseMinutes(Math.max(1, Number(opts.custom_goal_pause_minutes) || 30));
+      setWebSearchEnabled(opts.web_search_enabled ?? false);
+      // Modo de raciocínio: prefere reasoning_mode (novo); retrocompat thinking_budget.
+      if (opts.reasoning_mode === 0 || opts.reasoning_mode === 1 || opts.reasoning_mode === 2 || opts.reasoning_mode === 3) {
+        setReasoningMode(opts.reasoning_mode);
+      } else if (opts.thinking_budget !== undefined && opts.thinking_budget !== null && opts.thinking_budget !== "") {
+        const tb = Number(opts.thinking_budget);
+        setReasoningMode(tb === 3 ? 3 : tb < 0 ? 2 : tb > 0 ? 1 : 0);
+      } else {
+        setReasoningMode(0);
       }
-      if (kb.data) setKnowledge(kb.data);
-      setVinculoInstance(conn.data?.[0]?.instance_name || "");
-      if (stagesRes.data) setStages(stagesRes.data);
+      setMaxOutputTokens(
+        opts.max_output_tokens !== undefined && opts.max_output_tokens !== null && Number(opts.max_output_tokens) > 0
+          ? String(opts.max_output_tokens)
+          : ""
+      );
+      setTemperature(
+        opts.temperature !== undefined && opts.temperature !== null && opts.temperature !== "" && Number.isFinite(Number(opts.temperature))
+          ? String(opts.temperature)
+          : ""
+      );
+      // Lead Intelligence vem da coluna dedicada na tabela (não do JSONB options),
+      // pra worker/automation conseguirem ler com SELECT simples.
+      setLeadIntelligenceEnabled(data.lead_intelligence_enabled ?? false);
+
+      setSitePreviewAutoDetect(opts.site_preview_auto_detect ?? false);
+      setSitePreviewConfirmBeforeLink(opts.site_preview_confirm_before_link ?? true);
+      setSitePreviewEvalPrompt(opts.site_preview_eval_prompt || DEFAULT_SITE_PREVIEW_EVAL_PROMPT);
+      setSitePreviewPingMessage(opts.site_preview_ping_message || DEFAULT_SITE_PREVIEW_PING_MESSAGE);
+      setSitePreviewEvalModel(opts.site_preview_eval_model || "");
+    }
+    if (Array.isArray(payload?.knowledge)) {
+      setKnowledge(payload.knowledge);
+    }
+    setVinculoInstance(payload?.vinculoInstance || "");
+    if (Array.isArray(payload?.stages)) {
+      setStages(payload.stages);
+    }
+  }, []);
+
+  const loadAgent = useCallback(async (id: number) => {
+    if (!clientId) return;
+    setLoadingConfig(true);
+    try {
+      const res = await fetch(`/api/agent/settings?agent_id=${id}`, { cache: "no-store" });
+      if (!res.ok) return;
+      const payload = await res.json();
+      applyAgentBundle(payload);
     } finally {
       setLoadingConfig(false);
     }
-  }, [clientId]);
+  }, [clientId, applyAgentBundle]);
 
   /* ====================================================================
-     VINCULAR INSTÂNCIA — com checagem de conflito (instância já vinculada
-     a outro agente). Sem isso, um agente novo "rouba" a instância de outro
-     silenciosamente.
+     VINCULAR INSTÂNCIA — com checagem de conflito via BFF.
   ==================================================================== */
   const saveVinculoInstant = useCallback(async (instanceName: string) => {
     if (!instanceName || !activeAgentId) return;
     setSavingVinculo(true);
     try {
-      // Lookup com filtro de tenant — só vemos instâncias do próprio cliente.
-      let existingQ = supabase
-        .from("channel_connections")
-        .select("agent_id, instance_name, client_id")
-        .eq("instance_name", instanceName);
-      if (clientId) existingQ = existingQ.eq("client_id", clientId);
-      const { data: existing } = await existingQ.maybeSingle();
+      const sendBind = (force: boolean) =>
+        fetch("/api/agent/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "bind_instance",
+            agent_id: activeAgentId,
+            instance_name: instanceName,
+            force,
+          }),
+        });
 
-      if (existing && existing.agent_id && existing.agent_id !== activeAgentId) {
-        const otherAgent = agentsList.find((a) => a.id === existing.agent_id);
-        const otherName = otherAgent?.name ? `${otherAgent.name} (ID ${existing.agent_id})` : `agente ID ${existing.agent_id}`;
+      let res = await sendBind(false);
+      let data = await res.json().catch(() => null);
+
+      if (res.status === 409 && data?.conflict) {
+        const existingAgentId = Number(data.existing_agent_id);
+        const otherAgent = agentsList.find((a) => a.id === existingAgentId);
+        const otherName = otherAgent?.name ? `${otherAgent.name} (ID ${existingAgentId})` : `agente ID ${existingAgentId}`;
         const ok = window.confirm(
           `A instância "${instanceName}" já está vinculada ao ${otherName}.\n\n` +
           `Vincular ela a este agente vai TIRAR essa instância do outro agente — ` +
@@ -410,40 +430,18 @@ export default function AgentePage() {
           `Quer continuar?`
         );
         if (!ok) {
-          // Reverte a UI pro vínculo anterior do agente atual
-          let revertQ = supabase
-            .from("channel_connections")
-            .select("instance_name")
-            .eq("agent_id", activeAgentId)
-            .order("created_at", { ascending: true })
-            .limit(1);
-          if (clientId) revertQ = revertQ.eq("client_id", clientId);
-          const { data: revert } = await revertQ;
-          setVinculoInstance(revert?.[0]?.instance_name || "");
+          const curRes = await fetch(`/api/agent/settings?agent_id=${activeAgentId}`, { cache: "no-store" });
+          const curData = await curRes.json().catch(() => null);
+          setVinculoInstance(curData?.vinculoInstance || "");
           return;
         }
+        res = await sendBind(true);
+        data = await res.json().catch(() => null);
       }
 
-      // Vincula (upsert) e limpa OUTRAS instâncias antigas do mesmo agente
-      const { error: e1 } = await supabase
-        .from("channel_connections")
-        .upsert({
-          instance_name: instanceName,
-          agent_id: activeAgentId,
-          client_id: clientId,
-          status: "open"
-        }, { onConflict: "instance_name" });
-      if (e1) throw e1;
-
-      // Delete escopado: só apaga vínculos antigos DO MESMO tenant.
-      let delQ = supabase
-        .from("channel_connections")
-        .delete()
-        .eq("agent_id", activeAgentId)
-        .neq("instance_name", instanceName);
-      if (clientId) delQ = delQ.eq("client_id", clientId);
-      const { error: e2 } = await delQ;
-      if (e2) console.warn("[VINCULO] Erro ao limpar instâncias antigas:", e2.message);
+      if (!res.ok) {
+        throw new Error(data?.error || "Erro ao vincular instância");
+      }
     } catch (err) {
       alert("Erro ao vincular instância: " + (err as Error).message);
     } finally {
@@ -455,33 +453,36 @@ export default function AgentePage() {
      EFFECTS de boot — corre uma vez no mount.
   ==================================================================== */
   useEffect(() => {
-    if (clientId) {
-      const saved = localStorage.getItem(`sdr_active_agent_id_${clientId}`);
-      if (saved) setActiveAgentId(Number(saved));
-    }
+    const saved = clientId ? localStorage.getItem(`sdr_active_agent_id_${clientId}`) : null;
+    const savedAgentId = saved ? Number(saved) : activeAgentId;
+    if (saved) setActiveAgentId(savedAgentId);
 
     if (!clientId) return;
     (async () => {
-      supabase.from("ai_organizer_config").select("app_url").eq("id", 1).single().then(({ data }) => {
-        if (data?.app_url) setAppUrl(data.app_url);
-      });
-
-      supabase.from("agent_settings").select("id, name").eq("client_id", clientId).order("id").then(({ data }) => {
-        if (data && data.length > 0) {
-          setAgentsList(data);
-          const agentExists = data.some((a) => a.id === activeAgentId);
-          const idToLoad = agentExists ? activeAgentId : data[0].id;
-          if (!agentExists) setActiveAgentId(data[0].id);
-          loadAgent(idToLoad);
+      setLoadingConfig(true);
+      try {
+        const bootUrl = `/api/agent/settings?include_boot=1&agent_id=${savedAgentId || 1}`;
+        const bootRes = await fetch(bootUrl, { cache: "no-store" });
+        if (bootRes.ok) {
+          const boot = await bootRes.json();
+          if (boot.appUrl) setAppUrl(boot.appUrl);
+          if (Array.isArray(boot.agents) && boot.agents.length > 0) {
+            setAgentsList(boot.agents);
+            if (boot.selectedAgentId) setActiveAgentId(boot.selectedAgentId);
+            applyAgentBundle(boot);
+          }
+          if (Array.isArray(boot.instances)) {
+            setAllInstances(boot.instances);
+          }
+          if (Array.isArray(boot.webhookLogs)) {
+            setWebhookLogs(boot.webhookLogs);
+          }
         }
-      });
-
-      supabase.from("channel_connections").select("instance_name").eq("client_id", clientId).then(({ data }) => {
-        if (data) {
-          const names = Array.from(new Set(data.map((i) => i.instance_name as string))).filter(Boolean);
-          setAllInstances(names);
-        }
-      });
+      } catch (err) {
+        console.error("[AGENTE] Erro no boot:", err);
+      } finally {
+        setLoadingConfig(false);
+      }
 
       // Instâncias da Evolution API (caso tenha alguma que o banco não conhece ainda)
       // O endpoint /api/whatsapp já filtra por client_id no backend.
@@ -499,27 +500,19 @@ export default function AgentePage() {
           });
         })
         .catch(console.error);
-
     })();
 
     fetch("/api/ai-models").then((r) => r.json()).then((data) => {
       if (data.success && data.models) setModelOptions(data.models);
     });
 
-    // Multi-tenant: cliente só vê logs das próprias instâncias.
-    // Admin (clientId = id do admin) vê apenas os logs do escopo dele.
-    {
-      let wlQ = supabase.from("webhook_logs").select("*").order("created_at", { ascending: false }).limit(20);
-      if (clientId) wlQ = wlQ.eq("client_id", clientId);
-      wlQ.then(({ data }) => { if (data) setWebhookLogs(data); });
-    }
-
     const channel = supabase.channel("webhook_logs_realtime")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "webhook_logs" }, (payload) => {
         setWebhookLogs((prev) => {
           // Dedup por id — evita o caso onde o INSERT echo do realtime chega depois
           // do load inicial e duplica o log na UI.
-          const incoming = payload.new as WebhookLogRow;
+          const incoming = payload.new as WebhookLogRow & { client_id?: string | null };
+          if (clientId && incoming?.client_id && incoming.client_id !== clientId) return prev;
           if (incoming?.id && prev.some((l) => l.id === incoming.id)) return prev;
           return [incoming, ...prev].slice(0, 20);
         });
@@ -579,107 +572,164 @@ export default function AgentePage() {
   }, [clientId, loadAgent]);
 
   /* ====================================================================
-     SAVE handlers — todos chamam supabase.update com o subset relevante.
+     SAVE handlers — todos chamam PATCH /api/agent/settings (BFF seguro).
   ==================================================================== */
   const saveIdentity = async (silent = false) => {
     if (!activeAgentId) return;
     setSavingConfig(true);
-    const { data: current } = await supabase.from("agent_settings").select("options").eq("id", activeAgentId).single();
-    const { error } = await supabase.from("agent_settings").update({
-      name: nomeAgente, role: funcaoAgente, personality: personalidadeAgente, tone: tomAgente, target_model: targetModel,
-      options: {
-        ...current?.options,
-        app_url: appUrl,
-        message_buffer_seconds: messageBufferSeconds,
-        humanize_messages: humanizeMessages,
-        split_intensity: splitIntensity,
-        typing_delay_mode: typingDelayMode,
-        typing_delay_seconds: typingDelaySeconds,
-        typing_delay_min_seconds: typingDelayMinSeconds,
-        typing_delay_max_seconds: typingDelayMaxSeconds,
-        custom_goal_enabled: customGoalEnabled,
-        custom_goal_text: customGoalText,
-        custom_goal_pause_mode: customGoalPauseMode,
-        custom_goal_pause_minutes: customGoalPauseMinutes,
-        web_search_enabled: webSearchEnabled,
-        reasoning_mode: reasoningMode,
-        thinking_budget: reasoningMode,
-        site_preview_auto_detect: sitePreviewAutoDetect,
-        site_preview_confirm_before_link: sitePreviewConfirmBeforeLink,
-        site_preview_eval_prompt: sitePreviewEvalPrompt,
-        site_preview_ping_message: sitePreviewPingMessage,
-        site_preview_eval_model: sitePreviewEvalModel,
-      },
-      lead_intelligence_enabled: leadIntelligenceEnabled,
-    }).eq("id", activeAgentId).eq("client_id", clientId);
-    setSavingConfig(false);
-    if (!silent) { if (!error) alert("Identidade salva!"); else alert("Erro: " + error.message); }
-    return !error;
+    try {
+      const res = await fetch("/api/agent/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agent_id: activeAgentId,
+          section: "identity",
+          name: nomeAgente,
+          role: funcaoAgente,
+          personality: personalidadeAgente,
+          tone: tomAgente,
+          target_model: targetModel,
+          lead_intelligence_enabled: leadIntelligenceEnabled,
+          options: {
+            app_url: appUrl,
+            message_buffer_seconds: messageBufferSeconds,
+            humanize_messages: humanizeMessages,
+            split_intensity: splitIntensity,
+            typing_delay_mode: typingDelayMode,
+            typing_delay_seconds: typingDelaySeconds,
+            typing_delay_min_seconds: typingDelayMinSeconds,
+            typing_delay_max_seconds: typingDelayMaxSeconds,
+            custom_goal_enabled: customGoalEnabled,
+            custom_goal_text: customGoalText,
+            custom_goal_pause_mode: customGoalPauseMode,
+            custom_goal_pause_minutes: customGoalPauseMinutes,
+            web_search_enabled: webSearchEnabled,
+            reasoning_mode: reasoningMode,
+            thinking_budget: reasoningMode,
+            max_output_tokens: maxOutputTokens.trim() && Number(maxOutputTokens) > 0
+              ? Math.min(8192, Math.max(50, Math.floor(Number(maxOutputTokens))))
+              : undefined,
+            temperature: temperature.trim() !== "" && Number.isFinite(Number(temperature))
+              ? Math.min(2, Math.max(0, Number(temperature)))
+              : undefined,
+            custom_tools: customTools.filter((t) => t.name.trim() && t.webhook_url.trim()),
+            site_preview_auto_detect: sitePreviewAutoDetect,
+            site_preview_confirm_before_link: sitePreviewConfirmBeforeLink,
+            site_preview_eval_prompt: sitePreviewEvalPrompt,
+            site_preview_ping_message: sitePreviewPingMessage,
+            site_preview_eval_model: sitePreviewEvalModel,
+          },
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok) {
+        if (!silent) alert("Erro: " + (json?.error || "falha ao salvar"));
+        return false;
+      }
+      if (!silent) alert("Identidade salva!");
+      return true;
+    } finally {
+      setSavingConfig(false);
+    }
   };
 
   const savePrompt = async (silent = false) => {
     if (!activeAgentId) return;
     setSavingConfig(true);
-    const { error } = await supabase.from("agent_settings").update({ main_prompt: prompt }).eq("id", activeAgentId).eq("client_id", clientId);
-    setSavingConfig(false);
-    if (!silent) { if (!error) alert("Prompt salvo!"); else alert("Erro: " + error.message); }
-    return !error;
+    try {
+      const res = await fetch("/api/agent/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agent_id: activeAgentId,
+          section: "prompt",
+          main_prompt: prompt,
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok) {
+        if (!silent) alert("Erro: " + (json?.error || "falha ao salvar"));
+        return false;
+      }
+      if (!silent) alert("Prompt salvo!");
+      return true;
+    } finally {
+      setSavingConfig(false);
+    }
   };
 
   const saveSchedules = async () => {
     if (!activeAgentId) return;
     setSavingConfig(true);
-    const { error } = await supabase.from("agent_settings").update({ schedules, is_24h: is24h, away_message: awayMessage, disable_groups: disableGroups, transcription_method: transcriptionMethod }).eq("id", activeAgentId).eq("client_id", clientId);
-    setSavingConfig(false);
-    if (!error) alert("Horários salvos!"); else alert("Erro: " + error.message);
+    try {
+      const res = await fetch("/api/agent/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agent_id: activeAgentId,
+          section: "schedules",
+          schedules,
+          is_24h: is24h,
+          away_message: awayMessage,
+          disable_groups: disableGroups,
+          transcription_method: transcriptionMethod,
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok) alert("Erro: " + (json?.error || "falha ao salvar"));
+      else alert("Horários salvos!");
+    } finally {
+      setSavingConfig(false);
+    }
   };
 
   const saveCalendarConfig = async (silent = false) => {
     if (!activeAgentId) return;
     setSavingConfig(true);
-    const { data: current } = await supabase.from("agent_settings").select("options, scheduler_config").eq("id", activeAgentId).single();
-    const prevSched = current?.scheduler_config || {};
-    const { error } = await supabase.from("agent_settings").update({
-      options: {
-        ...current?.options,
-        // Credenciais OAuth Web Client (cole do Google Cloud). Antes NÃO eram
-        // salvas por nenhum handler — o usuario colava e se perdia. Agora o
-        // "Salvar Configurações de Agenda" persiste junto.
-        google_credentials: googleJson,
-        calendar_enabled: calendarEnabled,
-        calendar_generate_meet: calendarGenerateMeet,
-        calendar_send_meet_link: calendarSendMeetLink,
-        calendar_default_duration: calendarDefaultDuration,
-        calendar_optional_fields: calendarOptionalFields,
-        calendar_auto_capture: calendarAutoCapture,
-      },
-      // Migration 006: is_scheduler + scheduler_config são colunas dedicadas.
-      // O worker (appointment-worker.ts) lê reminders daqui pra disparar
-      // WhatsApp X tempo antes do start_at. Mesma fonte que organizer usa.
-      is_scheduler: isScheduler,
-      scheduler_config: {
-        ...prevSched,
-        calendar_id: prevSched.calendar_id || "primary",
-        default_duration_minutes: calendarDefaultDuration,
-        reminders,
-        auto_promote_kanban_after_minutes: autoPromoteAfter,
-        notify_owner: notifyOwner,
-        owner_phone: ownerPhone || null,
-        // Resumo IA pro dono
-        owner_summary_enabled: ownerSummaryEnabled,
-        owner_summary_prompt: ownerSummaryPrompt || "",
-        owner_summary_model: ownerSummaryModel || null,
-        // Auto-mover kanban: De → Para
-        auto_promote_from_status: autoPromoteFrom || "",
-        auto_promote_to_status: autoPromoteTo || "",
-        auto_promote_disabled: !!autoPromoteDisabled,
-        // Pausa pós-agendamento (minutos). 0 = não pausa.
-        pause_after_schedule_minutes: Number(pauseAfterSchedule) || 0,
-      },
-    }).eq("id", activeAgentId).eq("client_id", clientId);
-    setSavingConfig(false);
-    if (!silent) { if (!error) alert("Agenda salva!"); else alert("Erro: " + error.message); }
-    return !error;
+    try {
+      const res = await fetch("/api/agent/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agent_id: activeAgentId,
+          section: "calendar",
+          is_scheduler: isScheduler,
+          options: {
+            ...(googleJson.trim() ? { google_credentials: googleJson } : {}),
+            calendar_enabled: calendarEnabled,
+            calendar_generate_meet: calendarGenerateMeet,
+            calendar_send_meet_link: calendarSendMeetLink,
+            calendar_default_duration: calendarDefaultDuration,
+            calendar_optional_fields: calendarOptionalFields,
+            calendar_auto_capture: calendarAutoCapture,
+          },
+          scheduler_config: {
+            calendar_id: "primary",
+            default_duration_minutes: calendarDefaultDuration,
+            reminders,
+            auto_promote_kanban_after_minutes: autoPromoteAfter,
+            notify_owner: notifyOwner,
+            owner_phone: ownerPhone || null,
+            owner_summary_enabled: ownerSummaryEnabled,
+            owner_summary_prompt: ownerSummaryPrompt || "",
+            owner_summary_model: ownerSummaryModel || null,
+            auto_promote_from_status: autoPromoteFrom || "",
+            auto_promote_to_status: autoPromoteTo || "",
+            auto_promote_disabled: !!autoPromoteDisabled,
+            pause_after_schedule_minutes: Number(pauseAfterSchedule) || 0,
+          },
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok) {
+        if (!silent) alert("Erro: " + (json?.error || "falha ao salvar"));
+        return false;
+      }
+      if (!silent) alert("Agenda salva!");
+      return true;
+    } finally {
+      setSavingConfig(false);
+    }
   };
 
   // Conecta via 1 clique com as credenciais centrais da plataforma,
@@ -765,11 +815,18 @@ export default function AgentePage() {
   const toggleAgentActive = async () => {
     const nv = !isActiveAgente;
     setIsActiveAgente(nv);
-    // Defesa em profundidade: filtra por client_id pra não ativar/desativar
-    // agente de outro tenant caso RLS esteja frouxa.
-    let q = supabase.from("agent_settings").update({ is_active: nv }).eq("id", activeAgentId);
-    if (clientId) q = q.eq("client_id", clientId);
-    await q;
+    const res = await fetch("/api/agent/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agent_id: activeAgentId,
+        section: "toggle_active",
+        is_active: nv,
+      }),
+    });
+    if (!res.ok) {
+      setIsActiveAgente(!nv);
+    }
   };
 
   /* ====================================================================
@@ -879,10 +936,18 @@ export default function AgentePage() {
   ==================================================================== */
   const salvarNovoStage = async () => {
     if (!activeAgentId || !novoStageTitle) return;
-    const { error } = await supabase.from("agent_stages").insert({
-      agent_id: activeAgentId, title: novoStageTitle, goal_prompt: novoStagePrompt, order_index: stages.length,
+    const res = await fetch("/api/agent/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "create_stage",
+        agent_id: activeAgentId,
+        title: novoStageTitle,
+        goal_prompt: novoStagePrompt,
+        order_index: stages.length,
+      }),
     });
-    if (!error) {
+    if (res.ok) {
       setNovoStageTitle(""); setNovoStagePrompt(""); setShowNovoStage(false);
       loadAgent(activeAgentId);
     }
@@ -890,28 +955,42 @@ export default function AgentePage() {
 
   const deletarStage = async (sid: string) => {
     if (!confirm("Excluir esta etapa?")) return;
-    const { error } = await supabase.from("agent_stages").delete().eq("id", sid);
-    if (!error) loadAgent(activeAgentId);
+    const res = await fetch("/api/agent/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "delete_stage", stage_id: sid }),
+    });
+    if (res.ok) loadAgent(activeAgentId);
   };
 
   const reorderStages = async (newStages: Stage[]) => {
-    const updates = newStages.map((s, i) => ({ ...s, order_index: i }));
-    await Promise.all(
-      updates.map((st) =>
-        supabase.from("agent_stages").update({ order_index: st.order_index }).eq("id", st.id)
-      )
-    );
+    await fetch("/api/agent/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "reorder_stages",
+        agent_id: activeAgentId,
+        stage_ids: newStages.map((s) => s.id),
+      }),
+    });
   };
 
   const saveStage = async (stage: Stage) => {
-    const { error } = await supabase.from("agent_stages").update({
-      goal_prompt: stage.goal_prompt,
-      condition_variable: stage.condition_variable,
-      condition_operator: stage.condition_operator,
-      condition_value: stage.condition_value,
-      captured_variables: stage.captured_variables || [],
-    }).eq("id", stage.id);
-    if (error) alert("Erro ao salvar etapa: " + error.message);
+    const res = await fetch("/api/agent/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "update_stage",
+        stage_id: stage.id,
+        goal_prompt: stage.goal_prompt,
+        condition_variable: stage.condition_variable,
+        condition_operator: stage.condition_operator,
+        condition_value: stage.condition_value,
+        captured_variables: stage.captured_variables || [],
+      }),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok) alert("Erro ao salvar etapa: " + (json?.error || "erro desconhecido"));
     else alert("Alterações da etapa salvas!");
   };
 
@@ -1042,7 +1121,7 @@ export default function AgentePage() {
   const processSandboxQueue = async () => {
     if (testMessageBufferRef.current.length === 0) return;
 
-    const consolidatedText = testMessageBufferRef.current.join("\\n");
+    const consolidatedText = testMessageBufferRef.current.join("\n");
     testMessageBufferRef.current = [];
 
     setTestLoading(true);
@@ -1063,6 +1142,10 @@ export default function AgentePage() {
             variables: testVariables,
             currentStageIndex: testStageIndex,
             skippedStages: testSkippedStages,
+            previa_status: testPreviaStatus,
+            link_previa: testLinkPrevia,
+            previa_ping_enviado_em: testPreviaPingAt,
+            previa_link_enviado_em: testPreviaLinkAt,
             customGoalPaused: testCustomGoalPaused,
             customGoalPauseMode: testCustomGoalPauseMode,
             customGoalPauseMinutes: testCustomGoalPauseMinutes,
@@ -1098,12 +1181,22 @@ export default function AgentePage() {
         return;
       }
 
-      const toolLogs = Array.isArray(data.logs) ? data.logs : [];
+      const toolLogs = Array.isArray(data.logs) ? [...data.logs] : [];
 
       if (data.testStateUpdate) {
         if (data.testStateUpdate.variables) setTestVariables(data.testStateUpdate.variables);
         if (data.testStateUpdate.currentStageIndex !== undefined) setTestStageIndex(data.testStateUpdate.currentStageIndex);
         if (data.testStateUpdate.skippedStages) setTestSkippedStages(data.testStateUpdate.skippedStages);
+        if (data.testStateUpdate.previa_status !== undefined) setTestPreviaStatus(data.testStateUpdate.previa_status ?? null);
+        if (data.testStateUpdate.link_previa !== undefined) setTestLinkPrevia(data.testStateUpdate.link_previa ?? null);
+        if (data.testStateUpdate.previa_ping_enviado_em !== undefined) setTestPreviaPingAt(data.testStateUpdate.previa_ping_enviado_em ?? null);
+        if (data.testStateUpdate.previa_link_enviado_em !== undefined) setTestPreviaLinkAt(data.testStateUpdate.previa_link_enviado_em ?? null);
+        if (data.testStateUpdate.closingAutoPaused) {
+          toolLogs.push({
+            role: "system",
+            content: `[Auto-Pausa Pós-Despedida] Despedida detectada (${data.testStateUpdate.closingAutoPauseReason || "encerramento"}) — em produção a IA pausaria após enviar esta resposta.`,
+          });
+        }
         if (data.testStateUpdate.customGoalPaused) {
           setTestCustomGoalPaused(true);
           setTestCustomGoalPauseMode(data.testStateUpdate.customGoalPauseMode || "timed");
@@ -1166,7 +1259,7 @@ export default function AgentePage() {
     setTestMessages((prev) => {
       if (messageBufferSeconds > 0 && prev.length > 0 && prev[prev.length - 1].role === "user" && testMessageBufferRef.current.length > 0) {
         const newPrev = [...prev];
-        newPrev[newPrev.length - 1] = { ...newPrev[newPrev.length - 1], content: newPrev[newPrev.length - 1].content + "\\n\\n" + currentInput };
+        newPrev[newPrev.length - 1] = { ...newPrev[newPrev.length - 1], content: newPrev[newPrev.length - 1].content + "\n\n" + currentInput };
         return newPrev;
       }
       return [...prev, { role: "user", content: currentInput }];
@@ -1194,6 +1287,10 @@ export default function AgentePage() {
     setTestCustomGoalPauseMode(null);
     setTestCustomGoalPauseMinutes(null);
     setTestCustomGoalResumeAt(null);
+    setTestPreviaStatus(null);
+    setTestLinkPrevia(null);
+    setTestPreviaPingAt(null);
+    setTestPreviaLinkAt(null);
     try { localStorage.removeItem(`sdr_test_messages_${activeAgentId}`); } catch {}
   };
 
@@ -1269,6 +1366,9 @@ export default function AgentePage() {
                 customGoalPauseMinutes={customGoalPauseMinutes} setCustomGoalPauseMinutes={setCustomGoalPauseMinutes}
                 webSearchEnabled={webSearchEnabled} setWebSearchEnabled={setWebSearchEnabled}
                 reasoningMode={reasoningMode} setReasoningMode={setReasoningMode}
+                maxOutputTokens={maxOutputTokens} setMaxOutputTokens={setMaxOutputTokens}
+                temperature={temperature} setTemperature={setTemperature}
+                customTools={customTools} setCustomTools={setCustomTools}
                 leadIntelligenceEnabled={leadIntelligenceEnabled} setLeadIntelligenceEnabled={setLeadIntelligenceEnabled}
                 saveIdentity={saveIdentity}
                 savingConfig={savingConfig}

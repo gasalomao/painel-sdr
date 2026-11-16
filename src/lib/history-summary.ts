@@ -67,10 +67,9 @@ export async function cheapModelForSummary(opts?: SummarizeHistoryOptions): Prom
   const openrouterKey = opts?.openrouterApiKey || keys?.openrouter || null;
   const nvidiaKey = opts?.nvidiaApiKey || keys?.nvidia || null;
 
-  // Se o agente já usa Gateway/OpenCode ou Combo e não tem Gemini key direta,
-  // prioriza o modelo do próprio agente/gateway para não falhar sem API key paga.
+  // Se o agente usa Gateway/OpenCode, prioriza o gateway; para Combo, prefere chaves baratas diretas se houver.
   const pref = (opts?.preferredModelRef || "").trim();
-  if (pref && (pref.startsWith("gateway:") || pref.startsWith("combo:"))) {
+  if (pref && pref.startsWith("gateway:")) {
     return {
       modelRef: pref,
       geminiApiKey: geminiKey,
@@ -145,12 +144,18 @@ export async function summarizeMiddleMessages(
 ): Promise<string | null> {
   if (!middleMsgs || middleMsgs.length === 0) return null;
 
-  // Divide em bloco estável (múltiplo de BUCKET_SIZE, ou a 1ª mensagem enquanto < BUCKET_SIZE)
-  // + cauda residual (0 a 7 mensagens), evitando recalcular o hash a cada único turno.
+  // Curto-circuito econômico: 1-3 mensagens no meio (~30-100 tokens) não justificam
+  // gastar +200 tokens de prompt numa chamada extra de LLM; devolve compacto fiel.
+  if (middleMsgs.length < 4) {
+    return formatRemainderCompact(middleMsgs) || null;
+  }
+
+  // Divide em bloco estável (múltiplo de BUCKET_SIZE, ou bloco inicial >= 4 enquanto < BUCKET_SIZE)
+  // + cauda residual, evitando recalcular o hash a cada único turno.
   const stableCount =
     middleMsgs.length >= BUCKET_SIZE
       ? Math.floor(middleMsgs.length / BUCKET_SIZE) * BUCKET_SIZE
-      : 1;
+      : middleMsgs.length;
   const stableSlice = middleMsgs.slice(0, stableCount);
   const remainderSlice = middleMsgs.slice(stableCount);
 
@@ -208,24 +213,63 @@ export async function summarizeMiddleMessages(
       nvidiaApiKey: model.nvidiaApiKey,
       maxOutputTokens: 300,
     });
+
+    if (result.usage && result.usage.totalTokens > 0) {
+      import("@/lib/token-usage")
+        .then(async ({ logTokenUsage }) => {
+          const { providerDisplayName } = await import("@/lib/ai-provider");
+          await logTokenUsage({
+            source: "other",
+            sourceLabel: "Resumo de histórico (agente)",
+            model: result.modelUsed || model.modelRef,
+            provider: providerDisplayName(result.provider),
+            promptTokens: result.usage.promptTokens,
+            completionTokens: result.usage.completionTokens,
+            totalTokens: result.usage.totalTokens,
+            cachedTokens: result.usage.cachedTokens,
+            costUsd: result.usage.costUsd,
+            clientId: clientId || undefined,
+            metadata: { kind: "history_summary", messagesSummarized: stableSlice.length },
+          });
+        })
+        .catch(() => {});
+    }
+
     const summary = (result.text || "").trim();
     if (!summary) return null;
     MEM_CACHE.set(cacheKey, { hash, summary, at: Date.now() });
 
-    // Atualiza em memória no objeto de variáveis da sessão e persiste best-effort no banco
+    const summaryEntry = {
+      hash,
+      summary,
+      updated_at: new Date().toISOString(),
+    };
+
+    // Atualiza em memória e persiste fazendo merge com DB atual (evita sobrescrever variáveis de save_variables)
     if (opts?.sessionVariables && typeof opts.sessionVariables === "object") {
-      opts.sessionVariables._history_summary = {
-        hash,
-        summary,
-        updated_at: new Date().toISOString(),
-      };
-      if (opts.sessionId && supabaseAdmin) {
+      opts.sessionVariables._history_summary = summaryEntry;
+    }
+    if (opts?.sessionId && supabaseAdmin) {
+      Promise.resolve(
         supabaseAdmin
           .from("sessions")
-          .update({ variables: opts.sessionVariables })
+          .select("variables")
           .eq("id", opts.sessionId)
-          .then(() => {}, () => {});
-      }
+          .eq("client_id", clientId)
+          .maybeSingle(),
+      )
+        .then(({ data: latest }) => {
+          const base =
+            latest?.variables && typeof latest.variables === "object"
+              ? (latest.variables as Record<string, any>)
+              : opts?.sessionVariables || {};
+          return supabaseAdmin
+            .from("sessions")
+            .update({ variables: { ...base, _history_summary: summaryEntry } })
+            .eq("id", opts.sessionId!)
+            .eq("client_id", clientId);
+        })
+        .catch(() => {});
     }
 
     const rem = formatRemainderCompact(remainderSlice);
@@ -239,19 +283,4 @@ export async function summarizeMiddleMessages(
 /** Invalida o cache de um contato (ex.: ao apagar a conversa). */
 export function invalidateHistorySummary(clientId: string, remoteJid: string): void {
   MEM_CACHE.delete(`${clientId}:${remoteJid}`);
-}
-
-/** DB: persistência opcional do resumo por contato (se quisermos sobreviver a restart). */
-export async function getPersistedSummary(remoteJid: string): Promise<string | null> {
-  try {
-    const { data } = await supabaseAdmin
-      .from("sessions")
-      .select("variables")
-      .eq("contact_id", `(select id from contacts where phone_number = '${remoteJid}')` as any)
-      .maybeSingle();
-    const v = (data as any)?.variables;
-    return v?.history_summary || null;
-  } catch {
-    return null;
-  }
 }

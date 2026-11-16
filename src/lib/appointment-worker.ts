@@ -174,6 +174,7 @@ export async function tickReminders(): Promise<{ checked: number; sent: number; 
   let sent = 0;
   let errors = 0;
   const checked = appts?.length || 0;
+  const agentCfgCache = new Map<number, SchedulerConfig>();
 
   for (const appt of (appts || []) as AppointmentRow[]) {
     // Pula shadow rows do google_sync (não têm remote_jid real)
@@ -185,15 +186,21 @@ export async function tickReminders(): Promise<{ checked: number; sent: number; 
       continue;
     }
 
-    // Lê config de reminders do agente (se houver)
+    // Lê config de reminders do agente (cacheada por agent_id dentro do tick)
     let cfg: SchedulerConfig = {};
     if (appt.agent_id) {
-      const { data: ag } = await supabase
-        .from("agent_settings")
-        .select("scheduler_config")
-        .eq("id", appt.agent_id)
-        .maybeSingle();
-      cfg = (ag?.scheduler_config || {}) as any;
+      if (agentCfgCache.has(appt.agent_id)) {
+        cfg = agentCfgCache.get(appt.agent_id)!;
+      } else {
+        const { data: ag } = await supabase
+          .from("agent_settings")
+          .select("scheduler_config")
+          .eq("id", appt.agent_id)
+          .eq("client_id", appt.client_id)
+          .maybeSingle();
+        cfg = (ag?.scheduler_config || {}) as SchedulerConfig;
+        agentCfgCache.set(appt.agent_id, cfg);
+      }
     }
 
     // Reminders: prioriza CUSTOM do appointment (override por sessão — quando
@@ -275,9 +282,13 @@ export async function tickReminders(): Promise<{ checked: number; sent: number; 
         // reverte o claim nem conta como erro de envio.
         try {
           const msgId =
+            (result as any)?.messageId ||
             (result as any)?.key?.id ||
             (result as any)?.data?.key?.id ||
             `reminder-${appt.id}-${key}-${Date.now()}`;
+          import("@/lib/manual-send-registry")
+            .then((m: any) => m.registerAiSend?.(msgId))
+            .catch(() => {});
           const sess = await findOrCreateContactSession(appt.client_id, appt.remote_jid, appt.instance_name);
           await persistOutgoingMessage({
             sessionId: sess?.sessionId || null,
@@ -329,25 +340,33 @@ export async function tickAutoPromote(): Promise<{ promoted: number; errors: num
 
   const { data: appts } = await supabase
     .from("appointments")
-    .select("id, client_id, agent_id, lead_id, status, end_at")
+    .select("id, client_id, agent_id, lead_id, remote_jid, status, end_at")
     .eq("status", "confirmed")
     .gte("end_at", minPast)
     .lte("end_at", maxPast);
 
   let promoted = 0;
   let errors = 0;
+  const schedCache = new Map<number, any>();
+  const colsCache = new Map<string, Array<{ status_key: string; label: string; order_index: number }>>();
 
   for (const appt of appts || []) {
     try {
-      // Lê config do agente: offset + colunas de origem/destino do kanban.
+      // Lê config do agente (cacheada por agent_id dentro do tick)
       let sched: any = {};
       if (appt.agent_id) {
-        const { data: ag } = await supabase
-          .from("agent_settings")
-          .select("scheduler_config")
-          .eq("id", appt.agent_id)
-          .maybeSingle();
-        sched = (ag?.scheduler_config || {}) as any;
+        if (schedCache.has(appt.agent_id)) {
+          sched = schedCache.get(appt.agent_id);
+        } else {
+          const { data: ag } = await supabase
+            .from("agent_settings")
+            .select("scheduler_config")
+            .eq("id", appt.agent_id)
+            .eq("client_id", appt.client_id)
+            .maybeSingle();
+          sched = (ag?.scheduler_config || {}) as any;
+          schedCache.set(appt.agent_id, sched);
+        }
       }
       const promoteAfterMin = sched.auto_promote_kanban_after_minutes ?? 30;
       // Dono da conta pode desativar o auto-mover totalmente (toggle no painel).
@@ -355,11 +374,12 @@ export async function tickAutoPromote(): Promise<{ promoted: number; errors: num
       const dueAt = new Date(appt.end_at).getTime() + promoteAfterMin * 60_000;
       if (nowMs < dueAt) continue;
 
-      // Marca appointment como completed (claim atômico via .eq("status","confirmed"))
+      // Marca appointment como completed (claim atômico escopado por tenant)
       const { data: claimedAppt } = await supabase
         .from("appointments")
         .update({ status: "completed", completed_at: new Date().toISOString() })
         .eq("id", appt.id)
+        .eq("client_id", appt.client_id)
         .eq("status", "confirmed")
         .select("id")
         .maybeSingle();
@@ -373,11 +393,16 @@ export async function tickAutoPromote(): Promise<{ promoted: number; errors: num
       //  2. AUTOMÁTICO — sem config, cai na heurística: estágio terminal
       //     positivo (atendido/fechado/concluído...).
       if (appt.lead_id) {
-        const { data: cols } = await supabase
-          .from("kanban_columns")
-          .select("status_key, label, order_index")
-          .eq("client_id", appt.client_id)
-          .order("order_index", { ascending: true });
+        let cols = colsCache.get(appt.client_id);
+        if (!cols) {
+          const { data: fetchedCols } = await supabase
+            .from("kanban_columns")
+            .select("status_key, label, order_index")
+            .eq("client_id", appt.client_id)
+            .order("order_index", { ascending: true });
+          cols = (fetchedCols || []) as Array<{ status_key: string; label: string; order_index: number }>;
+          colsCache.set(appt.client_id, cols);
+        }
 
         let targetKey: string | null = null;
         const configuredTo   = String(sched.auto_promote_to_status   || "").trim();
@@ -418,13 +443,15 @@ export async function tickAutoPromote(): Promise<{ promoted: number; errors: num
             .eq("id", appt.lead_id)
             .eq("client_id", appt.client_id);
 
+          const reasonText = `Auto-movido pós-atendimento (appointment ${appt.id} concluído ${promoteAfterMin}min após end_at).`;
           await supabase.from("historico_ia_leads").insert({
             client_id: appt.client_id,
-            remote_jid: null,
+            remote_jid: appt.remote_jid || null,
             status_antigo: configuredFrom || null,
             status_novo: targetKey,
-            justificativa: `Auto-movido pós-atendimento (appointment ${appt.id} concluído ${promoteAfterMin}min após end_at).`,
-            origin: "appointment_auto_promote",
+            razao: reasonText,
+            resumo: reasonText,
+            batch_id: `appt-promote-${appt.id}`,
           }).then(({ error }) => {
             if (error) console.warn("[auto-promote] hist insert falhou:", error.message);
           });

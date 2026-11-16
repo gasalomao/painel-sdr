@@ -1,7 +1,6 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
-import { supabase } from "@/lib/supabase";
 import { Bot, Plus, Trash2 } from "lucide-react";
 
 type AgentRow = { id: number; name: string };
@@ -12,36 +11,41 @@ export function AgentSwitcher({
   setAgentsList,
   setActiveAgentId,
   loadAgent,
-  clientId,
 }: {
   activeAgentId: number;
   agentsList: AgentRow[];
   setAgentsList: (v: AgentRow[]) => void;
   setActiveAgentId: (id: number) => void;
   loadAgent: (id: number) => void;
-  clientId: string | null;
+  clientId?: string | null;
 }) {
   const handleCreate = async () => {
-    const randomId = Math.floor(Math.random() * 90000) + 1000;
-    const insertPayload: { id: number; name: string; client_id?: string } = { id: randomId, name: "Novo Agente" };
-    if (clientId) insertPayload.client_id = clientId;
-    
-    const { data } = await supabase.from("agent_settings").insert(insertPayload).select();
-    if (data && data[0]) {
-      setAgentsList([...agentsList, data[0]]);
-      setActiveAgentId(data[0].id);
-      loadAgent(data[0].id);
+    const res = await fetch("/api/agent/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "create_agent", name: "Novo Agente" }),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json?.agent) {
+      alert("Erro ao criar agente: " + (json?.error || "erro desconhecido"));
+      return;
     }
+    const created: AgentRow = { id: json.agent.id, name: json.agent.name };
+    setAgentsList([...agentsList, created]);
+    setActiveAgentId(created.id);
+    loadAgent(created.id);
   };
 
   const handleDelete = async () => {
     if (!confirm("Deletar agente?")) return;
-    // Supabase query builder NÃO é mutável — q.eq() retorna NOVO builder.
-    // Antes: `q.eq("client_id", ...)` era descartado e o delete rodava sem
-    // o filtro de tenant. Defesa em profundidade (mesmo com RLS).
-    let q = supabase.from("agent_settings").delete().eq("id", activeAgentId);
-    if (clientId) q = q.eq("client_id", clientId);
-    await q;
+    const res = await fetch(`/api/agent/settings?agent_id=${activeAgentId}`, {
+      method: "DELETE",
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok) {
+      alert("Erro ao deletar agente: " + (json?.error || "erro desconhecido"));
+      return;
+    }
 
     const filtered = agentsList.filter((a) => a.id !== activeAgentId);
     setAgentsList(filtered);

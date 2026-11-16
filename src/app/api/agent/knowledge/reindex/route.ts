@@ -17,7 +17,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
-import { indexKnowledgeDocument } from "@/lib/rag";
+import { getRagEmbeddingRef, indexKnowledgeDocument } from "@/lib/rag";
+import { getAiKeys } from "@/lib/ai-keys";
+import { parseModelRef } from "@/lib/ai-provider";
+import { invalidateAgentConfigCache } from "@/lib/agent-config-cache";
 
 export const dynamic = "force-dynamic";
 
@@ -31,15 +34,26 @@ export async function POST(req: NextRequest) {
   const agentIdParam: number | undefined = body.agent_id ? Number(body.agent_id) : undefined;
   const all: boolean = !!body.all;
 
-  // API key Gemini (mesma usada pelo agente)
-  const { data: org } = await supabaseAdmin.from("ai_organizer_config").select("api_key").eq("id", 1).maybeSingle();
-  const apiKey = org?.api_key || "";
-  if (!apiKey) {
+  // Valida chave apenas do provider configurado para embeddings (Gemini, OpenRouter ou NVIDIA NIM)
+  const [keys, embeddingRef] = await Promise.all([
+    getAiKeys().catch(() => null),
+    getRagEmbeddingRef().catch(() => "gemini-embedding-001"),
+  ]);
+  const { provider: embProvider } = parseModelRef(embeddingRef);
+  const hasRequiredKey =
+    embProvider === "nvidia"
+      ? Boolean(keys?.nvidia)
+      : embProvider === "openrouter"
+        ? Boolean(keys?.openrouter)
+        : Boolean(keys?.gemini);
+
+  if (!hasRequiredKey) {
     return NextResponse.json(
-      { ok: false, error: "API Key Gemini não configurada em /configuracoes — indexação RAG precisa dela." },
+      { ok: false, error: `API Key ${embProvider.toUpperCase()} não configurada em /configuracoes — indexação RAG precisa dela.` },
       { status: 400 }
     );
   }
+  const apiKey = keys?.gemini || "";
 
   // -- Caso 1: re-indexa todos os docs do agente
   if (all && agentIdParam) {
@@ -71,6 +85,7 @@ export async function POST(req: NextRequest) {
       });
       results.push({ id: d.id, title: d.title, ...r });
     }
+    invalidateAgentConfigCache(agentIdParam);
     return NextResponse.json({ ok: true, count: results.length, results });
   }
 
@@ -104,5 +119,6 @@ export async function POST(req: NextRequest) {
     content: doc.content || "",
     apiKey,
   });
+  invalidateAgentConfigCache(doc.agent_id);
   return NextResponse.json({ ...r });
 }

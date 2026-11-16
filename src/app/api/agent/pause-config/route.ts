@@ -18,7 +18,7 @@ export const dynamic = "force-dynamic";
 export async function GET(req: NextRequest) {
   const auth = await requireClientId(req);
   if (!auth.ok) return auth.response;
-  const cfg = await getHumanPauseConfig();
+  const cfg = await getHumanPauseConfig(auth.clientId);
   return NextResponse.json({ ok: true, ...cfg });
 }
 
@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "Nada pra salvar" }, { status: 400 });
   }
 
-  await setHumanPauseConfig(patch);
-  const cfg = await getHumanPauseConfig();
+  await setHumanPauseConfig(patch, auth.clientId);
+  const cfg = await getHumanPauseConfig(auth.clientId);
   return NextResponse.json({ ok: true, ...cfg });
 }

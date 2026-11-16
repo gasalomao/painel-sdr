@@ -453,7 +453,10 @@ export const evolution = {
       payload.delay = delay;
     }
 
-    return evoFetch(`/message/sendText/${instance}`, "POST", payload);
+    // Evolution segura a resposta HTTP pelo tempo de `delay` (digitando...);
+    // garante timeout acima do delay configurado (UI permite até 120s).
+    const requestTimeoutMs = Math.max(30_000, delay + 20_000);
+    return evoFetch(`/message/sendText/${instance}`, "POST", payload, requestTimeoutMs);
   },
 
   async sendMedia(

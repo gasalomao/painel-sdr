@@ -65,11 +65,21 @@ export async function sendOwnerAppointmentSummary(opts: {
     // API keys centrais — as mesmas do resto do sistema (Configurações).
     const keys = await getAiKeys();
 
-    // Modelo: resolveModel já garante a regra — admin pode fixar
-    // owner_summary_model, cliente comum cai no default da conta.
-    const model =
-      (await resolveModel(sched.owner_summary_model || null, opts.clientId)) ||
-      "gemini-2.5-flash";
+    // Se o agente não fixou owner_summary_model, prioriza modelo leve via cheapModelForSummary
+    // antes de cair no default global da conta (pode ser caro/flagship).
+    let model = "";
+    if (sched.owner_summary_model) {
+      model = (await resolveModel(sched.owner_summary_model, opts.clientId)) || "";
+    }
+    if (!model) {
+      const { cheapModelForSummary } = await import("@/lib/history-summary");
+      const cheap = await cheapModelForSummary({
+        geminiApiKey: keys.gemini,
+        openrouterApiKey: keys.openrouter,
+        nvidiaApiKey: keys.nvidia,
+      });
+      model = cheap?.modelRef || (await resolveModel(null, opts.clientId)) || "gemini-2.5-flash";
+    }
 
     const provider = providerOf(model);
     if (provider === "gemini" && !keys.gemini) {
@@ -80,20 +90,25 @@ export async function sendOwnerAppointmentSummary(opts: {
       console.warn("[OWNER-SUMMARY] sem API key OpenRouter configurada — pulando.");
       return;
     }
+    if (provider === "nvidia" && !keys.nvidia && !(keys as any).nvidiaAccounts?.length) {
+      console.warn("[OWNER-SUMMARY] sem API key NVIDIA configurada — pulando.");
+      return;
+    }
 
-    // Conversa recente com o cliente — fonte do resumo.
+    // Conversa recente com o cliente (últimas 16 msgs enxutas) — estritamente escopada por tenant.
     let convQuery = supabase
       .from("chats_dashboard")
       .select("sender_type, content, created_at")
       .eq("remote_jid", opts.remoteJid)
+      .eq("client_id", opts.clientId)
       .order("created_at", { ascending: false })
-      .limit(40);
+      .limit(16);
     if (opts.instanceName) convQuery = convQuery.eq("instance_name", opts.instanceName);
     const { data: msgs } = await convQuery;
     const conversa = (msgs || [])
       .slice()
       .reverse()
-      .map((m: any) => `${m.sender_type === "customer" ? "CLIENTE" : "AGENTE"}: ${(m.content || "").slice(0, 500)}`)
+      .map((m: any) => `${m.sender_type === "customer" ? "CLIENTE" : "AGENTE"}: ${String(m.content || "").slice(0, 280)}`)
       .join("\n");
 
     const customPrompt = String(sched.owner_summary_prompt || "").trim() || DEFAULT_PROMPT;
@@ -119,14 +134,16 @@ ${conversa || "(sem histórico de conversa registrado)"}
 Escreva APENAS o resumo final, em PT-BR, pronto pra mandar no WhatsApp do dono.
 Sem aspas, sem títulos, sem markdown.`;
 
-    // thinkingBudget=0: resumo curto pro dono não precisa de raciocínio em
-    // cadeia (cobrado como saída). Economiza tokens sem perder qualidade.
+    // thinkingBudget=0 + maxOutputTokens=350: resumo curto pro dono economiza tokens de saída.
     const out = await generateText({
       modelRef: model,
       prompt: sys,
+      reasoningMode: 0,
       thinkingBudget: 0,
+      maxOutputTokens: 350,
       geminiApiKey: keys.gemini,
       openrouterApiKey: keys.openrouter,
+      nvidiaApiKey: keys.nvidia,
     });
     const summary = out.text.replace(/^["']|["']$/g, "");
 
@@ -137,10 +154,12 @@ Sem aspas, sem títulos, sem markdown.`;
         sourceId: null,
         sourceLabel: "Resumo de agendamento p/ dono",
         model: out.modelUsed,
-        provider: providerDisplayName(provider),
+        provider: providerDisplayName(out.provider || provider),
         promptTokens: out.usage.promptTokens,
         completionTokens: out.usage.completionTokens,
         totalTokens: out.usage.totalTokens,
+        cachedTokens: out.usage.cachedTokens,
+        costUsd: out.usage.costUsd,
         clientId: opts.clientId || undefined,
         metadata: { kind: opts.kind },
       });
@@ -153,7 +172,18 @@ Sem aspas, sem títulos, sem markdown.`;
 
     const ownerJid = `${ownerPhone}@s.whatsapp.net`;
     const finalMsg = `${KIND_HEADER[opts.kind]}\n\n${summary}`;
-    await sendMessage(ownerJid, finalMsg, opts.instanceName);
+    try {
+      const { registerPendingAutomatedSend } = await import("@/lib/manual-send-registry");
+      registerPendingAutomatedSend(opts.instanceName, ownerJid, finalMsg);
+    } catch { /* ignore */ }
+    const sendRes: any = await sendMessage(ownerJid, finalMsg, opts.instanceName);
+    const sentId = sendRes?.messageId || sendRes?.key?.id || sendRes?.data?.key?.id;
+    if (sentId) {
+      try {
+        const { registerAiSend } = await import("@/lib/manual-send-registry");
+        registerAiSend(String(sentId));
+      } catch { /* ignore */ }
+    }
     console.log(`[OWNER-SUMMARY] resumo "${opts.kind}" enviado pro dono ${ownerPhone}.`);
   } catch (e: any) {
     console.warn("[OWNER-SUMMARY] falhou (não-fatal):", e?.message || e);

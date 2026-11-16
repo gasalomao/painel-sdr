@@ -7,8 +7,7 @@ import { isManualSend, isAiSend, isPendingAutomatedSend } from "@/lib/manual-sen
 import { DEFAULT_CLIENT_ID } from "@/lib/tenant";
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
 import { maskJid, truncForLog } from "@/lib/pii";
-import { refreshProfilePicIfStale, sanitizeLogPayload } from "../shared-helpers";
-import { getOrganizerConfig } from "@/lib/organizer-config-cache";
+import { describeDocument, describeImage, refreshProfilePicIfStale, sanitizeLogPayload } from "../shared-helpers";
 import { safeSecretEqual, shouldLogOnce } from "@/lib/webhook-security";
 import {
   processIncomingGroupMessage,
@@ -333,152 +332,6 @@ async function uploadMediaBase64(base64: string, remoteJid: string, mimetype: st
 function sanitizeMimetype(mt: string | null | undefined, fallback: string): string {
   if (!mt) return fallback;
   return mt.split(";")[0].trim() || fallback;
-}
-
-/**
- * Modelos Gemini tentados em ordem — ordenados por custo-benefício (mais
- * barato primeiro, fallback se a key não tiver acesso). Todos suportam
- * inlineData (áudio/imagem/PDF) nativamente.
- *
- * Construída DINAMICAMENTE em runtime via `buildFallbackChain()` — lê a lista
- * real da Google (com cache 10 min). Nada hardcoded: quando Google publica 4.x
- * aparece sozinho, quando despublica 3.x some sozinho.
- *
- * Fallback final (cold start, sem API key, Google fora): tenta o que dá. O
- * caller fica responsável por logar falha — não inventamos modelo.
- */
-async function getGeminiModelChain(): Promise<string[]> {
-  const { buildFallbackChain } = await import("@/lib/gemini-model-discovery");
-  return buildFallbackChain();
-}
-
-/**
- * Gera descrição curta de uma imagem com Gemini. Usado pra:
- *   1) Preencher o content da msg (em vez de "[sem conteúdo]")
- *   2) Dar contexto visual pro agente IA no próximo turno
- */
-async function describeImageWithGemini(base64: string, mimetype: string, clientId?: string): Promise<string | null> {
-  const cfg = await getOrganizerConfig();
-  const apiKey = cfg?.api_key;
-  if (!apiKey) return null;
-
-  const { GoogleGenerativeAI } = await import("@google/generative-ai");
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");
-  const effMime = sanitizeMimetype(mimetype, "image/jpeg");
-
-  const chain = await getGeminiModelChain();
-  if (!chain.length) return null;
-  for (const modelName of chain) {
-    try {
-      const model = genAI.getGenerativeModel({ model: modelName });
-      const result = await model.generateContent([
-        { inlineData: { data: cleanBase64, mimeType: effMime } },
-        { text: "Descreva brevemente (1-2 frases, PT-BR) o que aparece nesta imagem. Se for um documento/print com texto, extraia o texto principal. Sem prefixo nem explicação." },
-      ]);
-      const text = result.response.text().trim();
-      if (text) {
-        // Token tracking
-        const { logTokenUsage, extractGeminiUsage } = await import("@/lib/token-usage");
-        const u = extractGeminiUsage(result);
-        await logTokenUsage({
-          source: "other",
-          sourceLabel: "Descrição de imagem",
-          model: modelName,
-          promptTokens: u.promptTokens,
-          completionTokens: u.completionTokens,
-          totalTokens: u.totalTokens,
-          clientId: clientId || undefined,
-          metadata: { kind: "image_description", mime: effMime },
-        });
-        return text;
-      }
-    } catch (err: any) {
-      const msg = String(err?.message || err);
-      console.warn(`[ImageDescribe] falha ${modelName}: ${msg.slice(0, 200)}`);
-      // Se for erro de modelo, tenta o próximo; se for API key, aborta
-      if (/API key|invalid.*key|unauthorized|401|403.*api/i.test(msg) && !/model/i.test(msg)) return null;
-    }
-  }
-  return null;
-}
-
-/**
- * Extrai conteúdo de PDF/documento usando Gemini multimodal.
- * Gemini 1.5+ aceita PDFs inline diretamente (não precisa pdf-parse externo).
- * Pra outros tipos de documento (docx, xlsx, txt), só PDF e TXT são suportados
- * nativamente — outros formatos retornam null e a IA cai no placeholder.
- *
- * Retorna o conteúdo do documento resumido + texto principal extraído.
- */
-async function describeDocumentWithGemini(base64: string, mimetype: string, fileName: string | null, clientId?: string): Promise<string | null> {
-  const cfg = await getOrganizerConfig();
-  const apiKey = cfg?.api_key;
-  if (!apiKey) return null;
-
-  // Gemini API aceita estes mimetypes de documento inline:
-  // application/pdf, text/plain, text/html, text/css, text/javascript,
-  // application/x-javascript, text/x-typescript, application/x-typescript,
-  // text/csv, text/markdown, text/x-python, application/x-python-code,
-  // application/json, text/xml, application/rtf, text/rtf
-  const cleanMime = sanitizeMimetype(mimetype, "application/pdf");
-  const supportedDocs = /^(application\/pdf|text\/|application\/(json|rtf|x-javascript|x-python-code|x-typescript))/i;
-  if (!supportedDocs.test(cleanMime)) {
-    console.log(`[DocumentExtract] mimetype ${cleanMime} não suportado nativamente pelo Gemini — pulando.`);
-    return null;
-  }
-
-  const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");
-  const sizeBytes = Math.ceil(cleanBase64.length * 0.75);
-  // Gemini inline aceita até 20 MB. Acima disso seria preciso usar Files API (não cobrimos aqui).
-  if (sizeBytes > 20 * 1024 * 1024) {
-    console.warn(`[DocumentExtract] documento > 20 MB (${sizeBytes}B) — pulando (use Files API pra arquivos grandes).`);
-    return null;
-  }
-
-  const { GoogleGenerativeAI } = await import("@google/generative-ai");
-  const genAI = new GoogleGenerativeAI(apiKey);
-
-  const filenameHint = fileName ? ` (arquivo: ${fileName})` : "";
-
-  const chain = await getGeminiModelChain();
-  if (!chain.length) return null;
-  for (const modelName of chain) {
-    try {
-      const model = genAI.getGenerativeModel({ model: modelName });
-      const result = await model.generateContent([
-        { inlineData: { data: cleanBase64, mimeType: cleanMime } },
-        {
-          text:
-            `Você recebeu um documento${filenameHint}. ` +
-            "Gere um resumo executivo em PT-BR (até 4 frases) do conteúdo principal. " +
-            "Se o documento tiver dados estruturados (tabela, contrato, NF, currículo, proposta), " +
-            "liste os pontos-chave em bullets curtos. Sem preâmbulo, sem 'aqui está o resumo'.",
-        },
-      ]);
-      const text = result.response.text().trim();
-      if (text) {
-        const { logTokenUsage, extractGeminiUsage } = await import("@/lib/token-usage");
-        const u = extractGeminiUsage(result);
-        await logTokenUsage({
-          source: "other",
-          sourceLabel: "Extração de documento",
-          model: modelName,
-          promptTokens: u.promptTokens,
-          completionTokens: u.completionTokens,
-          totalTokens: u.totalTokens,
-          clientId: clientId || undefined,
-          metadata: { kind: "document_extraction", mime: cleanMime, fileName, sizeBytes },
-        });
-        return text;
-      }
-    } catch (err: any) {
-      const msg = String(err?.message || err);
-      console.warn(`[DocumentExtract] falha ${modelName}: ${msg.slice(0, 200)}`);
-      if (/API key|invalid.*key|unauthorized|401|403.*api/i.test(msg) && !/model/i.test(msg)) return null;
-    }
-  }
-  return null;
 }
 
 // Placeholder textual pra mídias (usado quando não há transcrição/descrição textual)
@@ -1042,7 +895,7 @@ export async function POST(req: NextRequest) {
           // (ordem definida em shared-helpers.transcribeAudioDetailed).
           try {
             const { transcribeAudioDetailed } = await import("@/app/api/webhooks/shared-helpers");
-            const det = await transcribeAudioDetailed(base64Media, effMimetype, finalId, transcriptionMethod, { models: orModels });
+            const det = await transcribeAudioDetailed(base64Media, effMimetype, finalId, transcriptionMethod, { models: orModels, clientId });
             if (det) {
               transcript = det.text;
               transcribeProvider = det.provider;
@@ -1083,6 +936,8 @@ export async function POST(req: NextRequest) {
               } catch (de: any) { whisperDiag = "diag-error: " + de?.message; }
 
               await supabase.from("webhook_logs").insert({
+                client_id: clientId,
+                instance_name: instanceName,
                 event: "TRANSCRIPTION_FAIL",
                 payload: {
                   message_id: finalId,
@@ -1114,13 +969,15 @@ export async function POST(req: NextRequest) {
       if (hasMedia && base64Media && !fromMe && (msgType === "image" || msgType === "document" || msgType === "video")) {
         try {
           mediaUrlInline = await uploadMediaBase64(base64Media, remoteJid, effMimetype);
-          if (msgType === "image") {
-            const desc = await describeImageWithGemini(base64Media, effMimetype, clientId);
-            if (desc) enrichedContent = `📷 ${desc}`;
-          } else if (msgType === "document") {
-            const fileName = extractFileName(message);
-            const desc = await describeDocumentWithGemini(base64Media, effMimetype, fileName, clientId);
-            if (desc) enrichedContent = `📄 ${fileName ? `[${fileName}] ` : ""}${desc}`;
+          if (!groupDisabled) {
+            if (msgType === "image") {
+              const desc = await describeImage(base64Media, effMimetype, clientId);
+              if (desc) enrichedContent = `📷 ${desc}`;
+            } else if (msgType === "document") {
+              const fileName = extractFileName(message);
+              const desc = await describeDocument(base64Media, effMimetype, fileName, clientId);
+              if (desc) enrichedContent = `📄 ${fileName ? `[${fileName}] ` : ""}${desc}`;
+            }
           }
           // vídeo: só upload (não há descrição de vídeo)
         } catch (e: any) {
@@ -1299,12 +1156,15 @@ export async function POST(req: NextRequest) {
             isEchoOfAi = !!(recentAi && recentAi.length > 0);
           }
           if (!isEchoOfAi) {
-            const { getHumanPauseConfig, snoozeSession } = await import("@/lib/bot-status");
-            const hp = await getHumanPauseConfig().catch(() => ({ enabled: true, minutes: 60 }));
-            // A auto-pausa de mensagens manuais (do chat ou do celular) silencia a IA temporariamente (default 60m)
-            const pauseMinutes = hp?.enabled ? hp.minutes : 60;
-            await snoozeSession(session.id, pauseMinutes, "human");
-            console.log(`[AUTO-PAUSE] IA pausada ${pauseMinutes}min (snooze automático) — humano respondeu ${maskJid(remoteJid)}`);
+            const { applyHumanAutoPause } = await import("@/lib/bot-status");
+            const pauseRes = await applyHumanAutoPause(session.id, clientId);
+            if (pauseRes.paused) {
+              console.log(
+                pauseRes.mode === "manual"
+                  ? `[AUTO-PAUSE] IA pausada manualmente (human) — humano respondeu ${maskJid(remoteJid)}`
+                  : `[AUTO-PAUSE] IA pausada ${pauseRes.minutes}min (snooze automático) — humano respondeu ${maskJid(remoteJid)}`
+              );
+            }
           }
         } catch (e: any) {
           console.warn("[AUTO-PAUSE] falhou:", e?.message);

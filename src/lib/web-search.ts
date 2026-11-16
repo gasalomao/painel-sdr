@@ -16,16 +16,16 @@ export function needsFreshWebSearch(text: string): boolean {
   // Gatilho explícito: usuário pede busca/web/google/online.
   const asksForSearch = /\b(pesquis[ea]|busc[ae]|procure|veja\s+(?:na\s+)?internet|na\s+web|online|google|site\s+oficial)\b/i.test(query);
 
-  // Tópicos que exigem dado vivo (preço, câmbio, notícia, clima, placar, eleição).
-  const currentTopic = /\b(cotaç[aã]o|d[oó]lar|euro|c[aâ]mbio|not[ií]cia|clima|tempo|previs[aã]o|placar|resultado|eleiç[aã]o|presidente|data\s+de\s+hoje|pre[çc]o\s+(?:atual|de\s+hoje)|hor[aá]rio\s+(?:de\s+hoje|atual)|endereç[oa]|telefone|funcionamento)\b/i.test(query);
+  // Tópicos que exigem dado vivo (câmbio, notícia, clima, placar, eleição, data/preço atual).
+  // Nota: endereço/telefone/horário genérico do próprio negócio NÃO dispara busca web (deve vir da KB/prompt).
+  const currentTopic = /\b(cotaç[aã]o|d[oó]lar|euro|c[aâ]mbio|not[ií]cia|clima|tempo|previs[aã]o|placar|resultado|eleiç[aã]o|presidente|data\s+de\s+hoje|pre[çc]o\s+(?:atual|de\s+hoje)|hor[aá]rio\s+(?:de\s+hoje|atual))\b/i.test(query);
 
-  // Pergunta factual + marcador de atualidade — disparado mesmo sem palavra "hoje"
-  // quando cliente menciona info típica de web (site, cidade, quem é, que ano).
+  // Pergunta factual + marcador de atualidade — disparado apenas quando há referência externa/temporal explícita.
   const asksCurrentFact =
     (/\b(qual|quanto|quem|quando|onde|como\s+(?:est[aá]|estão)|me\s+(?:diga|fale|informe)|atual(?:izado)?|recent(?:e|es)|[uú]ltim[ao]s?)\b/i.test(query) &&
      /\b(hoje|agora|atual(?:izado)?|esse\s+ano|[12]\d{3})\b/i.test(query));
   const asksImplicitFact =
-    /\b(qual\s+(?:o|a)?\s*(?:endereç[oa]|telefone|site|hor[aá]rio|pre[çc]o)|onde\s+(?:fica|est[aá]|é)|quem\s+é|que\s+ano|em\s+qual\s+(?:cidade|pa[ií]s|estado)|site\s+da\s+empresa|p[aá]gina\s+da\s+empresa)\b/i.test(query);
+    /\b(site\s+da\s+empresa|p[aá]gina\s+da\s+empresa|quem\s+é\s+(?:o|a)\s+(?:presidente|prefeito|governador|ceo)|que\s+ano\s+(?:estamos|foi))\b/i.test(query);
 
   return asksForSearch || currentTopic || asksCurrentFact || asksImplicitFact;
 }
@@ -125,7 +125,7 @@ export async function webFetchPage(url: string): Promise<{ success: boolean; tit
 
   const cleanUrl = url.trim();
   const key = process.env.JINA_API_KEY;
-  const MAX_CHARS = 30000; // ponytail: 30k cobre ~6k tokens Gemini; ampliar exige chunking
+  const MAX_CHARS = 12000; // ~3k tokens — evita inflar contexto após leitura de página
   let title = "";
   let mainContent = "";
 

@@ -15,17 +15,29 @@ vi.mock("next/dynamic", async () => {
     },
   };
 });
-const { from, writes, channel } = vi.hoisted(() => ({
-  from: vi.fn(),
-  writes: [] as { table: string; action: string; payload: unknown; filters: [string, unknown][] }[],
-  channel: { on: vi.fn().mockReturnThis(), subscribe: vi.fn().mockReturnThis() },
-}));
-vi.mock("@/lib/supabase", () => ({ supabase: { from, channel: () => channel, removeChannel: vi.fn() } }));
+const { writes, channel, emptyQuery } = vi.hoisted(() => {
+  const emptyQuery = {
+    select: () => emptyQuery,
+    eq: () => emptyQuery,
+    neq: () => emptyQuery,
+    order: () => emptyQuery,
+    limit: () => emptyQuery,
+    single: async () => ({ data: null, error: null }),
+    maybeSingle: async () => ({ data: null, error: null }),
+    then: (resolve: (r: { data: unknown[]; error: null }) => void) => resolve({ data: [], error: null }),
+  };
+  return {
+    writes: [] as { method: string; url: string; payload: Record<string, unknown> }[],
+    channel: { on: vi.fn().mockReturnThis(), subscribe: vi.fn().mockReturnThis() },
+    emptyQuery,
+  };
+});
+vi.mock("@/lib/supabase", () => ({ supabase: { from: vi.fn(() => emptyQuery), channel: () => channel, removeChannel: vi.fn() } }));
 
 const days = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado", "Domingo"];
 const settings = {
   id: 7001, name: "Clara", role: "Atender clientes", personality: "Atenciosa", tone: "Profissional",
-  main_prompt: "Responda com clareza", is_active: true, options: {},
+  main_prompt: "Responda com clareza", is_active: true, options: { google_connected: false, has_custom_google_credentials: false },
   schedules: days.map(day => ({ day, active: day !== "Domingo", start: "08:00", end: "18:00" })),
 };
 
@@ -36,41 +48,44 @@ beforeEach(() => {
   channel.subscribe.mockImplementation(() => channel);
   vi.spyOn(window, "alert").mockImplementation(() => {});
   vi.spyOn(window, "confirm").mockReturnValue(false);
-  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    const method = (init?.method || "GET").toUpperCase();
+    if (url.startsWith("/api/agent/settings")) {
+      if (method === "GET") {
+        const isBoot = url.includes("include_boot=1");
+        const payload = isBoot
+          ? {
+              success: true,
+              agents: [{ id: 7001, name: "Clara" }, { id: 7002, name: "Outro agente" }],
+              selectedAgentId: 7001,
+              instances: ["Atendimento"],
+              appUrl: "",
+              webhookLogs: [],
+              agent: settings,
+              knowledge: [{ id: "kb-1", title: "Serviços", content: "Informações dos serviços" }],
+              stages: [{ id: "stage-1", title: "Qualificação", goal_prompt: "Entenda a necessidade", order_index: 0 }],
+              vinculoInstance: "Atendimento",
+            }
+          : {
+              success: true,
+              agent: settings,
+              knowledge: [{ id: "kb-1", title: "Serviços", content: "Informações dos serviços" }],
+              stages: [{ id: "stage-1", title: "Qualificação", goal_prompt: "Entenda a necessidade", order_index: 0 }],
+              vinculoInstance: "Atendimento",
+            };
+        return new Response(JSON.stringify(payload), { status: 200 });
+      }
+      const parsedBody = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+      writes.push({ method, url, payload: parsedBody });
+      return new Response(JSON.stringify({ success: true, agent: settings }), { status: 200 });
+    }
     const data = url === "/api/auth/session" ? { authenticated: true, clientId: "cliente-teste", isAdmin: false }
       : url === "/api/whatsapp" ? { instances: [{ instanceName: "Atendimento" }] }
       : url === "/api/openrouter-audio-models" ? { success: true, models: [] }
       : { ok: true, success: true, models: [], columns: [] };
     return new Response(JSON.stringify(data), { status: 200 });
   }));
-  from.mockImplementation((table: string) => {
-    let single = false;
-    const filters: [string, unknown][] = [];
-    const record = (action: string, payload?: unknown) => { writes.push({ table, action, payload, filters }); return query; };
-    const query = {
-      select: () => query,
-      eq: (key: string, value: unknown) => { filters.push([key, value]); return query; },
-      neq: () => query,
-      order: () => query,
-      limit: () => query,
-      single: () => { single = true; return query; },
-      maybeSingle: () => { single = true; return query; },
-      update: (payload: unknown) => record("update", payload),
-      insert: (payload: unknown) => record("insert", payload),
-      delete: () => record("delete"),
-      upsert: (payload: unknown) => record("upsert", payload),
-      then: (resolve: (result: unknown) => void) => {
-        const rows = table === "agent_settings" ? [settings, { id: 7002, name: "Outro agente" }]
-          : table === "channel_connections" ? [{ instance_name: "Atendimento", agent_id: 7001 }]
-          : table === "agent_knowledge" ? [{ id: "kb-1", title: "Serviços", content: "Informações dos serviços" }]
-          : table === "agent_stages" ? [{ id: "stage-1", title: "Qualificação", goal_prompt: "Entenda a necessidade", order_index: 0 }]
-          : [];
-        resolve({ data: single ? rows[0] || {} : rows, error: null });
-      },
-    };
-    return query;
-  });
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
@@ -105,13 +120,13 @@ describe("Agente IA — regressão do refinamento visual", () => {
     fireEvent.click(screen.getByRole("button", { name: /Abrir editor de instruções/ }));
     expect(screen.getByDisplayValue("Responda com clareza")).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: "Salvar Tudo" }));
-    await waitFor(() => expect(writes.filter(w => w.action === "update")).toHaveLength(3));
+    await waitFor(() => expect(writes.filter(w => w.method === "PATCH")).toHaveLength(3));
     for (const write of writes) {
-      expect(write.table).toBe("agent_settings");
-      expect(write.filters).toContainEqual(["id", 7001]);
-      expect(write.filters).toContainEqual(["client_id", "cliente-teste"]);
+      expect(write.url).toBe("/api/agent/settings");
+      expect(write.payload.agent_id).toBe(7001);
     }
-    expect(writes[2].payload).toEqual({ main_prompt: "Responda com clareza" });
+    expect(writes.map(w => w.payload.section)).toEqual(["identity", "calendar", "prompt"]);
+    expect(writes[2].payload).toMatchObject({ agent_id: 7001, section: "prompt", main_prompt: "Responda com clareza" });
   });
 
   it("mantém sete horários, modo 24h, grupos e salvamento dos ajustes", async () => {
@@ -126,7 +141,7 @@ describe("Agente IA — regressão do refinamento visual", () => {
     expect(screen.getByRole("switch", { name: /Atender grupos/ })).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: /Salvar/ }));
     await waitFor(() => expect(writes).toHaveLength(1));
-    expect(writes[0].payload).toMatchObject({ is_24h: true, away_message: "Retornamos às 8h", disable_groups: false });
+    expect(writes[0].payload).toMatchObject({ agent_id: 7001, section: "schedules", is_24h: true, away_message: "Retornamos às 8h", disable_groups: false });
   });
 
   it("mantém testes, etapas e logs acessíveis e não executa exclusão cancelada", async () => {

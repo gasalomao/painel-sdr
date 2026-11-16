@@ -26,23 +26,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: "Missing remoteJid or instanceName" }, { status: 400 });
     }
 
-    // Verifica ownership da instância (admin pula)
-    if (!ctx.isAdmin) {
-      const { data: conn } = await supabase
-        .from("channel_connections")
-        .select("client_id")
-        .eq("instance_name", instanceName)
-        .maybeSingle();
-      if (!conn || conn.client_id !== ctx.clientId) {
-        return NextResponse.json({ success: false, error: "Instância não pertence à sua conta" }, { status: 403 });
-      }
-    }
+    // Resolve client_id da instância para isolamento multi-tenant estrito
+    const { data: conn } = await supabase
+      .from("channel_connections")
+      .select("client_id")
+      .eq("instance_name", instanceName)
+      .maybeSingle();
 
-    // 1. Encontrar contato
+    if (!ctx.isAdmin && (!conn || conn.client_id !== ctx.clientId)) {
+      return NextResponse.json({ success: false, error: "Instância não pertence à sua conta" }, { status: 403 });
+    }
+    const effectiveClientId = conn?.client_id || ctx.clientId;
+
+    // 1. Encontrar contato dentro do tenant
     const { data: contact } = await supabase
       .from("contacts")
       .select("id")
       .eq("remote_jid", remoteJid)
+      .eq("client_id", effectiveClientId)
       .maybeSingle();
 
     let v2Deleted = 0;
@@ -53,6 +54,7 @@ export async function POST(req: NextRequest) {
         .select("id")
         .eq("contact_id", contact.id)
         .eq("instance_name", instanceName)
+        .eq("client_id", effectiveClientId)
         .maybeSingle();
 
       if (session?.id) {
@@ -60,20 +62,22 @@ export async function POST(req: NextRequest) {
         const { error: v2Err, count } = await supabase
           .from("messages")
           .delete({ count: "exact" })
-          .eq("session_id", session.id);
+          .eq("session_id", session.id)
+          .eq("client_id", effectiveClientId);
         if (v2Err) console.warn("[CLEAR_MEMORY] V2 delete:", v2Err.message);
         v2Deleted = count || 0;
 
         // 4. Resetar marcadores de atividade na sessão
         await supabase
           .from("sessions")
-          .update({ 
-            last_message_at: null, 
+          .update({
+            last_message_at: null,
             unread_count: 0,
-            variables: '{}',
-            current_stage_id: null
+            variables: {},
+            current_stage_id: null,
           })
-          .eq("id", session.id);
+          .eq("id", session.id)
+          .eq("client_id", effectiveClientId);
       }
     }
 
@@ -82,7 +86,12 @@ export async function POST(req: NextRequest) {
       .from("chats_dashboard")
       .delete({ count: "exact" })
       .eq("remote_jid", remoteJid)
-      .eq("instance_name", instanceName);
+      .eq("instance_name", instanceName)
+      .eq("client_id", effectiveClientId);
+
+    // 6. Invalidar cache de resumo de histórico em memória
+    const { invalidateHistorySummary } = await import("@/lib/history-summary");
+    invalidateHistorySummary(effectiveClientId, remoteJid);
 
     if (legacyErr) {
       console.error("[CLEAR_MEMORY] Erro ao apagar chats_dashboard:", legacyErr);

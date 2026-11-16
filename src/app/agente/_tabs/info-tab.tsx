@@ -106,6 +106,7 @@ type CalendarAutoCaptureCfg = {
 };
 type ReminderItem = { offset_minutes: number; message: string };
 type KnowledgeDoc = { id: string; title: string; content?: string };
+export type CustomToolItem = { name: string; description: string; webhook_url: string };
 
 export type InfoTabProps = {
   // Identidade
@@ -136,6 +137,9 @@ export type InfoTabProps = {
   customGoalPauseMinutes: number; setCustomGoalPauseMinutes: (n: number) => void;
   webSearchEnabled: boolean; setWebSearchEnabled: (v: boolean) => void;
   reasoningMode: 0 | 1 | 2 | 3; setReasoningMode: (n: 0 | 1 | 2 | 3) => void;
+  maxOutputTokens?: string; setMaxOutputTokens?: (v: string) => void;
+  temperature?: string; setTemperature?: (v: string) => void;
+  customTools?: CustomToolItem[]; setCustomTools?: React.Dispatch<React.SetStateAction<CustomToolItem[]>>;
   leadIntelligenceEnabled: boolean; setLeadIntelligenceEnabled: (v: boolean) => void;
   saveIdentity: (silent?: boolean) => Promise<boolean | void>;
   savingConfig: boolean;
@@ -1179,6 +1183,130 @@ export function InfoTab(p: InfoTabProps) {
               Controla quanto a IA &quot;pensa&quot; antes de responder — <strong>em qualquer modelo</strong> (GPT, Claude, Gemini, DeepSeek). No modo <strong>Econômico</strong> responde direto (gasta menos token, ideal pra SDR). Suba pra <strong>Equilibrado</strong> se usar agendamento/tools, ou <strong>Intenso</strong> em casos complexos. <strong>Think Máximo</strong> força máxima inteligência (boost tokens + temperatura otimizada) em qualquer provedor. Modelos sem suporte ignoram silencioso.
             </p>
           </div>
+
+          {/* Limite de Tokens de Saída & Temperatura (avançado) */}
+          {p.setMaxOutputTokens && p.setTemperature && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 rounded-xl border border-white/10 bg-black/25 p-3">
+              <div className="space-y-1.5">
+                <label htmlFor="agent-max-output-tokens" className="text-[11px] font-semibold uppercase tracking-wider text-amber-300">
+                  Limite de Tokens na Resposta
+                </label>
+                <Input
+                  id="agent-max-output-tokens"
+                  type="number"
+                  min={80}
+                  max={8192}
+                  value={p.maxOutputTokens ?? ""}
+                  onChange={(e) => p.setMaxOutputTokens?.(e.target.value)}
+                  placeholder="Padrão (sem limite)"
+                  className="bg-white/5 border-white/10 text-white h-10 rounded-xl text-sm"
+                />
+                <p className="text-[10px] text-white/45 leading-relaxed">
+                  Opcional. Recomenda-se <strong>350–700</strong> para WhatsApp enxuto. Vazio = padrão do modelo.
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <label htmlFor="agent-temperature" className="text-[11px] font-semibold uppercase tracking-wider text-amber-300">
+                  Temperatura (Criatividade)
+                </label>
+                <Input
+                  id="agent-temperature"
+                  type="number"
+                  min={0}
+                  max={2}
+                  step={0.1}
+                  value={p.temperature ?? ""}
+                  onChange={(e) => p.setTemperature?.(e.target.value)}
+                  placeholder="Padrão do modelo"
+                  className="bg-white/5 border-white/10 text-white h-10 rounded-xl text-sm"
+                />
+                <p className="text-[10px] text-white/45 leading-relaxed">
+                  Entre <strong>0.0</strong> (determinístico/preciso) e <strong>1.0</strong> (criativo). Vazio = padrão automático.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Custom Tools (Webhooks N8N / Make por agente) */}
+          {p.setCustomTools && (
+            <div className="space-y-2.5 rounded-xl border border-white/10 bg-black/25 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Wrench className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-white">
+                    Ferramentas Customizadas (Webhooks)
+                  </span>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-[11px] border-white/15 bg-white/5 hover:bg-white/10"
+                  onClick={() =>
+                    p.setCustomTools?.((prev) => [
+                      ...prev,
+                      { name: `consultar_sistema_${prev.length + 1}`, description: "", webhook_url: "" },
+                    ])
+                  }
+                >
+                  <Plus className="w-3 h-3 mr-1" /> Adicionar Tool
+                </Button>
+              </div>
+
+              {(!p.customTools || p.customTools.length === 0) ? (
+                <p className="text-[11px] text-white/40">
+                  Nenhuma tool externa configurada. Adicione um webhook HTTP (n8n, Make, API própria) se quiser que a IA consulte sistemas externos durante a conversa.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {p.customTools.map((tool, idx) => (
+                    <div key={idx} className="rounded-lg border border-white/10 bg-black/40 p-2.5 space-y-2">
+                      <div className="flex items-center gap-2">
+                        <Input
+                          value={tool.name}
+                          onChange={(e) => {
+                            const nextName = e.target.value.replace(/[^a-zA-Z0-9_]/g, "_");
+                            p.setCustomTools?.((prev) => prev.map((it, i) => (i === idx ? { ...it, name: nextName } : it)));
+                          }}
+                          placeholder="nome_da_tool (sem espaços)"
+                          className="h-8 text-xs font-mono bg-white/5 border-white/10 text-white"
+                        />
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          aria-label={`Remover tool ${tool.name || idx + 1}`}
+                          className="h-8 w-8 text-rose-400 hover:bg-rose-500/10 shrink-0"
+                          onClick={() => p.setCustomTools?.((prev) => prev.filter((_, i) => i !== idx))}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </Button>
+                      </div>
+                      <Input
+                        value={tool.webhook_url}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          p.setCustomTools?.((prev) => prev.map((it, i) => (i === idx ? { ...it, webhook_url: val } : it)));
+                        }}
+                        placeholder="https://meu-n8n.com/webhook/consultar"
+                        className="h-8 text-xs bg-white/5 border-white/10 text-white"
+                      />
+                      <Input
+                        value={tool.description}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          p.setCustomTools?.((prev) => prev.map((it, i) => (i === idx ? { ...it, description: val } : it)));
+                        }}
+                        placeholder="Quando a IA deve chamar essa tool (ex: consultar status do pedido pelo CPF)"
+                        className="h-8 text-xs bg-white/5 border-white/10 text-white"
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Lead Intelligence — por agente */}
           <ToggleRow

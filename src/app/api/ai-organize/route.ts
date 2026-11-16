@@ -214,7 +214,7 @@ export async function POST(req: NextRequest) {
     } else {
       const hours = Number.isFinite(Number(windowHours)) && Number(windowHours) > 0 ? Number(windowHours) : 48;
       const windowStart = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
-      let recentQ = adminClient
+      const recentQ = adminClient
         .from("chats_dashboard")
         .select("remote_jid")
         .gte("created_at", windowStart)
@@ -556,7 +556,7 @@ export async function POST(req: NextRequest) {
     );
 
     // 6. Avaliar candidatos via IA em lotes enxutos (máx 12 chats por lote para zero truncamento)
-    let resultadosLista: any[] = [];
+    const resultadosLista: any[] = [];
     const BATCH_SIZE = 12;
 
     for (let i = 0; i < candidatosParaIA.length; i += BATCH_SIZE) {
@@ -600,6 +600,8 @@ export async function POST(req: NextRequest) {
         promptTokens: out.usage.promptTokens,
         completionTokens: out.usage.completionTokens,
         totalTokens: out.usage.totalTokens,
+        cachedTokens: out.usage.cachedTokens,
+        costUsd: out.usage.costUsd,
         clientId: clientIdScope || undefined,
         metadata: { triggered_by: triggerLabel, chats: loteJids.length },
       });

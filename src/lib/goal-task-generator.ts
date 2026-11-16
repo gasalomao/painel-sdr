@@ -12,6 +12,7 @@
 
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { generateText } from "@/lib/ai-provider";
+import { logTokenUsage } from "@/lib/token-usage";
 import {
   calculateDueAt,
   cleanGeneratedTaskText,
@@ -155,6 +156,21 @@ Instrução: Gere o título executivo da tarefa para nossa equipe atender esse l
       reasoningMode: 0,
     });
     taskText = cleanGeneratedTaskText(aiRes.text, leadContextLabel);
+    if (aiRes.usage) {
+      logTokenUsage({
+        source: "other",
+        sourceLabel: "Geração de tarefa de objetivo",
+        model: aiRes.modelUsed || targetModel,
+        provider: aiRes.provider,
+        promptTokens: aiRes.usage.promptTokens,
+        completionTokens: aiRes.usage.completionTokens,
+        totalTokens: aiRes.usage.totalTokens,
+        cachedTokens: aiRes.usage.cachedTokens,
+        costUsd: aiRes.usage.costUsd,
+        clientId,
+        metadata: { kind: "goal_task_generator", lead_id: resolvedLeadId },
+      }).catch(() => {});
+    }
   } catch (aiErr: any) {
     console.warn("[GOAL_TASK] Falha na IA ao gerar texto da tarefa, usando fallback:", aiErr?.message);
     taskText = cleanGeneratedTaskText("", leadContextLabel);

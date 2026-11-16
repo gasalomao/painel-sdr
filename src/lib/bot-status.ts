@@ -320,24 +320,35 @@ export type HumanPauseConfig = {
   mode: "timed" | "manual";
 };
 
-const HP_KEYS = ["human_pause_enabled", "human_pause_minutes", "human_pause_mode"];
+const HP_KEYS = ["human_pause_enabled", "human_pause_minutes", "human_pause_mode"] as const;
 
-/** Lê a config da pausa automática. Default: ligada, 30min, volta sozinha. */
-export async function getHumanPauseConfig(): Promise<HumanPauseConfig> {
-  return cachedSetting("hp", async () => {
+function hpKeysFor(clientId?: string | null): string[] {
+  if (!clientId) return [...HP_KEYS];
+  return HP_KEYS.map((k) => `${k}:${clientId}`);
+}
+
+/** Lê a config da pausa automática (escopada por tenant quando clientId é informado, com fallback global). Default: ligada, 30min, timed. */
+export async function getHumanPauseConfig(clientId?: string | null): Promise<HumanPauseConfig> {
+  const cacheKey = clientId ? `hp:${clientId}` : "hp";
+  return cachedSetting(cacheKey, async () => {
     try {
+      const tenantKeys = hpKeysFor(clientId);
+      const keysToFetch = clientId ? [...tenantKeys, ...HP_KEYS] : [...HP_KEYS];
       const { data } = await supabaseAdmin
         .from("app_settings")
         .select("key, value")
-        .in("key", HP_KEYS);
-      const map = new Map((data || []).map((r: any) => [r.key, r.value]));
-      const enabledRaw = map.get("human_pause_enabled");
+        .in("key", keysToFetch);
+      const map = new Map((data || []).map((r: { key: string; value: string }) => [r.key, r.value]));
+      const readKey = (base: (typeof HP_KEYS)[number]): string | undefined =>
+        clientId ? (map.get(`${base}:${clientId}`) ?? map.get(base)) : map.get(base);
+
+      const enabledRaw = readKey("human_pause_enabled");
       return {
         // Sem valor salvo = ligado (mantém o comportamento histórico de
         // auto-pausar quando o operador assume a conversa).
         enabled: enabledRaw == null || enabledRaw === "" ? true : enabledRaw === "true",
-        minutes: Math.max(1, Number(map.get("human_pause_minutes")) || 30),
-        mode: map.get("human_pause_mode") === "manual" ? "manual" : "timed",
+        minutes: Math.max(1, Number(readKey("human_pause_minutes")) || 30),
+        mode: readKey("human_pause_mode") === "manual" ? "manual" : "timed",
       };
     } catch {
       return { enabled: true, minutes: 30, mode: "timed" };
@@ -345,18 +356,42 @@ export async function getHumanPauseConfig(): Promise<HumanPauseConfig> {
   }) as Promise<HumanPauseConfig>;
 }
 
-/** Grava (parcialmente) a config da pausa automática em app_settings. */
-export async function setHumanPauseConfig(cfg: Partial<HumanPauseConfig>): Promise<void> {
+/** Grava (parcialmente) a config da pausa automática em app_settings (escopada por clientId). */
+export async function setHumanPauseConfig(
+  cfg: Partial<HumanPauseConfig>,
+  clientId?: string | null,
+): Promise<void> {
+  const keyName = (base: (typeof HP_KEYS)[number]): string => (clientId ? `${base}:${clientId}` : base);
   const rows: { key: string; value: string }[] = [];
-  if (cfg.enabled !== undefined) rows.push({ key: "human_pause_enabled", value: cfg.enabled ? "true" : "false" });
-  if (cfg.minutes !== undefined) rows.push({ key: "human_pause_minutes", value: String(Math.max(1, Math.floor(cfg.minutes))) });
-  if (cfg.mode !== undefined) rows.push({ key: "human_pause_mode", value: cfg.mode === "manual" ? "manual" : "timed" });
+  if (cfg.enabled !== undefined) rows.push({ key: keyName("human_pause_enabled"), value: cfg.enabled ? "true" : "false" });
+  if (cfg.minutes !== undefined) rows.push({ key: keyName("human_pause_minutes"), value: String(Math.max(1, Math.floor(cfg.minutes))) });
+  if (cfg.mode !== undefined) rows.push({ key: keyName("human_pause_mode"), value: cfg.mode === "manual" ? "manual" : "timed" });
   for (const r of rows) {
     await supabaseAdmin
       .from("app_settings")
       .upsert({ key: r.key, value: r.value, updated_at: new Date().toISOString() }, { onConflict: "key" });
   }
-  bustSettings("hp");
+  bustSettings(clientId ? `hp:${clientId}` : "hp");
+}
+
+/**
+ * Aplica a auto-pausa quando um operador humano responde manualmente.
+ * Respeita `enabled === false` (não pausa) e `mode === "manual"` (`bot_paused`).
+ */
+export async function applyHumanAutoPause(
+  sessionId: string,
+  clientId?: string | null,
+): Promise<{ paused: boolean; mode?: "manual" | "timed"; minutes?: number }> {
+  const hp = await getHumanPauseConfig(clientId).catch(
+    (): HumanPauseConfig => ({ enabled: true, minutes: 30, mode: "timed" }),
+  );
+  if (!hp.enabled) return { paused: false };
+  if (hp.mode === "manual") {
+    await pauseSession(sessionId, "human");
+    return { paused: true, mode: "manual" };
+  }
+  await snoozeSession(sessionId, hp.minutes, "human");
+  return { paused: true, mode: "timed", minutes: hp.minutes };
 }
 
 /* ============================================================
