@@ -55,7 +55,11 @@ vi.mock("@/lib/supabase_admin", () => ({
   supabaseAdmin: { from: mocks.from },
 }));
 
-import { tickWarmupWorker } from "../warmup-worker";
+import {
+  tickWarmupWorker,
+  resetWarmupWorkerRuntimeState,
+  selectAsymmetricWarmupPair,
+} from "../warmup-worker";
 
 function config(overrides: Partial<WarmupConfig> = {}): WarmupConfig {
   const nowIso = new Date().toISOString();
@@ -154,6 +158,7 @@ beforeEach(() => {
   mocks.acquireLock.mockReset().mockResolvedValue(true);
   mocks.releaseLock.mockReset().mockResolvedValue(undefined);
   mocks.finishMany.mockReset();
+  resetWarmupWorkerRuntimeState();
   activeAllRows = [];
   dueRows = [];
 });
@@ -341,5 +346,84 @@ describe("tickWarmupWorker — segurança", () => {
     expect(mocks.executeTurn).toHaveBeenCalledTimes(1);
     expect(mocks.insertConv).toHaveBeenCalledTimes(1);
     expect(result.exchangesCount).toBe(1);
+  });
+
+  it("selectAsymmetricWarmupPair prioriza chip veterano/outbound para iniciar e protege chip novo/inbound como receptor", () => {
+    const newborn = config({
+      instance_name: "chip-novo",
+      stage: 1,
+      days_active: 1,
+      purpose: "inbound",
+      sent_today: 2,
+      received_today: 0,
+    });
+    const veteran = config({
+      instance_name: "chip-veterano",
+      stage: 3,
+      days_active: 10,
+      purpose: "outbound",
+      sent_today: 1,
+      received_today: 6,
+    });
+
+    const picked = selectAsymmetricWarmupPair([newborn, veteran], new Set());
+    expect(picked).not.toBeNull();
+    expect(picked?.initiator.instance_name).toBe("chip-veterano");
+    expect(picked?.partner.instance_name).toBe("chip-novo");
+  });
+
+  it("libera chip após quarentena com health_score = 60 para manter Freio Dinâmico (50%)", async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    mocks.from.mockImplementation((table: string) => {
+      if (table === "whatsapp_warmup_configs") {
+        return {
+          update: (patch: Record<string, unknown>) => {
+            updates.push(patch);
+            const chain: { eq: () => typeof chain; then: (resolve: (v: { error: null }) => unknown) => Promise<unknown> } = {
+              eq: () => chain,
+              then: (resolve) => Promise.resolve({ error: null }).then(resolve),
+            };
+            return chain;
+          },
+        };
+      }
+      return conversationBuilder();
+    });
+
+    mocks.readConfigs.mockResolvedValue({
+      source: "table",
+      configs: {
+        "chip-1": config({
+          id: "cfg-1",
+          instance_name: "chip-1",
+          is_quarantined: true,
+          quarantine_until: "2020-01-01T00:00:00Z",
+          quarantine_reason: "Múltiplas falhas",
+          health_score: 40,
+        }),
+      },
+    });
+    mocks.ensure.mockResolvedValue({
+      created: [],
+      enabledNew: [],
+      source: "table",
+      connections: [{ instance_name: "chip-1", status: "open", phone_number: null }],
+    });
+
+    await tickWarmupWorker();
+
+    const unquarantinePatch = updates.find((u) => "is_quarantined" in u);
+    expect(unquarantinePatch).toMatchObject({
+      is_quarantined: false,
+      quarantine_reason: null,
+      health_score: 60,
+      error_count_today: 0,
+    });
+    expect(mocks.logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sender_instance: "chip-1",
+        receiver_instance: "circuit_breaker",
+      })
+    );
   });
 });

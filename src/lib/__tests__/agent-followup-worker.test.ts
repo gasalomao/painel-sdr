@@ -1,12 +1,15 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const state = vi.hoisted(() => ({ rpc: vi.fn(), from: vi.fn(), send: vi.fn(), rows: [] as unknown[] }));
+const state = vi.hoisted(() => ({ rpc: vi.fn(), from: vi.fn(), send: vi.fn(), rows: [] as unknown[], render: vi.fn((text: string) => text), feedback: vi.fn(async () => ({ triggered: false, cleared: false, recentErrors: 0 })) }));
 vi.mock("@/lib/supabase_admin", () => ({ supabaseAdmin: { rpc: state.rpc, from: state.from } }));
 vi.mock("@/lib/evolution", () => ({ getEvolutionConfig: async () => ({ url: "https://provider.example.test", apiKey: "fixture-only" }) }));
-vi.mock("@/lib/template-vars", () => ({ renderTemplate: (text: string) => text }));
+vi.mock("@/lib/template-vars", () => ({ renderTemplate: state.render }));
+vi.mock("@/lib/warmup/warmup-engine", () => ({ recordWebhookDeliveryFeedback: state.feedback }));
 import { runFollowUpWorker } from "@/workers/agent-followup-worker";
 const row = { id: 1, client_id: "11111111-1111-4111-8111-111111111111", agent_id: 1, session_id: 1, remote_jid: "5511999990000@s.whatsapp.net", instance_name: "fixture", current_step: 1, max_step: 4, claim_id: "22222222-2222-4222-8222-222222222222", initial_sent_at: "2026-10-11T00:00:00Z" };
 beforeEach(() => {
+  state.render.mockClear();
+  state.feedback.mockClear();
   vi.stubEnv("AGENT_FOLLOWUP_WORKER_ENABLED", "true");
   state.rows = [row];
   state.rpc.mockImplementation(async (name, args) => {
@@ -97,8 +100,52 @@ describe("claimed agent followup worker", () => {
     state.rpc.mockImplementation((name, args) => name === "claim_agent_followup" ? Promise.resolve({ data: state.rows.length ? [{ ...state.rows.shift() as object, claim_id: args.p_claim }] : [], error: null }) : Promise.resolve({ data: { action: "skipped" }, error: null }));
     await runFollowUpWorker(); expect(state.send).not.toHaveBeenCalled();
   });
+  it("cancels and does not send when lead has opt_out = true", async () => {
+    state.rows = [{ ...row, lead_id: 1 }];
+    state.from.mockImplementation((table: string) => {
+      const chain = {
+        select: () => chain,
+        eq: () => chain,
+        maybeSingle: async () => ({
+          data:
+            table === "agent_settings"
+              ? { options: { follow_up: { follow_up_1h_template: "fixture", follow_up_1h_enabled: true } } }
+              : { nome_negocio: "Fixture", opt_out: true },
+          error: null,
+        }),
+      };
+      return chain;
+    });
+    await runFollowUpWorker();
+    expect(state.send).not.toHaveBeenCalled();
+    expect(state.rpc).not.toHaveBeenCalledWith("prepare_agent_followup", expect.anything());
+    expect(state.rpc).toHaveBeenCalledWith(
+      "release_agent_followup",
+      expect.objectContaining({ p_status: "cancelled", p_error: "Lead solicitou opt-out." })
+    );
+  });
   it("two concurrent ticks cannot both send the same claimed row", async () => {
     await Promise.all([runFollowUpWorker(), runFollowUpWorker()]);
     expect(state.send).toHaveBeenCalledOnce();
+  });
+  it("habilita Spintax na renderização e reporta sucesso/falha ao disjuntor sem quebrar contrato de envio", async () => {
+    await runFollowUpWorker();
+    expect(state.render).toHaveBeenCalledWith("Fixture message", expect.any(Object), { spintax: true });
+    await vi.waitFor(() => expect(state.feedback).toHaveBeenCalledWith({
+      clientId: row.client_id,
+      instanceName: row.instance_name,
+      statusText: "delivered",
+    }));
+
+    state.feedback.mockClear();
+    state.rows = [row];
+    state.send.mockResolvedValueOnce(new Response(null, { status: 503 }));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await runFollowUpWorker();
+    await vi.waitFor(() => expect(state.feedback).toHaveBeenCalledWith({
+      clientId: row.client_id,
+      instanceName: row.instance_name,
+      statusText: "error",
+    }));
   });
 });

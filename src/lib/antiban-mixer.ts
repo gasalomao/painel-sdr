@@ -15,11 +15,30 @@ import { greetingFor } from "./template-vars";
 
 /** Histórico recente por escopo (campanha/instância) para não repetir a mesma estrutura seguida. */
 const recentPatternHistory = new Map<string, number[]>();
-const MAX_RECENT_HISTORY = 12;
+const MAX_RECENT_HISTORY = 28;
 
 /** Reset apenas para testes unitários. */
 export function __resetAntiBanHistoryForTests(): void {
   recentPatternHistory.clear();
+}
+
+export function seedAntiBanHistory(entries: Record<string, number[]> | null | undefined): void {
+  if (!entries || typeof entries !== "object") return;
+  for (const [k, list] of Object.entries(entries)) {
+    if (!Array.isArray(list)) continue;
+    const valid = list.filter((n) => Number.isInteger(n) && n >= 0).slice(-MAX_RECENT_HISTORY);
+    if (valid.length > 0 && !recentPatternHistory.has(k)) {
+      recentPatternHistory.set(k, valid);
+    }
+  }
+}
+
+export function exportAntiBanHistory(): Record<string, number[]> {
+  const out: Record<string, number[]> = {};
+  for (const [k, list] of recentPatternHistory.entries()) {
+    if (list.length > 0) out[k] = list.slice(-MAX_RECENT_HISTORY);
+  }
+  return out;
 }
 
 /**
@@ -167,8 +186,9 @@ export const isDefaultApproachTemplate = isShortIcebreakerTemplate;
 type ApproachPattern = (gCap: string, gLow: string, company: string) => string;
 
 /**
- * 24 estruturas sintáticas humanas que mantêm 100% o mesmo sentido de
- * "{{saudacao}}! Tudo bem? {{nome_empresa}}?" sem parecer oferta comercial.
+ * 48 estruturas sintáticas humanas que mantêm 100% o mesmo sentido de
+ * "{{saudacao}}! Tudo bem? {{nome_empresa}}?" sem parecer oferta comercial
+ * (Estratégia Two-Step Handshake: força a 1ª resposta do lead para remover o botão Denunciar da Meta).
  */
 const WITH_COMPANY_PATTERNS: ApproachPattern[] = [
   // Ordem 1: Saudação -> Tudo bem -> Empresa (pontuações e conectivos variados)
@@ -188,6 +208,14 @@ const WITH_COMPANY_PATTERNS: ApproachPattern[] = [
   (G, _g, c) => `${G}! Como vai? É da ${c}?`,
   (G, _g, c) => `${G}, tudo bem por aí? Falo com o pessoal da ${c}?`,
   (_G, g, c) => `Olá, ${g}! Tudo tranquilo? Falo com a ${c}?`,
+  (_G, g, c) => `Oi, ${g}! Tudo joia? É o contato da ${c}?`,
+  (_G, g, c) => `Olá, ${g}! Tudo certo por aí? É da ${c}?`,
+  (G, _g, c) => `${G}! Tudo bem? Esse é o número da ${c}?`,
+  (_G, g, c) => `Oi, ${g}, tudo tranquilo? Aí é da ${c}?`,
+  (_G, g, c) => `Opa, ${g}! Tudo joia por aí? Falo com a ${c}?`,
+  (G, _g, c) => `${G}, tudo certo? É do atendimento da ${c}?`,
+  (_G, g, c) => `Oi, ${g}! Tudo bem? Falo no WhatsApp da ${c}?`,
+  (_G, g, c) => `Olá, ${g}! Como estão as coisas? É da ${c}?`,
 
   // Ordem 2: Saudação + Confirmação da Empresa -> Tudo bem
   (G, _g, c) => `${G}! É da ${c}? Tudo bem?`,
@@ -196,10 +224,28 @@ const WITH_COMPANY_PATTERNS: ApproachPattern[] = [
   (_G, g, c) => `Olá, ${g}! Falo com a ${c}? Tudo bem por aí?`,
   (G, _g, c) => `${G}! ${c}? Tudo bem?`,
   (_G, g, c) => `Opa, ${g}! Aí é da ${c}? Tudo joia?`,
+  (G, _g, c) => `${G}, é o pessoal da ${c}? Tudo tranquilo?`,
+  (_G, g, c) => `Oi, ${g}, falo com a ${c}? Tudo bem?`,
+  (_G, g, c) => `Olá, ${g}! É o contato da ${c}? Tudo certo?`,
+  (G, _g, c) => `${G}! Aí é da ${c}? Tudo bem com vocês?`,
+  (_G, g, c) => `Opa, ${g}, é da ${c}? Tudo tranquilo por aí?`,
+  (_G, g, c) => `Oi, ${g}! Pessoal da ${c}? Tudo joia?`,
 
   // Ordem 3: Duas linhas naturais (quebra humana de balão/parágrafo)
   (G, _g, c) => `${G}! Tudo bem?\n\nÉ da ${c}?`,
   (_G, g, c) => `Oi, ${g}, tudo certo?\n\nFalo com a ${c}?`,
+  (_G, g, c) => `Olá, ${g}! Tudo bem?\n\nAí é da ${c}?`,
+  (G, _g, c) => `${G}, tudo joia?\n\nÉ o WhatsApp da ${c}?`,
+  (_G, g, c) => `Opa, ${g}! Tudo tranquilo?\n\nFalo com o pessoal da ${c}?`,
+  (G, _g, c) => `${G}! Tudo certo por aí?\n\nÉ da ${c}?`,
+  (_G, g, c) => `Oi, ${g}! Tudo bem?\n\n${c}?`,
+  (_G, g, c) => `Olá, ${g}, tudo tranquilo?\n\nÉ do atendimento da ${c}?`,
+
+  // Ordem 4: Abordagem direta humanizada (pergunta de confirmação sutil)
+  (G, _g, c) => `Oi! ${G}, tudo bem? É da ${c}?`,
+  (G, _g, c) => `Olá! ${G}, tudo certo? Falo com a ${c}?`,
+  (G, _g, c) => `Opa! ${G}, tudo joia? Aí é da ${c}?`,
+  (G, _g, c) => `${G}, pessoal da ${c}! Tudo bem por aí?`,
 ];
 
 const WITHOUT_COMPANY_PATTERNS: Array<(gCap: string, gLow: string) => string> = [
@@ -209,6 +255,12 @@ const WITHOUT_COMPANY_PATTERNS: Array<(gCap: string, gLow: string) => string> = 
   (_G, g) => `Olá, ${g}! Tudo certo?`,
   (_G, g) => `Opa, ${g}, tudo tranquilo?`,
   (G) => `${G}! Tudo joia?`,
+  (_G, g) => `Oi, ${g}, tudo bem por aí?`,
+  (_G, g) => `Olá, ${g}! Tudo bem com vocês?`,
+  (G) => `${G}, tudo certo por aí?`,
+  (_G, g) => `Opa, ${g}! Tudo bem?`,
+  (G) => `${G}! Como vai, tudo bem?`,
+  (_G, g) => `Oi, ${g}! Tudo tranquilo por aí?`,
 ];
 
 function pickNonRepeatingIndex(scopeKey: string, total: number, deterministicIndex?: number): number {
@@ -273,4 +325,65 @@ export function applyAntiBanMixer(params: {
   text = text.replace(/\bTudo bem\?/i, greetingsPool[gIdx]);
   return text;
 }
+
+/**
+ * Blindagem Two-Step Handshake para o 1º contato frio:
+ * Quando o operador configurou um template curto de quebra-gelo (ex: "{{saudacao}}! Tudo bem? {{nome_empresa}}?"),
+ * impede que a IA injete links (http/wa.me) ou textos longos de vendas (> 140 chars) no 1º disparo,
+ * garantindo que o lead responda o primeiro "Oi" e desative o botão de Denunciar do WhatsApp.
+ */
+export function enforceShortHandshakeGuard(params: {
+  template: string;
+  candidateText: string;
+  companyName?: string | null;
+  now?: Date;
+  scopeKey?: string;
+}): string {
+  const now = params.now || new Date();
+  const candidate = String(params.candidateText || "").trim();
+  if (!isShortIcebreakerTemplate(params.template)) {
+    return syncGreetingToCurrentHour(candidate, now);
+  }
+
+  const hasUrl = /https?:\/\/|www\.|wa\.me\//i.test(candidate);
+  const isTooLongForHandshake = candidate.length > 140;
+  const hasSalesBuzzwords = /\b(promo[cç][aã]o|desconto|or[cç]amento\s+gr[aá]tis|compre\s+agora|clique\s+no\s+link|oferta\s+especial)\b/i.test(
+    candidate
+  );
+
+  if (!candidate || hasUrl || isTooLongForHandshake || hasSalesBuzzwords) {
+    return applyAntiBanMixer({
+      template: params.template,
+      renderedText: candidate,
+      companyName: params.companyName,
+      enabled: true,
+      now,
+      scopeKey: params.scopeKey,
+    });
+  }
+
+  return syncGreetingToCurrentHour(candidate, now);
+}
+
+/**
+ * Variação leve e segura para mensagens de follow-up sem IA:
+ * sincroniza saudação ao horário real e alterna cumprimentos triviais
+ * ("Tudo bem?" -> "Tudo certo?"/"Tudo joia?") sem reescrever o sentido do step.
+ */
+export function applyFollowupTextVariation(
+  renderedText: string,
+  now: Date = new Date(),
+  scopeKey: string = "followup"
+): string {
+  if (!renderedText) return renderedText;
+  let text = syncGreetingToCurrentHour(renderedText, now);
+  const greetingsPool = ["Tudo bem?", "Tudo certo?", "Tudo joia?", "Tudo tranquilo?", "Tudo bem por aí?"];
+  if (/\bTudo bem\?/i.test(text)) {
+    const gIdx = pickNonRepeatingIndex(`${scopeKey}:fu_greet`, greetingsPool.length);
+    text = text.replace(/\bTudo bem\?/i, greetingsPool[gIdx]);
+  }
+  return text;
+}
+
+
 

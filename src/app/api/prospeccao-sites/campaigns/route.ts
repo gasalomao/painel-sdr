@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { validateCampaignInstanceAccess } from "@/lib/campaign-instance-access";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 import { computePriority, passesFilters, type ProspecOrderBy, type ProspecOrderDir } from "@/lib/prospeccao-priority";
 
@@ -45,6 +46,7 @@ export async function POST(req: NextRequest) {
       ai_prompt = null,
       humanize_messages = false,
       antiban_mixer = true,
+      weekend_guard = false,
       order_by = "reviews",
       order_dir = "desc",
       min_reviews = 0,
@@ -64,6 +66,10 @@ export async function POST(req: NextRequest) {
     }
     if (Number(min_interval_seconds) > Number(max_interval_seconds)) {
       return NextResponse.json({ success: false, error: "min_interval > max_interval" }, { status: 400 });
+    }
+    const access = await validateCampaignInstanceAccess(ctx.clientId, String(instance_name));
+    if (!access.ok) {
+      return NextResponse.json({ success: false, error: access.error }, { status: access.status });
     }
     if (!Array.isArray(lead_ids) || lead_ids.length === 0) {
       return NextResponse.json({ success: false, error: "Selecione ao menos 1 lead" }, { status: 400 });
@@ -98,11 +104,14 @@ export async function POST(req: NextRequest) {
     }
     if (cErr || !camp) return NextResponse.json({ success: false, error: cErr?.message || "Falha ao criar" }, { status: 500 });
 
-    // Persiste opção do Misturador Anti-Ban para campanhas manuais
+    // Persiste opções anti-ban para campanhas manuais
     try {
       await supabase
         .from("system_config")
-        .upsert({ key: `campaign_antiban:${camp.id}`, value: String(Boolean(antiban_mixer)) }, { onConflict: "key" });
+        .upsert([
+          { key: `campaign_antiban:${camp.id}`, value: String(Boolean(antiban_mixer)) },
+          { key: `campaign_weekend_guard:${camp.id}`, value: String(Boolean(weekend_guard)) },
+        ], { onConflict: "key" });
     } catch {}
 
     // Resolve leads → targets (filtra tenant p/ evitar cross-tenant injection)

@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { startCampaign, pauseCampaign, cancelCampaign, isCampaignActive } from "@/lib/campaign-worker";
-import { isInstanceOwnedByClient, requireClientId } from "@/lib/tenant";
+import { requireClientId } from "@/lib/tenant";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
+import { validateCampaignInstanceAccess } from "@/lib/campaign-instance-access";
 
 export const dynamic = "force-dynamic";
 
@@ -68,8 +69,11 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   // SaaS guard: cliente comum não pode mudar modelo no PATCH. Sobrescreve
   // ai_model do body pelo client.default_ai_model antes do whitelist.
   await enforceClientDefaultModel(body, { clientId: own.clientId, isAdmin: own.isAdmin }, ["ai_model"]);
-  if ("instance_name" in body && !(await isInstanceOwnedByClient(String(body.instance_name), own.clientId))) {
-    return NextResponse.json({ success: false, error: "Instância não pertence a este cliente" }, { status: 403 });
+  if ("instance_name" in body) {
+    const access = await validateCampaignInstanceAccess(own.clientId, String(body.instance_name));
+    if (!access.ok) {
+      return NextResponse.json({ success: false, error: access.error }, { status: access.status });
+    }
   }
 
   const ALLOWED_FIELDS = [
@@ -105,6 +109,15 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       .from("system_config")
       .upsert(
         { key: `campaign_antiban:${id}`, value: body.antiban_mixer !== false ? "true" : "false" },
+        { onConflict: "key" }
+      )
+      .then(() => undefined, () => undefined);
+  }
+  if ("weekend_guard" in body) {
+    await supabase
+      .from("system_config")
+      .upsert(
+        { key: `campaign_weekend_guard:${id}`, value: body.weekend_guard === true ? "true" : "false" },
         { onConflict: "key" }
       )
       .then(() => undefined, () => undefined);

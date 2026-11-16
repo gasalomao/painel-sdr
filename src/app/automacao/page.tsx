@@ -27,6 +27,7 @@ import { AutomationLogs } from "./AutomationLogs";
 import { MediaUploader } from "@/components/media-uploader";
 import { LeadIntelligenceBatch } from "@/components/lead-intelligence-batch";
 import { ModelOptions } from "@/components/ai-module-shared";
+import { AUTO_POOL_INSTANCE, formatInstanceLabel } from "@/lib/campaign-pool";
 import styles from "./automacao.module.css";
 
 type FollowupStep = { day_offset: number; template: string };
@@ -651,6 +652,11 @@ export default function AutomacaoPage() {
                     onChange={e => setFormData({ ...formData, instance_name: e.target.value })}
                     className="w-full mt-0.5 bg-black/40 border border-white/10 rounded-md px-3 h-10 text-sm">
                     <option value="">— escolha uma instância —</option>
+                    {instances.length >= 1 && (
+                      <option value={AUTO_POOL_INSTANCE} className="bg-neutral-900">
+                        ⚡ Pool Automático (alternar entre chips saudáveis)
+                      </option>
+                    )}
                     {instances.map(i => <option key={i.instanceName} value={i.instanceName} className="bg-neutral-900">{i.instanceName}</option>)}
                   </select>
                 </div>
@@ -1423,7 +1429,7 @@ export default function AutomacaoPage() {
                 <h4>Revise antes de iniciar</h4>
                 <dl>
                   <div><dt>Automação</dt><dd>{formData.name || "Nome não preenchido"}</dd></div>
-                  <div><dt>WhatsApp</dt><dd>{formData.instance_name || "Selecione uma instância"}</dd></div>
+                  <div><dt>WhatsApp</dt><dd>{formData.instance_name ? formatInstanceLabel(formData.instance_name) : "Selecione uma instância"}</dd></div>
                   <div><dt>Público</dt><dd>{nichesText.split("\n").filter(s => s.trim()).length} nicho(s) · {regionsText.split("\n").filter(s => s.trim()).length} região(ões) · até {formData.scrape_max_leads} leads</dd></div>
                   <div><dt>Mensagem</dt><dd>{formData.dispatch_personalize ? "Personalizada com IA" : "Mensagem-base"}{formData.dispatch_media_url ? " · com mídia" : ""}</dd></div>
                   <div><dt>Follow-up</dt><dd>{formData.followup_enabled !== false ? `${formData.followup_steps?.length || 0} etapa(s) configurada(s)` : "Desativado"}</dd></div>
@@ -1499,7 +1505,7 @@ export default function AutomacaoPage() {
                         {isOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
                         <span className={styles.automationIdentity}>
                           <strong>{a.name}</strong>
-                          <span>{a.instance_name} · agente {a.agent_id ?? "—"} · <b>{a.scraped_count || 0}</b> {a.scraped_count === 1 ? "lead captado" : "leads captados"}</span>
+                          <span>{formatInstanceLabel(a.instance_name)} · agente {a.agent_id ?? "—"} · <b>{a.scraped_count || 0}</b> {a.scraped_count === 1 ? "lead captado" : "leads captados"}</span>
                         </span>
                       </button>
                       <div className={styles.automationActions}>

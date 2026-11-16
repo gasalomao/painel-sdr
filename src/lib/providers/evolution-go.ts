@@ -117,8 +117,9 @@ async function resolveInstanceToken(instanceName: string): Promise<string> {
 
 function formatNumberForGo(remoteJid: string): string {
   if (!remoteJid) return "";
-  if (remoteJid.includes("@g.us")) return remoteJid;
-  return remoteJid.replace(/^phone:/i, "").replace(/@.*$/, "").replace(/\D/g, "");
+  const cleaned = remoteJid.replace(/^phone:/i, "").trim();
+  if (cleaned.includes("@g.us") || cleaned.includes("@lid")) return cleaned;
+  return cleaned.replace(/@.*$/, "").replace(/\D/g, "");
 }
 
 // ============================================================================
@@ -128,7 +129,12 @@ function formatNumberForGo(remoteJid: string): string {
 export const evolutionGo: WhatsAppProvider = {
   name: "evolution_go",
 
-  async sendText(remoteJid: string, text: string, instanceName: string, options?: { delay?: number }): Promise<SendResult> {
+  async sendText(
+    remoteJid: string,
+    text: string,
+    instanceName: string,
+    options?: { delay?: number; linkPreview?: boolean }
+  ): Promise<SendResult> {
     try {
       const token = await resolveInstanceToken(instanceName);
       const cleanNumber = formatNumberForGo(remoteJid);

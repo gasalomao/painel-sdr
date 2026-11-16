@@ -61,11 +61,23 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import styles from "./aquecer-chips.module.css";
 
+interface ChipDeliveryMetrics {
+  outbound: number;
+  deliveredRate: number;
+  readRate: number;
+  replyRate: number;
+  failed: number;
+}
+
 interface InstanceItem {
   instance_name: string;
   connection_status: string;
   phone_number: string | null;
+  orphan?: boolean;
   config: WarmupConfig;
+  day0_warnings?: string[];
+  day0_status?: "pending" | "warning" | "ok";
+  metrics?: ChipDeliveryMetrics | null;
   proxy: {
     enabled: boolean;
     host: string | null;
@@ -287,6 +299,7 @@ export default function AquecerChipsPage() {
   const [savingGlobal, setSavingGlobal] = useState(false);
   const [applyGlobalToAll, setApplyGlobalToAll] = useState(false);
   const [savingMap, setSavingMap] = useState<Record<string, boolean>>({});
+  const [reauditLoadingMap, setReauditLoadingMap] = useState<Record<string, boolean>>({});
   const [bulkBusy, setBulkBusy] = useState(false);
 
   // Tabs do Módulo
@@ -519,6 +532,32 @@ export default function AquecerChipsPage() {
       toast.error("Erro: " + err.message);
     } finally {
       setSwarmCycleLoading(false);
+    }
+  };
+
+  const handleReauditDay0 = async (instanceName: string) => {
+    setReauditLoadingMap((prev) => ({ ...prev, [instanceName]: true }));
+    try {
+      const res = await fetch("/api/warmup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "reaudit_day0", instance_name: instanceName }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        if (data.ok) {
+          toast.success(`Auditoria Dia-0 OK em ${instanceName}! Alertas resolvidos.`);
+        } else {
+          toast.warning(`Ainda há ${Array.isArray(data.warnings) ? data.warnings.length : 1} pendência(s) na Auditoria Dia-0 de ${instanceName}.`);
+        }
+        await loadData(true);
+      } else {
+        toast.error(data.error || "Falha ao reauditar o chip.");
+      }
+    } catch (err: any) {
+      toast.error("Erro ao reauditar: " + (err?.message || "desconhecido"));
+    } finally {
+      setReauditLoadingMap((prev) => ({ ...prev, [instanceName]: false }));
     }
   };
 
@@ -1573,6 +1612,64 @@ export default function AquecerChipsPage() {
                             </div>
                           )}
 
+                          {/* Auditoria Dia-0 (higiene do número e proxy) */}
+                          {!isQuarantined && item.day0_warnings && item.day0_warnings.length > 0 && (
+                            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 space-y-1.5">
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="text-[11px] font-semibold text-amber-300 flex items-center gap-1.5">
+                                  <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
+                                  Auditoria Dia-0: atenção antes de escalar disparos
+                                </p>
+                                <button
+                                  type="button"
+                                  onClick={() => handleReauditDay0(instName)}
+                                  disabled={Boolean(reauditLoadingMap[instName])}
+                                  className="inline-flex items-center gap-1 rounded border border-amber-400/40 bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-200 hover:bg-amber-500/25 disabled:opacity-50 transition-colors shrink-0"
+                                >
+                                  <RefreshCw className={`w-3 h-3 ${reauditLoadingMap[instName] ? "animate-spin" : ""}`} />
+                                  {reauditLoadingMap[instName] ? "Auditando…" : "Reauditar"}
+                                </button>
+                              </div>
+                              <ul className="space-y-0.5 pl-5 list-disc text-[11px] text-amber-100/90">
+                                {item.day0_warnings.map((warn, idx) => (
+                                  <li key={idx}>{warn}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+
+                          {/* Higiene Dia-0 para chips antigos sem alerta ou já aprovados */}
+                          {!isQuarantined && !item.orphan && !(item.day0_warnings && item.day0_warnings.length > 0) && (
+                            <div className="flex items-center justify-between gap-2 rounded-lg border border-white/10 bg-white/[0.02] px-2.5 py-1.5">
+                              <span className="text-[11px] text-neutral-300 flex items-center gap-1.5">
+                                {item.day0_status === "ok" ? (
+                                  <>
+                                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                    <span>Auditoria Dia-0 OK · foto e proxy validados</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <ShieldAlert className="w-3.5 h-3.5 text-neutral-400 shrink-0" />
+                                    <span>Auditoria Dia-0 ainda não executada</span>
+                                  </>
+                                )}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleReauditDay0(instName)}
+                                disabled={Boolean(reauditLoadingMap[instName])}
+                                className="inline-flex items-center gap-1 rounded border border-white/15 bg-white/[0.04] px-2 py-0.5 text-[10px] font-medium text-neutral-200 hover:bg-white/[0.1] disabled:opacity-50 transition-colors shrink-0"
+                              >
+                                <RefreshCw className={`w-3 h-3 ${reauditLoadingMap[instName] ? "animate-spin" : ""}`} />
+                                {reauditLoadingMap[instName]
+                                  ? "Auditando…"
+                                  : item.day0_status === "ok"
+                                    ? "Reauditar"
+                                    : "Verificar Dia-0"}
+                              </button>
+                            </div>
+                          )}
+
                           {/* O que está acontecendo agora */}
                           <div className={styles.progressContainer}>
                             <div className="flex flex-wrap items-baseline justify-between gap-2 text-xs">
@@ -1694,6 +1791,21 @@ export default function AquecerChipsPage() {
                             <span className="text-neutral-400">
                               Última atividade: <span className="text-neutral-300">{formatRelativeTime(cfg.last_activity_at)}</span>
                             </span>
+
+                            {item.metrics && item.metrics.outbound > 0 && (
+                              <span
+                                className={cn(
+                                  "inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 border text-[10px] tabular-nums",
+                                  item.metrics.failed > 0 || item.metrics.deliveredRate < 80
+                                    ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
+                                    : "border-[#2a352c] bg-[#111a14] text-neutral-300"
+                                )}
+                                title={`Baseado nos últimos ${item.metrics.outbound} envios recentes no chat`}
+                              >
+                                <CheckCheck className="w-3 h-3 text-emerald-400 shrink-0" />
+                                Entrega {item.metrics.deliveredRate}% · Leitura {item.metrics.readRate}% · Resposta {item.metrics.replyRate}%
+                              </span>
+                            )}
 
                             <a
                               href="/whatsapp"

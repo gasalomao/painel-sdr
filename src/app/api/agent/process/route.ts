@@ -11,7 +11,10 @@ import { getEvolutionConfig } from "@/lib/evolution";
 import { requireClientId } from "@/lib/tenant";
 import { hasInternalSecret } from "@/lib/internal-auth";
 import { maskJid } from "@/lib/pii";
-import { resolveFunnelStage, checkSchedulesSync, resolveAgentOutput, splitMessage, normalizeSplitIntensity } from "@/lib/agent-format";
+import { resolveFunnelStage, checkSchedulesSync, resolveAgentOutput, splitMessage, normalizeSplitIntensity, minifyPromptMaster } from "@/lib/agent-format";
+import { detectBotOrUraLoop, isExplicitOptOutRequest, shouldAutoPauseAfterClosing, type GuardHistoryMessage } from "@/lib/agent-guards";
+import { isLeadOptedOut, recordLeadOptOut } from "@/lib/opt-out";
+import { dropTrailingCurrentMessage, windowHistory, historyMessageContent, senderPrefix, historyRole, toGeminiTurns } from "@/lib/agent-history";
 import { parseAgendaDateTime, isDuplicateSlot, hasAgentOverlapConflict, calculateFreeSlots } from "@/lib/agenda-logic";
 import { indexKnowledgeDocument } from "@/lib/rag";
 import { getAiKeys } from "@/lib/ai-keys";
@@ -248,6 +251,7 @@ export async function POST(req: NextRequest) {
     contactRow = (contactRes as any).data || null;
 
     let previaSiteRequestedInTurn = false;
+    let meetingScheduledInTurn = false;
 
     if (isTestMode && testLeadData) {
         leadRow = {
@@ -340,6 +344,22 @@ export async function POST(req: NextRequest) {
         // Deploy antes de backfill total: sem owner conhecido não bloqueia
         // (compat), mas deixa rastro pra diagnosticar cobertura.
         console.warn(`[AGENT] Agente ${agentId} sem client_id — sem gate de tenant (verificar backfill).`);
+      }
+
+      if (!isTestMode) {
+        const requestedOptOut = Boolean(text && isExplicitOptOutRequest(text));
+        if (requestedOptOut && remoteJid) {
+          await recordLeadOptOut({
+            clientId,
+            remoteJid,
+            reason: text,
+            sessionId: sessionId || null,
+          }).catch(() => {});
+          return NextResponse.json({ success: true, status: "lead_opt_out" });
+        }
+        if (leadRow?.opt_out === true || (remoteJid && (await isLeadOptedOut(clientId, remoteJid)))) {
+          return NextResponse.json({ success: true, status: "lead_opt_out" });
+        }
       }
 
     console.log(`[AGENT] Processing for Agent: ${agentConfig.name} (ID: ${agentId})`);
@@ -442,7 +462,7 @@ export async function POST(req: NextRequest) {
           if (!allContents.includes(text)) allContents.unshift(text);
           if (allContents.length > 0) {
              finalProcessText = allContents.join("\n");
-             console.log(`[BUFFER] Lote FINAL consolidado com ${allContents.length} mensagens para ${maskJid(remoteJid)}:\n${finalProcessText}`);
+             console.log(`[BUFFER] Lote FINAL consolidado com ${allContents.length} mensagens para ${maskJid(remoteJid)}`);
           }
 
           await supabase.from("chat_buffers").delete().eq("remote_jid", remoteJid).eq("instance_name", instanceName);
@@ -582,9 +602,13 @@ export async function POST(req: NextRequest) {
     }
 
     const rawGeminiHistory: any[] = [];
+    let historyForLoopGuard: GuardHistoryMessage[] = [];
+    let chronoForWindow: any[] = [];
+
     if (isTestMode && testHistory.length > 0) {
         testHistory.forEach((m: any) => {
             if (m.role === "system") return; // Ignora logs de sistema no histórico da IA
+            historyForLoopGuard.push({ role: m.role, content: m.content });
             rawGeminiHistory.push({
                 role: m.role === "user" ? "user" : "model",
                 parts: [{ text: m.content || "" }]
@@ -592,33 +616,60 @@ export async function POST(req: NextRequest) {
         });
     } else if (historico.length > 0) {
         // Ordem cronológica (mais antiga primeiro)
-        const chrono = [...historico].reverse().filter((m: any) => {
+        const chronoRaw = [...historico].reverse().filter((m: any) => {
             const sk = m.sender || m.sender_type;
             return sk !== "system"; // Foca em tudo exceto mensagens internas de sistema (inclui IA, Campanhas/Disparos e Atendente Humano)
         });
 
-        // Para evitar duplicar a mensagem atual no histórico enviado ao Gemini (e evitar erros de alternância de turnos no SDK),
-        // se a última mensagem do histórico cronológico for a mensagem atual do cliente, nós a removemos do histórico.
-        // Ela será enviada unicamente na chamada sendMessage() abaixo.
-        // FIX: só remove se o conteúdo BATER com a mensagem sendo processada.
-        // Antes: com 2 mensagens rápidas, o run da M1 popava M2 (conteúdo
-        // diferente) → M2 saía do contexto e ainda era re-anexada duplicada.
-        while (chrono.length > 0) {
-            const lastMsg: any = chrono[chrono.length - 1];
-            const lastSender = lastMsg.sender_type || lastMsg.sender;
-            const lastContent = String(lastMsg.content || "").trim();
-            const currentText = String(finalProcessText || text || "").trim();
-            if (
-                lastSender === "customer" &&
-                lastContent.length > 0 &&
-                (lastContent === currentText ||
-                 (lastContent.length >= 2 && currentText.includes(lastContent)))
-            ) {
-                chrono.pop();
-            } else {
-                break;
-            }
+        // A mensagem atual já está persistida no histórico. Remove a(s) cópia(s)
+        // do fim; em lote consolidado, todas as mensagens do lote batem e saem.
+        chronoForWindow = dropTrailingCurrentMessage(
+          chronoRaw as any,
+          String(finalProcessText || text || ""),
+          finalProcessText !== text,
+        ) as any;
+        historyForLoopGuard = chronoForWindow;
+    }
+
+    // Proteção anti-loop de URA / auto-resposta repetitiva (roda antes de sumarizar ou chamar LLM = 0 tokens)
+    if (!forceActive && historyForLoopGuard.length > 0) {
+      const loopCheck = detectBotOrUraLoop({
+        currentText: String(finalProcessText || text || ""),
+        history: historyForLoopGuard,
+      });
+      if (loopCheck.isLoop) {
+        console.warn(`[AGENT] Loop de URA/bot detectado (${loopCheck.reason}) para ${maskJid(remoteJid)} — pausando sessão.`);
+        if (!isTestMode && sessionId) {
+          try {
+            const { pauseSession } = await import("@/lib/bot-status");
+            await pauseSession(sessionId, "system");
+          } catch (pauseErr: any) {
+            console.warn("[AGENT] Falha ao pausar sessão por loop de URA:", pauseErr?.message);
+          }
         }
+        await supabase.from("webhook_logs").insert({
+          instance_name: instanceName,
+          client_id: clientId,
+          event: "AGENT_URA_LOOP_PAUSED",
+          payload: {
+            agent_id: agentId,
+            remote_jid: maskJid(remoteJid),
+            session_id: sessionId || null,
+            reason: loopCheck.reason,
+          },
+          created_at: new Date().toISOString(),
+        }).then(() => {}, () => {});
+        return NextResponse.json({
+          success: true,
+          ai_responded: false,
+          suppressed: "ura_loop_detected",
+          reason: loopCheck.reason,
+        });
+      }
+    }
+
+    if (!isTestMode && chronoForWindow.length > 0) {
+        const chrono = chronoForWindow;
 
         // Janela adaptativa: se >15 trocas, mantém os 3 PRIMEIROS turnos (disparo
         // inicial / contexto fundador) + os 12 ÚLTIMOS (trocas recentes). Insere
@@ -627,7 +678,6 @@ export async function POST(req: NextRequest) {
         const KEEP_HEAD = 3, KEEP_TAIL = 12;
         let windowed: any[] = chrono;
         if (chrono.length > KEEP_HEAD + KEEP_TAIL) {
-            const skipped = chrono.length - KEEP_HEAD - KEEP_TAIL;
             const middle = chrono.slice(KEEP_HEAD, chrono.length - KEEP_TAIL);
             // RESUMO REAL do meio (antes era placeholder vazio — IA esquecia dados).
             // Gera com modelo barato + reasoningMode=0, cacheado por conteúdo (hash).
@@ -641,58 +691,32 @@ export async function POST(req: NextRequest) {
               sessionId: isTestMode ? null : sessionId,
               sessionVariables: currentVariables,
             }).catch(() => null);
+            const skipped = chrono.length - KEEP_HEAD - KEEP_TAIL;
             const middleContent = summary
               ? `[Resumo de ${skipped} mensagens intermediárias da conversa — a IA deve usar estas informações como contexto]: ${summary}`
               : `[...${skipped} mensagens intermediárias omitidas pra economizar contexto. Resumo: cliente já passou pelo disparo inicial e está em diálogo ativo...]`;
-            windowed = [
-                ...chrono.slice(0, KEEP_HEAD),
-                { sender: "system", content: middleContent, _skip_marker: true },
-                ...chrono.slice(-KEEP_TAIL),
-            ];
+            windowed = windowHistory(chrono as any, {
+              keepHead: KEEP_HEAD,
+              keepTail: KEEP_TAIL,
+              middleContent,
+            }).messages as any[];
         }
 
         windowed.forEach((m: any) => {
-            const senderKey = m.sender || m.sender_type;
-            const role = (m._skip_marker || senderKey !== 'customer') ? 'model' : 'user';
-            let prefix = "";
-            if (senderKey === "human" || senderKey === "user_panel" || senderKey === "operator") {
-              prefix = "[Atendente Humano da Empresa]: ";
-            }
-            // ECONOMIA DE TOKENS: no HISTÓRICO, URLs de imagem ([IMAGEM: ...],
-            // ![](url)) são ruído caro pro modelo — só importa saber que uma
-            // foto foi enviada. A URL completa segue no chats_dashboard e na
-            // resposta ATUAL (path de envio não é afetado).
-            let safeContent = m.content ? m.content : "[Mídia/Comando]";
-            if (safeContent !== "[Mídia/Comando]") {
-              safeContent = safeContent
-                .replace(/\[IMAGEM:\s*https?:\/\/[^\s\]]+\]/gi, "[foto enviada]")
-                .replace(/!\[[^\]]*\]\(https?:\/\/[^\s)]+\)/gi, "[foto enviada]");
-            }
-            // Corta msgs individuais grandes (1000 chars já é bastante).
-            if (safeContent.length > 600) safeContent = safeContent.substring(0, 600) + "... [cortado]";
-            rawGeminiHistory.push({ role, parts: [{ text: prefix + safeContent }] });
+            // ECONOMIA DE TOKENS: URLs de imagem ([IMAGEM: ...], ![](url)) são
+            // ruído caro no histórico — viram "[foto enviada]". A URL completa
+            // segue no chats_dashboard e na resposta ATUAL.
+            rawGeminiHistory.push({
+              role: historyRole(m),
+              parts: [{ text: senderPrefix(m) + historyMessageContent(m) }],
+            });
         });
     }
 
-    // Normaliza o histórico para o Gemini: 
+    // Normaliza o histórico para o Gemini:
     // 1. Deve começar com 'user'
     // 2. Deve alternar perfeitamente entre 'user' e 'model'
-    const geminiHistory: any[] = [];
-    for (const msg of rawGeminiHistory) {
-        if (geminiHistory.length === 0) {
-            if (msg.role === "model") {
-                geminiHistory.push({ role: "user", parts: [{ text: "(Contato iniciado pela IA/SDR com disparo ativo)" }] });
-            }
-            geminiHistory.push(msg);
-        } else {
-            const last = geminiHistory[geminiHistory.length - 1];
-            if (last.role === msg.role) {
-                last.parts[0].text += "\n\n" + msg.parts[0].text;
-            } else {
-                geminiHistory.push(msg);
-            }
-        }
-    }
+    const geminiHistory: any[] = toGeminiTurns(rawGeminiHistory as any) as any[];
 
     const agora = new Date();
 
@@ -1314,17 +1338,9 @@ ${capturedVariablesPrompt}
     diagnosticProvider = agentProvider;
     console.log(`[AGENT] Usando modelo: ${modelId} (provider=${agentProvider})`);
 
-    // OTIMIZAÇÃO AGRESSIVA: Remove espaços e newlines desnecessários do prompt
-    // (economia de ~5-10% tokens no system instruction sem perder semântica).
-    const minifiedPromptMaster = promptMaster
-      .replace(/\r/g, "")
-      .replace(/\n[ \t]+/g, "\n")        // Remove indentação
-      .replace(/[ \t]+\n/g, "\n")        // Remove espaços antes de newline
-      .replace(/\n{3,}/g, "\n\n")        // Max 2 newlines consecutivos
-      .replace(/\s{2,}/g, " ")           // Múltiplos espaços → 1 espaço
-      .replace(/\n\s*\n/g, "\n\n")       // Limpa linhas vazias extras
-      .replace(/^[\s\n]+|[\s\n]+$/g, "") // Trim agressivo início/fim
-      .trim();
+    // OTIMIZAÇÃO SEGURA: Remove espaços horizontais excessivos preservando quebras de parágrafo (\n\n),
+    // cabeçalhos Markdown e tags XML estruturadas.
+    const minifiedPromptMaster = minifyPromptMaster(promptMaster);
 
     // THINKING BUDGET — Gemini 2.5 Flash liga "thinking" por padrão, e esses
     // tokens são cobrados como SAÍDA (o token mais caro). Pra um SDR de chat o
@@ -1729,6 +1745,7 @@ ${capturedVariablesPrompt}
                    summary: resumo || `Reunião de fechamento agendada para ${horario}.`,
                 });
 
+                meetingScheduledInTurn = true;
                 if (sessionId) {
                    await supabase
                       .from("sessions")
@@ -2117,6 +2134,7 @@ ${capturedVariablesPrompt}
                    message: `Esse horário acabou de ser ocupado por outro cliente. Chame check_google_calendar_availability e ofereça um horário livre DIFERENTE — não confirme esse.`,
                 };
              } else {
+             meetingScheduledInTurn = true;
              await promoteLeadBySystemSignal({
                 clientId,
                 remoteJid,
@@ -2732,7 +2750,7 @@ ${capturedVariablesPrompt}
     // 9. Envio: roteia pelo provider do canal (Evolution OU WhatsApp Cloud).
     // Import dinâmico pra evitar ciclos.
     const channelMod = await import("@/lib/channel");
-    const { calculateTypingDelaySeconds } = await import("@/lib/agent-delay");
+    const { calculateTypingDelaySeconds, calculateChunkTypingMs } = await import("@/lib/agent-delay");
 
     const typingDelayConfig = {
       mode: agentConfig.options?.typing_delay_mode,
@@ -2744,6 +2762,15 @@ ${capturedVariablesPrompt}
 
     const humanize = agentConfig.options?.humanize_messages ?? false;
     const splitIntensity = normalizeSplitIntensity(agentConfig.options?.split_intensity);
+
+    const closingPauseCheck =
+      !meetingScheduledInTurn && !customGoalAchievedInTurn
+        ? shouldAutoPauseAfterClosing({
+            customerText: String(finalProcessText || text || ""),
+            assistantText: finalAnswer,
+          })
+        : { shouldPause: false as const, reason: null };
+    const closingAutoPaused = closingPauseCheck.shouldPause;
 
     const testStateUpdate = isTestMode ? {
         variables: currentVariables,
@@ -2757,6 +2784,8 @@ ${capturedVariablesPrompt}
         customGoalPauseMode: customGoalAchievedInTurn ? customGoalCfg.pauseMode : null,
         customGoalPauseMinutes: customGoalAchievedInTurn && customGoalCfg.pauseMode === "timed" ? customGoalCfg.pauseMinutes : null,
         customGoalResumeAt: customGoalAchievedInTurn ? customGoalResumeAtIso : null,
+        closingAutoPaused,
+        closingAutoPauseReason: closingPauseCheck.reason,
     } : undefined;
 
     if (isTestMode) {
@@ -2861,6 +2890,28 @@ ${capturedVariablesPrompt}
         });
       } catch (pauseErr: any) {
         console.warn("[AGENT] Falha ao pausar sessão por objetivo personalizado:", pauseErr?.message);
+      }
+    }
+
+    if (!isTestMode && !customGoalAchievedInTurn && closingAutoPaused && sessionId) {
+      try {
+        const { pauseSession } = await import("@/lib/bot-status");
+        await pauseSession(sessionId, "system");
+        supabase.from("webhook_logs").insert({
+          instance_name: instanceName,
+          client_id: clientId,
+          event: "AGENT_CLOSING_AUTO_PAUSED",
+          payload: {
+            agent_id: agentId,
+            remote_jid: maskJid(remoteJid),
+            session_id: sessionId,
+            reason: closingPauseCheck.reason,
+          },
+          created_at: new Date().toISOString(),
+        }).then(() => {}, () => {});
+        console.log(`[AGENT] Sessão pausada automaticamente pós-despedida (${closingPauseCheck.reason}) para ${maskJid(remoteJid)}.`);
+      } catch (closeErr: any) {
+        console.warn("[AGENT] Falha ao pausar sessão pós-despedida:", closeErr?.message);
       }
     }
 
@@ -2975,18 +3026,41 @@ ${capturedVariablesPrompt}
       }
     };
 
+    // Reporta falhas críticas/rate-limit ou confirmações do Agente para a saúde do chip sem bloquear o turno.
+    const reportAgentSendOutcome = (ok: boolean, errorMsg?: unknown) => {
+      if (isTestMode || !clientId || !instanceName) return;
+      if (ok) {
+        import("@/lib/warmup/warmup-engine")
+          .then((m) => m.recordWebhookDeliveryFeedback?.({ clientId, instanceName, statusText: "delivered" }))
+          .catch(() => {});
+        return;
+      }
+      const errStr = String(errorMsg || "");
+      if (/429|rate|timeout|timed out|econn|disconnect|closed|50[0-4]/i.test(errStr)) {
+        import("@/lib/warmup/warmup-engine")
+          .then((m) => m.recordWebhookDeliveryFeedback?.({ clientId, instanceName, statusText: "error" }))
+          .catch(() => {});
+      }
+    };
+
     // Helper pra enviar e PERSISTIR um texto (seja intro, produto, ou closing).
     // Retorna o msgId gerado (ou null em erro).
     const sendAndPersistText = async (text: string, customDelayMs?: number): Promise<string | null> => {
       if (!text.trim()) return null;
-      const effectiveDelayMs = customDelayMs ?? (typingDelaySeconds * 1000);
+      const effectiveDelayMs = Math.max(1, Math.round(customDelayMs ?? (typingDelaySeconds * 1000)));
+      const customerInboundCount = Array.isArray(historico)
+        ? historico.filter((h: { sender_type?: string | null }) => h?.sender_type === "customer").length
+        : 0;
+      const sendOptions = !isTestMode && customerInboundCount <= 1
+        ? { delay: effectiveDelayMs, linkPreview: false }
+        : { delay: effectiveDelayMs };
       try {
         try {
           const { registerPendingAutomatedSend } = await import("@/lib/manual-send-registry");
           registerPendingAutomatedSend(instanceName, remoteJid, text);
         } catch { /* ignore */ }
 
-        let sendResult: any = await channelMod.sendMessage(remoteJid, text, instanceName, { delay: effectiveDelayMs });
+        let sendResult: any = await channelMod.sendMessage(remoteJid, text, instanceName, sendOptions);
 
         const checkInstanceError = (res: any) => {
           if (!res || res.ok === false) {
@@ -3016,7 +3090,7 @@ ${capturedVariablesPrompt}
               registerPendingAutomatedSend(instanceName, remoteJid, text);
             } catch {}
 
-            sendResult = await channelMod.sendMessage(remoteJid, text, instanceName, { delay: effectiveDelayMs });
+            sendResult = await channelMod.sendMessage(remoteJid, text, instanceName, sendOptions);
           }
         }
 
@@ -3054,6 +3128,9 @@ ${capturedVariablesPrompt}
 
         if (sendResult?.ok === false) {
           anySendError = sendResult.error || "Falha no envio";
+          reportAgentSendOutcome(false, sendResult.error);
+        } else {
+          reportAgentSendOutcome(true);
         }
         return msgId;
       } catch (err: any) {
@@ -3075,7 +3152,7 @@ ${capturedVariablesPrompt}
               await supabase.from("sessions").update({ instance_name: altInstance }).eq("id", sessionId);
               instanceName = altInstance;
 
-              const sendResult: any = await channelMod.sendMessage(remoteJid, text, instanceName, { delay: effectiveDelayMs });
+              const sendResult: any = await channelMod.sendMessage(remoteJid, text, instanceName, sendOptions);
               const msgId = sendResult?.key?.id || sendResult?.messageId || `agent-${Date.now()}`;
               // FIX: resend pós-migração não registrava o msgId como envio da IA
               // → eco voltava classificado "human" → bot pausado 30min injustamente.
@@ -3104,6 +3181,7 @@ ${capturedVariablesPrompt}
                 client_id: clientId,
                 created_at: nowIso,
               }).then(() => {}, () => {});
+              reportAgentSendOutcome(true);
               return msgId;
             }
           } catch (migErr: any) {
@@ -3112,6 +3190,7 @@ ${capturedVariablesPrompt}
         }
         console.error(`[AGENT] Falha ao enviar texto:`, err.message);
         anySendError = err.message;
+        reportAgentSendOutcome(false, err?.message);
         return null;
       }
     };
@@ -3151,11 +3230,11 @@ ${capturedVariablesPrompt}
         if (!segments.some(s => s.kind === "image")) {
           // Delay de digitação em chunks 2+.
           if (i > 0) {
-            const typingSeconds = Math.min(Math.max(chunkText.length / 15, 2), 5);
-            await new Promise(r => setTimeout(r, typingSeconds * 1000));
-            await sendAndPersistText(chunkText, typingSeconds * 1000);
+            const chunkDelayMs = calculateChunkTypingMs(chunkText.length);
+            await new Promise(r => setTimeout(r, chunkDelayMs));
+            await sendAndPersistText(chunkText, chunkDelayMs);
           } else {
-            await sendAndPersistText(chunkText, typingDelaySeconds * 1000);
+            await sendAndPersistText(chunkText, Math.max(1, Math.round(typingDelaySeconds * 1000)));
           }
           continue;
         }
@@ -3193,9 +3272,9 @@ ${capturedVariablesPrompt}
             if ((s as any)._consumed) continue;
             if (!s.content.trim()) continue;
             // Delay natural de digitação (2-5s).
-            const typingSeconds = Math.min(Math.max(s.content.length / 15, 2), 5);
-            await new Promise(r => setTimeout(r, typingSeconds * 1000));
-            await sendAndPersistText(s.content);
+            const chunkDelayMs = calculateChunkTypingMs(s.content.length);
+            await new Promise(r => setTimeout(r, chunkDelayMs));
+            await sendAndPersistText(s.content, chunkDelayMs);
           } else {
             // Segmento de imagem.
             if (photosSent >= MAX_PHOTOS_PER_TURN) {

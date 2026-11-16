@@ -25,6 +25,7 @@ import {
   MessageSquare, FileText, Pencil, ChevronRight, BarChart3, Workflow,
 } from "lucide-react";
 import { TEMPLATE_VARIABLES, renderTemplate } from "@/lib/template-vars";
+import { AUTO_POOL_INSTANCE, formatInstanceLabel, isAutoPoolInstance } from "@/lib/campaign-pool";
 import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
 
@@ -115,6 +116,7 @@ export default function FollowUpPage(): ReactElement {
   const [startHour, setStartHour] = useState(9);
   const [endHour, setEndHour] = useState(20);
   const [autoExecute, setAutoExecute] = useState(true);
+  const [weekendGuard, setWeekendGuard] = useState(false);
 
   // Coluna do kanban que abastece a campanha. Default "follow-up" (estágio
   // padrão histórico). Quando o cliente cria kanban customizado via
@@ -340,6 +342,7 @@ export default function FollowUpPage(): ReactElement {
     setMinSec(40); setMaxSec(90);
     setStartHour(9); setEndHour(20);
     setAutoExecute(true);
+    setWeekendGuard(false);
     setSourceStatus("follow-up");
   };
 
@@ -356,6 +359,7 @@ export default function FollowUpPage(): ReactElement {
     setStartHour(c.allowed_start_hour);
     setEndHour(c.allowed_end_hour);
     setAutoExecute(!!c.auto_execute);
+    setWeekendGuard(Boolean((c as { weekend_guard?: boolean }).weekend_guard));
     setSourceStatus((c as any).source_status || "follow-up");
     setShowForm(true);
   };
@@ -548,6 +552,7 @@ export default function FollowUpPage(): ReactElement {
         allowed_start_hour: startHour,
         allowed_end_hour: endHour,
         auto_execute: autoExecute,
+        weekend_guard: weekendGuard,
         source_status: sourceStatus,
       };
       const r = editingId
@@ -740,7 +745,7 @@ export default function FollowUpPage(): ReactElement {
                           )}
                         </div>
                         <p className={styles.metadata}>
-                          {c.instance_name} · {c.steps.length} etapas · {c.allowed_start_hour}h–{c.allowed_end_hour}h
+                          {formatInstanceLabel(c.instance_name)} · {c.steps.length} etapas · {c.allowed_start_hour}h–{c.allowed_end_hour}h
                         </p>
                         {/* Coluna do kanban que abastece — mostra qual pool a
                             campanha está mirando. Crítico pra cliente que tem
@@ -1114,7 +1119,11 @@ export default function FollowUpPage(): ReactElement {
                 ) : (
                   <Select value={instanceName} onValueChange={(v) => setInstanceName(v as string)}>
                     <SelectTrigger id="campaign-instance" className={styles.field}>
-                      <SelectValue placeholder="Escolher conta">{instances.find(i => i.instanceName === instanceName)?.profileName || instanceName}</SelectValue>
+                      <SelectValue placeholder="Escolher conta">
+                        {isAutoPoolInstance(instanceName)
+                          ? "⚡ Pool Automático (alternar entre chips saudáveis)"
+                          : (instances.find(i => i.instanceName === instanceName)?.profileName || instanceName)}
+                      </SelectValue>
                     </SelectTrigger>
                     <SelectContent className={styles.selectPopup}>
                       {instances.map((i, idx) => (
@@ -1122,6 +1131,11 @@ export default function FollowUpPage(): ReactElement {
                           {i.profileName || i.instanceName}
                         </SelectItem>
                       ))}
+                      {instances.length >= 1 && (
+                        <SelectItem key={AUTO_POOL_INSTANCE} value={AUTO_POOL_INSTANCE}>
+                          ⚡ Pool Automático (alternar entre chips saudáveis)
+                        </SelectItem>
+                      )}
                     </SelectContent>
                   </Select>
                 )}
@@ -1349,6 +1363,10 @@ export default function FollowUpPage(): ReactElement {
               <div className={styles.optionRow}>
                 <div><label htmlFor="campaign-auto" className={styles.fieldLabel}>Executar automaticamente</label><p className={styles.helper}>Respeita os dias e horários configurados. Desative para processar somente de forma manual.</p></div>
                 <Switch id="campaign-auto" checked={autoExecute} onCheckedChange={setAutoExecute} />
+              </div>
+              <div className={styles.optionRow}>
+                <div><label htmlFor="campaign-weekend-b2b" className={styles.fieldLabel}>Modo Comercial B2B (Proteção Fim de Semana)</label><p className={styles.helper}>Pausa follow-ups aos domingos e reduz o teto por hora pela metade aos sábados para preservar a reputação.</p></div>
+                <Switch id="campaign-weekend-b2b" checked={weekendGuard} onCheckedChange={setWeekendGuard} />
               </div>
             </section>
           </div>

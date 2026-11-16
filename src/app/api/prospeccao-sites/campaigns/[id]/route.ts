@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { validateCampaignInstanceAccess } from "@/lib/campaign-instance-access";
 import { startCampaign, pauseCampaign, cancelCampaign, resetCampaign, isCampaignActive } from "@/lib/campaign-worker";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 
@@ -21,7 +22,7 @@ async function ownsProspeccaoCampaign(req: NextRequest, id: string) {
   if (!ctx.isAdmin && data.client_id !== ctx.clientId) {
     return { ok: false as const, res: NextResponse.json({ success: false, error: "Sem permissão" }, { status: 403 }) };
   }
-  return { ok: true as const, ctx };
+  return { ok: true as const, ctx, ownerClientId: data.client_id || ctx.clientId };
 }
 
 /** GET /api/prospeccao-sites/campaigns/:id — detalhes + targets + logs */
@@ -64,6 +65,13 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   if (!own.ok) return own.res;
   const body = await req.json();
   await enforceClientDefaultModel(body, { clientId: own.ctx.clientId, isAdmin: own.ctx.isAdmin, impersonating: own.ctx.impersonating }, ["ai_model"]);
+
+  if ("instance_name" in body) {
+    const access = await validateCampaignInstanceAccess(own.ownerClientId, String(body.instance_name));
+    if (!access.ok) {
+      return NextResponse.json({ success: false, error: access.error }, { status: access.status });
+    }
+  }
 
   const ALLOWED = [
     "name", "instance_name", "message_template",

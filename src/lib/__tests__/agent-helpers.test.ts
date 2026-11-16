@@ -1,5 +1,7 @@
 import { describe, test, expect } from "vitest";
-import { resolveFunnelStage, checkSchedulesSync, resolveAgentOutput, sanitizeAgentAnswer, sandboxSuppressionMessage, splitMessage, normalizeSplitIntensity, type FunnelStage } from "../agent-format";
+import { resolveFunnelStage, checkSchedulesSync, resolveAgentOutput, sanitizeAgentAnswer, sandboxSuppressionMessage, splitMessage, normalizeSplitIntensity, minifyPromptMaster, type FunnelStage } from "../agent-format";
+import { calculateChunkTypingMs, calculateTypingDelayMs } from "../agent-delay";
+import { getBrazilPhoneVariants } from "../jid-utils";
 
 /* ============================================================
    FUNIL — resolveFunnelStage
@@ -195,5 +197,73 @@ describe("splitMessage", () => {
     expect(normalizeSplitIntensity(undefined)).toBe(3);
     expect(normalizeSplitIntensity("9")).toBe(3);
     expect(normalizeSplitIntensity("2")).toBe(2);
+  });
+});
+
+/* ============================================================
+   MINIFICAÇÃO SEGURA DO PROMPT — minifyPromptMaster
+   ============================================================ */
+describe("minifyPromptMaster", () => {
+  test("preserva parágrafos (\\n\\n), cabeçalhos Markdown e tags XML ao remover espaços extras", () => {
+    const prompt = [
+      "  # Persona   ",
+      "  Você é   a   Sarah.  ",
+      "",
+      "",
+      "<regras>",
+      "  - Seja    direta  ",
+      "  - Nunca invente dados",
+      "</regras>",
+    ].join("\n");
+
+    const minified = minifyPromptMaster(prompt);
+
+    expect(minified).toBe(
+      "# Persona\nVocê é a Sarah.\n\n<regras>\n- Seja direta\n- Nunca invente dados\n</regras>",
+    );
+    expect(minified).toContain("\n\n<regras>");
+  });
+});
+
+/* ============================================================
+   DELAY DE DIGITAÇÃO (INTEIROS EM MS) — agent-delay
+   ============================================================ */
+describe("calculateChunkTypingMs e calculateTypingDelayMs", () => {
+  test("retorna sempre milissegundos inteiros dentro do intervalo 2000..5000ms", () => {
+    const samples = [1, 12, 37, 50, 120];
+    for (const len of samples) {
+      const ms = calculateChunkTypingMs(len);
+      expect(Number.isInteger(ms)).toBe(true);
+      expect(ms).toBeGreaterThanOrEqual(2000);
+      expect(ms).toBeLessThanOrEqual(5000);
+    }
+    expect(calculateChunkTypingMs(37)).toBe(2467);
+    expect(calculateChunkTypingMs(60)).toBe(4000);
+  });
+
+  test("calculateTypingDelayMs nunca retorna float fracionário", () => {
+    const ms = calculateTypingDelayMs({ mode: "fixed", fixedSeconds: 1.3333 });
+    expect(Number.isInteger(ms)).toBe(true);
+    expect(ms).toBeGreaterThanOrEqual(1);
+  });
+});
+
+/* ============================================================
+   NORMALIZAÇÃO BR 8/9 DÍGITOS — getBrazilPhoneVariants
+   ============================================================ */
+describe("getBrazilPhoneVariants", () => {
+  test("gera variantes com e sem 9º dígito para números celulares BR", () => {
+    const withNine = getBrazilPhoneVariants("5511987654321@s.whatsapp.net");
+    expect(withNine).toContain("5511987654321");
+    expect(withNine).toContain("551187654321");
+
+    const withoutNine = getBrazilPhoneVariants("551187654321@s.whatsapp.net");
+    expect(withoutNine).toContain("551187654321");
+    expect(withoutNine).toContain("5511987654321");
+  });
+
+  test("lida com entrada vazia ou nula sem quebrar", () => {
+    expect(getBrazilPhoneVariants("")).toEqual([]);
+    expect(getBrazilPhoneVariants(null)).toEqual([]);
   });
 });

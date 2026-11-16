@@ -26,8 +26,11 @@ import {
 import { logTokenUsage } from "@/lib/token-usage";
 import { registerPendingAutomatedSend } from "@/lib/manual-send-registry";
 import { isInstanceOwnedByClient } from "@/lib/tenant";
-import { calculateTypingDelayMs, DEFAULT_TYPING_DELAY_CONFIG } from "@/lib/agent-delay";
-import { syncGreetingToCurrentHour } from "@/lib/antiban-mixer";
+import { evaluateWeekendB2BGuard, isAutoPoolInstance } from "@/lib/campaign-pool";
+import { getBrazilPhoneVariants } from "@/lib/jid-utils";
+import { isChatRowInbound, isChatRowOutbound } from "@/lib/chat-direction";
+import { calculateChunkTypingMs, calculateTypingDelayMs, DEFAULT_TYPING_DELAY_CONFIG } from "@/lib/agent-delay";
+import { applyFollowupTextVariation, syncGreetingToCurrentHour } from "@/lib/antiban-mixer";
 
 type FollowupStep = {
   day_offset: number;
@@ -133,35 +136,74 @@ async function getApiKey(): Promise<string | null> {
   return data?.api_key || null;
 }
 
+function expandBrazilJidVariants(remoteJid: string, includeBareDigits = false): string[] {
+  if (!remoteJid || remoteJid.includes("@g.us") || remoteJid.includes("@lid")) {
+    return remoteJid ? [remoteJid] : [];
+  }
+  const variants = new Set<string>([remoteJid]);
+  for (const digits of getBrazilPhoneVariants(remoteJid)) {
+    if (digits.length >= 10) {
+      if (includeBareDigits) variants.add(digits);
+      variants.add(`${digits}@s.whatsapp.net`);
+    }
+  }
+  return Array.from(variants);
+}
+
 async function clientRespondedSince(remoteJid: string, sinceIso: string, clientId: string): Promise<boolean> {
-  const { data } = await supabase
+  const jidVariants = expandBrazilJidVariants(remoteJid);
+
+  const firstRes = await supabase
     .from("chats_dashboard")
-    .select("id")
-    .eq("remote_jid", remoteJid)
+    .select("id, sender_type, is_from_me")
+    .in("remote_jid", jidVariants)
     .eq("client_id", clientId)
-    .eq("is_from_me", false)
     .gt("created_at", sinceIso)
-    .limit(1);
-  return !!(data && data.length > 0);
+    .limit(50);
+
+  let data = firstRes.data;
+  if (firstRes.error && /is_from_me|column/i.test(String(firstRes.error.message || ""))) {
+    const retry = await supabase
+      .from("chats_dashboard")
+      .select("id, sender_type")
+      .in("remote_jid", jidVariants)
+      .eq("client_id", clientId)
+      .gt("created_at", sinceIso)
+      .limit(50);
+    data = retry.data as any;
+  }
+
+  return Array.isArray(data) && data.some((row) => isChatRowInbound(row as any));
 }
 
 export async function getConversationHistory(remoteJid: string, clientId: string, limit = 80): Promise<string> {
-  // Limit DEFAULT 80 (era 20). A IA do follow-up agora analisa a CONVERSA
-  // INTEIRA pra entender exatamente o contexto: quais perguntas foram feitas,
-  // o que o cliente respondeu, em que estágio do funil está, e adaptar a
-  // próxima mensagem com naturalidade. Mensagens são truncadas no fim do
-  // total (mantém as mais recentes).
-  const { data } = await supabase
+  // Limit DEFAULT 80 (era 20). Usa variantes BR (8/9 dígitos) para não perder
+  // o histórico quando o disparo inicial salvou o JID canônico diferente.
+  const jidVariants = expandBrazilJidVariants(remoteJid);
+  const firstHist = await supabase
     .from("chats_dashboard")
-    .select("content, is_from_me, created_at")
-    .eq("remote_jid", remoteJid)
+    .select("content, sender_type, is_from_me, created_at")
+    .in("remote_jid", jidVariants)
     .eq("client_id", clientId)
     .order("created_at", { ascending: false })
     .limit(limit);
+
+  let data = firstHist.data;
+  if (firstHist.error && /is_from_me|column/i.test(String(firstHist.error.message || ""))) {
+    const retry = await supabase
+      .from("chats_dashboard")
+      .select("content, sender_type, created_at")
+      .in("remote_jid", jidVariants)
+      .eq("client_id", clientId)
+      .order("created_at", { ascending: false })
+      .limit(limit);
+    data = retry.data as any;
+  }
+
   if (!data || data.length === 0) return "(sem histórico — este é o primeiro contato)";
   return data
     .reverse()
-    .map((m) => `[${new Date(m.created_at).toLocaleString("pt-BR")}] ${m.is_from_me ? "SDR" : "CLIENTE"}: ${m.content || "(mensagem sem texto)"}`)
+    .map((m) => `[${new Date(m.created_at).toLocaleString("pt-BR")}] ${isChatRowOutbound(m as any) ? "SDR" : "CLIENTE"}: ${m.content || "(mensagem sem texto)"}`)
     .join("\n");
 }
 
@@ -352,9 +394,76 @@ Antes de escrever, faça essa análise mental (não devolva, é só pra você):
 async function processTarget(
   camp: FollowupCampaign,
   target: FollowupTarget,
-  apiKey: string | null
-): Promise<"sent" | "responded" | "exhausted" | "failed" | "skipped"> {
+  apiKey: string | null,
+  hourlyFactor = 1
+): Promise<"sent" | "responded" | "exhausted" | "failed" | "skipped" | "deferred"> {
   const nomeLead = target.nome_negocio || target.remote_jid.split("@")[0];
+
+  // 0. Busca dados do lead (+ fallback BR 8/9 dígitos) e verifica opt_out ANTES de
+  //    clientRespondedSince/exhausted para nunca promover um contato que pediu saída para "interessado".
+  let leadFull: any = null;
+  const leadJidVariants = expandBrazilJidVariants(target.remote_jid, true);
+  {
+    const cols = "nome_negocio, ramo_negocio, telefone, endereco, website, instagram, facebook, avaliacao, reviews, status, categoria, resumo_avaliacoes";
+    let res = await supabase.from("leads_extraidos").select("*").eq("remoteJid", target.remote_jid).eq("client_id", camp.client_id).maybeSingle();
+    if (res.error && res.error.code === "PGRST204") {
+      res = await supabase
+        .from("leads_extraidos")
+        .select(cols.replace(", resumo_avaliacoes", ""))
+        .eq("remoteJid", target.remote_jid)
+        .eq("client_id", camp.client_id)
+        .maybeSingle();
+    }
+    leadFull = res.data || null;
+    if (!leadFull && leadJidVariants.length > 1) {
+      let fallbackRes = await supabase
+        .from("leads_extraidos")
+        .select("*")
+        .in("remoteJid", leadJidVariants)
+        .eq("client_id", camp.client_id)
+        .limit(1);
+      if (fallbackRes.error && fallbackRes.error.code === "PGRST204") {
+        fallbackRes = await supabase
+          .from("leads_extraidos")
+          .select(cols.replace(", resumo_avaliacoes", ""))
+          .in("remoteJid", leadJidVariants)
+          .eq("client_id", camp.client_id)
+          .limit(1);
+      }
+      leadFull = Array.isArray(fallbackRes.data) ? fallbackRes.data[0] || null : null;
+    }
+  }
+
+  let hasOptOut = Boolean(leadFull?.opt_out);
+  if (!hasOptOut && leadJidVariants.length > 1) {
+    const { data: optRows } = await supabase
+      .from("leads_extraidos")
+      .select("opt_out")
+      .in("remoteJid", leadJidVariants)
+      .eq("client_id", camp.client_id)
+      .eq("opt_out", true)
+      .limit(1);
+    hasOptOut = Array.isArray(optRows) && optRows.length > 0;
+  }
+
+  if (hasOptOut) {
+    await supabase
+      .from("followup_targets")
+      .update({
+        status: "skipped",
+        error_message: "Opt-out (lead pediu para não receber mensagens)",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", target.id)
+      .eq("client_id", camp.client_id);
+    await addFollowupLog(
+      camp.id,
+      camp.client_id,
+      `⊘ ${nomeLead} pulado no follow-up — opt-out ativo.`,
+      "warning"
+    );
+    return "skipped";
+  }
 
   // 1. Cliente respondeu? Se sim, encerra follow-up.
   if (target.last_sent_at) {
@@ -402,25 +511,6 @@ async function processTarget(
 
   await addFollowupLog(camp.id, camp.client_id, `Processando ${nomeLead} — step ${target.current_step + 1}/${camp.steps.length}...`, "info");
 
-  // Busca o lead completo no CRM pra abastecer TODAS as variáveis do template
-  // ({{endereco}}, {{website}}, {{avaliacao}}, {{ramo}}, etc) — não só o nome.
-  // resumo_avaliacoes é coluna da migração reviews_ai.sql — PGRST204 cai no
-  // retry sem ela (variável fica vazia, resto intacto).
-  let leadFull: any = null;
-  {
-    const cols = "nome_negocio, ramo_negocio, telefone, endereco, website, instagram, facebook, avaliacao, reviews, status, categoria, resumo_avaliacoes";
-    let res = await supabase.from("leads_extraidos").select("*").eq("remoteJid", target.remote_jid).eq("client_id", camp.client_id).maybeSingle();
-    if (res.error && res.error.code === "PGRST204") {
-      res = await supabase
-        .from("leads_extraidos")
-        .select(cols.replace(", resumo_avaliacoes", ""))
-        .eq("remoteJid", target.remote_jid)
-        .eq("client_id", camp.client_id)
-        .maybeSingle();
-    }
-    leadFull = res.data || null;
-  }
-
   // push_name do contato — vem da tabela contacts (nome do WhatsApp). Necessário
   // pra resolver {{nome}} e {{push_name}} corretamente no follow-up.
   let pushName: string | null = null;
@@ -443,8 +533,8 @@ async function processTarget(
     push_name: pushName,
   });
 
-  // 3. Renderiza template
-  let text = renderTemplate(step.template, renderCtx);
+  // 3. Renderiza template (+ Spintax)
+  let text = renderTemplate(step.template, renderCtx, { spintax: true });
   let aiInputText: string | null = null;
 
   // 4. Passa pela IA se habilitado. (Não exige mais a chave Gemini aqui — o
@@ -481,7 +571,7 @@ async function processTarget(
 
   // REDE DE SEGURANÇA — render final. Se a IA deixou/reintroduziu qualquer
   // {{variavel}} ou {variavel}, resolve agora. O cliente NUNCA pode receber chaves cruas.
-  text = renderTemplate(text, renderCtx);
+  text = renderTemplate(text, renderCtx, { spintax: true });
   // BLINDAGEM FINAL — a IA, ao reescrever, às vezes "generaliza" o texto e
   // RE-INTRODUZ {{saudacao}}/{{nome_empresa}} como se montasse um template.
   // Aqui, qualquer {{...}} ou {...} que ainda reste (variável desconhecida)
@@ -497,8 +587,73 @@ async function processTarget(
       .trim();
   }
 
-  // Garante que a saudação reflita o horário real do envio no WhatsApp
-  text = syncGreetingToCurrentHour(text, new Date());
+  // Garante que a saudação reflita o horário real do envio (e varia frases triviais sem IA)
+  text = !camp.ai_enabled
+    ? applyFollowupTextVariation(text, new Date(), `followup:${camp.id}`)
+    : syncGreetingToCurrentHour(text, new Date());
+
+  // 4.5. Blindagem Anti-Ban compartilhada (Quarentena, Berçário Fase 1, Cota Horária e Pool Multi-Chip c/ Sticky Sender)
+  let sendInstanceName = camp.instance_name;
+  try {
+    const cw: any = await import("@/lib/campaign-worker");
+    if (typeof cw.resolveHealthyCampaignChip === "function") {
+      const chipRes = await cw.resolveHealthyCampaignChip(camp.client_id, camp.instance_name, {
+        targetRemoteJid: target.remote_jid,
+        preferredInstanceName: leadFull?.instance_name || null,
+        hourlyFactor,
+      });
+      if (!chipRes.ok) {
+        const retryAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+        await supabase
+          .from("followup_targets")
+          .update({
+            status: "waiting",
+            next_send_at: retryAt,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", target.id)
+          .eq("client_id", camp.client_id);
+        await addFollowupLog(
+          camp.id,
+          camp.client_id,
+          `🛡️ Follow-up adiado 15 min (${chipRes.reason || "anti-ban cooldown"}) para proteger o chip.`,
+          "warning"
+        );
+        return "deferred";
+      }
+      if (chipRes.instanceName) {
+        sendInstanceName = chipRes.instanceName;
+      }
+    } else if (!isAutoPoolInstance(camp.instance_name)) {
+      const { data: warmupCfg } = await supabase
+        .from("whatsapp_warmup_configs")
+        .select("is_quarantined, quarantine_until, health_score, stage")
+        .eq("client_id", camp.client_id)
+        .eq("instance_name", camp.instance_name)
+        .maybeSingle();
+      const inQuarantine =
+        Boolean(warmupCfg?.is_quarantined) &&
+        Boolean(warmupCfg?.quarantine_until) &&
+        new Date(String(warmupCfg?.quarantine_until)) > new Date();
+      if (inQuarantine || (warmupCfg && Number(warmupCfg.health_score ?? 100) < 40)) {
+        const retryAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+        await supabase
+          .from("followup_targets")
+          .update({ status: "waiting", next_send_at: retryAt, updated_at: new Date().toISOString() })
+          .eq("id", target.id)
+          .eq("client_id", camp.client_id);
+        await addFollowupLog(
+          camp.id,
+          camp.client_id,
+          `🛡️ Follow-up adiado 15 min: chip "${camp.instance_name}" em quarentena/saúde crítica.`,
+          "warning"
+        );
+        return "deferred";
+      }
+    }
+  } catch {
+    /* degradado com segurança se módulo/tabela estiver ausente */
+  }
 
   // 5. Envia via Evolution
   try {
@@ -512,7 +667,7 @@ async function processTarget(
     const sess = await findOrCreateContactSession(
       camp.client_id,
       target.remote_jid,
-      camp.instance_name,
+      sendInstanceName,
       target.nome_negocio
     );
 
@@ -523,14 +678,16 @@ async function processTarget(
       const chunkText = chunks[i];
       if (!chunkText) continue;
 
-      // Delay de digitação entre chunks (2 a 5s) — pula no primeiro.
+      // Delay de digitação entre chunks (2 a 5s em ms inteiro) — pula no primeiro.
       if (i > 0) {
-        const typingSeconds = Math.min(Math.max(chunkText.length / 15, 2), 5);
-        await new Promise((r) => setTimeout(r, typingSeconds * 1000));
+        await new Promise((r) => setTimeout(r, calculateChunkTypingMs(chunkText.length)));
       }
 
-      registerPendingAutomatedSend(camp.instance_name, target.remote_jid, chunkText);
-      const result = await channel.sendMessage(target.remote_jid, chunkText, camp.instance_name, { delay: typingDelayMs });
+      registerPendingAutomatedSend(sendInstanceName, target.remote_jid, chunkText);
+      const result = await channel.sendMessage(target.remote_jid, chunkText, sendInstanceName, {
+        delay: typingDelayMs,
+        linkPreview: false,
+      });
       if (!result || result.ok === false) {
         throw new Error(result?.error || "Provider recusou o envio do follow-up");
       }
@@ -542,7 +699,7 @@ async function processTarget(
         await persistOutgoingMessage({
           sessionId: sess?.sessionId || null,
           remoteJid: target.remote_jid,
-          instanceName: camp.instance_name,
+          instanceName: sendInstanceName,
           msgId: chunkMsgId,
           text: chunkText,
           clientId: camp.client_id,
@@ -568,7 +725,7 @@ async function processTarget(
             fileName: camp.media_file_name || undefined,
             mimetype: camp.media_mimetype || undefined,
           },
-          camp.instance_name,
+          sendInstanceName,
           { delay: typingDelayMs },
         );
         if (!mediaResult || mediaResult.ok === false) {
@@ -580,7 +737,7 @@ async function processTarget(
           await persistOutgoingMessage({
             sessionId: sess?.sessionId || null,
             remoteJid: target.remote_jid,
-            instanceName: camp.instance_name,
+            instanceName: sendInstanceName,
             msgId: mediaMsgId,
             text: camp.media_caption || "",
             clientId: camp.client_id,
@@ -591,6 +748,24 @@ async function processTarget(
         await addFollowupLog(camp.id, camp.client_id, `⚠ Mídia falhou: ${mediaErr?.message}`, "warning");
       }
     }
+
+    try {
+      const cw: any = await import("@/lib/campaign-worker");
+      if (typeof cw.recordColdOutreachSend === "function") {
+        cw.recordColdOutreachSend(sendInstanceName, Date.now(), camp.client_id);
+      }
+      if (typeof cw.checkZeroReplyBrakeForInstance === "function") {
+        const brakeRes = await cw.checkZeroReplyBrakeForInstance(camp.client_id, sendInstanceName, target.remote_jid);
+        if (brakeRes?.brakeTriggered) {
+          await addFollowupLog(
+            camp.id,
+            camp.client_id,
+            `⚠️ Freio de Vácuo Silencioso: ${brakeRes.checkedCount} abordagens seguidas sem resposta em "${sendInstanceName}" — descansando 25 min.`,
+            "warning"
+          );
+        }
+      }
+    } catch {}
 
     const nextStep = target.current_step + 1;
     const hasMore = !!camp.steps[nextStep];
@@ -700,17 +875,33 @@ async function processTarget(
     );
     return "sent";
   } catch (err: any) {
+    const errMsg = String(err?.message || err);
+    try {
+      if (/429|rate|timeout|timed out|econn|disconnect|closed|50[0-4]/i.test(errMsg)) {
+        const { data: cfgRow } = await supabase
+          .from("whatsapp_warmup_configs")
+          .select("*")
+          .eq("client_id", camp.client_id)
+          .eq("instance_name", sendInstanceName)
+          .maybeSingle();
+        if (cfgRow) {
+          const { handleInstanceFailure } = await import("@/lib/warmup/warmup-engine");
+          await handleInstanceFailure(camp.client_id, cfgRow as any, `[Follow-up] ${errMsg}`);
+        }
+      }
+    } catch {}
+
     await supabase
       .from("followup_targets")
       .update({
         status: "failed",
-        error_message: String(err?.message || err).slice(0, 300),
+        error_message: errMsg.slice(0, 300),
         updated_at: new Date().toISOString(),
       })
       .eq("id", target.id)
       .eq("client_id", camp.client_id);
-    console.error(`[FOLLOWUP ${camp.name}] ✗ ${target.remote_jid}: ${err?.message || err}`);
-    await addFollowupLog(camp.id, camp.client_id, `✗ Falha ao enviar p/ ${nomeLead}: ${err?.message || err}`, "error");
+    console.error(`[FOLLOWUP ${camp.name}] ✗ ${target.remote_jid}: ${errMsg}`);
+    await addFollowupLog(camp.id, camp.client_id, `✗ Falha ao enviar p/ ${nomeLead}: ${errMsg}`, "error");
     return "failed";
   }
 }
@@ -751,7 +942,7 @@ export async function tickCampaign(campaignId: string, clientId: string): Promis
   if (camp.status !== "active" && camp.status !== "draft") {
     return { ok: false, processed: 0, error: `Campanha está ${camp.status}` };
   }
-  if (!(await isInstanceOwnedByClient(camp.instance_name, camp.client_id))) {
+  if (!isAutoPoolInstance(camp.instance_name) && !(await isInstanceOwnedByClient(camp.instance_name, camp.client_id))) {
     const error = `Instância "${camp.instance_name}" não pertence ao cliente da campanha`;
     await addFollowupLog(camp.id, camp.client_id, error, "error");
     await supabase.from("followup_campaigns").update({ status: "paused" }).eq("id", camp.id).eq("client_id", camp.client_id);
@@ -759,6 +950,28 @@ export async function tickCampaign(campaignId: string, clientId: string): Promis
   }
   if (!isWithinHourWindow(camp.allowed_start_hour, camp.allowed_end_hour)) {
     return { ok: false, processed: 0, error: "Fora da janela permitida" };
+  }
+
+  let weekendGuardEnabled = Boolean((camp as any).weekend_guard);
+  if (!weekendGuardEnabled) {
+    try {
+      const { data: wgCfg } = await supabase
+        .from("system_config")
+        .select("value")
+        .eq("key", `followup_weekend_guard:${camp.id}`)
+        .maybeSingle();
+      weekendGuardEnabled = wgCfg?.value === "true" || wgCfg?.value === "1";
+    } catch {}
+  }
+  const weekendGuard = evaluateWeekendB2BGuard(weekendGuardEnabled);
+  if (!weekendGuard.allowed) {
+    await addFollowupLog(
+      camp.id,
+      camp.client_id,
+      "📅 Modo Comercial B2B ativo — follow-up pausado aos domingos para preservar reputação; retoma na segunda-feira.",
+      "warning"
+    );
+    return { ok: true, processed: 0 };
   }
 
   const apiKey = camp.ai_enabled ? await getApiKey() : null;
@@ -805,7 +1018,7 @@ export async function tickCampaign(campaignId: string, clientId: string): Promis
     const claimedStep = t.current_step;
     let r: string | null = null;
     try {
-      r = await processTarget(camp, t, apiKey);
+      r = await processTarget(camp, t, apiKey, weekendGuard.hourlyFactor);
     } catch (err: any) {
       // processTarget jogou exception — destrava o claim pra não ficar "processing" eterno.
       console.error(`[FOLLOWUP] processTarget exception (target ${t.id}):`, err?.message);
@@ -834,6 +1047,9 @@ export async function tickCampaign(campaignId: string, clientId: string): Promis
     if (r === "sent" && !(stillOwned.status === "waiting" && stillOwned.current_step === claimedStep + 1)) {
       console.warn(`[FOLLOWUP] target ${t.id} mudou de dono durante o envio — resultado desta execução descartado.`);
       continue;
+    }
+    if (r === "deferred") {
+      break;
     }
     if (r === "sent" || r === "failed") {
       processed++;

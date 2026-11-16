@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { parseGroupInviteCodes } from "../warmup-groups";
+import {
+  classifyGroupJoinError,
+  extractDay0WarningsByInstance,
+  getDailyGroupJoinLimitForStage,
+  parseGroupInviteCodes,
+} from "../warmup-groups";
 import { PURPOSE_METADATA, type WarmupPurpose } from "../warmup-types";
 
 describe("Warmup Groups & Swarm Engine", () => {
@@ -94,6 +99,49 @@ describe("Warmup Groups & Swarm Engine", () => {
       expect(regex.test("Obrigado pela dica")).toBe(true);
       expect(regex.test("Valeu demais")).toBe(true);
       expect(regex.test("Show de bola")).toBe(true);
+    });
+  });
+
+  describe("Slow Join Escalonado por Fase", () => {
+    it("limita entrada diária em grupos para proteger chips novos (Fase 1: 2/dia, Fase 2: 3/dia, Fase 3+: 4/dia)", () => {
+      expect(getDailyGroupJoinLimitForStage(1)).toBe(2);
+      expect(getDailyGroupJoinLimitForStage(2)).toBe(3);
+      expect(getDailyGroupJoinLimitForStage(3)).toBe(4);
+      expect(getDailyGroupJoinLimitForStage(4)).toBe(4);
+    });
+  });
+
+  describe("extractDay0WarningsByInstance", () => {
+    it("limpa alertas anteriores quando existe log mais recente com Auditoria Dia-0 OK", () => {
+      const map = extractDay0WarningsByInstance([
+        {
+          sender_instance: "chip-ok",
+          receiver_instance: "day0_hygiene",
+          message_text: "✓ Auditoria Dia-0 OK (chip-ok): foto de perfil e proxy validados.",
+        },
+        {
+          sender_instance: "chip-ok",
+          receiver_instance: "day0_hygiene",
+          message_text: "⚠️ Auditoria Dia-0 (chip-ok): chip sem foto de perfil configurada.",
+        },
+        {
+          sender_instance: "chip-pendente",
+          receiver_instance: "day0_hygiene",
+          message_text: "⚠️ Auditoria Dia-0 (chip-pendente): proxy estrangeiro (US).",
+        },
+      ]);
+
+      expect(map.get("chip-ok")).toEqual([]);
+      expect(map.get("chip-pendente")).toEqual(["proxy estrangeiro (US)"]);
+    });
+  });
+
+  describe("classifyGroupJoinError", () => {
+    it("classifica erros permanentes de link lotado, revogado e restrito sem confundir erros transitórios", () => {
+      expect(classifyGroupJoinError("Group is full")).toBe("full");
+      expect(classifyGroupJoinError("Invite link revoked or invalid 404")).toBe("invalid");
+      expect(classifyGroupJoinError("not-authorized by admin")).toBe("restricted");
+      expect(classifyGroupJoinError("ETIMEDOUT connecting to gateway")).toBeNull();
     });
   });
 });

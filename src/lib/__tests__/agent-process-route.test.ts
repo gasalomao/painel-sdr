@@ -534,4 +534,101 @@ describe("POST /api/agent/process", () => {
     expect(json.ai_responded).toBe(true);
     expect(json.text).toContain("Reunião agendada para Quarta-feira às 14h");
   });
+
+  it("suprime loop de URA com 0 chamadas à IA e registra AGENT_URA_LOOP_PAUSED", async () => {
+    state.startAiChat.mockClear();
+
+    const req = new Request("http://localhost/api/agent/process", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-test-agent-id": "7" },
+      body: JSON.stringify({
+        instanceName: "inst-a",
+        remoteJid: REMOTE_JID,
+        text: "Não entendemos sua mensagem. Digite uma opção válida:\n*1* - Recepção\n*2* - Comercial\nSeu ID: 88210",
+        isTestMode: true,
+        testHistory: [
+          { role: "agent", content: "Oi! Posso mostrar uma prévia do site da clínica?" },
+          {
+            role: "user",
+            content: "Seja bem-vindo! Escolha uma das seguintes opções:\n1 - Recepção\n2 - Comercial\nSeu ID: 11002",
+          },
+          { role: "agent", content: "Consegue encaminhar para o responsável?" },
+        ],
+      }),
+    });
+
+    const response = await POST(req as never);
+    const json = await response.json();
+
+    expect(json.success).toBe(true);
+    expect(json.ai_responded).toBe(false);
+    expect(json.suppressed).toBe("ura_loop_detected");
+    expect(json.reason).toBe("ura_or_auto_reply_repeated");
+    expect(state.startAiChat).not.toHaveBeenCalled();
+    expect(webhookEvents()).toContain("AGENT_URA_LOOP_PAUSED");
+  });
+
+  it("marca closingAutoPaused em testStateUpdate após despedida sem pergunta depois de recusa", async () => {
+    state.startAiChat.mockResolvedValue({
+      provider: "gemini",
+      modelUsed: () => "gemini-test",
+      sendUser: vi.fn().mockResolvedValue({
+        text: "Compreendo perfeitamente! Respeito totalmente sua decisão e não incomodaremos mais. Muito sucesso para vocês!",
+        toolCalls: [],
+        usage: { promptTokens: 25, completionTokens: 22, totalTokens: 47 },
+      }),
+      sendToolResults: vi.fn(),
+    });
+
+    const req = new Request("http://localhost/api/agent/process", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-test-agent-id": "7" },
+      body: JSON.stringify({
+        instanceName: "inst-a",
+        remoteJid: REMOTE_JID,
+        text: "Não tenho interesse no momento, obrigado.",
+        isTestMode: true,
+      }),
+    });
+
+    const response = await POST(req as never);
+    const json = await response.json();
+
+    expect(json.success).toBe(true);
+    expect(json.ai_responded).toBe(true);
+    expect(json.testStateUpdate?.closingAutoPaused).toBe(true);
+    expect(json.testStateUpdate?.closingAutoPauseReason).toBe("explicit_closing");
+  });
+
+  it("não marca closingAutoPaused quando lead diz 'ainda não temos site' ou IA faz pergunta", async () => {
+    state.startAiChat.mockResolvedValue({
+      provider: "gemini",
+      modelUsed: () => "gemini-test",
+      sendUser: vi.fn().mockResolvedValue({
+        text: "Combinado! Vou montar uma prévia gratuita para vocês. Posso enviar por aqui ainda hoje?",
+        toolCalls: [],
+        usage: { promptTokens: 22, completionTokens: 18, totalTokens: 40 },
+      }),
+      sendToolResults: vi.fn(),
+    });
+
+    const req = new Request("http://localhost/api/agent/process", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-test-agent-id": "7" },
+      body: JSON.stringify({
+        instanceName: "inst-a",
+        remoteJid: REMOTE_JID,
+        text: "Ainda não temos site",
+        isTestMode: true,
+      }),
+    });
+
+    const response = await POST(req as never);
+    const json = await response.json();
+
+    expect(json.success).toBe(true);
+    expect(json.ai_responded).toBe(true);
+    expect(json.testStateUpdate?.closingAutoPaused).toBe(false);
+    expect(json.testStateUpdate?.closingAutoPauseReason).toBeNull();
+  });
 });

@@ -1,5 +1,6 @@
 /**
- * Banco de diálogos nativos e conteúdos para maturação de chips no WhatsApp (pt-BR).
+ * Banco de diálogos nativos, Spintax contextual e curvas de entropia humana
+ * para maturação de chips no WhatsApp (pt-BR).
  * Conversas naturais, cotidianas e informais, simulando interações reais entre conhecidos.
  */
 
@@ -9,6 +10,7 @@ export interface DialogueScript {
   turns: Array<{
     speaker: "A" | "B";
     text: string;
+    variants?: string[];
     reaction?: string;
     sendAudioInstead?: boolean;
     audioCaption?: string;
@@ -16,7 +18,7 @@ export interface DialogueScript {
 }
 
 export const WARMUP_THEMES = [
-  { id: "dia_a_dia", label: "Dia a Dia & Rotina", icon: "Coffee" },
+  { id: "dia_a_dia", label: "Dia a Dia & Rotina (Rotativo)", icon: "Coffee" },
   { id: "futebol", label: "Futebol & Esportes", icon: "Trophy" },
   { id: "trabalho", label: "Trabalho & Projetos", icon: "Briefcase" },
   { id: "churrasco", label: "Churrasco & Fim de Semana", icon: "Flame" },
@@ -24,7 +26,7 @@ export const WARMUP_THEMES = [
   { id: "compras", label: "Compras & Dicas", icon: "ShoppingBag" },
 ] as const;
 
-export const NATURAL_REACTIONS = ["👍", "❤️", "😂", "🔥", "👏", "👊", "🙌", "✨"];
+export const NATURAL_REACTIONS = ["👍", "❤️", "😂", "🔥", "👏", "👊", "🙌", "✨", "🤝", "😄", "🙏"];
 
 export const STATUS_STORIES_QUOTES = [
   "Começando o dia com aquele cafezinho ☕🙏",
@@ -37,6 +39,20 @@ export const STATUS_STORIES_QUOTES = [
   "Aquele clássico cafezinho da tarde pra salvar o expediente ☕",
   "Domingo de paz e descanso com a família ☀️",
   "Novos projetos saindo do papel! Vamos pra cima 🎯",
+  "Foco, paciência e constância — um passo de cada vez 🙏",
+  "Nada melhor que resolver pendências logo cedo ✅",
+  "Semana começando a todo vapor por aqui 🚀",
+  "Pausa rápida pro café porque ninguém é de ferro ☕😄",
+  "Trânsito hoje tá daquele jeito, paciência redobrada 🚗",
+  "Gratidão por mais uma semana abençoada 🙌",
+  "Organizando as metas do mês, vem coisa boa por aí 📈",
+  "Fim de tarde tranquilo graças a Deus 🌅",
+  "Bora fechar o dia com chave de ouro 💪",
+  "Chuva boa pra refrescar um pouco 🌧️",
+  "Sábado de colocar as coisas em ordem por aqui 🏡",
+  "Sempre aprendendo algo novo todo dia 📚✨",
+  "Aquele pós-almoço que pede um expresso urgente ☕",
+  "Dia de reuniões produtivas e bons alinhamentos 🤝",
 ];
 
 export const CASUAL_VOICE_NOTES = [
@@ -45,6 +61,13 @@ export const CASUAL_VOICE_NOTES = [
   "Beleza meu querido, valeu pelo toque, tamo junto!",
   "Opa meu amigo, tudo em paz por aí? Depois me dá um alô!",
   "Fala parceiro, fechadíssimo então, qualquer coisa me avisa!",
+  "Oi! Tô na rua agora resolvendo umas coisas, chegando já te chamo!",
+  "Boa! Deixa comigo que mais tarde te passo certinho como ficou.",
+  "Tranquilo demais mano, vamos falando sim, um abraço!",
+  "Perfeito, acabei de ouvir aqui, concordo 100% contigo!",
+  "Opa, valeu mesmo por avisar, salvou demais!",
+  "Show! Assim que eu sair da reunião aqui te dou um retorno.",
+  "Beleza pura, combinado então, mais tarde a gente se fala!",
 ];
 
 export const FALLBACK_SCRIPTS: DialogueScript[] = [
@@ -52,96 +75,718 @@ export const FALLBACK_SCRIPTS: DialogueScript[] = [
     id: "dia_a_dia_1",
     theme: "dia_a_dia",
     turns: [
-      { speaker: "A", text: "Fala mano, tudo bem por aí?", reaction: "👍" },
-      { speaker: "B", text: "Opa, tudo em paz! E contigo, como tá a correria?", reaction: "🙌" },
-      { speaker: "A", text: "Bastante trabalho hoje cara, cafezinho salvando a tarde haha", reaction: "😂" },
-      { speaker: "B", text: "Sei bem como é kkk aqui também tá uma loucura sem fim", reaction: "👊" },
-      { speaker: "A", text: "Mas é isso aí, logo mais sextou", reaction: "🔥" },
-      { speaker: "B", text: "Amém! Bom trampo aí parceiro, tamo junto!", reaction: "👍" },
+      {
+        speaker: "A",
+        text: "Fala mano, tudo bem por aí?",
+        variants: [
+          "Fala mano, tudo bem por aí?",
+          "Opa, tudo tranquilo por aí?",
+          "E aí meu querido, como estão as coisas?",
+          "Fala parceiro, tudo na paz?",
+        ],
+        reaction: "👍",
+      },
+      {
+        speaker: "B",
+        text: "Opa, tudo em paz! E contigo, como tá a correria?",
+        variants: [
+          "Opa, tudo em paz! E contigo, como tá a correria?",
+          "Tudo tranquilo graças a Deus! E por aí, muito movimento?",
+          "Tudo certo por aqui mano! E você, na correria de sempre?",
+          "Na paz! Hoje o dia já começou agitado por aqui haha e aí?",
+        ],
+        reaction: "🙌",
+      },
+      {
+        speaker: "A",
+        text: "Bastante trabalho hoje cara, cafezinho salvando a tarde haha",
+        variants: [
+          "Bastante trabalho hoje cara, cafezinho salvando a tarde haha",
+          "Correria boa, já tô no segundo café do dia pra dar conta kkk",
+          "Aqui tbm tá puxado hoje, mas devagar a gente coloca tudo em dia",
+          "Nem me fale, resolvendo mil coisas ao mesmo tempo hoje rs",
+        ],
+        reaction: "😂",
+      },
+      {
+        speaker: "B",
+        text: "Sei bem como é kkk aqui também tá uma loucura sem fim",
+        variants: [
+          "Sei bem como é kkk aqui também tá uma loucura sem fim",
+          "Haha faz parte, semana toda nesse ritmo por aqui tbm",
+          "Café é lei né mano, sem ele não rende nada kkk",
+          "Imagino! Mas importante é que as coisas tão andando bem",
+        ],
+        reaction: "👊",
+      },
+      {
+        speaker: "A",
+        text: "Mas é isso aí, logo mais sextou",
+        variants: [
+          "Mas é isso aí, logo mais dá pra descansar um pouco",
+          "Verdade, bora manter o foco que já já a semana compensa",
+          "Com certeza, vamo que vamo que hoje ainda tem chão",
+          "Exatamente mano, foco total aqui pra terminar cedo hoje",
+        ],
+        reaction: "🔥",
+      },
+      {
+        speaker: "B",
+        text: "Amém! Bom trampo aí parceiro, tamo junto!",
+        variants: [
+          "Amém! Bom trampo aí parceiro, tamo junto!",
+          "Show de bola! Bom trabalho por aí, qualquer coisa chama",
+          "Boa! Vai com tudo aí meu amigo, abraço!",
+          "Tamo junto mano, ótimo resto de dia pra você!",
+        ],
+        reaction: "👍",
+      },
     ],
   },
   {
     id: "dia_a_dia_2",
     theme: "dia_a_dia",
     turns: [
-      { speaker: "A", text: "E aí cara, sumido! Como você tá?", reaction: "👋" },
-      { speaker: "B", text: "E aí! Tudo certo por aqui, correria do dia a dia mesmo. E você?", reaction: "👍" },
-      { speaker: "A", text: "Tudo bem também, só na batalha. Tempo virou aí também?", reaction: "🌧️" },
-      { speaker: "B", text: "Nossa demais, esfriou do nada aqui hoje cedo", reaction: "🥶" },
-      { speaker: "A", text: "Pois é, clima doido. Se cuida aí viu!", reaction: "👊" },
-      { speaker: "B", text: "Valeu mano, pra você também! Abraço", reaction: "🙌" },
+      {
+        speaker: "A",
+        text: "E aí cara, sumido! Como você tá?",
+        variants: [
+          "E aí cara, sumido! Como você tá?",
+          "Fala meu amigo, quanto tempo! Tudo certo contigo?",
+          "Opa, passando pra dar um alô! Tudo bem por aí?",
+          "E aí grande, como estão as coisas por esses lados?",
+        ],
+        reaction: "👋",
+      },
+      {
+        speaker: "B",
+        text: "E aí! Tudo certo por aqui, correria do dia a dia mesmo. E você?",
+        variants: [
+          "E aí! Tudo certo por aqui, correria do dia a dia mesmo. E você?",
+          "Opa! Sumido nada, só trabalhando bastante mesmo haha e contigo?",
+          "Fala! Tudo ótimo graças a Deus, semana voando por aqui. E você?",
+          "Grande! Tudo em ordem na medida do possível, e por aí?",
+        ],
+        reaction: "👍",
+      },
+      {
+        speaker: "A",
+        text: "Tudo bem também, só na batalha. Tempo virou aí também?",
+        variants: [
+          "Tudo bem também, só na batalha. Tempo virou aí também?",
+          "Por aqui tudo em paz! Rapaz, o clima hoje mudou do nada né?",
+          "Na luta de sempre! Aí na sua região também tá ameaçando chover?",
+          "Graças a Deus tudo fluindo! Só esse tempo maluco que não decide se faz sol ou chove rs",
+        ],
+        reaction: "🌧️",
+      },
+      {
+        speaker: "B",
+        text: "Nossa demais, esfriou do nada aqui hoje cedo",
+        variants: [
+          "Nossa demais, mudou do nada aqui hoje cedo",
+          "Sim cara, ontem tava um calorão e hoje já virou totalmente",
+          "Aqui também fechou o tempo, tive até que pegar um guarda-chuva",
+          "Exatamente kkk cada hora uma estação diferente no mesmo dia",
+        ],
+        reaction: "🥶",
+      },
+      {
+        speaker: "A",
+        text: "Pois é, clima doido. Se cuida aí viu!",
+        variants: [
+          "Pois é, clima doido. Se cuida aí viu!",
+          "Desse jeito mesmo haha se cuida por aí meu querido!",
+          "Tem que ficar esperto pra não pegar friagem. Bom dia de trabalho aí!",
+          "É isso aí, depois a gente combina de tomar um café com calma!",
+        ],
+        reaction: "👊",
+      },
+      {
+        speaker: "B",
+        text: "Valeu mano, pra você também! Abraço",
+        variants: [
+          "Valeu mano, pra você também! Abraço",
+          "Combinado! Se cuida também, grande abraço!",
+          "Show, vamos marcar sim! Tudo de bom aí!",
+          "Brigadão parceiro, igualmente pra você!",
+        ],
+        reaction: "🙌",
+      },
+    ],
+  },
+  {
+    id: "dia_a_dia_3",
+    theme: "dia_a_dia",
+    turns: [
+      {
+        speaker: "A",
+        text: "Opa, conseguiu almoçar tranquilo hoje ou foi na correria?",
+        variants: [
+          "Opa, conseguiu almoçar tranquilo hoje ou foi na correria?",
+          "Fala! Hoje deu tempo de parar pra almoçar com calma?",
+          "E aí, já fez a pausa pro almoço ou ainda tá na pendência?",
+        ],
+        reaction: "🍽️",
+      },
+      {
+        speaker: "B",
+        text: "Hoje consegui parar uns 40 minutinhos, fez toda diferença!",
+        variants: [
+          "Hoje consegui parar uns 40 minutinhos, fez toda diferença!",
+          "Rapaz, almocei rapidinho aqui perto mesmo porque a tarde tá cheia",
+          "Acabei de voltar do almoço, agora bateu aquele sono clássico kkk",
+        ],
+        reaction: "😂",
+      },
+      {
+        speaker: "A",
+        text: "Haha clássico demais, só um expresso forte pra acordar agora",
+        variants: [
+          "Haha clássico demais, só um expresso forte pra acordar agora",
+          "Depois do almoço dá uma quebrada mesmo, café salva demais",
+          "Tem que fazer essa pausa senão a cabeça não aguenta até as 18h",
+        ],
+        reaction: "☕",
+      },
+      {
+        speaker: "B",
+        text: "Puríssima verdade! Já passei um café fresco aqui pra aguentar o segundo tempo",
+        variants: [
+          "Puríssima verdade! Já passei um café fresco aqui pra aguentar o segundo tempo",
+          "Nem fala, já tô com a caneca do lado aqui pra render a tarde",
+          "Isso aí, hidratar e mandar bala nas entregas de hoje",
+        ],
+        reaction: "🔥",
+      },
+      {
+        speaker: "A",
+        text: "Boa! Vou voltar pras planilhas aqui também, mais tarde a gente se fala",
+        variants: [
+          "Boa! Vou voltar pras planilhas aqui também, mais tarde a gente se fala",
+          "Show, vou adiantar umas ligações aqui então, bom expediente aí!",
+          "Perfeito mano, boa tarde de trabalho por aí!",
+        ],
+        reaction: "👍",
+      },
+      {
+        speaker: "B",
+        text: "Vai lá, bom foco aí! Qualquer novidade me chama",
+        variants: [
+          "Vai lá, bom foco aí! Qualquer novidade me chama",
+          "Valeu! Pra nós todos, até mais tarde!",
+          "Tamo junto, bom trabalho aí também!",
+        ],
+        reaction: "🤝",
+      },
+    ],
+  },
+  {
+    id: "dia_a_dia_4",
+    theme: "dia_a_dia",
+    turns: [
+      {
+        speaker: "A",
+        text: "Cara, o trânsito hoje cedo tava absurdo aí pros seus lados também?",
+        variants: [
+          "Cara, o trânsito hoje cedo tava absurdo aí pros seus lados também?",
+          "Mano, pegou muito trânsito hoje ou foi tranquilo?",
+          "Rapaz, hoje a avenida principal tava travadaça, viu isso?",
+        ],
+        reaction: "🚗",
+      },
+      {
+        speaker: "B",
+        text: "Tava tudo parado! Levei quase o dobro do tempo normal pra chegar",
+        variants: [
+          "Tava tudo parado! Levei quase o dobro do tempo normal pra chegar",
+          "Nem me fale,Waze mandou dar uma volta gigante por dentro do bairro",
+          "Por sorte saí uns 15 minutos antes hoje, escapei por pouco!",
+        ],
+        reaction: "😅",
+      },
+      {
+        speaker: "A",
+        text: "Waze salvando vidas como sempre haha qualquer obra já trava tudo",
+        variants: [
+          "Waze salvando vidas como sempre haha qualquer obra já trava tudo",
+          "Qualquer chuvinha ou horário de pico já vira um caos né",
+          "Eu fui ouvindo podcast pra não estressar no caminho rs",
+        ],
+        reaction: "👍",
+      },
+      {
+        speaker: "B",
+        text: "Melhor coisa que você faz, ligar um som ou podcast e ir na paciência",
+        variants: [
+          "Melhor coisa que você faz, ligar um som ou podcast e ir na paciência",
+          "Exato, não adianta buzinar que ninguém voa kkk",
+          "Haha boa, negócio é sair mais cedo mesmo pra ir sem pressa",
+        ],
+        reaction: "🙌",
+      },
+      {
+        speaker: "A",
+        text: "Com certeza! Bom, deixa eu correr aqui que começou reunião",
+        variants: [
+          "Com certeza! Bom, deixa eu correr aqui que começou reunião",
+          "Total! Vou atender um cliente aqui agora, já nos falamos",
+          "Verdade! Boa jornada aí hoje meu amigo",
+        ],
+        reaction: "👊",
+      },
+      {
+        speaker: "B",
+        text: "Beleza pura, boa reunião lá! Abraço",
+        variants: [
+          "Beleza pura, boa reunião lá! Abraço",
+          "Tranquilo, manda ver lá! Valeu",
+          "Show, até mais!",
+        ],
+        reaction: "👍",
+      },
     ],
   },
   {
     id: "futebol_1",
     theme: "futebol",
     turns: [
-      { speaker: "A", text: "Viu o jogo ontem mano?", reaction: "⚽" },
-      { speaker: "B", text: "Vi sim cara, inacreditável aquele gol no final!", reaction: "😱" },
-      { speaker: "A", text: "Achei que ia dar empate fácil, o time jogou muito nos acréscimos", reaction: "🔥" },
-      { speaker: "B", text: "Pois é, os caras não desistiram. Domingo promete ser pedreira agora", reaction: "👊" },
-      { speaker: "A", text: "Com certeza, clássico é clássico! Vai assistir onde?", reaction: "🤔" },
-      { speaker: "B", text: "Devo colar em casa mesmo com a família. Bora ver depois se dá pra marcar um!", reaction: "👏" },
+      {
+        speaker: "A",
+        text: "Viu o jogo ontem mano?",
+        variants: [
+          "Viu o jogo ontem mano?",
+          "E aí, assistiu a partida ontem à noite?",
+          "Rapaz, acompanhou a rodada de ontem?",
+        ],
+        reaction: "⚽",
+      },
+      {
+        speaker: "B",
+        text: "Vi sim cara, inacreditável aquele gol no final!",
+        variants: [
+          "Vi sim cara, inacreditável aquele gol no final!",
+          "Assisti até o último minuto, que jogo tenso foi aquele!",
+          "Vi os melhores momentos hoje cedo, jogaço demais!",
+        ],
+        reaction: "😱",
+      },
+      {
+        speaker: "A",
+        text: "Achei que ia dar empate fácil, o time jogou muito nos acréscimos",
+        variants: [
+          "Achei que ia dar empate fácil, o time jogou muito nos acréscimos",
+          "Quando entrou o reserva no segundo tempo mudou completamente o ritmo",
+          "O goleiro também salvou umas duas bolas absurdas ali no fim",
+        ],
+        reaction: "🔥",
+      },
+      {
+        speaker: "B",
+        text: "Pois é, os caras não desistiram. Domingo promete ser pedreira agora",
+        variants: [
+          "Pois é, os caras não desistiram. Domingo promete ser pedreira agora",
+          "Agora o campeonato embolou de vez na parte de cima da tabela",
+          "Próxima rodada vai ser teste pra cardíaco com certeza kkk",
+        ],
+        reaction: "👊",
+      },
+      {
+        speaker: "A",
+        text: "Com certeza, clássico é clássico! Vai assistir onde?",
+        variants: [
+          "Com certeza, clássico é clássico! Vai assistir onde?",
+          "Jogão mesmo! Deve reunir a galera pra assistir no fim de semana?",
+          "Nem fala! Essa semana promete muita resenha até o jogo",
+        ],
+        reaction: "🤔",
+      },
+      {
+        speaker: "B",
+        text: "Devo colar em casa mesmo com a família. Bora ver depois se dá pra marcar um!",
+        variants: [
+          "Devo colar em casa mesmo com a família. Bora ver depois se dá pra marcar um!",
+          "Capaz de ver em casa mesmo fazendo um petisco, aparece lá!",
+          "Vamos combinar sim de assistir juntos qualquer dia desses!",
+        ],
+        reaction: "👏",
+      },
     ],
   },
   {
     id: "futebol_2",
     theme: "futebol",
     turns: [
-      { speaker: "A", text: "Mano, seu time tá jogando demais esse ano hein", reaction: "🔥" },
-      { speaker: "B", text: "Nem fala kkk até que enfim começou a acertar o passe!", reaction: "😂" },
-      { speaker: "A", text: "O técnico conseguiu ajeitar a zaga, ficou bem mais consistente", reaction: "👍" },
-      { speaker: "B", text: "Verdade, antes levava gol bobo todo jogo. Agora tomara que mantenha o ritmo", reaction: "🙌" },
-      { speaker: "A", text: "Se mantiver leva o título fácil", reaction: "🏆" },
-      { speaker: "B", text: "Tomara Deus! Vamos ver a próxima rodada", reaction: "👊" },
+      {
+        speaker: "A",
+        text: "Mano, seu time tá jogando demais esse ano hein",
+        variants: [
+          "Mano, seu time tá jogando demais esse ano hein",
+          "Rapaz, o meio de campo do seu time encaixou muito bem nessa fase",
+          "Olha, fazia tempo que não via uma sequência tão boa na temporada",
+        ],
+        reaction: "🔥",
+      },
+      {
+        speaker: "B",
+        text: "Nem fala kkk até que enfim começou a acertar o passe!",
+        variants: [
+          "Nem fala kkk até que enfim começou a acertar o passe!",
+          "Demorou mas engrenou haha torcida já tava sem paciência",
+          "Rapaz, nem tô acreditando ainda, pé no chão sempre kkk",
+        ],
+        reaction: "😂",
+      },
+      {
+        speaker: "A",
+        text: "O técnico conseguiu ajeitar a zaga, ficou bem mais consistente",
+        variants: [
+          "O técnico conseguiu ajeitar a zaga, ficou bem mais consistente",
+          "A defesa parou de bater cabeça, isso dá outra tranquilidade pro ataque",
+          "E o contra-ataque tá muito rápido também, difícil segurar",
+        ],
+        reaction: "👍",
+      },
+      {
+        speaker: "B",
+        text: "Verdade, antes levava gol bobo todo jogo. Agora tomara que mantenha o ritmo",
+        variants: [
+          "Verdade, antes levava gol bobo todo jogo. Agora tomara que mantenha o ritmo",
+          "Sim, o calendário é puxado mas o elenco tá respondendo bem",
+          "Exato, se não tiver lesão dá pra brigar lá em cima até o fim",
+        ],
+        reaction: "🙌",
+      },
+      {
+        speaker: "A",
+        text: "Se mantiver leva o título fácil",
+        variants: [
+          "Se mantiver esse padrão briga forte pela taça",
+          "Com certeza vai dar trabalho nos mata-matas",
+          "Futebol brasileiro muda rápido mas o momento é excelente",
+        ],
+        reaction: "🏆",
+      },
+      {
+        speaker: "B",
+        text: "Tomara Deus! Vamos ver a próxima rodada",
+        variants: [
+          "Tomara Deus! Vamos ver a próxima rodada",
+          "Bora torcer! Quarta-feira já tem mais um desafio",
+          "É isso aí, um jogo de cada vez! Valeu mano",
+        ],
+        reaction: "👊",
+      },
     ],
   },
   {
     id: "churrasco_1",
     theme: "churrasco",
     turns: [
-      { speaker: "A", text: "E aí meu querido, animado pro fim de semana?", reaction: "🥩" },
-      { speaker: "B", text: "Opa, com certeza! Precisando dar uma relaxada", reaction: "🍻" },
-      { speaker: "A", text: "Tava pensando em acender a brasa no sábado, o que acha?", reaction: "🔥" },
-      { speaker: "B", text: "Boa ideia demais! Posso levar aquela picanha e a cerveja", reaction: "👏" },
-      { speaker: "A", text: "Fechou! Eu compro o carvão e as bebidas que faltarem", reaction: "👍" },
-      { speaker: "B", text: "Show de bola, combinadíssimo então!", reaction: "👊" },
+      {
+        speaker: "A",
+        text: "E aí meu querido, animado pro fim de semana?",
+        variants: [
+          "E aí meu querido, animado pro fim de semana?",
+          "Fala parceiro, quais os planos pro sabadão?",
+          "Opa, semana quase acabando, já pensou na programação do fds?",
+        ],
+        reaction: "🥩",
+      },
+      {
+        speaker: "B",
+        text: "Opa, com certeza! Precisando dar uma relaxada",
+        variants: [
+          "Opa, com certeza! Precisando dar uma relaxada",
+          "Mais que preparado haha semana foi intensa por aqui",
+          "Tranquilo por enquanto, querendo descansar e reunir os amigos",
+        ],
+        reaction: "🍻",
+      },
+      {
+        speaker: "A",
+        text: "Tava pensando em acender a brasa no sábado, o que acha?",
+        variants: [
+          "Tava pensando em acender a brasa no sábado, o que acha?",
+          "Bora fazer uma carninha na grelha sábado na hora do almoço?",
+          "Que tal um churrasquinho de leve pra botar o papo em dia?",
+        ],
+        reaction: "🔥",
+      },
+      {
+        speaker: "B",
+        text: "Boa ideia demais! Posso levar aquela picanha e a cerveja",
+        variants: [
+          "Boa ideia demais! Posso levar aquela picanha e a cerveja",
+          "Tô dentro na hora! Deixa que eu levo a linguiça artesanal e o pão de alho",
+          "Convite irrecusável haha já conta comigo que eu levo a fraldinha!",
+        ],
+        reaction: "👏",
+      },
+      {
+        speaker: "A",
+        text: "Fechou! Eu compro o carvão e as bebidas que faltarem",
+        variants: [
+          "Fechou! Eu compro o carvão e as bebidas que faltarem",
+          "Maravilha! Já vou deixar tudo gelando desde sexta à noite",
+          "Show! Vou avisar o resto do pessoal pra começarmos lá pelo meio-dia",
+        ],
+        reaction: "👍",
+      },
+      {
+        speaker: "B",
+        text: "Show de bola, combinadíssimo então!",
+        variants: [
+          "Show de bola, combinadíssimo então!",
+          "Fechadíssimo meu amigo, sábado tô encostando lá!",
+          "Perfeito, sexta a gente confirma os detalhes finais. Abraço!",
+        ],
+        reaction: "👊",
+      },
     ],
   },
   {
     id: "trabalho_1",
     theme: "trabalho",
     turns: [
-      { speaker: "A", text: "Opa parceiro, conseguiu ver aquele relatório que te mandei?", reaction: "📄" },
-      { speaker: "B", text: "Fala! Consegui sim, dei uma olhada rápida agora há pouco", reaction: "👍" },
-      { speaker: "A", text: "Ficou claro os números ou acha que precisa detalhar mais alguma coisa?", reaction: "🤔" },
-      { speaker: "B", text: "Achei bem estruturado, só a parte do comparativo mensal que vale destacar", reaction: "💡" },
-      { speaker: "A", text: "Perfeito, vou fazer esse ajuste fino antes da reunião amanhã", reaction: "👏" },
-      { speaker: "B", text: "Fechou, vai ficar excelente. Qualquer coisa me dá um toque!", reaction: "👊" },
+      {
+        speaker: "A",
+        text: "Opa parceiro, conseguiu ver aquele relatório que te mandei?",
+        variants: [
+          "Opa parceiro, conseguiu ver aquele relatório que te mandei?",
+          "Fala! Deu tempo de revisar o material da apresentação de amanhã?",
+          "Oi! Viu o cronograma atualizado que subi lá na pasta?",
+        ],
+        reaction: "📄",
+      },
+      {
+        speaker: "B",
+        text: "Fala! Consegui sim, dei uma olhada rápida agora há pouco",
+        variants: [
+          "Fala! Consegui sim, dei uma olhada rápida agora há pouco",
+          "Opa, abri aqui sim, tava justamente analisando os indicadores",
+          "Vi sim! Ficou bem organizado, gostei da divisão das etapas",
+        ],
+        reaction: "👍",
+      },
+      {
+        speaker: "A",
+        text: "Ficou claro os números ou acha que precisa detalhar mais alguma coisa?",
+        variants: [
+          "Ficou claro os números ou acha que precisa detalhar mais alguma coisa?",
+          "Acha que tá bom nesse formato ou vale incluir o resumo trimestral?",
+          "Se tiver algum ponto que queira ajustar me fala que já edito aqui",
+        ],
+        reaction: "🤔",
+      },
+      {
+        speaker: "B",
+        text: "Achei bem estruturado, só a parte do comparativo mensal que vale destacar",
+        variants: [
+          "Achei bem estruturado, só a parte do comparativo mensal que vale destacar",
+          "Tá ótimo! Só colocaria em negrito as metas da próxima semana",
+          "Ficou bem direto ao ponto, acho que o pessoal vai aprovar de primeira",
+        ],
+        reaction: "💡",
+      },
+      {
+        speaker: "A",
+        text: "Perfeito, vou fazer esse ajuste fino antes da reunião amanhã",
+        variants: [
+          "Perfeito, vou fazer esse ajuste fino antes da reunião amanhã",
+          "Boa sugestão! Já vou atualizar a versão final aqui então",
+          "Show, em 10 minutinhos já deixo atualizado lá pra todo mundo",
+        ],
+        reaction: "👏",
+      },
+      {
+        speaker: "B",
+        text: "Fechou, vai ficar excelente. Qualquer coisa me dá um toque!",
+        variants: [
+          "Fechou, vai ficar excelente. Qualquer coisa me dá um toque!",
+          "Maravilha, valeu pelo cuidado aí! Até mais",
+          "Perfeito parceiro, seguimos alinhados!",
+        ],
+        reaction: "👊",
+      },
+    ],
+  },
+  {
+    id: "trabalho_2",
+    theme: "trabalho",
+    turns: [
+      {
+        speaker: "A",
+        text: "Bom dia! A reunião das 15h continua confirmada no mesmo link?",
+        variants: [
+          "Opa! A reunião das 15h continua confirmada no mesmo link?",
+          "Fala! Nosso alinhamento de hoje à tarde tá mantido às 15h?",
+          "Oi! Tudo certo pro nosso call de acompanhamento mais tarde?",
+        ],
+        reaction: "📅",
+      },
+      {
+        speaker: "B",
+        text: "Confirmadíssima! Já separei as pautas principais pra ser bem objetivo",
+        variants: [
+          "Confirmadíssima! Já separei as pautas principais pra ser bem objetivo",
+          "Mantido sim! Vai ser rápido, uns 20 minutinhos só pra fechar a semana",
+          "Tudo certo! Mesmo link do Meet de sempre",
+        ],
+        reaction: "👍",
+      },
+      {
+        speaker: "A",
+        text: "Ótimo, já vou levar os dados do fechamento atualizados",
+        variants: [
+          "Ótimo, já vou levar os dados do fechamento atualizados",
+          "Show, já deixei as anotações prontas aqui do meu lado também",
+          "Beleza, 5 minutos antes eu já entro na sala",
+        ],
+        reaction: "🚀",
+      },
+      {
+        speaker: "B",
+        text: "Combinado, até às 15h então! Bom trabalho até lá",
+        variants: [
+          "Combinado, até às 15h então! Bom trabalho até lá",
+          "Perfeito, nos falamos mais tarde então!",
+          "Fechou, até já!",
+        ],
+        reaction: "🤝",
+      },
     ],
   },
   {
     id: "tecnologia_1",
     theme: "tecnologia",
     turns: [
-      { speaker: "A", text: "E aí mano, você que manja de celular, qual recomendaria até uns 2k?", reaction: "📱" },
-      { speaker: "B", text: "Opa! Nessa faixa a linha Galaxy A ou os Redmi tão entregando muito", reaction: "💡" },
-      { speaker: "A", text: "Bateria dura bem o dia todo? Meu foco é mais bateria e tela fluida", reaction: "🔋" },
-      { speaker: "B", text: "Dura sim, tela AMOLED 120hz e bateria de 5000mAh. Vai tranquilo", reaction: "🔥" },
-      { speaker: "A", text: "Show de bola, vou dar uma olhada nas promoções hoje", reaction: "👍" },
-      { speaker: "B", text: "Se achar algum link com preço bom me avisa também!", reaction: "👊" },
+      {
+        speaker: "A",
+        text: "E aí mano, você que manja de celular, qual recomendaria até uns 2k?",
+        variants: [
+          "E aí mano, você que manja de celular, qual recomendaria até uns 2k?",
+          "Fala! Tava pesquisando um aparelho intermediário bom de câmera e bateria, alguma dica?",
+          "Opa, viu os lançamentos de celular desse mês? Tava pensando em trocar o meu",
+        ],
+        reaction: "📱",
+      },
+      {
+        speaker: "B",
+        text: "Opa! Nessa faixa a linha Galaxy A ou os Redmi tão entregando muito",
+        variants: [
+          "Opa! Nessa faixa a linha Galaxy A ou os Redmi tão entregando muito",
+          "Cara, hoje em dia o A55 ou o Poco X6 tão com custo-benefício excelente",
+          "Se quiser bateria que dura dois dias e tela boa, vai de linha intermediária da Samsung ou Xiaomi",
+        ],
+        reaction: "💡",
+      },
+      {
+        speaker: "A",
+        text: "Bateria dura bem o dia todo? Meu foco é mais bateria e tela fluida",
+        variants: [
+          "Bateria dura bem o dia todo? Meu foco é mais bateria e tela fluida",
+          "E não trava usando bastante WhatsApp e aplicativos de banco o dia inteiro?",
+          "Show! E o carregamento rápido deles é tranquilo mesmo?",
+        ],
+        reaction: "🔋",
+      },
+      {
+        speaker: "B",
+        text: "Dura sim, tela AMOLED 120hz e bateria de 5000mAh. Vai tranquilo",
+        variants: [
+          "Dura sim, tela AMOLED 120hz e bateria de 5000mAh. Vai tranquilo",
+          "Aguenta o tranco fácil o dia todo e ainda sobra uns 30% à noite",
+          "Roda liso demais, com 8GB de RAM não engasga com nada no dia a dia",
+        ],
+        reaction: "🔥",
+      },
+      {
+        speaker: "A",
+        text: "Show de bola, vou dar uma olhada nas promoções hoje",
+        variants: [
+          "Show de bola, vou dar uma olhada nas promoções hoje",
+          "Excelente, vou ativar alerta de preço pra pegar numa promoção boa",
+          "Valeu demais pela dica, já me poupou horas de pesquisa!",
+        ],
+        reaction: "👍",
+      },
+      {
+        speaker: "B",
+        text: "Se achar algum link com preço bom me avisa também!",
+        variants: [
+          "Se achar algum link com preço bom me avisa também!",
+          "Tamo junto! Se pintar cupom bom eu te mando aqui",
+          "Precisando é só chamar mano, boa compra lá!",
+        ],
+        reaction: "👊",
+      },
     ],
   },
   {
     id: "compras_1",
     theme: "compras",
     turns: [
-      { speaker: "A", text: "Fala meu amigo, chegou aquele pacote que você tava esperando?", reaction: "📦" },
-      { speaker: "B", text: "Chegou hoje de manhã cara! Entrega rápida demais", reaction: "🚀" },
-      { speaker: "A", text: "Veio tudo certinho ou teve que abrir reclamação?", reaction: "🤔" },
-      { speaker: "B", text: "Veio 100%, muito bem embalado e funcionou de primeira", reaction: "👍" },
-      { speaker: "A", text: "Que top, tava na dúvida se comprava lá. Vou pedir o meu", reaction: "🔥" },
-      { speaker: "B", text: "Pode pedir sem medo, valeu cada centavo!", reaction: "👏" },
+      {
+        speaker: "A",
+        text: "Fala meu amigo, chegou aquele pacote que você tava esperando?",
+        variants: [
+          "Fala meu amigo, chegou aquele pacote que você tava esperando?",
+          "E aí, a encomenda do Mercado Livre já foi entregue hoje?",
+          "Opa! Deu tudo certo com aquela compra que você fez na internet?",
+        ],
+        reaction: "📦",
+      },
+      {
+        speaker: "B",
+        text: "Chegou hoje de manhã cara! Entrega rápida demais",
+        variants: [
+          "Chegou hoje de manhã cara! Entrega rápida demais",
+          "Entregaram agorinha na portaria, menos de 24h depois de pedir!",
+          "Chegou sim! Logística dos caras tá impressionante de rápida",
+        ],
+        reaction: "🚀",
+      },
+      {
+        speaker: "A",
+        text: "Veio tudo certinho ou teve que abrir reclamação?",
+        variants: [
+          "Veio tudo certinho ou teve que abrir reclamação?",
+          "A qualidade é boa mesmo igual nas fotos do anúncio?",
+          "Já conseguiu testar pra ver se veio funcionando 100%?",
+        ],
+        reaction: "🤔",
+      },
+      {
+        speaker: "B",
+        text: "Veio 100%, muito bem embalado e funcionou de primeira",
+        variants: [
+          "Veio 100%, muito bem embalado e funcionou de primeira",
+          "Qualidade surpreendeu positivamente, acabamento muito bom mesmo",
+          "Testei aqui na hora e bateu certinho com o que eu precisava",
+        ],
+        reaction: "👍",
+      },
+      {
+        speaker: "A",
+        text: "Que top, tava na dúvida se comprava lá. Vou pedir o meu",
+        variants: [
+          "Que top, tava na dúvida se comprava lá. Vou pedir o meu",
+          "Bom saber! Depois me manda o link desse mesmo vendedor",
+          "Maravilha, com referência boa assim dá pra comprar tranquilo",
+        ],
+        reaction: "🔥",
+      },
+      {
+        speaker: "B",
+        text: "Pode pedir sem medo, valeu cada centavo!",
+        variants: [
+          "Pode pedir sem medo, valeu cada centavo!",
+          "Já te mando o link aqui, vale muito a pena!",
+          "Vai gostar com certeza, ótimo custo-benefício!",
+        ],
+        reaction: "👏",
+      },
     ],
   },
 ];
@@ -158,23 +803,130 @@ export function getRandomCasualVoiceNote(): string {
   return CASUAL_VOICE_NOTES[Math.floor(Math.random() * CASUAL_VOICE_NOTES.length)];
 }
 
+/**
+ * Resolve o tema efetivo para uma nova conversa:
+ * Se o tema configurado for "dia_a_dia" (padrão) ou "todos", sorteia entre todos
+ * os temas para evitar que 100% das conversas fiquem presas no mesmo assunto.
+ */
+export function pickEffectiveConversationTheme(configuredTheme?: string | null): string {
+  const allIds = WARMUP_THEMES.map((t) => t.id);
+  if (!configuredTheme || configuredTheme === "todos" || configuredTheme === "dia_a_dia") {
+    return allIds[Math.floor(Math.random() * allIds.length)];
+  }
+  return allIds.includes(configuredTheme as (typeof allIds)[number])
+    ? configuredTheme
+    : allIds[Math.floor(Math.random() * allIds.length)];
+}
+
 export function pickFallbackDialogue(theme?: string): DialogueScript {
-  const filtered = theme && theme !== "todos"
-    ? FALLBACK_SCRIPTS.filter((s) => s.theme === theme)
-    : FALLBACK_SCRIPTS;
+  const filtered =
+    theme && theme !== "todos"
+      ? FALLBACK_SCRIPTS.filter((s) => s.theme === theme)
+      : FALLBACK_SCRIPTS;
 
   const pool = filtered.length > 0 ? filtered : FALLBACK_SCRIPTS;
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
 /**
- * Calcula duração de digitação humana com variação gaussiana (3 a 10s).
+ * Seleciona uma fala natural do banco de diálogos evitando repetir frases já
+ * presentes no histórico da conversa atual e aplicando variações humanas sutis.
+ */
+export function pickVariedFallbackTurnText(opts: {
+  theme?: string;
+  stepIndex: number;
+  usedTexts?: string[];
+}): string {
+  const { theme, stepIndex, usedTexts = [] } = opts;
+  const usedSet = new Set(usedTexts.map((t) => t.trim().toLowerCase()));
+
+  const themeScripts =
+    theme && theme !== "todos"
+      ? FALLBACK_SCRIPTS.filter((s) => s.theme === theme)
+      : FALLBACK_SCRIPTS;
+  const scriptsPool = themeScripts.length > 0 ? themeScripts : FALLBACK_SCRIPTS;
+
+  // Coleta todas as variantes candidatas para este turno em todos os scripts do tema
+  const candidates: string[] = [];
+  for (const script of scriptsPool) {
+    const turn = script.turns[Math.min(stepIndex, script.turns.length - 1)] || script.turns[0];
+    if (!turn) continue;
+    const pool = turn.variants && turn.variants.length > 0 ? turn.variants : [turn.text];
+    for (const v of pool) {
+      if (v && !usedSet.has(v.trim().toLowerCase())) {
+        candidates.push(v);
+      }
+    }
+  }
+
+  let chosen: string;
+  if (candidates.length > 0) {
+    chosen = candidates[Math.floor(Math.random() * candidates.length)];
+  } else {
+    const fallbackScript = pickFallbackDialogue(theme);
+    const turn =
+      fallbackScript.turns[Math.min(stepIndex, fallbackScript.turns.length - 1)] ||
+      fallbackScript.turns[0];
+    const pool = turn?.variants && turn.variants.length > 0 ? turn.variants : [turn?.text || "Opa, tudo bem por aí?"];
+    chosen = pool[Math.floor(Math.random() * pool.length)];
+  }
+
+  return chosen;
+}
+
+/**
+ * Calcula duração de digitação humana com variação (3 a 10s), evitando cravar
+ * sempre no piso mínimo de 3000ms.
  */
 export function calculateTypingDuration(textLength: number, minSec = 3, maxSec = 10): number {
   const minMs = minSec * 1000;
   const maxMs = maxSec * 1000;
-  const charSpeedMs = textLength * 55;
-  const clamped = Math.min(Math.max(charSpeedMs, minMs), maxMs);
-  const jitter = Math.floor(Math.random() * 800) - 400;
+  // Velocidade variável entre 55 e 95 ms por caractere + tempo de leitura/pensamento (600 a 1800ms)
+  const perCharMs = 55 + Math.floor(Math.random() * 41);
+  const thinkMs = 600 + Math.floor(Math.random() * 1200);
+  const rawMs = textLength * perCharMs + thinkMs;
+  const clamped = Math.min(Math.max(rawMs, minMs), maxMs);
+  const jitter = Math.floor(Math.random() * 900) - 450;
   return Math.max(minMs, Math.min(clamped + jitter, maxMs));
+}
+
+/**
+ * Atraso humano variável para confirmação de leitura (tiques azuis):
+ * Em vez de 4200ms fixos, varia entre 3.2s e 18.5s no modo automático.
+ */
+export function calculateReadReceiptDelayMs(isManualTrigger = false): number {
+  if (isManualTrigger) {
+    return 1800 + Math.floor(Math.random() * 1400);
+  }
+  // Distribuição assimétrica: maioria entre 3.5s e 9s, cauda até 18.5s
+  const base = 3200;
+  const u = Math.random() * Math.random(); // enviesado para leituras naturais rápidas/médias
+  return base + Math.floor(u * 15300);
+}
+
+/**
+ * Atraso humano variável para reação com emoji:
+ * Em vez de 7500ms fixos, varia entre 4.2s e 16.0s no modo automático.
+ */
+export function calculateReactionDelayMs(isManualTrigger = false): number {
+  if (isManualTrigger) {
+    return 1500 + Math.floor(Math.random() * 1000);
+  }
+  return 4200 + Math.floor(Math.random() * 11800);
+}
+
+/**
+ * Intervalo de descanso (cooldown) entre o fim de uma conversa completa e o
+ * início de uma nova conversa entre o mesmo par de chips (12 a 35 minutos,
+ * escalonado pelo estágio do chip).
+ */
+export function calculateInterConversationCooldownSec(stage = 1): number {
+  const baseMinByStage: Record<number, [number, number]> = {
+    1: [25 * 60, 45 * 60], // Fase 1 (Frio): 25 a 45 min entre sessões
+    2: [18 * 60, 35 * 60], // Fase 2 (Morno): 18 a 35 min entre sessões
+    3: [12 * 60, 25 * 60], // Fase 3 (Quente): 12 a 25 min entre sessões
+    4: [10 * 60, 20 * 60], // Fase 4 (Blindado): 10 a 20 min entre sessões
+  };
+  const [minSec, maxSec] = baseMinByStage[stage] || baseMinByStage[2];
+  return minSec + Math.floor(Math.random() * (maxSec - minSec + 1));
 }

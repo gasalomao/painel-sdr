@@ -118,7 +118,7 @@ export type TemplateContext = {
   additional_categories?: unknown;
   categorias_adicionais?: string | null;
   distribuicao_estrelas?: unknown;
-  reviews_detalhes?: Array<{ data?: string; texto?: string }> | null;
+  reviews_detalhes?: unknown;
   // Vars dinâmicas capturadas pelo funil (sessions.variables)
   // — também usado pra injetar dados de agendamento ({hora_agendamento},
   // {data_agendamento}, {servico}, {meet_link}, etc.)
@@ -341,7 +341,35 @@ export function leadRowToTemplateContext(
   };
 }
 
-export function renderTemplate(template: string, ctx: TemplateContext = {}): string {
+/**
+ * Expande expressões Spintax inline do tipo `{Oi|Olá|Opa}` ou `{Tudo bem?|Tudo certo?}`.
+ * Ignora chaves duplas `{{...}}`, blocos multilinha ou expressões sem `|`.
+ */
+export function resolveSpintax(text: string): string {
+  if (!text || !text.includes("{") || !text.includes("|")) return text;
+  let current = text;
+  const pattern = /(^|[^{])\{([^{}\r\n|]+(?:\|[^{}\r\n|]*)+)\}(?!\})/g;
+
+  for (let pass = 0; pass < 5; pass++) {
+    let changed = false;
+    current = current.replace(pattern, (_full, prefix: string, body: string) => {
+      const options = body.split("|");
+      if (options.length < 2) return _full;
+      const picked = options[Math.floor(Math.random() * options.length)] ?? "";
+      changed = true;
+      return `${prefix}${picked}`;
+    });
+    if (!changed) break;
+  }
+
+  return current;
+}
+
+export function renderTemplate(
+  template: string,
+  ctx: TemplateContext = {},
+  opts?: { spintax?: boolean }
+): string {
   if (!template) return "";
   const now = ctx.now || new Date();
 
@@ -369,7 +397,9 @@ export function renderTemplate(template: string, ctx: TemplateContext = {}): str
   // Ano no Google ("No Google desde"): coluna explícita ou inferida das reviews
   const resolvedYear = resolveLeadGoogleYear({
     yearEstablished: ctx.year_established ?? ctx.ano_google ?? null,
-    reviews: Array.isArray(ctx.reviews_detalhes) ? ctx.reviews_detalhes : null,
+    reviews: Array.isArray(ctx.reviews_detalhes)
+      ? (ctx.reviews_detalhes as Array<{ data?: string; texto?: string }>)
+      : null,
     refDate: now,
   });
   const anoGoogleVal =
@@ -574,9 +604,11 @@ export function renderTemplate(template: string, ctx: TemplateContext = {}): str
     if (baseMap[k] !== undefined) return baseMap[k];
     return full;
   };
-  return template
+  const rendered = template
     .replace(/\{\{\s*([a-z_][\w]*)\s*\}\}/gi, replacer)
     .replace(/\{\s*([a-z_][\w]*)\s*\}/gi, replacer);
+
+  return opts?.spintax ? resolveSpintax(rendered) : rendered;
 }
 
 /**
@@ -584,55 +616,55 @@ export function renderTemplate(template: string, ctx: TemplateContext = {}): str
  * prompt do Agente IA (/agente) e nos editores de template (/disparo, /follow-up, etc.).
  */
 export const PROMPT_VARIABLES = [
-  { key: "saudacao",              label: "Saudação",            hint: "Bom dia / Boa tarde / Boa noite / Boa madrugada (hora SP)" },
-  { key: "nome",                  label: "Nome",                hint: "Nome do contato no WhatsApp (push_name) com fallback pra empresa" },
-  { key: "nome_empresa",          label: "Nome empresa",        hint: "Nome do negócio no CRM / Google Maps (alias: {{nome_negocio}})" },
-  { key: "primeiro_nome",         label: "1ª palavra",          hint: "Primeira palavra do nome da empresa" },
-  { key: "ramo",                  label: "Ramo",                hint: "Ramo de negócio do CRM / Maps" },
-  { key: "categoria",             label: "Categoria",           hint: "Categoria principal do negócio no Google Maps" },
-  { key: "nota",                  label: "Nota Google",         hint: "Nota média no Google Maps de 1 a 5 (alias: {{avaliacao}})" },
-  { key: "avaliacao",             label: "Avaliação",           hint: "Nota média no Google Maps de 1 a 5 (alias: {{nota}})" },
-  { key: "avaliacoes",            label: "Avaliações (qtd)",    hint: "Quantidade total de avaliações no Google (alias: {{reviews}})" },
-  { key: "reviews",               label: "Reviews",             hint: "Quantidade total de avaliações no Google (alias: {{avaliacoes}})" },
-  { key: "resumo_avaliacoes",     label: "Resumo avaliações",   hint: "Resumo IA das avaliações do Google (elogios, reclamações e gancho)" },
-  { key: "ano_google",            label: "No Google desde",     hint: "Ano em que a empresa está no Google Maps (alias: {{year_established}})" },
-  { key: "endereco",              label: "Endereço",            hint: "Endereço completo do negócio no Google Maps" },
-  { key: "cidade",                label: "Cidade",              hint: "Cidade do negócio (extraída do Google Maps)" },
-  { key: "bairro",                label: "Bairro",              hint: "Bairro do negócio (extraído do Google Maps)" },
-  { key: "estado",                label: "Estado (UF)",         hint: "Estado/UF do negócio (alias: {{uf}})" },
-  { key: "cep",                   label: "CEP",                 hint: "CEP capturado do Google Maps" },
-  { key: "website",               label: "Website",             hint: "Site do negócio (alias: {{site}})" },
-  { key: "instagram",             label: "Instagram",           hint: "@ ou URL do Instagram capturado" },
-  { key: "facebook",              label: "Facebook",            hint: "URL do Facebook capturado" },
-  { key: "telefone",              label: "Telefone",            hint: "Número de telefone / WhatsApp limpo" },
-  { key: "maps_url",              label: "Link Google Maps",    hint: "URL da ficha do negócio no Google Maps (alias: {{link_maps}})" },
-  { key: "horario_funcionamento", label: "Horário func.",       hint: "Horários de funcionamento no Google Maps (alias: {{horarios}})" },
-  { key: "aberto_agora",          label: "Aberto agora",        hint: "Status de abertura no Google Maps" },
-  { key: "faixa_preco",           label: "Faixa de preço",      hint: "Faixa de preço informada no Google Maps (alias: {{preco}})" },
-  { key: "atributos",             label: "Atributos Maps",      hint: "Diferenciais do negócio no Maps (Entrega, Acessibilidade, etc.)" },
-  { key: "proprietario",          label: "Proprietário",        hint: "Nome do dono/proprietário no Google Maps (alias: {{dono}})" },
-  { key: "reivindicado",          label: "Perfil reivindicado", hint: "Se a empresa reivindicou o perfil no Google (Sim/Não)" },
-  { key: "total_fotos",           label: "Total de fotos",      hint: "Quantidade de fotos no Google Maps" },
-  { key: "topicos_avaliacoes",    label: "Tópicos avaliações",  hint: "Temas mais mencionados nas avaliações do Google" },
-  { key: "categorias_adicionais", label: "Categorias extras",   hint: "Subcategorias adicionais do negócio no Google Maps" },
-  { key: "descricao_google",      label: "Descrição Maps",      hint: "Descrição oficial 'Sobre' da empresa no Google Maps" },
-  { key: "link_previa",           label: "Link prévia site",    hint: "URL da prévia de site gerada para o lead (alias: {{site_previa}})" },
-  { key: "email",                 label: "Email",               hint: "Email do lead (se cadastrado)" },
-  { key: "observacoes",           label: "Observações",         hint: "Notas livres do CRM" },
-  { key: "data_atual",            label: "Data e dia atual",    hint: "Dia da semana + data atual (ex: sexta-feira, 06/11/2026)" },
-  { key: "dia_semana",            label: "Dia da semana",       hint: "Dia da semana atual por extenso (hora SP)" },
-  { key: "data",                  label: "Data",                hint: "Data atual DD/MM/AAAA" },
-  { key: "hora",                  label: "Hora",                hint: "Hora atual HH:MM" },
+  { key: "saudacao", label: "Saudação", hint: "Bom dia / Boa tarde / Boa noite / Boa madrugada (hora SP)" },
+  { key: "nome", label: "Nome", hint: "Nome do contato no WhatsApp (push_name) com fallback pra empresa" },
+  { key: "nome_empresa", label: "Nome empresa", hint: "Nome do negócio no CRM / Google Maps (alias: {{nome_negocio}})" },
+  { key: "primeiro_nome", label: "1ª palavra", hint: "Primeira palavra do nome da empresa" },
+  { key: "ramo", label: "Ramo", hint: "Ramo de negócio do CRM / Maps" },
+  { key: "categoria", label: "Categoria", hint: "Categoria principal do negócio no Google Maps" },
+  { key: "nota", label: "Nota Google", hint: "Nota média no Google Maps de 1 a 5 (alias: {{avaliacao}})" },
+  { key: "avaliacao", label: "Avaliação", hint: "Nota média no Google Maps de 1 a 5 (alias: {{nota}})" },
+  { key: "avaliacoes", label: "Avaliações (qtd)", hint: "Quantidade total de avaliações no Google (alias: {{reviews}})" },
+  { key: "reviews", label: "Reviews", hint: "Quantidade total de avaliações no Google (alias: {{avaliacoes}})" },
+  { key: "resumo_avaliacoes", label: "Resumo avaliações", hint: "Resumo IA das avaliações do Google (elogios, reclamações e gancho)" },
+  { key: "ano_google", label: "No Google desde", hint: "Ano em que a empresa está no Google Maps (alias: {{year_established}})" },
+  { key: "endereco", label: "Endereço", hint: "Endereço completo do negócio no Google Maps" },
+  { key: "cidade", label: "Cidade", hint: "Cidade do negócio (extraída do Google Maps)" },
+  { key: "bairro", label: "Bairro", hint: "Bairro do negócio (extraído do Google Maps)" },
+  { key: "estado", label: "Estado (UF)", hint: "Estado/UF do negócio (alias: {{uf}})" },
+  { key: "cep", label: "CEP", hint: "CEP capturado do Google Maps" },
+  { key: "website", label: "Website", hint: "Site do negócio (alias: {{site}})" },
+  { key: "instagram", label: "Instagram", hint: "@ ou URL do Instagram capturado" },
+  { key: "facebook", label: "Facebook", hint: "URL do Facebook capturado" },
+  { key: "telefone", label: "Telefone", hint: "Número de telefone / WhatsApp limpo" },
+  { key: "maps_url", label: "Link Google Maps", hint: "URL da ficha do negócio no Google Maps (alias: {{link_maps}})" },
+  { key: "horario_funcionamento", label: "Horário func.", hint: "Horários de funcionamento no Google Maps (alias: {{horarios}})" },
+  { key: "aberto_agora", label: "Aberto agora", hint: "Status de abertura no Google Maps" },
+  { key: "faixa_preco", label: "Faixa de preço", hint: "Faixa de preço informada no Google Maps (alias: {{preco}})" },
+  { key: "atributos", label: "Atributos Maps", hint: "Diferenciais do negócio no Maps (Entrega, Acessibilidade, etc.)" },
+  { key: "proprietario", label: "Proprietário", hint: "Nome do dono/proprietário no Google Maps (alias: {{dono}})" },
+  { key: "reivindicado", label: "Perfil reivindicado", hint: "Se a empresa reivindicou o perfil no Google (Sim/Não)" },
+  { key: "total_fotos", label: "Total de fotos", hint: "Quantidade de fotos no Google Maps" },
+  { key: "topicos_avaliacoes", label: "Tópicos avaliações", hint: "Temas mais mencionados nas avaliações do Google" },
+  { key: "categorias_adicionais", label: "Categorias extras", hint: "Subcategorias adicionais do negócio no Google Maps" },
+  { key: "descricao_google", label: "Descrição Maps", hint: "Descrição oficial 'Sobre' da empresa no Google Maps" },
+  { key: "link_previa", label: "Link prévia site", hint: "URL da prévia de site gerada para o lead (alias: {{site_previa}})" },
+  { key: "email", label: "Email", hint: "Email do lead (se cadastrado)" },
+  { key: "observacoes", label: "Observações", hint: "Notas livres do CRM" },
+  { key: "data_atual", label: "Data e dia atual", hint: "Dia da semana + data atual (ex: sexta-feira, 06/11/2026)" },
+  { key: "dia_semana", label: "Dia da semana", hint: "Dia da semana atual por extenso (hora SP)" },
+  { key: "data", label: "Data", hint: "Data atual DD/MM/AAAA" },
+  { key: "hora", label: "Hora", hint: "Hora atual HH:MM" },
 ] as const;
 
 /** Lista completa de variáveis pra mostrar como chips na UI (inclui agendamento). */
 export const TEMPLATE_VARIABLES = [
   ...PROMPT_VARIABLES,
   // Variáveis injetadas em contexto de AGENDAMENTO (via ctx.variables)
-  { key: "hora_agendamento", label: "Hora ag.",  hint: "Hora do agendamento (HH:MM)" },
-  { key: "data_agendamento", label: "Data ag.",  hint: "Data do agendamento (DD/MM)" },
-  { key: "servico",          label: "Serviço",   hint: "Nome do serviço agendado" },
-  { key: "titulo",           label: "Título ag.", hint: "Título completo do agendamento" },
-  { key: "meet_link",        label: "Link Meet", hint: "URL do Google Meet quando o agendamento tiver" },
-  { key: "local",            label: "Local",     hint: "Endereço do agendamento (location do Google)" },
+  { key: "hora_agendamento", label: "Hora ag.", hint: "Hora do agendamento (HH:MM)" },
+  { key: "data_agendamento", label: "Data ag.", hint: "Data do agendamento (DD/MM)" },
+  { key: "servico", label: "Serviço", hint: "Nome do serviço agendado" },
+  { key: "titulo", label: "Título ag.", hint: "Título completo do agendamento" },
+  { key: "meet_link", label: "Link Meet", hint: "URL do Google Meet quando o agendamento tiver" },
+  { key: "local", label: "Local", hint: "Endereço do agendamento (location do Google)" },
 ] as const;

@@ -8,7 +8,12 @@ import { evolution } from "@/lib/evolution";
 export const evolutionV2: WhatsAppProvider = {
   name: "evolution",
 
-  async sendText(remoteJid: string, text: string, instanceName: string, options?: { delay?: number }): Promise<SendResult> {
+  async sendText(
+    remoteJid: string,
+    text: string,
+    instanceName: string,
+    options?: { delay?: number; linkPreview?: boolean }
+  ): Promise<SendResult> {
     try {
       const res = await evolution.sendMessage(remoteJid, text, instanceName, options);
       const msgId = res?.key?.id || res?.messageId || res?.id || res?.data?.key?.id;

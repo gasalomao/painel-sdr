@@ -22,13 +22,526 @@ import { logTokenUsage } from "@/lib/token-usage";
 import { registerAiSend, registerPendingAutomatedSend } from "@/lib/manual-send-registry";
 import { splitMessage } from "@/lib/agent-format";
 import { isInstanceOwnedByClient } from "@/lib/tenant";
-import { calculateTypingDelayMs, DEFAULT_TYPING_DELAY_CONFIG } from "@/lib/agent-delay";
+import {
+  evaluateWeekendB2BGuard,
+  isAutoPoolInstance,
+  type WeekendB2BGuardResult,
+} from "@/lib/campaign-pool";
+import { getBrazilPhoneVariants } from "@/lib/jid-utils";
+import { isChatRowInbound } from "@/lib/chat-direction";
+import { calculateChunkTypingMs, calculateTypingDelayMs, DEFAULT_TYPING_DELAY_CONFIG } from "@/lib/agent-delay";
 import {
   applyAntiBanMixer,
   cleanCompanyNameForApproach,
   effectiveDateForWindow,
+  enforceShortHandshakeGuard,
+  exportAntiBanHistory,
+  isShortIcebreakerTemplate,
+  seedAntiBanHistory,
   syncGreetingToCurrentHour,
 } from "@/lib/antiban-mixer";
+
+export type ColdOutreachPolicy = {
+  allowed: boolean;
+  dailyColdCap: number;
+  hourlyColdCap: number;
+  minSafeIntervalSec: number;
+  symbioticEveryN: number;
+  throttledByHealth?: boolean;
+  reason?: string;
+};
+
+/**
+ * Extrai os 2 dígitos de DDD de um telefone ou JID brasileiro (ex: "5511999..." -> "11").
+ */
+export function extractBrazilDdd(phoneOrJid?: string | null): string | null {
+  if (!phoneOrJid) return null;
+  let digits = String(phoneOrJid).replace(/@.*$/, "").replace(/\D/g, "");
+  if (!digits) return null;
+  if (digits.startsWith("55") && digits.length >= 12) {
+    digits = digits.slice(2);
+  }
+  if (digits.length >= 10 && digits.length <= 11) {
+    return digits.slice(0, 2);
+  }
+  return null;
+}
+
+/**
+ * Política Anti-Ban da Meta para Prospecção Fria (First-Contact Outbound) baseada
+ * no estágio de maturação (`stage 1..4`) e saúde (`health_score`) do chip:
+ * - Fase 1 (Berçário, dias 1..3): BLOQUEADO de disparos frios (risco extremo de ban).
+ * - Saúde < 40: BLOQUEADO até se recuperar no aquecimento.
+ * - Saúde 40..74: Freio Dinâmico (cota diária/horária reduzida pela metade e mais pulsos simbióticos).
+ */
+export function getColdOutreachPolicyForStage(stage: number, healthScore = 100): ColdOutreachPolicy {
+  const normalizedStage = Math.max(1, Math.min(4, Math.floor(Number(stage) || 1)));
+  if (normalizedStage <= 1) {
+    return {
+      allowed: false,
+      dailyColdCap: 0,
+      hourlyColdCap: 0,
+      minSafeIntervalSec: 300,
+      symbioticEveryN: 2,
+      reason: "nursery_stage_1",
+    };
+  }
+  if (healthScore < 40) {
+    return {
+      allowed: false,
+      dailyColdCap: 0,
+      hourlyColdCap: 0,
+      minSafeIntervalSec: 300,
+      symbioticEveryN: 2,
+      reason: "low_health",
+    };
+  }
+
+  let policy: ColdOutreachPolicy;
+  if (normalizedStage === 2) {
+    policy = { allowed: true, dailyColdCap: 18, hourlyColdCap: 5, minSafeIntervalSec: 150, symbioticEveryN: 3 };
+  } else if (normalizedStage === 3) {
+    policy = { allowed: true, dailyColdCap: 35, hourlyColdCap: 8, minSafeIntervalSec: 120, symbioticEveryN: 3 };
+  } else {
+    policy = { allowed: true, dailyColdCap: 60, hourlyColdCap: 12, minSafeIntervalSec: 90, symbioticEveryN: 4 };
+  }
+
+  // Freio Dinâmico por Saúde: se health_score cair abaixo de 75, corta ritmo pela metade antes da crise
+  if (healthScore < 75) {
+    return {
+      ...policy,
+      dailyColdCap: Math.max(2, Math.floor(policy.dailyColdCap / 2)),
+      hourlyColdCap: Math.max(1, Math.floor(policy.hourlyColdCap / 2)),
+      minSafeIntervalSec: policy.minSafeIntervalSec + 60,
+      symbioticEveryN: 2,
+      throttledByHealth: true,
+    };
+  }
+
+  return policy;
+}
+
+const STAGE_COMBINED_DAILY_CAP: Record<number, number> = { 1: 0, 2: 32, 3: 55, 4: 90 };
+
+export { evaluateWeekendB2BGuard, type WeekendB2BGuardResult };
+
+type ColdBatchState = {
+  countInBatch: number;
+  batchLimit: number;
+  sendsSincePulse: number;
+};
+
+const _coldSendTimestampsByInstance = new Map<string, number[]>();
+const _coldBatchStateByInstance = new Map<string, ColdBatchState>();
+const _verifiedCanonicalJids = new Map<string, { jid: string; exists: boolean; verifiedAt: number }>();
+const _hydratedColdQuotaTenants = new Set<string>();
+const _hydratedExtraAntiBanTenants = new Set<string>();
+const _coldQuotaClientInstances = new Map<string, Set<string>>();
+const _recentColdJidsByInstance = new Map<string, string[]>();
+const _zeroReplyBrakeUntil = new Map<string, number>();
+const _zeroReplyClientInstances = new Map<string, Set<string>>();
+const CANONICAL_JID_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+const ZERO_REPLY_BATCH_THRESHOLD = 15;
+const ZERO_REPLY_BRAKE_MS = 25 * 60 * 1000;
+
+export function __resetCampaignAntiBanStateForTests(): void {
+  _coldSendTimestampsByInstance.clear();
+  _coldBatchStateByInstance.clear();
+  _verifiedCanonicalJids.clear();
+  _hydratedColdQuotaTenants.clear();
+  _hydratedExtraAntiBanTenants.clear();
+  _coldQuotaClientInstances.clear();
+  _recentColdJidsByInstance.clear();
+  _zeroReplyBrakeUntil.clear();
+  _zeroReplyClientInstances.clear();
+}
+
+export function clearZeroReplyBrakeForInstance(instanceName: string): void {
+  if (!instanceName) return;
+  _zeroReplyBrakeUntil.delete(instanceName);
+  _recentColdJidsByInstance.delete(instanceName);
+}
+
+function buildJidLookupVariants(remoteJid: string): string[] {
+  const clean = String(remoteJid || "").trim();
+  const variants = new Set<string>();
+  if (clean) variants.add(clean);
+  if (clean && !clean.includes("@g.us") && !clean.includes("@lid")) {
+    for (const digits of getBrazilPhoneVariants(clean)) {
+      variants.add(digits);
+      variants.add(`${digits}@s.whatsapp.net`);
+    }
+  }
+  return Array.from(variants);
+}
+
+async function hydrateZeroReplyAndMixerIfNeeded(clientId: string, nowMs = Date.now()): Promise<void> {
+  if (
+    !clientId ||
+    _hydratedExtraAntiBanTenants.has(clientId) ||
+    process.env.VITEST === "true" ||
+    process.env.NODE_ENV === "test"
+  ) {
+    return;
+  }
+  _hydratedExtraAntiBanTenants.add(clientId);
+
+  try {
+    const { data: rows } = await supabase
+      .from("app_settings")
+      .select("key, value")
+      .in("key", [`zero_reply_state_${clientId}`, `antiban_mixer_${clientId}`]);
+
+    for (const row of rows || []) {
+      if (!row?.value) continue;
+      if (row.key === `zero_reply_state_${clientId}`) {
+        const parsed = JSON.parse(String(row.value)) as {
+          recent?: Record<string, string[]>;
+          brakeUntil?: Record<string, number>;
+        };
+        const instSet = _zeroReplyClientInstances.get(clientId) || new Set<string>();
+        if (parsed.recent && typeof parsed.recent === "object") {
+          for (const [inst, list] of Object.entries(parsed.recent)) {
+            if (!Array.isArray(list)) continue;
+            instSet.add(inst);
+            if (!_recentColdJidsByInstance.has(inst)) {
+              _recentColdJidsByInstance.set(inst, list.slice(-ZERO_REPLY_BATCH_THRESHOLD));
+            }
+          }
+        }
+        if (parsed.brakeUntil && typeof parsed.brakeUntil === "object") {
+          for (const [inst, until] of Object.entries(parsed.brakeUntil)) {
+            instSet.add(inst);
+            if (Number.isFinite(until) && until > nowMs) {
+              _zeroReplyBrakeUntil.set(inst, until);
+            }
+          }
+        }
+        _zeroReplyClientInstances.set(clientId, instSet);
+      } else if (row.key === `antiban_mixer_${clientId}`) {
+        const parsed = JSON.parse(String(row.value)) as Record<string, number[]>;
+        seedAntiBanHistory(parsed);
+      }
+    }
+  } catch {
+    /* persistência em app_settings é best-effort */
+  }
+}
+
+function persistZeroReplyStateAsync(clientId: string, instanceName: string, nowMs = Date.now()): void {
+  if (!clientId || process.env.VITEST === "true" || process.env.NODE_ENV === "test") return;
+
+  const instSet = _zeroReplyClientInstances.get(clientId) || new Set<string>();
+  instSet.add(instanceName);
+  _zeroReplyClientInstances.set(clientId, instSet);
+
+  const recent: Record<string, string[]> = {};
+  const brakeUntil: Record<string, number> = {};
+  for (const inst of instSet) {
+    const jids = _recentColdJidsByInstance.get(inst);
+    if (jids && jids.length > 0) recent[inst] = jids.slice(-ZERO_REPLY_BATCH_THRESHOLD);
+    const until = _zeroReplyBrakeUntil.get(inst) || 0;
+    if (until > nowMs) brakeUntil[inst] = until;
+  }
+
+  supabase
+    .from("app_settings")
+    .upsert(
+      {
+        key: `zero_reply_state_${clientId}`,
+        value: JSON.stringify({ recent, brakeUntil }),
+        updated_at: new Date(nowMs).toISOString(),
+      },
+      { onConflict: "key" }
+    )
+    .then(() => {}, () => {});
+}
+
+function persistAntiBanMixerAsync(clientId: string): void {
+  if (!clientId || process.env.VITEST === "true" || process.env.NODE_ENV === "test") return;
+  const snapshot = exportAntiBanHistory();
+  supabase
+    .from("app_settings")
+    .upsert(
+      {
+        key: `antiban_mixer_${clientId}`,
+        value: JSON.stringify(snapshot),
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "key" }
+    )
+    .then(() => {}, () => {});
+}
+
+/**
+ * Auditoria de "Vácuo Silencioso" (Zero-Reply Brake):
+ * Acompanha os últimos 15 contatos frios abordados pelo chip. Se nenhum deles
+ * respondeu (0 de 15 no `chats_dashboard`), ativa descanso preventivo de 25 min
+ * para interromper a perda silenciosa de reputação na Meta.
+ */
+export async function checkZeroReplyBrakeForInstance(
+  clientId: string,
+  instanceName: string,
+  sentRemoteJid: string,
+  nowMs = Date.now()
+): Promise<{ brakeTriggered: boolean; checkedCount: number }> {
+  await hydrateZeroReplyAndMixerIfNeeded(clientId, nowMs);
+
+  const jids = _recentColdJidsByInstance.get(instanceName) || [];
+  if (sentRemoteJid && !jids.includes(sentRemoteJid)) {
+    jids.push(sentRemoteJid);
+  }
+  _recentColdJidsByInstance.set(instanceName, jids);
+
+  if (jids.length < ZERO_REPLY_BATCH_THRESHOLD) {
+    persistZeroReplyStateAsync(clientId, instanceName, nowMs);
+    return { brakeTriggered: false, checkedCount: jids.length };
+  }
+
+  const batch = jids.splice(0, jids.length);
+  _recentColdJidsByInstance.set(instanceName, []);
+  const expandedBatch = Array.from(
+    new Set(batch.flatMap((jid) => buildJidLookupVariants(jid)))
+  );
+
+  try {
+    let { data, error } = await supabase
+      .from("chats_dashboard")
+      .select("id, sender_type, is_from_me")
+      .eq("client_id", clientId)
+      .in("remote_jid", expandedBatch)
+      .limit(50);
+
+    if (error && /is_from_me|column/i.test(String(error.message || ""))) {
+      const retry = await supabase
+        .from("chats_dashboard")
+        .select("id, sender_type")
+        .eq("client_id", clientId)
+        .in("remote_jid", expandedBatch)
+        .limit(50);
+      data = retry.data as any;
+      error = retry.error;
+    }
+
+    if (error) {
+      persistZeroReplyStateAsync(clientId, instanceName, nowMs);
+      return { brakeTriggered: false, checkedCount: batch.length };
+    }
+    if (Array.isArray(data) && data.some((row) => isChatRowInbound(row as any))) {
+      persistZeroReplyStateAsync(clientId, instanceName, nowMs);
+      return { brakeTriggered: false, checkedCount: batch.length };
+    }
+
+    _zeroReplyBrakeUntil.set(instanceName, nowMs + ZERO_REPLY_BRAKE_MS);
+    persistZeroReplyStateAsync(clientId, instanceName, nowMs);
+    return { brakeTriggered: true, checkedCount: batch.length };
+  } catch {
+    persistZeroReplyStateAsync(clientId, instanceName, nowMs);
+    return { brakeTriggered: false, checkedCount: batch.length };
+  }
+}
+
+async function hydrateColdSendCountsIfNeeded(clientId: string, nowMs = Date.now()): Promise<void> {
+  if (!clientId || _hydratedColdQuotaTenants.has(clientId)) return;
+  _hydratedColdQuotaTenants.add(clientId);
+
+  try {
+    const { data } = await supabase
+      .from("app_settings")
+      .select("value")
+      .eq("key", `cold_sends_${clientId}`)
+      .maybeSingle();
+
+    if (!data?.value) return;
+    const parsed = JSON.parse(String(data.value)) as Record<string, number[]>;
+    if (!parsed || typeof parsed !== "object") return;
+
+    const oneDayAgo = nowMs - 24 * 60 * 60 * 1000;
+    const instSet = _coldQuotaClientInstances.get(clientId) || new Set<string>();
+    for (const [inst, timestamps] of Object.entries(parsed)) {
+      if (!Array.isArray(timestamps)) continue;
+      instSet.add(inst);
+      const existing = _coldSendTimestampsByInstance.get(inst) || [];
+      const merged = [...existing, ...timestamps]
+        .filter((ts) => Number.isFinite(ts) && ts > oneDayAgo)
+        .sort((a, b) => a - b);
+      _coldSendTimestampsByInstance.set(inst, merged);
+    }
+    _coldQuotaClientInstances.set(clientId, instSet);
+  } catch {
+    /* persistência em app_settings é best-effort */
+  }
+}
+
+function persistColdSendCountsAsync(clientId: string, instanceName: string, nowMs = Date.now()): void {
+  if (!clientId || process.env.VITEST === "true" || process.env.NODE_ENV === "test") return;
+
+  const instSet = _coldQuotaClientInstances.get(clientId) || new Set<string>();
+  instSet.add(instanceName);
+  _coldQuotaClientInstances.set(clientId, instSet);
+
+  const oneDayAgo = nowMs - 24 * 60 * 60 * 1000;
+  const snapshot: Record<string, number[]> = {};
+  for (const inst of instSet) {
+    const valid = (_coldSendTimestampsByInstance.get(inst) || []).filter((ts) => ts > oneDayAgo);
+    if (valid.length > 0) snapshot[inst] = valid.slice(-120);
+  }
+
+  supabase
+    .from("app_settings")
+    .upsert(
+      {
+        key: `cold_sends_${clientId}`,
+        value: JSON.stringify(snapshot),
+        updated_at: new Date(nowMs).toISOString(),
+      },
+      { onConflict: "key" }
+    )
+    .then(() => {}, () => {});
+}
+
+function randomBatchLimit(): number {
+  return 6 + Math.floor(Math.random() * 5); // 6 a 10 disparos por lote antes do Coffee-Break
+}
+
+export function getColdSendCounts(
+  instanceName: string,
+  nowMs = Date.now()
+): { hourlyCount: number; dailyCount: number } {
+  const oneHourAgo = nowMs - 60 * 60 * 1000;
+  const oneDayAgo = nowMs - 24 * 60 * 60 * 1000;
+  const list = (_coldSendTimestampsByInstance.get(instanceName) || []).filter((ts) => ts > oneDayAgo);
+  _coldSendTimestampsByInstance.set(instanceName, list);
+  const hourlyCount = list.filter((ts) => ts > oneHourAgo).length;
+  return { hourlyCount, dailyCount: list.length };
+}
+
+export function recordColdOutreachSend(
+  instanceName: string,
+  nowMs = Date.now(),
+  clientId?: string
+): ColdBatchState {
+  const oneDayAgo = nowMs - 24 * 60 * 60 * 1000;
+  const list = (_coldSendTimestampsByInstance.get(instanceName) || []).filter((ts) => ts > oneDayAgo);
+  list.push(nowMs);
+  _coldSendTimestampsByInstance.set(instanceName, list);
+
+  if (clientId) {
+    persistColdSendCountsAsync(clientId, instanceName, nowMs);
+  }
+
+  const prev = _coldBatchStateByInstance.get(instanceName) || {
+    countInBatch: 0,
+    batchLimit: randomBatchLimit(),
+    sendsSincePulse: 0,
+  };
+  const next: ColdBatchState = {
+    countInBatch: prev.countInBatch + 1,
+    batchLimit: prev.batchLimit,
+    sendsSincePulse: prev.sendsSincePulse + 1,
+  };
+  _coldBatchStateByInstance.set(instanceName, next);
+  return next;
+}
+
+export function markSymbioticPulseTriggered(instanceName: string): void {
+  const prev = _coldBatchStateByInstance.get(instanceName);
+  if (prev) {
+    prev.sendsSincePulse = 0;
+    _coldBatchStateByInstance.set(instanceName, prev);
+  }
+}
+
+export function cacheVerifiedCanonicalJid(
+  instanceName: string,
+  phoneDigits: string,
+  entry: { exists: boolean; jid?: string | null },
+  nowMs = Date.now()
+): void {
+  const clean = String(phoneDigits || "").replace(/\D/g, "");
+  if (!clean) return;
+  const jid = entry.jid || `${clean}@s.whatsapp.net`;
+  _verifiedCanonicalJids.set(`${instanceName}:${clean}`, {
+    jid,
+    exists: entry.exists !== false,
+    verifiedAt: nowMs,
+  });
+  _verifiedCanonicalJids.set(`*:${clean}`, {
+    jid,
+    exists: entry.exists !== false,
+    verifiedAt: nowMs,
+  });
+}
+
+export function getCachedCanonicalJid(
+  instanceName: string,
+  phoneDigits: string,
+  nowMs = Date.now()
+): { jid: string; exists: boolean } | null {
+  const clean = String(phoneDigits || "").replace(/\D/g, "");
+  if (!clean) return null;
+  const hit =
+    _verifiedCanonicalJids.get(`${instanceName}:${clean}`) ||
+    _verifiedCanonicalJids.get(`*:${clean}`);
+  if (!hit) return null;
+  if (nowMs - hit.verifiedAt > CANONICAL_JID_CACHE_TTL_MS) {
+    _verifiedCanonicalJids.delete(`${instanceName}:${clean}`);
+    return null;
+  }
+  return { jid: hit.jid, exists: hit.exists };
+}
+
+/**
+ * Delay humano (3.5s a 7.5s) entre uma consulta `onWhatsApp` (USyncQuery) ao vivo
+ * e o início do `composing` ("digitando..."), eliminando a assinatura robótica de
+ * consultar existência e disparar no mesmo segundo.
+ */
+export function calculatePreSendProfilePauseMs(): number {
+  return 3500 + Math.floor(Math.random() * 4001);
+}
+
+/**
+ * Calcula o delay até o próximo disparo frio da campanha:
+ * - Respeita o piso seguro do estágio do chip (`stageMinIntervalSec`).
+ * - A cada lote de 6 a 10 disparos (`batchLimit`), aplica automaticamente um
+ *   Coffee-Break humano de 12 a 22 minutos para quebrar a distribuição uniforme.
+ */
+export function computeCampaignNextDelayMs(params: {
+  instanceName: string;
+  minIntervalSec: number;
+  maxIntervalSec: number;
+  stageMinIntervalSec?: number;
+}): { delayMs: number; isCoffeeBreak: boolean; batchCount: number } {
+  const effectiveMin = Math.max(
+    5,
+    Number(params.minIntervalSec) || 30,
+    Number(params.stageMinIntervalSec) || 0
+  );
+  const effectiveMax = Math.max(effectiveMin + 15, Number(params.maxIntervalSec) || 60);
+
+  const state = _coldBatchStateByInstance.get(params.instanceName);
+  if (state && state.countInBatch >= state.batchLimit) {
+    const completedCount = state.countInBatch;
+    state.countInBatch = 0;
+    state.batchLimit = randomBatchLimit();
+    _coldBatchStateByInstance.set(params.instanceName, state);
+
+    // Pausa longa de 12 a 22 minutos (720s a 1320s)
+    const coffeeBreakMs = (720 + Math.floor(Math.random() * 601)) * 1000;
+    return {
+      delayMs: coffeeBreakMs,
+      isCoffeeBreak: true,
+      batchCount: completedCount,
+    };
+  }
+
+  return {
+    delayMs: jitterMs(effectiveMin, effectiveMax),
+    isCoffeeBreak: false,
+    batchCount: state?.countInBatch || 0,
+  };
+}
+
 
 type CampaignRow = {
   id: string;
@@ -157,24 +670,58 @@ async function preflightCheck(campaignId: string): Promise<{ ok: boolean; error?
     }
   }
 
-  // Checa se a instância existe e está conectada (apenas pra Evolution; Cloud é sempre "open" se token válido)
-  try {
-    const ch = await channel.resolveChannel(c.instance_name, { fresh: true });
-    if (ch.provider === "whatsapp_cloud") {
-      if (!ch.cloud?.access_token || !ch.cloud?.phone_number_id) {
-        return { ok: false, error: `Conexão Cloud "${c.instance_name}" sem token/phone_number_id. Configure em /whatsapp.` };
-      }
-    } else {
-      const status = await channel.getStatus(c.instance_name);
-      if (status.state === "not_found") {
-        return { ok: false, error: `Instância "${c.instance_name}" não existe na Evolution API. Vai em /whatsapp e cria/conecta.` };
-      }
-      if (status.state !== "open") {
-        return { ok: false, error: `Instância "${c.instance_name}" não está conectada (estado: ${status.state}). Escaneia o QR em /whatsapp.` };
-      }
+  // Checa se a instância existe e está conectada (ou se usa Pool Automático multi-chip)
+  if (isAutoPoolInstance(c.instance_name)) {
+    const poolCheck = await resolveHealthyCampaignChip(c.client_id, c.instance_name);
+    if (!poolCheck.ok) {
+      return {
+        ok: false,
+        error: `Nenhum chip saudável/maduro disponível no Pool Automático (${poolCheck.reason || "sem chips prontos"}). Aguarde os chips passarem da Fase 1 ou saírem da quarentena.`,
+      };
     }
-  } catch (err: any) {
-    return { ok: false, error: `Falha ao consultar canal: ${err.message}.` };
+  } else {
+    try {
+      const ch = await channel.resolveChannel(c.instance_name, { fresh: true });
+      if (ch.provider === "whatsapp_cloud") {
+        if (!ch.cloud?.access_token || !ch.cloud?.phone_number_id) {
+          return { ok: false, error: `Conexão Cloud "${c.instance_name}" sem token/phone_number_id. Configure em /whatsapp.` };
+        }
+      } else {
+        const status = await channel.getStatus(c.instance_name);
+        if (status.state === "not_found") {
+          return { ok: false, error: `Instância "${c.instance_name}" não existe na Evolution API. Vai em /whatsapp e cria/conecta.` };
+        }
+        if (status.state !== "open") {
+          return { ok: false, error: `Instância "${c.instance_name}" não está conectada (estado: ${status.state}). Escaneia o QR em /whatsapp.` };
+        }
+      }
+    } catch (err: any) {
+      return { ok: false, error: `Falha ao consultar canal: ${err.message}.` };
+    }
+
+    // Proteção cruzada com Aquecedor de Chips: impede iniciar disparo frio em massa
+    // se o chip estiver em quarentena preventiva (Circuit Breaker ativo).
+    try {
+      const { data: warmupCfg } = await supabase
+        .from("whatsapp_warmup_configs")
+        .select("is_quarantined, quarantine_until, quarantine_reason")
+        .eq("client_id", c.client_id)
+        .eq("instance_name", c.instance_name)
+        .maybeSingle();
+
+      if (
+        warmupCfg?.is_quarantined &&
+        warmupCfg.quarantine_until &&
+        new Date(warmupCfg.quarantine_until) > new Date()
+      ) {
+        return {
+          ok: false,
+          error: `O chip "${c.instance_name}" está em quarentena preventiva anti-ban no Aquecedor de Chips (${warmupCfg.quarantine_reason || "múltiplas falhas recentes"}). Aguarde o término da quarentena antes de disparar campanhas.`,
+        };
+      }
+    } catch {
+      /* tabela opcional em ambientes antigos */
+    }
   }
 
   // Se personalize_with_ai, precisa de pelo menos UMA chave de IA (Gemini ou
@@ -423,7 +970,386 @@ export async function persistOutgoingMessage(opts: {
     console.error("[persist] chats_dashboard error:", e.message);
   }
 }
-async function processNextTarget(campaignId: string): Promise<"continue" | "done" | "stopped" | "out_of_hours" | "too_soon"> {
+const _lastSelectedInstanceByCampaign = new Map<string, { instanceName: string; stageMinIntervalSec?: number }>();
+
+export async function resolveHealthyCampaignChip(
+  clientId: string,
+  primaryInstanceName: string,
+  nowMsOrOpts: number | { targetRemoteJid?: string | null; preferredInstanceName?: string | null; nowMs?: number; hourlyFactor?: number } = Date.now()
+): Promise<{
+  ok: boolean;
+  instanceName: string;
+  rotated: boolean;
+  policy: ColdOutreachPolicy | null;
+  reason?: string;
+}> {
+  const nowMs =
+    typeof nowMsOrOpts === "number" ? nowMsOrOpts : nowMsOrOpts?.nowMs ?? Date.now();
+  const targetRemoteJid =
+    typeof nowMsOrOpts === "object" ? nowMsOrOpts?.targetRemoteJid : null;
+  const preferredInstanceName =
+    typeof nowMsOrOpts === "object" ? nowMsOrOpts?.preferredInstanceName || null : null;
+  const hourlyFactor =
+    typeof nowMsOrOpts === "object" && typeof nowMsOrOpts?.hourlyFactor === "number"
+      ? Math.max(0, Math.min(1, nowMsOrOpts.hourlyFactor))
+      : 1;
+  const targetDdd = extractBrazilDdd(targetRemoteJid);
+
+  try {
+    await Promise.all([
+      hydrateColdSendCountsIfNeeded(clientId, nowMs),
+      hydrateZeroReplyAndMixerIfNeeded(clientId, nowMs),
+    ]);
+
+    const { data: warmupRows, error } = await supabase
+      .from("whatsapp_warmup_configs")
+      .select("instance_name, phone_number, enabled, stage, health_score, is_quarantined, quarantine_until, purpose, sent_today")
+      .eq("client_id", clientId);
+
+    const { data: connRows } = await supabase
+      .from("channel_connections")
+      .select("instance_name, status, provider_config")
+      .eq("client_id", clientId);
+
+    const openConns: string[] = [];
+    const openSet = new Set<string>();
+    const connPhoneByInstance = new Map<string, string>();
+    if (Array.isArray(connRows)) {
+      for (const r of connRows) {
+        const inst = String((r as any)?.instance_name || "");
+        const st = String((r as any)?.status || "").toLowerCase();
+        if (st === "open" || st === "connected" || st === "online") {
+          openSet.add(inst);
+          if (inst) openConns.push(inst);
+        }
+        const pCfg = (r as any)?.provider_config;
+        const owner = pCfg?.owner_phone || pCfg?.owner_jid;
+        if (inst && owner) connPhoneByInstance.set(inst, String(owner));
+      }
+    }
+
+    if (error || !Array.isArray(warmupRows) || warmupRows.length === 0) {
+      if (isAutoPoolInstance(primaryInstanceName)) {
+        if (openConns.length > 0) {
+          return { ok: true, instanceName: openConns[0], rotated: true, policy: null, reason: "auto_pool" };
+        }
+        return { ok: false, instanceName: "", rotated: false, policy: null, reason: "no_connected_pool_chip" };
+      }
+      return { ok: true, instanceName: primaryInstanceName, rotated: false, policy: null };
+    }
+
+    const isChipEligible = (row: any): { eligible: boolean; policy: ColdOutreachPolicy; hourlyCount: number; dailyCount: number; ddd: string | null; reason?: string } => {
+      const inst = String(row.instance_name || "");
+      const isQuarantined =
+        Boolean(row.is_quarantined) &&
+        Boolean(row.quarantine_until) &&
+        new Date(String(row.quarantine_until)).getTime() > nowMs;
+      const zeroReplyUntil = _zeroReplyBrakeUntil.get(inst) || 0;
+      const normalizedStage = Math.max(1, Math.min(4, Math.floor(Number(row.stage || 1))));
+      const policy = getColdOutreachPolicyForStage(normalizedStage, Number(row.health_score ?? 100));
+      const { hourlyCount, dailyCount } = getColdSendCounts(inst, nowMs);
+      const warmupSentToday = Math.max(0, Number(row.sent_today || 0));
+      const combinedCeiling = STAGE_COMBINED_DAILY_CAP[normalizedStage] ?? 90;
+      const effectiveDailyCap = Math.min(policy.dailyColdCap, Math.max(0, combinedCeiling - warmupSentToday));
+      const effectiveHourlyCap =
+        hourlyFactor < 1 && policy.allowed
+          ? Math.max(1, Math.floor(policy.hourlyColdCap * hourlyFactor))
+          : policy.hourlyColdCap;
+      const ddd = extractBrazilDdd(row.phone_number || connPhoneByInstance.get(inst) || null);
+
+      if (isQuarantined) {
+        return { eligible: false, policy, hourlyCount, dailyCount, ddd, reason: "quarantined" };
+      }
+      if (zeroReplyUntil > nowMs) {
+        return { eligible: false, policy, hourlyCount, dailyCount, ddd, reason: "zero_reply_brake" };
+      }
+      if (!policy.allowed) {
+        return { eligible: false, policy, hourlyCount, dailyCount, ddd, reason: policy.reason || "policy_blocked" };
+      }
+      if (hourlyCount >= effectiveHourlyCap) {
+        return {
+          eligible: false,
+          policy,
+          hourlyCount,
+          dailyCount,
+          ddd,
+          reason: hourlyFactor < 1 ? "weekend_hourly_cap" : "hourly_cold_cap",
+        };
+      }
+      if (dailyCount >= effectiveDailyCap) {
+        return {
+          eligible: false,
+          policy,
+          hourlyCount,
+          dailyCount,
+          ddd,
+          reason: warmupSentToday > 0 && effectiveDailyCap < policy.dailyColdCap ? "combined_daily_cap" : "daily_cold_cap",
+        };
+      }
+      return { eligible: true, policy, hourlyCount, dailyCount, ddd };
+    };
+
+    const scoreChipCandidate = (row: any, ev: ReturnType<typeof isChipEligible>, isPrimary: boolean): number => {
+      let score = Number(row.health_score ?? 100);
+      score -= ev.hourlyCount * 22;
+      if (preferredInstanceName && row.instance_name === preferredInstanceName) {
+        score += 150; // Sticky Sender: prioriza o mesmo chip que já iniciou conversa com o lead
+      }
+      if (targetDdd && ev.ddd) {
+        if (targetDdd === ev.ddd) {
+          score += 120; // Presença local exata (mesmo DDD do lead)
+        } else if (targetDdd.charAt(0) === ev.ddd.charAt(0)) {
+          score += 20; // Mesma macro-região de DDD
+        }
+      }
+      if (isPrimary && ev.hourlyCount < 2) {
+        score += 10;
+      }
+      return score;
+    };
+
+    const isAutoPool = isAutoPoolInstance(primaryInstanceName);
+    const primaryRow = isAutoPool
+      ? null
+      : warmupRows.find((r: any) => r.instance_name === primaryInstanceName);
+    const primaryEval = primaryRow ? isChipEligible(primaryRow) : null;
+
+    // Avalia candidatos irmãos conectados (ou todo o pool no modo __auto_pool__)
+    const siblingCandidates = warmupRows
+      .filter((r: any) => {
+        if (!r?.instance_name) return false;
+        if (!isAutoPool && r.instance_name === primaryInstanceName) return false;
+        if (r.enabled === false && r.purpose !== "outbound") return false;
+        if (openSet.size > 0 && !openSet.has(r.instance_name)) return false;
+        return true;
+      })
+      .map((r: any) => {
+        const evalRes = isChipEligible(r);
+        return { row: r, eval: evalRes, score: scoreChipCandidate(r, evalRes, false) };
+      })
+      .filter((item) => item.eval.eligible)
+      .sort((a, b) => b.score - a.score);
+
+    if (isAutoPool) {
+      if (siblingCandidates.length > 0) {
+        const chosen = siblingCandidates[0];
+        const reason =
+          preferredInstanceName && chosen.row.instance_name === preferredInstanceName
+            ? "sticky_sender"
+            : targetDdd && chosen.eval.ddd === targetDdd
+              ? "ddd_affinity"
+              : "auto_pool";
+        return {
+          ok: true,
+          instanceName: String(chosen.row.instance_name),
+          rotated: true,
+          policy: chosen.eval.policy,
+          reason,
+        };
+      }
+      return {
+        ok: false,
+        instanceName: "",
+        rotated: false,
+        policy: null,
+        reason: "no_eligible_pool_chip",
+      };
+    }
+
+    if (!primaryRow) {
+      return { ok: true, instanceName: primaryInstanceName, rotated: false, policy: null };
+    }
+
+    if (primaryEval?.eligible) {
+      const topSibling = siblingCandidates[0];
+
+      // 1. Afinidade de DDD: se o irmão tiver exatamente o mesmo DDD do lead e o principal não, roteia para ele
+      if (
+        topSibling &&
+        targetDdd &&
+        topSibling.eval.ddd === targetDdd &&
+        primaryEval.ddd !== targetDdd
+      ) {
+        return {
+          ok: true,
+          instanceName: String(topSibling.row.instance_name),
+          rotated: true,
+          policy: topSibling.eval.policy,
+          reason: "ddd_affinity",
+        };
+      }
+
+      // 2. Balanceamento de carga: divide o ritmo entre chips saudáveis quando o principal já disparou >= 2 na hora
+      if (
+        primaryEval.hourlyCount >= 2 &&
+        topSibling &&
+        topSibling.eval.hourlyCount + 1 < primaryEval.hourlyCount
+      ) {
+        return {
+          ok: true,
+          instanceName: String(topSibling.row.instance_name),
+          rotated: true,
+          policy: topSibling.eval.policy,
+          reason: "load_balance",
+        };
+      }
+
+      return {
+        ok: true,
+        instanceName: primaryInstanceName,
+        rotated: false,
+        policy: primaryEval.policy,
+      };
+    }
+
+    // Chip principal bloqueado (Nursery Stage 1, saúde crítica, quarentena ou teto da hora) -> rotaciona para irmão saudável
+    if (siblingCandidates.length > 0) {
+      const chosen = siblingCandidates[0];
+      return {
+        ok: true,
+        instanceName: String(chosen.row.instance_name),
+        rotated: true,
+        policy: chosen.eval.policy,
+        reason: primaryEval?.reason || "failover",
+      };
+    }
+
+    return {
+      ok: false,
+      instanceName: primaryInstanceName,
+      rotated: false,
+      policy: primaryEval?.policy || null,
+      reason: primaryEval?.reason || "cold_cap_reached",
+    };
+  } catch {
+    return { ok: true, instanceName: primaryInstanceName, rotated: false, policy: null };
+  }
+}
+
+const CROSS_CAMPAIGN_COOLDOWN_HOURS = 72;
+
+/**
+ * Impede que campanhas/automações diferentes disparem abordagem fria para o
+ * mesmo lead (incluindo variante 8/9º dígito BR) em menos de `cooldownHours`.
+ */
+export async function findRecentCrossCampaignSend(params: {
+  clientId: string;
+  currentCampaignId: string;
+  remoteJid: string;
+  cooldownHours?: number;
+  nowMs?: number;
+}): Promise<{ campaignId: string; sentAt: string } | null> {
+  const {
+    clientId,
+    currentCampaignId,
+    remoteJid,
+    cooldownHours = CROSS_CAMPAIGN_COOLDOWN_HOURS,
+    nowMs = Date.now(),
+  } = params;
+  if (!clientId || !remoteJid) return null;
+
+  const variants = buildJidLookupVariants(remoteJid);
+  if (variants.length === 0) return null;
+
+  const cutoffIso = new Date(nowMs - Math.max(1, cooldownHours) * 60 * 60 * 1000).toISOString();
+  try {
+    const { data, error } = await supabase
+      .from("campaign_targets")
+      .select("campaign_id, sent_at")
+      .eq("client_id", clientId)
+      .neq("campaign_id", currentCampaignId)
+      .eq("status", "sent")
+      .in("remote_jid", variants)
+      .gte("sent_at", cutoffIso)
+      .order("sent_at", { ascending: false })
+      .limit(1);
+
+    if (error || !Array.isArray(data) || data.length === 0) return null;
+    const hit = data[0] as { campaign_id?: string | null; sent_at?: string | null };
+    if (!hit?.campaign_id || !hit?.sent_at) return null;
+    return { campaignId: String(hit.campaign_id), sentAt: String(hit.sent_at) };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchLeadFullForCampaign(remoteJid: string, clientId: string): Promise<any | null> {
+  const cols =
+    "nome_negocio, ramo_negocio, telefone, endereco, website, instagram, facebook, avaliacao, reviews, status, categoria, resumo_avaliacoes";
+  const variants = buildJidLookupVariants(remoteJid);
+
+  let res = await supabase
+    .from("leads_extraidos")
+    .select("*")
+    .eq("remoteJid", remoteJid)
+    .eq("client_id", clientId)
+    .maybeSingle();
+  if (res.error && res.error.code === "PGRST204") {
+    res = await supabase
+      .from("leads_extraidos")
+      .select(cols.replace(", resumo_avaliacoes", ""))
+      .eq("remoteJid", remoteJid)
+      .eq("client_id", clientId)
+      .maybeSingle();
+  }
+  if (res.data) return res.data;
+
+  if (variants.length > 1) {
+    let fallbackRes = await supabase
+      .from("leads_extraidos")
+      .select("*")
+      .in("remoteJid", variants)
+      .eq("client_id", clientId)
+      .limit(1);
+    if (fallbackRes.error && fallbackRes.error.code === "PGRST204") {
+      fallbackRes = await supabase
+        .from("leads_extraidos")
+        .select(cols.replace(", resumo_avaliacoes", ""))
+        .in("remoteJid", variants)
+        .eq("client_id", clientId)
+        .limit(1);
+    }
+    if (Array.isArray(fallbackRes.data) && fallbackRes.data[0]) {
+      return fallbackRes.data[0];
+    }
+  }
+  return null;
+}
+
+async function resolveCampaignAntiBanContext(c: any): Promise<{
+  linkedAuto: { scrape_filters?: any; agent_id?: number | null } | null;
+  antibanMixerEnabled: boolean;
+}> {
+  let linkedAuto: { scrape_filters?: any; agent_id?: number | null } | null = null;
+  let antibanMixerEnabled = false;
+  try {
+    if (c?.automation_id) {
+      const { data: auto } = await supabase
+        .from("automations")
+        .select("scrape_filters, agent_id")
+        .eq("id", c.automation_id)
+        .maybeSingle();
+      linkedAuto = auto || null;
+      if (auto?.scrape_filters?.antiban_mixer !== undefined) {
+        antibanMixerEnabled = Boolean(auto.scrape_filters.antiban_mixer);
+      }
+    } else if (c?.antiban_mixer !== undefined) {
+      antibanMixerEnabled = Boolean(c.antiban_mixer);
+    } else if (c?.id) {
+      const { data: sysCfg } = await supabase
+        .from("system_config")
+        .select("value")
+        .eq("key", `campaign_antiban:${c.id}`)
+        .maybeSingle();
+      if (sysCfg?.value !== undefined) {
+        antibanMixerEnabled = sysCfg.value === "true" || sysCfg.value === "1";
+      }
+    }
+  } catch {}
+  return { linkedAuto, antibanMixerEnabled };
+}
+
+async function processNextTarget(campaignId: string): Promise<"continue" | "done" | "stopped" | "out_of_hours" | "too_soon" | "cold_cap_rest"> {
   // Re-fetch campaign (status pode ter mudado)
   const { data: c } = await supabase.from("campaigns").select("*").eq("id", campaignId).single();
   if (!c) return "stopped";
@@ -439,7 +1365,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     }).eq("id", campaignId);
     return "stopped";
   }
-  if (!(await isInstanceOwnedByClient(c.instance_name, clientId))) {
+  if (!isAutoPoolInstance(c.instance_name) && !(await isInstanceOwnedByClient(c.instance_name, clientId))) {
     const msg = `Instância "${c.instance_name}" não pertence ao cliente da campanha — disparo pausado.`;
     await addCampaignLog(campaignId, msg, "error");
     await supabase.from("campaigns").update({
@@ -450,6 +1376,35 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
 
   if (!isWithinAllowedHour(c as any)) {
     const msg = `⏰ Fora do horário permitido — agora são ${nowHourBRT()}h, a janela é ${c.allowed_start_hour}h-${c.allowed_end_hour}h. O disparo retoma sozinho quando a janela abrir.`;
+    console.log(`[CAMPAIGN ${c.name}] ${msg}`);
+    await addCampaignLog(campaignId, msg, "warning");
+    return "out_of_hours";
+  }
+
+  let weekendGuardEnabled = Boolean((c as any).weekend_guard);
+  if (!weekendGuardEnabled && (c as any).automation_id) {
+    try {
+      const { data: autoRow } = await supabase
+        .from("automations")
+        .select("scrape_filters")
+        .eq("id", (c as any).automation_id)
+        .maybeSingle();
+      weekendGuardEnabled = Boolean(autoRow?.scrape_filters?.weekend_guard);
+    } catch {}
+  }
+  if (!weekendGuardEnabled) {
+    try {
+      const { data: wgCfg } = await supabase
+        .from("system_config")
+        .select("value")
+        .eq("key", `campaign_weekend_guard:${c.id}`)
+        .maybeSingle();
+      weekendGuardEnabled = wgCfg?.value === "true" || wgCfg?.value === "1";
+    } catch {}
+  }
+  const weekendGuard = evaluateWeekendB2BGuard(weekendGuardEnabled);
+  if (!weekendGuard.allowed) {
+    const msg = "📅 Modo Comercial B2B ativo — disparos frios pausados aos domingos para preservar reputação; retoma na segunda-feira.";
     console.log(`[CAMPAIGN ${c.name}] ${msg}`);
     await addCampaignLog(campaignId, msg, "warning");
     return "out_of_hours";
@@ -482,13 +1437,10 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     return "too_soon";
   }
 
-  // CLAIM ATÔMICO: pega o próximo pending E marca como "processing" no MESMO
-  // UPDATE. Se outro worker (timer paralelo, recover do boot) tentar pegar o
-  // mesmo, vai falhar a condição `status=pending` → 0 rows → pula. Resolve a
-  // duplicação de envio (cliente recebia 2 mensagens iguais).
+  // CLAIM ATÔMICO (fase 1 — leitura do próximo pending antes do roteamento Multi-Chip para casar DDD)
   const { data: candidate } = await supabase
     .from("campaign_targets")
-    .select("id")
+    .select("id, remote_jid")
     .eq("campaign_id", campaignId)
     .eq("status", "pending")
     .order("priority", { ascending: false })
@@ -524,6 +1476,47 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     return "done";
   }
 
+  // ───────── ESCUDO DE CAPACIDADE FRIA + POOL MULTI-CHIP COM AFINIDADE DE DDD ─────────
+  const chipResolution = await resolveHealthyCampaignChip(clientId, c.instance_name, {
+    targetRemoteJid: candidate.remote_jid,
+    hourlyFactor: weekendGuard.hourlyFactor,
+  });
+  if (!chipResolution.ok) {
+    const restMsg =
+      chipResolution.reason === "nursery_stage_1"
+        ? `🍼 Proteção Berçário Anti-Ban: o chip "${c.instance_name}" ainda está na Fase 1 (dias 1–3) e não pode iniciar prospecção fria ainda. Aguardando amadurecer ou outro chip disponível.`
+        : `🛡️ Proteção Anti-Ban: chip(s) atingiram o teto seguro de prospecção fria da hora/estágio (${chipResolution.reason || "cold_cap"}). Descansando 15 min antes de retomar automaticamente.`;
+    console.log(`[CAMPAIGN ${c.name}] ${restMsg}`);
+    await addCampaignLog(campaignId, restMsg, "warning");
+    return "cold_cap_rest";
+  }
+
+  const effectiveInstanceName = chipResolution.instanceName || c.instance_name;
+  _lastSelectedInstanceByCampaign.set(campaignId, {
+    instanceName: effectiveInstanceName,
+    stageMinIntervalSec: chipResolution.policy?.minSafeIntervalSec,
+  });
+
+  if (chipResolution.rotated && effectiveInstanceName !== c.instance_name) {
+    const rotLabel =
+      chipResolution.reason === "ddd_affinity"
+        ? "afinidade de DDD local"
+        : chipResolution.reason === "load_balance"
+          ? "balanceamento de carga"
+          : "proteção do chip principal";
+    await addCampaignLog(
+      campaignId,
+      `🔄 Pool Multi-Chip Anti-Ban: alternando disparo para o chip saudável "${effectiveInstanceName}" (${rotLabel}).`,
+      "info"
+    );
+  } else if (chipResolution.policy?.throttledByHealth) {
+    await addCampaignLog(
+      campaignId,
+      `🐢 Freio Dinâmico de Saúde ativo no chip "${effectiveInstanceName}" — ritmo reduzido em 50% e pulso simbiótico reforçado.`,
+      "info"
+    );
+  }
+
   // Tenta claim. Só prossegue se ESTE chamador conseguiu mover pending→processing.
   // Não atualiza `updated_at` porque a tabela campaign_targets não tem essa coluna.
   const { data: claimed } = await supabase
@@ -540,14 +1533,16 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
   }
   const target = claimed;
 
-  // Opt-out check — lead pediu parar. Pula + loga. Anti-spam + LGPD.
-  const { data: optRow } = await supabase
+  // Opt-out check (inclui variantes de 8/9º dígito BR) — lead pediu parar. Pula + loga. Anti-spam + LGPD.
+  const optVariants = buildJidLookupVariants(target.remote_jid);
+  const { data: optRows } = await supabase
     .from("leads_extraidos")
     .select("opt_out")
-    .eq("remoteJid", target.remote_jid)
+    .in("remoteJid", optVariants)
     .eq("client_id", clientId)
-    .maybeSingle();
-  if (optRow?.opt_out) {
+    .eq("opt_out", true)
+    .limit(1);
+  if (Array.isArray(optRows) && optRows.length > 0) {
     await supabase.from("campaign_targets").update({
       status: "skipped",
       error_message: "Opt-out (lead pediu parar)",
@@ -561,6 +1556,30 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     return "continue";
   }
 
+  // Cooldown Anti-Spam entre campanhas diferentes (impede 2 disparos frios para o mesmo contato em < 72h)
+  const recentCrossSend = await findRecentCrossCampaignSend({
+    clientId,
+    currentCampaignId: campaignId,
+    remoteJid: target.remote_jid,
+  });
+  if (recentCrossSend) {
+    await supabase.from("campaign_targets").update({
+      status: "skipped",
+      error_message: `Cooldown entre campanhas (< ${CROSS_CAMPAIGN_COOLDOWN_HOURS}h)`,
+      attempts: (target.attempts || 0) + 1,
+    }).eq("id", target.id);
+    await supabase.from("campaigns").update({
+      skipped_count: (c.skipped_count || 0) + 1,
+      updated_at: new Date().toISOString(),
+    }).eq("id", campaignId);
+    await addCampaignLog(
+      campaignId,
+      `⊘ Pulado ${target.remote_jid} — já abordado em outra campanha recentemente (${recentCrossSend.campaignId.slice(0, 8)}).`,
+      "warning"
+    );
+    return "continue";
+  }
+
   await addCampaignLog(campaignId, `Processando lead: ${target.nome_negocio || target.remote_jid}`, "info");
 
   // Validação prévia + resolução do JID canônico. Grupos (@g.us) pulam.
@@ -569,12 +1588,28 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
   // canônico mantém o disparo e a resposta do cliente NO MESMO chat (era o
   // motivo da mensagem de disparo "sumir" da conversa).
   let sendJid = target.remote_jid;
-  if (!target.remote_jid.includes("@g.us")) {
+  if (!target.remote_jid.includes("@g.us") && !target.remote_jid.includes("@lid")) {
     const phone = target.remote_jid.replace(/@.*$/, "").replace(/\D/g, "");
     if (phone) {
-      const check = await channel.checkWhatsAppNumbersDetailed([phone], c.instance_name);
-      // A chave do retorno pode vir como número limpo OU canônico — pega a 1ª entrada.
-      const entry = check[phone] || Object.values(check)[0] || null;
+      // 1. Consulta primeiro o cache pré-validado para evitar a assinatura robótica
+      //    de disparar `USyncQuery (onWhatsApp)` milissegundos antes de `sendMessage`.
+      const cachedEntry = getCachedCanonicalJid(effectiveInstanceName, phone);
+      let entry: { exists?: boolean; jid?: string | null } | null = cachedEntry;
+      let checkedLiveNow = false;
+
+      if (!entry) {
+        const check = await channel.checkWhatsAppNumbersDetailed([phone], effectiveInstanceName);
+        // A chave do retorno pode vir como número limpo OU canônico — pega a 1ª entrada.
+        entry = check[phone] || Object.values(check)[0] || null;
+        checkedLiveNow = true;
+        if (entry) {
+          cacheVerifiedCanonicalJid(effectiveInstanceName, phone, {
+            exists: entry.exists !== false,
+            jid: entry.jid,
+          });
+        }
+      }
+
       if (entry && entry.exists === false) {
         await supabase.from("campaign_targets").update({
           status: "skipped",
@@ -588,6 +1623,19 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
         await addCampaignLog(campaignId, `⊘ Pulado ${target.remote_jid} — número não tem WhatsApp`, "warning");
         return "continue";
       }
+
+      // Se consultou a existência ao vivo agora (e não veio do cache pré-validado),
+      // aguarda um micro-delay humano (3.5s–7.5s) antes de iniciar o "digitando...",
+      // quebrando a correlação USyncQuery -> sendMessage imediata.
+      if (
+        checkedLiveNow &&
+        entry &&
+        process.env.VITEST !== "true" &&
+        process.env.NODE_ENV !== "test"
+      ) {
+        await new Promise((r) => setTimeout(r, calculatePreSendProfilePauseMs()));
+      }
+
       if (entry && entry.jid) {
         sendJid = entry.jid;
         if (sendJid !== target.remote_jid) {
@@ -664,25 +1712,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     }
   }
 
-  // Busca o lead completo no CRM pra abastecer TODAS as variáveis do template
-  // ({{endereco}}, {{website}}, {{avaliacao}}, {{ramo}}, etc) — não só o nome.
-  // resumo_avaliacoes é coluna da migração reviews_ai.sql — se o banco ainda
-  // não tem, o PGRST204 cai no retry sem ela (variável fica vazia, resto intacto).
-  let leadFull: any = null;
-  {
-    const cols = "nome_negocio, ramo_negocio, telefone, endereco, website, instagram, facebook, avaliacao, reviews, status, categoria, resumo_avaliacoes";
-    const q = supabase.from("leads_extraidos").select("*").eq("remoteJid", target.remote_jid).eq("client_id", clientId);
-    let res = await q.maybeSingle();
-    if (res.error && res.error.code === "PGRST204") {
-      res = await supabase
-        .from("leads_extraidos")
-        .select(cols.replace(", resumo_avaliacoes", ""))
-        .eq("remoteJid", target.remote_jid)
-        .eq("client_id", clientId)
-        .maybeSingle();
-    }
-    leadFull = res.data || null;
-  }
+  const leadFull: any = await fetchLeadFullForCampaign(target.remote_jid, clientId);
 
   // push_name do contato — vem da tabela contacts (nome do WhatsApp).
   let pushName: string | null = null;
@@ -696,34 +1726,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     pushName = (contact as any)?.push_name || null;
   }
 
-  // Carrega dados da automação vinculada (se houver) para resolver
-  // Misturador Anti-Ban (antiban_mixer) e Delay de digitação (typing_delay).
-  let linkedAuto: { scrape_filters?: any; agent_id?: number | null } | null = null;
-  let antibanMixerEnabled = false;
-  try {
-    if ((c as any).automation_id) {
-      const { data: auto } = await supabase
-        .from("automations")
-        .select("scrape_filters, agent_id")
-        .eq("id", (c as any).automation_id)
-        .maybeSingle();
-      linkedAuto = auto || null;
-      if (auto?.scrape_filters?.antiban_mixer !== undefined) {
-        antibanMixerEnabled = Boolean(auto.scrape_filters.antiban_mixer);
-      }
-    } else if ((c as any).antiban_mixer !== undefined) {
-      antibanMixerEnabled = Boolean((c as any).antiban_mixer);
-    } else {
-      const { data: sysCfg } = await supabase
-        .from("system_config")
-        .select("value")
-        .eq("key", `campaign_antiban:${c.id}`)
-        .maybeSingle();
-      if (sysCfg?.value !== undefined) {
-        antibanMixerEnabled = sysCfg.value === "true" || sysCfg.value === "1";
-      }
-    }
-  } catch {}
+  const { linkedAuto, antibanMixerEnabled } = await resolveCampaignAntiBanContext(c);
 
   const rawCompanyName = leadFull?.nome_negocio || target.nome_negocio;
   const effectiveCompanyName = antibanMixerEnabled
@@ -739,8 +1742,8 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     push_name: pushName,
   });
 
-  // Renderiza msg base substituindo variáveis ({{saudacao}}, {{nome_empresa}}, etc)
-  let text = renderTemplate(c.message_template, renderCtx);
+  // Renderiza msg base substituindo variáveis ({{saudacao}}, {{nome_empresa}}, etc) e Spintax
+  let text = renderTemplate(c.message_template, renderCtx, { spintax: true });
 
   // Se o Misturador Anti-Ban estiver ativo (variação semântica de abordagem),
   // aplica a mistura sobre a mensagem base antes da IA ou do envio direto.
@@ -752,6 +1755,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
       now: new Date(),
       scopeKey: c.id,
     });
+    persistAntiBanMixerAsync(clientId);
   }
 
   // Guarda o texto ANTES da IA — é o que foi enviado pro Gemini. Permite comparar
@@ -800,7 +1804,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
 
   // REDE DE SEGURANÇA — render final. Se a IA deixou/reintroduziu qualquer
   // {{variavel}} ou {variavel}, resolve agora. O cliente NUNCA pode receber chaves cruas.
-  text = renderTemplate(text, renderCtx);
+  text = renderTemplate(text, renderCtx, { spintax: true });
   // BLINDAGEM FINAL — a IA, ao reescrever, às vezes "generaliza" o texto e
   // RE-INTRODUZ {{saudacao}}/{{nome_empresa}} como se montasse um template.
   // Aqui, qualquer {{...}} ou {...} que ainda reste (variável inventada ou desconhecida)
@@ -816,11 +1820,17 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
       .trim();
   }
 
-  // SINCRONIZAÇÃO INTELIGENTE DE HORÁRIO DA SAUDAÇÃO:
+  // SINCRONIZAÇÃO INTELIGENTE DE HORÁRIO DA SAUDAÇÃO + BLINDAGEM HANDSHAKE:
   // Garante que a saudação ("Bom dia", "Boa tarde", "Boa noite", "Boa madrugada")
-  // corresponda EXATAMENTE ao horário real em que o disparo está saindo agora
-  // (corrige textos pré-gerados de madrugada que saem às 8h/9h da manhã).
-  text = syncGreetingToCurrentHour(text, new Date());
+  // corresponda EXATAMENTE ao horário real em que o disparo está saindo agora,
+  // e impede links/pitch longo quando o template é de quebra-gelo curto.
+  text = enforceShortHandshakeGuard({
+    template: c.message_template,
+    candidateText: text,
+    companyName: effectiveCompanyName,
+    now: new Date(),
+    scopeKey: c.id,
+  });
 
   try {
     // Picota a mensagem em chunks se humanize_messages estiver ativo
@@ -842,7 +1852,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     // (evita N round-trips pra mesma session).
     let sess: { sessionId: string | null } | null = null;
     try {
-      sess = await findOrCreateContactSession(clientId, sendJid, c.instance_name, renderCtx.nome_negocio, c.agent_id);
+      sess = await findOrCreateContactSession(clientId, sendJid, effectiveInstanceName, renderCtx.nome_negocio, c.agent_id);
     } catch (sessErr: any) {
       console.warn(`[CAMPAIGN ${c.name}] findOrCreateContactSession falhou (best-effort): ${sessErr?.message || sessErr}`);
     }
@@ -885,18 +1895,20 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
       const chunkText = chunks[i];
       if (!chunkText) continue;
 
-      // Delay de digitação entre chunks (2 a 5s) — pula no primeiro.
+      // Delay de digitação entre chunks (2 a 5s em ms inteiro) — pula no primeiro.
       // Mesma fórmula do agente: ~15 chars/seg, clamp [2,5].
       if (i > 0) {
-        const typingSeconds = Math.min(Math.max(chunkText.length / 15, 2), 5);
-        await new Promise((r) => setTimeout(r, typingSeconds * 1000));
+        await new Promise((r) => setTimeout(r, calculateChunkTypingMs(chunkText.length)));
       }
 
       // Registra cada chunk anti-echo (webhook pode chegar antes de persistir).
-      registerPendingAutomatedSend(c.instance_name, sendJid, chunkText);
+      registerPendingAutomatedSend(effectiveInstanceName, sendJid, chunkText);
 
-      // Envia com delay de presença "digitando..." configurado para evitar banimento
-      const result = await channel.sendMessage(sendJid, chunkText, c.instance_name, { delay: typingDelayMs });
+      // Envia com delay de presença "digitando..." e linkPreview desativado em 1º contato frio (anti-ban)
+      const result = await channel.sendMessage(sendJid, chunkText, effectiveInstanceName, {
+        delay: typingDelayMs,
+        linkPreview: false,
+      });
       if (!result || result.ok === false) {
         throw new Error(result?.error || "Provider recusou o envio da campanha");
       }
@@ -908,7 +1920,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
         await persistOutgoingMessage({
           sessionId: sess?.sessionId || null,
           remoteJid: sendJid,
-          instanceName: c.instance_name,
+          instanceName: effectiveInstanceName,
           msgId: chunkMsgId,
           text: chunkText,
           clientId,
@@ -933,7 +1945,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
             fileName: c.media_file_name || undefined,
             mimetype: c.media_mimetype || undefined,
           },
-          c.instance_name,
+          effectiveInstanceName,
           { delay: typingDelayMs },
         );
         if (!mediaResult || mediaResult.ok === false) {
@@ -945,7 +1957,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
           await persistOutgoingMessage({
             sessionId: sess?.sessionId || null,
             remoteJid: sendJid,
-            instanceName: c.instance_name,
+            instanceName: effectiveInstanceName,
             msgId: mediaMsgId,
             text: c.media_caption || "",
             clientId,
@@ -980,13 +1992,52 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
       updated_at: new Date().toISOString(),
     }).eq("id", campaignId);
 
+    // ───────── CONTABILIZAÇÃO ANTI-BAN & PULSO SIMBIÓTICO + FREIO DE VÁCUO SILENCIOSO ─────────
+    const batchState = recordColdOutreachSend(effectiveInstanceName, Date.now(), clientId);
+    const brakeRes = await checkZeroReplyBrakeForInstance(clientId, effectiveInstanceName, sendJid);
+    if (brakeRes.brakeTriggered) {
+      await addCampaignLog(
+        campaignId,
+        `⚠️ Freio de Vácuo Silencioso: ${brakeRes.checkedCount} abordagens seguidas sem resposta em "${effectiveInstanceName}" — descansando 25 min + acionando aquecimento simbiótico.`,
+        "warning"
+      );
+      setTimeout(async () => {
+        try {
+          const { triggerSymbioticWarmupPulse } = await import("@/lib/warmup/warmup-worker");
+          await triggerSymbioticWarmupPulse(clientId, effectiveInstanceName);
+        } catch {}
+      }, process.env.VITEST === "true" || process.env.NODE_ENV === "test" ? 0 : 8000);
+    }
+
+    const symbioticEveryN = chipResolution.policy?.symbioticEveryN ?? 3;
+    if (batchState.sendsSincePulse >= symbioticEveryN) {
+      markSymbioticPulseTriggered(effectiveInstanceName);
+      const pulseDelayMs =
+        process.env.VITEST === "true" || process.env.NODE_ENV === "test"
+          ? 0
+          : 12_000 + Math.floor(Math.random() * 18_000);
+      setTimeout(async () => {
+        try {
+          const { triggerSymbioticWarmupPulse } = await import("@/lib/warmup/warmup-worker");
+          const pulse = await triggerSymbioticWarmupPulse(clientId, effectiveInstanceName);
+          if (pulse.triggered && pulse.peerInstance) {
+            await addCampaignLog(
+              campaignId,
+              `🛡️ Escudo Simbiótico: interação bidirecional intercalada (${pulse.peerInstance} ⇄ ${effectiveInstanceName}) para diluir vácuo de respostas na Meta.`,
+              "info"
+            );
+          }
+        } catch {}
+      }, pulseDelayMs);
+    }
+
     // Disparo enviado com sucesso → move o lead para "primeiro_contato" no Kanban.
     // Regra: move quando o status atual está ANTES de primeiro_contato na hierarquia.
     // Preserva leads já mais avançados (interessado/follow-up/agendado/fechado).
     try {
       const { data: existingLead } = await supabase
         .from("leads_extraidos")
-        .select("id, status")
+        .select("id, status, instance_name")
         .eq("remoteJid", target.remote_jid)
         .eq("client_id", clientId)
         .maybeSingle();
@@ -1010,6 +2061,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
             .from("leads_extraidos")
             .update({
               status: "primeiro_contato",
+              instance_name: effectiveInstanceName,
               primeiro_contato_at: nowIso,
               primeiro_contato_source: "disparo",
               updated_at: nowIso,
@@ -1020,7 +2072,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
             // Fallback: algumas colunas podem não existir ainda
             if ((updErr as any).code === "PGRST204") {
               await supabase.from("leads_extraidos")
-                .update({ status: "primeiro_contato" })
+                .update({ status: "primeiro_contato", instance_name: effectiveInstanceName })
                 .eq("id", existingLead.id)
                 .eq("client_id", clientId);
               console.warn(`[CAMPAIGN ${c.name}] leads_extraidos sem colunas primeiro_contato_at/source. Rode a migração correspondente.`);
@@ -1030,13 +2082,22 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
           }
           await addCampaignLog(campaignId, `Lead ${target.nome_negocio || target.remote_jid} movido p/ primeiro_contato`, "info");
         } else {
+          // Sticky Sender: registra o chip que abordou caso o lead vindo do scraper ainda não tenha instance_name
+          if (!existingLead.instance_name) {
+            await supabase
+              .from("leads_extraidos")
+              .update({ instance_name: effectiveInstanceName })
+              .eq("id", existingLead.id)
+              .eq("client_id", clientId)
+              .then(() => {}, () => {});
+          }
           await addCampaignLog(campaignId, `Lead ${target.nome_negocio || target.remote_jid} mantido no status "${existingLead.status}" (mais avançado que primeiro_contato)`, "info");
         }
       } else {
-        // Sem lead — cria no estágio primeiro_contato direto
+        // Sem lead — cria no estágio primeiro_contato direto vinculando ao chip real que disparou (Sticky Sender)
         const { error: insErr } = await supabase.from("leads_extraidos").insert({
           client_id: clientId,
-          instance_name: c.instance_name,
+          instance_name: effectiveInstanceName,
           remoteJid: target.remote_jid,
           nome_negocio: target.nome_negocio || `Lead Disparo (${target.remote_jid.split("@")[0]})`,
           ramo_negocio: target.ramo_negocio || null,
@@ -1047,7 +2108,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
         if (insErr && (insErr as any).code === "PGRST204") {
           await supabase.from("leads_extraidos").insert({
             client_id: clientId,
-            instance_name: c.instance_name,
+            instance_name: effectiveInstanceName,
             remoteJid: target.remote_jid,
             nome_negocio: target.nome_negocio || `Lead Disparo (${target.remote_jid.split("@")[0]})`,
             ramo_negocio: target.ramo_negocio || null,
@@ -1103,6 +2164,22 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     const fails = (consecutiveFailures.get(campaignId) || 0) + 1;
     consecutiveFailures.set(campaignId, fails);
 
+    // Reporta falhas reais de transporte/rate limit para o score e disjuntor do Aquecedor
+    try {
+      if (is429 || /timeout|timed out|econn|disconnect|closed|401|403|50[0-4]/i.test(msg)) {
+        const { data: wCfg } = await supabase
+          .from("whatsapp_warmup_configs")
+          .select("*")
+          .eq("client_id", clientId)
+          .eq("instance_name", effectiveInstanceName)
+          .maybeSingle();
+        if (wCfg) {
+          const { handleInstanceFailure } = await import("@/lib/warmup/warmup-engine");
+          await handleInstanceFailure(clientId, wCfg as any, `[Campanha] ${msg}`);
+        }
+      }
+    } catch {}
+
     await supabase.from("campaign_targets").update({
       status: is429 && (target.attempts || 0) < 3 ? "pending" : "failed",
       error_message: msg.slice(0, 300),
@@ -1152,8 +2229,16 @@ async function loop(campaignId: string) {
       scheduleNext(campaignId, 5 * 60 * 1000); // tenta em 5 min
       return;
     }
-    // Próximo envio com jitter
-    const { data: c } = await supabase.from("campaigns").select("min_interval_seconds, max_interval_seconds").eq("id", campaignId).single();
+    if (result === "cold_cap_rest") {
+      scheduleNext(campaignId, 15 * 60 * 1000); // descansa 15 min quando teto da hora foi atingido
+      return;
+    }
+    // Próximo envio com jitter ou Coffee-Break em lotes
+    const { data: c } = await supabase
+      .from("campaigns")
+      .select("instance_name, min_interval_seconds, max_interval_seconds")
+      .eq("id", campaignId)
+      .single();
     if (result === "too_soon") {
       // Loop concorrente adiantado — o gate de intervalo barrou o envio.
       // Reagenda no ritmo normal; o loop "dono" segue enviando sozinho.
@@ -1161,11 +2246,30 @@ async function loop(campaignId: string) {
       scheduleNext(campaignId, wait);
       return;
     }
-    const wait = jitterMs(Number(c?.min_interval_seconds || 30), Number(c?.max_interval_seconds || 60));
-    const secs = Math.round(wait / 1000);
-    console.log(`[CAMPAIGN ${campaignId}] Próximo envio em ${secs}s`);
-    await addCampaignLog(campaignId, `Aguardando ${secs}s até o próximo envio...`, "info");
-    scheduleNext(campaignId, wait);
+
+    const lastSel = _lastSelectedInstanceByCampaign.get(campaignId);
+    const activeInstance = lastSel?.instanceName || (c as any)?.instance_name || "default";
+    const delayCalc = computeCampaignNextDelayMs({
+      instanceName: activeInstance,
+      minIntervalSec: Number(c?.min_interval_seconds || 30),
+      maxIntervalSec: Number(c?.max_interval_seconds || 60),
+      stageMinIntervalSec: lastSel?.stageMinIntervalSec,
+    });
+
+    const secs = Math.round(delayCalc.delayMs / 1000);
+    if (delayCalc.isCoffeeBreak) {
+      const mins = Math.round(secs / 60);
+      console.log(`[CAMPAIGN ${campaignId}] Coffee-Break Anti-Ban: descansando ${mins} min após lote de ${delayCalc.batchCount} envios.`);
+      await addCampaignLog(
+        campaignId,
+        `☕ Pausa anti-ban de lote (${mins} min) após ${delayCalc.batchCount} abordagens — simulando rotina humana para proteger o chip.`,
+        "info"
+      );
+    } else {
+      console.log(`[CAMPAIGN ${campaignId}] Próximo envio em ${secs}s`);
+      await addCampaignLog(campaignId, `Aguardando ${secs}s até o próximo envio...`, "info");
+    }
+    scheduleNext(campaignId, delayCalc.delayMs);
   } catch (err: any) {
     const msg = err?.message || String(err);
     console.error(`[CAMPAIGN ${campaignId}] Erro inesperado no loop:`, msg);
@@ -1173,6 +2277,88 @@ async function loop(campaignId: string) {
     // Não deixa a campanha morrer por um erro pontual — reagenda em 30s.
     scheduleNext(campaignId, 30_000);
   }
+}
+
+/**
+ * Pré-valida um lote de números pendentes de uma campanha com antecedência,
+ * armazenando o JID canônico em cache para que o momento do envio não precise
+ * disparar `USyncQuery (onWhatsApp)` milissegundos antes de `sendMessage`.
+ */
+export async function preValidateCampaignNumbers(
+  campaignId: string,
+  maxBatch = 15
+): Promise<{ checked: number; skippedInvalid: number }> {
+  let checked = 0;
+  let skippedInvalid = 0;
+  try {
+    const { data: c } = await supabase
+      .from("campaigns")
+      .select("id, client_id, instance_name, status, skipped_count")
+      .eq("id", campaignId)
+      .maybeSingle();
+    if (!c || c.status !== "running") return { checked: 0, skippedInvalid: 0 };
+
+    let checkInstance = c.instance_name;
+    if (isAutoPoolInstance(checkInstance)) {
+      const poolChoice = await resolveHealthyCampaignChip(c.client_id, checkInstance);
+      if (!poolChoice.ok || !poolChoice.instanceName) return { checked: 0, skippedInvalid: 0 };
+      checkInstance = poolChoice.instanceName;
+    }
+
+    const { data: targets } = await supabase
+      .from("campaign_targets")
+      .select("id, remote_jid")
+      .eq("campaign_id", campaignId)
+      .eq("status", "pending")
+      .order("priority", { ascending: false })
+      .order("created_at", { ascending: true })
+      .limit(maxBatch);
+
+    if (!Array.isArray(targets) || targets.length === 0) {
+      return { checked: 0, skippedInvalid: 0 };
+    }
+
+    for (const t of targets) {
+      const rjid = String((t as any).remote_jid || "");
+      if (!rjid || rjid.includes("@g.us") || rjid.includes("@lid")) continue;
+      const phone = rjid.replace(/@.*$/, "").replace(/\D/g, "");
+      if (!phone) continue;
+      if (getCachedCanonicalJid(checkInstance, phone)) continue;
+
+      try {
+        const res = await channel.checkWhatsAppNumbersDetailed([phone], checkInstance);
+        const entry = res?.[phone] || (res ? Object.values(res)[0] : null);
+        checked++;
+        if (entry) {
+          cacheVerifiedCanonicalJid(checkInstance, phone, {
+            exists: entry.exists !== false,
+            jid: entry.jid,
+          });
+          if (entry.exists === false) {
+            skippedInvalid++;
+            await supabase
+              .from("campaign_targets")
+              .update({
+                status: "skipped",
+                error_message: "Número não existe no WhatsApp (pré-validação antecipada)",
+                attempts: 1,
+              })
+              .eq("id", (t as any).id);
+          } else if (entry.jid && entry.jid !== rjid) {
+            await supabase
+              .from("campaign_targets")
+              .update({ remote_jid: entry.jid })
+              .eq("id", (t as any).id);
+          }
+        }
+      } catch {}
+
+      if (process.env.VITEST !== "true" && process.env.NODE_ENV !== "test") {
+        await new Promise((r) => setTimeout(r, 1200 + Math.floor(Math.random() * 1300)));
+      }
+    }
+  } catch {}
+  return { checked, skippedInvalid };
 }
 
 export async function startCampaign(campaignId: string): Promise<{ ok: boolean; error?: string }> {
@@ -1214,10 +2400,11 @@ export async function startCampaign(campaignId: string): Promise<{ ok: boolean; 
     `Preflight OK. 1º disparo em ~${Math.round(firstDelay / 1000)}s (ritmo configurado da campanha).`, "success");
   scheduleNext(campaignId, firstDelay);
 
-  // PRÉ-GERAÇÃO COM IA: começa JÁ, mesmo fora da janela de envio — quando a
-  // janela abrir, o envio só lê o texto pronto (rendered_message) em vez de
-  // chamar a IA na hora. Fire-and-forget: não atrasa o 1º envio; targets que
-  // a pré-geração não cobrir caem no caminho normal (IA no momento do envio).
+  // PRÉ-VALIDAÇÃO DE JIDs + PRÉ-GERAÇÃO COM IA: começam JÁ em background,
+  // desacoplando a consulta `onWhatsApp (USyncQuery)` e a geração de texto
+  // do momento exato do envio.
+  preValidateCampaignNumbers(campaignId).catch(() => {});
+
   {
     const { data: camp } = await supabase.from("campaigns").select("personalize_with_ai").eq("id", campaignId).maybeSingle();
     if (camp?.personalize_with_ai) {
@@ -1397,37 +2584,43 @@ export async function preGenerateCampaignMessages(campaignId: string): Promise<{
   await addCampaignLog(campaignId,
     `🧠 Pré-gerando ${targets.length} mensagem(ns) com IA${foraDaJanela ? " (fora da janela de envio — o disparo espera, a IA não)" : ""}...`, "info");
 
+  const { antibanMixerEnabled } = await resolveCampaignAntiBanContext(c);
+
   let generated = 0, failed = 0, skipped = 0;
   for (const target of targets) {
-    // lead do CRM p/ variáveis do template (mesmo select do caminho de envio)
-    const cols = "nome_negocio, ramo_negocio, telefone, endereco, website, instagram, facebook, avaliacao, reviews, status, categoria, resumo_avaliacoes";
-    let leadFull: any = null;
-    {
-      let res = await supabase.from("leads_extraidos").select("*").eq("remoteJid", target.remote_jid).eq("client_id", c.client_id).maybeSingle();
-      if (res.error && res.error.code === "PGRST204") {
-        res = await supabase.from("leads_extraidos").select(cols.replace(", resumo_avaliacoes", "")).eq("remoteJid", target.remote_jid).eq("client_id", c.client_id).maybeSingle();
-      }
-      leadFull = res.data || null;
-    }
+    const leadFull: any = await fetchLeadFullForCampaign(target.remote_jid, c.client_id);
+    const rawCompanyName = leadFull?.nome_negocio || target.nome_negocio;
+    const effectiveCompanyName = antibanMixerEnabled
+      ? cleanCompanyNameForApproach(rawCompanyName) || rawCompanyName
+      : rawCompanyName;
     const windowRefDate = effectiveDateForWindow(new Date(), c.allowed_start_hour, c.allowed_end_hour);
     const renderCtx = {
       ...leadRowToTemplateContext(leadFull, {
         remoteJid: target.remote_jid,
-        nome_negocio: leadFull?.nome_negocio || target.nome_negocio,
+        nome_negocio: effectiveCompanyName,
         ramo_negocio: leadFull?.ramo_negocio || target.ramo_negocio,
         push_name: null,
       }),
       now: windowRefDate,
     };
 
-    const baseText = renderTemplate(c.message_template, renderCtx);
+    let baseText = renderTemplate(c.message_template, renderCtx, { spintax: true });
+    if (antibanMixerEnabled) {
+      baseText = applyAntiBanMixer({
+        template: c.message_template,
+        renderedText: baseText,
+        companyName: effectiveCompanyName,
+        now: windowRefDate,
+        scopeKey: c.id,
+      });
+    }
     let text = baseText;
     try {
       const aiText = await personalizeWithAI({
         baseMessage: baseText,
         model: c.ai_model || "gemini-1.5-flash",
         customPrompt: c.ai_prompt ? renderTemplate(c.ai_prompt, renderCtx) : null,
-        nomeEmpresa: target.nome_negocio || "",
+        nomeEmpresa: effectiveCompanyName || "",
         ramo: target.ramo_negocio || "",
         useWebSearch: !!c.use_web_search,
         campaignId: c.id,
@@ -1444,7 +2637,7 @@ export async function preGenerateCampaignMessages(campaignId: string): Promise<{
 
     // Rede de segurança — mesma blindagem do caminho de envio: nenhuma
     // {{variavel}} pode sobreviver à IA.
-    text = renderTemplate(text, renderCtx);
+    text = renderTemplate(text, renderCtx, { spintax: true });
     if (/\{\{.*?\}\}|\{.*?\}/.test(text)) {
       text = text
         .replace(/\{\{\s*[\w-]+\s*\}\}/g, "")
@@ -1453,6 +2646,14 @@ export async function preGenerateCampaignMessages(campaignId: string): Promise<{
         .replace(/\s+([.,!?])/g, "$1")
         .trim();
     }
+
+    text = enforceShortHandshakeGuard({
+      template: c.message_template,
+      candidateText: text,
+      companyName: leadFull?.nome_negocio || target.nome_negocio,
+      now: windowRefDate,
+      scopeKey: c.id,
+    });
 
     // Grava SÓ se ainda pending e ainda sem mensagem (não pisa em já enviado).
     const { data: upd } = await supabase
@@ -1531,6 +2732,7 @@ async function personalizeWithAI(opts: {
   }
 
   // Se a campanha tem um prompt custom salvo, usa ele. Senão usa o padrão.
+  const isHandshake = isShortIcebreakerTemplate(opts.baseMessage);
   const customInstructions = opts.customPrompt?.trim();
   const sys = customInstructions
     ? `${customInstructions}
@@ -1547,6 +2749,21 @@ ${opts.baseMessage}
 ${opts.useWebSearch ? "Ferramenta web_search disponível: use no máximo 1x pra pegar UM detalhe relevante da empresa." : ""}
 
 Devolva APENAS a mensagem final, em PT-BR, sem aspas, sem explicação.`
+    : isHandshake
+    ? `Você é uma pessoa real iniciando um primeiro contato rápido via WhatsApp para confirmar se está falando com a empresa certa (abordagem Two-Step Handshake anti-ban).
+
+DADOS DO LEAD:
+- Empresa: ${opts.nomeEmpresa || "(não informada)"}
+
+MENSAGEM-BASE:
+"""
+${opts.baseMessage}
+"""
+
+REGRAS OBRIGATÓRIAS:
+- Escreva APENAS 1 linha curta (máximo 12 palavras), natural como um cliente humano perguntando se é da empresa.
+- PROIBIDO fazer oferta comercial, falar de serviços, preços ou colocar links.
+- Devolva APENAS a frase final, sem aspas e sem explicação.`
     : `Você é um SDR experiente fazendo uma primeira abordagem PROFISSIONAL via WhatsApp.
 
 ${intelContext}DADOS DO LEAD:

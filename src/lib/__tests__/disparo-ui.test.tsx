@@ -124,4 +124,20 @@ describe("interface de disparo sem mudança do contrato", () => {
     expect(window.confirm).toHaveBeenCalled();
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/campaigns/campaign-test", { method: "DELETE" }));
   });
+
+  it("renderiza Spintax ao vivo na prévia e permite optar pelo Modo Comercial B2B", async () => {
+    mockRequests();
+    render(<DisparoPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Nova campanha", exact: true }));
+    await screen.findByRole("checkbox", { name: "Selecionar Empresa de teste" });
+    fireEvent.change(screen.getByLabelText("Mensagem-base"), { target: { value: "{Oi|Olá}, {{nome_empresa}}!" } });
+    expect(screen.getByText(/^(Oi|Olá), Empresa de teste!$/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Sortear variação" }));
+    expect(screen.getByText(/^(Oi|Olá), Empresa de teste!$/)).toBeInTheDocument();
+
+    const weekendCheckbox = screen.getByRole("checkbox", { name: "Modo Comercial B2B", exact: true });
+    expect(weekendCheckbox).not.toBeChecked();
+    fireEvent.click(weekendCheckbox);
+    expect(weekendCheckbox).toBeChecked();
+  });
 });

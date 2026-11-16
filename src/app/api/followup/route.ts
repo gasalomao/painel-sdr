@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
-import { isInstanceOwnedByClient, requireClientId } from "@/lib/tenant";
+import { requireClientId } from "@/lib/tenant";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
+import { validateCampaignInstanceAccess } from "@/lib/campaign-instance-access";
 
 export const dynamic = "force-dynamic";
 
@@ -36,6 +37,7 @@ export async function POST(req: NextRequest) {
       allowed_start_hour = 9,
       allowed_end_hour = 20,
       auto_execute = false,
+      weekend_guard = false,
       // Coluna do kanban que abastece essa campanha — default "follow-up" pra
       // manter retrocompatibilidade com clientes/kanbans antigos.
       source_status = "follow-up",
@@ -47,8 +49,9 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
-    if (!(await isInstanceOwnedByClient(instance_name, ctx.clientId))) {
-      return NextResponse.json({ success: false, error: "Instância não pertence a este cliente" }, { status: 403 });
+    const access = await validateCampaignInstanceAccess(ctx.clientId, String(instance_name));
+    if (!access.ok) {
+      return NextResponse.json({ success: false, error: access.error }, { status: access.status });
     }
     if (!Array.isArray(steps) || steps.length === 0) {
       return NextResponse.json(
@@ -104,6 +107,14 @@ export async function POST(req: NextRequest) {
       .select()
       .single();
     if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    try {
+      await supabase
+        .from("system_config")
+        .upsert(
+          { key: `followup_weekend_guard:${data.id}`, value: String(Boolean(weekend_guard)) },
+          { onConflict: "key" }
+        );
+    } catch {}
     return NextResponse.json({ success: true, campaign: data });
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });

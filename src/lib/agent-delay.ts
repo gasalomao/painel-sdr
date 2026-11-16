@@ -86,8 +86,18 @@ export function calculateTypingDelaySeconds(rawConfig?: Partial<TypingDelayConfi
 }
 
 /**
- * Retorna o delay em milissegundos para envio ao Evolution API (parâmetro `delay`).
+ * Retorna o delay em milissegundos (inteiro) para envio ao Evolution API (parâmetro `delay`).
  */
 export function calculateTypingDelayMs(rawConfig?: Partial<TypingDelayConfig> | null): number {
-  return calculateTypingDelaySeconds(rawConfig) * 1000;
+  return Math.max(1, Math.round(calculateTypingDelaySeconds(rawConfig) * 1000));
+}
+
+/**
+ * Calcula o tempo de digitação em milissegundos inteiros (2000ms a 5000ms) para
+ * chunks secundários divididos pela humanização. Evolution API rejeita floats.
+ */
+export function calculateChunkTypingMs(textLength: number): number {
+  const len = Number.isFinite(textLength) ? Math.max(0, textLength) : 0;
+  const typingSeconds = Math.min(Math.max(len / 15, 2), 5);
+  return Math.round(typingSeconds * 1000);
 }

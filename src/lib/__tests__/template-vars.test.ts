@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   renderTemplate,
+  resolveSpintax,
   greetingFor,
   leadRowToTemplateContext,
   PROMPT_VARIABLES,
@@ -194,5 +195,25 @@ describe("renderTemplate — variáveis do disparo e Google Maps", () => {
       expect(val.trim().length, `Variável {{${v.key}}} não deveria ficar vazia no sample padrão`).toBeGreaterThan(0);
     }
     expect(TEMPLATE_VARIABLES.length).toBeGreaterThan(PROMPT_VARIABLES.length);
+  });
+
+  it("resolveSpintax expande variações inline quando { spintax: true } sem quebrar variáveis nem JSON", () => {
+    const out = renderTemplate(
+      "{Oi|Olá|Opa} {{nome_empresa}}! {{saudacao}}, {tudo bem|tudo certo}?",
+      { nome_negocio: "Café Bom", now: tarde },
+      { spintax: true },
+    );
+    expect(out).toMatch(/^(Oi|Olá|Opa) Café Bom! Boa tarde, (tudo bem|tudo certo)\?$/);
+
+    // Sem spintax:true (prompts do agente), chaves com | ficam intactas
+    const promptText = renderTemplate("Responda {sim|nao} em {\"ok\": true} para {{nome_empresa}}", {
+      nome_negocio: "Café Bom",
+      now: tarde,
+    });
+    expect(promptText).toBe("Responda {sim|nao} em {\"ok\": true} para Café Bom");
+
+    // Nested spintax direto
+    const nested = resolveSpintax("{Bom dia {pessoal|equipe}|Olá amigos}");
+    expect(["Bom dia pessoal", "Bom dia equipe", "Olá amigos"]).toContain(nested);
   });
 });

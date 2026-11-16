@@ -318,6 +318,93 @@ describe("Reset diário idempotente e progressão segura", () => {
     expect(res.stagePromoted).toBe(false);
     expect(res.newDailyTarget).toBe(33);
   });
+
+  it("reconcilia estágio inflado acima da idade real do chip (created_at)", () => {
+    const res = evaluateDailyAutoProgress(
+      dailyConfig({
+        stage: 4,
+        daily_target: 70,
+        created_at: "2026-11-06T12:00:00Z", // 5 dias civis até 2026-11-10 -> Fase 2 (Morno)
+        consecutive_successful_days: 2,
+      }),
+      nowIso,
+      "2026-11-09"
+    );
+
+    expect(res.isNewDay).toBe(true);
+    expect(res.newDaysActive).toBe(5);
+    expect(res.stageReconciled).toBe(true);
+    expect(res.newStage).toBe(2);
+    expect(res.newDailyTarget).toBe(STAGE_DEFAULTS[2].dailyTarget);
+    expect(res.newPurpose).toBe("inbound");
+    expect(res.purposeGraduated).toBe(true);
+  });
+
+  it("gradua automaticamente a carreira do chip de contingency -> inbound (Dia 4) -> outbound (Dia 8)", async () => {
+    const { getAutoCareerPurpose, getOrganicScheduleDecision } = await import("../warmup-engine");
+
+    expect(
+      getAutoCareerPurpose({ currentPurpose: "contingency", stage: 1, daysActive: 2 }).nextPurpose
+    ).toBe("contingency");
+
+    const day4 = getAutoCareerPurpose({ currentPurpose: "contingency", stage: 2, daysActive: 4 });
+    expect(day4.nextPurpose).toBe("inbound");
+    expect(day4.graduated).toBe(true);
+
+    const day8 = getAutoCareerPurpose({
+      currentPurpose: "inbound",
+      stage: 3,
+      daysActive: 8,
+      healthScore: 95,
+    });
+    expect(day8.nextPurpose).toBe("outbound");
+    expect(day8.graduated).toBe(true);
+
+    // 12:30 BRT = 15:30 UTC -> janela orgânica detecta almoço para desacelerar novas sessões
+    const lunchDecision = getOrganicScheduleDecision(
+      "00000_DD_11",
+      8,
+      21,
+      new Date("2026-11-10T15:30:00Z")
+    );
+    expect(lunchDecision.allowed).toBe(true);
+    expect(lunchDecision.inLunchLull).toBe(true);
+  });
+});
+
+describe("Anti-Repetição Spintax e Entropia Temporal Humana", () => {
+  it("evita repetir frases já usadas no histórico ao escolher diálogo nativo", async () => {
+    const { pickVariedFallbackTurnText } = await import("../warmup-dialogues");
+    const first = pickVariedFallbackTurnText({
+      theme: "dia_a_dia",
+      stepIndex: 0,
+      usedTexts: ["Fala mano, tudo bem por aí?", "E aí cara, sumido! Como você tá?"],
+    });
+
+    expect(first).not.toBe("Fala mano, tudo bem por aí?");
+    expect(first).not.toBe("E aí cara, sumido! Como você tá?");
+    expect(first.length).toBeGreaterThan(5);
+  });
+
+  it("gera atrasos variáveis de leitura, reação e descanso entre sessões", async () => {
+    const {
+      calculateReadReceiptDelayMs,
+      calculateReactionDelayMs,
+      calculateInterConversationCooldownSec,
+    } = await import("../warmup-dialogues");
+
+    const readMs = calculateReadReceiptDelayMs(false);
+    expect(readMs).toBeGreaterThanOrEqual(3200);
+    expect(readMs).toBeLessThanOrEqual(19000);
+
+    const reactMs = calculateReactionDelayMs(false);
+    expect(reactMs).toBeGreaterThanOrEqual(4200);
+    expect(reactMs).toBeLessThanOrEqual(16500);
+
+    const cooldownStage1 = calculateInterConversationCooldownSec(1);
+    expect(cooldownStage1).toBeGreaterThanOrEqual(25 * 60);
+    expect(cooldownStage1).toBeLessThanOrEqual(45 * 60);
+  });
 });
 
 describe("Áudio Real e Comportamentos Avançados de Maturação", () => {

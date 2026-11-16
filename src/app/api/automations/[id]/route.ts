@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isDeepStrictEqual } from "node:util";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
-import { isInstanceOwnedByClient, requireClientId } from "@/lib/tenant";
+import { requireClientId } from "@/lib/tenant";
+import { validateCampaignInstanceAccess } from "@/lib/campaign-instance-access";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 import { parseMinReviews } from "@/lib/scraper-review-count";
 import {
@@ -146,8 +147,11 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     if (!["draft", "paused", "done", "error"].includes(current.status)) {
       return NextResponse.json({ success: false, error: "Pause a automação antes de editar a configuração." }, { status: 409 });
     }
-    if ("instance_name" in body && !(await isInstanceOwnedByClient(String(body.instance_name), current.client_id))) {
-      return NextResponse.json({ success: false, error: "Instância não pertence a este cliente" }, { status: 403 });
+    if ("instance_name" in body) {
+      const access = await validateCampaignInstanceAccess(current.client_id, String(body.instance_name));
+      if (!access.ok) {
+        return NextResponse.json({ success: false, error: access.error }, { status: access.status });
+      }
     }
     const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
     for (const key of EDITABLE_FIELDS) {

@@ -35,6 +35,8 @@ import { isAiSend, isManualSend, isPendingAutomatedSend } from "@/lib/manual-sen
 import { safeSecretEqual, shouldLogOnce } from "@/lib/webhook-security";
 import { shouldSkipGroupActions, resolveTranscriptionConfig } from "@/lib/bot-status";
 import { evolution } from "@/lib/evolution";
+import { handleIncomingOptOutIfDetected } from "@/lib/opt-out";
+import { detectWarmupPeerTraffic } from "@/lib/warmup/warmup-firewall";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -62,8 +64,9 @@ export async function POST(req: NextRequest) {
     // FIX: events de STATUS (messages.update/delete) carregam data.key e antes
     // vazavam pro caminho de mensagem virando mensagens fantasma "[Mídia]".
     const isStatusEvent = /MESSAGES?\.(UPDATE|DELETE)|READ|RECEIPT|PRESENCE|STATUS/i.test(eventType);
+    const isConnectionEvent = /CONNECTION/.test(eventType) || eventTypeRaw.toLowerCase() === "connection.update";
     if (
-      (eventType && !["MESSAGE", "ALL", "MESSAGES_UPSERT"].includes(eventType) &&
+      (!isConnectionEvent && eventType && !["MESSAGE", "ALL", "MESSAGES_UPSERT"].includes(eventType) &&
         eventTypeRaw !== "messages.upsert" && (!raw.key || !raw.message)) ||
       (eventType && isStatusEvent)
     ) {
@@ -117,6 +120,35 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "Instância não cadastrada" }, { status: 401 });
     }
 
+    if (isConnectionEvent) {
+      const rawState = String(raw?.state || raw?.status || "").toLowerCase();
+      let state = "";
+      if (rawState === "open" || rawState === "connected") state = "open";
+      else if (rawState === "connecting" || rawState === "pairing") state = "connecting";
+      else if (rawState === "close" || rawState === "disconnected") state = "close";
+
+      if (state) {
+        await supabase
+          .from("channel_connections")
+          .update({ status: state })
+          .eq("instance_name", instanceName);
+
+        if (state === "close") {
+          const statusReason = raw?.statusReason ?? raw?.reason ?? raw?.error ?? null;
+          import("@/lib/warmup/warmup-engine")
+            .then((m) =>
+              m.handleWebhookConnectionClosed({
+                clientId,
+                instanceName,
+                statusReason,
+              })
+            )
+            .catch(() => {});
+        }
+      }
+      return NextResponse.json({ ok: true, event: "connection_update", state: state || rawState || "unknown" });
+    }
+
     // ===== Extrair dados (formato whatsmeow) =====
     const key = raw.key || {};
     const message = raw.message || body.message || {};
@@ -164,6 +196,24 @@ export async function POST(req: NextRequest) {
     const fileName = extractFileName(unwrapped);
     const quoted = extractQuoted(unwrapped);
     const pushName = raw.pushName || raw.push_name || "";
+
+    // Bloqueia tráfego 1x1 entre chips em aquecimento (recebido OU fromMe=true).
+    const warmupCheck = await detectWarmupPeerTraffic({
+      clientId,
+      instanceName,
+      messageId,
+      remoteJid,
+      remoteJidAlt: key.remoteJidAlt || key.senderPn || null,
+    });
+    if (warmupCheck.blocked) {
+      seenMessageIds.add(dedupeKey);
+      return NextResponse.json({
+        ok: true,
+        skipped: true,
+        reason: warmupCheck.reason || "warmup_peer_traffic",
+        peer_instance: warmupCheck.peerInstance || null,
+      });
+    }
 
     // ===== Criar/atualizar contato + sessão =====
     const contact = await findOrCreateContact(remoteJid, pushName || undefined, clientId);
@@ -375,8 +425,22 @@ export async function POST(req: NextRequest) {
 
     // (mídia já processada inline acima, antes do insert)
 
-    // ===== Disparar agente IA (mensagens do cliente com texto/mídia) =====
-    if (!fromMe && (text || msgType === "audio" || msgType === "image") && session?.id && !groupDisabled) {
+    const effectiveCustomerText = text || enrichedContent;
+    let optedOutInTurn = false;
+    if (!fromMe && effectiveCustomerText && remoteJid) {
+      optedOutInTurn = await handleIncomingOptOutIfDetected({
+        clientId,
+        remoteJid,
+        messageText: effectiveCustomerText,
+        sessionId: session?.id || null,
+      }).catch(() => false);
+      import("@/lib/campaign-worker")
+        .then((m) => m.clearZeroReplyBrakeForInstance?.(instanceName))
+        .catch(() => {});
+    }
+
+    // ===== Disparar agente IA (mensagens do cliente com texto/mídia; reações ou opt-out NÃO disparam IA) =====
+    if (!fromMe && !optedOutInTurn && msgType !== "reaction" && (text || msgType === "audio" || msgType === "image") && session?.id && !groupDisabled) {
       // FIX crítico: usar getEffectiveStatus de verdade — antes lia
       // `_effective_active` (nunca setado aqui) e bot_status cru, então o
       // snooze expirava e a IA ficava MUDA para sempre, e a pausa por

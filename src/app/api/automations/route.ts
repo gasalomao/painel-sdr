@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
-import { isInstanceOwnedByClient, requireClientId } from "@/lib/tenant";
+import { requireClientId } from "@/lib/tenant";
+import { validateCampaignInstanceAccess } from "@/lib/campaign-instance-access";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 import { parseMinReviews } from "@/lib/scraper-review-count";
 import {
@@ -123,8 +124,9 @@ export async function POST(req: NextRequest) {
     if (typeof body.instance_name !== "string" || !body.instance_name.trim()) {
       return NextResponse.json({ success: false, error: "instance_name é obrigatório" }, { status: 400 });
     }
-    if (!(await isInstanceOwnedByClient(String(body.instance_name), ctx.clientId))) {
-      return NextResponse.json({ success: false, error: "Instância não pertence a este cliente" }, { status: 403 });
+    const access = await validateCampaignInstanceAccess(ctx.clientId, String(body.instance_name));
+    if (!access.ok) {
+      return NextResponse.json({ success: false, error: access.error }, { status: access.status });
     }
 
     const row = {

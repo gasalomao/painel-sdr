@@ -10,7 +10,11 @@ import { maskJid, truncForLog } from "@/lib/pii";
 import { refreshProfilePicIfStale, sanitizeLogPayload } from "../shared-helpers";
 import { getOrganizerConfig } from "@/lib/organizer-config-cache";
 import { safeSecretEqual, shouldLogOnce } from "@/lib/webhook-security";
-import { processIncomingGroupMessage } from "@/lib/warmup/warmup-groups";
+import {
+  processIncomingGroupMessage,
+  processPassiveOrganicGroupMessage,
+} from "@/lib/warmup/warmup-groups";
+import { handleIncomingOptOutIfDetected } from "@/lib/opt-out";
 import { detectWarmupPeerTraffic } from "@/lib/warmup/warmup-firewall";
 
 export const dynamic = 'force-dynamic';
@@ -843,8 +847,17 @@ export async function POST(req: NextRequest) {
           console.error("[WARMUP] Erro no processamento de grupo:", err);
         }
 
-        // Se for outro grupo qualquer do WhatsApp (não registrado no SDR como contato 1x1):
-        // Ignora CRM e SDR para nunca gerar contatos/leads falsos a partir de grupos públicos.
+        // Se for outro grupo qualquer do WhatsApp (não registrado na tabela de aquecimento):
+        // Agenda apenas leitura passiva humana (se o chip estiver em aquecimento ativo) e
+        // ignora CRM e SDR para nunca gerar contatos/leads falsos a partir de grupos públicos.
+        processPassiveOrganicGroupMessage({
+          clientId,
+          instanceName,
+          groupJid: remoteJid,
+          messageId: finalId,
+          fromMe,
+        }).catch(() => {});
+
         return NextResponse.json({
           success: true,
           ignored: true,
@@ -1300,6 +1313,18 @@ export async function POST(req: NextRequest) {
 
       // === Disparar IA (texto OU áudio transcrito; reações de emoji ficam salvas no chat mas NÃO disparam IA) ===
       const agentText = text || enrichedContent;
+      let optedOutInTurn = false;
+      if (!fromMe && agentText && remoteJid) {
+        optedOutInTurn = await handleIncomingOptOutIfDetected({
+          clientId,
+          remoteJid,
+          messageText: agentText,
+          sessionId: session?.id || null,
+        }).catch(() => false);
+        import("@/lib/campaign-worker")
+          .then((m) => m.clearZeroReplyBrakeForInstance?.(instanceName))
+          .catch(() => {});
+      }
       if (!fromMe && msgType === "reaction" && session?.id) {
         console.log(`[Webhook] Reação de emoji (${truncForLog(agentText, 24)}) salva no chat sem acionar IA:`, maskJid(remoteJid));
         supabase.from("webhook_logs").insert({
@@ -1307,6 +1332,14 @@ export async function POST(req: NextRequest) {
           client_id: clientId,
           event: "AGENT_SKIP_REACTION",
           payload: { remote_jid: maskJid(remoteJid), text: truncForLog(agentText, 40) },
+          created_at: new Date().toISOString(),
+        }).then(() => {}, () => {});
+      } else if (!fromMe && optedOutInTurn) {
+        supabase.from("webhook_logs").insert({
+          instance_name: instanceName,
+          client_id: clientId,
+          event: "OPT_OUT_BLOCKED_AI",
+          payload: { remote_jid: maskJid(remoteJid), session_id: session?.id || null },
           created_at: new Date().toISOString(),
         }).then(() => {}, () => {});
       } else if (!fromMe && msgType !== "reaction" && agentText && session?.id && !groupDisabled) {
@@ -1390,6 +1423,17 @@ export async function POST(req: NextRequest) {
         const statusText = STATUS_MAP[statusRaw] || "sent";
         await supabase.from("messages").update({ delivery_status: statusText }).eq("message_id", msgId).eq("client_id", clientId);
         await supabase.from("chats_dashboard").update({ status_envio: statusText }).eq("message_id", msgId).eq("client_id", clientId);
+        if (instanceName && (statusText === "error" || statusText === "delivered" || statusText === "read" || statusText === "played")) {
+          import("@/lib/warmup/warmup-engine")
+            .then((m) =>
+              m.recordWebhookDeliveryFeedback?.({
+                clientId,
+                instanceName,
+                statusText,
+              })
+            )
+            .catch(() => {});
+        }
       }
       return NextResponse.json({ success: true, event: "status_updated" });
     }
@@ -1412,6 +1456,24 @@ export async function POST(req: NextRequest) {
           .from("channel_connections")
           .update({ status: state })
           .eq("instance_name", instanceName);
+
+        if (state === "close") {
+          const statusReason =
+            (data as any)?.statusReason ??
+            (data as any)?.reason ??
+            (data as any)?.error ??
+            (body as any)?.statusReason ??
+            null;
+          import("@/lib/warmup/warmup-engine")
+            .then((m) =>
+              m.handleWebhookConnectionClosed({
+                clientId,
+                instanceName,
+                statusReason,
+              })
+            )
+            .catch(() => {});
+        }
 
         // QR escaneado → instância CONECTOU. Vincula automaticamente um
         // agente de IA (1º livre · senão outro · senão cria). Não bloqueia

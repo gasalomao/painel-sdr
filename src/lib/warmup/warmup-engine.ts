@@ -6,11 +6,14 @@ import { registerWarmupSend } from "@/lib/manual-send-registry";
 import { getRandomWarmupVoiceBase64 } from "./warmup-audio";
 import { invalidateWarmupFirewallCache, persistResolvedChipPhone } from "./warmup-firewall";
 import {
+  calculateInterConversationCooldownSec,
+  calculateReactionDelayMs,
+  calculateReadReceiptDelayMs,
   calculateTypingDuration,
+  getRandomCasualVoiceNote,
   getRandomReaction,
   getRandomStatusQuote,
-  getRandomCasualVoiceNote,
-  pickFallbackDialogue,
+  pickVariedFallbackTurnText,
   WARMUP_THEMES,
 } from "./warmup-dialogues";
 import {
@@ -19,11 +22,31 @@ import {
   type WarmupConversation,
   type WarmupConversationTurn,
   type WarmupLog,
+  type WarmupPurpose,
   type WarmupStage,
 } from "./warmup-types";
 
 // Base64 de um áudio sintético super leve de voz silenciosa/neutra (OPUS) para fallback de PTT
 const CASUAL_OPUS_BASE64 = "GkXfo59ChoEBQveBAULygQRC84EIQoKEd2VibUKHgQRChYECGFOAZwEAAAAAAAA+1icBAAAAAAAAPtYnAQAAAAAAAA==";
+
+// Memória recente por instância para evitar repetição das mesmas frases em conversas seguidas
+const _recentTextsBySender = new Map<string, string[]>();
+const MAX_RECENT_TEXTS_PER_SENDER = 30;
+
+export function recordRecentWarmupText(senderKey: string, text: string): void {
+  const clean = text.trim();
+  if (!clean) return;
+  const list = _recentTextsBySender.get(senderKey) || [];
+  list.push(clean);
+  if (list.length > MAX_RECENT_TEXTS_PER_SENDER) {
+    list.splice(0, list.length - MAX_RECENT_TEXTS_PER_SENDER);
+  }
+  _recentTextsBySender.set(senderKey, list);
+}
+
+export function getRecentWarmupTexts(senderKey: string): string[] {
+  return _recentTextsBySender.get(senderKey) || [];
+}
 
 /**
  * Retorna a hora atual no fuso horário brasileiro (America/Sao_Paulo).
@@ -51,6 +74,76 @@ export function isWithinOperatingHours(
     return currentHour >= startHour && currentHour < endHour;
   }
   return currentHour >= startHour || currentHour < endHour;
+}
+
+function hashSeed(input: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+/**
+ * Minutos decorridos desde 00:00 no fuso de Brasília (0..1439).
+ */
+export function getBrazilMinutesOfDay(date = new Date()): number {
+  const hour = getBrazilHour(date);
+  const minuteStr = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Sao_Paulo",
+    minute: "numeric",
+  }).format(date);
+  const minute = parseInt(minuteStr, 10);
+  return hour * 60 + (Number.isNaN(minute) ? date.getMinutes() : minute);
+}
+
+/**
+ * Curva horária orgânica não-linear:
+ * - Aplica jitter determinístico diário (+/- 22 min) na abertura e fechamento da janela
+ *   para janelas regulares (>= 4h e < 24h), evitando todos os chips acordarem/dormirem
+ *   no segundo exato das 08:00 e 21:00.
+ * - Detecta faixas de pausa de refeição (12h10–13h15 e 19h15–19h45 BRT) para reduzir
+ *   início de novas conversas no horário de almoço/jantar.
+ */
+export function getOrganicScheduleDecision(
+  instanceName: string,
+  startHour: number,
+  endHour: number,
+  date = new Date()
+): { allowed: boolean; inLunchLull: boolean; startMinuteOffset: number; endMinuteOffset: number } {
+  const baseAllowed = isWithinOperatingHours(startHour, endHour, date);
+  if (!baseAllowed) {
+    return { allowed: false, inLunchLull: false, startMinuteOffset: 0, endMinuteOffset: 0 };
+  }
+
+  const dayKey = getBrazilDayKey(date);
+  const spanHours = startHour <= endHour ? endHour - startHour : 24 - startHour + endHour;
+  const totalMinutes = getBrazilMinutesOfDay(date);
+
+  // Jitter diário nos limites apenas em janelas operacionais regulares (>= 4h e < 24h)
+  let startMinuteOffset = 0;
+  let endMinuteOffset = 0;
+  if (spanHours >= 4 && spanHours < 24) {
+    const startSeed = hashSeed(`${instanceName}:${dayKey}:start`);
+    const endSeed = hashSeed(`${instanceName}:${dayKey}:end`);
+    // Entre +3 e +24 min na abertura; -3 a -24 min antes do encerramento
+    startMinuteOffset = 3 + (startSeed % 22);
+    endMinuteOffset = -(3 + (endSeed % 22));
+
+    const openMinute = startHour * 60 + startMinuteOffset;
+    const closeMinute = endHour * 60 + endMinuteOffset;
+
+    if (startHour < endHour && (totalMinutes < openMinute || totalMinutes >= closeMinute)) {
+      return { allowed: false, inLunchLull: false, startMinuteOffset, endMinuteOffset };
+    }
+  }
+
+  const inLunchLull =
+    (totalMinutes >= 12 * 60 + 10 && totalMinutes <= 13 * 60 + 15) ||
+    (totalMinutes >= 19 * 60 + 15 && totalMinutes <= 19 * 60 + 45);
+
+  return { allowed: true, inLunchLull, startMinuteOffset, endMinuteOffset };
 }
 
 /**
@@ -90,6 +183,57 @@ export function isSameBrazilDay(
   } catch {
     return false;
   }
+}
+
+/**
+ * Fase máxima permitida pela idade real (dias ativos) do chip quando o
+ * piloto automático está ligado:
+ * - Dias 1..3: Fase 1 (Frio)
+ * - Dias 4..7: Fase 2 (Morno)
+ * - Dias 8..12: Fase 3 (Quente)
+ * - Dia 13+: Fase 4 (Blindado)
+ */
+export function getMaxStageForDaysActive(daysActive: number): WarmupStage {
+  if (daysActive >= 13) return 4;
+  if (daysActive >= 8) return 3;
+  if (daysActive >= 4) return 2;
+  return 1;
+}
+
+/**
+ * Calcula os dias civis reais desde `created_at` no fuso de Brasília.
+ */
+export function calculateElapsedDaysFromCreatedAt(
+  createdAt?: string | null,
+  nowIso: string = new Date().toISOString()
+): number | null {
+  if (!createdAt) return null;
+  const createdKey = getBrazilDayKey(createdAt);
+  const todayKey = getBrazilDayKey(nowIso);
+  if (!createdKey || !todayKey) return null;
+  const createdDate = new Date(`${createdKey}T12:00:00Z`);
+  const todayDate = new Date(`${todayKey}T12:00:00Z`);
+  const elapsed = Math.floor((todayDate.getTime() - createdDate.getTime()) / 86_400_000) + 1;
+  return Number.isFinite(elapsed) && elapsed >= 1 ? elapsed : null;
+}
+
+/**
+ * Teto de envios por hora para distribuir a meta diária suavemente ao longo
+ * da janela comercial (evita disparar 50 mensagens em 3h pela manhã).
+ */
+export function getHourlySendCap(cfg: WarmupConfig, effectiveDailyTarget: number): number {
+  const start = cfg.allowed_start_hour ?? 8;
+  const end = cfg.allowed_end_hour ?? 21;
+  const windowHours = Math.max(6, end >= start ? end - start : 24 - start + end);
+  const avgPerHour = effectiveDailyTarget / windowHours;
+  const stageMaxByHour: Record<WarmupStage, number> = {
+    1: 3,
+    2: 5,
+    3: 8,
+    4: 10,
+  };
+  const stageCap = stageMaxByHour[(cfg.stage || 1) as WarmupStage] || 6;
+  return Math.max(2, Math.min(stageCap, Math.ceil(avgPerHour * 1.45)));
 }
 
 /**
@@ -158,7 +302,7 @@ export async function resolveInstancePhone(
 }
 
 /**
- * Gera mensagem de aquecimento usando o modelo de IA configurado ou diálogos nativos.
+ * Gera mensagem de aquecimento usando o modelo de IA configurado ou diálogos nativos variados.
  */
 export async function generateWarmupMessage(opts: {
   theme: string;
@@ -166,15 +310,23 @@ export async function generateWarmupMessage(opts: {
   history: WarmupConversationTurn[];
   aiModel?: string;
   customPrompt?: string | null;
+  senderInstance?: string;
 }): Promise<{ text: string; provider: string; modelUsed: string }> {
-  const { theme, speakerRole, history, aiModel, customPrompt } = opts;
+  const { theme, speakerRole, history, aiModel, customPrompt, senderInstance } = opts;
+
+  const historyTexts = history.map((h) => h.text).filter(Boolean);
+  const recentSenderTexts = senderInstance ? getRecentWarmupTexts(senderInstance) : [];
+  const usedTexts = [...historyTexts, ...recentSenderTexts];
 
   if (!aiModel || aiModel === "fallback" || aiModel === "nativo") {
-    const script = pickFallbackDialogue(theme);
-    const step = Math.min(history.length, script.turns.length - 1);
-    const turn = script.turns[step] || script.turns[0];
+    const text = pickVariedFallbackTurnText({
+      theme,
+      stepIndex: history.length,
+      usedTexts,
+    });
+    if (senderInstance) recordRecentWarmupText(senderInstance, text);
     return {
-      text: turn.text,
+      text,
       provider: "native_fallback",
       modelUsed: "dialogue_bank_pt_br",
     };
@@ -183,29 +335,31 @@ export async function generateWarmupMessage(opts: {
   try {
     const keys = await getAiKeys();
     const recentHistoryText = history
-      .slice(-4)
+      .slice(-5)
       .map((h) => `${h.sender}: ${h.text}`)
       .join("\n");
 
     const themeObj = WARMUP_THEMES.find((t) => t.id === theme) || WARMUP_THEMES[0];
+    const avoidSample = usedTexts.slice(-8).join(" | ");
 
     const systemPrompt = `Você é um usuário brasileiro casual conversando no WhatsApp com um amigo próximo sobre ${themeObj.label}.
 REGRAS OBRIGATÓRIAS:
-1. Escreva EXATAMENTE UMA mensagem curta e natural em português brasileiro (como alguém digita no WhatsApp pelo celular).
+1. Escreva EXATAMENTE UMA mensagem curta e natural em português brasileiro (como alguém digita no WhatsApp pelo celular, entre 4 e 18 palavras).
 2. Use linguagem casual e gírias leves (ex: 'blz', 'show', 'tbm', 'vc', 'kkk', 'mano', 'cara', 'valeu').
 3. NUNCA faça ofertas comerciais, nunca fale como atendente, robô ou empresa.
-4. Mantenha coerência com as mensagens anteriores.
+4. Mantenha coerência com as mensagens anteriores e NÃO repita frases já ditas (${avoidSample || "nenhuma"}).
 5. Devolva APENAS o texto da mensagem, sem aspas, sem explicações.`;
 
-    const userPrompt = history.length === 0
-      ? `Inicie a conversa casualmente com um cumprimento e uma frase sobre ${themeObj.label}. ${customPrompt ? `Detalhe: ${customPrompt}` : ""}`
-      : `Últimas mensagens trocadas:\n${recentHistoryText}\n\nResponda casualmente como o interlocutor (${speakerRole}):`;
+    const userPrompt =
+      history.length === 0
+        ? `Inicie a conversa casualmente com um cumprimento e uma frase sobre ${themeObj.label}. ${customPrompt ? `Detalhe: ${customPrompt}` : ""}`
+        : `Últimas mensagens trocadas:\n${recentHistoryText}\n\nResponda casualmente como o interlocutor (${speakerRole}):`;
 
     const res = await generateText({
       modelRef: aiModel,
       system: systemPrompt,
       prompt: userPrompt,
-      temperature: 0.85,
+      temperature: 0.9,
       geminiApiKey: keys.gemini,
       openrouterApiKey: keys.openrouter,
       openrouterKeys: keys.openrouterKeys,
@@ -216,6 +370,7 @@ REGRAS OBRIGATÓRIAS:
 
     const cleanText = (res.text || "").trim().replace(/^["']|["']$/g, "");
     if (cleanText.length > 2) {
+      if (senderInstance) recordRecentWarmupText(senderInstance, cleanText);
       return {
         text: cleanText,
         provider: res.provider,
@@ -223,13 +378,17 @@ REGRAS OBRIGATÓRIAS:
       };
     }
   } catch (err: any) {
-    console.warn(`[Warmup] Geração IA falhou (${err.message}) — usando fallback nativo.`);
+    console.warn(`[Warmup] Geração IA falhou (${err.message}) — usando fallback nativo variado.`);
   }
 
-  const script = pickFallbackDialogue(theme);
-  const step = Math.min(history.length, script.turns.length - 1);
+  const text = pickVariedFallbackTurnText({
+    theme,
+    stepIndex: history.length,
+    usedTexts,
+  });
+  if (senderInstance) recordRecentWarmupText(senderInstance, text);
   return {
-    text: script.turns[step]?.text || "Opa, tudo bem por aí?",
+    text,
     provider: "native_fallback",
     modelUsed: "dialogue_bank_pt_br",
   };
@@ -321,8 +480,180 @@ export async function handleInstanceFailure(
   });
 }
 
+const _lastDisconnectReportAt = new Map<string, number>();
+const DISCONNECT_REPORT_COOLDOWN_MS = 5 * 60 * 1000;
+
 /**
- * Avalia a progressão de dias e promoção de estágio do piloto automático.
+ * Responde a quedas/desconexões recebidas via webhook `connection.update`:
+ * - Reporta falha ao circuito do Aquecedor (com cooldown de 5 min em oscilações comuns,
+ *   ou imediato em erros 401/403/loggedOut/ban).
+ * - Em logout/banimento severo, pausa campanhas exclusivas do chip para interromper disparos em erro.
+ */
+export async function handleWebhookConnectionClosed(params: {
+  clientId: string;
+  instanceName: string;
+  statusReason?: unknown;
+  nowMs?: number;
+}): Promise<{ severe: boolean; pausedCampaigns: number }> {
+  const { clientId, instanceName, statusReason, nowMs = Date.now() } = params;
+  if (!clientId || !instanceName) return { severe: false, pausedCampaigns: 0 };
+
+  const reasonStr = statusReason != null && String(statusReason).trim() ? String(statusReason).trim() : "desconexão";
+  const severe = /(?:^|\D)(401|403|405)(?:\D|$)|logged.?out|ban|blocked|restricted|removed/i.test(reasonStr);
+  const lastAt = _lastDisconnectReportAt.get(instanceName) || 0;
+
+  if (severe || nowMs - lastAt >= DISCONNECT_REPORT_COOLDOWN_MS) {
+    _lastDisconnectReportAt.set(instanceName, nowMs);
+    try {
+      const { data: wCfg } = await supabaseAdmin
+        .from("whatsapp_warmup_configs")
+        .select("*")
+        .eq("client_id", clientId)
+        .eq("instance_name", instanceName)
+        .maybeSingle();
+
+      if (wCfg) {
+        await handleInstanceFailure(
+          clientId,
+          wCfg as WarmupConfig,
+          `[Webhook] Conexão fechada (${reasonStr})`
+        );
+      }
+    } catch {}
+  }
+
+  let pausedCampaigns = 0;
+  if (severe) {
+    try {
+      const { data: paused } = await supabaseAdmin
+        .from("campaigns")
+        .update({
+          status: "paused",
+          last_error: `Instância "${instanceName}" desconectada/bloqueada (${reasonStr}). Campanha pausada automaticamente.`,
+          last_error_at: new Date(nowMs).toISOString(),
+          updated_at: new Date(nowMs).toISOString(),
+        })
+        .eq("client_id", clientId)
+        .eq("instance_name", instanceName)
+        .eq("status", "running")
+        .select("id");
+      pausedCampaigns = Array.isArray(paused) ? paused.length : 0;
+    } catch {}
+  }
+
+  return { severe, pausedCampaigns };
+}
+
+const DELIVERY_BURST_WINDOW_MS = 10 * 60 * 1000;
+const DELIVERY_BURST_THRESHOLD = 3;
+const DELIVERY_COOLDOWN_MS = 5 * 60 * 1000;
+const _deliveryErrorBurstByInstance = new Map<string, number[]>();
+const _deliveryFeedbackCooldown = new Map<string, number>();
+
+export function resetDeliveryFeedbackForTests(): void {
+  _deliveryErrorBurstByInstance.clear();
+  _deliveryFeedbackCooldown.clear();
+}
+
+/**
+ * Fecha o loop entre eventos `messages.update` do WhatsApp e o Disjuntor do Aquecedor:
+ * - Confirmação positiva (`delivered`, `read`, `played`) zera a janela de erros da instância.
+ * - >= 3 falhas de entrega (`error` / `failed`) dentro de 10 minutos acionam `handleInstanceFailure`,
+ *   reduzindo o health_score e colocando o chip em quarentena preventiva após reincidência.
+ */
+export async function recordWebhookDeliveryFeedback(params: {
+  clientId: string;
+  instanceName: string;
+  statusText: string;
+  nowMs?: number;
+}): Promise<{ triggered: boolean; cleared: boolean; recentErrors: number }> {
+  const { clientId, instanceName, statusText, nowMs = Date.now() } = params;
+  if (!clientId || !instanceName || !statusText) {
+    return { triggered: false, cleared: false, recentErrors: 0 };
+  }
+
+  const key = `${clientId}:${instanceName}`;
+  const normalized = statusText.toLowerCase();
+
+  if (normalized === "delivered" || normalized === "read" || normalized === "played") {
+    _deliveryErrorBurstByInstance.delete(key);
+    return { triggered: false, cleared: true, recentErrors: 0 };
+  }
+
+  if (normalized !== "error" && normalized !== "failed") {
+    return { triggered: false, cleared: false, recentErrors: 0 };
+  }
+
+  const cutoff = nowMs - DELIVERY_BURST_WINDOW_MS;
+  const recent = (_deliveryErrorBurstByInstance.get(key) || []).filter((ts) => ts >= cutoff);
+  recent.push(nowMs);
+  _deliveryErrorBurstByInstance.set(key, recent);
+
+  const lastTriggered = _deliveryFeedbackCooldown.get(key) || 0;
+  if (recent.length >= DELIVERY_BURST_THRESHOLD && nowMs - lastTriggered >= DELIVERY_COOLDOWN_MS) {
+    _deliveryErrorBurstByInstance.delete(key);
+    _deliveryFeedbackCooldown.set(key, nowMs);
+    try {
+      const { data: wCfg } = await supabaseAdmin
+        .from("whatsapp_warmup_configs")
+        .select("*")
+        .eq("client_id", clientId)
+        .eq("instance_name", instanceName)
+        .maybeSingle();
+
+      if (wCfg) {
+        await handleInstanceFailure(
+          clientId,
+          wCfg as WarmupConfig,
+          `[Webhook] Surto de falhas de entrega (${recent.length}x em 10 min via messages.update)`
+        );
+        return { triggered: true, cleared: false, recentErrors: recent.length };
+      }
+    } catch {}
+  }
+
+  return { triggered: false, cleared: false, recentErrors: recent.length };
+}
+
+/**
+ * Esteira automática de carreira do chip (Plug & Play Zero-Toque):
+ * - Fase 1 / Dias 1..3 (Berçário): permanece em "contingency" (bloqueado de disparo frio).
+ * - Fase 2 / Dias 4..7 (Pré-Prospecção): gradua de "contingency" -> "inbound".
+ * - Fase 3+ / Dia 8+ com saúde >= 70 (Produção): gradua -> "outbound" para o pool de campanhas.
+ */
+export function getAutoCareerPurpose(opts: {
+  currentPurpose?: WarmupPurpose | null;
+  stage: WarmupStage;
+  daysActive: number;
+  healthScore?: number | null;
+  autoProgress?: boolean;
+}): { nextPurpose: WarmupPurpose; graduated: boolean } {
+  const current = (opts.currentPurpose || "contingency") as WarmupPurpose;
+  if (opts.autoProgress === false) {
+    return { nextPurpose: current, graduated: false };
+  }
+
+  const health = opts.healthScore ?? 100;
+  let target: WarmupPurpose = current;
+
+  if (opts.stage >= 3 && opts.daysActive >= 8 && health >= 70) {
+    if (current === "contingency" || current === "inbound") {
+      target = "outbound";
+    }
+  } else if (opts.stage >= 2 && opts.daysActive >= 4) {
+    if (current === "contingency") {
+      target = "inbound";
+    }
+  }
+
+  return {
+    nextPurpose: target,
+    graduated: target !== current,
+  };
+}
+
+/**
+ * Avalia a progressão de dias e promoção/reconciliação de estágio do piloto automático.
  *
  * `lastResetDay` (YYYY-MM-DD, fuso Brasil) evita reset a cada tick quando o
  * chip não envia nada: sem ele, `last_activity_at` antigo marcava "novo dia"
@@ -335,7 +666,10 @@ export function evaluateDailyAutoProgress(
 ): {
   isNewDay: boolean;
   stagePromoted: boolean;
+  stageReconciled?: boolean;
+  purposeGraduated: boolean;
   newStage: WarmupStage;
+  newPurpose: WarmupPurpose;
   newDaysActive: number;
   newConsecutiveDays: number;
   newDailyTarget: number;
@@ -349,12 +683,16 @@ export function evaluateDailyAutoProgress(
       : false;
 
   const curStage = (cfg.stage || 1) as WarmupStage;
+  const curPurpose = (cfg.purpose || "contingency") as WarmupPurpose;
 
   if (!isNewDay) {
     return {
       isNewDay: false,
       stagePromoted: false,
+      stageReconciled: false,
+      purposeGraduated: false,
       newStage: curStage,
+      newPurpose: curPurpose,
       newDaysActive: cfg.days_active || 1,
       newConsecutiveDays: cfg.consecutive_successful_days || 0,
       newDailyTarget: cfg.daily_target || STAGE_DEFAULTS[curStage].dailyTarget,
@@ -369,23 +707,27 @@ export function evaluateDailyAutoProgress(
 
   // Dias ativos = dias civis desde a criação do chip (fonte real), com fallback
   // para o contador incremental quando created_at não estiver disponível.
-  let newDaysActive = (cfg.days_active || 1) + 1;
-  if (cfg.created_at) {
-    const createdKey = getBrazilDayKey(cfg.created_at);
-    if (createdKey && todayKey) {
-      const createdDate = new Date(`${createdKey}T12:00:00Z`);
-      const todayDate = new Date(`${todayKey}T12:00:00Z`);
-      const elapsed = Math.floor((todayDate.getTime() - createdDate.getTime()) / 86_400_000) + 1;
-      if (Number.isFinite(elapsed) && elapsed >= 1) newDaysActive = elapsed;
-    }
-  }
+  const elapsedFromCreated = calculateElapsedDaysFromCreatedAt(cfg.created_at, nowIso);
+  const newDaysActive = elapsedFromCreated ?? (cfg.days_active || 1) + 1;
 
   let newStage: WarmupStage = curStage;
   let stagePromoted = false;
+  let stageReconciled = false;
+
+  // Reconciliação de segurança: se o chip tem created_at real e está em uma fase
+  // acima do permitido pela sua idade real (ex: herança do bug antigo de 624 dias),
+  // ajusta para a fase compatível com a idade real.
+  if (cfg.stage_auto_progress !== false && elapsedFromCreated !== null) {
+    const maxAllowedStage = getMaxStageForDaysActive(newDaysActive);
+    if (curStage > maxAllowedStage) {
+      newStage = maxAllowedStage;
+      stageReconciled = true;
+    }
+  }
 
   // PILOTO AUTOMÁTICO DE ESCADA DE FASES
   // Só promove com dias suficientes E pelo menos 2 dias consecutivos saudáveis.
-  if (cfg.stage_auto_progress !== false && newConsecutiveDays >= 2) {
+  if (cfg.stage_auto_progress !== false && newConsecutiveDays >= 2 && !stageReconciled) {
     if (newStage === 1 && newDaysActive >= 4) {
       newStage = 2;
       stagePromoted = true;
@@ -398,24 +740,37 @@ export function evaluateDailyAutoProgress(
     }
   }
 
+  const career = getAutoCareerPurpose({
+    currentPurpose: cfg.purpose,
+    stage: newStage,
+    daysActive: newDaysActive,
+    healthScore: cfg.health_score,
+    autoProgress: cfg.stage_auto_progress,
+  });
+
   const stageInfo = STAGE_DEFAULTS[newStage];
 
   return {
     isNewDay: true,
     stagePromoted,
+    stageReconciled,
+    purposeGraduated: career.graduated,
     newStage,
+    newPurpose: career.nextPurpose,
     newDaysActive,
     newConsecutiveDays,
-    newDailyTarget: stagePromoted
-      ? stageInfo.dailyTarget
-      : cfg.daily_target || stageInfo.dailyTarget,
+    newDailyTarget:
+      stagePromoted || stageReconciled
+        ? stageInfo.dailyTarget
+        : cfg.daily_target || stageInfo.dailyTarget,
     stageInfo,
   };
 }
 
 /**
  * Executa um turno avançado de aquecimento com toda a gama de comportamentos humanos:
- * vCard, Digitação, Texto ou Áudio Opus PTT, Tiques Azuis, Reações e Status.
+ * vCard, Digitação, Texto ou Áudio Opus PTT recodificado, Tiques Azuis variáveis,
+ * Reações variáveis e Status.
  */
 export async function executeWarmupTurn(opts: {
   clientId: string;
@@ -426,7 +781,15 @@ export async function executeWarmupTurn(opts: {
   forceStatusPost?: boolean;
   forceVCard?: boolean;
 }): Promise<{ success: boolean; messageText: string; error?: string }> {
-  const { clientId, senderConfig, receiverConfig, conversation, isManualTrigger, forceStatusPost, forceVCard } = opts;
+  const {
+    clientId,
+    senderConfig,
+    receiverConfig,
+    conversation,
+    isManualTrigger,
+    forceStatusPost,
+    forceVCard,
+  } = opts;
 
   // 1. Checagem de Quarentena (Circuit Breaker)
   if (senderConfig.is_quarantined && !isManualTrigger) {
@@ -442,13 +805,6 @@ export async function executeWarmupTurn(opts: {
       senderConfig.allowed_end_hour ?? 21
     );
     if (!inHours) {
-      await logWarmupAction({
-        client_id: clientId,
-        sender_instance: senderConfig.instance_name,
-        receiver_instance: receiverConfig.instance_name,
-        message_text: `Fora da janela permitida (${senderConfig.allowed_start_hour}h às ${senderConfig.allowed_end_hour}h BRT). Aguardando próximo ciclo.`,
-        action_type: "system",
-      });
       return { success: false, messageText: "", error: "outside_hours" };
     }
   }
@@ -459,8 +815,6 @@ export async function executeWarmupTurn(opts: {
 
   if (!receiverPhone) {
     const errorMsg = `Telefone do chip destinatário (${receiverConfig.instance_name}) não encontrado.`;
-    // Falha de cadastro do destinatário NÃO é falha de reputação do remetente.
-    // Por isso não passa pelo circuit breaker.
     await logWarmupAction({
       client_id: clientId,
       sender_instance: senderConfig.instance_name,
@@ -505,7 +859,6 @@ export async function executeWarmupTurn(opts: {
         action_type: "vcard",
       });
 
-      // Envia o cartão de contato do REMETENTE para o destinatário salvar na agenda
       const vcardRes: any = await evolution.sendContact(
         targetJid,
         [{ fullName: senderConfig.instance_name, phoneNumber: senderPhone }],
@@ -513,7 +866,6 @@ export async function executeWarmupTurn(opts: {
       );
       registerWarmupSend(vcardRes?.key?.id || vcardRes?.data?.key?.id || vcardRes?.id);
 
-      // Marca como trocado em ambos os lados
       const updatedPeers = [...vcardPeers, receiverConfig.instance_name];
       await supabaseAdmin
         .from("whatsapp_warmup_configs")
@@ -523,13 +875,14 @@ export async function executeWarmupTurn(opts: {
     } catch {}
   }
 
-  // 5. POSTAGEM DE STATUS (WhatsApp Stories) - A cada 48h ou se requisitado no teste manual
+  // 5. POSTAGEM DE STATUS (WhatsApp Stories) - A cada 24–36h ou se requisitado no teste manual
+  const statusIntervalMs = (24 + Math.floor(Math.random() * 12)) * 60 * 60 * 1000;
   const shouldPostStatus =
     (forceStatusPost || !isManualTrigger) &&
     senderConfig.enable_status_posts !== false &&
     (Boolean(forceStatusPost) ||
       !senderConfig.last_status_post_at ||
-      Date.now() - new Date(senderConfig.last_status_post_at).getTime() > 48 * 60 * 60 * 1000);
+      Date.now() - new Date(senderConfig.last_status_post_at).getTime() > statusIntervalMs);
 
   if (shouldPostStatus) {
     try {
@@ -558,7 +911,7 @@ export async function executeWarmupTurn(opts: {
 
   // 6. Geração da Mensagem (Texto ou Áudio)
   const isAudioTurn =
-    senderConfig.enable_audio !== false && senderConfig.stage >= 2 && Math.random() < 0.18; // ~18% de turnos viram áudio
+    senderConfig.enable_audio !== false && senderConfig.stage >= 2 && Math.random() < 0.16;
   let messageText = "";
   let genResult = { provider: "native", modelUsed: "dialogue_bank" };
 
@@ -572,6 +925,7 @@ export async function executeWarmupTurn(opts: {
       history: conversation.history || [],
       aiModel: senderConfig.ai_model,
       customPrompt: senderConfig.custom_prompt,
+      senderInstance: senderConfig.instance_name,
     });
     messageText = generated.text;
     genResult = { provider: generated.provider, modelUsed: generated.modelUsed };
@@ -605,7 +959,7 @@ export async function executeWarmupTurn(opts: {
     await new Promise((r) => setTimeout(r, effectiveWait));
   }
 
-  // 8. Envio Efetivo (Áudio Opus PTT ou Texto)
+  // 8. Envio Efetivo (Áudio Opus PTT com encoding: true para variar hash binário, ou Texto)
   let sendResult: any = null;
   try {
     if (isAudioTurn) {
@@ -615,7 +969,7 @@ export async function executeWarmupTurn(opts: {
         "",
         { type: "audio", base64: voiceB64, mimetype: "audio/ogg; codecs=opus" },
         senderConfig.instance_name,
-        { delay: 1500, encoding: false }
+        { delay: 1200 + Math.floor(Math.random() * 900), encoding: true }
       );
     } else {
       sendResult = await evolution.sendTextMessage(targetJid, messageText, senderConfig.instance_name);
@@ -650,10 +1004,10 @@ export async function executeWarmupTurn(opts: {
     },
   });
 
-  // 9. Confirmação de Leitura e Tique Azul no Destinatário (com Atraso Humano)
+  // 9. Confirmação de Leitura e Tique Azul no Destinatário (com Atraso Humano Variável)
   if (receiverConfig.enable_blue_ticks !== false && senderPhone) {
     const senderJid = `${senderPhone}@s.whatsapp.net`;
-    const readDelayMs = 4200;
+    const readDelayMs = calculateReadReceiptDelayMs(Boolean(isManualTrigger));
 
     const performReadConfirmation = async () => {
       try {
@@ -684,10 +1038,10 @@ export async function executeWarmupTurn(opts: {
     }
   }
 
-  // 10. Reação de Emoji (probabilidade ~32%)
-  if (receiverConfig.enable_reactions !== false && senderPhone && (isManualTrigger || Math.random() < 0.32)) {
+  // 10. Reação de Emoji (probabilidade ~28% com atraso humano variável)
+  if (receiverConfig.enable_reactions !== false && senderPhone && (isManualTrigger || Math.random() < 0.28)) {
     const reactionEmoji = getRandomReaction();
-    const reactionDelayMs = isManualTrigger ? 2000 : 7500;
+    const reactionDelayMs = calculateReactionDelayMs(Boolean(isManualTrigger));
 
     const performReaction = async () => {
       try {
@@ -708,7 +1062,7 @@ export async function executeWarmupTurn(opts: {
           receiver_phone: senderPhone,
           message_text: `Reagiu com ${reactionEmoji} à mensagem anterior`,
           action_type: "reaction",
-          details: { reaction: reactionEmoji, target_msg_id: messageId },
+          details: { reaction: reactionEmoji, target_msg_id: messageId, delay_ms: reactionDelayMs },
         });
       } catch {}
     };
@@ -757,13 +1111,16 @@ export async function executeWarmupTurn(opts: {
     .eq("instance_name", receiverConfig.instance_name)
     .eq("client_id", clientId);
 
-  // 12. Atualização da conversa ativa
+  // 12. Atualização da conversa ativa (com cooldown longo ao encerrar sessão)
   const updatedTurnCount = conversation.turn_count + 1;
   const isFinished = updatedTurnCount >= conversation.max_turns;
 
   const minSec = senderConfig.min_interval_seconds || 90;
   const maxSec = senderConfig.max_interval_seconds || 300;
-  const nextIntervalSec = Math.floor(Math.random() * (maxSec - minSec + 1)) + minSec;
+  const turnIntervalSec = Math.floor(Math.random() * (maxSec - minSec + 1)) + minSec;
+  const nextIntervalSec = isFinished
+    ? calculateInterConversationCooldownSec(senderConfig.stage || 1)
+    : turnIntervalSec;
   const nextTurnAt = new Date(Date.now() + nextIntervalSec * 1000).toISOString();
 
   const newTurn: WarmupConversationTurn = {

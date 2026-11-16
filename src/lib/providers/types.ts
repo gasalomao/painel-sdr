@@ -45,7 +45,12 @@ export interface WhatsAppProvider {
   readonly name: string;
 
   /** Enviar mensagem de texto. */
-  sendText(remoteJid: string, text: string, instanceName: string, options?: { delay?: number }): Promise<SendResult>;
+  sendText(
+    remoteJid: string,
+    text: string,
+    instanceName: string,
+    options?: { delay?: number; linkPreview?: boolean }
+  ): Promise<SendResult>;
 
   /** Enviar mídia (imagem/áudio/vídeo/documento). */
   sendMedia(remoteJid: string, caption: string, media: MediaData, instanceName: string, options?: { delay?: number }): Promise<SendResult>;

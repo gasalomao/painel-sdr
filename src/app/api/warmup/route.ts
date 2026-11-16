@@ -2,7 +2,17 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireClientId } from "@/lib/tenant";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { evolution } from "@/lib/evolution";
-import { STAGE_DEFAULTS, type WarmupConfig, type WarmupLog, type WarmupStage } from "@/lib/warmup/warmup-types";
+import { isChatRowInbound, isChatRowOutbound } from "@/lib/chat-direction";
+import {
+  auditChipDay0Hygiene,
+  extractDay0WarningsByInstance,
+} from "@/lib/warmup/warmup-groups";
+import {
+  STAGE_DEFAULTS,
+  type WarmupConfig,
+  type WarmupLog,
+  type WarmupStage,
+} from "@/lib/warmup/warmup-types";
 import {
   ensureWarmupConfigsForTenant,
   getGlobalWarmupSettings,
@@ -16,6 +26,65 @@ import {
 } from "@/lib/warmup/warmup-config-service";
 
 export const dynamic = "force-dynamic";
+
+type ChipDeliveryMetrics = {
+  outbound: number;
+  deliveredRate: number;
+  readRate: number;
+  replyRate: number;
+  failed: number;
+};
+
+async function getChipDeliveryMetricsMap(clientId: string): Promise<Map<string, ChipDeliveryMetrics>> {
+  const result = new Map<string, ChipDeliveryMetrics>();
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("chats_dashboard")
+      .select("instance_name, sender_type, status_envio")
+      .eq("client_id", clientId)
+      .order("created_at", { ascending: false })
+      .limit(400);
+
+    if (error || !Array.isArray(data) || data.length === 0) return result;
+
+    const buckets = new Map<
+      string,
+      { outbound: number; delivered: number; read: number; failed: number; inbound: number }
+    >();
+
+    for (const row of data as Array<Record<string, unknown>>) {
+      const inst = String(row.instance_name || "").trim();
+      if (!inst || inst === "__all__") continue;
+      let acc = buckets.get(inst);
+      if (!acc) {
+        acc = { outbound: 0, delivered: 0, read: 0, failed: 0, inbound: 0 };
+        buckets.set(inst, acc);
+      }
+      if (isChatRowOutbound(row)) {
+        acc.outbound++;
+        const st = String(row.status_envio || "").toLowerCase();
+        if (st === "delivered" || st === "read" || st === "played") acc.delivered++;
+        if (st === "read" || st === "played") acc.read++;
+        if (st === "error" || st === "failed") acc.failed++;
+      } else if (isChatRowInbound(row)) {
+        acc.inbound++;
+      }
+    }
+
+    for (const [inst, acc] of buckets.entries()) {
+      if (acc.outbound === 0 && acc.inbound === 0) continue;
+      const denom = Math.max(1, acc.outbound);
+      result.set(inst, {
+        outbound: acc.outbound,
+        deliveredRate: acc.outbound > 0 ? Math.min(100, Math.round((acc.delivered / denom) * 100)) : 0,
+        readRate: acc.outbound > 0 ? Math.min(100, Math.round((acc.read / denom) * 100)) : 0,
+        replyRate: acc.outbound > 0 ? Math.min(100, Math.round((acc.inbound / denom) * 100)) : 0,
+        failed: acc.failed,
+      });
+    }
+  } catch {}
+  return result;
+}
 
 /**
  * Lê logs de aquecimento do DB ou de app_settings.
@@ -127,8 +196,9 @@ export async function GET(req: NextRequest) {
     const { configs: cfgMap } = await readTenantWarmupConfigs(clientId);
     const globalSettings = await getGlobalWarmupSettings(clientId);
 
-    // 3. Enriquece telefones com dados ao vivo da Evolution API.
+    // 3. Enriquece telefones, status ao vivo e proxy da Evolution API.
     const phoneByInstance = new Map<string, string>();
+    const liveStatusByInstance = new Map<string, string>();
     for (const c of connections) {
       if (c.phone_number) phoneByInstance.set(c.instance_name, c.phone_number);
     }
@@ -142,6 +212,17 @@ export async function GET(req: NextRequest) {
       for (const item of evoList) {
         const name = item.instance?.instanceName || item.instance?.name || item.name || item.instanceName;
         if (!name) continue;
+        const rawLiveStatus = String(
+          item.connectionStatus || item.instance?.connectionStatus || item.instance?.state || item.state || ""
+        ).toLowerCase();
+        if (rawLiveStatus === "open" || rawLiveStatus === "connected") {
+          liveStatusByInstance.set(name, "open");
+        } else if (rawLiveStatus === "close" || rawLiveStatus === "disconnected") {
+          liveStatusByInstance.set(name, "close");
+        } else if (rawLiveStatus) {
+          liveStatusByInstance.set(name, rawLiveStatus);
+        }
+
         const owner = item.ownerJid || item.instance?.ownerJid || item.owner || item.instance?.owner;
         if (owner) {
           const clean = String(owner).replace(/@.*$/, "").replace(/\D/g, "");
@@ -153,8 +234,49 @@ export async function GET(req: NextRequest) {
       }
     } catch {}
 
+    const proxyByInstance = new Map<
+      string,
+      { enabled: boolean; host: string | null; port: string | null; protocol: string }
+    >();
+    if (typeof (evolution as { findProxy?: unknown }).findProxy === "function") {
+      await Promise.all(
+        connections.map(async (c) => {
+          try {
+            const p: any = await evolution.findProxy(c.instance_name);
+            if (p && typeof p === "object") {
+              proxyByInstance.set(c.instance_name, {
+                enabled: Boolean(p.enabled),
+                host: p.host ? String(p.host) : null,
+                port: p.port ? String(p.port) : null,
+                protocol: p.protocol ? String(p.protocol) : "http",
+              });
+            }
+          } catch {}
+        })
+      );
+    }
+
+    const logs = await getLogsFromDbOrSettings(clientId);
+    const day0WarningsByInstance = extractDay0WarningsByInstance(logs);
+    const deliveryMetricsByInstance = await getChipDeliveryMetricsMap(clientId);
+
     const instancesList = connections.map((connection) => {
       const existingCfg = cfgMap[connection.instance_name];
+      const liveState = liveStatusByInstance.get(connection.instance_name);
+      const effectiveConnStatus =
+        connection.status === "connecting" && liveState === "open"
+          ? "open"
+          : connection.status || liveState || "unknown";
+
+      if (connection.status === "connecting" && liveState === "open") {
+        supabaseAdmin
+          .from("channel_connections")
+          .update({ status: "open" })
+          .eq("client_id", clientId)
+          .eq("instance_name", connection.instance_name)
+          .then(() => {}, () => {});
+      }
+
       const config = buildDisplayConfig({
         clientId,
         instanceName: connection.instance_name,
@@ -164,13 +286,29 @@ export async function GET(req: NextRequest) {
         enabledFallback: false,
       });
 
+      const hasDay0Record = day0WarningsByInstance.has(connection.instance_name);
+      const day0Warnings = day0WarningsByInstance.get(connection.instance_name) || [];
+      const day0Status: "pending" | "warning" | "ok" = !hasDay0Record
+        ? "pending"
+        : day0Warnings.length > 0
+          ? "warning"
+          : "ok";
+
       return {
         instance_name: connection.instance_name,
-        connection_status: connection.status || "unknown",
+        connection_status: effectiveConnStatus,
         phone_number: config.phone_number,
         orphan: false,
         config,
-        proxy: { enabled: false, host: null, port: null, protocol: "http" },
+        day0_warnings: day0Warnings,
+        day0_status: day0Status,
+        metrics: deliveryMetricsByInstance.get(connection.instance_name) || null,
+        proxy: proxyByInstance.get(connection.instance_name) || {
+          enabled: false,
+          host: null,
+          port: null,
+          protocol: "http",
+        },
       };
     });
 
@@ -189,13 +327,14 @@ export async function GET(req: NextRequest) {
           globalSettings,
           enabledFallback: false,
         }),
+        day0_warnings: [],
+        day0_status: "pending",
+        metrics: null,
         proxy: { enabled: false, host: null, port: null, protocol: "http" },
       });
     }
 
-    // 4. Logs e estatísticas
-    const logs = await getLogsFromDbOrSettings(clientId);
-
+    // 4. Estatísticas
     const warmable = instancesList.filter((i) => !i.orphan);
     const totalChips = warmable.length;
     const activeWarmup = warmable.filter((i) => i.config.enabled).length;
@@ -273,6 +412,33 @@ export async function POST(req: NextRequest) {
       const enabled = body.action === "enable_all";
       const result = await setWarmupEnabledForAll(clientId, enabled);
       return NextResponse.json({ success: true, enabled, updated: result.updated });
+    }
+
+    // Reauditoria Dia-0 sob demanda (limpa alertas assim que foto/proxy estiverem OK)
+    if (body.action === "reaudit_day0") {
+      const instanceName = typeof body.instance_name === "string" ? body.instance_name.trim() : "";
+      if (!instanceName) {
+        return NextResponse.json(
+          { success: false, error: "instance_name é obrigatório" },
+          { status: 400 }
+        );
+      }
+      const [conns, configsResult] = await Promise.all([
+        readTenantConnections(clientId),
+        readTenantWarmupConfigs(clientId),
+      ]);
+      const owned =
+        conns.some((c) => c.instance_name === instanceName) ||
+        Boolean(configsResult?.configs?.[instanceName]) ||
+        Object.values(configsResult?.configs || {}).some((c) => c.instance_name === instanceName);
+      if (!owned) {
+        return NextResponse.json(
+          { success: false, error: "Instância não pertence a este cliente" },
+          { status: 403 }
+        );
+      }
+      const audit = await auditChipDay0Hygiene(clientId, instanceName, { forceInTests: true });
+      return NextResponse.json({ success: true, ok: audit.ok, warnings: audit.warnings });
     }
 
     // Configurações globais do tenant

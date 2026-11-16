@@ -259,7 +259,12 @@ async function ensureBase64(media: MediaData): Promise<MediaData> {
   };
 }
 
-export async function sendMessage(remoteJid: string, text: string, instanceName: string, options?: { delay?: number }): Promise<SendResult> {
+export async function sendMessage(
+  remoteJid: string,
+  text: string,
+  instanceName: string,
+  options?: { delay?: number; linkPreview?: boolean }
+): Promise<SendResult> {
   const ch = await resolveChannel(instanceName);
   if (ch.provider === "whatsapp_cloud") {
     const cfg = ensureCloudConfig(ch);

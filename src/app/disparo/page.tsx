@@ -20,6 +20,7 @@ import { cn } from "@/lib/utils";
 import { useClientSession } from "@/lib/use-session";
 import { LeadIntelligenceBatch } from "@/components/lead-intelligence-batch";
 import { ModelOptions } from "@/components/ai-module-shared";
+import { AUTO_POOL_INSTANCE, isAutoPoolInstance } from "@/lib/campaign-pool";
 
 type Lead = {
   id: number;
@@ -92,6 +93,8 @@ export default function DisparoPage() {
   const [personalizeWithAI, setPersonalizeWithAI] = useState(false);
   const [humanizeMessages, setHumanizeMessages] = useState(false);
   const [antibanMixer, setAntibanMixer] = useState(true);
+  const [weekendGuard, setWeekendGuard] = useState(false);
+  const [spintaxSeed, setSpintaxSeed] = useState(0);
   const [useWebSearch, setUseWebSearch] = useState(false);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
   const [mediaType, setMediaType] = useState<string | null>(null);
@@ -163,7 +166,7 @@ export default function DisparoPage() {
       const r = await fetch(`/api/campaigns/${campaignId}`, { cache: "no-store" });
       const d = await r.json();
       if (d.success) setTargets((d.targets || []) as TargetRow[]);
-    } catch {}
+    } catch { }
     finally { setLoadingTargets(false); }
   }
 
@@ -248,17 +251,17 @@ export default function DisparoPage() {
 
     setIsAdmin(!!session?.isAdmin && !session?.impersonating);
     setDefaultAiModel(session?.defaultAiModel || null);
-    
+
     let query = supabase
       .from("leads_extraidos")
       .select("id, remoteJid, nome_negocio, ramo_negocio, status, instance_name")
       .order("created_at", { ascending: false })
       .limit(2000);
-      
+
     if (session?.clientId) {
       query = query.eq("client_id", session.clientId);
     }
-    
+
     const { data } = await query;
     setLeads((data as Lead[]) || []);
   }
@@ -411,19 +414,20 @@ export default function DisparoPage() {
       if (!leadsSearch) return true;
       const s = leadsSearch.toLowerCase();
       return (l.nome_negocio || "").toLowerCase().includes(s)
-          || (l.ramo_negocio || "").toLowerCase().includes(s)
-          || (l.remoteJid || "").includes(s);
+        || (l.ramo_negocio || "").toLowerCase().includes(s)
+        || (l.remoteJid || "").includes(s);
     });
   }, [leads, leadsSearch, statusFilter]);
 
   const previewMessage = useMemo(() => {
+    void spintaxSeed;
     const sample = leads.find(l => selectedLeadIds.has(l.id)) || leads[0];
     return renderTemplate(template, {
       remoteJid: sample?.remoteJid,
       nome_negocio: sample?.nome_negocio,
       ramo_negocio: sample?.ramo_negocio,
-    });
-  }, [template, leads, selectedLeadIds]);
+    }, { spintax: true });
+  }, [template, leads, selectedLeadIds, spintaxSeed]);
 
   function insertVariable(key: string) {
     const v = `{{${key}}}`;
@@ -449,6 +453,7 @@ export default function DisparoPage() {
     setPersonalizeWithAI(false);
     setHumanizeMessages(false);
     setAntibanMixer(true);
+    setWeekendGuard(false);
     setUseWebSearch(false);
     setMediaUrl(null); setMediaType(null); setMediaFileName(null); setMediaMimetype(null); setMediaCaption("");
     // NÃO limpa aiModel — mantém o último escolhido pra próxima campanha
@@ -509,6 +514,7 @@ export default function DisparoPage() {
         use_web_search: useWebSearch,
         humanize_messages: humanizeMessages,
         antiban_mixer: antibanMixer,
+        weekend_guard: weekendGuard,
         ai_model: personalizeWithAI ? aiModel : null,
         ai_prompt: personalizeWithAI ? (aiPrompt.trim() || null) : null,
         media_url: mediaUrl,
@@ -527,7 +533,7 @@ export default function DisparoPage() {
         });
         const d = await r.json();
         if (!d.success) throw new Error(d.error || "Erro ao editar");
-        
+
         if (startImmediately) {
           const startRes = await fetch(`/api/campaigns/${editingCampaignId}`, {
             method: "POST",
@@ -553,7 +559,7 @@ export default function DisparoPage() {
         });
         const d = await r.json();
         if (!d.success) throw new Error(d.error || "Erro");
-        
+
         if (startImmediately) {
           const startRes = await fetch(`/api/campaigns/${d.campaign.id}`, {
             method: "POST",
@@ -689,7 +695,7 @@ export default function DisparoPage() {
                         <div className={styles.metadata}>
                           <span>
                             <Smartphone />
-                            {c.instance_name}
+                            {isAutoPoolInstance(c.instance_name) ? "⚡ Pool Automático (Multi-Chip)" : c.instance_name}
                           </span>
                           <span><Clock />{c.allowed_start_hour}h às {c.allowed_end_hour}h</span>
                           <span><Zap />Intervalo de {c.min_interval_seconds}–{c.max_interval_seconds}s</span>
@@ -881,6 +887,11 @@ export default function DisparoPage() {
                       <option value="">
                         {loadingInstances ? "Carregando contas…" : instances.length === 0 ? "Nenhuma conta disponível" : "Selecione a conta de envio"}
                       </option>
+                      {instances.length > 0 && (
+                        <option value={AUTO_POOL_INSTANCE}>
+                          ⚡ Pool Automático (alternar entre chips saudáveis)
+                        </option>
+                      )}
                       {instances.map(i => <option key={i.instanceName} value={i.instanceName}>
                         {i.profileName || i.instanceName}
                       </option>)}
@@ -916,9 +927,20 @@ export default function DisparoPage() {
                   <div className={styles.preview}>
                     <div className={styles.previewHeading}>
                       <span><MessageSquare />Prévia da mensagem</span>
-                      <span>
-                        {selectedLeadIds.size ? "Primeiro contato selecionado" : "Exemplo com um contato"}
-                      </span>
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => setSpintaxSeed(s => s + 1)}
+                          className={styles.inlineAction}
+                          title="Sortear uma nova variação para blocos Spintax {op1|op2}"
+                        >
+                          <RefreshCw />
+                          Sortear variação
+                        </button>
+                        <span>
+                          {selectedLeadIds.size ? "Primeiro contato selecionado" : "Exemplo com um contato"}
+                        </span>
+                      </div>
                     </div>
                     <p className={styles.bubble}>
                       {previewMessage}
@@ -1026,6 +1048,13 @@ export default function DisparoPage() {
                       <span>
                         <strong>Misturador Anti-Ban (Variação de Abordagem)</strong>
                         <small id="campaign-antiban-help">Alterna a estrutura da saudação e limpa o nome da empresa sem alterar o sentido, evitando mensagens idênticas no WhatsApp.</small>
+                      </span>
+                    </label>
+                    <label className={styles.option}>
+                      <input type="checkbox" checked={weekendGuard} onChange={e => setWeekendGuard(e.target.checked)} aria-label="Modo Comercial B2B" aria-describedby="campaign-weekend-help" />
+                      <span>
+                        <strong>Modo Comercial B2B (Proteção Fim de Semana)</strong>
+                        <small id="campaign-weekend-help">Pausa disparos frios aos domingos e reduz o ritmo pela metade aos sábados para evitar denúncias de empresas fora do expediente.</small>
                       </span>
                     </label>
                     <div className={styles.media}>

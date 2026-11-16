@@ -21,6 +21,7 @@ import {
   Clock, MessageSquare, ChevronRight, Bot, Smartphone, Zap, Repeat, Plus, Scissors, Sparkles,
 } from "lucide-react";
 import { renderTemplate, type TemplateContext } from "@/lib/template-vars";
+import { AUTO_POOL_INSTANCE, formatInstanceLabel } from "@/lib/campaign-pool";
 import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
 import { parseMinReviews } from "@/lib/scraper-review-count";
@@ -547,6 +548,8 @@ export default function ProspeccaoSitesPage() {
   const [personalizeWithAi, setPersonalizeWithAi] = useState(false);
   const [humanizeMessages, setHumanizeMessages] = useState(false);
   const [antibanMixer, setAntibanMixer] = useState(true);
+  const [weekendGuard, setWeekendGuard] = useState(false);
+  const [spintaxSeed, setSpintaxSeed] = useState(0);
   const [aiModels, setAiModels] = useState<{ id: string; name?: string; provider?: string }[]>([]);
   const [aiModel, setAiModel] = useState("");
   const [aiPrompt, setAiPrompt] = useState("");
@@ -614,6 +617,7 @@ export default function ProspeccaoSitesPage() {
   const [autoPersonalize, setAutoPersonalize] = useState(false);
   const [autoHumanize, setAutoHumanize] = useState(false);
   const [autoAntibanMixer, setAutoAntibanMixer] = useState(true);
+  const [autoWeekendGuard, setAutoWeekendGuard] = useState(false);
   const [autoAiModel, setAutoAiModel] = useState("");
   const [autoAiPrompt, setAutoAiPrompt] = useState("");
   const [autoCaptureAllReviews, setAutoCaptureAllReviews] = useState(false);
@@ -805,6 +809,7 @@ export default function ProspeccaoSitesPage() {
               max_seconds: autoTypingDelayMaxSeconds,
             },
             antiban_mixer: autoAntibanMixer,
+            weekend_guard: autoWeekendGuard,
           },
           scrape_max_leads: autoMaxLeads,
           dispatch_template: autoTemplate,
@@ -1008,6 +1013,7 @@ export default function ProspeccaoSitesPage() {
   }, [campaigns]);
 
   const previewFor = (lead: Lead) => {
+    void spintaxSeed;
     const ctx: TemplateContext = {
       nome_negocio: lead.nome_negocio || "",
       ramo_negocio: lead.ramo_negocio || "",
@@ -1018,7 +1024,7 @@ export default function ProspeccaoSitesPage() {
       website: lead.website || "",
       variables: { vendedor },
     };
-    return renderTemplate(template, ctx);
+    return renderTemplate(template, ctx, { spintax: true });
   };
 
   const createCampaign = async () => {
@@ -1039,6 +1045,7 @@ export default function ProspeccaoSitesPage() {
           personalize_with_ai: personalizeWithAi,
           humanize_messages: humanizeMessages,
           antiban_mixer: antibanMixer,
+          weekend_guard: weekendGuard,
           ai_model: personalizeWithAi ? (aiModel || null) : null,
           ai_prompt: personalizeWithAi ? (aiPrompt || null) : null,
           order_by: sort, order_dir: order,
@@ -1837,12 +1844,16 @@ export default function ProspeccaoSitesPage() {
                   <div className="text-xs text-white/40">
                     {rankedLeads.length} leads elegíveis após filtros · {selected.size} selecionados
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
                     <Button variant="outline" size="sm" onClick={() => { setSelected(new Map(rankedLeads.map((l) => [l.id, l]))); }}>
                       Selecionar elegíveis ({rankedLeads.length})
                     </Button>
                     <Button variant="outline" size="sm" onClick={() => setSelected(new Map())}>
                       Limpar seleção
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={() => setSpintaxSeed((s) => s + 1)} title="Sortear nova variação para blocos Spintax {op1|op2}">
+                      <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
+                      Sortear variação
                     </Button>
                   </div>
                 </CardContent></Card>
@@ -1903,13 +1914,18 @@ export default function ProspeccaoSitesPage() {
                 <div>
                   <label className="text-xs text-white/60">Instância WhatsApp</label>
                   <Select value={instanceName} onValueChange={(v: string | null) => setInstanceName(v || "")}>
-                    <SelectTrigger aria-label="Instância WhatsApp" className="w-full"><SelectValue placeholder="Selecione…">{instanceName || "Selecione…"}</SelectValue></SelectTrigger>
+                    <SelectTrigger aria-label="Instância WhatsApp" className="w-full"><SelectValue placeholder="Selecione…">{instanceName ? formatInstanceLabel(instanceName) : "Selecione…"}</SelectValue></SelectTrigger>
                     <SelectContent>
                       {instances.map((i) => (
                         <SelectItem key={i.instance_name} value={i.instance_name}>
                           {i.instance_name}{i.status ? ` — ${i.status}` : ""}
                         </SelectItem>
                       ))}
+                      {instances.length >= 1 && (
+                        <SelectItem key={AUTO_POOL_INSTANCE} value={AUTO_POOL_INSTANCE}>
+                          ⚡ Pool Automático (alternar entre chips saudáveis)
+                        </SelectItem>
+                      )}
                     </SelectContent>
                   </Select>
                 </div>
@@ -1969,6 +1985,16 @@ export default function ProspeccaoSitesPage() {
                     <Switch aria-label="Misturador Anti-Ban" checked={antibanMixer} onCheckedChange={setAntibanMixer} />
                   </div>
                 </div>
+
+                <div className={styles.optionSection}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-bold uppercase tracking-wider text-white/50">Modo Comercial B2B (Proteção Fim de Semana)</div>
+                      <div className="text-xs text-white/40">Pausa disparos frios aos domingos e reduz o ritmo pela metade aos sábados para evitar denúncias de empresas fora do expediente.</div>
+                    </div>
+                    <Switch aria-label="Modo Comercial B2B" checked={weekendGuard} onCheckedChange={setWeekendGuard} />
+                  </div>
+                </div>
                 <div className="text-xs text-white/50">
                   <Globe className="w-3.5 h-3.5 inline mr-1" /> {selected.size} leads selecionados
                 </div>
@@ -2011,7 +2037,7 @@ export default function ProspeccaoSitesPage() {
                         <div className="min-w-0">
                           <div className="font-bold text-white truncate">{c.name}</div>
                           <div className="text-[10px] text-white/50 uppercase tracking-wider flex items-center gap-2 flex-wrap">
-                            <Smartphone className="w-3 h-3" /> {c.instance_name}
+                            <Smartphone className="w-3 h-3" /> {formatInstanceLabel(c.instance_name)}
                             <span className="opacity-30">·</span>
                             <Clock className="w-3 h-3" /> {c.allowed_start_hour}h-{c.allowed_end_hour}h
                             <span className="opacity-30">·</span>
@@ -2258,6 +2284,11 @@ export default function ProspeccaoSitesPage() {
                             {inst.instance_name}{inst.status ? ` (${inst.status})` : ""}
                           </SelectItem>
                         ))}
+                        {instances.length >= 1 && (
+                          <SelectItem key={AUTO_POOL_INSTANCE} value={AUTO_POOL_INSTANCE}>
+                            ⚡ Pool Automático (alternar entre chips saudáveis)
+                          </SelectItem>
+                        )}
                       </SelectContent>
                     </Select>
                   </div>
@@ -2688,6 +2719,18 @@ export default function ProspeccaoSitesPage() {
                   </div>
                 </div>
 
+                <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3 space-y-1.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-semibold text-white/80">Modo Comercial B2B (Proteção Fim de Semana)</div>
+                      <div className="text-[11px] text-white/40 leading-relaxed mt-0.5">
+                        Pausa disparos frios aos domingos e reduz o teto por hora pela metade aos sábados para empresas que não respondem no fim de semana.
+                      </div>
+                    </div>
+                    <Switch aria-label="Modo Comercial B2B na automação" checked={autoWeekendGuard} onCheckedChange={setAutoWeekendGuard} />
+                  </div>
+                </div>
+
                 {/* Resumo de avaliações com IA (antes do disparo) — reviews-ai */}
                 <div className={cn(
                   "rounded-lg border p-3 space-y-2 transition-colors",
@@ -2920,7 +2963,7 @@ export default function ProspeccaoSitesPage() {
                           <div className="min-w-0 flex-1 basis-full sm:basis-0">
                             <p className="text-sm font-bold text-white truncate">{a.name}</p>
                             <p className="text-[10px] text-white/40">
-                              {(a.niches || []).join(", ") || "—"} · {(a.regions || []).join(", ") || "—"} · {a.instance_name}
+                              {(a.niches || []).join(", ") || "—"} · {(a.regions || []).join(", ") || "—"} · {formatInstanceLabel(a.instance_name)}
                             </p>
                           </div>
                           <div className="flex items-center gap-2 shrink-0">

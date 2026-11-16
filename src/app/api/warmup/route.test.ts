@@ -13,11 +13,19 @@ const mocks = vi.hoisted(() => ({
   saveGlobal: vi.fn(),
   saveConfig: vi.fn(),
   setEnabled: vi.fn(),
+  reaudit: vi.fn(),
 }));
 
 vi.mock("@/lib/tenant", () => ({ requireClientId: mocks.auth }));
 vi.mock("@/lib/supabase_admin", () => ({ supabaseAdmin: { from: mocks.from } }));
 vi.mock("@/lib/evolution", () => ({ evolution: { fetchInstances: mocks.fetchInstances } }));
+vi.mock("@/lib/warmup/warmup-groups", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/warmup/warmup-groups")>("@/lib/warmup/warmup-groups");
+  return {
+    ...actual,
+    auditChipDay0Hygiene: mocks.reaudit,
+  };
+});
 vi.mock("@/lib/warmup/warmup-config-service", () => ({
   ensureWarmupConfigsForTenant: mocks.ensure,
   readTenantWarmupConfigs: mocks.readConfigs,
@@ -59,6 +67,7 @@ beforeEach(() => {
     config: { client_id: "tenant-1", instance_name: "chip-1" },
   });
   mocks.setEnabled.mockReset().mockResolvedValue({ updated: 2, source: "table" });
+  mocks.reaudit.mockReset().mockResolvedValue({ ok: true, warnings: [] });
 });
 
 describe("GET /api/warmup", () => {
@@ -113,6 +122,115 @@ describe("GET /api/warmup", () => {
       orphanChips: 1,
       totalSentToday: 3,
     });
+  });
+
+  it("expõe alertas da Auditoria Dia-0 e taxa de entrega/leitura/resposta em cada chip", async () => {
+    mocks.ensure.mockResolvedValue({
+      created: [],
+      enabledNew: [],
+      source: "table",
+      connections: [{ instance_name: "chip-1", status: "open", phone_number: "5511999990000" }],
+    });
+    mocks.readConfigs.mockResolvedValue({
+      source: "table",
+      configs: {
+        "chip-1": { client_id: "tenant-1", instance_name: "chip-1", enabled: true, stage: 2 },
+      },
+    });
+    mocks.from.mockImplementation((table: string) => {
+      const rows =
+        table === "whatsapp_warmup_logs"
+          ? [
+              {
+                sender_instance: "chip-1",
+                receiver_instance: "day0_hygiene",
+                message_text: "⚠️ Auditoria Dia-0 (chip-1): chip sem foto de perfil configurada | proxy estrangeiro (US).",
+                action_type: "system",
+              },
+            ]
+          : table === "chats_dashboard"
+            ? [
+                { instance_name: "chip-1", sender_type: "ai", status_envio: "read" },
+                { instance_name: "chip-1", sender_type: "ai", status_envio: "delivered" },
+                { instance_name: "chip-1", sender_type: "customer", status_envio: "received" },
+              ]
+            : [];
+      const builder: any = {
+        select: () => builder,
+        eq: () => builder,
+        order: () => builder,
+        limit: async () => ({ data: rows, error: null }),
+        then: (resolve: any, reject: any) =>
+          Promise.resolve({ data: rows, error: null, count: rows.length }).then(resolve, reject),
+      };
+      return builder;
+    });
+
+    const response = await GET(new NextRequest("http://localhost/api/warmup"));
+    const body = await response.json();
+    const chip = body.data.instances[0];
+
+    expect(response.status).toBe(200);
+    expect(chip.day0_warnings).toEqual([
+      "chip sem foto de perfil configurada",
+      "proxy estrangeiro (US)",
+    ]);
+    expect(chip.day0_status).toBe("warning");
+    expect(chip.metrics).toEqual({
+      outbound: 2,
+      deliveredRate: 100,
+      readRate: 50,
+      replyRate: 50,
+      failed: 0,
+    });
+  });
+
+  it("expõe day0_status ok após Auditoria Dia-0 OK e pending para chips sem histórico", async () => {
+    mocks.ensure.mockResolvedValue({
+      created: [],
+      enabledNew: [],
+      source: "table",
+      connections: [
+        { instance_name: "chip-ok", status: "open", phone_number: "5511999990001" },
+        { instance_name: "chip-antigo", status: "open", phone_number: "5511999990002" },
+      ],
+    });
+    mocks.readConfigs.mockResolvedValue({
+      source: "table",
+      configs: {
+        "chip-ok": { client_id: "tenant-1", instance_name: "chip-ok", enabled: true, stage: 2 },
+        "chip-antigo": { client_id: "tenant-1", instance_name: "chip-antigo", enabled: true, stage: 3 },
+      },
+    });
+    mocks.from.mockImplementation((table: string) => {
+      const rows =
+        table === "whatsapp_warmup_logs"
+          ? [
+              {
+                sender_instance: "chip-ok",
+                receiver_instance: "day0_hygiene",
+                message_text: "✓ Auditoria Dia-0 OK (chip-ok): foto de perfil e proxy validados.",
+                action_type: "system",
+              },
+            ]
+          : [];
+      const builder: any = {
+        select: () => builder,
+        eq: () => builder,
+        order: () => builder,
+        limit: async () => ({ data: rows, error: null }),
+        then: (resolve: any, reject: any) =>
+          Promise.resolve({ data: rows, error: null, count: rows.length }).then(resolve, reject),
+      };
+      return builder;
+    });
+
+    const response = await GET(new NextRequest("http://localhost/api/warmup"));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.data.instances[0]).toMatchObject({ instance_name: "chip-ok", day0_status: "ok", day0_warnings: [] });
+    expect(body.data.instances[1]).toMatchObject({ instance_name: "chip-antigo", day0_status: "pending", day0_warnings: [] });
   });
 });
 
@@ -169,5 +287,18 @@ describe("POST /api/warmup", () => {
       expect.objectContaining({ enable_audio: false, auto_warmup_new_chips: true }),
       true
     );
+  });
+
+  it("reaudita Dia-0 para instância do tenant e bloqueia instância de outro tenant", async () => {
+    mocks.readConnections.mockResolvedValue([{ instance_name: "chip-1", status: "open", phone_number: "5511999990000" }]);
+    const okRes = await POST(request("POST", { action: "reaudit_day0", instance_name: "chip-1" }));
+    const okBody = await okRes.json();
+
+    expect(okRes.status).toBe(200);
+    expect(okBody).toEqual({ success: true, ok: true, warnings: [] });
+    expect(mocks.reaudit).toHaveBeenCalledWith("tenant-1", "chip-1", { forceInTests: true });
+
+    const forbiddenRes = await POST(request("POST", { action: "reaudit_day0", instance_name: "chip-outro" }));
+    expect(forbiddenRes.status).toBe(403);
   });
 });

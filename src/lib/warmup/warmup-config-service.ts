@@ -254,6 +254,9 @@ export async function readTenantWarmupConfigs(clientId: string): Promise<{
   return { source: "settings", configs: await readSettingsConfigs(clientId) };
 }
 
+const _lastConnectingProbeAt = new Map<string, number>();
+const CONNECTING_PROBE_THROTTLE_MS = 60 * 1000;
+
 export async function readTenantConnections(clientId: string): Promise<TenantConnection[]> {
   try {
     const { data, error } = await supabaseAdmin
@@ -263,7 +266,7 @@ export async function readTenantConnections(clientId: string): Promise<TenantCon
 
     if (error || !Array.isArray(data)) return [];
 
-    return data.map((row) => {
+    const connections: TenantConnection[] = data.map((row) => {
       const providerConfig = (row.provider_config || {}) as Record<string, unknown>;
       const rawPhone = providerConfig.owner_phone ?? providerConfig.owner_jid ?? null;
       const cleanPhone = rawPhone
@@ -275,6 +278,32 @@ export async function readTenantConnections(clientId: string): Promise<TenantCon
         phone_number: cleanPhone.length >= 10 ? cleanPhone : null,
       };
     });
+
+    // Auto-cura para instâncias presas em status transitório ("connecting") no banco
+    // quando a Evolution API já restabeleceu a sessão ("open").
+    for (const conn of connections) {
+      if (conn.status.trim().toLowerCase() !== "connecting") continue;
+      const lastProbe = _lastConnectingProbeAt.get(conn.instance_name) || 0;
+      if (Date.now() - lastProbe < CONNECTING_PROBE_THROTTLE_MS) continue;
+      _lastConnectingProbeAt.set(conn.instance_name, Date.now());
+
+      try {
+        const { evolution } = await import("@/lib/evolution");
+        const live = await evolution.getStatus(conn.instance_name);
+        if (live?.state && isConnectedStatus(live.state)) {
+          conn.status = "open";
+          await supabaseAdmin
+            .from("channel_connections")
+            .update({ status: "open" })
+            .eq("client_id", clientId)
+            .eq("instance_name", conn.instance_name);
+        }
+      } catch {
+        /* mantém status atual se Evolution não responder */
+      }
+    }
+
+    return connections;
   } catch {
     return [];
   }

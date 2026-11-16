@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
-import { isInstanceOwnedByClient, requireClientId } from "@/lib/tenant";
+import { requireClientId } from "@/lib/tenant";
+import { validateCampaignInstanceAccess } from "@/lib/campaign-instance-access";
 
 export const dynamic = "force-dynamic";
 
@@ -51,6 +52,7 @@ export async function POST(req: NextRequest) {
       use_web_search = false,
       humanize_messages = false,
       antiban_mixer = true,
+      weekend_guard = false,
       ai_model = null,
       ai_prompt = null,
       media_url = null,
@@ -69,8 +71,9 @@ export async function POST(req: NextRequest) {
     if (Number(min_interval_seconds) > Number(max_interval_seconds)) {
       return NextResponse.json({ success: false, error: "min_interval > max_interval" }, { status: 400 });
     }
-    if (!(await isInstanceOwnedByClient(instance_name, session.clientId))) {
-      return NextResponse.json({ success: false, error: "Instância não pertence a este cliente" }, { status: 403 });
+    const access = await validateCampaignInstanceAccess(session.clientId, String(instance_name));
+    if (!access.ok) {
+      return NextResponse.json({ success: false, error: access.error }, { status: access.status });
     }
 
     const requestedLeadIds = Array.isArray(lead_ids) ? [...new Set(lead_ids.map(Number).filter(Number.isInteger))] : [];
@@ -119,7 +122,10 @@ export async function POST(req: NextRequest) {
     try {
       await supabase
         .from("system_config")
-        .upsert({ key: `campaign_antiban:${camp.id}`, value: String(Boolean(antiban_mixer)) }, { onConflict: "key" });
+        .upsert([
+          { key: `campaign_antiban:${camp.id}`, value: String(Boolean(antiban_mixer)) },
+          { key: `campaign_weekend_guard:${camp.id}`, value: String(Boolean(weekend_guard)) },
+        ], { onConflict: "key" });
     } catch {}
 
     // Resolve leads → targets

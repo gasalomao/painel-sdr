@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
-import { isInstanceOwnedByClient, requireClientId } from "@/lib/tenant";
+import { requireClientId } from "@/lib/tenant";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
+import { validateCampaignInstanceAccess } from "@/lib/campaign-instance-access";
 
 export const dynamic = "force-dynamic";
 
@@ -54,8 +55,11 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     const body = await req.json();
     // SaaS guard: cliente comum não pode escolher modelo arbitrário no PATCH.
     await enforceClientDefaultModel(body, { clientId: own.clientId, isAdmin: own.isAdmin }, ["ai_model"]);
-    if ("instance_name" in body && !(await isInstanceOwnedByClient(String(body.instance_name), own.clientId))) {
-      return NextResponse.json({ success: false, error: "Instância não pertence a este cliente" }, { status: 403 });
+    if ("instance_name" in body) {
+      const access = await validateCampaignInstanceAccess(own.clientId, String(body.instance_name));
+      if (!access.ok) {
+        return NextResponse.json({ success: false, error: access.error }, { status: access.status });
+      }
     }
     const allowed = [
       "name",
@@ -87,6 +91,15 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       .select()
       .single();
     if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    if ("weekend_guard" in body) {
+      await supabase
+        .from("system_config")
+        .upsert(
+          { key: `followup_weekend_guard:${id}`, value: body.weekend_guard === true ? "true" : "false" },
+          { onConflict: "key" }
+        )
+        .then(() => undefined, () => undefined);
+    }
     return NextResponse.json({ success: true, campaign: data });
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });

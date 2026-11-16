@@ -217,6 +217,18 @@ async function evoFetch(path: string, method: string = "GET", body?: unknown, ti
   }
 }
 
+function resolveEvolutionTargetJid(raw: string): string {
+  const cleanNum = String(raw || "").replace(/^phone:/i, "").trim();
+  if (cleanNum.endsWith("@c.us")) {
+    return cleanNum.replace(/@c\.us$/i, "@s.whatsapp.net");
+  }
+  if (cleanNum.includes("@") && (cleanNum.endsWith("@s.whatsapp.net") || cleanNum.endsWith("@g.us") || cleanNum.endsWith("@lid"))) {
+    return cleanNum;
+  }
+  const digits = cleanNum.replace(/@.*$/, "").replace(/\D/g, "");
+  return digits ? `${digits}@s.whatsapp.net` : cleanNum;
+}
+
 export const evolution = {
   /**
    * Snapshot SÍNCRONO da instância atual (pode estar vazio se ainda não foi
@@ -290,8 +302,8 @@ export const evolution = {
       integration: "WHATSAPP-BAILEYS",
       rejectCall: true,
       msgCall: "No momento não atendemos por chamadas. Envie uma mensagem.",
-      groupsIgnore: true,
-      alwaysOnline: true,
+      groupsIgnore: false,
+      alwaysOnline: false,
       readMessages: false,
       readStatus: false,
       syncFullHistory: false,
@@ -303,14 +315,20 @@ export const evolution = {
   /**
    * Aplica os settings padrão da instância no endpoint dedicado da v2.
    * Idempotente: pode rodar quantas vezes quiser.
+   * - `alwaysOnline: false`: evita transmitir presença "Online" 24h/dia de madrugada (sinal anti-ban).
+   * - `groupsIgnore: false`: permite que a camada Zero-Token de grupos de aquecimento receba eventos
+   *   (o Warmup Firewall no webhook bloqueia 100% das mensagens @g.us de entrarem no CRM/agente).
    */
-  async setSettings(instance?: string) {
+  async setSettings(
+    instance?: string,
+    overrides?: { groupsIgnore?: boolean; alwaysOnline?: boolean }
+  ) {
     instance = await resolveInstance(instance);
     return evoFetch(`/settings/set/${instance}`, "POST", {
       rejectCall: true,
       msgCall: "No momento não atendemos por chamadas. Envie uma mensagem.",
-      groupsIgnore: true,
-      alwaysOnline: true,
+      groupsIgnore: overrides?.groupsIgnore ?? false,
+      alwaysOnline: overrides?.alwaysOnline ?? false,
       readMessages: false,
       readStatus: false,
       syncFullHistory: false,
@@ -403,25 +421,23 @@ export const evolution = {
 
   async sendTextMessage(number: string, text: string, instance?: string) {
     instance = await resolveInstance(instance);
-    if (!number.includes("@s.whatsapp.net") && !number.includes("@g.us")) {
-      number = number.replace(/\D/g, "") + "@s.whatsapp.net";
-    }
-    return evoFetch(`/message/sendText/${instance}`, "POST", { number, text });
+    const target = resolveEvolutionTargetJid(number);
+    return evoFetch(`/message/sendText/${instance}`, "POST", { number: target, text });
   },
 
-  async sendMessage(number: string, text: string, instance?: string, options?: { delay?: number }) {
+  async sendMessage(
+    number: string,
+    text: string,
+    instance?: string,
+    options?: { delay?: number; linkPreview?: boolean }
+  ) {
     if (!text) return null;
     instance = await resolveInstance(instance);
 
-    // Na v2, o ideal é o número estar limpo ou ser o JID completo
-    let target = number.replace(/\D/g, "");
-    if (number.includes("@g.us")) {
-       target = number; // mantém JID de grupo
-    } else if (!target.includes("@")) {
-       target = target + "@s.whatsapp.net";
-    }
+    const target = resolveEvolutionTargetJid(number);
 
-    const delay = options?.delay && options.delay > 0 ? options.delay : 1200;
+    const rawDelay = options?.delay && Number.isFinite(options.delay) && options.delay > 0 ? options.delay : 1200;
+    const delay = Math.max(1, Math.round(rawDelay));
 
     // Simular digitação
     try {
@@ -431,7 +447,7 @@ export const evolution = {
     const payload: Record<string, any> = {
       number: target,
       text,
-      linkPreview: true,
+      linkPreview: options?.linkPreview ?? true,
     };
     if (delay > 0) {
       payload.delay = delay;
@@ -448,10 +464,7 @@ export const evolution = {
     options?: { delay?: number; encoding?: boolean }
   ) {
     instance = await resolveInstance(instance);
-    const cleanNum = number.replace(/^phone:/i, "").trim();
-    const targetJid = (cleanNum.includes("@") && (cleanNum.endsWith(".net") || cleanNum.endsWith(".us") || cleanNum.endsWith(".g.us")))
-       ? cleanNum
-       : cleanNum.replace(/\D/g, "") + "@s.whatsapp.net";
+    const targetJid = resolveEvolutionTargetJid(number);
 
     // Simular digitação ou gravação de áudio
     const presenceType = mediaData.type === "audio" ? "recording" : "composing";
@@ -471,7 +484,8 @@ export const evolution = {
       : null;
     const mediaSource = cleanBase64 || mediaData.mediaUrl || mediaData.url || mediaData.base64 || "";
 
-    const mediaDelay = options?.delay && options.delay > 0 ? options.delay : (mediaData.type === "audio" ? 2000 : 1500);
+    const rawMediaDelay = options?.delay && Number.isFinite(options.delay) && options.delay > 0 ? options.delay : (mediaData.type === "audio" ? 2000 : 1500);
+    const mediaDelay = Math.max(1, Math.round(rawMediaDelay));
 
     if (mediaData.type === "audio") {
       // Áudio always via sendWhatsAppAudio (PTT com player nativo no WhatsApp).

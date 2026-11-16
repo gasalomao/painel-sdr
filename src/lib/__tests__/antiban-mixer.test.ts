@@ -3,6 +3,7 @@ import {
   applyAntiBanMixer,
   cleanCompanyNameForApproach,
   effectiveDateForWindow,
+  enforceShortHandshakeGuard,
   isDefaultApproachTemplate,
   syncGreetingToCurrentHour,
 } from "../antiban-mixer";
@@ -101,6 +102,32 @@ describe("antiban-mixer & saudação inteligente por horário real", () => {
       now: nineAmBrt,
     });
     expect(msg).toBe("Bom dia! Tudo bem? Vidraçaria Silva?");
+  });
+
+  it("enforceShortHandshakeGuard bloqueia URLs e textos comerciais longos gerados pela IA quando o template é curto (Two-Step Handshake)", () => {
+    const nineAmBrt = new Date("2026-11-09T12:00:00.000Z");
+    const template = "{{saudacao}}! Tudo bem? {{nome_empresa}}?";
+
+    const blockedUrl = enforceShortHandshakeGuard({
+      template,
+      candidateText: "Bom dia! Veja nossa oferta especial em https://meusite.com.br para a Vidraçaria Silva!",
+      companyName: "VIDRAÇARIA SILVA LTDA",
+      now: nineAmBrt,
+      scopeKey: "test-guard",
+    });
+    expect(blockedUrl).not.toContain("https://");
+    expect(blockedUrl).toContain("Vidraçaria Silva");
+
+    const blockedLongPitch = enforceShortHandshakeGuard({
+      template,
+      candidateText:
+        "Bom dia! Sou consultor especializado em marketing digital e criação de sites de alta conversão e gostaria de apresentar uma proposta completa para aumentar suas vendas ainda esta semana!",
+      companyName: "Vidraçaria Silva",
+      now: nineAmBrt,
+      scopeKey: "test-guard",
+    });
+    expect(blockedLongPitch.length).toBeLessThanOrEqual(140);
+    expect(blockedLongPitch).toContain("Vidraçaria Silva");
   });
 });
 

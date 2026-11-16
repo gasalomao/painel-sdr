@@ -1,14 +1,144 @@
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { evolution } from "@/lib/evolution";
-import { logWarmupAction } from "./warmup-engine";
+import { getBrazilDayKey, logWarmupAction } from "./warmup-engine";
 import { getRandomStatusQuote } from "./warmup-dialogues";
 import type { WarmupGroup } from "./warmup-types";
+
+// Anti-flood para grupos orgânicos passivos
+const _organicGroupChipCache = new Map<
+  string,
+  { eligible: boolean; cachedAt: number }
+>();
+const _lastPassiveReadPerGroup = new Map<string, number>();
+const _lastPassiveTouchPerChip = new Map<string, number>();
+const PASSIVE_GROUP_READ_COOLDOWN_MS = 45 * 1000;
+const PASSIVE_CHIP_TOUCH_COOLDOWN_MS = 3 * 60 * 1000;
+const GROUP_RECEIVE_FLUSH_MS = 12 * 1000;
+
+const _groupReceivePending = new Map<string, number>();
+const _groupReceiveLastFlushAt = new Map<string, number>();
+const _groupReceiveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const _groupReceiveQueue = new Map<string, Promise<void>>();
+const _seenGroupMessageIds = new Set<string>();
+
+export function resetGroupReceiveBufferForTests(): void {
+  for (const timer of _groupReceiveTimers.values()) clearTimeout(timer);
+  _groupReceiveTimers.clear();
+  _groupReceivePending.clear();
+  _groupReceiveLastFlushAt.clear();
+  _groupReceiveQueue.clear();
+  _seenGroupMessageIds.clear();
+  _organicGroupChipCache.clear();
+  _groupJidCache.clear();
+  _lastPassiveReadPerGroup.clear();
+  _lastPassiveTouchPerChip.clear();
+  _lastReactionPerChipGroup.clear();
+}
+
+async function flushChipGroupReceive(clientId: string, instanceName: string): Promise<void> {
+  const key = `${clientId}:${instanceName}`;
+  const run = async () => {
+    const pendingDelta = _groupReceivePending.get(key) || 0;
+    if (pendingDelta <= 0) return;
+    _groupReceivePending.delete(key);
+    _groupReceiveLastFlushAt.set(key, Date.now());
+    try {
+      const { data: cfg } = await supabaseAdmin
+        .from("whatsapp_warmup_configs")
+        .select("received_today")
+        .eq("client_id", clientId)
+        .eq("instance_name", instanceName)
+        .maybeSingle();
+
+      if (!cfg) return;
+      const nowIso = new Date().toISOString();
+      const nextReceived = Math.max(0, Number(cfg.received_today || 0)) + pendingDelta;
+      await supabaseAdmin
+        .from("whatsapp_warmup_configs")
+        .update({
+          received_today: nextReceived,
+          last_activity_at: nowIso,
+          updated_at: nowIso,
+        })
+        .eq("client_id", clientId)
+        .eq("instance_name", instanceName);
+    } catch {
+      /* atualização incremental best-effort */
+    }
+  };
+
+  const prev = _groupReceiveQueue.get(key) || Promise.resolve();
+  const next = prev.then(run, run);
+  _groupReceiveQueue.set(key, next);
+  await next;
+}
+
+/**
+ * Contabiliza no `received_today` do chip mensagens reais recebidas em grupos
+ * (de aquecimento ou orgânicos), deduplicando `messageId` repetido de webhooks e
+ * consolidando rajadas em lote sem perder contagem.
+ */
+export async function recordChipGroupMessageReceived(
+  clientId: string,
+  instanceName: string,
+  messageId?: string | null
+): Promise<boolean> {
+  if (!clientId || !instanceName) return false;
+  if (messageId) {
+    const dedupKey = `${instanceName}:${messageId}`;
+    if (_seenGroupMessageIds.has(dedupKey)) return false;
+    _seenGroupMessageIds.add(dedupKey);
+    if (_seenGroupMessageIds.size > 500) {
+      const oldest = _seenGroupMessageIds.values().next().value;
+      if (oldest) _seenGroupMessageIds.delete(oldest);
+    }
+  }
+
+  const key = `${clientId}:${instanceName}`;
+  _groupReceivePending.set(key, (_groupReceivePending.get(key) || 0) + 1);
+
+  const isTestEnv = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
+  const lastFlush = _groupReceiveLastFlushAt.get(key) || 0;
+  const elapsed = Date.now() - lastFlush;
+
+  if (isTestEnv || elapsed >= GROUP_RECEIVE_FLUSH_MS) {
+    const existingTimer = _groupReceiveTimers.get(key);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+      _groupReceiveTimers.delete(key);
+    }
+    await flushChipGroupReceive(clientId, instanceName);
+    return true;
+  }
+
+  if (!_groupReceiveTimers.has(key)) {
+    const delay = Math.max(200, GROUP_RECEIVE_FLUSH_MS - elapsed);
+    const timer = setTimeout(() => {
+      _groupReceiveTimers.delete(key);
+      flushChipGroupReceive(clientId, instanceName).catch(() => {});
+    }, delay);
+    if (typeof (timer as { unref?: () => void }).unref === "function") {
+      (timer as { unref: () => void }).unref();
+    }
+    _groupReceiveTimers.set(key, timer);
+  }
+  return true;
+}
+
+export function getDailyGroupJoinLimitForStage(stage?: number | null): number {
+  const normalized = Math.max(1, Math.min(4, Math.floor(Number(stage) || 1)));
+  if (normalized === 1) return 2;
+  if (normalized === 2) return 3;
+  return 4;
+}
 
 // Cache em memória de curta duração (60 segundos) para validação ultrarrápida no Webhook (<1ms)
 interface GroupCacheItem {
   isWarmup: boolean;
   groupId?: string;
   clientId?: string;
+  totalMessages?: number;
+  totalReactions?: number;
   cachedAt: number;
 }
 const _groupJidCache = new Map<string, GroupCacheItem>();
@@ -173,11 +303,12 @@ export async function importWarmupGroups(
         errors.push(`Erro ao salvar grupo ${code}: ${insertError.message}`);
       } else {
         added++;
-        // Invalida cache local
         if (groupJid) {
           _groupJidCache.set(groupJid, {
             isWarmup: true,
             clientId,
+            totalMessages: 0,
+            totalReactions: 0,
             cachedAt: Date.now(),
           });
         }
@@ -197,7 +328,13 @@ export async function importWarmupGroups(
 export async function isWarmupGroupJid(
   groupJid: string,
   clientId?: string
-): Promise<{ isWarmup: boolean; groupId?: string; clientId?: string }> {
+): Promise<{
+  isWarmup: boolean;
+  groupId?: string;
+  clientId?: string;
+  totalMessages?: number;
+  totalReactions?: number;
+}> {
   if (!groupJid || !groupJid.includes("@g.us")) {
     return { isWarmup: false };
   }
@@ -205,14 +342,20 @@ export async function isWarmupGroupJid(
   const cached = _groupJidCache.get(groupJid);
   if (cached && Date.now() - cached.cachedAt < CACHE_TTL_MS) {
     if (!clientId || cached.clientId === clientId) {
-      return { isWarmup: cached.isWarmup, groupId: cached.groupId, clientId: cached.clientId };
+      return {
+        isWarmup: cached.isWarmup,
+        groupId: cached.groupId,
+        clientId: cached.clientId,
+        totalMessages: cached.totalMessages,
+        totalReactions: cached.totalReactions,
+      };
     }
   }
 
   try {
     let query = supabaseAdmin
       .from("whatsapp_warmup_groups")
-      .select("id, client_id, status")
+      .select("id, client_id, status, total_messages_received, total_reactions_sent")
       .eq("group_jid", groupJid);
 
     if (clientId) {
@@ -222,13 +365,22 @@ export async function isWarmupGroupJid(
     const { data } = await query.maybeSingle();
 
     if (data) {
-      _groupJidCache.set(groupJid, {
+      const item: GroupCacheItem = {
         isWarmup: true,
         groupId: data.id,
         clientId: data.client_id,
+        totalMessages: Number(data.total_messages_received || 0),
+        totalReactions: Number(data.total_reactions_sent || 0),
         cachedAt: Date.now(),
-      });
-      return { isWarmup: true, groupId: data.id, clientId: data.client_id };
+      };
+      _groupJidCache.set(groupJid, item);
+      return {
+        isWarmup: true,
+        groupId: data.id,
+        clientId: data.client_id,
+        totalMessages: item.totalMessages,
+        totalReactions: item.totalReactions,
+      };
     }
 
     _groupJidCache.set(groupJid, {
@@ -245,7 +397,7 @@ export async function isWarmupGroupJid(
  * Processa mensagens recebidas de grupos no webhook via Camada Zero-Token.
  * 1. Simula leitura humana (ticks azuis).
  * 2. Avalia heurísticas de sentimentos para reações com emoji naturais.
- * 3. Atualiza contadores do grupo sem poluir o CRM.
+ * 3. Atualiza contadores incrementais do grupo sem poluir o CRM.
  */
 export async function processIncomingGroupMessage(params: {
   clientId: string;
@@ -268,19 +420,32 @@ export async function processIncomingGroupMessage(params: {
   }
 
   const nowIso = new Date().toISOString();
+  const nextMessagesCount = (warmupCheck.totalMessages || 0) + 1;
+  const cachedEntry = _groupJidCache.get(groupJid);
+  if (cachedEntry) {
+    cachedEntry.totalMessages = nextMessagesCount;
+  }
 
-  // 1. Atualiza métricas do grupo (Fire-and-forget assíncrono para zero latência)
+  // 1. Atualiza métricas do grupo (incrementando total_messages_received) e received_today do chip
   supabaseAdmin
     .from("whatsapp_warmup_groups")
     .update({
+      total_messages_received: nextMessagesCount,
       last_activity_at: nowIso,
       updated_at: nowIso,
     })
     .eq("group_jid", groupJid)
     .then(() => {}, () => {});
 
-  // 2. Leitura com marcação de tique azul humana
-  evolution.markMessageAsRead([{ remoteJid: groupJid, id: messageId, fromMe: false }], instanceName).catch(() => {});
+  await recordChipGroupMessageReceived(clientId, instanceName, messageId);
+
+  // 2. Leitura com marcação de tique azul humana (atraso orgânico de 2 a 8s)
+  const readDelayMs = 2000 + Math.floor(Math.random() * 6000);
+  setTimeout(() => {
+    evolution
+      .markMessageAsRead([{ remoteJid: groupJid, id: messageId, fromMe: false }], instanceName)
+      .catch(() => {});
+  }, readDelayMs);
 
   // 3. Heurística de Reação com Emoji (Zero-Token Tier)
   const antiFloodKey = `${instanceName}:${groupJid}`;
@@ -306,9 +471,13 @@ export async function processIncomingGroupMessage(params: {
 
   if (reactionChosen) {
     _lastReactionPerChipGroup.set(antiFloodKey, Date.now());
+    const nextReactionsCount = (warmupCheck.totalReactions || 0) + 1;
+    if (cachedEntry) {
+      cachedEntry.totalReactions = nextReactionsCount;
+    }
 
-    // Dispara reação com delay orgânico de 2 a 5 segundos
-    const delayMs = Math.floor(Math.random() * 3000) + 2000;
+    // Dispara reação com delay orgânico de 3 a 9 segundos
+    const delayMs = Math.floor(Math.random() * 6000) + 3000;
     setTimeout(async () => {
       try {
         await evolution.sendReaction(
@@ -329,11 +498,10 @@ export async function processIncomingGroupMessage(params: {
           details: { groupJid, participant, emoji: reactionChosen },
         });
 
-        // Incrementa contagem de reações do grupo
         await supabaseAdmin
           .from("whatsapp_warmup_groups")
           .update({
-            total_reactions_sent: 1, // trigger/raw increment
+            total_reactions_sent: nextReactionsCount,
             updated_at: new Date().toISOString(),
           })
           .eq("group_jid", groupJid);
@@ -347,7 +515,105 @@ export async function processIncomingGroupMessage(params: {
 }
 
 /**
- * Fila de entrada cadenciada (Staggered Join) de chips nos grupos cadastrados.
+ * Aproveita grupos orgânicos reais (não cadastrados em `whatsapp_warmup_groups`)
+ * onde o chip já participa para gerar sinal passivo de leitura humana e receita de
+ * tráfego Inbound sem nunca enviar mensagens no grupo e sem poluir o CRM.
+ */
+export async function processPassiveOrganicGroupMessage(params: {
+  clientId: string;
+  instanceName: string;
+  groupJid: string;
+  messageId: string;
+  fromMe?: boolean;
+}): Promise<{ handled: boolean; action: "ignored" | "read_scheduled" | "throttled" }> {
+  const { clientId, instanceName, groupJid, messageId, fromMe } = params;
+  if (fromMe || !groupJid || !groupJid.includes("@g.us") || !clientId || !instanceName) {
+    return { handled: false, action: "ignored" };
+  }
+
+  const cacheKey = `${clientId}:${instanceName}`;
+  const nowMs = Date.now();
+  let chipInfo = _organicGroupChipCache.get(cacheKey);
+
+  if (!chipInfo || nowMs - chipInfo.cachedAt > CACHE_TTL_MS) {
+    try {
+      const { data: cfg } = await supabaseAdmin
+        .from("whatsapp_warmup_configs")
+        .select("enabled, is_quarantined, enable_blue_ticks")
+        .eq("client_id", clientId)
+        .eq("instance_name", instanceName)
+        .maybeSingle();
+
+      const eligible = Boolean(
+        cfg?.enabled && !cfg?.is_quarantined && cfg?.enable_blue_ticks !== false
+      );
+      chipInfo = { eligible, cachedAt: nowMs };
+      _organicGroupChipCache.set(cacheKey, chipInfo);
+    } catch {
+      return { handled: false, action: "ignored" };
+    }
+  }
+
+  if (!chipInfo.eligible) {
+    return { handled: false, action: "ignored" };
+  }
+
+  await recordChipGroupMessageReceived(clientId, instanceName, messageId);
+
+  const readKey = `${instanceName}:${groupJid}`;
+  const lastRead = _lastPassiveReadPerGroup.get(readKey) || 0;
+  if (nowMs - lastRead < PASSIVE_GROUP_READ_COOLDOWN_MS) {
+    return { handled: true, action: "throttled" };
+  }
+  _lastPassiveReadPerGroup.set(readKey, nowMs);
+
+  const delayMs =
+    process.env.VITEST === "true" || process.env.NODE_ENV === "test"
+      ? 10
+      : 2500 + Math.floor(Math.random() * 6000);
+
+  setTimeout(() => {
+    evolution
+      .markMessageAsRead([{ remoteJid: groupJid, id: messageId, fromMe: false }], instanceName)
+      .catch(() => {});
+  }, delayMs);
+
+  // Atualiza last_activity_at no máximo a cada 3 minutos por chip para não sobrecarregar o banco
+  const lastTouch = _lastPassiveTouchPerChip.get(cacheKey) || 0;
+  if (nowMs - lastTouch >= PASSIVE_CHIP_TOUCH_COOLDOWN_MS) {
+    _lastPassiveTouchPerChip.set(cacheKey, nowMs);
+    supabaseAdmin
+      .from("whatsapp_warmup_configs")
+      .update({ last_activity_at: new Date(nowMs).toISOString() })
+      .eq("client_id", clientId)
+      .eq("instance_name", instanceName)
+      .then(() => {}, () => {});
+  }
+
+  return { handled: true, action: "read_scheduled" };
+}
+
+/**
+ * Classifica falhas definitivas ao tentar ingressar em um grupo via convite para
+ * evitar tentativas repetidas contra links mortos/revogados na Evolution API.
+ */
+export function classifyGroupJoinError(errMsg: string): "full" | "invalid" | "restricted" | null {
+  const msg = String(errMsg || "");
+  if (!msg) return null;
+  if (/\bfull\b|lotad[oa]|max.?participants|invite.?limit/i.test(msg)) return "full";
+  if (/not.?authorized|restricted|admin.?only|permission/i.test(msg)) return "restricted";
+  if (/invalid|revoked|expired|\b404\b|\b410\b|gone|not.?found|does.?not.?exist|bad.?invite/i.test(msg)) {
+    return "invalid";
+  }
+  return null;
+}
+
+/**
+ * Fila de entrada cadenciada (Slow Join Anti-Ban) de chips nos grupos cadastrados:
+ * - Respeita o limite diário por estágio (Fase 1: máx. 2/dia, Fase 2: máx. 3/dia, Fase 3+: 4/dia)
+ * - Prioriza chips mais novos (menor stage) e com menos grupos antes dos veteranos
+ * - Respeita o teto `max_groups_per_chip` de cada chip
+ * - Interrompe imediatamente links revogados/inválidos/lotados sem desperdiçar tentativas
  */
 export async function syncGroupMembershipForChips(
   clientId: string
@@ -356,10 +622,10 @@ export async function syncGroupMembershipForChips(
   const errors: string[] = [];
 
   try {
-    // 1. Busca chips ativos na colmeia
+    // 1. Busca chips ativos na colmeia com estágio e limite total de grupos
     const { data: configs } = await supabaseAdmin
       .from("whatsapp_warmup_configs")
-      .select("instance_name, group_auto_join, is_quarantined")
+      .select("instance_name, stage, group_auto_join, is_quarantined, max_groups_per_chip")
       .eq("client_id", clientId)
       .eq("enabled", true)
       .eq("is_quarantined", false);
@@ -368,11 +634,8 @@ export async function syncGroupMembershipForChips(
       return { joinedCount: 0, errors: ["Nenhum chip ativo elegível para entrada em grupos."] };
     }
 
-    const eligibleChips = configs
-      .filter((c) => c.group_auto_join !== false)
-      .map((c) => c.instance_name);
-
-    if (eligibleChips.length === 0) {
+    const eligibleConfigRows = configs.filter((c) => c.group_auto_join !== false);
+    if (eligibleConfigRows.length === 0) {
       return { joinedCount: 0, errors: [] };
     }
 
@@ -387,20 +650,57 @@ export async function syncGroupMembershipForChips(
       return { joinedCount: 0, errors: [] };
     }
 
-    // 3. Busca associações já existentes
+    // 3. Busca associações já existentes para respeitar teto total e teto diário (Slow Join)
     const { data: existingMembers } = await supabaseAdmin
       .from("whatsapp_warmup_group_members")
-      .select("group_id, instance_name, status")
+      .select("group_id, instance_name, status, joined_at")
       .eq("client_id", clientId);
 
-    const memberSet = new Set(
-      (existingMembers || []).map((m) => `${m.group_id}:${m.instance_name}`)
-    );
+    const todayKey = getBrazilDayKey(new Date());
+    const memberSet = new Set<string>();
+    const totalJoinedByChip = new Map<string, number>();
+    const joinedTodayByChip = new Map<string, number>();
+
+    for (const m of existingMembers || []) {
+      if (!m?.group_id || !m?.instance_name) continue;
+      memberSet.add(`${m.group_id}:${m.instance_name}`);
+      if (m.status === "joined") {
+        totalJoinedByChip.set(
+          m.instance_name,
+          (totalJoinedByChip.get(m.instance_name) || 0) + 1
+        );
+        if (m.joined_at && getBrazilDayKey(String(m.joined_at)) === todayKey) {
+          joinedTodayByChip.set(
+            m.instance_name,
+            (joinedTodayByChip.get(m.instance_name) || 0) + 1
+          );
+        }
+      }
+    }
+
+    const prioritizedChips = [...eligibleConfigRows].sort((a, b) => {
+      const stageDiff = Number(a.stage ?? 1) - Number(b.stage ?? 1);
+      if (stageDiff !== 0) return stageDiff;
+      return (totalJoinedByChip.get(a.instance_name) || 0) - (totalJoinedByChip.get(b.instance_name) || 0);
+    });
 
     for (const group of groups as WarmupGroup[]) {
-      for (const chip of eligibleChips) {
+      for (const chipCfg of prioritizedChips) {
+        const chip = chipCfg.instance_name;
         const key = `${group.id}:${chip}`;
         if (memberSet.has(key)) continue;
+
+        const maxTotalGroups = Number(chipCfg.max_groups_per_chip ?? 10);
+        const currentTotalGroups = totalJoinedByChip.get(chip) || 0;
+        if (currentTotalGroups >= maxTotalGroups) {
+          continue;
+        }
+
+        const dailyCap = getDailyGroupJoinLimitForStage(chipCfg.stage);
+        const joinedToday = joinedTodayByChip.get(chip) || 0;
+        if (joinedToday >= dailyCap) {
+          continue;
+        }
 
         try {
           // Entra no grupo usando a Evolution API
@@ -420,7 +720,6 @@ export async function syncGroupMembershipForChips(
               { onConflict: "group_id,instance_name" }
             );
 
-            // Se o grupo ainda não tinha JID salvo, atualiza
             if (groupJid && (!group.group_jid || group.status !== "active")) {
               await supabaseAdmin
                 .from("whatsapp_warmup_groups")
@@ -435,6 +734,8 @@ export async function syncGroupMembershipForChips(
                 isWarmup: true,
                 groupId: group.id,
                 clientId,
+                totalMessages: group.total_messages_received || 0,
+                totalReactions: group.total_reactions_sent || 0,
                 cachedAt: Date.now(),
               });
             }
@@ -449,18 +750,37 @@ export async function syncGroupMembershipForChips(
 
             joinedCount++;
             memberSet.add(key);
+            totalJoinedByChip.set(chip, currentTotalGroups + 1);
+            joinedTodayByChip.set(chip, joinedToday + 1);
 
-            // Intervalo humano mínimo entre entradas para não disparar rate limits
-            await new Promise((r) => setTimeout(r, 1500));
+            // Intervalo humano entre entradas para não disparar rate limits
+            const joinPauseMs =
+              process.env.VITEST === "true" || process.env.NODE_ENV === "test"
+                ? 25
+                : 4500 + Math.floor(Math.random() * 7000);
+            await new Promise((r) => setTimeout(r, joinPauseMs));
           } else {
             const errMsg = joinRes.error || "Não foi possível entrar no grupo";
-            if (errMsg.includes("full") || errMsg.includes("lotado")) {
+            const terminalStatus = classifyGroupJoinError(errMsg);
+            errors.push(`Chip ${chip} não conseguiu entrar no grupo ${group.invite_code}: ${errMsg}`);
+            if (terminalStatus) {
               await supabaseAdmin
                 .from("whatsapp_warmup_groups")
-                .update({ status: "full", last_error: errMsg })
+                .update({
+                  status: terminalStatus,
+                  last_error: errMsg.slice(0, 300),
+                  updated_at: new Date().toISOString(),
+                })
                 .eq("id", group.id);
+              await logWarmupAction({
+                client_id: clientId,
+                sender_instance: chip,
+                receiver_instance: group.name || group.invite_code,
+                message_text: `⊘ Link de grupo marcado como "${terminalStatus}" (${group.invite_code}): ${errMsg.slice(0, 140)}`,
+                action_type: "system",
+              });
+              break; // Não insiste com os outros chips em convite morto/lotado
             }
-            errors.push(`Chip ${chip} não conseguiu entrar no grupo ${group.invite_code}: ${errMsg}`);
           }
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -490,9 +810,14 @@ export async function hydrateChipProfile(
       "Disponível para contato",
       "Foco em resultados e eficiência",
       "Conectado via WhatsApp",
+      "Consultoria e soluções digitais",
+      "Atendimento de segunda a sexta",
     ];
     const pickedStatus = defaultStatuses[Math.floor(Math.random() * defaultStatuses.length)];
 
+    if (typeof (evolution as { setSettings?: unknown }).setSettings === "function") {
+      await evolution.setSettings(instanceName, { groupsIgnore: false, alwaysOnline: false }).catch(() => {});
+    }
     await evolution.updateProfileStatus(pickedStatus, instanceName).catch(() => {});
 
     // Publica status inicial se ainda não tiver postado
@@ -517,9 +842,115 @@ export async function hydrateChipProfile(
       action_type: "system",
     });
 
+    await auditChipDay0Hygiene(clientId, instanceName);
+
     return { success: true };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return { success: false, error: msg };
   }
+}
+
+/**
+ * Auditoria Dia-0 (higiene do número e proxy): verifica foto de perfil e país do proxy.
+ * Loga alertas quando há pendências ou marca como resolvido ("✓ Auditoria Dia-0 OK")
+ * para limpar avisos antigos automaticamente na interface.
+ */
+export async function auditChipDay0Hygiene(
+  clientId: string,
+  instanceName: string,
+  opts?: { forceInTests?: boolean }
+): Promise<{ ok: boolean; warnings: string[] }> {
+  const warnings: string[] = [];
+  if (!opts?.forceInTests && (process.env.VITEST === "true" || process.env.NODE_ENV === "test")) {
+    return { ok: true, warnings };
+  }
+
+  try {
+    const { data: chipRow } = await supabaseAdmin
+      .from("whatsapp_warmup_configs")
+      .select("phone_number")
+      .eq("client_id", clientId)
+      .eq("instance_name", instanceName)
+      .maybeSingle();
+
+    const phone = chipRow?.phone_number ? String(chipRow.phone_number).replace(/\D/g, "") : "";
+    if (phone && typeof (evolution as { fetchProfilePicture?: unknown }).fetchProfilePicture === "function") {
+      const picUrl = await evolution.fetchProfilePicture(phone, instanceName).catch(() => null);
+      if (!picUrl) {
+        warnings.push("chip sem foto de perfil configurada no WhatsApp (adicione uma foto antes de prospectar)");
+      }
+    }
+  } catch {}
+
+  try {
+    if (typeof (evolution as { findProxy?: unknown }).findProxy === "function") {
+      const pr: { enabled?: boolean; host?: string | null } | null = await evolution
+        .findProxy(instanceName)
+        .catch(() => null);
+      if (pr?.enabled && pr.host) {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 2500);
+        const geoRes = await fetch(
+          `http://ip-api.com/json/${encodeURIComponent(String(pr.host))}?fields=status,countryCode,country,hosting`,
+          { signal: ctrl.signal }
+        )
+          .then((r) => r.json())
+          .catch(() => null);
+        clearTimeout(timer);
+        if (geoRes?.status === "success" && geoRes.countryCode && geoRes.countryCode !== "BR") {
+          warnings.push(
+            `proxy estrangeiro (${geoRes.country || geoRes.countryCode}) em chip +55 — recomendado proxy BR ou conexão direta`
+          );
+        }
+      }
+    }
+  } catch {}
+
+  if (warnings.length > 0) {
+    await logWarmupAction({
+      client_id: clientId,
+      sender_instance: instanceName,
+      receiver_instance: "day0_hygiene",
+      message_text: `⚠️ Auditoria Dia-0 (${instanceName}): ${warnings.join(" | ")}.`,
+      action_type: "system",
+    });
+    return { ok: false, warnings };
+  }
+
+  await logWarmupAction({
+    client_id: clientId,
+    sender_instance: instanceName,
+    receiver_instance: "day0_hygiene",
+    message_text: `✓ Auditoria Dia-0 OK (${instanceName}): foto de perfil e proxy validados.`,
+    action_type: "system",
+  });
+  return { ok: true, warnings: [] };
+}
+
+/**
+ * Extrai avisos pendentes de Auditoria Dia-0 a partir dos logs (mais recentes primeiro).
+ * Um registro recente marcado com "✓" / "Auditoria Dia-0 OK" limpa avisos anteriores da instância.
+ */
+export function extractDay0WarningsByInstance(
+  logs: Array<{ receiver_instance?: string | null; sender_instance?: string | null; message_text?: string | null }>
+): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  for (const log of logs) {
+    if (log?.receiver_instance !== "day0_hygiene" || !log?.sender_instance) continue;
+    if (map.has(log.sender_instance)) continue;
+    const raw = String(log.message_text || "").trim();
+    if (/^[✓✔]|Auditoria Dia-0 OK/i.test(raw)) {
+      map.set(log.sender_instance, []);
+      continue;
+    }
+    const cleaned = raw
+      .replace(/^⚠️?\s*Auditoria Dia-0\s*\([^)]*\):\s*/i, "")
+      .replace(/\.$/, "")
+      .trim();
+    if (!cleaned) continue;
+    const parts = cleaned.split(/\s*\|\s*/).map((s) => s.trim()).filter(Boolean);
+    if (parts.length > 0) map.set(log.sender_instance, parts);
+  }
+  return map;
 }

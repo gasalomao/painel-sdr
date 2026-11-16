@@ -1185,3 +1185,98 @@ describe("processTarget — recusa estruturada do provider", () => {
     expect(updated.error_message).toBeNull();
   });
 });
+
+describe("consistência BR 9º dígito & Modo Comercial B2B no follow-up", () => {
+  it("getConversationHistory encontra histórico salvo no JID canônico brasileiro (8 vs 9 dígitos)", async () => {
+    setTable("chats_dashboard", [
+      {
+        client_id: "client-123",
+        remote_jid: "551188887777@s.whatsapp.net",
+        sender_type: "ai",
+        content: "Olá, tudo bem?",
+        created_at: "2026-11-10T12:00:00Z",
+      },
+      {
+        client_id: "client-123",
+        remote_jid: "5511988887777@s.whatsapp.net",
+        sender_type: "customer",
+        content: "Tudo ótimo!",
+        created_at: "2026-11-10T12:05:00Z",
+      },
+    ]);
+
+    const hist = await getConversationHistory("5511988887777@s.whatsapp.net", "client-123");
+    expect(hist).toContain("SDR: Olá, tudo bem?");
+    expect(hist).toContain("CLIENTE: Tudo ótimo!");
+  });
+
+  it("tickCampaign preenche dados do lead via fallback de variante BR de 9º dígito", async () => {
+    setTable("followup_campaigns", [
+      makeCampaign({ steps: [{ day_offset: 2, template: "Oi {{nome_empresa}}!" }] }),
+    ]);
+    setTable("followup_targets", [
+      makeTarget({ remote_jid: "5511988887777@s.whatsapp.net", nome_negocio: null }),
+    ]);
+    setTable("leads_extraidos", [
+      makeLead({ remoteJid: "551188887777@s.whatsapp.net", nome_negocio: "Padaria Central" }),
+    ]);
+
+    const { sendMessage } = await import("@/lib/channel");
+    (sendMessage as any).mockClear();
+
+    await tickCampaign("camp-001", "client-123");
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      "5511988887777@s.whatsapp.net",
+      expect.stringContaining("Padaria Central"),
+      expect.any(String),
+      expect.objectContaining({ linkPreview: false })
+    );
+  });
+
+  it("pausa follow-up aos domingos quando followup_weekend_guard está habilitado", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-15T15:00:00Z")); // Dom 12:00 BRT
+    try {
+      setTable("followup_campaigns", [makeCampaign()]);
+      setTable("followup_targets", [makeTarget()]);
+      setTable("leads_extraidos", [makeLead()]);
+      setTable("system_config", [{ key: "followup_weekend_guard:camp-001", value: "true" }]);
+
+      const { sendMessage } = await import("@/lib/channel");
+      (sendMessage as any).mockClear();
+
+      const res = await tickCampaign("camp-001", "client-123");
+      expect(res).toEqual({ ok: true, processed: 0 });
+      expect(sendMessage).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("não promove lead com opt_out = true para 'interessado' mesmo se houver mensagem inbound recente", async () => {
+    setTable("followup_campaigns", [makeCampaign()]);
+    setTable("followup_targets", [
+      makeTarget({ last_sent_at: "2026-11-10T10:00:00Z", current_step: 1 }),
+    ]);
+    setTable("leads_extraidos", [makeLead({ opt_out: true, status: "follow-up" })]);
+    setTable("chats_dashboard", [
+      {
+        client_id: "client-123",
+        remote_jid: "5511999990000@s.whatsapp.net",
+        sender_type: "customer",
+        content: "Pare de me enviar mensagens!",
+        created_at: "2026-11-10T11:00:00Z",
+      },
+    ]);
+
+    const { sendMessage } = await import("@/lib/channel");
+    (sendMessage as any).mockClear();
+
+    await tickCampaign("camp-001", "client-123");
+
+    expect(mockTableState.followup_targets[0].status).toBe("skipped");
+    expect(mockTableState.leads_extraidos[0].status).toBe("follow-up");
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+});

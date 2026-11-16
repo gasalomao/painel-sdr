@@ -31,6 +31,21 @@ export function sanitizeAgentAnswer(text: string): string {
     .trim();
 }
 
+/**
+ * Compacta espaços horizontais e linhas em branco excedentes do prompt de sistema
+ * preservando quebras de parágrafo (\n\n), cabeçalhos Markdown e tags XML.
+ */
+export function minifyPromptMaster(prompt: string): string {
+  if (!prompt) return "";
+  return prompt
+    .replace(/\r\n?/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export type AgentOutputDecision =
   | { send: true; text: string }
   | { send: false; suppressed: "empty_output" | "tool_loop_exhausted" | "safety_classification" };

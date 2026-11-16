@@ -25,6 +25,7 @@ import { startScraperRun, stopScraper, getStatus as getScraperStatus } from "@/l
 import { requireAutomationClientId as requireClientId } from "@/lib/automation-lead-scope";
 import { summarizeReviewsForLead } from "@/lib/reviews-ai";
 import * as channel from "@/lib/channel";
+import { isAutoPoolInstance } from "@/lib/campaign-pool";
 
 type AutomationRow = any;
 
@@ -616,6 +617,17 @@ async function startDispatchPhase(
   }
   if (cErr || !camp?.id) return markError(a.id, `Falha criando campanha: ${cErr?.message}`);
 
+  if (a.scrape_filters?.weekend_guard !== undefined) {
+    try {
+      await supabase
+        .from("system_config")
+        .upsert(
+          { key: `campaign_weekend_guard:${camp.id}`, value: String(Boolean(a.scrape_filters.weekend_guard)) },
+          { onConflict: "key" }
+        );
+    } catch {}
+  }
+
   // 2) campaign_targets
   const targets = leads.map(l => ({
     campaign_id: camp.id,
@@ -654,11 +666,11 @@ async function selectCapturedLeads(a: AutomationRow): Promise<CapturedLead[]> {
   const seen = new Set<string>();
   for (let i = 0; i < ids.length; i += 500) {
     const { data, error } = await supabase.from("leads_extraidos")
-      .select("id, remoteJid, nome_negocio, ramo_negocio, status")
+      .select("id, remoteJid, nome_negocio, ramo_negocio, status, opt_out")
       .eq("client_id", clientId).in("id", ids.slice(i, i + 500)).not("remoteJid", "is", null);
     if (error) throw new Error(`Falha lendo leads colhidos: ${error.message}`);
     for (const lead of data || []) {
-      if (!lead.remoteJid || lead.status === "invalid_number" || seen.has(lead.remoteJid)) continue;
+      if (!lead.remoteJid || lead.status === "invalid_number" || lead.opt_out === true || seen.has(lead.remoteJid)) continue;
       seen.add(lead.remoteJid);
       leads.push(lead as CapturedLead);
     }
@@ -679,7 +691,15 @@ async function canonicalizeAndFilterLeads(
   const phoneOf = (jid: string): string => jid.replace(/@.*$/, "").replace(/\D/g, "");
   let checks: Awaited<ReturnType<typeof channel.checkWhatsAppNumbersDetailed>> = {};
   try {
-    checks = await channel.checkWhatsAppNumbersDetailed(leads.map(lead => phoneOf(lead.remoteJid)), a.instance_name);
+    let checkInstance = String(a.instance_name || "");
+    if (isAutoPoolInstance(checkInstance)) {
+      const { resolveHealthyCampaignChip } = await import("@/lib/campaign-worker");
+      const resolved = await resolveHealthyCampaignChip(clientId, checkInstance);
+      checkInstance = resolved.ok && resolved.instanceName ? resolved.instanceName : "";
+    }
+    if (checkInstance) {
+      checks = await channel.checkWhatsAppNumbersDetailed(leads.map(lead => phoneOf(lead.remoteJid)), checkInstance);
+    }
   } catch (err) {
     console.warn(`[AUTOMATION ${a.id}] Validação WhatsApp temporariamente indisponível (${(err as Error).message}). Prosseguindo com os números capturados.`);
   }

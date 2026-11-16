@@ -25,7 +25,7 @@ function ownership(row: ClaimedFollowUp): Record<string, unknown> {
   return { p_id: row.id, p_client: row.client_id, p_agent: row.agent_id, p_step: row.current_step, p_claim: row.claim_id };
 }
 
-async function messageFor(row: ClaimedFollowUp): Promise<string> {
+async function messageFor(row: ClaimedFollowUp): Promise<string | null> {
   if (!supabaseAdmin) throw new Error("Banco de follow-up não configurado.");
   const { data: agent, error } = await supabaseAdmin.from("agent_settings").select("options").eq("id", row.agent_id).eq("client_id", row.client_id).maybeSingle();
   if (error || !agent) throw new Error("Configuração de follow-up indisponível.");
@@ -36,15 +36,27 @@ async function messageFor(row: ClaimedFollowUp): Promise<string> {
   if (typeof template !== "string" || !template.trim() || template.length > 4000) throw new Error("Template de follow-up inválido.");
   let lead: Record<string, unknown> | null = null;
   if (row.lead_id) {
-    const result = await supabaseAdmin.from("leads_extraidos").select("nome_negocio,ramo_negocio,categoria,endereco,telefone").eq("id", row.lead_id).eq("client_id", row.client_id).maybeSingle();
+    const result = await supabaseAdmin.from("leads_extraidos").select("nome_negocio,ramo_negocio,categoria,endereco,telefone,opt_out").eq("id", row.lead_id).eq("client_id", row.client_id).maybeSingle();
     if (result.error) throw new Error("Dados de follow-up indisponíveis.");
     lead = result.data;
+    if (lead?.opt_out === true) return null;
   }
   return renderTemplate(template, {
     remoteJid: row.remote_jid, nome_negocio: String(lead?.nome_negocio || "sua empresa"),
     ramo_negocio: String(lead?.ramo_negocio || lead?.categoria || "seu ramo"), categoria: String(lead?.categoria || ""),
     endereco: String(lead?.endereco || ""), telefone: String(lead?.telefone || row.remote_jid.split("@")[0]),
-  });
+  }, { spintax: true });
+}
+
+function reportFollowupDeliveryFeedback(
+  clientId: string,
+  instanceName: string,
+  statusText: "error" | "delivered"
+): void {
+  if (!clientId || !instanceName) return;
+  import("@/lib/warmup/warmup-engine")
+    .then((m) => m.recordWebhookDeliveryFeedback?.({ clientId, instanceName, statusText }))
+    .catch(() => {});
 }
 
 async function processClaim(row: ClaimedFollowUp): Promise<void> {
@@ -52,6 +64,10 @@ async function processClaim(row: ClaimedFollowUp): Promise<void> {
   try {
     if (!/^[1-9]\d{5,19}@s\.whatsapp\.net$/.test(row.remote_jid) || !row.instance_name) throw new Error("Destino de follow-up inválido.");
     const message = await messageFor(row);
+    if (message === null) {
+      await rpc("release_agent_followup", { ...ownership(row), p_status: "cancelled", p_error: "Lead solicitou opt-out." });
+      return;
+    }
     const config = await getEvolutionConfig();
     const endpoint = new URL(`${config.url.replace(/\/$/, "")}/message/sendText/${encodeURIComponent(row.instance_name)}`);
     if (!["http:", "https:"].includes(endpoint.protocol) || !config.apiKey) throw new Error("Transporte de follow-up inválido.");
@@ -62,12 +78,16 @@ async function processClaim(row: ClaimedFollowUp): Promise<void> {
     if (prepared?.action === "cancelled" || prepared?.action === "skipped") return;
     if (prepared?.action !== "send") throw new Error("Intenção de follow-up não confirmada.");
     const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json", apikey: config.apiKey }, body: JSON.stringify({ number: row.remote_jid, text: message }), signal: AbortSignal.timeout(30_000) });
-    if (!response.ok) throw new Error("Resultado de follow-up não confirmado pelo provider.");
+    if (!response.ok) {
+      reportFollowupDeliveryFeedback(row.client_id, row.instance_name, "error");
+      throw new Error("Resultado de follow-up não confirmado pelo provider.");
+    }
     const result: unknown = await response.json();
     const providerId = result && typeof result === "object" && "key" in result && result.key && typeof result.key === "object" && "id" in result.key ? result.key.id : null;
     if (typeof providerId !== "string" || !providerId.trim() || providerId.length > 500) throw new Error("Envio de follow-up sem identificação confirmada.");
     const finalized = await rpc("finish_agent_followup", { ...ownership(row), p_attempt: attempt, p_provider_id: providerId });
     if (!finalized) throw new Error("Conclusão de follow-up não confirmada.");
+    reportFollowupDeliveryFeedback(row.client_id, row.instance_name, "delivered");
   } catch {
     try {
       await rpc("release_agent_followup", { ...ownership(row), p_status: hasIntent ? "ambiguous" : "failed", p_error: hasIntent ? "Resultado do envio não confirmado; reconciliação necessária antes de qualquer repetição." : "Preparação de follow-up falhou; nenhum envio iniciado." });
