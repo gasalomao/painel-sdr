@@ -29,6 +29,27 @@ type Section = typeof SECTIONS[number][0];
 ============================================================ */
 type AgentRef = { id: number; name: string; role: string | null };
 
+type SyncWarning = { code: string; severity: "warn" | "info"; message: string };
+type SyncDiagnostics = { inSync: boolean; warnings: SyncWarning[]; missingKeysInPrompt: string[] };
+
+type AuditReport = {
+  totalLeads: number;
+  healthy: boolean;
+  issuesCount: number;
+  metrics: {
+    nullStatusCount: number;
+    orphanStatusCount: number;
+    invalidNumberOutOfDiscardCount: number;
+    nullNomeCount: number;
+    genericRazaoCount: number;
+    missingResumoWithChatCount: number;
+    ownChipsAsLeadsCount: number;
+    appointmentMisalignedCount: number;
+    previewMisalignedCount: number;
+  };
+  syncDiagnostics: SyncDiagnostics;
+};
+
 type OrganizerState = {
   enabled: boolean;
   prompt: string;
@@ -41,6 +62,7 @@ type OrganizerState = {
   provider: string;
   isAdmin: boolean;
   agents: AgentRef[];
+  syncDiagnostics?: SyncDiagnostics | null;
 };
 
 type KanbanColumn = {
@@ -153,6 +175,10 @@ export default function OrganizadorPage() {
   // Disparo manual ("Rodar agora") — só pra essa conta
   const [runningNow, setRunningNow] = useState(false);
 
+  // Auditoria automática de integridade CRM (0 tokens)
+  const [auditReport, setAuditReport] = useState<AuditReport | null>(null);
+  const [auditing, setAuditing] = useState(false);
+
   // ============= LOAD =============
   const reload = useCallback(async () => {
     setLoading(true);
@@ -186,6 +212,7 @@ export default function OrganizadorPage() {
           provider: orgRes.provider || "Gemini",
           isAdmin: !!orgRes.isAdmin,
           agents: orgRes.agents || [],
+          syncDiagnostics: orgRes.syncDiagnostics || null,
         };
         setOrg(o);
         setPromptDraft(orgRes.prompt || "");
@@ -798,6 +825,100 @@ NUNCA mova de "agendado" pra "interessado" só porque ela perguntou algo.
                   >
                     {savingOrg ? <><Loader2 className="w-4 h-4 animate-spin" /> Salvando…</> : <><Save className="w-4 h-4" /> Salvar configuração</>}
                   </Button>
+                </div>
+
+                {/* ----- SINCRONIA KANBAN × AGENTE & AUDITORIA CRM ----- */}
+                <div className="mt-4 rounded-xl border border-white/10 bg-black/30 p-3.5 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <ClipboardCheck className="w-4 h-4 text-emerald-400" />
+                      <div>
+                        <p className="text-xs font-bold text-white">Integridade do CRM & Sincronia Kanban × Agente</p>
+                        <p className="text-[10px] text-muted-foreground">Verifica status órfãos, chips próprios, agendamentos e alinhamento com o agente ativo (0 tokens).</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={auditing}
+                        onClick={async () => {
+                          setAuditing(true);
+                          setError(null);
+                          try {
+                            const r = await fetch("/api/organizer/audit", { cache: "no-store" });
+                            const d = await r.json();
+                            if (!d.ok) setError(d.error || "Falha na auditoria");
+                            else setAuditReport(d.report);
+                          } finally { setAuditing(false); }
+                        }}
+                        className="text-[11px] h-8 gap-1.5"
+                      >
+                        {auditing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ClipboardCheck className="w-3.5 h-3.5" />}
+                        Auditar CRM
+                      </Button>
+                      {auditReport && auditReport.issuesCount > 0 && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          disabled={auditing}
+                          onClick={async () => {
+                            setAuditing(true);
+                            setError(null);
+                            try {
+                              const r = await fetch("/api/organizer/audit", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ autoFix: true }),
+                              });
+                              const d = await r.json();
+                              if (!d.ok) setError(d.error || "Falha no reparo");
+                              else {
+                                setAuditReport(d.report);
+                                setInfo(`Reparo concluído: ${d.fixedCount || 0} registro(s) ajustado(s).`);
+                                setTimeout(() => setInfo(null), 4000);
+                              }
+                            } finally { setAuditing(false); }
+                          }}
+                          className="text-[11px] h-8 bg-emerald-600 hover:bg-emerald-500 gap-1.5"
+                        >
+                          <Wand2 className="w-3.5 h-3.5" /> Auto-corrigir ({auditReport.issuesCount})
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+
+                  {org?.syncDiagnostics?.warnings && org.syncDiagnostics.warnings.length > 0 && (
+                    <div className="space-y-1">
+                      {org.syncDiagnostics.warnings.map((w) => (
+                        <div key={w.code} className={cn(
+                          "rounded-lg px-3 py-2 text-[11px] border flex items-center justify-between gap-2",
+                          w.severity === "warn"
+                            ? "bg-amber-500/10 border-amber-500/30 text-amber-200"
+                            : "bg-cyan-500/10 border-cyan-500/20 text-cyan-200"
+                        )}>
+                          <span>{w.message}</span>
+                          <button type="button" onClick={() => setSection("suggest")} className="underline shrink-0 text-[10px]">
+                            Ajustar com IA
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {auditReport && (
+                    <div className={cn(
+                      "rounded-lg px-3 py-2 text-[11px] border",
+                      auditReport.issuesCount === 0
+                        ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-200"
+                        : "bg-amber-500/10 border-amber-500/30 text-amber-200"
+                    )}>
+                      {auditReport.issuesCount === 0
+                        ? `✓ ${auditReport.totalLeads} leads verificados — nenhuma inconsistência encontrada.`
+                        : `Encontradas ${auditReport.issuesCount} inconsistência(s) em ${auditReport.totalLeads} leads (órfãos: ${auditReport.metrics.orphanStatusCount}, sem status: ${auditReport.metrics.nullStatusCount}, inválidos fora do descarte: ${auditReport.metrics.invalidNumberOutOfDiscardCount}, chips próprios: ${auditReport.metrics.ownChipsAsLeadsCount}, agenda/prévia: ${auditReport.metrics.appointmentMisalignedCount + auditReport.metrics.previewMisalignedCount}).`}
+                    </div>
+                  )}
                 </div>
               </section>
 

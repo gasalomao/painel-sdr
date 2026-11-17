@@ -53,7 +53,7 @@ export async function register() {
     clientName: string,
     cfg: { api_key: string; model: string; provider: string },
     triggerLabel: "auto" | "schedule_catchup" = "auto"
-  ) => {
+  ): Promise<boolean> => {
     try {
       console.log(`[SCHEDULER] ⏰ [${clientName}] Disparando Organizer IA [${cfg.provider}/${cfg.model}] — trigger=${triggerLabel}...`);
       const baseUrl = process.env.INTERNAL_APP_URL || `http://localhost:${process.env.PORT || 3000}`;
@@ -76,13 +76,15 @@ export async function register() {
       if (response.ok) {
         const result = await response.json();
         console.log(`[SCHEDULER] ✅ [${clientName}] ${result.updatedCount || 0} leads movidos.`);
-        // /api/ai-organize já marca clients.organizer_last_run quando clientId vem no body
+        return true;
       } else {
         const errData = await response.json().catch(() => ({}));
         console.error(`[SCHEDULER] ❌ [${clientName}] Falha:`, errData.error || response.statusText);
+        return false;
       }
     } catch (err) {
       console.error(`[SCHEDULER] [${clientName}] Erro no disparo:`, (err as Error).message);
+      return false;
     }
   };
 
@@ -125,18 +127,51 @@ export async function register() {
       }
 
       const now = new Date();
-      const todayStr = now.toDateString();
-      const currentHour = now.getHours();
+      const fmtBrt = (d: Date) => ({
+        day: new Intl.DateTimeFormat("en-CA", {
+          timeZone: "America/Sao_Paulo",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        }).format(d),
+        hour: Number(
+          new Intl.DateTimeFormat("en-US", {
+            timeZone: "America/Sao_Paulo",
+            hour: "2-digit",
+            hour12: false,
+          }).format(d)
+        ) % 24,
+      });
+      const brtNow = fmtBrt(now);
+      const startOfTodayBrtIso = new Date(`${brtNow.day}T00:00:00-03:00`).toISOString();
       let fired = 0;
 
       for (const c of clients || []) {
         const hour = typeof c.organizer_execution_hour === "number" ? c.organizer_execution_hour : 20;
-        const lastRunDate = c.organizer_last_run ? new Date(c.organizer_last_run).toDateString() : null;
-        const ranToday = lastRunDate === todayStr;
-        const windowReached = currentHour >= hour;
+        const lastRunDate = c.organizer_last_run ? fmtBrt(new Date(c.organizer_last_run)).day : null;
+        const ranToday = lastRunDate === brtNow.day;
+        const windowReached = brtNow.hour >= hour;
         if (!ranToday && windowReached) {
-          await runOrganizerForClient(c.id, (c as any).name || c.id, cfg as any, "auto");
-          fired++;
+          // Lock otimista atômico em Postgres: impede disparo duplicado entre múltiplas instâncias Node
+          const claimIso = new Date().toISOString();
+          const { data: claimed } = await supabase
+            .from("clients")
+            .update({ organizer_last_run: claimIso })
+            .eq("id", c.id)
+            .or(`organizer_last_run.is.null,organizer_last_run.lt.${startOfTodayBrtIso}`)
+            .select("id");
+          if (!claimed || claimed.length === 0) continue;
+
+          const ok = await runOrganizerForClient(c.id, (c as { name?: string }).name || c.id, cfg as { api_key: string; model: string; provider: string }, "auto");
+          if (!ok) {
+            await supabase
+              .from("clients")
+              .update({ organizer_last_run: c.organizer_last_run || null })
+              .eq("id", c.id)
+              .eq("organizer_last_run", claimIso);
+          } else {
+            fired++;
+          }
         }
       }
       if (fired > 0) console.log(`[SCHEDULER] Tick processou ${fired} cliente(s) na janela.`);

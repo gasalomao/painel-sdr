@@ -193,7 +193,7 @@ describe("BFF CRM Leads: GET /api/leads & PATCH /api/leads/[id]/status", () => {
     expect(mocks.calls).toContainEqual({
       table: "leads_extraidos",
       op: "limit",
-      args: [500],
+      args: [1000],
     });
   });
 

@@ -1014,14 +1014,27 @@ export default function LeadsPage() {
             </CardContent>
           </Card>
         ) : (
-          <KanbanBoard
-            leads={leads}
-            columns={columns}
-            onLeadClick={setSelectedLead}
-            formatPhone={formatPhone}
-            onLeadsUpdated={handleKanbanLeadsUpdated}
-            onColumnsChange={(cols) => setColumns(cols.map((c) => ({ id: c.id, uuid: c.uuid, label: c.label, color: c.color, isTerminal: !!c.isTerminal })))}
-          />
+          <div className="space-y-3">
+            {total > leads.length && (
+              <div
+                role="status"
+                className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-amber-200"
+              >
+                <span>
+                  Exibindo os <strong>{leads.length.toLocaleString("pt-BR")}</strong> cards atualizados mais recentemente de{" "}
+                  <strong>{total.toLocaleString("pt-BR")}</strong> leads neste funil. Use a busca, filtros ou a aba Lista para localizar registros mais antigos.
+                </span>
+              </div>
+            )}
+            <KanbanBoard
+              leads={leads}
+              columns={columns}
+              onLeadClick={setSelectedLead}
+              formatPhone={formatPhone}
+              onLeadsUpdated={handleKanbanLeadsUpdated}
+              onColumnsChange={(cols) => setColumns(cols.map((c) => ({ id: c.id, uuid: c.uuid, label: c.label, color: c.color, isTerminal: !!c.isTerminal })))}
+            />
+          </div>
         )}
       </div>
 

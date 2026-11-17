@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { analyzeKanbanAgentSync } from "@/lib/organizer-prompt";
 
 export const dynamic = "force-dynamic";
 
@@ -27,7 +28,7 @@ export async function GET(req: NextRequest) {
   if (!ctx.ok) return ctx.response;
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
 
-  const [{ data: client }, { data: cfg }, { data: agents }] = await Promise.all([
+  const [{ data: client }, { data: cfg }, { data: agents }, { data: kanbanCols }] = await Promise.all([
     supabaseAdmin
       .from("clients")
       .select("organizer_enabled, organizer_prompt, organizer_execution_hour, organizer_last_run")
@@ -44,10 +45,27 @@ export async function GET(req: NextRequest) {
     // organizador deve analisar pra sugerir kanban + prompt".
     supabaseAdmin
       .from("agent_settings")
-      .select("id, name, role")
+      .select("id, name, role, main_prompt, options, is_active")
       .eq("client_id", ctx.clientId)
       .order("id"),
+    supabaseAdmin
+      .from("kanban_columns")
+      .select("status_key, label, order_index, is_terminal")
+      .eq("client_id", ctx.clientId)
+      .order("order_index", { ascending: true }),
   ]);
+
+  const activeAgent =
+    (agents || []).find((a: { is_active?: boolean | null }) => Boolean(a.is_active)) ||
+    (agents || [])[0] ||
+    null;
+
+  const syncDiagnostics = analyzeKanbanAgentSync({
+    columns: (kanbanCols || []) as Array<{ status_key: string; label: string; order_index?: number; is_terminal?: boolean }>,
+    organizerPrompt: client?.organizer_prompt || null,
+    agentPrompt: (activeAgent as { main_prompt?: string | null } | null)?.main_prompt || null,
+    agentOptions: ((activeAgent as { options?: Record<string, unknown> | null } | null)?.options) || null,
+  });
 
   // Prompt EFETIVO que está sendo usado (custom do cliente OU default global)
   const effectivePrompt = (client?.organizer_prompt && client.organizer_prompt.trim())
@@ -69,7 +87,12 @@ export async function GET(req: NextRequest) {
     model: cfg?.model || "gemini-2.5-flash",          // modelo em uso (global)
     provider: cfg?.provider || "Gemini",
     isAdmin: ctx.isAdmin,                             // pra UI mostrar/esconder controles
-    agents: agents || [],                             // pra dropdown de "agente base pra sugestão"
+    agents: (agents || []).map((a: { id: number; name: string; role: string | null }) => ({
+      id: a.id,
+      name: a.name,
+      role: a.role,
+    })),                                              // pra dropdown de "agente base pra sugestão"
+    syncDiagnostics,
   });
 }
 

@@ -1133,16 +1133,37 @@ export async function resolveHealthyCampaignChip(
     };
 
     const isAutoPool = isAutoPoolInstance(primaryInstanceName);
-    const primaryRow = isAutoPool
-      ? null
-      : warmupRows.find((r: any) => r.instance_name === primaryInstanceName);
-    const primaryEval = primaryRow ? isChipEligible(primaryRow) : null;
 
-    // Avalia candidatos irmãos conectados (ou todo o pool no modo __auto_pool__)
-    const siblingCandidates = warmupRows
+    if (!isAutoPool) {
+      const primaryRow = warmupRows.find((r: any) => r.instance_name === primaryInstanceName);
+      if (!primaryRow) {
+        return { ok: true, instanceName: primaryInstanceName, rotated: false, policy: null };
+      }
+
+      const primaryEval = isChipEligible(primaryRow);
+      if (primaryEval.eligible) {
+        return {
+          ok: true,
+          instanceName: primaryInstanceName,
+          rotated: false,
+          policy: primaryEval.policy,
+        };
+      }
+
+      // Chip fixo selecionado: nunca rotaciona para outro chip; aguarda no próprio chip.
+      return {
+        ok: false,
+        instanceName: primaryInstanceName,
+        rotated: false,
+        policy: primaryEval.policy,
+        reason: primaryEval.reason || "cold_cap_reached",
+      };
+    }
+
+    // Modo Pool Automático (__auto_pool__): avalia candidatos conectados e escolhe o melhor chip saudável
+    const poolCandidates = warmupRows
       .filter((r: any) => {
         if (!r?.instance_name) return false;
-        if (!isAutoPool && r.instance_name === primaryInstanceName) return false;
         if (r.enabled === false && r.purpose !== "outbound") return false;
         if (openSet.size > 0 && !openSet.has(r.instance_name)) return false;
         return true;
@@ -1154,96 +1175,29 @@ export async function resolveHealthyCampaignChip(
       .filter((item) => item.eval.eligible)
       .sort((a, b) => b.score - a.score);
 
-    if (isAutoPool) {
-      if (siblingCandidates.length > 0) {
-        const chosen = siblingCandidates[0];
-        const reason =
-          preferredInstanceName && chosen.row.instance_name === preferredInstanceName
-            ? "sticky_sender"
-            : targetDdd && chosen.eval.ddd === targetDdd
-              ? "ddd_affinity"
-              : "auto_pool";
-        return {
-          ok: true,
-          instanceName: String(chosen.row.instance_name),
-          rotated: true,
-          policy: chosen.eval.policy,
-          reason,
-        };
-      }
-      return {
-        ok: false,
-        instanceName: "",
-        rotated: false,
-        policy: null,
-        reason: "no_eligible_pool_chip",
-      };
-    }
-
-    if (!primaryRow) {
-      return { ok: true, instanceName: primaryInstanceName, rotated: false, policy: null };
-    }
-
-    if (primaryEval?.eligible) {
-      const topSibling = siblingCandidates[0];
-
-      // 1. Afinidade de DDD: se o irmão tiver exatamente o mesmo DDD do lead e o principal não, roteia para ele
-      if (
-        topSibling &&
-        targetDdd &&
-        topSibling.eval.ddd === targetDdd &&
-        primaryEval.ddd !== targetDdd
-      ) {
-        return {
-          ok: true,
-          instanceName: String(topSibling.row.instance_name),
-          rotated: true,
-          policy: topSibling.eval.policy,
-          reason: "ddd_affinity",
-        };
-      }
-
-      // 2. Balanceamento de carga: divide o ritmo entre chips saudáveis quando o principal já disparou >= 2 na hora
-      if (
-        primaryEval.hourlyCount >= 2 &&
-        topSibling &&
-        topSibling.eval.hourlyCount + 1 < primaryEval.hourlyCount
-      ) {
-        return {
-          ok: true,
-          instanceName: String(topSibling.row.instance_name),
-          rotated: true,
-          policy: topSibling.eval.policy,
-          reason: "load_balance",
-        };
-      }
-
-      return {
-        ok: true,
-        instanceName: primaryInstanceName,
-        rotated: false,
-        policy: primaryEval.policy,
-      };
-    }
-
-    // Chip principal bloqueado (Nursery Stage 1, saúde crítica, quarentena ou teto da hora) -> rotaciona para irmão saudável
-    if (siblingCandidates.length > 0) {
-      const chosen = siblingCandidates[0];
+    if (poolCandidates.length > 0) {
+      const chosen = poolCandidates[0];
+      const reason =
+        preferredInstanceName && chosen.row.instance_name === preferredInstanceName
+          ? "sticky_sender"
+          : targetDdd && chosen.eval.ddd === targetDdd
+            ? "ddd_affinity"
+            : "auto_pool";
       return {
         ok: true,
         instanceName: String(chosen.row.instance_name),
         rotated: true,
         policy: chosen.eval.policy,
-        reason: primaryEval?.reason || "failover",
+        reason,
       };
     }
 
     return {
       ok: false,
-      instanceName: primaryInstanceName,
+      instanceName: "",
       rotated: false,
-      policy: primaryEval?.policy || null,
-      reason: primaryEval?.reason || "cold_cap_reached",
+      policy: null,
+      reason: "no_eligible_pool_chip",
     };
   } catch {
     return { ok: true, instanceName: primaryInstanceName, rotated: false, policy: null };

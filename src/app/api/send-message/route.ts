@@ -316,6 +316,17 @@ export async function POST(req: NextRequest) {
         { status: 502 }
       );
     }
+
+    // Reavalia etapa do lead após envio humano pelo /chat (debounce de 45s)
+    if (ctx.clientId && cleanJid && !cleanJid.includes("@g.us")) {
+      try {
+        const { scheduleRealtimeLeadEvaluation } = await import("@/lib/organizer-realtime");
+        scheduleRealtimeLeadEvaluation(ctx.clientId, cleanJid);
+      } catch {
+        // não-fatal
+      }
+    }
+
     return NextResponse.json({
       success: true,
       msgId,

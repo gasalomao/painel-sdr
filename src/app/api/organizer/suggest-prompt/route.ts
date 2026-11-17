@@ -75,7 +75,14 @@ export async function POST(req: NextRequest) {
     })
     .join("\n");
 
-  const customGoal = (agent as any)?.options?.custom_goal_text || "";
+  const agentOptions = ((agent as any)?.options && typeof (agent as any).options === "object") ? (agent as any).options : {};
+  const customGoal = agentOptions.custom_goal_text || "";
+  const activeCapabilities = [
+    agentOptions.site_preview_auto_detect ? "Detecção automática e geração de prévia de site" : null,
+    (agentOptions.google_calendar_enabled || agentOptions.calendar_enabled || /agend|calendar|meet/i.test(agent.main_prompt || "")) ? "Agendamento de reuniões / Google Calendar" : null,
+    (agentOptions.rag_enabled || agentOptions.knowledge_enabled) ? "Base de Conhecimento / Catálogo RAG" : null,
+    customGoal ? "Pausa automática por objetivo personalizado" : null,
+  ].filter(Boolean);
 
   const systemPrompt = `
 Você é um especialista sênior em CRM e Classificação Automática de Conversas no WhatsApp.
@@ -88,10 +95,10 @@ REGRAS OBRIGATÓRIAS:
 - Explique para cada "status_key" do Kanban a condição exata da conversa (o que o CLIENTE disse vs. o que o SDR/IA enviou) que faz o lead ir para aquela coluna.
 - Deixe explícito:
   1. Mensagens "SDR:" são da nossa empresa/IA; mensagens "CLIENTE:" são do lead.
-  2. Se apenas o SDR falou e o cliente não respondeu (ou só mandou saudação automática única), manter em "primeiro_contato" (ou "follow-up").
+  2. Se apenas o SDR falou e o cliente não respondeu (ou só mandou auto-resposta de horário/saudação automática de WhatsApp Business), manter em "primeiro_contato" (ou "follow-up").
   3. Se o atendimento do cliente for um robô/URA preso em loop repetitivo ("Escolha 1 ou 2", "Não entendemos sua mensagem") ou número errado → mover para a coluna de descarte ("descartado").
   4. Regra Anti-Regressão: um lead que já avançou (ex: já pediu prévia, já recebeu link/proposta ou já agendou) NUNCA volta para colunas iniciais só porque respondeu "ok", "obrigado", "combinado" ou reagiu com emoji ("❤️", "👍").
-  5. Instrução final do formato JSON esperado pelo avaliador: array JSON com { "jid", "status", "lead_type", "razao", "resumo" }.
+  5. Instrução final obrigatória: cada item no JSON array deve conter "jid", "status", "lead_type", "razao" (obrigatório em PT-BR explicando o motivo) e "resumo" (obrigatório de 1-2 frases resumindo a situação atual do lead).
 
 FORMATO DE SAÍDA (APENAS JSON VÁLIDO, SEM MARKDOWN):
 {
@@ -104,6 +111,7 @@ FORMATO DE SAÍDA (APENAS JSON VÁLIDO, SEM MARKDOWN):
 === AGENTE IA DESTA CONTA ===
 Nome: ${agent.name || "(sem nome)"}
 Função/Cargo: ${agent.role || "(não informado)"}
+Recursos/ferramentas detectados: ${activeCapabilities.length > 0 ? activeCapabilities.join(" · ") : "(padrão SDR conversacional)"}
 Objetivo personalizado: ${customGoal || "(não definido)"}
 Personalidade: ${(agent.personality || "").slice(0, 400)}
 Tom de voz: ${(agent.tone || "").slice(0, 300)}

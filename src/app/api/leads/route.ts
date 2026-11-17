@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 
 const DEFAULT_PAGE_SIZE = 15;
 const MAX_PAGE_SIZE = 100;
-const KANBAN_LIMIT = 500;
+const KANBAN_LIMIT = 1000;
 
 const LEAD_LIST_COLUMNS = [
   "id",
@@ -97,7 +97,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const buildLeadsQuery = (columnsToSelect: string) => {
       let query = db
         .from("leads_extraidos")
-        .select(columnsToSelect, { count: "exact" })
+        .select(columnsToSelect, { count: "exact" });
+
+      if (view === "kanban") {
+        query = query.order("updated_at", { ascending: false, nullsFirst: false });
+      }
+
+      query = query
         .order("created_at", { ascending: false })
         .order("id", { ascending: false })
         .eq("client_id", auth.clientId);

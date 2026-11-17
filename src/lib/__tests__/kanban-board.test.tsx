@@ -102,11 +102,11 @@ function mountBoard() {
 
 // Locate a card by visible content and its column label, without depending on CSS
 // classes, hook state, or how the optimistic update/rollback is implemented.
-function statusOf(name: string): string | undefined {
+function statusOf(name: string, cols: KanbanColumnDef[] = columns): string | undefined {
   const overlay = screen.getByTestId("drag-overlay");
   let node: HTMLElement | null = screen.getAllByText(name).find((item) => !overlay.contains(item)) ?? null;
   while (node) {
-    const column = columns.find(({ label }) => within(node!).queryByRole("button", { name: label, exact: true }));
+    const column = cols.find(({ label }) => within(node!).queryByRole("button", { name: label, exact: true }));
     if (column) return column.id;
     node = node.parentElement;
   }
@@ -455,5 +455,27 @@ describe("KanbanBoard — persistência e concorrência", () => {
       await pending;
     });
     expect(statusOf("Oficina Aurora Renomeada")).toBe("ganho");
+  });
+
+  it("exibe leads com status 'invalid_number' na coluna 'descartado' sem torná-los invisíveis", () => {
+    const colsWithDiscard: KanbanColumnDef[] = [
+      ...columns,
+      { id: "descartado", uuid: "column-uuid-4", label: "Descartado", color: "#737373", isTerminal: true },
+    ];
+    const leadsWithInvalid = [
+      lead(1, "Oficina Aurora", "novo"),
+      lead(99, "Empresa Sem WhatsApp", "invalid_number"),
+    ];
+    render(
+      <KanbanBoard
+        leads={leadsWithInvalid}
+        columns={colsWithDiscard}
+        onLeadClick={vi.fn()}
+        formatPhone={(jid) => jid}
+        onLeadsUpdated={vi.fn()}
+      />
+    );
+    expect(statusOf("Empresa Sem WhatsApp", colsWithDiscard)).toBe("descartado");
+    expect(statusOf("Oficina Aurora", colsWithDiscard)).toBe("novo");
   });
 });

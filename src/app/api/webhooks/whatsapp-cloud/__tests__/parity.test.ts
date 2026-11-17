@@ -75,7 +75,7 @@ vi.mock("@/lib/supabase_admin", () => ({
 vi.mock("@/lib/whatsapp-cloud", () => ({
   whatsappCloud: {
     parseIncoming: (body: Record<string, unknown>) => body.__parsed,
-    markRead: vi.fn(async () => {}),
+    markRead: vi.fn(async () => { }),
   },
 }));
 
@@ -97,7 +97,7 @@ vi.mock("@/lib/webhook-security", () => ({ shouldLogOnce: () => true }));
 vi.mock("@/lib/opt-out", () => ({
   handleIncomingOptOutIfDetected: vi.fn(async () => state.optOutResult),
 }));
-vi.mock("@/lib/campaign-worker", () => ({ clearZeroReplyBrakeForInstance: vi.fn(async () => {}) }));
+vi.mock("@/lib/campaign-worker", () => ({ clearZeroReplyBrakeForInstance: vi.fn(async () => { }) }));
 vi.mock("@/app/api/agent/process/route", () => ({
   POST: vi.fn(async (req: NextRequest) => {
     const body = await req.json();

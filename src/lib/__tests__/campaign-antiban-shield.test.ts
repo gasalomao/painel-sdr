@@ -201,7 +201,7 @@ describe("Campaign Anti-Ban Shield (Meta Integrity Protection)", () => {
     expect(pause).toBeLessThanOrEqual(7500);
   });
 
-  it("resolveHealthyCampaignChip rotaciona por afinidade de DDD local, protege chip Berçário (Fase 1) e hidrata histórico de app_settings", async () => {
+  it("resolveHealthyCampaignChip trava estritamente no chip fixo escolhido e só rotaciona em Pool Automático (__auto_pool__)", async () => {
     const clientId = "00000000-0000-0000-0000-00000000a001";
     expect(extractBrazilDdd("5511961607625@s.whatsapp.net")).toBe("11");
     expect(extractBrazilDdd("557391810230")).toBe("73");
@@ -233,38 +233,78 @@ describe("Campaign Anti-Ban Shield (Meta Integrity Protection)", () => {
       }
     );
 
-    // Lead com DDD 73 deve ir automaticamente para 00000_numero2 (DDD 73)!
-    const dddMatch = await resolveHealthyCampaignChip(clientId, "00000_DD_11", {
+    // 1. Chip fixo NÃO troca por afinidade de DDD mesmo existindo irmão com DDD 73
+    const fixedDdd = await resolveHealthyCampaignChip(clientId, "00000_DD_11", {
       targetRemoteJid: "557399887766@s.whatsapp.net",
     });
-    expect(dddMatch.ok).toBe(true);
-    expect(dddMatch.instanceName).toBe("00000_numero2");
-    expect(dddMatch.rotated).toBe(true);
-    expect(dddMatch.reason).toBe("ddd_affinity");
+    expect(fixedDdd.ok).toBe(true);
+    expect(fixedDdd.instanceName).toBe("00000_DD_11");
+    expect(fixedDdd.rotated).toBe(false);
 
-    // Simula persistência em app_settings após suposto restart do servidor
-    const nowMs = Date.now();
+    // 2. Chip fixo NÃO troca por balanceamento após 2, 3 ou 4 envios na hora
+    const baseNow = Date.now();
+    for (let sends = 1; sends <= 4; sends++) {
+      recordColdOutreachSend("00000_DD_11", baseNow - (5 - sends) * 1000, clientId);
+      if (sends >= 2) {
+        const res = await resolveHealthyCampaignChip(clientId, "00000_DD_11", baseNow);
+        expect(res.ok).toBe(true);
+        expect(res.instanceName).toBe("00000_DD_11");
+        expect(res.rotated).toBe(false);
+      }
+    }
+
+    // 3. No modo Pool Automático (__auto_pool__), afinidade de DDD e balanceamento continuam ativos
+    const poolDdd73 = await resolveHealthyCampaignChip(clientId, AUTO_POOL_INSTANCE, {
+      targetRemoteJid: "557399887766@s.whatsapp.net",
+      nowMs: baseNow,
+    });
+    expect(poolDdd73.ok).toBe(true);
+    expect(poolDdd73.instanceName).toBe("00000_numero2");
+    expect(poolDdd73.rotated).toBe(true);
+    expect(poolDdd73.reason).toBe("ddd_affinity");
+
+    // 4. Hidrata histórico de app_settings e ao atingir teto horário (5/h):
+    //    - chip fixo aguarda no próprio chip (ok: false, hourly_cold_cap, rotated: false)
+    //    - Pool Automático rotaciona para o irmão saudável
+    __resetCampaignAntiBanStateForTests();
     tables.app_settings.push({
       key: `cold_sends_${clientId}`,
       value: JSON.stringify({
-        "00000_DD_11": [nowMs - 1000, nowMs - 2000, nowMs - 3000, nowMs - 4000, nowMs - 5000],
+        "00000_DD_11": [baseNow - 1000, baseNow - 2000, baseNow - 3000, baseNow - 4000, baseNow - 5000],
       }),
     });
-    __resetCampaignAntiBanStateForTests();
 
-    const restored = await resolveHealthyCampaignChip(clientId, "00000_DD_11", nowMs);
-    expect(getColdSendCounts("00000_DD_11", nowMs).hourlyCount).toBe(5);
-    expect(restored.ok).toBe(true);
-    expect(restored.instanceName).toBe("00000_numero2");
-    expect(restored.rotated).toBe(true);
+    const fixedCapped = await resolveHealthyCampaignChip(clientId, "00000_DD_11", baseNow);
+    expect(getColdSendCounts("00000_DD_11", baseNow).hourlyCount).toBe(5);
+    expect(fixedCapped.ok).toBe(false);
+    expect(fixedCapped.instanceName).toBe("00000_DD_11");
+    expect(fixedCapped.rotated).toBe(false);
+    expect(fixedCapped.reason).toBe("hourly_cold_cap");
 
-    // Chip em Berçário (Fase 1) não pode disparar se não houver irmãos elegíveis
+    const poolFailover = await resolveHealthyCampaignChip(clientId, AUTO_POOL_INSTANCE, {
+      targetRemoteJid: "5511988887777@s.whatsapp.net",
+      nowMs: baseNow,
+    });
+    expect(poolFailover.ok).toBe(true);
+    expect(poolFailover.instanceName).toBe("00000_numero2");
+    expect(poolFailover.rotated).toBe(true);
+
+    // 5. Chip fixo em Berçário (Fase 1) bloqueia no próprio chip mesmo com irmão em Fase 2 saudável
     __resetCampaignAntiBanStateForTests();
     tables.whatsapp_warmup_configs[0].stage = 1;
-    tables.whatsapp_warmup_configs[1].stage = 1;
-    const nurseryBlocked = await resolveHealthyCampaignChip(clientId, "00000_DD_11", nowMs);
-    expect(nurseryBlocked.ok).toBe(false);
-    expect(nurseryBlocked.reason).toBe("nursery_stage_1");
+    const fixedNursery = await resolveHealthyCampaignChip(clientId, "00000_DD_11", baseNow);
+    expect(fixedNursery.ok).toBe(false);
+    expect(fixedNursery.instanceName).toBe("00000_DD_11");
+    expect(fixedNursery.rotated).toBe(false);
+    expect(fixedNursery.reason).toBe("nursery_stage_1");
+
+    // E no Pool Automático pula o Berçário e escolhe o irmão em Fase 2
+    const poolSkipsNursery = await resolveHealthyCampaignChip(clientId, AUTO_POOL_INSTANCE, {
+      targetRemoteJid: "5511988887777@s.whatsapp.net",
+      nowMs: baseNow,
+    });
+    expect(poolSkipsNursery.ok).toBe(true);
+    expect(poolSkipsNursery.instanceName).toBe("00000_numero2");
   });
 
   it("ativa Freio de Vácuo Silencioso após 15 envios sem resposta e resolve Pool Automático (__auto_pool__)", async () => {
@@ -313,6 +353,15 @@ describe("Campaign Anti-Ban Shield (Meta Integrity Protection)", () => {
       if (check.brakeTriggered) brakeHit = true;
     }
     expect(brakeHit).toBe(true);
+
+    // Em chip fixo, freio de vácuo pausa no próprio chip (não troca para irmão)
+    const fixedBrake = await resolveHealthyCampaignChip(clientId, "00000_DD_11", {
+      targetRemoteJid: "5511988887777@s.whatsapp.net",
+    });
+    expect(fixedBrake.ok).toBe(false);
+    expect(fixedBrake.instanceName).toBe("00000_DD_11");
+    expect(fixedBrake.rotated).toBe(false);
+    expect(fixedBrake.reason).toBe("zero_reply_brake");
 
     // Com 00000_DD_11 em freio de vácuo, Pool Automático deve rotacionar imediatamente para 00000_numero2
     const afterBrake = await resolveHealthyCampaignChip(clientId, AUTO_POOL_INSTANCE, {
@@ -381,13 +430,23 @@ describe("Campaign Anti-Ban Shield (Meta Integrity Protection)", () => {
       recordColdOutreachSend("chip-aquecido-hoje", baseNow - (i + 2) * 65 * 60 * 1000, clientId);
     }
 
-    const rotated = await resolveHealthyCampaignChip(clientId, "chip-aquecido-hoje", {
+    // Em chip fixo, bloqueia no próprio chip por combined_daily_cap sem jogar para chip-reserva
+    const fixedBlocked = await resolveHealthyCampaignChip(clientId, "chip-aquecido-hoje", {
+      nowMs: baseNow,
+    });
+    expect(fixedBlocked.ok).toBe(false);
+    expect(fixedBlocked.rotated).toBe(false);
+    expect(fixedBlocked.instanceName).toBe("chip-aquecido-hoje");
+    expect(fixedBlocked.reason).toBe("combined_daily_cap");
+
+    // No Pool Automático, rotaciona para o chip-reserva disponível
+    const rotated = await resolveHealthyCampaignChip(clientId, AUTO_POOL_INSTANCE, {
       nowMs: baseNow,
     });
     expect(rotated.ok).toBe(true);
     expect(rotated.rotated).toBe(true);
     expect(rotated.instanceName).toBe("chip-reserva");
-    expect(rotated.reason).toBe("combined_daily_cap");
+    expect(rotated.reason).toBe("auto_pool");
   });
 
   it("evaluateWeekendB2BGuard é opt-in (não bloqueia domingos por padrão) e reduz sábado em 50% quando ativo", async () => {

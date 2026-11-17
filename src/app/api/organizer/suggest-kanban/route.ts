@@ -4,7 +4,7 @@ import { requireClientId } from "@/lib/tenant";
 import { getAiKeys } from "@/lib/ai-keys";
 import { generateText, providerDisplayName, providerOf } from "@/lib/ai-provider";
 import { logTokenUsage } from "@/lib/token-usage";
-import { extractJsonSafe, isTerminalColumn } from "@/lib/organizer-prompt";
+import { extractJsonSafe, inferStageRole, isTerminalColumn } from "@/lib/organizer-prompt";
 
 export const dynamic = "force-dynamic";
 
@@ -57,7 +57,14 @@ export async function POST(req: NextRequest) {
     aiKeys.defaultAiModel ||
     "gemini-2.5-flash";
 
-  const customGoal = (agent as any)?.options?.custom_goal_text || "";
+  const agentOptions = ((agent as any)?.options && typeof (agent as any).options === "object") ? (agent as any).options : {};
+  const customGoal = agentOptions.custom_goal_text || "";
+  const activeCapabilities = [
+    agentOptions.site_preview_auto_detect ? "Detecção automática e geração de prévia de site" : null,
+    (agentOptions.google_calendar_enabled || agentOptions.calendar_enabled || /agend|calendar|meet/i.test(agent.main_prompt || "")) ? "Agendamento de reuniões / Google Calendar" : null,
+    (agentOptions.rag_enabled || agentOptions.knowledge_enabled) ? "Base de Conhecimento / Catálogo RAG" : null,
+    customGoal ? "Pausa automática por objetivo personalizado" : null,
+  ].filter(Boolean);
 
   const systemPrompt = `
 Você é um especialista sênior em CRM, Funis de Vendas no WhatsApp e Automação Comercial.
@@ -82,9 +89,10 @@ REGRAS PARA O PROMPT ("organizer_prompt"):
 - Escreva um prompt objetivo, claro e direto (entre 15 e 25 linhas) instruindo o Organizador IA sobre como classificar as conversas deste nicho usando exatamente os "status_key" das colunas sugeridas.
 - Explique claramente:
   - Quando mover para cada "status_key" com base no que o CLIENTE respondeu vs. o que o SDR/IA enviou.
-  - Que leads onde só o SDR falou (sem resposta humana real) ficam em "primeiro_contato" (ou "follow-up").
+  - Que leads onde só o SDR falou (sem resposta humana real, incluindo auto-resposta automática de WhatsApp Business) ficam em "primeiro_contato" (ou "follow-up").
   - Que URAs/robôs em loop ou números errados vão para "descartado".
   - Que leads em etapas avançadas não devem regredir de coluna por respostas curtas ("ok", "obrigado", "❤️").
+  - Que TODA decisão no JSON precisa preencher obrigatoriamente "razao" (motivo claro) e "resumo" (1-2 frases da situação atual do lead).
 
 FORMATO DE SAÍDA (APENAS JSON VÁLIDO, SEM MARKDOWN):
 {
@@ -100,6 +108,7 @@ FORMATO DE SAÍDA (APENAS JSON VÁLIDO, SEM MARKDOWN):
 DADOS DO AGENTE DE IA DA CONTA:
 Nome: ${agent.name || "(sem nome)"}
 Função/Cargo: ${agent.role || "(não informado)"}
+Recursos/ferramentas detectados: ${activeCapabilities.length > 0 ? activeCapabilities.join(" · ") : "(padrão SDR conversacional)"}
 Objetivo personalizado ativo: ${customGoal || "(não definido)"}
 Personalidade: ${(agent.personality || "").slice(0, 400)}
 Tom de voz: ${(agent.tone || "").slice(0, 300)}
@@ -157,6 +166,7 @@ ${(agent.main_prompt || "(vazio)").slice(0, 4500)}
           : typeof c.is_terminal === "boolean"
             ? c.is_terminal
             : isTerminalColumn({ status_key, label });
+      const stage_role = inferStageRole({ status_key, label, is_terminal });
       return {
         status_key,
         label,
@@ -164,6 +174,7 @@ ${(agent.main_prompt || "(vazio)").slice(0, 4500)}
         order_index: idx,
         is_system: idx === 0,
         is_terminal,
+        stage_role,
         rationale: String(c.rationale || "").slice(0, 200),
       };
     });

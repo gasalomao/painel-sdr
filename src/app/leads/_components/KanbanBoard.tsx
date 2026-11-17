@@ -237,6 +237,16 @@ export default function KanbanBoard({ leads, columns, onLeadClick, formatPhone, 
     }
   }, [clientId, localCols, onLeadsUpdated]);
 
+  const resolveVisualColId = useCallback((rawStatus?: string | null): string => {
+    const status = String(rawStatus || "").trim() || "novo";
+    if (localCols.some((c) => c.id === status)) return status;
+    if (status === "invalid_number" || status === "sem_contato") {
+      const discardCol = localCols.find((c) => /descartad|sem_interesse|perdid/i.test(`${c.id} ${c.label}`));
+      if (discardCol) return discardCol.id;
+    }
+    return localCols[0]?.id || "novo";
+  }, [localCols]);
+
   return (
     <div className="flex-1 w-full overflow-x-auto custom-scrollbar pb-8 cursor-default kanban-scroll-container mobile-safe-bottom">
       {errorMessage && (
@@ -263,15 +273,17 @@ export default function KanbanBoard({ leads, columns, onLeadClick, formatPhone, 
         onDragCancel={() => setActiveId(null)}
       >
         <div className="flex gap-3 sm:gap-4 min-w-max p-2 h-full min-h-[calc(100vh-250px)] items-stretch">
-          {localCols.map((col) => (
+          {localCols.map((col) => {
+            const colLeads = localLeads.filter((l) => resolveVisualColId(l.status) === col.id);
+            return (
             <SortableContext
               key={col.uuid || col.id || col.label}
-              items={localLeads.filter((l) => (l.status || "novo") === col.id).map((l) => l.id)}
+              items={colLeads.map((l) => l.id)}
               strategy={verticalListSortingStrategy}
             >
               <KanbanColumn
                 column={col}
-                leads={localLeads.filter((l) => (l.status || "novo") === col.id)}
+                leads={colLeads}
                 onLeadClick={onLeadClick}
                 formatPhone={formatPhone}
                 onRename={(label: string) => persistColumn(col.uuid, { label })}
@@ -279,7 +291,8 @@ export default function KanbanBoard({ leads, columns, onLeadClick, formatPhone, 
                 onColorChange={(color: string) => persistColumn(col.uuid, { color })}
               />
             </SortableContext>
-          ))}
+            );
+          })}
 
           {/* Add coluna */}
           <button

@@ -229,10 +229,11 @@ describe("POST /api/ai-organize", () => {
     )!;
     expectClientFilter(recentChanges);
 
-    const preHistory = mocks.queries.find((query) =>
-      query.table === "chats_dashboard" && query.calls.some((call) => call.method === "lt")
-    )!;
-    expectClientFilter(preHistory);
+    const chatQueries = mocks.queries.filter((query) => query.table === "chats_dashboard");
+    expect(chatQueries.length).toBeGreaterThanOrEqual(2);
+    for (const chatQuery of chatQueries) {
+      expectClientFilter(chatQuery);
+    }
 
     const historyInsert = mocks.queries.find((query) =>
       query.table === "historico_ia_leads" && query.operation === "insert"

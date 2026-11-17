@@ -1119,6 +1119,10 @@ export async function POST(req: NextRequest) {
                   : `[AUTO-PAUSE] IA pausada ${pauseRes.minutes}min (snooze automático) — humano respondeu ${maskJid(remoteJid)}`
               );
             }
+            if (!groupDisabled && clientId && remoteJid) {
+              const { scheduleRealtimeLeadEvaluation } = await import("@/lib/organizer-realtime");
+              scheduleRealtimeLeadEvaluation(clientId, remoteJid);
+            }
           }
         } catch (e: any) {
           console.warn("[AUTO-PAUSE] falhou:", e?.message);
@@ -1156,6 +1160,11 @@ export async function POST(req: NextRequest) {
           payload: { remote_jid: maskJid(remoteJid), session_id: session?.id || null },
           created_at: new Date().toISOString(),
         }).then(() => {}, () => {});
+        if (clientId && remoteJid) {
+          import("@/lib/organizer-realtime")
+            .then((m) => m.scheduleRealtimeLeadEvaluation(clientId, remoteJid))
+            .catch(() => {});
+        }
       } else if (!fromMe && msgType !== "reaction" && agentText && session?.id && !groupDisabled) {
         const effectiveActive = (session as any)._effective_active ?? (session.bot_status === 'bot_active');
         if (effectiveActive) {
@@ -1224,6 +1233,11 @@ export async function POST(req: NextRequest) {
             payload: { remote_jid: maskJid(remoteJid), bot_status: session.bot_status, message_saved: true },
             created_at: new Date().toISOString()
           });
+          if (clientId && remoteJid) {
+            import("@/lib/organizer-realtime")
+              .then((m) => m.scheduleRealtimeLeadEvaluation(clientId, remoteJid))
+              .catch(() => {});
+          }
         }
       }
 

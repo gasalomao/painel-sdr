@@ -1,8 +1,12 @@
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
+import { inferStageRole, type KanbanColLite } from "@/lib/organizer-prompt";
 
 declare global {
   var organizerRealtimeTimers: Map<string, NodeJS.Timeout> | undefined;
+  var organizerRealtimePending: Map<string, { clientId: string; remoteJid: string }> | undefined;
+  var organizerRealtimeInFlight: Set<string> | undefined;
+  var organizerRealtimeShutdownHooked: boolean | undefined;
 }
 
 const DEBOUNCE_MS = 45_000; // 45s após a última mensagem da conversa estabilizar
@@ -12,6 +16,20 @@ function getTimersMap(): Map<string, NodeJS.Timeout> {
     globalThis.organizerRealtimeTimers = new Map();
   }
   return globalThis.organizerRealtimeTimers;
+}
+
+function getPendingMap(): Map<string, { clientId: string; remoteJid: string }> {
+  if (!globalThis.organizerRealtimePending) {
+    globalThis.organizerRealtimePending = new Map();
+  }
+  return globalThis.organizerRealtimePending;
+}
+
+function getInFlightSet(): Set<string> {
+  if (!globalThis.organizerRealtimeInFlight) {
+    globalThis.organizerRealtimeInFlight = new Set();
+  }
+  return globalThis.organizerRealtimeInFlight;
 }
 
 export type SystemSignalType =
@@ -46,13 +64,13 @@ export async function promoteLeadBySystemSignal(params: {
         .order("order_index", { ascending: true }),
       supabaseAdmin
         .from("leads_extraidos")
-        .select('id, "remoteJid", nome_negocio, status')
+        .select('id, "remoteJid", nome_negocio, status, previa_status, reuniao_agendada_em')
         .eq("client_id", clientId)
         .eq("remoteJid", remoteJid)
         .maybeSingle(),
     ]);
 
-    const columns = (cols || []) as Array<{ status_key: string; label: string; order_index: number }>;
+    const columns = (cols || []) as KanbanColLite[];
     const findCol = (regex: RegExp, fallbacks: string[]): string | null => {
       const match = columns.find((c) => regex.test(`${c.status_key} ${c.label}`));
       if (match) return match.status_key;
@@ -61,32 +79,50 @@ export async function promoteLeadBySystemSignal(params: {
       }
       return fallbacks[0] || null;
     };
+    const findByRole = (role: ReturnType<typeof inferStageRole>, regex: RegExp, fallbacks: string[]): string | null => {
+      const byRole = columns.find((c) => inferStageRole(c) === role);
+      if (byRole) return byRole.status_key;
+      return findCol(regex, fallbacks);
+    };
 
     let targetStatus: string | null = null;
     if (signal === "site_preview_requested") {
-      targetStatus = findCol(
+      targetStatus = findByRole(
+        "waiting_asset",
         /previa_solicitada|previa_pedida|aceitou_previa|orcamento_solicitado|interessado|qualificado/i,
         ["previa_solicitada", "interessado", "em_qualificacao"]
       );
     } else if (signal === "custom_goal_reached") {
-      if (/reuni[aã]o|agend|call|consulta|visita/i.test(reason)) {
-        targetStatus = findCol(
+      const currentStatus = String(lead?.status || "").toLowerCase();
+      const currentCol = columns.find((c) => c.status_key === lead?.status);
+      const currentRole = currentCol ? inferStageRole(currentCol) : null;
+      if (
+        (currentRole && ["waiting_asset", "proposal", "scheduled", "won", "lost", "discarded"].includes(currentRole)) ||
+        /previa|negociac|agend|fechad|sem_interesse|descart|perdid/i.test(currentStatus)
+      ) {
+        return { moved: false, newStatus: lead?.status || null };
+      }
+      if (Boolean((lead as { reuniao_agendada_em?: unknown })?.reuniao_agendada_em) || (lead as { previa_status?: unknown })?.previa_status === "REUNIAO_AGENDADA") {
+        targetStatus = findByRole(
+          "scheduled",
           /agendad|reuniao|call|consulta|visita/i,
           ["agendado", "interessado"]
         );
       } else {
         targetStatus = findCol(
-          /previa_solicitada|previa_pedida|aceitou_previa|orcamento_solicitado|interessado|qualificado|em_negociacao/i,
-          ["previa_solicitada", "interessado", "agendado"]
+          /interessado|qualificado|em_qualificacao|previa_solicitada|em_negociacao/i,
+          ["interessado", "em_qualificacao", "previa_solicitada"]
         );
       }
     } else if (signal === "site_preview_sent") {
-      targetStatus = findCol(
+      targetStatus = findByRole(
+        "proposal",
         /em_negociacao|previa_enviada|previa_pronta|proposta|interessado/i,
         ["em_negociacao", "interessado", "agendado"]
       );
     } else if (signal === "calendar_scheduled") {
-      targetStatus = findCol(
+      targetStatus = findByRole(
+        "scheduled",
         /agendad|reuniao|call|consulta|visita/i,
         ["agendado", "interessado"]
       );
@@ -134,6 +170,72 @@ export async function promoteLeadBySystemSignal(params: {
   }
 }
 
+async function executeRealtimeEvaluation(clientId: string, remoteJid: string): Promise<void> {
+  const key = `${clientId}:${remoteJid}`;
+  const inFlight = getInFlightSet();
+  if (inFlight.has(key)) return;
+  inFlight.add(key);
+  try {
+    if (!supabaseAdmin) return;
+    const { data: cli } = await supabaseAdmin
+      .from("clients")
+      .select("organizer_enabled")
+      .eq("id", clientId)
+      .maybeSingle();
+
+    if (cli?.organizer_enabled === false) return;
+
+    const { NextRequest } = await import("next/server");
+    const { POST: runAiOrganize } = await import("@/app/api/ai-organize/route");
+    const internalReq = new NextRequest("http://internal/api/ai-organize", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        [INTERNAL_SECRET_HEADER]: getInternalSecret(),
+      },
+      body: JSON.stringify({
+        clientId,
+        targetJids: [remoteJid],
+        triggered_by: "realtime",
+      }),
+    });
+    await runAiOrganize(internalReq);
+  } catch (err: unknown) {
+    console.warn("[organizer-realtime] falha na avaliação pós-conversa:", err instanceof Error ? err.message : err);
+  } finally {
+    inFlight.delete(key);
+  }
+}
+
+/**
+ * Despacha imediatamente avaliações em debounce pendentes (chamado em shutdown gracioso).
+ */
+export async function flushPendingRealtimeEvaluations(): Promise<number> {
+  const timers = getTimersMap();
+  const pending = getPendingMap();
+  const entries = Array.from(pending.entries());
+  for (const [key] of entries) {
+    const t = timers.get(key);
+    if (t) clearTimeout(t);
+    timers.delete(key);
+    pending.delete(key);
+  }
+  await Promise.allSettled(
+    entries.map(([, item]) => executeRealtimeEvaluation(item.clientId, item.remoteJid))
+  );
+  return entries.length;
+}
+
+function ensureShutdownHook(): void {
+  if (globalThis.organizerRealtimeShutdownHooked) return;
+  globalThis.organizerRealtimeShutdownHooked = true;
+  if (typeof process !== "undefined" && typeof process.once === "function") {
+    process.once("beforeExit", () => {
+      void flushPendingRealtimeEvaluations();
+    });
+  }
+}
+
 /**
  * Agenda avaliação automática em background (com debounce de 45s por contato)
  * para mover o card no Kanban sozinho logo após a conversa estabilizar.
@@ -144,46 +246,23 @@ export function scheduleRealtimeLeadEvaluation(
   delayMs: number = DEBOUNCE_MS
 ): void {
   if (!clientId || !remoteJid) return;
+  ensureShutdownHook();
   const key = `${clientId}:${remoteJid}`;
   const timers = getTimersMap();
+  const pending = getPendingMap();
 
   const existing = timers.get(key);
   if (existing) clearTimeout(existing);
+  pending.set(key, { clientId, remoteJid });
 
   const timer = setTimeout(async () => {
     timers.delete(key);
-    try {
-      if (!supabaseAdmin) return;
-      const { data: cli } = await supabaseAdmin
-        .from("clients")
-        .select("organizer_enabled")
-        .eq("id", clientId)
-        .maybeSingle();
-
-      if (cli?.organizer_enabled === false) return;
-
-      const { NextRequest } = await import("next/server");
-      const { POST: runAiOrganize } = await import("@/app/api/ai-organize/route");
-      const internalReq = new NextRequest("http://internal/api/ai-organize", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          [INTERNAL_SECRET_HEADER]: getInternalSecret(),
-        },
-        body: JSON.stringify({
-          clientId,
-          targetJids: [remoteJid],
-          triggered_by: "realtime",
-        }),
-      });
-      await runAiOrganize(internalReq);
-    } catch (err: any) {
-      console.warn("[organizer-realtime] falha na avaliação pós-conversa:", err?.message);
-    }
+    pending.delete(key);
+    await executeRealtimeEvaluation(clientId, remoteJid);
   }, delayMs);
 
-  if (typeof (timer as any)?.unref === "function") {
-    (timer as any).unref();
+  if (typeof (timer as { unref?: () => void })?.unref === "function") {
+    (timer as { unref: () => void }).unref();
   }
   timers.set(key, timer);
 }

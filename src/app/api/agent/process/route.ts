@@ -149,6 +149,9 @@ export async function POST(req: NextRequest) {
             payload: { remote_jid: maskJid(remoteJid), reason: eff.reason, resumeAt: eff.resumeAt },
             created_at: new Date().toISOString(),
           });
+          if (initialSessionData.client_id && remoteJid) {
+            scheduleRealtimeLeadEvaluation(initialSessionData.client_id, remoteJid);
+          }
           return NextResponse.json({ success: true, status: "ai_paused", reason: eff.reason });
         }
       }
@@ -564,6 +567,9 @@ export async function POST(req: NextRequest) {
                       payload: { remote_jid: maskJid(remoteJid), reason: effAfterWait.reason, stage: "post_buffer" },
                       created_at: new Date().toISOString(),
                    }).then(() => {}, () => {});
+                   if (!isTestMode && clientId && remoteJid) {
+                     scheduleRealtimeLeadEvaluation(clientId, remoteJid);
+                   }
                    return NextResponse.json({ success: true, status: "ai_paused", reason: effAfterWait.reason });
                 }
              }
@@ -2002,6 +2008,9 @@ export async function POST(req: NextRequest) {
               payload: { remote_jid: maskJid(remoteJid), reason: effFinal.reason, text_length: finalAnswer.length },
               created_at: new Date().toISOString(),
             }).then(() => {}, () => {});
+            if (!isTestMode && clientId && remoteJid) {
+              scheduleRealtimeLeadEvaluation(clientId, remoteJid);
+            }
             return NextResponse.json({ success: true, suppressed: "paused_before_send", reason: effFinal.reason });
           }
         }
@@ -2039,13 +2048,15 @@ export async function POST(req: NextRequest) {
             customGoalCfg.pauseMode === "indefinite" ? "indeterminado" : `${customGoalCfg.pauseMinutes}min`
           }).`,
         );
-        await promoteLeadBySystemSignal({
-          clientId,
-          remoteJid,
-          signal: "custom_goal_reached",
-          reason: `Objetivo alcançado: "${customGoalCfg.goalText}".`,
-          summary: `Meta do agente atingida ("${customGoalCfg.goalText}"). Atendimento IA pausado para ação da equipe.`,
-        });
+        if (!previaSiteRequestedInTurn && !meetingScheduledInTurn) {
+          await promoteLeadBySystemSignal({
+            clientId,
+            remoteJid,
+            signal: "custom_goal_reached",
+            reason: `Objetivo alcançado: "${customGoalCfg.goalText}".`,
+            summary: `Meta do agente atingida ("${customGoalCfg.goalText}"). Atendimento IA pausado para ação da equipe.`,
+          });
+        }
 
         const { triggerGoalTaskGeneration } = await import("@/lib/goal-task-generator");
         triggerGoalTaskGeneration({

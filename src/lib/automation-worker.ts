@@ -670,7 +670,7 @@ async function selectCapturedLeads(a: AutomationRow): Promise<CapturedLead[]> {
       .eq("client_id", clientId).in("id", ids.slice(i, i + 500)).not("remoteJid", "is", null);
     if (error) throw new Error(`Falha lendo leads colhidos: ${error.message}`);
     for (const lead of data || []) {
-      if (!lead.remoteJid || lead.status === "invalid_number" || lead.opt_out === true || seen.has(lead.remoteJid)) continue;
+      if (!lead.remoteJid || lead.status === "invalid_number" || lead.status === "descartado" || lead.opt_out === true || seen.has(lead.remoteJid)) continue;
       seen.add(lead.remoteJid);
       leads.push(lead as CapturedLead);
     }
@@ -708,8 +708,15 @@ async function canonicalizeAndFilterLeads(
   for (const lead of leads) {
     const entry = checks[phoneOf(lead.remoteJid)];
     if (entry?.exists === false) {
-      const { error } = await supabase.from("leads_extraidos").update({ status: "invalid_number" })
-        .eq("id", lead.id).eq("client_id", clientId);
+      const { error } = await supabase
+        .from("leads_extraidos")
+        .update({
+          status: "descartado",
+          justificativa_ia: "Número inválido / inexistente no WhatsApp (pré-validação da automação).",
+          resumo_ia: "Número sem WhatsApp ativo detectado antes do disparo.",
+        })
+        .eq("id", lead.id)
+        .eq("client_id", clientId);
       if (error) throw new Error(`Falha persistindo número inválido: ${error.message}`);
       continue;
     }

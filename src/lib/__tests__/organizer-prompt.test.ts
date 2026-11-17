@@ -133,4 +133,15 @@ describe("buildOrganizerSystemPrompt", () => {
     expect(DEFAULT_ORGANIZER_BASE_PROMPT).toContain("R17.");
     expect(DEFAULT_ORGANIZER_BASE_PROMPT).toContain("R15");
   });
+
+  it("preserva contrato universal (SDR/CLIENTE, auto-resposta e JSON com razao/resumo) mesmo com prompt customizado", () => {
+    const out = buildOrganizerSystemPrompt("PROMPT NICHO BARBEARIA", COLS, new Date("2026-05-17"));
+    expect(out.systemPrompt).toContain("PROMPT NICHO BARBEARIA");
+    expect(out.systemPrompt).not.toContain("classificador SÊNIOR");
+    expect(out.systemPrompt).toContain("CONTRATO UNIVERSAL DE LEITURA E SAÍDA");
+    expect(out.systemPrompt).toContain('"razao"');
+    expect(out.systemPrompt).toContain('"resumo"');
+    expect(out.systemPrompt).toContain('mensagens "SDR:"');
+    expect(out.systemPrompt).toContain("Auto-resposta de WhatsApp Business");
+  });
 });

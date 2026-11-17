@@ -450,6 +450,11 @@ export async function POST(req: NextRequest) {
         if (!isEchoOfAi) {
           const { applyHumanAutoPause } = await import("@/lib/bot-status");
           await applyHumanAutoPause(session.id, clientId);
+          if (!groupDisabled && clientId && remoteJid) {
+            import("@/lib/organizer-realtime")
+              .then((m) => m.scheduleRealtimeLeadEvaluation(clientId, remoteJid))
+              .catch(() => {});
+          }
         }
       } catch (e: any) {
         console.warn("[evo-go-webhook] auto-pausa falhou:", e?.message);
@@ -470,6 +475,11 @@ export async function POST(req: NextRequest) {
       import("@/lib/campaign-worker")
         .then((m) => m.clearZeroReplyBrakeForInstance?.(instanceName))
         .catch(() => {});
+      if (optedOutInTurn && !groupDisabled) {
+        import("@/lib/organizer-realtime")
+          .then((m) => m.scheduleRealtimeLeadEvaluation(clientId, remoteJid))
+          .catch(() => {});
+      }
     }
 
     // ===== Disparar agente IA (mensagens do cliente com texto/mídia; reações ou opt-out NÃO disparam IA) =====
@@ -540,6 +550,9 @@ export async function POST(req: NextRequest) {
             created_at: new Date().toISOString(),
           })
           .then(() => {}, () => {});
+        import("@/lib/organizer-realtime")
+          .then((m) => m.scheduleRealtimeLeadEvaluation(clientId, remoteJid))
+          .catch(() => {});
       }
     }
 

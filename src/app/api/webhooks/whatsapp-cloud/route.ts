@@ -486,6 +486,11 @@ export async function POST(req: NextRequest) {
           payload: { remote_jid: maskJid(effectiveJid), session_id: sessionRow?.id || null, source: "cloud" },
           created_at: new Date().toISOString(),
         }).then(() => {}, () => {});
+        if (clientId && effectiveJid) {
+          import("@/lib/organizer-realtime")
+            .then((m) => m.scheduleRealtimeLeadEvaluation(clientId, effectiveJid))
+            .catch(() => {});
+        }
       } else if (content && (m.text || m.caption || m.type === "audio" || m.type === "image" || m.type === "document") && sessionRow?.id && !groupDisabled) {
         const eff = await getEffectiveStatus(sessionRow as any);
         if (eff.isActive) {
@@ -540,6 +545,11 @@ export async function POST(req: NextRequest) {
             payload: { remote_jid: maskJid(effectiveJid), bot_status: sessionRow.bot_status, source: "cloud" },
             created_at: new Date().toISOString(),
           }).then(() => {}, () => {});
+          if (clientId && effectiveJid) {
+            import("@/lib/organizer-realtime")
+              .then((m) => m.scheduleRealtimeLeadEvaluation(clientId, effectiveJid))
+              .catch(() => {});
+          }
         }
       }
 
