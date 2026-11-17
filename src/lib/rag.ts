@@ -388,44 +388,77 @@ export async function embedTexts(texts: string[], apiKey?: string | null): Promi
   return out;
 }
 
+const RAG_QUERY_CACHE_TTL_MS = 5 * 60_000;
+const RAG_QUERY_CACHE_MAX = 500;
+const ragQueryCache = new Map<string, { vec: number[]; expiresAt: number }>();
+
+export function clearRagQueryCache(): void {
+  ragQueryCache.clear();
+}
+
 /**
  * Embedding de UMA query (mesmo modelo configurado da indexação).
+ * Inclui cache em memória de 5 min em produção para perguntas repetidas.
  */
-export async function embedQuery(text: string, apiKey?: string | null): Promise<number[]> {
+export async function embedQuery(
+  text: string,
+  apiKey?: string | null,
+  opts?: { forceCacheInTests?: boolean },
+): Promise<number[]> {
   const { parseModelRef } = await import("@/lib/ai-provider");
   const { getAiKeys } = await import("@/lib/ai-keys");
   const ref = await getRagEmbeddingRef();
   const { provider, model } = parseModelRef(ref);
+  const isTestEnv = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
+  const cacheEnabled = !isTestEnv || opts?.forceCacheInTests === true;
+  const cacheKey = `${ref}::${text.trim().toLowerCase()}`;
+
+  if (cacheEnabled) {
+    const cached = ragQueryCache.get(cacheKey);
+    if (cached && Date.now() < cached.expiresAt) {
+      return cached.vec;
+    }
+  }
+
   const keys = await getAiKeys();
+  let vec: number[];
 
   if (provider === "nvidia") {
     const nvKey = keys.nvidia;
     if (!nvKey) throw new Error("Modelo de embeddings é da NVIDIA mas a chave NVIDIA NIM não está configurada.");
     const [v] = await nvidiaEmbed(model, [text], nvKey, "query");
-    return v;
-  }
-
-  if (provider === "openrouter") {
+    vec = v;
+  } else if (provider === "openrouter") {
     const orKey = keys.openrouter;
     if (!orKey) throw new Error("Modelo de embeddings é do OpenRouter mas a chave OpenRouter não está configurada.");
     const [v] = await openRouterEmbed(model, [text], orKey);
-    return v;
+    vec = v;
+  } else {
+    const gKey = apiKey || keys.gemini;
+    if (!gKey) throw new Error("apiKey Gemini vazia — configure em /configuracoes");
+    const { GoogleGenerativeAI } = await import("@google/generative-ai");
+    const genAI = new GoogleGenerativeAI(gKey);
+    const gModel = genAI.getGenerativeModel({ model });
+    const res = await gModel.embedContent({
+      content: { role: "user", parts: [{ text }] },
+      taskType: "RETRIEVAL_QUERY" as any,
+      outputDimensionality: EMBEDDING_DIMS,
+    } as any);
+    vec = res.embedding.values;
   }
 
-  const gKey = apiKey || keys.gemini;
-  if (!gKey) throw new Error("apiKey Gemini vazia — configure em /configuracoes");
-  const { GoogleGenerativeAI } = await import("@google/generative-ai");
-  const genAI = new GoogleGenerativeAI(gKey);
-  const gModel = genAI.getGenerativeModel({ model });
-  const res = await gModel.embedContent({
-    content: { role: "user", parts: [{ text }] },
-    taskType: "RETRIEVAL_QUERY" as any,
-    outputDimensionality: EMBEDDING_DIMS,
-  } as any);
-  const vec = res.embedding.values;
   if (!vec || vec.length !== EMBEDDING_DIMS) {
     throw new Error(`embedQuery: dimensão ${vec?.length} ≠ ${EMBEDDING_DIMS} (modelo "${model}"). Reindexe a base ou troque o modelo.`);
   }
+
+  if (cacheEnabled) {
+    if (ragQueryCache.size >= RAG_QUERY_CACHE_MAX) {
+      const oldestKey = ragQueryCache.keys().next().value;
+      if (oldestKey) ragQueryCache.delete(oldestKey);
+    }
+    ragQueryCache.set(cacheKey, { vec, expiresAt: Date.now() + RAG_QUERY_CACHE_TTL_MS });
+  }
+
   return vec;
 }
 

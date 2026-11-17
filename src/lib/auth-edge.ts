@@ -47,6 +47,18 @@ export async function signSession(claims: SessionClaims): Promise<string> {
     .sign(getSecret());
 }
 
+export function timingSafeEqualEdge(a: string, b: string): boolean {
+  const enc = new TextEncoder();
+  const ab = enc.encode(a);
+  const bb = enc.encode(b);
+  const len = Math.max(ab.length, bb.length);
+  let diff = ab.length ^ bb.length;
+  for (let i = 0; i < len; i++) {
+    diff |= (ab[i] ?? 0) ^ (bb[i] ?? 0);
+  }
+  return diff === 0;
+}
+
 export async function verifySession(token: string): Promise<SessionClaims | null> {
   try {
     const { payload } = await jwtVerify(token, getSecret(), { algorithms: [JWT_ALG] });

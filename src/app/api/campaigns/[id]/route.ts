@@ -3,7 +3,7 @@ import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { startCampaign, pauseCampaign, cancelCampaign, isCampaignActive } from "@/lib/campaign-worker";
 import { requireClientId } from "@/lib/tenant";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
-import { validateCampaignInstanceAccess } from "@/lib/campaign-instance-access";
+import { validateCampaignInstanceAccess, validateClientAgentAccess } from "@/lib/campaign-instance-access";
 
 export const dynamic = "force-dynamic";
 
@@ -75,6 +75,13 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       return NextResponse.json({ success: false, error: access.error }, { status: access.status });
     }
   }
+  if ("agent_id" in body) {
+    const agentAccess = await validateClientAgentAccess(own.clientId, body.agent_id);
+    if (!agentAccess.ok) {
+      return NextResponse.json({ success: false, error: agentAccess.error }, { status: agentAccess.status });
+    }
+    body.agent_id = agentAccess.agentId;
+  }
 
   const ALLOWED_FIELDS = [
     "name", "instance_name", "message_template", "agent_id",
@@ -102,7 +109,10 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     .eq("client_id", own.clientId)
     .select()
     .single();
-  if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  if (error) {
+    console.error("[campaigns/PATCH] Erro:", error.message);
+    return NextResponse.json({ success: false, error: "Falha ao atualizar campanha" }, { status: 500 });
+  }
 
   if ("antiban_mixer" in body) {
     await supabase

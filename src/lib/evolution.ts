@@ -145,9 +145,13 @@ export async function getEvolutionConfig(
   };
 }
 
+const allowInsecureEvolutionTls =
+  process.env.EVOLUTION_ALLOW_INSECURE_TLS === "true" ||
+  process.env.EVOLUTION_ALLOW_INSECURE_TLS === "1";
+
 const httpsAgent = new https.Agent({
-  rejectUnauthorized: false,
-  family: 4
+  rejectUnauthorized: !allowInsecureEvolutionTls,
+  family: 4,
 });
 
 async function evoFetch(path: string, method: string = "GET", body?: unknown, timeoutMs: number = 30000) {

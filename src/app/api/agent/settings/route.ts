@@ -120,8 +120,35 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const sp = req.nextUrl.searchParams;
   const requestedAgentId = parsePositiveAgentId(sp.get("agent_id"));
   const includeBoot = sp.get("include_boot") === "1" || sp.get("include_boot") === "true";
+  const previewLeads = sp.get("preview_leads") === "1" || sp.get("preview_leads") === "true";
+  const logsOnly = sp.get("logs_only") === "1" || sp.get("logs_only") === "true";
 
   try {
+    if (logsOnly) {
+      const { data: logs, error: logsErr } = await supabaseAdmin
+        .from("webhook_logs")
+        .select("*")
+        .eq("client_id", auth.clientId)
+        .order("created_at", { ascending: false })
+        .limit(20);
+      if (logsErr) {
+        return NextResponse.json({ error: logsErr.message }, { status: 500 });
+      }
+      return NextResponse.json({ success: true, webhookLogs: logs || [] });
+    }
+    if (previewLeads) {
+      const { data: leads, error: leadsErr } = await supabaseAdmin
+        .from("leads_extraidos")
+        .select("*")
+        .eq("client_id", auth.clientId)
+        .order("created_at", { ascending: false })
+        .limit(500);
+      if (leadsErr) {
+        return NextResponse.json({ error: leadsErr.message }, { status: 500 });
+      }
+      return NextResponse.json({ success: true, leads: leads || [] });
+    }
+
     if (!includeBoot) {
       if (!requestedAgentId) {
         const { data: agents, error } = await supabaseAdmin
@@ -305,6 +332,12 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
           typeof incomingOpts.site_preview_eval_model === "string"
             ? incomingOpts.site_preview_eval_model
             : existingOpts.site_preview_eval_model,
+        // Segurança: apenas admin pode configurar modelo reserva (mesmo controle de custo de target_model).
+        fallback_model: auth.isAdmin
+          ? (typeof incomingOpts.fallback_model === "string"
+              ? incomingOpts.fallback_model.trim()
+              : existingOpts.fallback_model || "")
+          : existingOpts.fallback_model || "",
       });
 
       const rawMaxOut = incomingOpts.max_output_tokens;
@@ -413,6 +446,18 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     } else if (section === "toggle_active") {
       updatePayload = {
         is_active: Boolean(body.is_active),
+      };
+    } else if (section === "follow_up") {
+      const incomingFollowUp =
+        body.follow_up && typeof body.follow_up === "object"
+          ? (body.follow_up as JsonObject)
+          : {};
+      const mergedOpts: JsonObject = preserveSecretOptions(existingOpts, {
+        ...existingOpts,
+        follow_up: incomingFollowUp,
+      });
+      updatePayload = {
+        options: mergedOpts,
       };
     } else {
       return NextResponse.json({ error: "Seção de atualização desconhecida" }, { status: 400 });

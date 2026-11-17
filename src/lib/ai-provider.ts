@@ -1200,6 +1200,7 @@ interface LadderKeys {
   nvidia?: string | null;
   openrouter?: string | null;
   openrouterKeys?: string[] | null;
+  agentFallbackModel?: string | null;
   gatewayFallbackModel?: string | null;
 }
 
@@ -1207,14 +1208,11 @@ interface LadderKeys {
  * Monta a escada de fallback cross-provider, dedup POR PROVIDER (a rotação
  * interna já cobre "outra conta do mesmo provider"):
  *   1. modelRef pedido
- *   2. gatewayFallbackModel — RESERVA ESCOLHIDA PELO USUÁRIO em
- *      Configurações ("Modelo de reserva"). É aqui que o usuário decide pra
- *      onde cair primeiro.
- *   3. melhor flash ATUAL descoberto na hora (pickBestFlashModel — consulta
- *      a lista real da Google; nunca fica ultrapassado como um id fixo)
- *   4. openrouter:openai/gpt-4o-mini (último rung, pago porém frações de
- *      centavo; só é alcançado quando TUDO acima morreu. ponytail: se
- *      preferir sem custo, remova este rung.)
+ *   2. agentFallbackModel — RESERVA ESCOLHIDA NO AGENTE (se configurada)
+ *   3. gatewayFallbackModel — RESERVA ESCOLHIDA PELO USUÁRIO em Configurações
+ *   4. melhor flash ATUAL descoberto na hora (pickBestFlashModel)
+ *   5. nvidia:nvidia/nemotron-3.5-lightning-30b-a3b (se chave NVIDIA configurada)
+ *   6. openrouter:openai/gpt-4o-mini (última rede de segurança)
  */
 async function buildLadder(requestedRef: string, keys: LadderKeys | null): Promise<string[]> {
   const ladder = [requestedRef];
@@ -1235,7 +1233,8 @@ async function buildLadder(requestedRef: string, keys: LadderKeys | null): Promi
     ladder.push(r);
   };
 
-  // 1. Reserva do usuário (máxima prioridade)
+  // 1. Reserva específica do agente (máxima prioridade) e reserva global da conta
+  push(keys?.agentFallbackModel, true);
   push(keys?.gatewayFallbackModel, true);
 
   // 2. Provedor Gemini (melhor flash do momento)
@@ -1258,21 +1257,23 @@ async function buildLadder(requestedRef: string, keys: LadderKeys | null): Promi
   return ladder;
 }
 
-/** Lê as chaves pra montar a escada — best-effort (DB fora = escada vazia). */
-async function ladderKeys(opts: { geminiApiKey?: string | null; nvidiaApiKey?: string | null; openrouterApiKey?: string | null; openrouterKeys?: string[] | null; fallbackModelRef?: string | null }): Promise<LadderKeys | null> {
+/** Lê as chaves pra montar a escada — preserva chaves passadas mesmo se o banco falhar. */
+async function ladderKeys(opts: { geminiApiKey?: string | null; nvidiaApiKey?: string | null; openrouterApiKey?: string | null; openrouterKeys?: string[] | null; fallbackModelRef?: string | null }): Promise<LadderKeys> {
+  let keys: Awaited<ReturnType<typeof import("@/lib/ai-keys")["getAiKeys"]>> | null = null;
   try {
     const { getAiKeys } = await import("@/lib/ai-keys");
-    const keys = await getAiKeys();
-    return {
-      gemini: opts.geminiApiKey || keys?.gemini || null,
-      nvidia: opts.nvidiaApiKey || keys?.nvidia || null,
-      openrouter: opts.openrouterApiKey || keys?.openrouter || null,
-      openrouterKeys: opts.openrouterKeys || keys?.openrouterKeys || null,
-      gatewayFallbackModel: opts.fallbackModelRef || keys?.gatewayFallbackModel || null,
-    };
+    keys = await getAiKeys();
   } catch {
-    return null;
+    keys = null;
   }
+  return {
+    gemini: opts.geminiApiKey || keys?.gemini || null,
+    nvidia: opts.nvidiaApiKey || keys?.nvidia || null,
+    openrouter: opts.openrouterApiKey || keys?.openrouter || null,
+    openrouterKeys: opts.openrouterKeys || keys?.openrouterKeys || null,
+    agentFallbackModel: opts.fallbackModelRef || null,
+    gatewayFallbackModel: keys?.gatewayFallbackModel || null,
+  };
 }
 
 function normalizeGenerateTextOpts(raw: GenerateTextOpts): GenerateTextOpts & { modelRef: string; prompt: string } {
@@ -1858,6 +1859,31 @@ async function startAiChatSingle(opts: StartAiChatOpts): Promise<AiChatSession> 
 
 // ---------- Gemini session ----------
 
+export function isTransientRateOrServiceError(err: unknown): boolean {
+  if (err instanceof ProviderHttpError) {
+    return err.status === 429 || err.status === 503;
+  }
+  const msg = String((err as { message?: unknown })?.message || err || "").toLowerCase();
+  const status = Number((err as { status?: unknown })?.status || 0);
+  if (status === 429 || status === 503) return true;
+  return /\b429\b|too many requests|resource.?exhausted|rate.?limit|service unavailable|\b503\b/.test(msg);
+}
+
+async function withShortTransientRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (!isTransientRateOrServiceError(err)) throw err;
+    const isTestEnv = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
+    if (!isTestEnv) {
+      const hintMs = err instanceof ProviderHttpError && err.retryAfterMs ? err.retryAfterMs : 0;
+      const waitMs = Math.min(2500, Math.max(800, hintMs || 900 + Math.floor(Math.random() * 400)));
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+    return await fn();
+  }
+}
+
 function startGeminiChat(opts: StartAiChatOpts, requestedModel: string): AiChatSession {
   if (!opts.geminiApiKey) throw new Error("API Key Gemini não configurada.");
   const genAI = new GoogleGenerativeAI(opts.geminiApiKey);
@@ -1903,11 +1929,13 @@ function startGeminiChat(opts: StartAiChatOpts, requestedModel: string): AiChatS
     provider: "gemini",
     modelUsed: () => usedModel,
     async sendUser(text: string) {
-      // 1ª tentativa com fallback automático de modelo morto (404 generateContent).
+      // 1ª tentativa com retry curto para 429/503 transitório + fallback de modelo morto (404).
       try {
-        chat = buildChat(usedModel);
-        const r = await withAiTimeout(chat.sendMessage([{ text }]), `Gemini ${usedModel}`);
-        return parse(r);
+        return await withShortTransientRetry(async () => {
+          chat = buildChat(usedModel);
+          const r = await withAiTimeout(chat.sendMessage([{ text }]), `Gemini ${usedModel}`);
+          return parse(r);
+        });
       } catch (err) {
         if (!isDeadModelError(err)) throw err;
         const fb = await pickBestFlashModel();
@@ -1923,7 +1951,9 @@ function startGeminiChat(opts: StartAiChatOpts, requestedModel: string): AiChatS
       const parts = results.map((r) => ({
         functionResponse: { name: r.name, response: r.response },
       }));
-      const r = await withAiTimeout(chat.sendMessage(parts), `Gemini ${usedModel} tool`);
+      const r = await withShortTransientRetry(() =>
+        withAiTimeout(chat.sendMessage(parts), `Gemini ${usedModel} tool`),
+      );
       return parse(r);
     },
   };
@@ -2011,7 +2041,7 @@ function startOpenAICompatibleChat(opts: StartAiChatOpts, model: string, deps: O
 
     let json: any;
     try {
-      json = await deps.post(body);
+      json = await withShortTransientRetry(() => deps.post(body));
     } catch (err: any) {
       const emsg = String(err?.message || err);
       const isToolError = /tool|function/i.test(emsg);

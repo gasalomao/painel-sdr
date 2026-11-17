@@ -195,4 +195,105 @@ describe("Auditoria IA — helpers puros e módulos de suporte", () => {
       expect(gwRes?.modelRef).toBe("gateway:claude-sonnet-4");
     });
   });
+
+  describe("Agenda — resolveDayScheduleForDate e calculateFreeSlots respeitam expediente", () => {
+    it("fecha dia marcado como active=false e respeita startTime/endTime customizados", async () => {
+      const { resolveDayScheduleForDate, calculateFreeSlots } = await import("../agenda-logic");
+      const schedules = [
+        { day: "Segunda-feira", active: true, start: "09:30", end: "11:00" },
+        { day: "Domingo", active: false, start: "08:00", end: "18:00" },
+      ];
+
+      // 2026-11-15 é Domingo, 2026-11-16 é Segunda-feira
+      const sunday = resolveDayScheduleForDate("2026-11-15", schedules, false);
+      expect(sunday.closed).toBe(true);
+      expect(sunday.weekdayName).toBe("Domingo");
+
+      const monday = resolveDayScheduleForDate("2026-11-16", schedules, false);
+      expect(monday).toEqual({
+        closed: false,
+        weekdayName: "Segunda-feira",
+        startTime: "09:30",
+        endTime: "11:00",
+      });
+
+      const slots = calculateFreeSlots({
+        targetDate: "2026-11-16",
+        startTime: monday.startTime,
+        endTime: monday.endTime,
+        durationMinutes: 30,
+        stepMinutes: 30,
+        nowDate: new Date("2026-11-10T10:00:00-03:00"),
+      });
+      expect(slots).toEqual(["09:30", "10:00", "10:30"]);
+    });
+  });
+
+  describe("Anti-eco + JID @lid + Cache RAG + Retry 429", () => {
+    it("manual-send-registry reconhece mídia pendente e variantes BR (8/9 dígitos)", async () => {
+      const {
+        registerPendingAutomatedSend,
+        isPendingAutomatedSend,
+        registerPendingAutomatedMedia,
+        isPendingAutomatedMedia,
+      } = await import("../manual-send-registry");
+
+      registerPendingAutomatedSend("inst-1", "5511988887777@s.whatsapp.net", "Temos o plano Pro!");
+      expect(isPendingAutomatedSend("inst-1", "551188887777@s.whatsapp.net", "Temos o plano Pro!")).toBe(true);
+      expect(isPendingAutomatedSend("inst-1", "5511988887777@s.whatsapp.net", "Temos o plano Pro!")).toBe(false);
+
+      registerPendingAutomatedMedia("inst-1", "5511988887777@s.whatsapp.net");
+      expect(isPendingAutomatedMedia("inst-1", "551188887777@s.whatsapp.net")).toBe(true);
+    });
+
+    it("jid-utils resolve telefone real em mensagens @lid com remoteJidAlt e gera candidatos CRM", async () => {
+      const { resolveAlternateWhatsappJid, buildLeadJidCandidates } = await import("../jid-utils");
+
+      const alt = resolveAlternateWhatsappJid("998877665544@lid", "5511987654321@s.whatsapp.net", null);
+      expect(alt).toBe("5511987654321@s.whatsapp.net");
+
+      const candidates = buildLeadJidCandidates("998877665544@lid", alt);
+      expect(candidates).toContain("998877665544@lid");
+      expect(candidates).toContain("5511987654321@s.whatsapp.net");
+      expect(candidates).toContain("551187654321@s.whatsapp.net");
+    });
+
+    it("rag embedQuery reutiliza vetor cacheado dentro do TTL e limpa via clearRagQueryCache", async () => {
+      const { embedQuery, clearRagQueryCache, invalidateRagEmbeddingCache } = await import("../rag");
+      invalidateRagEmbeddingCache();
+      clearRagQueryCache();
+      mockState.appSettings.set("rag_embedding_model", "openrouter:openai/text-embedding-3-small");
+
+      const vec768 = Array.from({ length: 768 }, (_, idx) => (idx === 0 ? 0.5 : 0.01));
+      const fetchSpy = vi.fn(async () =>
+        new Response(JSON.stringify({ data: [{ index: 0, embedding: vec768 }] }), { status: 200 }),
+      );
+      vi.stubGlobal("fetch", fetchSpy);
+
+      try {
+        const first = await embedQuery("Tabela de preços", null, { forceCacheInTests: true });
+        const second = await embedQuery("  tabela de preços ", null, { forceCacheInTests: true });
+        expect(first).toHaveLength(768);
+        expect(second).toEqual(first);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+        clearRagQueryCache();
+        await embedQuery("Tabela de preços", null, { forceCacheInTests: true });
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+      } finally {
+        mockState.appSettings.delete("rag_embedding_model");
+        invalidateRagEmbeddingCache();
+        clearRagQueryCache();
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("ai-provider distingue erros transitórios 429/503 de erros 400 inválidos", async () => {
+      const { isTransientRateOrServiceError, ProviderHttpError } = await import("../ai-provider");
+      expect(isTransientRateOrServiceError(new ProviderHttpError(429, "Too many requests"))).toBe(true);
+      expect(isTransientRateOrServiceError(new ProviderHttpError(503, "Service unavailable"))).toBe(true);
+      expect(isTransientRateOrServiceError(new Error("RESOURCE_EXHAUSTED: quota momentânea"))).toBe(true);
+      expect(isTransientRateOrServiceError(new ProviderHttpError(400, "Bad request invalid schema"))).toBe(false);
+    });
+  });
 });

@@ -6,10 +6,9 @@
  */
 
 import { supabaseAdmin } from "@/lib/supabase_admin";
-import { supabase } from "@/lib/supabase";
 import { sanitizeCombos, type AiCombo } from "@/lib/ai-combos";
 
-const adminClient = supabaseAdmin || supabase;
+const adminClient = supabaseAdmin;
 
 /**
  * Uma CONEXÃO de gateway = uma conta/assinatura conectada via proxy local. Dá
@@ -196,6 +195,7 @@ export function parseOpenRouterKeys(raw: unknown, legacyKey: string | null): str
 
 export async function getAiKeys(force = false): Promise<AiKeys> {
   if (!force && CACHE && Date.now() - CACHE.at < TTL_MS) return CACHE.keys;
+  if (!adminClient) return CACHE?.keys || { ...EMPTY_KEYS };
   try {
     // Tenta com as colunas do gateway; se ainda não existirem (migração não
     // rodada), o select falha e caímos no fallback só-Gemini/OpenRouter abaixo.

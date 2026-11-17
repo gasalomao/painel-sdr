@@ -13,7 +13,15 @@ const server = await createServer({
       res.end('<!doctype html><html lang="pt-BR"><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Editor sintético</title></head><body><div id="root"></div><script type="module" src="/scripts/site-editor-fixture.tsx"></script></body></html>');
     });
   } }],
-  resolve: { alias: { "@": resolve("src") } },
+  resolve: {
+    alias: {
+      "@": resolve("src"),
+      "next/dynamic": resolve("scripts/site-editor-next-stubs/dynamic.tsx"),
+      "next/image": resolve("scripts/site-editor-next-stubs/image.tsx"),
+      "next/link": resolve("scripts/site-editor-next-stubs/link.tsx"),
+      "next/navigation": resolve("scripts/site-editor-next-stubs/navigation.ts"),
+    },
+  },
   esbuild: { jsx: "automatic" },
   optimizeDeps: { entries: ["scripts/site-editor-fixture.tsx"] },
   define: { "process.env.NEXT_PUBLIC_APP_URL": JSON.stringify("") },

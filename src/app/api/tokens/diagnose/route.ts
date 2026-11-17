@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { supabase, supabaseAdmin } from "@/lib/supabase";
+import { supabaseAdmin } from "@/lib/supabase_admin";
 import { logTokenUsage } from "@/lib/token-usage";
 import { requireClientId } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
-const adminClient = supabaseAdmin || supabase;
+const adminClient = supabaseAdmin;
 
 /**
  * Diagnóstico do sistema de tokens. Acesse:
@@ -21,6 +21,13 @@ export async function GET(req: NextRequest) {
   if (!auth.ok) return auth.response;
   if (!auth.isAdmin) return NextResponse.json({ ok: false, error: "Apenas admin" }, { status: 403 });
   const checks: any[] = [];
+
+  if (!adminClient) {
+    return NextResponse.json(
+      { ok: false, checks: [{ ok: false, step: "0. Supabase Admin", message: "SUPABASE_SERVICE_ROLE_KEY ausente" }] },
+      { status: 500 }
+    );
+  }
 
   // 1) Existência + count
   try {

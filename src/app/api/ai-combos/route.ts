@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { supabase, supabaseAdmin } from "@/lib/supabase";
+import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
 import { sanitizeCombos, DEFAULT_AI_COMBOS, type AiCombo } from "@/lib/ai-combos";
 import { invalidateAiKeysCache } from "@/lib/ai-keys";
 
-const adminClient = supabaseAdmin || supabase;
+const adminClient = supabaseAdmin;
 
 /** GET: Retorna os combos salvos no sistema */
 export async function GET(req: NextRequest) {
@@ -12,6 +12,7 @@ export async function GET(req: NextRequest) {
     const auth = await requireClientId(req);
     if (!auth.ok) return auth.response;
 
+    if (!adminClient) throw new Error("DB indisponível");
     const { data, error } = await adminClient
       .from("ai_organizer_config")
       .select("ai_combos")
@@ -42,6 +43,9 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const combos = sanitizeCombos(body?.combos);
 
+    if (!adminClient) {
+      return NextResponse.json({ success: false, error: "DB indisponível" }, { status: 500 });
+    }
     const { error } = await adminClient
       .from("ai_organizer_config")
       .upsert({ id: 1, ai_combos: combos, updated_at: new Date().toISOString() });

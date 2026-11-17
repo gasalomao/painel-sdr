@@ -1,11 +1,9 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { supabase } from "@/lib/supabase";
 import {
   matchesContactFilters,
   normalizeConversations,
-  CONVERSATION_SELECT,
   formatLastMessagePreview,
   isSameJid,
   sortConversationsByLastMessage,
@@ -204,9 +202,21 @@ export function ConversationList({
     onConversationsLoadedRef.current = onConversationsLoaded;
   });
 
+  const conversationsRef = useRef(conversations);
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
+
+  const instancesRef = useRef(instances);
+  useEffect(() => {
+    instancesRef.current = instances;
+  }, [instances]);
+
+  const hydratedForLoadKeyRef = useRef<string | null>(null);
+
   // Hidrata fotos de perfil via /api/contacts/avatars.
-  // Atualiza o state das conversas com as URLs recebidas, sem recarregar tudo.
-  const hydrateAvatars = useCallback(async (jids: string[], instance?: string) => {
+  // Usa ref (ou fallbackList recém-carregada) para evitar closure obsoleto [] após carga inicial.
+  const hydrateAvatars = useCallback(async (jids: string[], instance?: string, fallbackList?: Conversation[]) => {
     if (jids.length === 0) return;
     try {
       const res = await fetch("/api/contacts/avatars", {
@@ -220,7 +230,12 @@ export function ConversationList({
       const avatars: Record<string, string> = data.avatars;
       const updates = Object.entries(avatars).filter(([, url]) => !!url);
       if (updates.length === 0) return;
-      
+
+      const baseConversations = conversationsRef.current.length > 0
+        ? conversationsRef.current
+        : (fallbackList ?? []);
+      if (baseConversations.length === 0) return;
+
       const avatarMap = new Map<string, string>();
       for (const [key, url] of updates) {
         avatarMap.set(key, url);
@@ -229,7 +244,7 @@ export function ConversationList({
       }
 
       onConversationsLoadedRef.current(
-        conversations.map((c) => {
+        baseConversations.map((c) => {
           const url = avatarMap.get(c.id) || avatarMap.get(c.id.replace(/\D/g, "")) || (c.contact?.remote_jid ? avatarMap.get(c.contact.remote_jid) : null);
           if (!url) return c;
           return {
@@ -249,68 +264,43 @@ export function ConversationList({
         })
       );
     } catch {}
-  }, [conversations, clientId]);
+  }, [clientId]);
 
   useEffect(() => {
     if (!clientId) return;
     let cancelled = false;
+    const loadKey = `${clientId}:${resyncToken}`;
+    hydratedForLoadKeyRef.current = null;
 
     (async () => {
-      // Executa as consultas EM PARALELO com limites otimizados para máxima velocidade.
-      // Inclui kanban_columns e leads_extraidos para alimentar o filtro de colunas do Kanban.
-      const [sessionsRes, msgsRes, colsRes, leadsRes] = await Promise.all([
-        supabase
-          .from("sessions")
-          .select("id, client_id, contact_id, instance_name, bot_status, resume_at, unread_count, last_message_at, created_at, updated_at, agent_id, contact:contacts(*)")
-          .eq("client_id", clientId)
-          .order("last_message_at", { ascending: false, nullsFirst: false })
-          .limit(100),
-        supabase
-          .from("chats_dashboard")
-          .select("remote_jid, content, created_at, media_type, media_url")
-          .eq("client_id", clientId)
-          .order("created_at", { ascending: false })
-          .limit(600),
-        supabase
-          .from("kanban_columns")
-          .select("id, status_key, label, color, order_index")
-          .eq("client_id", clientId)
-          .order("order_index"),
-        supabase
-          .from("leads_extraidos")
-          .select("id, remoteJid, telefone, nome_negocio, status, photos, created_at")
-          .eq("client_id", clientId)
-          .order("created_at", { ascending: false })
-          .limit(2000),
-      ]);
+      try {
+        const res = await fetch("/api/inbox/conversations?mode=full", { cache: "no-store" });
+        const payload = await res.json().catch(() => null);
+        if (cancelled) return;
+        if (!res.ok || !payload?.ok) {
+          console.error("Falha ao buscar sessões do chat:", payload?.error || `HTTP ${res.status}`);
+          setLoading(false);
+          return;
+        }
 
-      if (cancelled) return;
+        const sessionsData = Array.isArray(payload.sessions) ? payload.sessions : [];
+        const msgsData = Array.isArray(payload.messages) ? payload.messages : [];
+        const colsData = Array.isArray(payload.columns) ? payload.columns : [];
+        const leadsData = Array.isArray(payload.leads) ? payload.leads : [];
 
-      if (colsRes?.data && Array.isArray(colsRes.data) && colsRes.data.length > 0) {
-        setKanbanCols(
-          colsRes.data.map((c: any) => ({
-            status_key: c.status_key,
-            label: c.label,
-            color: c.color || "#3b82f6",
-          }))
-        );
-      }
-      if (leadsRes?.error) {
-        console.error("[ConversationList] Erro ao carregar leads_extraidos:", leadsRes.error);
-      }
-      if (leadsRes?.data && Array.isArray(leadsRes.data)) {
-        setKanbanLeads(leadsRes.data as KanbanLeadItem[]);
-      }
+        if (colsData.length > 0) {
+          setKanbanCols(
+            colsData.map((c: any) => ({
+              status_key: c.status_key,
+              label: c.label,
+              color: c.color || "#3b82f6",
+            }))
+          );
+        }
+        setKanbanLeads(leadsData as KanbanLeadItem[]);
 
-      if (sessionsRes.error) {
-        console.error("Falha ao buscar sessões do chat:", sessionsRes.error);
-        setLoading(false);
-        return;
-      }
-
-      const latestMap = new Map<string, { content: string; created_at: string }>();
-      if (msgsRes.data) {
-        for (const msg of msgsRes.data) {
+        const latestMap = new Map<string, { content: string; created_at: string }>();
+        for (const msg of msgsData) {
           if (!msg.remote_jid) continue;
           const cleanPhone = msg.remote_jid.replace(/\D/g, "");
           const previewText = formatLastMessagePreview(
@@ -321,48 +311,65 @@ export function ConversationList({
           if (!latestMap.has(msg.remote_jid)) latestMap.set(msg.remote_jid, val);
           if (cleanPhone && !latestMap.has(cleanPhone)) latestMap.set(cleanPhone, val);
         }
-      }
 
-      const normalized = normalizeConversations(sessionsRes.data ?? []).map((c) => {
-        const jidDigits = c.id.replace(/\D/g, "");
-        const contactPhoneDigits = c.contact?.phone?.replace(/\D/g, "");
-        const contactJidDigits = c.contact?.remote_jid?.replace(/\D/g, "");
-        const lastMsgObj =
-          (jidDigits ? latestMap.get(jidDigits) : undefined) ||
-          latestMap.get(c.id) ||
-          (contactPhoneDigits ? latestMap.get(contactPhoneDigits) : undefined) ||
-          (contactJidDigits ? latestMap.get(contactJidDigits) : undefined);
+        const normalized = normalizeConversations(sessionsData).map((c) => {
+          const jidDigits = c.id.replace(/\D/g, "");
+          const contactPhoneDigits = c.contact?.phone?.replace(/\D/g, "");
+          const contactJidDigits = c.contact?.remote_jid?.replace(/\D/g, "");
+          const lastMsgObj =
+            (jidDigits ? latestMap.get(jidDigits) : undefined) ||
+            latestMap.get(c.id) ||
+            (contactPhoneDigits ? latestMap.get(contactPhoneDigits) : undefined) ||
+            (contactJidDigits ? latestMap.get(contactJidDigits) : undefined);
 
-        const text = lastMsgObj?.content || formatLastMessagePreview(c.last_message_text) || "";
-        return {
-          ...c,
-          last_message_text: text,
-          last_message_at: lastMsgObj?.created_at || c.last_message_at,
-        };
-      });
+          const text = lastMsgObj?.content || formatLastMessagePreview(c.last_message_text) || "";
+          return {
+            ...c,
+            last_message_text: text,
+            last_message_at: lastMsgObj?.created_at || c.last_message_at,
+          };
+        });
 
-      onConversationsLoadedRef.current(normalized);
-      setLoading(false);
+        onConversationsLoadedRef.current(normalized);
+        setLoading(false);
 
-      // ===== Hidratar fotos de perfil =====
-      // Busca avatares de contatos que NÃO têm profile_pic_url no banco.
-      // O endpoint /api/contacts/avatars processa em batch: lê cache,
-      // atualiza stale em background e devolve o que tem no momento.
-      // Roda fire-and-forget — não bloqueia a UI.
-      const jidsSemFoto = normalized
-        .filter((c) => !c.contact?.avatar_url)
-        .map((c) => c.id)
-        .filter(Boolean) as string[];
-      if (jidsSemFoto.length > 0 && instances.length > 0) {
-        const instanceName = instances[0]?.instance_name;
-        hydrateAvatars(jidsSemFoto, instanceName).catch(() => {});
+        const availableInstances = instancesRef.current;
+        const jidsSemFoto = normalized
+          .filter((c) => !c.contact?.avatar_url)
+          .map((c) => c.id)
+          .filter(Boolean) as string[];
+        if (jidsSemFoto.length > 0 && availableInstances.length > 0) {
+          hydratedForLoadKeyRef.current = loadKey;
+          const instanceName = availableInstances[0]?.instance_name;
+          hydrateAvatars(jidsSemFoto, instanceName, normalized).catch(() => {});
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.error("Falha ao buscar sessões do chat:", err);
+          setLoading(false);
+        }
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [resyncToken, clientId]);
+  }, [resyncToken, clientId, hydrateAvatars]);
+
+  // Caso instances carregue após o mount inicial das conversas, hidrata os avatares uma vez.
+  useEffect(() => {
+    if (loading || !clientId || instances.length === 0 || conversations.length === 0) return;
+    const loadKey = `${clientId}:${resyncToken}`;
+    if (hydratedForLoadKeyRef.current === loadKey) return;
+    const jidsSemFoto = conversations
+      .filter((c) => !c.contact?.avatar_url)
+      .map((c) => c.id)
+      .filter(Boolean) as string[];
+    hydratedForLoadKeyRef.current = loadKey;
+    if (jidsSemFoto.length > 0) {
+      hydrateAvatars(jidsSemFoto, instances[0]?.instance_name).catch(() => {});
+    }
+  }, [loading, clientId, resyncToken, instances, conversations, hydrateAvatars]);
 
   // Polling em background silencioso (5s) para manter a lista de conversas e contadores atualizados
   useEffect(() => {
@@ -379,26 +386,13 @@ export function ConversationList({
     const interval = setInterval(async () => {
       if (document.hidden) return;
 
-      const [sessionsRes, msgsRes] = await Promise.all([
-        supabase
-          .from("sessions")
-          .select(CONVERSATION_SELECT)
-          .eq("client_id", clientId)
-          .order("last_message_at", { ascending: false, nullsFirst: false })
-          .limit(100),
-        supabase
-          .from("chats_dashboard")
-          .select("remote_jid, content, created_at, media_type, media_url")
-          .eq("client_id", clientId)
-          .order("created_at", { ascending: false })
-          .limit(600),
-      ]);
-
-      if (!sessionsRes.data) return;
+      const res = await fetch("/api/inbox/conversations?mode=poll", { cache: "no-store" }).catch(() => null);
+      const payload = res ? await res.json().catch(() => null) : null;
+      if (!res?.ok || !payload?.ok || !Array.isArray(payload.sessions)) return;
 
       const latestMap = new Map<string, { content: string; created_at: string }>();
-      if (msgsRes.data) {
-        for (const msg of msgsRes.data) {
+      if (Array.isArray(payload.messages)) {
+        for (const msg of payload.messages) {
           if (!msg.remote_jid) continue;
           const cleanPhone = msg.remote_jid.replace(/\D/g, "");
           const previewText = formatLastMessagePreview(
@@ -411,7 +405,7 @@ export function ConversationList({
         }
       }
 
-      const normalized = normalizeConversations(sessionsRes.data).map((c) => {
+      const normalized = normalizeConversations(payload.sessions).map((c) => {
         const jidDigits = c.id.replace(/\D/g, "");
         const contactPhoneDigits = c.contact?.phone?.replace(/\D/g, "");
         const contactJidDigits = c.contact?.remote_jid?.replace(/\D/g, "");

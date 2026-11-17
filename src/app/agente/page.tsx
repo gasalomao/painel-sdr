@@ -18,6 +18,7 @@ import { leadRowToTemplateContext, renderTemplate } from "@/lib/template-vars";
 import { DEFAULT_SITE_PREVIEW_EVAL_PROMPT, DEFAULT_SITE_PREVIEW_PING_MESSAGE } from "@/lib/sites/agreement-detector-constants";
 import { sandboxSuppressionMessage, normalizeSplitIntensity, DEFAULT_SPLIT_INTENSITY, type SplitIntensity } from "@/lib/agent-format";
 import { cn } from "@/lib/utils";
+import { mergeRealtimeLog } from "@/lib/realtime-logs";
 import styles from "./agente.module.css";
 import { useClientSession } from "@/lib/use-session";
 import { Activity, FlaskConical, Info, ListTree, Settings, type LucideIcon } from "lucide-react";
@@ -83,6 +84,7 @@ export default function AgentePage() {
   const [personalidadeAgente, setPersonalidadeAgente] = useState("");
   const [tomAgente, setTomAgente] = useState("");
   const [targetModel, setTargetModel] = useState("");  // carregado do DB / hook em runtime
+  const [fallbackModel, setFallbackModel] = useState(""); // modelo reserva de failover
   const [modelOptions, setModelOptions] = useState<GroupableModel[]>([]);
   const [isAdmin, setIsAdmin] = useState(false);  // só admin altera modelo de IA
   const [defaultAiModel, setDefaultAiModel] = useState<string | null>(null);
@@ -291,6 +293,7 @@ export default function AgentePage() {
         : DAYS.map((day) => ({ day, active: day !== "Domingo", start: "08:00", end: "18:00" }));
       setSchedules(loaded);
       setTargetModel(data.target_model || "");
+      setFallbackModel(String(data.options?.fallback_model || ""));
       setIsActiveAgente(data.is_active ?? true);
       setIs24h(data.is_24h ?? false);
       setAwayMessage(data.away_message || "");
@@ -506,21 +509,36 @@ export default function AgentePage() {
       if (data.success && data.models) setModelOptions(data.models);
     });
 
-    const channel = supabase.channel("webhook_logs_realtime")
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "webhook_logs" }, (payload) => {
-        setWebhookLogs((prev) => {
-          // Dedup por id — evita o caso onde o INSERT echo do realtime chega depois
-          // do load inicial e duplica o log na UI.
-          const incoming = payload.new as WebhookLogRow & { client_id?: string | null };
-          if (clientId && incoming?.client_id && incoming.client_id !== clientId) return prev;
-          if (incoming?.id && prev.some((l) => l.id === incoming.id)) return prev;
-          return [incoming, ...prev].slice(0, 20);
-        });
-      })
-      .subscribe();
+    const channel = typeof supabase?.channel === "function"
+      ? supabase.channel(`webhook_logs_realtime_${clientId}`)
+          .on(
+            "postgres_changes",
+            { event: "INSERT", schema: "public", table: "webhook_logs", filter: `client_id=eq.${clientId}` },
+            (payload) => {
+              const incoming = payload.new as WebhookLogRow & { client_id?: string | null };
+              if (incoming?.client_id !== clientId) return;
+              setWebhookLogs((prev) => mergeRealtimeLog(prev, incoming, 20, "prepend"));
+            }
+          )
+          .subscribe()
+      : null;
+
+    // Fallback de polling suave caso o canal Realtime caia ou RLS bloqueie webhook_logs.
+    const pollLogs = setInterval(() => {
+      if (document.hidden) return;
+      fetch("/api/agent/settings?logs_only=1", { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (d?.success && Array.isArray(d.webhookLogs)) {
+            setWebhookLogs(d.webhookLogs);
+          }
+        })
+        .catch(() => {});
+    }, 12_000);
 
     return () => {
-      supabase.removeChannel(channel);
+      clearInterval(pollLogs);
+      if (channel) supabase.removeChannel(channel);
       // Sandbox usa um timer pra agrupar mensagens (humanização) — limpa pra evitar
       // que o setTimeout dispare depois que a página foi desmontada.
       if (testBufferTimerRef.current) clearTimeout(testBufferTimerRef.current);
@@ -618,6 +636,7 @@ export default function AgentePage() {
             site_preview_eval_prompt: sitePreviewEvalPrompt,
             site_preview_ping_message: sitePreviewPingMessage,
             site_preview_eval_model: sitePreviewEvalModel,
+            fallback_model: fallbackModel,
           },
         }),
       });
@@ -1023,19 +1042,10 @@ export default function AgentePage() {
   const loadPreviewLeads = useCallback(async () => {
     setPreviewLeadsLoading(true);
     try {
-      const sessRes = await fetch("/api/auth/session");
-      const session = await sessRes.json();
-      
-      let query = supabase
-        .from("leads_extraidos")
-        .select("*")
-        .order("created_at", { ascending: false })
-        .limit(500);
-      if (session?.clientId) {
-        query = query.eq("client_id", session.clientId);
-      }
-      const { data } = await query;
-      setPreviewLeads((data || []) as PreviewLead[]);
+      const res = await fetch("/api/agent/settings?preview_leads=1", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json().catch(() => null);
+      setPreviewLeads((data?.leads || []) as PreviewLead[]);
     } finally {
       setPreviewLeadsLoading(false);
     }
@@ -1345,6 +1355,7 @@ export default function AgentePage() {
                 tomAgente={tomAgente} setTomAgente={setTomAgente}
                 isActiveAgente={isActiveAgente} setIsActiveAgente={setIsActiveAgente}
                 targetModel={targetModel} setTargetModel={setTargetModel}
+                fallbackModel={fallbackModel} setFallbackModel={setFallbackModel}
                 modelOptions={modelOptions}
                 isAdmin={isAdmin}
                 defaultAiModel={defaultAiModel}

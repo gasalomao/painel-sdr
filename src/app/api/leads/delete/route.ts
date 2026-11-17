@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { supabase } from "@/lib/supabase";
-import { verifySession } from "@/lib/auth";
+import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
+import { requireClientId } from "@/lib/tenant";
 
 /**
  * Escape do termo de busca pra PostgREST .or() — sem isso, vírgulas e
@@ -13,7 +13,7 @@ function escapeForOr(term: string): string {
 }
 
 function buildFilterQuery(clientId: string, search: string | null, category: string | null) {
-  const q = supabase.from("leads_extraidos");
+  const q = supabase!.from("leads_extraidos");
   let sel: any = q.select("id, remoteJid").eq("client_id", clientId);
   if (search) {
     const safe = escapeForOr(search);
@@ -30,9 +30,12 @@ function buildFilterQuery(clientId: string, search: string | null, category: str
 }
 
 export async function DELETE(req: NextRequest) {
-  const session = await verifySession(req);
-  if (!session) {
+  const session = await requireClientId(req);
+  if (!session.ok) {
     return NextResponse.json({ error: "Não autorizado" }, { status: 401 });
+  }
+  if (!supabase) {
+    return NextResponse.json({ error: "DB indisponível" }, { status: 500 });
   }
 
   try {
@@ -54,7 +57,7 @@ export async function DELETE(req: NextRequest) {
       const pageSize = 1000;
       let from = 0;
       while (true) {
-        const { data, error } = await buildFilterQuery(session.clientId!, search, category).range(
+        const { data, error } = await buildFilterQuery(session.clientId, search, category).range(
           from,
           from + pageSize - 1
         );

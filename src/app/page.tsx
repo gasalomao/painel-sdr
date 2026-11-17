@@ -22,7 +22,6 @@ import { buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { DashboardCalendarWidget } from "@/components/dashboard-calendar-widget";
 import { DashboardRemindersWidget } from "@/components/dashboard-reminders-widget";
-import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
 import styles from "./dashboard.module.css";
 
@@ -104,66 +103,14 @@ export default function DashboardPage(): React.JSX.Element {
         const clientId = session.clientId;
         if (!isAdmin && !clientId) return;
 
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const tomorrow = new Date(today);
-        tomorrow.setDate(tomorrow.getDate() + 1);
+        const summaryRes = await fetch("/api/dashboard/summary", { cache: "no-store" });
+        const summary = await summaryRes.json().catch(() => null);
+        if (!summaryRes.ok || !summary?.success) return;
 
-        let totalLeadsQuery = supabase.from("leads_extraidos").select("*", { count: "exact", head: true });
-        let leadsTodayQuery = supabase.from("leads_extraidos").select("*", { count: "exact", head: true }).gte("created_at", today.toISOString());
-        let conversationsTodayQuery = supabase.from("chats_dashboard").select("remote_jid").gte("created_at", today.toISOString()).limit(2000);
-        let appointmentsTodayQuery = supabase.from("appointments").select("*", { count: "exact", head: true }).gte("start_at", today.toISOString()).lt("start_at", tomorrow.toISOString()).in("status", ["confirmed", "tentative"]);
-        let onlineInstancesQuery = supabase.from("channel_connections").select("*", { count: "exact", head: true }).eq("status", "open");
-        let campaignsQuery = supabase.from("campaigns").select("*", { count: "exact", head: true }).in("status", ["running", "sending"]);
-        let followUpsQuery = supabase.from("followup_campaigns").select("*", { count: "exact", head: true }).in("status", ["running", "sending"]);
-        let aiTodayQuery = supabase.from("chats_dashboard").select("*", { count: "exact", head: true }).eq("sender_type", "ai").gte("created_at", today.toISOString());
-        let recentLeadsQuery = supabase.from("leads_extraidos").select("id, nome_negocio, ramo_negocio, created_at").order("created_at", { ascending: false }).order("id", { ascending: false }).limit(6);
-
-        if (clientId) {
-          totalLeadsQuery = totalLeadsQuery.eq("client_id", clientId);
-          leadsTodayQuery = leadsTodayQuery.eq("client_id", clientId);
-          conversationsTodayQuery = conversationsTodayQuery.eq("client_id", clientId);
-          appointmentsTodayQuery = appointmentsTodayQuery.eq("client_id", clientId);
-          onlineInstancesQuery = onlineInstancesQuery.eq("client_id", clientId);
-          campaignsQuery = campaignsQuery.eq("client_id", clientId);
-          followUpsQuery = followUpsQuery.eq("client_id", clientId);
-          aiTodayQuery = aiTodayQuery.eq("client_id", clientId);
-          recentLeadsQuery = recentLeadsQuery.eq("client_id", clientId);
+        if (summary.metrics) {
+          setMetrics(summary.metrics);
         }
-
-        const [
-          { count: totalLeads },
-          { count: leadsHoje },
-          { data: conversations },
-          { count: agendamentosHoje },
-          { count: instanciasOnline },
-          { count: disparosAtivos },
-          { count: followUpCampanhas },
-          { count: iaInteracoesHoje },
-          { data: recentLeadsData },
-        ] = await Promise.all([
-          totalLeadsQuery,
-          leadsTodayQuery,
-          conversationsTodayQuery,
-          appointmentsTodayQuery,
-          onlineInstancesQuery,
-          campaignsQuery,
-          followUpsQuery,
-          aiTodayQuery,
-          recentLeadsQuery,
-        ]);
-
-        setMetrics({
-          totalLeads: totalLeads || 0,
-          leadsHoje: leadsHoje || 0,
-          conversasHoje: new Set((conversations || []).map((conversation: { remote_jid: string }) => conversation.remote_jid)).size,
-          agendamentosHoje: agendamentosHoje || 0,
-          instanciasOnline: instanciasOnline || 0,
-          disparosAtivos: disparosAtivos || 0,
-          followUpCampanhas: followUpCampanhas || 0,
-          iaInteracoesHoje: iaInteracoesHoje || 0,
-        });
-        setRecentLeads(recentLeadsData || []);
+        setRecentLeads(Array.isArray(summary.recentLeads) ? summary.recentLeads : []);
       } catch (error) {
         console.error("Erro ao carregar dashboard:", error);
       } finally {

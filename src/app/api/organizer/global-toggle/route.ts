@@ -28,7 +28,10 @@ export async function PATCH(req: NextRequest) {
     .from("ai_organizer_config")
     .update({ enabled, updated_at: new Date().toISOString() })
     .eq("id", 1);
-  if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+  if (error) {
+    console.error("[organizer/global-toggle] Erro:", error.message);
+    return NextResponse.json({ ok: false, error: "Falha ao atualizar status global do Organizador" }, { status: 500 });
+  }
   const { invalidateOrganizerConfigCache } = await import("@/lib/organizer-config-cache");
   invalidateOrganizerConfigCache();
   return NextResponse.json({ ok: true, enabled });

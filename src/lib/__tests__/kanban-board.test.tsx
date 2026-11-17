@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   dnd: {} as DndContextProps,
   droppableNodes: new Map<UniqueIdentifier, HTMLElement>(),
-  from: vi.fn(),
   clientId: "tenant-fixture" as string | null,
   sessionLoading: false,
 }));
@@ -59,18 +58,15 @@ vi.mock("@/lib/use-session", () => ({
   }),
 }));
 
-vi.mock("@/lib/supabase", () => ({ supabase: { from: mocks.from } }));
-
 import KanbanBoard, { type KanbanColumnDef } from "@/app/leads/_components/KanbanBoard";
 
 type Lead = ComponentProps<typeof KanbanBoard>["leads"][number];
 type WriteResult = { data: { id: number } | null; error: { message: string } | null };
 type Write = {
-  table: string;
+  url: string;
+  method: string;
+  leadId: string;
   values: Record<string, unknown>;
-  filters: [string, unknown][];
-  returning?: string;
-  cardinality?: "single" | "maybeSingle";
 };
 
 const columns: KanbanColumnDef[] = [
@@ -161,27 +157,48 @@ beforeEach(() => {
     matches: false, media, onchange: null,
     addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn(), dispatchEvent: vi.fn(),
   })));
-  vi.stubGlobal("fetch", vi.fn(() => { throw new Error("Requisição externa proibida neste teste"); }));
-
-  // A thenable query accepts the current await(eq(...)) and the fixed
-  // eq(...).eq(...).select(...).single()/maybeSingle(), without prescribing order.
-  mocks.from.mockImplementation((table: string) => ({
-    update: (values: Record<string, unknown>) => {
-      const write: Write = { table, values, filters: [] };
-      writes.push(write);
-      const response = outcomes.shift()?.() ?? Promise.resolve().then(() => ({
-        data: { id: Number(write.filters.find(([key]) => key === "id")?.[1]) }, error: null,
-      }));
-      const query = {
-        eq: (key: string, value: unknown) => { write.filters.push([key, value]); return query; },
-        select: (projection: string) => { write.returning = projection; return query; },
-        single: () => { write.cardinality = "single"; return query; },
-        maybeSingle: () => { write.cardinality = "maybeSingle"; return query; },
-        then: response.then.bind(response),
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const match = url.match(/^\/api\/leads\/([^/]+)\/status$/);
+      if (!match) {
+        throw new Error(`Requisição externa proibida neste teste: ${url}`);
+      }
+      const leadId = decodeURIComponent(match[1]);
+      const values = JSON.parse((init?.body as string) || "{}") as Record<string, unknown>;
+      const write: Write = {
+        url,
+        method: init?.method || "GET",
+        leadId,
+        values,
       };
-      return query;
-    },
-  }));
+      writes.push(write);
+      const outcomePromise =
+        outcomes.shift()?.() ??
+        Promise.resolve().then(() => ({
+          data: { id: Number(leadId) },
+          error: null,
+        }));
+      const result = await outcomePromise;
+      if (result.error) {
+        return new Response(JSON.stringify({ error: result.error.message }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (!result.data) {
+        return new Response(JSON.stringify({ error: "Lead não encontrado" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ success: true, lead: result.data }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    })
+  );
 });
 
 afterEach(() => {
@@ -304,10 +321,10 @@ describe("KanbanBoard — persistência e concorrência", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(writes).toHaveLength(1);
     expect(writes[0]).toMatchObject({
-      table: "leads_extraidos", values: { status: "ganho" },
-      filters: expect.arrayContaining([["id", 1], ["client_id", "tenant-fixture"]]),
-      returning: expect.stringMatching(/\bid\b/),
-      cardinality: expect.stringMatching(/^(single|maybeSingle)$/),
+      method: "PATCH",
+      leadId: "1",
+      url: "/api/leads/1/status",
+      values: { status: "ganho" },
     });
   });
 

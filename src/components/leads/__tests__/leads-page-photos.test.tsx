@@ -42,13 +42,6 @@ vi.mock("@/components/add-lead-dialog", () => ({
 }));
 
 const mockFetch = vi.fn();
-const mockSupabaseFrom = vi.fn();
-
-vi.mock("@/lib/supabase", () => ({
-  supabase: {
-    from: (...args: unknown[]) => mockSupabaseFrom(...args),
-  },
-}));
 
 function response(body: unknown, status = 200, ok = true): Response {
   return {
@@ -118,33 +111,10 @@ describe("LeadsPage - Sincronização e Hidratação de Fotos", () => {
     customColumns = [];
     sampleLeads[0].status = "novo";
 
-    mockSupabaseFrom.mockImplementation((table: string) => {
-      if (table === "campaign_targets") {
-        return {
-          select: vi.fn().mockReturnThis(),
-          eq: vi.fn().mockReturnThis(),
-          then: (res: any) => Promise.resolve(res({ data: [] })),
-        };
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.startsWith("/api/leads?") || url === "/api/leads") {
+        return response({ leads: [...sampleLeads], totalCount, sentJids: [] });
       }
-      if (table === "leads_extraidos") {
-        const query: any = {
-          select: vi.fn().mockReturnThis(),
-          order: vi.fn().mockReturnThis(),
-          eq: vi.fn().mockReturnThis(),
-          or: vi.fn().mockReturnThis(),
-          range: vi.fn().mockReturnThis(),
-          limit: vi.fn().mockReturnThis(),
-          then: (res: (result: { data: typeof sampleLeads; count: number }) => unknown) => Promise.resolve(res({ data: [...sampleLeads], count: totalCount })),
-        };
-        return query;
-      }
-      return {
-        select: vi.fn().mockReturnThis(),
-        then: (res: any) => Promise.resolve(res({ data: [] })),
-      };
-    });
-
-    mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url.includes("/api/kanban-columns")) {
         return response({ ok: true, columns: customColumns });
       }
@@ -184,9 +154,11 @@ describe("LeadsPage - Sincronização e Hidratação de Fotos", () => {
     await waitFor(() => expect(screen.getAllByText("Auto Mecânica Alpha")[0]).toBeInTheDocument());
     fireEvent.change(screen.getByRole("searchbox", { name: "Buscar clientes" }), { target: { value: "Alpha" } });
     await waitFor(() => {
-      const query = mockSupabaseFrom.mock.results.filter((_, index) => mockSupabaseFrom.mock.calls[index][0] === "leads_extraidos").at(-1)?.value;
-      expect(query.eq).toHaveBeenCalledWith("client_id", "client-test-123");
-      expect(query.or).toHaveBeenCalledWith(expect.stringContaining("nome_negocio.ilike.%Alpha%"));
+      const leadCalls = mockFetch.mock.calls.filter(([url]) => String(url).startsWith("/api/leads"));
+      const lastUrl = String(leadCalls.at(-1)?.[0] || "");
+      const params = new URL(lastUrl, "http://localhost").searchParams;
+      expect(params.get("search")).toBe("Alpha");
+      expect(params.has("clientId")).toBe(false);
     });
     fireEvent.click(screen.getByRole("button", { name: "Limpar filtros" }));
     expect(screen.getByRole("searchbox", { name: "Buscar clientes" })).toHaveValue("");
@@ -215,8 +187,10 @@ describe("LeadsPage - Sincronização e Hidratação de Fotos", () => {
     fireEvent.click(screen.getByRole("button", { name: "Próximo" }));
     await waitFor(() => expect(screen.getByText("Página 2 de 3")).toBeInTheDocument());
     expect(screen.queryByText("2 leads selecionados")).not.toBeInTheDocument();
-    const queries = mockSupabaseFrom.mock.results.filter((_, index) => mockSupabaseFrom.mock.calls[index][0] === "leads_extraidos");
-    expect(queries.at(-1)?.value.range).toHaveBeenCalledWith(15, 29);
+    const leadCalls = mockFetch.mock.calls.filter(([url]) => String(url).startsWith("/api/leads"));
+    const page2Params = new URL(String(leadCalls.at(-1)?.[0] || ""), "http://localhost").searchParams;
+    expect(page2Params.get("page")).toBe("1");
+    expect(page2Params.get("pageSize")).toBe("15");
   });
 
   it("mantém a lista utilizável para etapa nula quando as colunas foram personalizadas", async () => {
@@ -230,10 +204,12 @@ describe("LeadsPage - Sincronização e Hidratação de Fotos", () => {
   it("recarrega a lista após adicionar um cliente mesmo quando já está na primeira página", async () => {
     render(<LeadsPage />);
     await waitFor(() => expect(screen.getAllByText("Auto Mecânica Alpha")[0]).toBeInTheDocument());
-    const before = mockSupabaseFrom.mock.calls.filter(([table]) => table === "leads_extraidos").length;
+    const before = mockFetch.mock.calls.filter(([url]) => String(url).startsWith("/api/leads")).length;
     fireEvent.click(screen.getByRole("button", { name: "Adicionar Cliente" }));
     fireEvent.click(screen.getByRole("button", { name: "Concluir cadastro de teste" }));
-    await waitFor(() => expect(mockSupabaseFrom.mock.calls.filter(([table]) => table === "leads_extraidos").length).toBeGreaterThan(before));
+    await waitFor(() =>
+      expect(mockFetch.mock.calls.filter(([url]) => String(url).startsWith("/api/leads")).length).toBeGreaterThan(before)
+    );
   });
 
   it("hidrata fotos em cache com cachedOnly: true e não faz chamada remota automática na visualização", async () => {
@@ -267,6 +243,9 @@ describe("LeadsPage - Sincronização e Hidratação de Fotos", () => {
 
   it("executa sincronização sequencial em lote com aria-live e atualiza leads sem fetchLeads total", async () => {
     mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.startsWith("/api/leads")) {
+        return response({ leads: [...sampleLeads], totalCount, sentJids: [] });
+      }
       if (url.includes("/api/kanban-columns")) {
         return response({ ok: true, columns: [] });
       }
@@ -347,6 +326,7 @@ describe("LeadsPage - Sincronização e Hidratação de Fotos", () => {
   it("anuncia preparação sem 0/0 e não diz que fotos estão atualizadas quando WhatsApp não disponibiliza", async () => {
     const pendingBatch = deferred<Response>();
     mockFetch.mockImplementation(async (url: string) => {
+      if (url.startsWith("/api/leads")) return response({ leads: [...sampleLeads], totalCount, sentJids: [] });
       if (url.includes("/api/kanban-columns")) return response({ ok: true, columns: [] });
       if (url.includes("/api/contacts/sync-avatars")) return pendingBatch.promise;
       return response({ success: true, avatars: {} });
@@ -378,6 +358,7 @@ describe("LeadsPage - Sincronização e Hidratação de Fotos", () => {
 
   it("preserva foto válida exibida quando o lote retorna null", async () => {
     mockFetch.mockImplementation(async (url: string) => {
+      if (url.startsWith("/api/leads")) return response({ leads: [...sampleLeads], totalCount, sentJids: [] });
       if (url.includes("/api/kanban-columns")) return response({ ok: true, columns: [] });
       if (url.includes("/api/contacts/avatars")) return response({ success: true, avatars: { "5511999990001@s.whatsapp.net": "https://pps.whatsapp.net/v/alpha.jpg" } });
       if (url.includes("/api/contacts/sync-avatars")) return response({
@@ -442,6 +423,7 @@ describe("LeadsPage - Sincronização e Hidratação de Fotos", () => {
     const pendingBatch = deferred<Response>();
 
     mockFetch.mockImplementation(async (url: string) => {
+      if (url.startsWith("/api/leads")) return response({ leads: [...sampleLeads], totalCount, sentJids: [] });
       if (url.includes("/api/kanban-columns")) return response({ ok: true, columns: [] });
       if (url.includes("/api/contacts/avatars")) return response({ success: true, avatars: {} });
       if (url.includes("/api/contacts/sync-avatars")) {

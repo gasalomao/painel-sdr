@@ -5,6 +5,9 @@ const mocks = vi.hoisted(() => ({ from: vi.fn(), admin: true }));
 vi.mock("@/lib/supabase", () => ({
   get supabaseAdmin() { return mocks.admin ? { from: mocks.from } : null; },
 }));
+vi.mock("@/lib/supabase_admin", () => ({
+  get supabaseAdmin() { return mocks.admin ? { from: mocks.from } : null; },
+}));
 
 import { loadExhaustedSearches, makeSearchKey, markSearchExhausted } from "@/lib/scraper-search-memory";
 

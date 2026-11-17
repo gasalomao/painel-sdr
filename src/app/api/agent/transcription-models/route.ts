@@ -8,11 +8,11 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
-import { supabase } from "@/lib/supabase";
 import { requireClientId } from "@/lib/tenant";
 import { getTranscriptionModels, invalidateTranscriptionModelsCache } from "@/lib/bot-status";
+import { invalidateAgentConfigCache } from "@/lib/agent-config-cache";
 
-const adminClient = supabaseAdmin || supabase;
+const adminClient = supabaseAdmin;
 export const dynamic = "force-dynamic";
 
 /** Verifica que o agente pertence ao cliente (admin pode qualquer). */
@@ -82,6 +82,7 @@ export async function POST(req: NextRequest) {
   // Cache do webhook é no mesmo processo — invalida pra valer na hora.
   try {
     invalidateTranscriptionModelsCache(agentId);
+    invalidateAgentConfigCache(agentId);
   } catch { /* TTL 30s cobre */ }
 
   return NextResponse.json({ success: true, models });

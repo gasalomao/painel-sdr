@@ -3,11 +3,12 @@ import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { evolution } from "@/lib/evolution";
 import { getEffectiveStatus } from "@/lib/bot-status";
 import { shouldSkipGroupActions, resolveTranscriptionConfig } from "@/lib/bot-status";
-import { isManualSend, isAiSend, isPendingAutomatedSend } from "@/lib/manual-send-registry";
+import { isManualSend, isAiSend, isPendingAutomatedSend, isPendingAutomatedMedia } from "@/lib/manual-send-registry";
 import { DEFAULT_CLIENT_ID } from "@/lib/tenant";
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
 import { maskJid, truncForLog } from "@/lib/pii";
-import { describeDocument, describeImage, refreshProfilePicIfStale, sanitizeLogPayload } from "../shared-helpers";
+import { resolveAlternateWhatsappJid } from "@/lib/jid-utils";
+import { describeDocument, describeImage, refreshProfilePicIfStale, sanitizeLogPayload, uploadMediaBase64 } from "../shared-helpers";
 import { safeSecretEqual, shouldLogOnce } from "@/lib/webhook-security";
 import {
   processIncomingGroupMessage,
@@ -256,75 +257,6 @@ export function extractQuoted(messageRaw: Record<string, any>) {
     || (qMsg?.locationMessage ? "📍 Localização" : null)
     || (qMsg?.contactMessage ? "👤 Contato" : null);
   return { quotedId: contextInfo.stanzaId || null, quotedText };
-}
-
-// ============================================================
-// UPLOAD DE MÍDIA PARA SUPABASE STORAGE
-// ============================================================
-
-// Cacheia se o bucket foi verificado/criado, pra não bater em Storage toda vez
-let bucketReady: boolean | null = null;
-
-async function ensureMediaBucket(): Promise<boolean> {
-  if (bucketReady === true) return true;
-  const bucketName = "whatsapp_media";
-  try {
-    // Tenta listar pra descobrir se existe — se não, cria público
-    const { data: list, error: listErr } = await supabase.storage.listBuckets();
-    if (listErr) {
-      console.warn("[Bucket] Não consegui listar buckets:", listErr.message);
-      return false;
-    }
-    if (list?.some((b: any) => b.name === bucketName)) {
-      bucketReady = true;
-      return true;
-    }
-    console.log("[Bucket] Criando whatsapp_media (público)...");
-    const { error: createErr } = await supabase.storage.createBucket(bucketName, {
-      public: true,
-      fileSizeLimit: 50 * 1024 * 1024, // 50 MB por arquivo
-    });
-    if (createErr) {
-      // Pode ter sido criado em paralelo — ignora "already exists"
-      if (/already exists/i.test(createErr.message)) {
-        bucketReady = true;
-        return true;
-      }
-      console.warn("[Bucket] Falha ao criar:", createErr.message, "— cria manual em Supabase Storage > New bucket 'whatsapp_media' (public).");
-      return false;
-    }
-    bucketReady = true;
-    return true;
-  } catch (err: any) {
-    console.error("[Bucket] Erro:", err?.message);
-    return false;
-  }
-}
-
-async function uploadMediaBase64(base64: string, remoteJid: string, mimetype: string): Promise<string | null> {
-  try {
-    const bucketName = "whatsapp_media";
-    await ensureMediaBucket();
-
-    const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");
-    const buffer = Buffer.from(cleanBase64, "base64");
-    const extension = mimetype?.split("/")[1]?.split(";")[0] || "bin";
-    const path = `${remoteJid}/${Date.now()}.${extension}`;
-
-    const { error: uploadError } = await supabase.storage
-      .from(bucketName)
-      .upload(path, buffer, { contentType: mimetype || "application/octet-stream", upsert: true });
-
-    if (uploadError) {
-      console.warn("[Media Upload] Falha:", uploadError.message, "— confere se o bucket 'whatsapp_media' existe e é public.");
-      return null;
-    }
-    const { data } = supabase.storage.from(bucketName).getPublicUrl(path);
-    return data.publicUrl;
-  } catch (err) {
-    console.error("[Media Upload] Erro:", err);
-    return null;
-  }
 }
 
 // Gemini aceita mimetype base (sem "; codecs=..."). WhatsApp manda "audio/ogg; codecs=opus"
@@ -721,8 +653,9 @@ export async function POST(req: NextRequest) {
       // 2. Mensagens 1x1 trocadas entre chips do mesmo tenant durante o aquecimento
       // (tanto recebidas quanto enviadas via fromMe=true, textos, áudios, vCards ou reações):
       // NÃO devem abrir sessões no CRM, poluir o chat nem acionar o agente de IA.
+      const remoteJidAlt = data.key?.remoteJidAlt || body.key?.remoteJidAlt || data.key?.senderPn || body.key?.senderPn || null;
+      const altWhatsappJid = resolveAlternateWhatsappJid(remoteJid, remoteJidAlt, null);
       if (remoteJid) {
-        const remoteJidAlt = data.key?.remoteJidAlt || body.key?.remoteJidAlt || data.key?.senderPn || body.key?.senderPn || null;
         const warmupCheck = await detectWarmupPeerTraffic({
           clientId,
           instanceName,
@@ -782,10 +715,11 @@ export async function POST(req: NextRequest) {
         // estiver vazio/placeholder — sem sobrescrever nomes reais (scraper).
         if (!fromMe && pushName) {
           await healLeadNameFromPushName(remoteJid, pushName, clientId);
+          if (altWhatsappJid) await healLeadNameFromPushName(altWhatsappJid, pushName, clientId);
         }
         // Buscar foto de perfil (fire-and-forget — não bloqueia a mensagem).
         if (!fromMe && instanceName) {
-          refreshProfilePicIfStale(remoteJid, instanceName, clientId).catch(() => {});
+          refreshProfilePicIfStale(altWhatsappJid || remoteJid, instanceName, clientId).catch(() => {});
         }
       } catch (sessErr: any) {
         console.error(">>> [Webhook] ⚠ Falha ao criar contact/session (não-fatal):", sessErr?.message);
@@ -793,7 +727,7 @@ export async function POST(req: NextRequest) {
           client_id: clientId,
           instance_name: instanceName,
           event: "WEBHOOK_SESSION_FAIL",
-          payload: { remote_jid: remoteJid, error: sessErr?.message, fromMe },
+          payload: { remote_jid: maskJid(remoteJid), error: sessErr?.message, fromMe },
           created_at: new Date().toISOString(),
         }).then(() => {}, () => {});
       }
@@ -808,9 +742,14 @@ export async function POST(req: NextRequest) {
       );
 
       // Determinar sender. Pra mensagens fromMe (saíram do nosso número):
+      const isMediaMessage = ["image", "audio", "video", "document"].includes(msgType);
       let sender: 'customer' | 'ai' | 'human' | 'system' = 'customer';
       if (fromMe) {
-        if (isAiSend(finalId) || isPendingAutomatedSend(instanceName, remoteJid, text)) {
+        if (
+          isAiSend(finalId) ||
+          isPendingAutomatedSend(instanceName, remoteJid, text) ||
+          (isMediaMessage && isPendingAutomatedMedia(instanceName, remoteJid))
+        ) {
           sender = 'ai';
         } else if (isManualSend(finalId)) {
           sender = 'human';
@@ -968,7 +907,7 @@ export async function POST(req: NextRequest) {
       let mediaUrlInline: string | null = null;
       if (hasMedia && base64Media && !fromMe && (msgType === "image" || msgType === "document" || msgType === "video")) {
         try {
-          mediaUrlInline = await uploadMediaBase64(base64Media, remoteJid, effMimetype);
+          mediaUrlInline = await uploadMediaBase64(base64Media, remoteJid, effMimetype, clientId);
           if (!groupDisabled) {
             if (msgType === "image") {
               const desc = await describeImage(base64Media, effMimetype, clientId);
@@ -996,7 +935,7 @@ export async function POST(req: NextRequest) {
       let mediaUrl: string | null = mediaUrlInline;
       if (!mediaUrl && hasMedia && base64Media && msgType === "audio") {
         try {
-          mediaUrl = await uploadMediaBase64(base64Media, remoteJid, effMimetype);
+          mediaUrl = await uploadMediaBase64(base64Media, remoteJid, effMimetype, clientId);
         } catch {}
       }
 
@@ -1063,8 +1002,9 @@ export async function POST(req: NextRequest) {
           console.error(">>> [Webhook] ❌ FALHA chats_dashboard:", dashErr.message, "| Details:", JSON.stringify(dashErr));
           await supabase.from("webhook_logs").insert({
             instance_name: instanceName,
+            client_id: clientId,
             event: "WEBHOOK_DASH_INSERT_FAIL",
-            payload: { remote_jid: remoteJid, sender, message_id: finalId, error: dashErr.message, code: (dashErr as any).code, details: dashErr },
+            payload: { remote_jid: maskJid(remoteJid), sender, message_id: finalId, error: dashErr.message, code: (dashErr as any).code, details: dashErr },
             created_at: new Date().toISOString(),
           }).then(() => {}, () => {});
         }
@@ -1112,8 +1052,9 @@ export async function POST(req: NextRequest) {
             console.error(">>> [Webhook] ⚠ messages insert falhou (não-fatal):", insertError.message);
             await supabase.from("webhook_logs").insert({
               instance_name: instanceName,
+              client_id: clientId,
               event: "WEBHOOK_V2_INSERT_FAIL",
-              payload: { remote_jid: remoteJid, sender, message_id: finalId, error: insertError.message, code: insertError.code },
+              payload: { remote_jid: maskJid(remoteJid), sender, message_id: finalId, error: insertError.message, code: insertError.code },
               created_at: new Date().toISOString(),
             }).then(() => {}, () => {});
           }
@@ -1140,20 +1081,33 @@ export async function POST(req: NextRequest) {
       // que foi conversado. Configurável (ligar/desligar, minutos, modo).
       if (fromMe && sender === "human" && session?.id) {
         try {
-          // Salvaguarda anti-eco: se há uma mensagem IDÊNTICA da IA nos
+          // Salvaguarda anti-eco: se há uma mensagem IDÊNTICA (ou mídia recente) da IA nos
           // últimos 30s pra esse contato, isto é só o echo da própria IA
           // (caso raro do id não bater no registro) — NÃO pausa a si mesma.
           let isEchoOfAi = false;
+          const recentSinceIso = new Date(Date.now() - 30_000).toISOString();
           if (text) {
             const { data: recentAi } = await supabase
               .from("chats_dashboard")
               .select("id")
+              .eq("client_id", clientId)
               .eq("remote_jid", remoteJid)
               .eq("sender_type", "ai")
               .eq("content", text)
-              .gte("created_at", new Date(Date.now() - 30_000).toISOString())
+              .gte("created_at", recentSinceIso)
               .limit(1);
             isEchoOfAi = !!(recentAi && recentAi.length > 0);
+          } else if (hasMedia && ["image", "document"].includes(msgType)) {
+            const { data: recentAiMedia } = await supabase
+              .from("chats_dashboard")
+              .select("id")
+              .eq("client_id", clientId)
+              .eq("remote_jid", remoteJid)
+              .eq("sender_type", "ai")
+              .eq("media_type", msgType)
+              .gte("created_at", recentSinceIso)
+              .limit(1);
+            isEchoOfAi = !!(recentAiMedia && recentAiMedia.length > 0);
           }
           if (!isEchoOfAi) {
             const { applyHumanAutoPause } = await import("@/lib/bot-status");
@@ -1177,7 +1131,7 @@ export async function POST(req: NextRequest) {
       if (!fromMe && agentText && remoteJid) {
         optedOutInTurn = await handleIncomingOptOutIfDetected({
           clientId,
-          remoteJid,
+          remoteJid: altWhatsappJid || remoteJid,
           messageText: agentText,
           sessionId: session?.id || null,
         }).catch(() => false);
@@ -1212,6 +1166,7 @@ export async function POST(req: NextRequest) {
           if (!internalSecretValue) {
             await supabase.from("webhook_logs").insert({
               instance_name: instanceName,
+              client_id: clientId,
               event: "AGENT_DISPATCH_NO_SECRET",
               payload: { hint: "AUTH_SECRET ou SUPABASE_SERVICE_ROLE_KEY vazio no env do container; /api/agent/process vai rejeitar com 401", remote_jid: maskJid(remoteJid) },
               created_at: new Date().toISOString(),
@@ -1224,6 +1179,7 @@ export async function POST(req: NextRequest) {
           // Evolution aceita até 30s tranquilamente.
           await supabase.from("webhook_logs").insert({
             instance_name: instanceName,
+            client_id: clientId,
             event: "AGENT_DISPATCH_SCHEDULED",
             payload: { remote_jid: maskJid(remoteJid), via: "direct-call" },
             created_at: new Date().toISOString(),
@@ -1238,7 +1194,13 @@ export async function POST(req: NextRequest) {
                 [INTERNAL_SECRET_HEADER]: internalSecretValue,
                 ...(overrideAgentId ? { "x-test-agent-id": overrideAgentId } : {}),
               },
-              body: JSON.stringify({ instanceName, remoteJid, text: agentText, sessionId: session.id }),
+              body: JSON.stringify({
+                instanceName,
+                remoteJid,
+                ...(altWhatsappJid ? { alternateJid: altWhatsappJid } : {}),
+                text: agentText,
+                sessionId: session.id,
+              }),
             });
             // Invoca agent/process diretamente — serialização e buffer são gerenciados internamente
             await agentMod.POST(fakeReq as any);
@@ -1247,6 +1209,7 @@ export async function POST(req: NextRequest) {
             console.error("[Webhook] Erro ao disparar IA:", e?.message);
             await supabase.from("webhook_logs").insert({
               instance_name: instanceName,
+              client_id: clientId,
               event: "AGENT_DISPATCH_FETCH_FAIL",
               payload: { error: String(e?.message || e), stack: String(e?.stack || "").slice(0, 500), via: "direct-call" },
               created_at: new Date().toISOString(),
@@ -1256,8 +1219,9 @@ export async function POST(req: NextRequest) {
           console.log("⏸️ IA pausada para:", maskJid(remoteJid), "| status:", session.bot_status, "(mensagem foi salva, IA terá contexto ao voltar)");
           await supabase.from("webhook_logs").insert({
             instance_name: instanceName,
+            client_id: clientId,
             event: "AGENT_SKIP_PAUSED",
-            payload: { remoteJid, bot_status: session.bot_status, message_saved: true },
+            payload: { remote_jid: maskJid(remoteJid), bot_status: session.bot_status, message_saved: true },
             created_at: new Date().toISOString()
           });
         }
@@ -1315,7 +1279,8 @@ export async function POST(req: NextRequest) {
         await supabase
           .from("channel_connections")
           .update({ status: state })
-          .eq("instance_name", instanceName);
+          .eq("instance_name", instanceName)
+          .eq("client_id", clientId);
 
         if (state === "close") {
           const statusReason =
@@ -1355,25 +1320,20 @@ export async function POST(req: NextRequest) {
             if (phone) {
               const phoneInstanceName = `phone:${phone}`;
               console.log(`[CONNECTION_UPDATE] Instância "${instanceName}" ativa. Restaurando histórico do telefone ${phone}`);
-              // Busca o client_id associado à conexão
               const { data: connData } = await supabase
                 .from("channel_connections")
-                .select("client_id")
+                .select("client_id, provider_config")
                 .eq("instance_name", instanceName)
+                .eq("client_id", clientId)
                 .maybeSingle();
 
               if (connData?.client_id) {
-                // Sincroniza owner_phone no provider_config
-                const { data: cur } = await supabase
-                  .from("channel_connections")
-                  .select("provider_config")
-                  .eq("instance_name", instanceName)
-                  .maybeSingle();
-                const merged = { ...(cur?.provider_config || {}), owner_phone: phone, owner_jid: owner };
+                const merged = { ...((connData.provider_config as Record<string, unknown>) || {}), owner_phone: phone, owner_jid: owner };
                 await supabase
                   .from("channel_connections")
                   .update({ provider_config: merged })
-                  .eq("instance_name", instanceName);
+                  .eq("instance_name", instanceName)
+                  .eq("client_id", connData.client_id);
 
                 // Migra conversas, sessões e mensagens de volta
                 await Promise.all([
@@ -1415,7 +1375,7 @@ export async function POST(req: NextRequest) {
 
   } catch (err) {
     console.error(">>> WEBHOOK ERROR:", err);
-    return NextResponse.json({ success: false, error: (err as Error).message }, { status: 500 });
+    return NextResponse.json({ success: false, error: "Erro interno ao processar webhook" }, { status: 500 });
   }
 }
 

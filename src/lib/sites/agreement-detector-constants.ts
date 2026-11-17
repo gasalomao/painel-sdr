@@ -24,6 +24,16 @@ export interface AgreementEvaluationResult {
   confidence: "alta" | "baixa";
   reason: string;
   tokensUsed?: number;
+  usage?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    cachedTokens?: number;
+    costUsd?: number;
+    estimated?: boolean;
+  };
+  modelUsed?: string;
+  provider?: "gemini" | "openrouter" | "nvidia" | "gateway" | "combo";
   evaluatorMethod: "ai" | "heuristic_fallback";
 }
 

@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { renderTemplate } from "@/lib/template-vars";
 import { getEvolutionConfig } from "@/lib/evolution";
+import { checkSchedulesSync, computeNextBusinessWindowAt } from "@/lib/agent-format";
+import { isLeadOptedOut } from "@/lib/opt-out";
 
 interface ClaimedFollowUp {
   id: number;
@@ -25,14 +27,30 @@ function ownership(row: ClaimedFollowUp): Record<string, unknown> {
   return { p_id: row.id, p_client: row.client_id, p_agent: row.agent_id, p_step: row.current_step, p_claim: row.claim_id };
 }
 
-async function messageFor(row: ClaimedFollowUp): Promise<string | null> {
+async function messageFor(
+  row: ClaimedFollowUp,
+): Promise<{ text: string; outsideHours?: boolean; schedules?: unknown; is24h?: boolean } | null> {
   if (!supabaseAdmin) throw new Error("Banco de follow-up não configurado.");
-  const { data: agent, error } = await supabaseAdmin.from("agent_settings").select("options").eq("id", row.agent_id).eq("client_id", row.client_id).maybeSingle();
+  const { data: agent, error } = await supabaseAdmin.from("agent_settings").select("options, schedules, is_24h").eq("id", row.agent_id).eq("client_id", row.client_id).maybeSingle();
   if (error || !agent) throw new Error("Configuração de follow-up indisponível.");
-  const options = agent.options?.follow_up as Record<string, unknown> | undefined;
+
+  // Respeita expediente do agente (evita disparar follow-up de madrugada quando !is_24h).
+  const typedAgent = agent as { options?: Record<string, unknown>; schedules?: unknown; is_24h?: boolean };
+  if (typedAgent.is_24h === false && Array.isArray(typedAgent.schedules) && typedAgent.schedules.length > 0) {
+    if (checkSchedulesSync(typedAgent.schedules)) {
+      return {
+        text: "",
+        outsideHours: true,
+        schedules: typedAgent.schedules,
+        is24h: typedAgent.is_24h,
+      };
+    }
+  }
+
+  const options = typedAgent.options?.follow_up as Record<string, unknown> | undefined;
   const key = ["", "1h", "4h", "24h", "48h"][row.current_step];
   const template = options?.[`follow_up_${key}_template`];
-  if (options?.[`follow_up_${key}_enabled`] === false) return "";
+  if (options?.[`follow_up_${key}_enabled`] === false) return { text: "" };
   if (typeof template !== "string" || !template.trim() || template.length > 4000) throw new Error("Template de follow-up inválido.");
   let lead: Record<string, unknown> | null = null;
   if (row.lead_id) {
@@ -40,12 +58,20 @@ async function messageFor(row: ClaimedFollowUp): Promise<string | null> {
     if (result.error) throw new Error("Dados de follow-up indisponíveis.");
     lead = result.data;
     if (lead?.opt_out === true) return null;
+  } else if (await isLeadOptedOut(row.client_id, row.remote_jid).catch(() => false)) {
+    // Mesmo sem lead_id vinculado na fila, respeita opt-out por JID / variantes BR.
+    return null;
   }
-  return renderTemplate(template, {
-    remoteJid: row.remote_jid, nome_negocio: String(lead?.nome_negocio || "sua empresa"),
-    ramo_negocio: String(lead?.ramo_negocio || lead?.categoria || "seu ramo"), categoria: String(lead?.categoria || ""),
-    endereco: String(lead?.endereco || ""), telefone: String(lead?.telefone || row.remote_jid.split("@")[0]),
-  }, { spintax: true });
+  return {
+    text: renderTemplate(template, {
+      remoteJid: row.remote_jid,
+      nome_negocio: String(lead?.nome_negocio || "sua empresa"),
+      ramo_negocio: String(lead?.ramo_negocio || lead?.categoria || "seu ramo"),
+      categoria: String(lead?.categoria || ""),
+      endereco: String(lead?.endereco || ""),
+      telefone: String(lead?.telefone || row.remote_jid.split("@")[0]),
+    }, { spintax: true }),
+  };
 }
 
 function reportFollowupDeliveryFeedback(
@@ -63,11 +89,28 @@ async function processClaim(row: ClaimedFollowUp): Promise<void> {
   let hasIntent = false;
   try {
     if (!/^[1-9]\d{5,19}@s\.whatsapp\.net$/.test(row.remote_jid) || !row.instance_name) throw new Error("Destino de follow-up inválido.");
-    const message = await messageFor(row);
-    if (message === null) {
+    const rendered = await messageFor(row);
+    if (rendered === null) {
       await rpc("release_agent_followup", { ...ownership(row), p_status: "cancelled", p_error: "Lead solicitou opt-out." });
       return;
     }
+    if (rendered.outsideHours) {
+      const nextWindow = computeNextBusinessWindowAt(new Date(), rendered.schedules, rendered.is24h);
+      if (nextWindow) {
+        try {
+          await rpc("reschedule_agent_followup", {
+            ...ownership(row),
+            p_next_send_at: nextWindow.toISOString(),
+          });
+          return;
+        } catch {
+          // Retrocompatibilidade caso a migration 029 ainda não tenha sido aplicada no banco.
+        }
+      }
+      await rpc("release_agent_followup", { ...ownership(row), p_status: "pending", p_error: "Fora do horário comercial do agente." });
+      return;
+    }
+    const message = rendered.text;
     const attempt = randomUUID();
     // Após tentar persistir intenção, uma resposta perdida também é ambígua.
     hasIntent = true;

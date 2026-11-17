@@ -12,6 +12,7 @@ interface RealtimeEvent<T> {
 
 interface UseRealtimeOptions {
   channelName: string;
+  clientId?: string | null;
   onMessageEvent?: (event: RealtimeEvent<any>) => void;
   onConversationEvent?: (event: RealtimeEvent<any>) => void;
   enabled?: boolean;
@@ -19,6 +20,7 @@ interface UseRealtimeOptions {
 
 export function useRealtime({
   channelName,
+  clientId,
   onMessageEvent,
   onConversationEvent,
   enabled = true,
@@ -36,16 +38,19 @@ export function useRealtime({
   useEffect(() => {
     if (!enabled) return;
 
+    const filterClause = clientId ? { filter: `client_id=eq.${clientId}` } : {};
+
     // Escuta a tabela chats_dashboard para mensagens e sessions para conversas
     const channel = supabase
-      .channel(channelName)
+      .channel(clientId ? `${channelName}-${clientId}` : channelName)
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "chats_dashboard" },
+        { event: "*", schema: "public", table: "chats_dashboard", ...filterClause },
         (payload) => {
           // Normaliza o payload para o formato esperado pelo frontend
           const raw = payload.new as any;
           if (!raw || !raw.id) return;
+          if (clientId && raw.client_id !== clientId) return;
 
           const mappedMsg = {
             id: String(raw.id),
@@ -78,11 +83,12 @@ export function useRealtime({
       )
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "sessions" },
+        { event: "*", schema: "public", table: "sessions", ...filterClause },
         (payload) => {
           // Normaliza o payload de sessions para Conversation
           const raw = payload.new as any;
           if (!raw || !raw.id) return;
+          if (clientId && raw.client_id !== clientId) return;
 
           onConversationRef.current?.({
             eventType: payload.eventType as RealtimeEvent<any>["eventType"],
@@ -102,7 +108,7 @@ export function useRealtime({
       channelRef.current = null;
       setIsConnected(false);
     };
-  }, [channelName, enabled]);
+  }, [channelName, clientId, enabled]);
 
   return { isConnected };
 }

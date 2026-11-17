@@ -23,19 +23,18 @@ function maskToken(t?: string | null): string {
 }
 
 /**
- * Verifica ownership da instance. Retorna:
- *   - "owned": o cliente é dono
- *   - "free": a row não existe OU é legacy (sem client_id) → pode adotar
- *   - "denied": pertence a outro cliente
+ * Verifica ownership da instance:
+ *   - "owned": pertence exatamente ao clientId autenticado
+ *   - "new": não existe row ainda (permitido apenas para criação em action="save")
+ *   - "denied": pertence a outro cliente ou é registro legado sem client_id
  */
-async function checkInstanceOwnership(instanceName: string, clientId: string): Promise<"owned" | "free" | "denied"> {
+async function checkInstanceOwnership(instanceName: string, clientId: string): Promise<"owned" | "new" | "denied"> {
   const { data } = await supabase
     .from("channel_connections")
     .select("client_id")
     .eq("instance_name", instanceName)
     .maybeSingle();
-  if (!data) return "free";
-  if (!data.client_id) return "free";
+  if (!data) return "new";
   return data.client_id === clientId ? "owned" : "denied";
 }
 
@@ -49,11 +48,15 @@ export async function GET(req: NextRequest) {
   if (own === "denied") {
     return NextResponse.json({ success: false, error: "Instância não pertence a este cliente" }, { status: 403 });
   }
+  if (own === "new") {
+    return NextResponse.json({ success: false, error: "Conexão não encontrada" }, { status: 404 });
+  }
 
   const { data } = await supabase
     .from("channel_connections")
     .select("instance_name, provider, agent_id, status, provider_config")
     .eq("instance_name", instance)
+    .eq("client_id", auth.clientId)
     .maybeSingle();
 
   if (!data) return NextResponse.json({ success: false, error: "Conexão não encontrada" }, { status: 404 });
@@ -98,6 +101,9 @@ export async function POST(req: NextRequest) {
   if (own === "denied") {
     return NextResponse.json({ success: false, error: "Instância não pertence a este cliente" }, { status: 403 });
   }
+  if (action !== "save" && own !== "owned") {
+    return NextResponse.json({ success: false, error: "Conexão não encontrada" }, { status: 404 });
+  }
 
   // SAVE
   if (action === "save") {
@@ -109,11 +115,31 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Valida vínculo de agent_id dentro do próprio tenant
+    let validatedAgentId: number | undefined;
+    if (body.agent_id !== undefined && body.agent_id !== null) {
+      const candidate = Number(body.agent_id);
+      if (!Number.isInteger(candidate) || candidate <= 0) {
+        return NextResponse.json({ success: false, error: "agent_id inválido" }, { status: 400 });
+      }
+      const { data: ownedAgent } = await supabase
+        .from("agent_settings")
+        .select("id")
+        .eq("id", candidate)
+        .eq("client_id", auth.clientId)
+        .maybeSingle();
+      if (!ownedAgent) {
+        return NextResponse.json({ success: false, error: "Agente não pertence a este cliente" }, { status: 403 });
+      }
+      validatedAgentId = candidate;
+    }
+
     // Preserva access_token/app_secret se vieram mascarados (front pode reenviar formulário sem mexer)
     const { data: existing } = await supabase
       .from("channel_connections")
-      .select("provider_config")
+      .select("provider_config, agent_id")
       .eq("instance_name", instanceName)
+      .eq("client_id", auth.clientId)
       .maybeSingle();
     const prev = existing?.provider_config || {};
 
@@ -123,28 +149,37 @@ export async function POST(req: NextRequest) {
       business_account_id: cfgIn.business_account_id ? String(cfgIn.business_account_id).trim() : (prev.business_account_id || null),
       verify_token:        cfgIn.verify_token ? String(cfgIn.verify_token).trim() : (prev.verify_token || null),
       app_secret:          cfgIn.app_secret && !cfgIn.app_secret.includes("…") ? String(cfgIn.app_secret).trim() : prev.app_secret,
-      graph_version:       cfgIn.graph_version ? String(cfgIn.graph_version).trim() : (prev.graph_version || "v21.0"),
+      graph_version:       /^v\d+\.\d+$/.test(String(cfgIn.graph_version || "")) ? String(cfgIn.graph_version).trim() : (prev.graph_version || "v21.0"),
     };
 
-    const upsertPayload: any = {
+    const upsertPayload: Record<string, unknown> = {
       instance_name: instanceName,
       provider: "whatsapp_cloud",
       provider_config,
       status: "open",
       client_id: auth.clientId,
     };
-    if (typeof body.agent_id === "number") upsertPayload.agent_id = body.agent_id;
-    else if (existing) {
-      // mantém agent_id existente
-    } else {
-      upsertPayload.agent_id = 1;
+    if (validatedAgentId !== undefined) {
+      upsertPayload.agent_id = validatedAgentId;
+    } else if (!existing) {
+      const { data: firstAgent } = await supabase
+        .from("agent_settings")
+        .select("id")
+        .eq("client_id", auth.clientId)
+        .order("id", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      upsertPayload.agent_id = firstAgent?.id ?? null;
     }
 
     const { error } = await supabase
       .from("channel_connections")
       .upsert(upsertPayload, { onConflict: "instance_name" });
 
-    if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    if (error) {
+      console.error("[WhatsApp Cloud/SAVE] Erro:", error.message);
+      return NextResponse.json({ success: false, error: "Falha ao salvar configuração" }, { status: 500 });
+    }
 
     invalidateChannelCache(instanceName);
     return NextResponse.json({ success: true });
@@ -178,8 +213,15 @@ export async function POST(req: NextRequest) {
 
   // DELETE
   if (action === "delete") {
-    const { error } = await supabase.from("channel_connections").delete().eq("instance_name", instanceName);
-    if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    const { error } = await supabase
+      .from("channel_connections")
+      .delete()
+      .eq("instance_name", instanceName)
+      .eq("client_id", auth.clientId);
+    if (error) {
+      console.error("[WhatsApp Cloud/DELETE] Erro:", error.message);
+      return NextResponse.json({ success: false, error: "Falha ao remover conexão" }, { status: 500 });
+    }
     invalidateChannelCache(instanceName);
     return NextResponse.json({ success: true });
   }

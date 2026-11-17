@@ -8,6 +8,7 @@ import { NumberInput } from "@/components/ui/number-input";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { supabase } from "@/lib/supabase";
+import { useClientSession } from "@/lib/use-session";
 import { cn } from "@/lib/utils";
 import { parseMinReviews } from "@/lib/scraper-review-count";
 import {
@@ -128,6 +129,7 @@ const FORM_STEPS = [
 ];
 
 export default function AutomacaoPage() {
+  const { clientId } = useClientSession();
   const [automations, setAutomations] = useState<Automation[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [instances, setInstances] = useState<Instance[]>([]);
@@ -234,23 +236,17 @@ export default function AutomacaoPage() {
       setIsAdmin(!!session?.isAdmin && !session?.impersonating);
       setDefaultAiModel(session?.defaultAiModel || null);
 
-      let agQuery = supabase.from("agent_settings").select("id, name").order("id");
-      let chQuery = supabase.from("channel_connections").select("instance_name").order("instance_name");
-
-      if (session.clientId) {
-        agQuery = agQuery.eq("client_id", session.clientId);
-        chQuery = chQuery.eq("client_id", session.clientId);
-      }
-
-      const [autoRes, agRes, chRes, evoRes] = await Promise.all([
+      const [autoRes, agRes, instRes, evoRes] = await Promise.all([
         safeJson("/api/automations"),
-        agQuery,
-        chQuery,
+        safeJson("/api/agent/settings"),
+        safeJson("/api/instances?scope=tenant"),
         safeJson("/api/whatsapp?instances=true"),
       ]);
       if (autoRes.success) setAutomations(autoRes.automations || []);
-      if (agRes.data) setAgents(agRes.data as Agent[]);
-      const fromDb = ((chRes.data || []) as any[]).map(c => ({ instanceName: c.instance_name }));
+      if (Array.isArray(agRes.agents)) setAgents(agRes.agents as Agent[]);
+      const fromDb = ((instRes?.instances || []) as Array<{ instance_name?: string; instanceName?: string }>)
+        .map((c) => ({ instanceName: c.instance_name || c.instanceName || "" }))
+        .filter((x) => Boolean(x.instanceName));
       
       const myInstances = new Set(fromDb.map((i: any) => i.instanceName));
       const fromEvo = (evoRes.instances || []).filter((i: any) => myInstances.has(i.instanceName)).map((i: any) => ({ instanceName: i.instanceName }));
@@ -319,15 +315,29 @@ export default function AutomacaoPage() {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => loadAll(false), 300);
     };
-    const ch = supabase
-      .channel("automations-live")
-      .on("postgres_changes", { event: "*", schema: "public", table: "automations" }, debouncedLoad)
-      .subscribe();
+    const ch = clientId && typeof supabase?.channel === "function"
+      ? supabase
+          .channel(`automations-live-${clientId}`)
+          .on(
+            "postgres_changes",
+            { event: "*", schema: "public", table: "automations", filter: `client_id=eq.${clientId}` },
+            (payload: any) => {
+              if (payload?.new?.client_id && payload.new.client_id !== clientId) return;
+              debouncedLoad();
+            }
+          )
+          .subscribe()
+      : null;
+    // Fallback de polling suave caso o canal Realtime seja bloqueado por RLS/rede
+    const pollId = setInterval(() => {
+      if (!document.hidden) loadAll(false);
+    }, 15_000);
     return () => {
       if (timer) clearTimeout(timer);
-      supabase.removeChannel(ch);
+      clearInterval(pollId);
+      if (ch) supabase.removeChannel(ch);
     };
-  }, [loadAll]);
+  }, [loadAll, clientId]);
 
   function openCreateForm() {
     setEditingId(null);
@@ -1596,13 +1606,19 @@ function AutomationLeadIntelBatch({ automationId, startedAt, scrapedCount }: { a
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!startedAt) { setLeadIds([]); return; }
     let alive = true;
-    supabase
-      .from("leads_extraidos")
-      .select("id")
-      .gte("created_at", startedAt)
-      .not("remoteJid", "is", null)
-      .limit(scrapedCount + 50)
-      .then(({ data }) => { if (alive) setLeadIds((data || []).map((r: any) => r.id)); });
+    const qs = new URLSearchParams({
+      scrape_count: "1",
+      started_at: startedAt,
+      limit: String(scrapedCount + 50),
+    });
+    fetch(`/api/automations/${encodeURIComponent(automationId)}/logs?${qs.toString()}`, { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => {
+        if (alive && d?.ok && Array.isArray(d.leadIds)) {
+          setLeadIds(d.leadIds);
+        }
+      })
+      .catch(() => {});
     return () => { alive = false; };
   }, [automationId, startedAt, scrapedCount]);
 

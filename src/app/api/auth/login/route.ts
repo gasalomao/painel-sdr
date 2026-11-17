@@ -46,10 +46,13 @@ export async function POST(req: NextRequest) {
     if (entry && entry.blockedUntil > now) {
       return NextResponse.json({ ok: false, error: "Muitas tentativas. Tente novamente em alguns minutos." }, { status: 429 });
     }
-    const attempts = entry && now - entry.windowStart < LOGIN_WINDOW_MS ? entry.count : 0;
-    LOGIN_ATTEMPTS.set(rlKey, { count: attempts + 1, windowStart: entry?.windowStart || now, blockedUntil: entry?.blockedUntil || 0 });
+    const windowActive = Boolean(entry && now - entry.windowStart < LOGIN_WINDOW_MS);
+    const attempts = windowActive ? entry!.count : 0;
+    const windowStart = windowActive ? entry!.windowStart : now;
+    const blockedUntil = windowActive ? (entry?.blockedUntil || 0) : 0;
+    LOGIN_ATTEMPTS.set(rlKey, { count: attempts + 1, windowStart, blockedUntil });
     if (attempts + 1 >= LOGIN_MAX_ATTEMPTS) {
-      LOGIN_ATTEMPTS.set(rlKey, { count: attempts + 1, windowStart: entry?.windowStart || now, blockedUntil: now + LOGIN_WINDOW_MS });
+      LOGIN_ATTEMPTS.set(rlKey, { count: attempts + 1, windowStart, blockedUntil: now + LOGIN_WINDOW_MS });
       return NextResponse.json({ ok: false, error: "Muitas tentativas. Tente novamente em alguns minutos." }, { status: 429 });
     }
 

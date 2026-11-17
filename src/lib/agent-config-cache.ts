@@ -107,7 +107,10 @@ export async function getCachedAgentStaticBundle(opts: {
     hasCatalogOrPhotoKb,
   };
 
-  if (cacheEnabled && bundle.agentConfig) {
+  const ownerMatchesTenant =
+    !bundle.agentConfig?.client_id || bundle.agentConfig.client_id === clientId;
+
+  if (cacheEnabled && bundle.agentConfig && ownerMatchesTenant) {
     bundleCache.set(key, {
       value: bundle,
       expiresAt: Date.now() + AGENT_CONFIG_CACHE_TTL_MS,

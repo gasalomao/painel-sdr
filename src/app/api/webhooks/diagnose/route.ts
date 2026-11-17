@@ -59,6 +59,7 @@ export async function GET(req: NextRequest) {
   try {
     const r = await fetch(`${EVO_URL.replace(/\/$/, "")}/webhook/find/${instance}`, {
       headers: { apikey: EVO_KEY },
+      signal: AbortSignal.timeout(15_000),
     });
     const text = await r.text();
     // Detecta HTML (Evolution offline)

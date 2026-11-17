@@ -3,6 +3,7 @@ import { google } from 'googleapis';
 import { supabaseAdmin as supabase } from '@/lib/supabase_admin';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { resolveGoogleCredentials } from '@/lib/google-calendar';
+import { invalidateAgentConfigCache } from '@/lib/agent-config-cache';
 
 export const dynamic = "force-dynamic";
 
@@ -128,6 +129,8 @@ export async function GET(req: NextRequest) {
       console.error("Token save error:", errorUpd);
       return resultPage(false, "Quase lá...", "Conectamos no Google mas falhou ao salvar o acesso. Tente novamente.");
     }
+
+    invalidateAgentConfigCache(Number(agentId));
 
     return resultPage(
       true,

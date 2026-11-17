@@ -47,15 +47,17 @@ CREATE TABLE IF NOT EXISTS backup_history (
 );
 
 -- Índices
-CREATE INDEX idx_backup_config_client_id ON backup_config(client_id);
-CREATE INDEX idx_backup_history_client_id ON backup_history(client_id);
-CREATE INDEX idx_backup_history_created_at ON backup_history(created_at);
+CREATE INDEX IF NOT EXISTS idx_backup_config_client_id ON backup_config(client_id);
+CREATE INDEX IF NOT EXISTS idx_backup_history_client_id ON backup_history(client_id);
+CREATE INDEX IF NOT EXISTS idx_backup_history_created_at ON backup_history(created_at);
 
 -- RLS
 ALTER TABLE backup_config ENABLE ROW LEVEL SECURITY;
 ALTER TABLE backup_history ENABLE ROW LEVEL SECURITY;
 
 -- Tokens OAuth somente no servidor. Instalações anteriores precisam da migration 020.
+DROP POLICY IF EXISTS backup_config_all ON backup_config;
+DROP POLICY IF EXISTS backup_history_all ON backup_history;
 CREATE POLICY backup_config_all ON backup_config FOR ALL TO service_role USING (true) WITH CHECK (true);
 CREATE POLICY backup_history_all ON backup_history FOR ALL TO service_role USING (true) WITH CHECK (true);
 REVOKE ALL ON backup_config, backup_history FROM anon, authenticated;

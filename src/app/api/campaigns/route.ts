@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 import { requireClientId } from "@/lib/tenant";
-import { validateCampaignInstanceAccess } from "@/lib/campaign-instance-access";
+import { validateCampaignInstanceAccess, validateClientAgentAccess } from "@/lib/campaign-instance-access";
 
 export const dynamic = "force-dynamic";
 
@@ -21,7 +21,8 @@ export async function GET(req: NextRequest) {
     .order("created_at", { ascending: false });
     
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    console.error("[campaigns/GET] Erro:", error.message);
+    return NextResponse.json({ success: false, error: "Falha ao listar campanhas" }, { status: 500 });
   }
   return NextResponse.json({ success: true, campaigns: data });
 }
@@ -75,6 +76,10 @@ export async function POST(req: NextRequest) {
     if (!access.ok) {
       return NextResponse.json({ success: false, error: access.error }, { status: access.status });
     }
+    const agentAccess = await validateClientAgentAccess(session.clientId, agent_id);
+    if (!agentAccess.ok) {
+      return NextResponse.json({ success: false, error: agentAccess.error }, { status: agentAccess.status });
+    }
 
     const requestedLeadIds = Array.isArray(lead_ids) ? [...new Set(lead_ids.map(Number).filter(Number.isInteger))] : [];
     let selectedLeads: Array<{ id: number; remoteJid: string; nome_negocio: string | null; ramo_negocio: string | null }> = [];
@@ -96,7 +101,7 @@ export async function POST(req: NextRequest) {
     // Cria campanha
     const insertPayload: Record<string, any> = {
       client_id: session.clientId,
-      name, instance_name, message_template, agent_id: agent_id || null,
+      name, instance_name, message_template, agent_id: agentAccess.agentId,
       min_interval_seconds, max_interval_seconds, allowed_start_hour, allowed_end_hour,
       personalize_with_ai, use_web_search, humanize_messages,
       ai_prompt: ai_prompt || null,
@@ -117,7 +122,10 @@ export async function POST(req: NextRequest) {
       camp = retry.data as any; cErr = retry.error as any;
       console.warn("[campaigns] coluna ai_model não existe. Rode criar_campaign_logs.sql pra habilitar escolha de modelo por campanha.");
     }
-    if (cErr || !camp) return NextResponse.json({ success: false, error: cErr?.message || "Falha ao criar" }, { status: 500 });
+    if (cErr || !camp) {
+      console.error("[campaigns/POST] Erro ao criar:", cErr?.message);
+      return NextResponse.json({ success: false, error: "Falha ao criar campanha" }, { status: 500 });
+    }
 
     try {
       await supabase
@@ -152,14 +160,16 @@ export async function POST(req: NextRequest) {
       // upsert pra não falhar se houver duplicado
       const { error: tErr } = await supabase.from("campaign_targets").upsert(targetsRows, { onConflict: "campaign_id,remote_jid", ignoreDuplicates: true });
       if (tErr) {
+        console.error("[campaigns/POST] Erro targets:", tErr.message);
         await supabase.from("campaigns").delete().eq("id", camp.id).eq("client_id", session.clientId);
-        return NextResponse.json({ success: false, error: tErr.message }, { status: 500 });
+        return NextResponse.json({ success: false, error: "Falha ao registrar destinatários da campanha" }, { status: 500 });
       }
       await supabase.from("campaigns").update({ total_targets: targetsRows.length }).eq("id", camp.id).eq("client_id", session.clientId);
     }
 
     return NextResponse.json({ success: true, campaign: { ...camp, total_targets: targetsRows.length } });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    console.error("[campaigns/POST] Erro inesperado:", err instanceof Error ? err.message : err);
+    return NextResponse.json({ success: false, error: "Erro interno ao criar campanha" }, { status: 500 });
   }
 }

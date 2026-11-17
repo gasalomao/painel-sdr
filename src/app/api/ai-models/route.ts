@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { supabase, supabaseAdmin } from "@/lib/supabase";
+import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
 import { listAvailableOpenRouterModels } from "@/lib/openrouter-model-discovery";
 import { listAvailableGatewayModels } from "@/lib/gateway-model-discovery";
@@ -7,7 +7,7 @@ import { listAvailableNvidiaModels } from "@/lib/nvidia-model-discovery";
 import { formatModelRef } from "@/lib/ai-provider";
 
 // Lê com service role pra contornar RLS (mesmo motivo que ai-organize).
-const adminClient = supabaseAdmin || supabase;
+const adminClient = supabaseAdmin;
 
 /**
  * Modelo unificado exibido nos seletores. `id` é o valor STORABLE (com prefixo
@@ -61,6 +61,9 @@ export async function GET(req: NextRequest) {
     // Lê em 3 camadas pra retrocompat: (1) com gateway_endpoints e nvidia_api_key; se a coluna não
     // existir, (2) com a coluna single legada; se nem essa, (3) só o básico.
     let cfg: Record<string, any> | null = null;
+    if (!adminClient) {
+      return NextResponse.json({ success: false, error: "DB indisponível", models: [] }, { status: 500 });
+    }
     const full = await adminClient
       .from("ai_organizer_config")
       .select("api_key, openrouter_api_key, gateway_base_url, gateway_api_key, gateway_endpoints, ai_combos, nvidia_api_key")

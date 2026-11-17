@@ -9,12 +9,14 @@
  * Solução: quando o painel envia, registra o msgId aqui por 2 min.
  * O webhook consulta — se bate, rotula como 'human' em vez de 'ai'.
  */
+import { getBrazilPhoneVariants } from "@/lib/jid-utils";
+
 declare global {
    
   var __manualSendRegistry: Map<string, number> | undefined;
 }
 
-const TTL_MS = 2 * 60 * 1000; // 2 min
+const TTL_MS = 5 * 60 * 1000; // 5 min — cobre delays de digitação (até 120s) + múltiplos balões/fotos
 
 function getStore(): Map<string, number> {
   if (!globalThis.__manualSendRegistry) {
@@ -103,28 +105,83 @@ function getNormText(t: string): string {
   return (t || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase().slice(0, 30);
 }
 
+function jidVariantsForPending(remoteJid: string): string[] {
+  const clean = remoteJid.replace("@s.whatsapp.net", "");
+  if (remoteJid.includes("@lid") || remoteJid.includes("@g.us")) {
+    return [clean];
+  }
+  const set = new Set<string>([clean]);
+  for (const digits of getBrazilPhoneVariants(remoteJid)) {
+    if (digits) set.add(digits);
+  }
+  return Array.from(set);
+}
+
 export function registerPendingAutomatedSend(instanceName: string, remoteJid: string, text: string) {
   if (!instanceName || !remoteJid || !text) return;
   const store = getPendingAutomatedStore();
   prune(store);
-  const cleanJid = remoteJid.replace("@s.whatsapp.net", "");
   const norm = getNormText(text);
-  const key = `${instanceName}:${cleanJid}:${norm}`;
-  store.set(key, Date.now() + TTL_MS);
+  const expiresAt = Date.now() + TTL_MS;
+  for (const jidKey of jidVariantsForPending(remoteJid)) {
+    store.set(`${instanceName}:${jidKey}:${norm}`, expiresAt);
+  }
 }
 
 export function isPendingAutomatedSend(instanceName: string, remoteJid: string, text: string): boolean {
   if (!instanceName || !remoteJid || !text) return false;
   const store = getPendingAutomatedStore();
   prune(store);
-  const cleanJid = remoteJid.replace("@s.whatsapp.net", "");
   const norm = getNormText(text);
-  const key = `${instanceName}:${cleanJid}:${norm}`;
-  if (store.has(key)) {
-    store.delete(key);
-    return true;
+  const variants = jidVariantsForPending(remoteJid);
+  let matched = false;
+  for (const jidKey of variants) {
+    const key = `${instanceName}:${jidKey}:${norm}`;
+    if (store.has(key)) {
+      store.delete(key);
+      matched = true;
+    }
   }
-  return false;
+  return matched;
+}
+
+/* ============================================================
+   REGISTRO DE MÍDIAS AUTOMÁTICAS PENDENTES (fotos de produto/catálogo)
+   ============================================================ */
+declare global {
+  var __pendingAutomatedMedia: Map<string, number> | undefined;
+}
+
+function getPendingMediaStore(): Map<string, number> {
+  if (!globalThis.__pendingAutomatedMedia) {
+    globalThis.__pendingAutomatedMedia = new Map();
+  }
+  return globalThis.__pendingAutomatedMedia;
+}
+
+export function registerPendingAutomatedMedia(instanceName: string, remoteJid: string): void {
+  if (!instanceName || !remoteJid) return;
+  const store = getPendingMediaStore();
+  prune(store);
+  const expiresAt = Date.now() + TTL_MS;
+  for (const jidKey of jidVariantsForPending(remoteJid)) {
+    store.set(`${instanceName}:${jidKey}`, expiresAt);
+  }
+}
+
+export function isPendingAutomatedMedia(instanceName: string, remoteJid: string): boolean {
+  if (!instanceName || !remoteJid) return false;
+  const store = getPendingMediaStore();
+  prune(store);
+  let matched = false;
+  for (const jidKey of jidVariantsForPending(remoteJid)) {
+    const key = `${instanceName}:${jidKey}`;
+    if (store.has(key)) {
+      store.delete(key);
+      matched = true;
+    }
+  }
+  return matched;
 }
 
 /* ============================================================

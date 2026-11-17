@@ -11,7 +11,7 @@
  * Node, exatamente como antes.
  */
 
-import { supabase, supabaseAdmin } from "@/lib/supabase";
+import { supabaseAdmin } from "@/lib/supabase_admin";
 import { readCaptureIds, readRejectedCaptureIds, updateAutomationCapture, type AutomationCaptureRow } from "@/lib/automation-capture";
 import { getEvolutionConfig } from "@/lib/evolution";
 import { summarizeReviewsForLead } from "@/lib/reviews-ai";
@@ -234,7 +234,7 @@ function broadcastToClient(clientId: string, data: Record<string, unknown>): voi
 async function logToAutomation(clientId: string, automationId: string | null, message: string, level: "info" | "success" | "warning" | "error" = "info", kind: "scrape" | "state" | "error" = "scrape") {
   if (!automationId) return;
   try {
-    const client = supabaseAdmin || supabase;
+    const client = supabaseAdmin;
     if (!client) return;
     // .insert() do Supabase NÃO lança em erro de banco — devolve { error }.
     // Sem checar isso, uma falha de gravação (RLS, constraint) ficava
@@ -432,7 +432,7 @@ export async function checkCrmDuplicate(
 ): Promise<string | null> {
   const normalizedClientId = normalizeClientId(clientId);
   if (!normalizedClientId) throw new Error("client_id obrigatório para consultar duplicatas do CRM");
-  const client = supabaseAdmin || supabase;
+  const client = supabaseAdmin;
   if (!client) throw new Error("Supabase client não inicializado");
   const digits = formatJid(identity?.phones || remoteJid.split("@")[0]).split("@")[0];
   const queries: { table: string; column: string; value: string; pattern?: boolean; maps?: boolean }[] = [];
@@ -531,7 +531,7 @@ async function saveLeadAndSync(lead: Lead, settings: ScraperSettings, run: RunCo
   const hasWhatsApp = !!lead.remoteJid;
 
   try {
-    const client = supabaseAdmin || supabase;
+    const client = supabaseAdmin;
     if (!client) throw new Error("Supabase client não inicializado");
 
     if (!await checkpointCapture(run)) return null;

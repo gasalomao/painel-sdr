@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Header } from "@/components/layout/header";
+import { SystemHealthPanel } from "@/components/system-health-panel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -1709,6 +1710,7 @@ export default function ConfiguracoesPage() {
             {/* TAB: Chaves API & Banco */}
             {activeTab === "ai_keys" && (
               <div className="space-y-4 sm:space-y-6 animate-in fade-in duration-200">
+                <SystemHealthPanel />
                 {/* Google Gemini Card */}
                 <Card className="border-white/10 bg-white/[0.02] overflow-hidden transition-all duration-300 shadow-md">
                   <button type="button" data-slot="card-header" aria-expanded={openGemini} aria-controls={openGemini ? "settings-gemini" : undefined}

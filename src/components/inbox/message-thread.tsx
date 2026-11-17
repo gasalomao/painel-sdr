@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { supabase } from "@/lib/supabase";
 import type { Conversation, Contact, Message, ConversationStatus } from "@/types";
 import { getPossibleJids } from "@/lib/inbox/conversations";
 import { cn } from "@/lib/utils";
@@ -52,6 +51,7 @@ interface MessageThreadProps {
   onBack?: () => void;
   resyncToken?: number;
   clientId: string | null;
+  realtimeConnected?: boolean;
   activeInstance?: string;
   contactPanelOpen?: boolean;
   onToggleContactPanel?: () => void;
@@ -141,6 +141,7 @@ export function MessageThread({
   onBack,
   resyncToken = 0,
   clientId,
+  realtimeConnected = false,
   activeInstance = "__all__",
   contactPanelOpen = true,
   onToggleContactPanel,
@@ -188,56 +189,35 @@ export function MessageThread({
 
     (async () => {
       setLoading(true);
-      const posiblesJids = getAllConversationJids(conversation, contact);
-      const { data: initialData, error } = await supabase
-        .from("chats_dashboard")
-        .select("*")
-        .eq("client_id", clientId)
-        .in("remote_jid", posiblesJids)
-        .order("created_at", { ascending: false })
-        .limit(100);
+      try {
+        const posiblesJids = getAllConversationJids(conversation, contact);
+        const params = new URLSearchParams({
+          jids: posiblesJids.join(","),
+          conversation_id: conversationId,
+          limit: "100",
+        });
+        if (conversation?.session_id) params.set("session_id", conversation.session_id);
+        const res = await fetch(`/api/inbox/messages?${params.toString()}`, { cache: "no-store" });
+        const payload = await res.json().catch(() => null);
 
-      let data = initialData;
+        if (cancelled) return;
 
-      // Fallback para a tabela messages (V2) caso chats_dashboard esteja vazio
-      if ((!data || data.length === 0) && conversation?.session_id) {
-        const { data: v2Msgs } = await supabase
-          .from("messages")
-          .select("*")
-          .eq("client_id", clientId)
-          .eq("session_id", conversation.session_id)
-          .order("created_at", { ascending: false })
-          .limit(100);
+        if (!res.ok || !payload?.ok) {
+          console.error("Erro ao carregar mensagens do chat:", payload?.error || `HTTP ${res.status}`);
+          setLoading(false);
+          return;
+        }
 
-        if (v2Msgs && v2Msgs.length > 0) {
-          data = v2Msgs.map((raw: any) => ({
-            id: raw.id,
-            remote_jid: conversationId,
-            sender_type: raw.sender === "customer" ? "customer" : raw.sender === "ai" ? "ai" : "human",
-            content: raw.content || raw.text || "",
-            media_type: raw.media_category || raw.media_type,
-            media_url: raw.media_url,
-            mimetype: raw.mimetype,
-            file_name: raw.file_name,
-            message_id: raw.message_id,
-            status_envio: raw.delivery_status || "sent",
-            created_at: raw.created_at,
-            is_from_me: raw.sender !== "customer",
-          }));
+        const data = Array.isArray(payload.rows) ? payload.rows : [];
+        const normalized = [...data].reverse().map(normalizeDbMessage);
+        onMessagesLoadedRef.current(normalized);
+        setLoading(false);
+      } catch (err) {
+        if (!cancelled) {
+          console.error("Erro ao carregar mensagens do chat:", err);
+          setLoading(false);
         }
       }
-
-      if (cancelled) return;
-
-      if (error) {
-        console.error("Erro ao carregar mensagens do chat:", error);
-        setLoading(false);
-        return;
-      }
-
-      const normalized = (data ?? []).reverse().map(normalizeDbMessage);
-      onMessagesLoadedRef.current(normalized);
-      setLoading(false);
     })();
 
     return () => {
@@ -255,17 +235,21 @@ export function MessageThread({
     // conversa antiga na nova thread.
     const myConversationId = conversationId;
 
+    // Fallback de polling: 2.5s quando WebSocket Realtime está desconectado,
+    // 12s quando já conectado (reduz tráfego preservando consistência).
+    const pollIntervalMs = realtimeConnected ? 12_000 : 2_500;
     const interval = setInterval(async () => {
       if (document.hidden) return;
 
       const posiblesJids = getAllConversationJids(convRef.current, contactRef.current);
-      const { data } = await supabase
-        .from("chats_dashboard")
-        .select("*")
-        .eq("client_id", clientId)
-        .in("remote_jid", posiblesJids)
-        .order("created_at", { ascending: false })
-        .limit(20);
+      const params = new URLSearchParams({
+        jids: posiblesJids.join(","),
+        limit: "20",
+        poll: "1",
+      });
+      const res = await fetch(`/api/inbox/messages?${params.toString()}`, { cache: "no-store" }).catch(() => null);
+      const payload = res ? await res.json().catch(() => null) : null;
+      const data = res?.ok && payload?.ok && Array.isArray(payload.rows) ? payload.rows : null;
 
       if (!data || data.length === 0) return;
       if (myConversationId !== conversationIdRef.current) return; // trocou de conversa no meio
@@ -294,10 +278,10 @@ export function MessageThread({
         (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
       );
       onMessagesLoadedRef.current(sorted);
-    }, 2500);
+    }, pollIntervalMs);
 
     return () => clearInterval(interval);
-  }, [conversationId, clientId]);
+  }, [conversationId, clientId, realtimeConnected]);
 
 
   // Marca como lido no banco ao abrir a conversa.
@@ -308,11 +292,11 @@ export function MessageThread({
     if (!clientId || !contactId || !hasUnread) return;
 
     (async () => {
-      await supabase
-        .from("sessions")
-        .update({ unread_count: 0 })
-        .eq("client_id", clientId)
-        .eq("contact_id", contactId);
+      await fetch("/api/inbox/sessions", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contactId, unread_count: 0 }),
+      }).catch(() => {});
     })();
   }, [clientId, contactId, hasUnread]);
 
@@ -415,8 +399,10 @@ export function MessageThread({
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
           toast.error(data.error || "Falha ao enviar mensagem via WhatsApp.");
-          // Propaga pro composer: rascunho NÃO é limpo em falha.
-          throw new Error(data.error || "send_failed");
+          // Propaga pro composer preservar o rascunho sem duplicar toast no catch abaixo.
+          const sendErr = new Error(data.error || "send_failed") as Error & { handled?: boolean };
+          sendErr.handled = true;
+          throw sendErr;
         }
 
         const now = new Date().toISOString();
@@ -435,20 +421,12 @@ export function MessageThread({
         setReplyTo(null);
         // Scroll suave pro fim pra ver a mensagem que acabou de ser enviada.
         scrollToBottom("smooth");
-
-        // Ao responder manualmente, silencia o robô por 60 min para atendimento humano
-        void fetch("/api/agent/control", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action: "snooze",
-            durationMinutes: 60,
-            remoteJid: conversationId,
-            instanceName: instName,
-          }),
-        }).catch(() => {});
-      } catch (err: any) {
-        toast.error("Erro de conexão ao enviar mensagem: " + err.message);
+      } catch (err: unknown) {
+        const handled = typeof err === "object" && err !== null && (err as { handled?: boolean }).handled;
+        if (!handled) {
+          const msg = err instanceof Error ? err.message : "erro desconhecido";
+          toast.error("Erro de conexão ao enviar mensagem: " + msg);
+        }
         throw err; // composer preserva o rascunho
       } finally {
         setSending(false);
@@ -514,18 +492,6 @@ export function MessageThread({
         onNewMessage(optimisticMsg);
         toast.success(isAudio ? "Áudio enviado como mensagem de voz gravada!" : "Arquivo enviado!");
         scrollToBottom("smooth");
-
-        // Ao enviar mídia manualmente (áudio, foto, etc.), silencia o robô por 60 min para atendimento humano
-        void fetch("/api/agent/control", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action: "snooze",
-            durationMinutes: 60,
-            remoteJid: conversationId,
-            instanceName: instName,
-          }),
-        }).catch(() => {});
       } catch (err: any) {
         toast.error("Erro ao processar mídia: " + err.message);
       } finally {
@@ -545,13 +511,15 @@ export function MessageThread({
         // closed -> closed
         const botStatus = newStatus === "open" ? "bot_paused" : (newStatus === "pending" ? "bot_active" : "closed");
 
-        const { error } = await supabase
-          .from("sessions")
-          .update({ bot_status: botStatus })
-          .eq("client_id", clientId)
-          .eq("contact_id", conversation.contact_id);
-
-        if (error) throw error;
+        const sessionRes = await fetch("/api/inbox/sessions", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contactId: conversation.contact_id, bot_status: botStatus }),
+        });
+        const sessionJson = await sessionRes.json().catch(() => null);
+        if (!sessionRes.ok || !sessionJson?.ok) {
+          throw new Error(sessionJson?.error || "Falha ao atualizar status da conversa");
+        }
 
         onStatusChange(conversation.id, newStatus);
         toast.success(`Status da conversa alterado para: ${newStatus === "open" ? "Humano (Aberto)" : (newStatus === "pending" ? "Robô (Aguardando)" : "Fechado")}`);

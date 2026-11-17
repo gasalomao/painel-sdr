@@ -144,7 +144,11 @@ function Editor({ projectId, clientId, draftScope }: { projectId: string; client
       if (!response.ok) throw new ApiError("Não foi possível carregar o rascunho confirmado.", response.status);
       const { checkpoint } = await response.json() as { checkpoint: { version: string; run_id: string; base_revision_id: string | null; files: WebsiteFiles } | null };
       if (stale() || getSiteDraft(draftScope, "files") || getSiteDraft(draftScope, "project")) return;
-      if (checkpoint && (checkpoint.run_id !== candidate.id || checkpoint.base_revision_id !== snapshotRevision.current)) return;
+      if (checkpoint && (checkpoint.run_id !== candidate.id || checkpoint.base_revision_id !== snapshotRevision.current)) {
+        checkpointEtag.current = null;
+        setCheckpointPreview(null);
+        return;
+      }
       checkpointEtag.current = { runId: candidate.id, value: response.headers.get("ETag") ?? "" };
       setCheckpointPreview(checkpoint);
     } finally {
@@ -197,41 +201,49 @@ function Editor({ projectId, clientId, draftScope }: { projectId: string; client
   }, [loadDeployments, working, refresh]);
 
   const activeRun = runs.find((run) => isActiveRun(run.status)) ?? null;
+  const activeRunId = activeRun?.id ?? null;
   const hasActive = Boolean(activeRun);
 
-  // ✅ NOVO: SSE listener para eventos de arquivo em tempo real
   useEffect(() => {
-    if (!activeRun || working) return;
-
-    const eventSource = new EventSource(`${base}/runs/${activeRun.id}/activities?stream=true`);
+    if (!activeRunId || working) return;
+    const controller = new AbortController();
+    let sseSequence = 0;
+    const eventSource = new EventSource(`${base}/runs/${encodeURIComponent(activeRunId)}/activities?stream=true`);
 
     eventSource.onmessage = (event) => {
       try {
-        const data = JSON.parse(event.data);
-
-        // Detectar mudança de arquivo
+        const data = JSON.parse(event.data) as { type?: string; status?: string; details?: { path?: string } };
         if (
           data.type?.startsWith("file_") &&
           data.status === "completed" &&
           data.details?.path
         ) {
-          console.log(`[SSE] File ${data.type} detected:`, data.details.path);
-
-          // Buscar checkpoint atualizado
+          if (controller.signal.aborted || getSiteDraft(draftScope, "files") || getSiteDraft(draftScope, "project")) return;
+          const sequence = ++sseSequence;
           void (async () => {
             try {
-              const response = await fetch(`${base}/files?run_id=${encodeURIComponent(activeRun.id)}`, { cache: "no-store" });
+              const known = checkpointEtag.current?.runId === activeRunId ? checkpointEtag.current.value : undefined;
+              const response = await fetch(`${base}/files?run_id=${encodeURIComponent(activeRunId)}`, {
+                signal: controller.signal,
+                cache: "no-store",
+                ...(known ? { headers: { "If-None-Match": known } } : {}),
+              });
+              if (controller.signal.aborted || sequence !== sseSequence || response.status === 304) return;
               if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-              const responseData = await response.json() as { checkpoint: { version: string; run_id: string; base_revision_id: string | null; files: WebsiteFiles } | null };
-
-              if (responseData.checkpoint) {
-                console.log(`[Checkpoint] Updated with ${Object.keys(responseData.checkpoint.files).length} files`);
-                checkpointEtag.current = { runId: activeRun.id, value: response.headers.get("ETag") ?? "" };
-                setCheckpointPreview(responseData.checkpoint);
+              const { checkpoint } = await response.json() as { checkpoint: { version: string; run_id: string; base_revision_id: string | null; files: WebsiteFiles } | null };
+              if (controller.signal.aborted || sequence !== sseSequence || getSiteDraft(draftScope, "files") || getSiteDraft(draftScope, "project")) return;
+              if (checkpoint && (checkpoint.run_id !== activeRunId || checkpoint.base_revision_id !== snapshotRevision.current)) {
+                checkpointEtag.current = null;
+                setCheckpointPreview(null);
+                return;
+              }
+              if (checkpoint) {
+                checkpointEtag.current = { runId: activeRunId, value: response.headers.get("ETag") ?? "" };
+                setCheckpointPreview(checkpoint);
               }
             } catch (err) {
-              console.error("[Checkpoint] Fetch error:", err);
+              if (!controller.signal.aborted) console.error("[Checkpoint] Fetch error:", err);
             }
           })();
         }
@@ -241,15 +253,14 @@ function Editor({ projectId, clientId, draftScope }: { projectId: string; client
     };
 
     eventSource.onerror = () => {
-      console.warn("[SSE] Connection lost, will retry...");
       eventSource.close();
     };
 
     return () => {
-      console.log("[SSE] Cleaning up connection");
+      controller.abort();
       eventSource.close();
     };
-  }, [activeRun, working, base]);
+  }, [activeRunId, working, base, draftScope]);
 
   useEffect(() => {
     if (!hasActive || working) return;
@@ -269,6 +280,7 @@ function Editor({ projectId, clientId, draftScope }: { projectId: string; client
   function queued(run: WebsiteRun): void {
     runsSequence.current++;
     checkpointEtag.current = null;
+    setCheckpointPreview(null);
     previousRuns.current.set(run.id, run);
     setRuns((prev) => [run, ...prev.filter((item) => item.id !== run.id)]);
   }

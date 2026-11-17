@@ -148,4 +148,97 @@ describe("claimed agent followup worker", () => {
       statusText: "error",
     }));
   });
+
+  it("adia follow-up para pending quando fora do horário comercial do agente e cancela opt-out sem lead_id", async () => {
+    vi.useFakeTimers();
+    try {
+      // 2026-11-16T03:00:00Z = 00:00 BRT (Segunda-feira fora do expediente 08:00-18:00)
+      vi.setSystemTime(new Date("2026-11-16T03:00:00Z"));
+      state.rows = [{ ...row, lead_id: null }];
+      state.from.mockImplementation((table: string) => {
+        const chain: Record<string, unknown> = {
+          select: () => chain,
+          eq: () => chain,
+          in: () => chain,
+          maybeSingle: async () => ({
+            data: table === "agent_settings"
+              ? {
+                  is_24h: false,
+                  schedules: [
+                    { day: "Segunda-feira", active: true, start: "08:00", end: "18:00" },
+                  ],
+                  options: {
+                    follow_up: { enabled: true, follow_up_1h_enabled: true, follow_up_1h_template: "Oi!" },
+                  },
+                }
+              : null,
+            error: null,
+          }),
+          then: (resolve: (r: { data: unknown[]; error: null }) => void) => resolve({ data: [], error: null }),
+        };
+        return chain;
+      });
+      await runFollowUpWorker();
+      expect(state.send).not.toHaveBeenCalled();
+      expect(state.rpc).toHaveBeenCalledWith(
+        "reschedule_agent_followup",
+        expect.objectContaining({
+          p_client: row.client_id,
+          p_next_send_at: "2026-11-16T11:00:00.000Z",
+        }),
+      );
+
+      // Fallback automático para release_agent_followup se a migration 029 não existir no banco
+      state.rpc.mockClear();
+      state.rows = [{ ...row, lead_id: null }];
+      const prevRpcImpl = state.rpc.getMockImplementation()!;
+      state.rpc.mockImplementation(async (name, args) => {
+        if (name === "reschedule_agent_followup") return { data: null, error: { message: "function not found" } };
+        return prevRpcImpl(name, args);
+      });
+      await runFollowUpWorker();
+      expect(state.rpc).toHaveBeenCalledWith(
+        "release_agent_followup",
+        expect.objectContaining({ p_status: "pending", p_error: "Fora do horário comercial do agente." }),
+      );
+      state.rpc.mockImplementation(prevRpcImpl);
+
+      // Segundo caso: sem lead_id, mas leads_extraidos retorna opt_out=true pelo JID
+      state.rpc.mockClear();
+      state.rows = [{ ...row, lead_id: null }];
+      state.from.mockImplementation((table: string) => {
+        const chain: Record<string, unknown> = {
+          select: () => chain,
+          eq: () => chain,
+          in: () => chain,
+          maybeSingle: async () => ({
+            data: table === "agent_settings"
+              ? {
+                  is_24h: true,
+                  schedules: [],
+                  options: {
+                    follow_up: { enabled: true, follow_up_1h_enabled: true, follow_up_1h_template: "Oi!" },
+                  },
+                }
+              : null,
+            error: null,
+          }),
+          then: (resolve: (r: { data: unknown[]; error: null }) => void) =>
+            resolve({
+              data: table === "leads_extraidos" ? [{ id: 99, opt_out: true }] : [],
+              error: null,
+            }),
+        };
+        return chain;
+      });
+      await runFollowUpWorker();
+      expect(state.send).not.toHaveBeenCalled();
+      expect(state.rpc).toHaveBeenCalledWith(
+        "release_agent_followup",
+        expect.objectContaining({ p_status: "cancelled", p_error: "Lead solicitou opt-out." }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

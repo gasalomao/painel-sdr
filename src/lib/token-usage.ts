@@ -6,10 +6,9 @@
  */
 
 import { supabaseAdmin } from "@/lib/supabase_admin";
-import { supabase } from "@/lib/supabase";
 import { ensurePricing, lookupPriceSync, computeCost } from "@/lib/pricing";
 
-const adminClient = supabaseAdmin || supabase;
+const adminClient = supabaseAdmin;
 
 export type TokenSource = "agent" | "disparo" | "followup" | "organizer" | "other";
 
@@ -75,6 +74,8 @@ export async function logTokenUsage(input: TokenUsageInput): Promise<void> {
     if (!isReported) await ensurePricing().catch(() => null);
     const cost = isReported ? Number(input.costUsd) : estimateCost(input.model, promptTokens, completionTokens, input.cachedTokens);
     const costStatus = isReported ? "reported" : cost === null ? "unknown" : "estimated";
+
+    if (!adminClient) return;
 
     const { error } = await adminClient.from("ai_token_usage").insert({
       client_id: input.clientId || "00000000-0000-0000-0000-000000000001",

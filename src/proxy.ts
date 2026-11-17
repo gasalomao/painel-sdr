@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { verifySession, SESSION_COOKIE } from "@/lib/auth-edge";
+import { verifySession, SESSION_COOKIE, timingSafeEqualEdge } from "@/lib/auth-edge";
 
 // Mesma constante do lib/internal-auth.ts (não importamos diretamente porque
 // internal-auth depende de bindings node não disponíveis no edge runtime).
@@ -51,6 +51,7 @@ export async function proxy(req: NextRequest) {
   if (
     pathname.startsWith("/_next") ||
     pathname.startsWith("/api/auth/") ||
+    pathname === "/api/health" ||
     pathname.startsWith("/api/webhooks/") ||
     // DeepSeek: as rotas de captura (import-bookmarklet, userscript.user.js) e
     // o proxy OpenAI-shape (/v1/*) são chamadas CROSS-ORIGIN — do navegador do
@@ -87,7 +88,7 @@ export async function proxy(req: NextRequest) {
     !pathname.startsWith("/api/admin") &&
     internalHeader &&
     internalSecret &&
-    internalHeader === internalSecret
+    timingSafeEqualEdge(internalHeader, internalSecret)
   ) {
     return NextResponse.next();
   }

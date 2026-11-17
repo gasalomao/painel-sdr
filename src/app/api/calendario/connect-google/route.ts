@@ -22,6 +22,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
 import { resolveGoogleCredentials, hasCalendarConnected } from "@/lib/google-calendar";
+import { invalidateAgentConfigCache } from "@/lib/agent-config-cache";
 
 export const dynamic = "force-dynamic";
 
@@ -95,6 +96,7 @@ export async function POST(req: NextRequest) {
       .eq("id", agent.id);
 
     if (discErr) return NextResponse.json({ ok: false, error: discErr.message }, { status: 500 });
+    invalidateAgentConfigCache(agent.id);
     return NextResponse.json({ ok: true, disconnected: true, agent_id: agent.id });
   }
 
@@ -124,6 +126,7 @@ export async function POST(req: NextRequest) {
       .eq("id", agent.id);
 
     if (updErr) return NextResponse.json({ ok: false, error: updErr.message }, { status: 500 });
+    invalidateAgentConfigCache(agent.id);
   } else {
     // 1-Clique com credenciais centralizadas da plataforma
     const resolved = await resolveGoogleCredentials(currentOptions);

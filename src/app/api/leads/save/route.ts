@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { supabase } from "@/lib/supabase";
-import { verifySession } from "@/lib/auth";
+import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
+import { requireClientId } from "@/lib/tenant";
 
 /**
  * POST /api/leads/save
@@ -21,9 +21,12 @@ import { verifySession } from "@/lib/auth";
  *   - skip_status_change?   — se true, NUNCA mexe no status mesmo se vier valor
  */
 export async function POST(req: NextRequest) {
-  const session = await verifySession(req);
-  if (!session) {
+  const session = await requireClientId(req);
+  if (!session.ok) {
     return NextResponse.json({ error: "Não autorizado" }, { status: 401 });
+  }
+  if (!supabase) {
+    return NextResponse.json({ error: "DB indisponível" }, { status: 500 });
   }
 
   try {

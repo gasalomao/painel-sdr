@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { supabaseAdmin } from "@/lib/supabase";
+import { supabaseAdmin } from "@/lib/supabase_admin";
 import { parseMinReviews } from "@/lib/scraper-review-count";
 import { parseGoogleYear, parseMaxReviews, parseRatingBound } from "@/lib/scraper-lead-filters";
 import { normRegionName } from "@/lib/geo-regions";

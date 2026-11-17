@@ -13,12 +13,22 @@ export const dynamic = "force-dynamic";
 async function ownsFollowup(req: NextRequest, id: string) {
   const tenant = await requireClientId(req);
   if (!tenant.ok) return { ok: false as const, res: tenant.response };
-  const { data } = await supabase.from("followup_campaigns").select("client_id").eq("id", id).maybeSingle();
+  const { data } = await supabase
+    .from("followup_campaigns")
+    .select("client_id, min_interval_seconds, max_interval_seconds")
+    .eq("id", id)
+    .maybeSingle();
   if (!data) return { ok: false as const, res: NextResponse.json({ success: false, error: "Não encontrada" }, { status: 404 }) };
   if (!tenant.isAdmin && data.client_id !== tenant.clientId) {
     return { ok: false as const, res: NextResponse.json({ success: false, error: "Sem permissão" }, { status: 403 }) };
   }
-  return { ok: true as const, isAdmin: tenant.isAdmin, clientId: data.client_id };
+  return {
+    ok: true as const,
+    isAdmin: tenant.isAdmin,
+    clientId: data.client_id,
+    minInterval: typeof data.min_interval_seconds === "number" ? data.min_interval_seconds : null,
+    maxInterval: typeof data.max_interval_seconds === "number" ? data.max_interval_seconds : null,
+  };
 }
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -32,7 +42,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     .eq("id", id)
     .eq("client_id", own.clientId)
     .maybeSingle();
-  if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  if (error) {
+    console.error("[followup/GET] Erro:", error.message);
+    return NextResponse.json({ success: false, error: "Falha ao carregar follow-up" }, { status: 500 });
+  }
   if (!camp) return NextResponse.json({ success: false, error: "Não encontrada" }, { status: 404 });
 
   const { data: targets } = await supabase
@@ -83,6 +96,29 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (update.status && !["active", "paused", "draft"].includes(update.status)) {
       return NextResponse.json({ success: false, error: "Status inválido" }, { status: 400 });
     }
+    if ("steps" in update) {
+      if (!Array.isArray(update.steps) || update.steps.length === 0) {
+        return NextResponse.json({ success: false, error: "Inclua pelo menos 1 passo de follow-up." }, { status: 400 });
+      }
+      for (const s of update.steps) {
+        if (typeof s?.day_offset !== "number" || !Number.isFinite(s.day_offset) || s.day_offset < 1) {
+          return NextResponse.json({ success: false, error: "Cada passo precisa de day_offset >= 1." }, { status: 400 });
+        }
+        if (typeof s?.template !== "string" || !s.template.trim()) {
+          return NextResponse.json({ success: false, error: "Cada passo precisa de template não vazio." }, { status: 400 });
+        }
+      }
+    }
+    if ("min_interval_seconds" in update || "max_interval_seconds" in update) {
+      const nextMin = "min_interval_seconds" in update ? Number(update.min_interval_seconds) : (own.minInterval ?? 40);
+      const nextMax = "max_interval_seconds" in update ? Number(update.max_interval_seconds) : (own.maxInterval ?? 90);
+      if (!Number.isFinite(nextMin) || !Number.isFinite(nextMax) || nextMin < 5 || nextMax < 5) {
+        return NextResponse.json({ success: false, error: "Intervalo mínimo entre envios: 5 s." }, { status: 400 });
+      }
+      if (nextMin > nextMax) {
+        return NextResponse.json({ success: false, error: "min_interval > max_interval" }, { status: 400 });
+      }
+    }
     const { data, error } = await supabase
       .from("followup_campaigns")
       .update(update)
@@ -90,7 +126,10 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       .eq("client_id", own.clientId)
       .select()
       .single();
-    if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    if (error) {
+      console.error("[followup/PATCH] Erro:", error.message);
+      return NextResponse.json({ success: false, error: "Falha ao atualizar follow-up" }, { status: 500 });
+    }
     if ("weekend_guard" in body) {
       await supabase
         .from("system_config")
@@ -101,8 +140,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         .then(() => undefined, () => undefined);
     }
     return NextResponse.json({ success: true, campaign: data });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    console.error("[followup/PATCH] Erro inesperado:", err instanceof Error ? err.message : err);
+    return NextResponse.json({ success: false, error: "Erro interno ao atualizar follow-up" }, { status: 500 });
   }
 }
 
@@ -115,6 +155,9 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
     .delete()
     .eq("id", id)
     .eq("client_id", own.clientId);
-  if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  if (error) {
+    console.error("[followup/DELETE] Erro:", error.message);
+    return NextResponse.json({ success: false, error: "Falha ao remover follow-up" }, { status: 500 });
+  }
   return NextResponse.json({ success: true });
 }

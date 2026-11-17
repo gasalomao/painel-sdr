@@ -16,7 +16,6 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Phone, Clock, Star, Plus, MoreVertical, Pencil, Trash2, MapPin, Download, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { supabase } from "@/lib/supabase";
 import { useClientSession } from "@/lib/use-session";
 import { LeadAvatar } from "@/components/leads/lead-avatar";
 import { downloadLeadMapsKit } from "@/lib/lead-maps-kit-client";
@@ -215,16 +214,15 @@ export default function KanbanBoard({ leads, columns, onLeadClick, formatPhone, 
     setErrorMessage(null);
 
     try {
-      const { data, error } = await supabase
-        .from("leads_extraidos")
-        .update({ status: newStatus })
-        .eq("id", leadId)
-        .eq("client_id", clientId)
-        .select("id")
-        .maybeSingle();
+      const res = await fetch(`/api/leads/${encodeURIComponent(leadId)}/status`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: newStatus }),
+      });
 
-      if (error || !data) {
-        throw new Error(error?.message || "Registro não encontrado");
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody?.error || "Registro não encontrado");
       }
     } catch {
       const reverted = leadsRef.current.map((l) =>

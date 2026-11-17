@@ -2,7 +2,6 @@
 
 import { Suspense, useEffect, useState, useRef, useCallback } from "react";
 import { Header } from "@/components/layout/header";
-import { supabase } from "@/lib/supabase";
 import { useClientSession } from "@/lib/use-session";
 import { useRealtime } from "@/hooks/use-realtime";
 import { normalizeConversation, sortConversationsByLastMessage, isSameJid, formatLastMessagePreview } from "@/lib/inbox/conversations";
@@ -65,47 +64,26 @@ function ChatPageContent() {
     instancesLoadedRef.current = true;
     
     async function loadChannelConnectionsAndAgents() {
-      // Busca conexÃµes do WhatsApp no Painel-SDR
-      const { data: conns } = await supabase
-        .from("channel_connections")
-        .select("*")
-        .eq("client_id", clientId)
-        .order("created_at", { ascending: true });
+      try {
+        const res = await fetch("/api/instances?include_agents=1&scope=tenant&rebind=1", {
+          cache: "no-store",
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.ok) return;
 
-      if (conns) {
+        const conns = Array.isArray(data.instances) ? data.instances : [];
         setInstances(conns);
-
-        // Auto-rebind de conversas salvas por nÃºmero de telefone (phone:NUMERO).
-        // Disparado uma Ãºnica vez quando as conexÃµes carregam â€” antes rodava a
-        // cada resyncToken (3-4x por minuto quando o usuÃ¡rio troca de aba).
-        for (const inst of conns) {
-          const rawPhone = inst.phone_number || inst.owner_phone || inst.instance_name;
-          const cleanPhone = rawPhone ? String(rawPhone).replace(/\D/g, "") : "";
-          if (cleanPhone.length >= 8) {
-            try {
-              await supabase
-                .from("sessions")
-                .update({ instance_name: inst.instance_name })
-                .eq("client_id", clientId)
-                .eq("instance_name", `phone:${cleanPhone}`);
-            } catch { /* nÃ£o-fatal â€” auto-rebind Ã© best-effort */ }
-          }
-        }
-
         const hasConnected = conns.some(
-          (inst) => inst.status === "open" || inst.status === "CONNECTED" || inst.status === "connected"
+          (inst: { status?: string | null }) =>
+            inst.status === "open" || inst.status === "CONNECTED" || inst.status === "connected"
         );
         setWhatsappConnected(hasConnected || conns.length > 0);
-      }
 
-      // Busca Agentes de IA configurados
-      const { data: agents } = await supabase
-        .from("agent_settings")
-        .select("id, name")
-        .eq("client_id", clientId);
-
-      if (agents) {
-        setAiAgents(agents);
+        if (Array.isArray(data.agents)) {
+          setAiAgents(data.agents);
+        }
+      } catch {
+        // Não-fatal — falha transitória de rede não trava o chat
       }
     }
     loadChannelConnectionsAndAgents();
@@ -128,11 +106,10 @@ function ChatPageContent() {
         : msg.sender_type === "human" ? "agent"
         : "customer";
 
+      // FIX multi-tenant: RLS desligada → realtime pode entregar INSERT/UPDATEs de outros tenants.
+      if ((msg as any).client_id && clientId && (msg as any).client_id !== clientId) return;
+
       if (event.eventType === "INSERT") {
-        // FIX multi-tenant: RLS desligada â†’ realtime entrega INSERTs de TODOS
-        // os clientes. Sem esse guard, mensagem de outro SaaS (mesmo telefone)
-        // aparecia ao vivo dentro da thread deste operador.
-        if ((msg as any).client_id && clientId && (msg as any).client_id !== clientId) return;
         if (currentActive && isSameJid(msg.remote_jid, currentActive.id)) {
           setMessages((prev) => {
             // Deduplicação: otimista + webhook podem chegar na mesma msg.
@@ -213,7 +190,7 @@ function ChatPageContent() {
         }
       }
     },
-    []
+    [clientId]
   );
 
   const handleConversationEvent = useCallback(
@@ -260,6 +237,7 @@ function ChatPageContent() {
 
   const { isConnected } = useRealtime({
     channelName: "painel-sdr-inbox-realtime",
+    clientId,
     onMessageEvent: handleMessageEvent,
     onConversationEvent: handleConversationEvent,
     enabled: !!clientId,
@@ -431,40 +409,15 @@ function ChatPageContent() {
           return;
         }
 
-        // Filtra no banco pelos últimos 8 dígitos (incluindo máscara com hífen/espaço) para evitar baixar a tabela inteira
-        const last8 = phoneClean.slice(-8);
-        const maskedLast8 = `${last8.slice(0, 4)}%${last8.slice(4)}`;
-        const baseLeadQuery = supabase
-          .from("leads_extraidos")
-          .select("maps_url, lat, lng, endereco, telefone, remoteJid, nome_negocio")
-          .eq("client_id", clientId);
-
-        const filteredQuery =
-          "or" in baseLeadQuery && typeof baseLeadQuery.or === "function"
-            ? baseLeadQuery.or(
-                `remoteJid.ilike.%${last8}%,telefone.ilike.%${last8}%,telefone.ilike.%${maskedLast8}%`
-              )
-            : baseLeadQuery;
-
-        const limitedQuery =
-          "limit" in filteredQuery && typeof filteredQuery.limit === "function"
-            ? filteredQuery.limit(25)
-            : filteredQuery;
-
-        const { data: allLeads, error } = await limitedQuery;
-
-        if (error) {
-          console.error('[Maps] Erro:', error);
+        const res = await fetch(`/api/leads/lookup?phone=${encodeURIComponent(phoneClean)}`, {
+          cache: "no-store",
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.ok) {
           setActiveLead(null);
           return;
         }
-
-        // Compara últimos 8 dígitos do telefone ou remoteJid
-        const leadData = allLeads?.find((lead) => {
-          const leadPhone = lead.telefone ? lead.telefone.replace(/\D/g, "") : "";
-          const leadJid = lead.remoteJid ? lead.remoteJid.replace(/\D/g, "") : "";
-          return leadPhone.includes(last8) || leadJid.includes(last8);
-        }) || null;
+        const leadData = data.lead || null;
 
         console.log('[Maps] Resultado:', leadData?.nome_negocio, leadData?.maps_url ? '✅ HAS MAPS' : '❌ NO MAPS');
         setActiveLead(leadData);
@@ -781,6 +734,7 @@ function ChatPageContent() {
             onBack={handleCloseConversation}
             resyncToken={resyncToken}
             clientId={clientId}
+            realtimeConnected={isConnected}
             activeInstance={activeInstance}
             contactPanelOpen={contactPanelOpen}
             onToggleContactPanel={handleToggleContactPanel}

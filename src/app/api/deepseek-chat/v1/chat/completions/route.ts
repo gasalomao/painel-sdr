@@ -16,6 +16,7 @@ import { pickToken, getFullToken } from "@/lib/deepseek-chat-manager";
 import { chatComplete, DsUpstreamError, messagesToPrompt, DEEPSEEK_CHAT_MODELS } from "@/lib/deepseek-chat-client";
 import { verifySession, SESSION_COOKIE } from "@/lib/auth-edge";
 import { hasInternalSecret } from "@/lib/internal-auth";
+import { safeSecretEqual } from "@/lib/webhook-security";
 
 // Streaming pode demorar — afrouxa o timeout.
 export const maxDuration = 120;
@@ -33,7 +34,7 @@ async function authorized(req: NextRequest): Promise<boolean> {
   // Bearer com o AUTH_SECRET — permite ferramentas externas apontarem aqui
   const bearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
   const secret = process.env.AUTH_SECRET || "";
-  return !!(bearer && secret && bearer === secret);
+  return !!(bearer && secret && safeSecretEqual(bearer, secret));
 }
 
 export async function POST(req: NextRequest) {

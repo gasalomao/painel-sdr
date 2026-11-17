@@ -44,6 +44,47 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
     const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
     requests.push({ url, body });
+    const sessions = contacts.map((contact, i) => ({
+      id: `session-${i}`,
+      client_id: "client-test",
+      contact_id: contact.id,
+      contact,
+      instance_name: "Comercial",
+      agent_id: 1,
+      bot_status: i === 0 ? "bot_paused" : "bot_active",
+      unread_count: i === 1 ? 2 : 0,
+      last_message_at: date,
+      created_at: date,
+    }));
+    const messages = [{ id: "m1", remote_jid: jid, content: "Podemos conversar amanhã?", sender_type: "customer", created_at: date }];
+    if (String(url).startsWith("/api/instances")) {
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          instances: [{ id: "i1", instance_name: "Comercial", status: "open" }],
+          agents: [{ id: 1, name: "Assistente comercial" }],
+        }),
+        { status: 200 },
+      );
+    }
+    if (String(url).startsWith("/api/inbox/conversations")) {
+      return new Response(JSON.stringify({ ok: true, sessions, messages: [], columns: [], leads: [] }), { status: 200 });
+    }
+    if (String(url).startsWith("/api/inbox/messages")) {
+      const parsed = new URL(String(url), "http://localhost");
+      const jids = (parsed.searchParams.get("jids") || "").split(",").filter(Boolean);
+      const rows = messages.filter((m) => jids.length === 0 || jids.includes(m.remote_jid));
+      return new Response(JSON.stringify({ ok: true, rows, source: "chats_dashboard" }), { status: 200 });
+    }
+    if (String(url).startsWith("/api/inbox/sessions")) {
+      return new Response(JSON.stringify({ ok: true, session: { agent_id: 1, instance_name: "Comercial" } }), { status: 200 });
+    }
+    if (String(url).startsWith("/api/contacts/")) {
+      return new Response(JSON.stringify({ ok: true, contact: { id: "contact-a" } }), { status: 200 });
+    }
+    if (String(url).startsWith("/api/leads/lookup")) {
+      return new Response(JSON.stringify({ ok: true, lead: null }), { status: 200 });
+    }
     return new Response(JSON.stringify({ success: true, messageId: "sent-test", key: { id: "sent-test" }, avatars: {} }), { status: 200 });
   }));
 });
@@ -84,9 +125,9 @@ describe("Chat — regressão da apresentação", () => {
     fireEvent.change(connection, { target: { value: "Comercial" } });
     fireEvent.change(agent, { target: { value: "1" } });
     expect(await screen.findByText("Marina Oliveira")).toBeDefined();
-    const calls = from.mock.calls.length;
+    const convCalls = requests.filter((r) => String(r.url).startsWith("/api/inbox/conversations")).length;
     fireEvent.click(screen.getByRole("button", { name: "Sincronizar conversas" }));
-    await waitFor(() => expect(from.mock.calls.length).toBeGreaterThan(calls));
+    await waitFor(() => expect(requests.filter((r) => String(r.url).startsWith("/api/inbox/conversations")).length).toBeGreaterThan(convCalls));
     await openConversation();
     fireEvent.click(screen.getByRole("button", { name: "Anexar arquivo" }));
     const menu = await screen.findByRole("menu");

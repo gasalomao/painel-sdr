@@ -20,7 +20,6 @@ import { Badge } from "@/components/ui/badge";
 import { CalendarDays, ChevronRight, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useClientSession } from "@/lib/use-session";
-import { supabase } from "@/lib/supabase";
 
 interface Appointment {
   id: string;
@@ -74,18 +73,18 @@ export function DashboardCalendarWidget(): React.JSX.Element | null {
         const tomorrow = new Date(today);
         tomorrow.setDate(tomorrow.getDate() + 1);
 
-        // Query: próximos 30 dias, status confirmed/tentative
-        let q = supabase
-          .from("appointments")
-          .select("id, title, start_at, end_at, status, remote_jid, service_name")
-          .gte("start_at", today.toISOString())
-          .lt("start_at", in30.toISOString())
-          .in("status", ["confirmed", "tentative"])
-          .order("start_at", { ascending: true });
-        if (session && session.clientId) q = q.eq("client_id", session.clientId);
-
-        const { data } = await q;
-        const list = (data || []) as Appointment[];
+        // Consulta via BFF multi-tenant: próximos 30 dias, filtrando confirmados/tentativos
+        const params = new URLSearchParams({
+          from: today.toISOString(),
+          to: in30.toISOString(),
+          limit: "200",
+        });
+        const res = await fetch(`/api/appointments?${params.toString()}`, { cache: "no-store" });
+        const json = await res.json().catch(() => null);
+        const raw = res.ok && json?.ok && Array.isArray(json.appointments) ? (json.appointments as Appointment[]) : [];
+        const list = raw
+          .filter((a) => a.status === "confirmed" || a.status === "tentative")
+          .sort((a, b) => new Date(a.start_at).getTime() - new Date(b.start_at).getTime());
 
         const hojeCount = list.filter((a) => new Date(a.start_at) < tomorrow).length;
         const semanaCount = list.filter((a) => new Date(a.start_at) < in7).length;

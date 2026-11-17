@@ -573,16 +573,39 @@ const consecutiveFailures = new Map<string, number>();
 
 // Cacheia se a tabela existe, pra não martelar o banco com erros 42P01 em loop.
 let campaignLogsAvailable: boolean | null = null;
+const campaignClientIdCache = new Map<string, string>();
+
+async function resolveCampaignClientId(campaignId: string): Promise<string | null> {
+  const cached = campaignClientIdCache.get(campaignId);
+  if (cached) return cached;
+  try {
+    const { data } = await supabase
+      .from("campaigns")
+      .select("client_id")
+      .eq("id", campaignId)
+      .maybeSingle();
+    const cid = (data as { client_id?: string } | null)?.client_id || null;
+    if (cid) {
+      if (campaignClientIdCache.size > 500) campaignClientIdCache.clear();
+      campaignClientIdCache.set(campaignId, cid);
+    }
+    return cid;
+  } catch {
+    return null;
+  }
+}
 
 async function addCampaignLog(campaignId: string, message: string, level: "info" | "success" | "warning" | "error" = "info") {
   const timestamp = new Date().toLocaleTimeString();
   console.log(`[CAMPAIGN_LOG][${timestamp}][${level.toUpperCase()}] Campaign: ${campaignId} | Msg: ${message}`);
+  const clientId = await resolveCampaignClientId(campaignId);
 
   // 1) Fallback SEMPRE-disponível: webhook_logs (tabela que já existe no projeto).
   //    Mesmo se campaign_logs falhar, o usuário tem rastro em algum lugar.
   //    Só gravamos níveis !==info pra não poluir.
   if (level !== "info") {
     supabase.from("webhook_logs").insert({
+      ...(clientId ? { client_id: clientId } : {}),
       instance_name: "campaign",
       event: `CAMPAIGN_${level.toUpperCase()}`,
       payload: { campaign_id: campaignId, message, level },
@@ -603,6 +626,7 @@ async function addCampaignLog(campaignId: string, message: string, level: "info"
 
   try {
     const { error } = await supabase.from("campaign_logs").insert({
+      ...(clientId ? { client_id: clientId } : {}),
       campaign_id: campaignId,
       message,
       level

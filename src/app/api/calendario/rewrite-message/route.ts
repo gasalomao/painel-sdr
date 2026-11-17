@@ -70,6 +70,7 @@ export async function POST(req: NextRequest) {
           .from("leads_extraidos")
           .select("nome_negocio, ramo_negocio")
           .eq("id", appt.lead_id)
+          .eq("client_id", appt.client_id)
           .maybeSingle();
         if (lead) {
           context += `  - Lead: ${lead.nome_negocio || "(sem nome)"}\n  - Ramo: ${lead.ramo_negocio || "(não informado)"}\n`;
@@ -126,7 +127,8 @@ REGRAS ABSOLUTAS:
       return NextResponse.json({ ok: false, error: "IA não retornou texto" }, { status: 500 });
     }
     return NextResponse.json({ ok: true, rewritten, model_used: model });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500 });
+  } catch (e: unknown) {
+    console.error("[calendario/rewrite-message] Erro:", e instanceof Error ? e.message : e);
+    return NextResponse.json({ ok: false, error: "Erro ao reescrever mensagem com IA" }, { status: 500 });
   }
 }

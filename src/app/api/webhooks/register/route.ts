@@ -3,6 +3,7 @@ import axios from "axios";
 import { evolution } from "@/lib/evolution";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { invalidateAgentConfigCache } from "@/lib/agent-config-cache";
 
 export const dynamic = 'force-dynamic';
 
@@ -48,7 +49,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ success: false, error: "Sem instância configurada. Crie uma em Configurações → Evolution API." }, { status: 400 });
   }
   const access = await requireInstanceAccess(req, instanceName);
-  if (!("ok" in access)) return access;
+  if (!("clientId" in access)) return access;
   try {
 
     // Usa getEvolutionConfig() que lê do banco (app_settings) com fallback pro .env
@@ -64,13 +65,15 @@ export async function GET(req: NextRequest) {
 
     const base = EVO_URL.endsWith("/") ? EVO_URL.slice(0, -1) : EVO_URL;
     const res = await fetch(`${base}/webhook/find/${instanceName}`, {
-      headers: { apikey: EVO_KEY || "" }
+      headers: { apikey: EVO_KEY || "" },
+      signal: AbortSignal.timeout(15_000),
     });
 
     const data = await res.json();
     return NextResponse.json({ success: true, webhook: data });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    console.error(">>> ERRO AO CONSULTAR WEBHOOK:", err instanceof Error ? err.message : err);
+    return NextResponse.json({ success: false, error: "Erro ao consultar webhook" }, { status: 500 });
   }
 }
 
@@ -83,7 +86,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: "Sem instância configurada. Crie uma em Configurações → Evolution API." }, { status: 400 });
     }
     const access = await requireInstanceAccess(req, instance);
-    if (!("ok" in access)) return access;
+    if (!("clientId" in access)) return access;
 
     // Prioridade para buscar URL pública (ao clicar "Sincronizar Agora"):
     //   1. appUrl enviado pelo front-end (geralmente window.location.origin → o
@@ -141,39 +144,58 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Persiste a URL efetiva — assim a próxima abertura do painel já sabe qual é
-    // a URL pública atual sem o user precisar clicar em Salvar em outro canto.
-    // (a) app_settings.public_url — fonte global usada por outras rotas
-    try {
-      await supabase.from("app_settings").upsert(
-        { key: "public_url", value: baseUrl, updated_at: new Date().toISOString() },
-        { onConflict: "key" }
-      );
-    } catch (e) {
-      console.warn("[register] não consegui persistir app_settings.public_url:", (e as Error).message);
-    }
-    // (b) agent_settings.options.app_url — fonte usada pela aba do Agente
-    if (agentId) {
+    // Valida agentId com ownership antes de gravar options ou construir query string
+    let parsedAgentId: number | null = null;
+    if (agentId !== undefined && agentId !== null && String(agentId).trim() !== "") {
+      const candidateId = Number(agentId);
+      if (!Number.isInteger(candidateId) || candidateId <= 0) {
+        return NextResponse.json({ success: false, error: "agentId inválido" }, { status: 400 });
+      }
+      let agentQuery = supabase
+        .from("agent_settings")
+        .select("id, client_id, options")
+        .eq("id", candidateId);
+      if (!access.isAdmin) {
+        agentQuery = agentQuery.eq("client_id", access.clientId);
+      }
+      const { data: ownedAgent } = await agentQuery.maybeSingle();
+      if (!ownedAgent) {
+        return NextResponse.json({ success: false, error: "Agente não encontrado neste tenant" }, { status: 403 });
+      }
+      parsedAgentId = candidateId;
+
       try {
-        const { data: agent } = await supabase
-          .from("agent_settings")
-          .select("options")
-          .eq("id", agentId)
-          .single();
-        const newOptions = { ...((agent?.options as any) || {}), app_url: baseUrl };
-        await supabase.from("agent_settings").update({ options: newOptions }).eq("id", agentId);
+        const newOptions = { ...((ownedAgent.options as Record<string, unknown> | null) || {}), app_url: baseUrl };
+        let updQuery = supabase.from("agent_settings").update({ options: newOptions }).eq("id", parsedAgentId);
+        if (!access.isAdmin) updQuery = updQuery.eq("client_id", access.clientId);
+        await updQuery;
+        invalidateAgentConfigCache(parsedAgentId);
       } catch (e) {
         console.warn("[register] não consegui persistir agent_settings.options.app_url:", (e as Error).message);
       }
     }
 
-    // Identifica o provider — Evolution registra webhook por instância na própria Evolution;
-    // Cloud é só sanity check + WABA subscribe (a Callback URL é registrada no Meta App).
-    const { data: chRow } = await supabase
+    // app_settings.public_url é configuração global — apenas admin deve sobrescrever.
+    if (access.isAdmin) {
+      try {
+        await supabase.from("app_settings").upsert(
+          { key: "public_url", value: baseUrl, updated_at: new Date().toISOString() },
+          { onConflict: "key" }
+        );
+      } catch (e) {
+        console.warn("[register] não consegui persistir app_settings.public_url:", (e as Error).message);
+      }
+    }
+
+    // Identifica o provider escopando sempre por tenant quando não-admin.
+    let chQuery = supabase
       .from("channel_connections")
-      .select("provider, provider_config")
-      .eq("instance_name", instance)
-      .maybeSingle();
+      .select("client_id, provider, provider_config")
+      .eq("instance_name", instance);
+    if (!access.isAdmin) {
+      chQuery = chQuery.eq("client_id", access.clientId);
+    }
+    const { data: chRow } = await chQuery.maybeSingle();
 
     const provider = chRow?.provider || "evolution";
 
@@ -192,9 +214,11 @@ export async function POST(req: NextRequest) {
       let subscribed = false;
       let subDetail = "";
       if (cfg.business_account_id) {
+        const safeGraphVersion = /^v\d+\.\d+$/.test(String(cfg.graph_version || "")) ? String(cfg.graph_version) : "v21.0";
+        const safeWabaId = encodeURIComponent(String(cfg.business_account_id).trim());
         try {
           await axios.post(
-            `https://graph.facebook.com/${cfg.graph_version || "v21.0"}/${cfg.business_account_id}/subscribed_apps`,
+            `https://graph.facebook.com/${safeGraphVersion}/${safeWabaId}/subscribed_apps`,
             {},
             { headers: { Authorization: `Bearer ${cfg.access_token}` }, timeout: 15000 }
           );
@@ -218,7 +242,7 @@ export async function POST(req: NextRequest) {
 
     // Evolution
     let webhookUrl = `${baseUrl}/api/webhooks/whatsapp`;
-    if (agentId) webhookUrl += `?agentId=${agentId}`;
+    if (parsedAgentId) webhookUrl += `?agentId=${parsedAgentId}`;
 
     // Gera secret per-instância (32 bytes hex) e salva em provider_config.
     // Quando a Evolution v2 receber esse webhook config, vai mandar o header
@@ -229,18 +253,22 @@ export async function POST(req: NextRequest) {
     try {
       const { data: existing } = await supabase
         .from("channel_connections")
-        .select("provider_config")
+        .select("client_id, provider_config")
         .eq("instance_name", instance)
         .maybeSingle();
-      webhookSecret = (existing?.provider_config as any)?.webhook_secret || null;
+      if (existing?.client_id && !access.isAdmin && existing.client_id !== access.clientId) {
+        return NextResponse.json({ success: false, error: "Instância não pertence a este cliente" }, { status: 403 });
+      }
+      webhookSecret = (existing?.provider_config as Record<string, unknown> | null)?.webhook_secret as string || null;
       if (!webhookSecret) {
         webhookSecret = randomBytes(32).toString("hex");
-        const newConfig = { ...((existing?.provider_config as any) || {}), webhook_secret: webhookSecret };
+        const newConfig = { ...((existing?.provider_config as Record<string, unknown> | null) || {}), webhook_secret: webhookSecret };
         await supabase
           .from("channel_connections")
           .upsert(
             {
               instance_name: instance,
+              client_id: existing?.client_id || access.clientId,
               provider: "evolution",
               provider_config: newConfig,
             },
@@ -264,8 +292,8 @@ export async function POST(req: NextRequest) {
       appUrl: baseUrl,
       secured: !!webhookSecret,
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error(">>> ERRO AO REGISTRAR WEBHOOK:", err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+    return NextResponse.json({ success: false, error: "Erro ao registrar webhook" }, { status: 500 });
   }
 }

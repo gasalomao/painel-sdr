@@ -9,7 +9,6 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Toaster, toast as notify } from "sonner";
-import { supabase } from "@/lib/supabase";
 import { Loader2, Save, RotateCcw, Bot, AlertCircle } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useClientSession } from "@/lib/use-session";
@@ -106,19 +105,15 @@ export default function FollowUpControlPage() {
     try {
       setLoading(true);
 
-      // Busca TODOS os agentes desse cliente
-      const { data: agentsList, error: agentsError } = await supabase
-        .from("agent_settings")
-        .select("id, name, client_id")
-        .eq("client_id", clientId)
-        .order("name");
+      const res = await fetch("/api/agent/settings", { cache: "no-store" });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error || "Erro ao carregar agentes");
 
-      if (agentsError) throw agentsError;
-
-      setAgents(agentsList || []);
+      const agentsList = Array.isArray(data?.agents) ? data.agents : [];
+      setAgents(agentsList);
 
       // Seleciona primeiro agente por padrão
-      if (agentsList && agentsList.length > 0) {
+      if (agentsList.length > 0) {
         setSelectedAgentId(agentsList[0].id);
       }
     } catch (err: any) {
@@ -136,15 +131,12 @@ export default function FollowUpControlPage() {
   async function loadConfig(agentId: number, sequence: number) {
     if (!clientId) return;
     try {
-      const { data: agent, error } = await supabase
-        .from("agent_settings")
-        .select("options")
-        .eq("id", agentId)
-        .eq("client_id", clientId)
-        .single();
+      const res = await fetch(`/api/agent/settings?agent_id=${agentId}`, { cache: "no-store" });
+      const payload = await res.json().catch(() => null);
 
-      if (error) throw error;
+      if (!res.ok) throw new Error(payload?.error || "Erro ao carregar configuração");
 
+      const agent = payload?.agent;
       if (!agent) throw new Error("Agente não encontrado.");
       if (sequence !== configSequence.current) return;
       const followUpConfig = agent.options?.follow_up || {};
@@ -189,30 +181,17 @@ export default function FollowUpControlPage() {
     try {
       setSaving(true);
 
-      // Busca options atual
-      const { data: agent, error: readError } = await supabase
-        .from("agent_settings")
-        .select("options")
-        .eq("id", selectedAgentId)
-        .eq("client_id", clientId)
-        .single();
-      if (readError || !agent) throw new Error("Não foi possível ler as opções atuais. Nada foi salvo.");
-      const currentOptions = agent.options || {};
-
-      // Atualiza apenas a seção follow_up
-      const { error } = await supabase
-        .from("agent_settings")
-        .update({
-          options: {
-            ...currentOptions,
-            follow_up: config
-          },
-          updated_at: new Date().toISOString()
-        })
-        .eq("id", selectedAgentId)
-        .eq("client_id", clientId);
-
-      if (error) throw error;
+      const res = await fetch("/api/agent/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agent_id: selectedAgentId,
+          section: "follow_up",
+          follow_up: config,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error || "Não foi possível salvar as opções de follow-up.");
 
       toast({
         title: "✅ Configuração salva",

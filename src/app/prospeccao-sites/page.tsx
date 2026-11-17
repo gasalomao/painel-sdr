@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
-import Link from "next/link";
 import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,6 +22,8 @@ import {
 import { renderTemplate, type TemplateContext } from "@/lib/template-vars";
 import { AUTO_POOL_INSTANCE, formatInstanceLabel } from "@/lib/campaign-pool";
 import { supabase } from "@/lib/supabase";
+import { mergeRealtimeLog } from "@/lib/realtime-logs";
+import { useClientSession } from "@/lib/use-session";
 import { cn } from "@/lib/utils";
 import { parseMinReviews } from "@/lib/scraper-review-count";
 import {
@@ -190,6 +191,7 @@ function mapsUrlFor(lead: { maps_url?: string | null; place_id?: string | null; 
 }
 
 export default function ProspeccaoSitesPage() {
+  const { clientId } = useClientSession();
   const [tab, setTab] = useState<TabKey>("captura");
 
   // ----- Captura (scraper) -----
@@ -723,13 +725,11 @@ export default function ProspeccaoSitesPage() {
 
   const loadAutoLogs = useCallback(async (id: string) => {
     try {
-      const { data } = await supabase
-        .from("automation_logs")
-        .select("id, kind, level, message, created_at")
-        .eq("automation_id", id)
-        .order("created_at", { ascending: false })
-        .limit(100);
-      setAutoLogs(prev => ({ ...prev, [id]: (data as AutoLog[]) || [] }));
+      const res = await fetch(`/api/automations/${encodeURIComponent(id)}/logs?only=automation`, { cache: "no-store" });
+      const json = await res.json().catch(() => null);
+      if (res.ok && json?.ok) {
+        setAutoLogs(prev => ({ ...prev, [id]: (json.logs as AutoLog[]) || [] }));
+      }
     } catch { /* noop */ }
   }, []);
 
@@ -895,29 +895,32 @@ export default function ProspeccaoSitesPage() {
       return;
     }
     async function fetchInitialLogs() {
-      const { data } = await supabase
-        .from("campaign_logs")
-        .select("*")
-        .eq("campaign_id", activeLogCampaignId)
-        .order("created_at", { ascending: true })
-        .limit(200);
-      setCampLogs(data || []);
+      const r = await fetch(`/api/campaigns/logs?campaign_id=${encodeURIComponent(activeLogCampaignId!)}&limit=200`, { cache: "no-store" });
+      const d = await r.json().catch(() => null);
+      if (r.ok && d?.success) setCampLogs(Array.isArray(d.logs) ? d.logs : []);
     }
     fetchInitialLogs();
+    const campLogPoll = setInterval(() => {
+      if (!document.hidden) fetchInitialLogs();
+    }, 4000);
 
-    const channel = supabase
-      .channel(`ps-logs-${activeLogCampaignId}`)
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "campaign_logs", filter: `campaign_id=eq.${activeLogCampaignId}` },
-        (payload) => {
-          setCampLogs(prev => [...prev, payload.new as any].slice(-200));
-        }
-      )
-      .subscribe();
+    const channel = typeof supabase?.channel === "function"
+      ? supabase
+          .channel(`ps-logs-${activeLogCampaignId}`)
+          .on(
+            "postgres_changes",
+            { event: "INSERT", schema: "public", table: "campaign_logs", filter: `campaign_id=eq.${activeLogCampaignId}` },
+            (payload) => {
+              const incoming = payload.new as any;
+              if (clientId && incoming?.client_id && incoming.client_id !== clientId) return;
+              setCampLogs((prev) => mergeRealtimeLog(prev, incoming, 200));
+            }
+          )
+          .subscribe()
+      : null;
 
-    return () => { supabase.removeChannel(channel); };
-  }, [activeLogCampaignId]);
+    return () => { clearInterval(campLogPoll); if (channel) supabase.removeChannel(channel); };
+  }, [activeLogCampaignId, clientId]);
 
   useEffect(() => {
     campLogEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -925,19 +928,16 @@ export default function ProspeccaoSitesPage() {
 
   async function refreshLogs() {
     if (!activeLogCampaignId) return;
-    const { data } = await supabase
-      .from("campaign_logs")
-      .select("*")
-      .eq("campaign_id", activeLogCampaignId)
-      .order("created_at", { ascending: true })
-      .limit(200);
-    setCampLogs(data || []);
+    const r = await fetch(`/api/campaigns/logs?campaign_id=${encodeURIComponent(activeLogCampaignId)}&limit=200`, { cache: "no-store" });
+    const d = await r.json().catch(() => null);
+    if (r.ok && d?.success) setCampLogs(Array.isArray(d.logs) ? d.logs : []);
   }
 
   async function clearLogs(campaignId: string) {
     if (!confirm("Apagar todo o histórico de logs desta campanha?")) return;
-    const { error } = await supabase.from("campaign_logs").delete().eq("campaign_id", campaignId);
-    if (error) alert("Erro: " + error.message);
+    const r = await fetch(`/api/campaigns/logs?campaign_id=${encodeURIComponent(campaignId)}`, { method: "DELETE" });
+    const d = await r.json().catch(() => null);
+    if (!r.ok || !d?.success) alert("Erro: " + (d?.error || "falha no servidor"));
     else setCampLogs([]);
   }
 
@@ -951,17 +951,10 @@ export default function ProspeccaoSitesPage() {
 
     let cancelled = false;
     async function fetchLatest() {
-      const { data } = await supabase
-        .from("campaign_logs")
-        .select("campaign_id, message, level, created_at")
-        .in("campaign_id", runningIds)
-        .order("created_at", { ascending: false })
-        .limit(runningIds.length * 3);
-      if (cancelled || !data) return;
-      const byId: Record<string, any> = {};
-      for (const row of data as any[]) {
-        if (!byId[row.campaign_id]) byId[row.campaign_id] = row;
-      }
+      const r = await fetch(`/api/campaigns/logs?latest_ids=${encodeURIComponent(runningIds.join(","))}`, { cache: "no-store" });
+      const d = await r.json().catch(() => null);
+      if (cancelled || !r.ok || !d?.latestById) return;
+      const byId = d.latestById as Record<string, any>;
       setLatestLogByCampaign(prev => ({ ...prev, ...byId }));
 
       // Parse countdown from "Aguardando Xs até o próximo envio..."
@@ -986,31 +979,33 @@ export default function ProspeccaoSitesPage() {
     fetchLatest();
     const t = setInterval(fetchLatest, 3000);
 
-    const channel = supabase
-      .channel(`ps-live-${runningIds.join("-")}`)
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "campaign_logs" },
-        (payload) => {
-          const row = payload.new as any;
-          if (!runningIds.includes(row.campaign_id)) return;
-          setLatestLogByCampaign(prev => ({ ...prev, [row.campaign_id]: row }));
-          const m = row.message?.match(/Aguardando\s+(\d+)s/i);
-          if (m) {
-            const secs = parseInt(m[1], 10);
-            const startMs = new Date(row.created_at).getTime();
-            setCountdowns(prev => ({ ...prev, [row.campaign_id]: { secs, nextAt: startMs + secs * 1000 } }));
-          }
-        }
-      )
-      .subscribe();
+    const channel = clientId && typeof supabase?.channel === "function"
+      ? supabase
+          .channel(`ps-live-${clientId}-${runningIds.join("-")}`)
+          .on(
+            "postgres_changes",
+            { event: "INSERT", schema: "public", table: "campaign_logs", filter: `client_id=eq.${clientId}` },
+            (payload) => {
+              const row = payload.new as any;
+              if (row?.client_id !== clientId || !runningIds.includes(row.campaign_id)) return;
+              setLatestLogByCampaign(prev => ({ ...prev, [row.campaign_id]: row }));
+              const m = row.message?.match(/Aguardando\s+(\d+)s/i);
+              if (m) {
+                const secs = parseInt(m[1], 10);
+                const startMs = new Date(row.created_at).getTime();
+                setCountdowns(prev => ({ ...prev, [row.campaign_id]: { secs, nextAt: startMs + secs * 1000 } }));
+              }
+            }
+          )
+          .subscribe()
+      : null;
 
     return () => {
       cancelled = true;
       clearInterval(t);
-      supabase.removeChannel(channel);
+      if (channel) supabase.removeChannel(channel);
     };
-  }, [campaigns]);
+  }, [campaigns, clientId]);
 
   const previewFor = (lead: Lead) => {
     void spintaxSeed;

@@ -1,3 +1,13 @@
+## Checkpoint de continuidade — 11/11/2026: Harness real do Editor (`SiteProjectPage`) + correções SSE/polling
+
+**Estado atual canônico:** início de `docs/SITE_STUDIO_HANDOFF.md`, seção **RETOMADA AUTOMÁTICA**.
+- **Concluído neste incremento:**
+  * Harness real do Editor em `scripts/site-editor-fixture.tsx`, `scripts/site-editor-server.mjs` e stubs mínimos `scripts/site-editor-next-stubs/` (`dynamic.tsx`, `image.tsx`, `link.tsx`, `navigation.ts`), montando `SitesLayout` + `SiteProjectPage` reais com shell `h-[100dvh] overflow-hidden` fiel ao `RootLayout`.
+  * Correções reais em `src/app/sites/[projectId]/page.tsx`: limpeza de `checkpointPreview`/`checkpointEtag` em mismatch de `run_id` ou `base_revision_id` e em `queued()`; correção do `EventSource` SSE para depender de `activeRunId` (sem reconectar a cada poll), com `AbortController`, sequência local, `If-None-Match` (`304`) e guarda de rascunho sujo (`getSiteDraft`).
+  * `scripts/site-editor.browser.ts` reescrito sem lógica copiada e aprovado no primeiro passe (`npm run sites:test-editor`: **6 passed (1.3m)** — polling + `304`, resposta atrasada preservando edição manual em Código, descarte de `run_id`/`base_revision_id` divergentes, SSE `file_written` sem reconexão, `completed` e `Cancelar`).
+- **Gates executados após o último edit de código:** `npm run sites:test-editor` (`6/6`), `npm run sites:test-preview` (`18/18`), `npx --no-install tsc --noEmit --incremental false` (exit 0), `eslint` focado (0 erros, 0 avisos), `npm test` (`197 arquivos passed | 18 skipped`, `3222 testes passed | 31 skipped`), `npm run build` (exit 0) e `git diff --check` (exit 0).
+- **Ainda falta / limites:** recuperar e validar `test-results/site-creation-nemotron.json.partial.json`; assets privados no browser; relatório de QA completo com histórico/binários; testes de lease; validação autenticada no projeto real após envio do link `/sites/<projectId>`; E2B segue `0/3`, sem commit, publicação ou migration remota.
+
 ## Checkpoint de continuidade — 31/10/2026: OpenCode CLI + Metodologia Impeccable (Craft Floor & Modo Persuade)
 
 **Estado atual canônico:** início de `docs/SITE_STUDIO_HANDOFF.md`, seção **RETOMADA AUTOMÁTICA**.

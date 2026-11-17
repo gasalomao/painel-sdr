@@ -2,8 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { Header } from "@/components/layout/header";
-import { supabase } from "@/lib/supabase";
-import { History, Search, Filter, Loader2, ArrowRight, Calendar, BrainCircuit, ChevronRight, ChevronDown, Trash2, X, Check, Play, Clock } from "lucide-react";
+import { History, Search, Filter, Loader2, ArrowRight, Calendar, BrainCircuit, ChevronRight, ChevronDown, Trash2, Play, Clock } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
@@ -62,43 +61,34 @@ export default function HistoricoIAPage() {
   const [running, setRunning] = useState(false);
   const [runFeedback, setRunFeedback] = useState<null | { ok: boolean; msg: string }>(null);
 
-  const fetchRuns = useCallback(async () => {
-    if (!clientId) return;
-    const query = supabase
-      .from("ai_organizer_runs")
-      .select("*")
-      .eq("client_id", clientId)
-      .order("started_at", { ascending: false })
-      .limit(30);
-    const { data } = await query;
-    if (data) setRuns(data as OrganizerRun[]);
-  }, [clientId]);
-
-  const fetchLogs = useCallback(async () => {
+  const fetchHistoryData = useCallback(async () => {
     if (!clientId) return;
     setLoading(true);
-    let query = supabase.from("historico_ia_leads")
-      .select("*")
-      .eq("client_id", clientId)
-      .order("created_at", { ascending: false })
-      .order("id", { ascending: false });
-    
-    if (filterStatus !== "all") {
-       query = query.eq("status_novo", filterStatus);
+    try {
+      const qs = new URLSearchParams({ limit: "200" });
+      if (filterStatus !== "all") qs.set("status_novo", filterStatus);
+      const res = await fetch(`/api/organizer/history?${qs.toString()}`, { cache: "no-store" });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.ok) {
+        if (Array.isArray(data.runs)) setRuns(data.runs as OrganizerRun[]);
+        if (Array.isArray(data.history)) {
+          setLogs(data.history);
+          if (data.history.length > 0 && !expandedBatch) {
+            setExpandedBatch(data.history[0].batch_id || "legacy");
+          }
+        }
+      }
+    } finally {
+      setLoading(false);
     }
-    
-    const { data, error } = await query;
-    if (!error && data) {
-      setLogs(data);
-      if (data.length > 0 && !expandedBatch) setExpandedBatch(data[0].batch_id || "legacy");
-    }
-    setLoading(false);
   }, [clientId, filterStatus, expandedBatch]);
 
+  const fetchRuns = fetchHistoryData;
+  const fetchLogs = fetchHistoryData;
+
   useEffect(() => {
-    fetchLogs();
-    fetchRuns();
-  }, [fetchLogs, fetchRuns]);
+    fetchHistoryData();
+  }, [fetchHistoryData]);
 
   // Carrega o estado do agendador (próxima execução, ativo/inativo, etc)
   const fetchSchedulerCfg = useCallback(async () => {
@@ -121,24 +111,17 @@ export default function HistoricoIAPage() {
   useEffect(() => { fetchSchedulerCfg(); }, [fetchSchedulerCfg]);
 
   // ────────────────────────────────────────────────────────────────────────
-  // REALTIME: assina ai_organizer_runs + historico_ia_leads. Toda vez que o
-  // organizador roda (manual, auto ou catch-up), a UI atualiza sozinha — sem
-  // F5. Antes a página só fazia 1 fetch no mount, então rodadas automáticas
-  // pareciam "perdidas" mesmo estando salvas no DB.
+  // Atualização periódica via BFF multi-tenant (sem acesso direto ao banco
+  // pelo navegador): mantém histórico e agendador sincronizados em segundo plano.
   // ────────────────────────────────────────────────────────────────────────
   useEffect(() => {
-    const channel = supabase
-      .channel("historico-ia-live")
-      .on("postgres_changes", { event: "*", schema: "public", table: "ai_organizer_runs" }, () => {
-        fetchRuns();
-        fetchSchedulerCfg();
-      })
-      .on("postgres_changes", { event: "*", schema: "public", table: "historico_ia_leads" }, () => {
-        fetchLogs();
-      })
-      .subscribe();
-    return () => { supabase.removeChannel(channel); };
-  }, [fetchRuns, fetchLogs, fetchSchedulerCfg]);
+    if (!clientId) return;
+    const timer = setInterval(() => {
+      fetchHistoryData();
+      fetchSchedulerCfg();
+    }, 30_000);
+    return () => clearInterval(timer);
+  }, [clientId, fetchHistoryData, fetchSchedulerCfg]);
 
   // Disparo manual a partir desta tela — pra você ver o histórico aparecer ao vivo.
   const runOrganizerNow = async () => {
@@ -181,31 +164,30 @@ export default function HistoricoIAPage() {
   async function executeDelete() {
     if (!confirmDelete) return;
     setIsDeleting(true);
-    
+
     try {
-        if (confirmDelete.type === 'log') {
-            const id = confirmDelete.id as number;
-            const { error } = await supabase.from("historico_ia_leads").delete().eq("id", id);
-            if (error) throw error;
-            setLogs(prev => prev.filter(l => l.id !== id));
-        } else {
-            const batchId = confirmDelete.id as string;
-            let query = supabase.from("historico_ia_leads").delete();
-            if (batchId === "legacy") {
-                query = query.is("batch_id", null);
-            } else {
-                query = query.eq("batch_id", batchId);
-            }
-            const { error } = await query;
-            if (error) throw error;
-            setLogs(prev => prev.filter(l => (l.batch_id || "legacy") !== batchId));
-            if (expandedBatch === batchId) setExpandedBatch(null);
-        }
+      if (confirmDelete.type === "log") {
+        const id = confirmDelete.id as number;
+        const res = await fetch(`/api/organizer/history?id=${id}`, { method: "DELETE" });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.ok) throw new Error(json?.error || "Erro ao excluir item");
+        setLogs((prev) => prev.filter((l) => l.id !== id));
+      } else {
+        const batchId = confirmDelete.id as string;
+        const res = await fetch(
+          `/api/organizer/history?batch_id=${encodeURIComponent(batchId)}`,
+          { method: "DELETE" },
+        );
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.ok) throw new Error(json?.error || "Erro ao excluir lote");
+        setLogs((prev) => prev.filter((l) => (l.batch_id || "legacy") !== batchId));
+        if (expandedBatch === batchId) setExpandedBatch(null);
+      }
     } catch (err: any) {
-        alert("Erro ao excluir: " + err.message);
+      alert("Erro ao excluir: " + err.message);
     } finally {
-        setIsDeleting(false);
-        setConfirmDelete(null);
+      setIsDeleting(false);
+      setConfirmDelete(null);
     }
   }
 

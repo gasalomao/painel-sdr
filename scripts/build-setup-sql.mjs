@@ -15,13 +15,20 @@ if (!existsSync(sqlPath)) {
 const APPENDED_MIGRATIONS = [
   "016_website_studio.sql",
   "017_website_studio_completion_guard.sql",
+  "017_dashboard_tasks.sql",
+  "018_agent_followups_FINAL.sql",
   "018_enable_impeccable_skill.sql",
+  "019_backup_config.sql",
+  "020_backup_security_runs.sql",
+  "021_agent_followup_claims.sql",
+  "022_backup_diagnostics.sql",
   "023_performance_leads_indexes.sql",
   "024_enterprise_security_hardening.sql",
   "025_prospeccao_autonoma_previa.sql",
   "026_whatsapp_warmup.sql",
   "027_whatsapp_warmup_schema_fix.sql",
   "028_whatsapp_warmup_swarm_groups.sql",
+  "029_followup_reschedule.sql",
 ];
 
 let sql = readFileSync(sqlPath, "utf8");

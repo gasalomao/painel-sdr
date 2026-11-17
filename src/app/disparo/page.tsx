@@ -17,6 +17,7 @@ import {
 import { TEMPLATE_VARIABLES, renderTemplate, greetingFor } from "@/lib/template-vars";
 import { MediaUploader } from "@/components/media-uploader";
 import { cn } from "@/lib/utils";
+import { mergeRealtimeLog } from "@/lib/realtime-logs";
 import { useClientSession } from "@/lib/use-session";
 import { LeadIntelligenceBatch } from "@/components/lead-intelligence-batch";
 import { ModelOptions } from "@/components/ai-module-shared";
@@ -216,15 +217,23 @@ export default function DisparoPage() {
     setLoadingInstances(true);
     setInstancesError(null);
     try {
-      const { data: conns } = await supabase.from("channel_connections").select("instance_name").eq("client_id", clientId);
-      const myInstances = new Set((conns || []).map((c: any) => c.instance_name));
-
-      // Timeout generoso (35s) — Evolution pode levar até 30s em instâncias pesadas
-      const ctrl = new AbortController();
-      const tm = setTimeout(() => ctrl.abort(), 35000);
-      const r = await fetch("/api/whatsapp?instances=true", { signal: ctrl.signal, cache: "no-store" });
-      clearTimeout(tm);
-      const d = await r.json();
+      const [instRes, evoRes] = await Promise.all([
+        fetch("/api/instances?scope=tenant", { cache: "no-store" }).then((x) => x.json()).catch(() => null),
+        (async () => {
+          // Timeout generoso (35s) — Evolution pode levar até 30s em instâncias pesadas
+          const ctrl = new AbortController();
+          const tm = setTimeout(() => ctrl.abort(), 35000);
+          try {
+            const r = await fetch("/api/whatsapp?instances=true", { signal: ctrl.signal, cache: "no-store" });
+            return await r.json();
+          } finally {
+            clearTimeout(tm);
+          }
+        })(),
+      ]);
+      const conns = Array.isArray(instRes?.instances) ? instRes.instances : [];
+      const myInstances = new Set(conns.map((c: { instance_name?: string; instanceName?: string }) => c.instance_name || c.instanceName).filter(Boolean));
+      const d = evoRes || {};
       console.log("[DISPARO] loadInstances() resposta:", d);
       if (d.success && Array.isArray(d.instances)) {
         const filtered = d.instances.filter((i: any) => myInstances.has(i.instanceName));
@@ -246,24 +255,17 @@ export default function DisparoPage() {
   }, [clientId]);
 
   async function loadLeads() {
-    const sessRes = await fetch("/api/auth/session");
-    const session = await sessRes.json();
+    const [sessRes, leadsRes] = await Promise.all([
+      fetch("/api/auth/session"),
+      fetch("/api/leads/lookup?mode=disparo", { cache: "no-store" }),
+    ]);
+    const session = await sessRes.json().catch(() => null);
+    const leadsJson = await leadsRes.json().catch(() => null);
 
     setIsAdmin(!!session?.isAdmin && !session?.impersonating);
     setDefaultAiModel(session?.defaultAiModel || null);
 
-    let query = supabase
-      .from("leads_extraidos")
-      .select("id, remoteJid, nome_negocio, ramo_negocio, status, instance_name")
-      .order("created_at", { ascending: false })
-      .limit(2000);
-
-    if (session?.clientId) {
-      query = query.eq("client_id", session.clientId);
-    }
-
-    const { data } = await query;
-    setLeads((data as Lead[]) || []);
+    setLeads(Array.isArray(leadsJson?.leads) ? (leadsJson.leads as Lead[]) : []);
   }
 
   useEffect(() => {
@@ -310,34 +312,38 @@ export default function DisparoPage() {
       return;
     }
 
-    // Carrega logs iniciais
+    // Carrega logs iniciais via BFF
     async function fetchInitialLogs() {
-      const { data } = await supabase
-        .from("campaign_logs")
-        .select("*")
-        .eq("campaign_id", activeLogCampaignId)
-        .order("created_at", { ascending: true })
-        .limit(100);
-      setLogs(data || []);
+      const r = await fetch(`/api/campaigns/logs?campaign_id=${encodeURIComponent(activeLogCampaignId!)}&limit=100`, { cache: "no-store" });
+      const d = await r.json().catch(() => null);
+      if (r.ok && d?.success) setLogs(Array.isArray(d.logs) ? d.logs : []);
     }
     fetchInitialLogs();
+    const logPoll = setInterval(() => {
+      if (!document.hidden) fetchInitialLogs();
+    }, 4000);
 
     // Inscrição Realtime
-    const channel = supabase
-      .channel(`logs-${activeLogCampaignId}`)
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "campaign_logs", filter: `campaign_id=eq.${activeLogCampaignId}` },
-        (payload) => {
-          setLogs(prev => [...prev, payload.new as any].slice(-100));
-        }
-      )
-      .subscribe();
+    const channel = typeof supabase?.channel === "function"
+      ? supabase
+          .channel(`logs-${activeLogCampaignId}`)
+          .on(
+            "postgres_changes",
+            { event: "INSERT", schema: "public", table: "campaign_logs", filter: `campaign_id=eq.${activeLogCampaignId}` },
+            (payload) => {
+              const incoming = payload.new as any;
+              if (clientId && incoming?.client_id && incoming.client_id !== clientId) return;
+              setLogs((prev) => mergeRealtimeLog(prev, incoming, 100));
+            }
+          )
+          .subscribe()
+      : null;
 
     return () => {
-      supabase.removeChannel(channel);
+      clearInterval(logPoll);
+      if (channel) supabase.removeChannel(channel);
     };
-  }, [activeLogCampaignId]);
+  }, [activeLogCampaignId, clientId]);
 
   // Auto-scroll logs
   useEffect(() => {
@@ -346,13 +352,9 @@ export default function DisparoPage() {
 
   async function refreshLogs() {
     if (!activeLogCampaignId) return;
-    const { data } = await supabase
-      .from("campaign_logs")
-      .select("*")
-      .eq("campaign_id", activeLogCampaignId)
-      .order("created_at", { ascending: true })
-      .limit(100);
-    setLogs(data || []);
+    const r = await fetch(`/api/campaigns/logs?campaign_id=${encodeURIComponent(activeLogCampaignId)}&limit=100`, { cache: "no-store" });
+    const d = await r.json().catch(() => null);
+    if (r.ok && d?.success) setLogs(Array.isArray(d.logs) ? d.logs : []);
   }
 
   // Polling mais rápido se houver campanha rodando (também sem loading=true)
@@ -371,42 +373,36 @@ export default function DisparoPage() {
 
     let cancelled = false;
     async function fetchLatest() {
-      const { data } = await supabase
-        .from("campaign_logs")
-        .select("campaign_id, message, level, created_at")
-        .in("campaign_id", runningIds)
-        .order("created_at", { ascending: false })
-        .limit(runningIds.length * 3);
-      if (cancelled || !data) return;
-      const byId: Record<string, any> = {};
-      for (const row of data as any[]) {
-        if (!byId[row.campaign_id]) byId[row.campaign_id] = row;
-      }
-      setLatestLogByCampaign(prev => ({ ...prev, ...byId }));
+      const r = await fetch(`/api/campaigns/logs?latest_ids=${encodeURIComponent(runningIds.join(","))}`, { cache: "no-store" });
+      const d = await r.json().catch(() => null);
+      if (cancelled || !r.ok || !d?.latestById) return;
+      setLatestLogByCampaign(prev => ({ ...prev, ...d.latestById }));
     }
     fetchLatest();
     const t = setInterval(fetchLatest, 4000);
 
     // Também escuta realtime de INSERT pra cada campanha rodando (fica instantâneo).
-    const channel = supabase
-      .channel(`live-log-${runningIds.join("-")}`)
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "campaign_logs" },
-        (payload) => {
-          const row = payload.new as any;
-          if (!runningIds.includes(row.campaign_id)) return;
-          setLatestLogByCampaign(prev => ({ ...prev, [row.campaign_id]: row }));
-        }
-      )
-      .subscribe();
+    const channel = clientId && typeof supabase?.channel === "function"
+      ? supabase
+          .channel(`live-log-${clientId}-${runningIds.join("-")}`)
+          .on(
+            "postgres_changes",
+            { event: "INSERT", schema: "public", table: "campaign_logs", filter: `client_id=eq.${clientId}` },
+            (payload) => {
+              const row = payload.new as any;
+              if (row?.client_id !== clientId || !runningIds.includes(row.campaign_id)) return;
+              setLatestLogByCampaign(prev => ({ ...prev, [row.campaign_id]: row }));
+            }
+          )
+          .subscribe()
+      : null;
 
     return () => {
       cancelled = true;
       clearInterval(t);
-      supabase.removeChannel(channel);
+      if (channel) supabase.removeChannel(channel);
     };
-  }, [campaigns]);
+  }, [campaigns, clientId]);
 
   const filteredLeads = useMemo(() => {
     return leads.filter(l => {
@@ -609,8 +605,9 @@ export default function DisparoPage() {
 
   async function clearLogs(campaignId: string) {
     if (!confirm("Tem certeza que deseja apagar todo o histórico de logs desta campanha?")) return;
-    const { error } = await supabase.from("campaign_logs").delete().eq("campaign_id", campaignId);
-    if (error) alert("Erro ao apagar logs: " + error.message);
+    const r = await fetch(`/api/campaigns/logs?campaign_id=${encodeURIComponent(campaignId)}`, { method: "DELETE" });
+    const d = await r.json().catch(() => null);
+    if (!r.ok || !d?.success) alert("Erro ao apagar logs: " + (d?.error || "falha no servidor"));
     else setLogs([]);
   }
 

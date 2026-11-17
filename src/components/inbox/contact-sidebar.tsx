@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Autocomplete } from "@base-ui/react/autocomplete";
-import { supabase } from "@/lib/supabase";
 import type { ContactCrmData, ContactCrmLead } from "@/lib/inbox/contact-crm";
 import type { Contact } from "@/types";
 import {
@@ -332,14 +331,13 @@ function ContactSidebarContent({ contact, clientId, aiAgents = [], onContactUpda
     let active = true;
     void (async () => {
       try {
-        let query = supabase.from("sessions").select("agent_id, instance_name").eq("client_id", clientId);
-        query = sessionId ? query.eq("id", sessionId) : query.eq("contact_id", contactId)
-          .order("last_message_at", { ascending: false, nullsFirst: false }).limit(1);
-        const { data, error } = await query.maybeSingle();
-        if (error) throw error;
+        const params = new URLSearchParams(sessionId ? { session_id: sessionId } : { contact_id: contactId });
+        const res = await fetch(`/api/inbox/sessions?${params.toString()}`, { cache: "no-store" });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.ok) throw new Error(json?.error || "Falha ao buscar sessão");
         if (active) {
-          setAssignedAgentId(data?.agent_id ? String(data.agent_id) : "");
-          if (data?.instance_name) setSessionInstanceName(data.instance_name);
+          setAssignedAgentId(json.session?.agent_id ? String(json.session.agent_id) : "");
+          if (json.session?.instance_name) setSessionInstanceName(json.session.instance_name);
         }
       } catch {
         if (active) {
@@ -556,27 +554,16 @@ function ContactSidebarContent({ contact, clientId, aiAgents = [], onContactUpda
 
     try {
       const agentIdNum = newAgentId ? Number(newAgentId) : null;
-
-      // 1. Atualiza na tabela sessions:
-      //    - Se sessionId fornecido: update exato por id (sessão ativa).
-      //    - Senão: update por contact_id (legado, cobre todas as sessões).
-      //    Antes só havia o caminho contact_id, que bagunçava sessão errada
-      //    quando o contato tinha múltiplos connects (instância velha + nova).
-      let updatePromise;
-      if (sessionId) {
-        updatePromise = supabase
-          .from("sessions")
-          .update({ agent_id: agentIdNum })
-          .eq("id", sessionId);
-      } else {
-        updatePromise = supabase
-          .from("sessions")
-          .update({ agent_id: agentIdNum })
-          .eq("contact_id", contact.id);
-      }
-      const { error: sessionErr } = await updatePromise;
-
-      if (sessionErr) throw sessionErr;
+      const res = await fetch("/api/inbox/sessions", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...(sessionId ? { sessionId } : { contactId: contact.id }),
+          agent_id: agentIdNum,
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.ok) throw new Error(json?.error || "Falha ao atribuir agente");
 
       setAssignedAgentId(newAgentId);
       toast.success(newAgentId ? "Agente de IA atribuído à conversa!" : "Atendimento sem Agente de IA atribuído.");
@@ -595,9 +582,13 @@ function ContactSidebarContent({ contact, clientId, aiAgents = [], onContactUpda
     noteMutation.current = true;
     setSavingNote(true);
     try {
-      const { data, error } = await supabase.from("contacts").update({ notes: savedNote })
-        .eq("id", current.id).eq("client_id", clientId).select("id").maybeSingle();
-      if (error || !data) throw new Error("Contato não atualizado");
+      const res = await fetch(`/api/contacts/${encodeURIComponent(current.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes: savedNote }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.ok) throw new Error("Contato não atualizado");
       if (!mounted.current) return;
       const updated = { ...latestContact.current!, notes: savedNote };
       latestContact.current = updated;
@@ -686,9 +677,13 @@ function ContactSidebarContent({ contact, clientId, aiAgents = [], onContactUpda
     setTagSuggestionsOpen(false);
     setAddingTag(true);
     try {
-      const { data, error } = await supabase.from("contacts").update({ tags: updatedTags })
-        .eq("id", current.id).eq("client_id", clientId).select("id").maybeSingle();
-      if (error || !data) throw new Error("Contato não atualizado");
+      const res = await fetch(`/api/contacts/${encodeURIComponent(current.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tags: updatedTags }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.ok) throw new Error("Contato não atualizado");
       if (!mounted.current) return;
       const updated = {
         ...latestContact.current!,

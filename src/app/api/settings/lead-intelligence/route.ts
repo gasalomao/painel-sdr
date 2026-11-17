@@ -97,8 +97,17 @@ async function listAllModels(): Promise<ModelOpt[]> {
   return [...g, ...nv, ...o, ...gw];
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
+    const ctx = await requireClientId(req);
+    if (!ctx.ok) return ctx.response;
+    if (!ctx.isAdmin) {
+      return NextResponse.json(
+        { success: false, error: "Apenas admin pode consultar configurações de IA." },
+        { status: 403 }
+      );
+    }
+
     const [{ data: cur }, models] = await Promise.all([
       supabaseAdmin.from("app_settings").select("value").eq("key", KEY).maybeSingle(),
       listAllModels(),
@@ -108,8 +117,9 @@ export async function GET() {
       model: cur?.value || DEFAULT_MODEL,
       models,
     });
-  } catch (e: any) {
-    return NextResponse.json({ success: false, error: e?.message || String(e) }, { status: 500 });
+  } catch (e: unknown) {
+    console.error("[settings/lead-intelligence/GET] Erro:", e instanceof Error ? e.message : e);
+    return NextResponse.json({ success: false, error: "Falha ao carregar configurações de IA" }, { status: 500 });
   }
 }
 
@@ -133,7 +143,8 @@ export async function PATCH(req: NextRequest) {
       .upsert({ key: KEY, value: model, updated_at: new Date().toISOString() }, { onConflict: "key" });
     if (error) throw error;
     return NextResponse.json({ success: true, model });
-  } catch (e: any) {
-    return NextResponse.json({ success: false, error: e?.message || String(e) }, { status: 500 });
+  } catch (e: unknown) {
+    console.error("[settings/lead-intelligence/PATCH] Erro:", e instanceof Error ? e.message : e);
+    return NextResponse.json({ success: false, error: "Falha ao salvar modelo de IA" }, { status: 500 });
   }
 }

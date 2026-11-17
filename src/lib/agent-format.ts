@@ -135,6 +135,64 @@ export function checkSchedulesSync(schedulesJSON: any, now: Date = new Date()): 
   return false; // ABERTO
 }
 
+/**
+ * Calcula o próximo instante de abertura da escala do agente (em BRT / America/Sao_Paulo).
+ * Usado para reagendar follow-ups fora do expediente sem loop a cada tick.
+ */
+export function computeNextBusinessWindowAt(
+  now: Date,
+  schedulesJSON: unknown,
+  is24h?: boolean,
+): Date | null {
+  if (is24h !== false || !Array.isArray(schedulesJSON) || schedulesJSON.length === 0) {
+    return null;
+  }
+
+  const TZ = "America/Sao_Paulo";
+  const dayMap: Record<string, string> = {
+    Sun: "Domingo",
+    Mon: "Segunda-feira",
+    Tue: "Terça-feira",
+    Wed: "Quarta-feira",
+    Thu: "Quinta-feira",
+    Fri: "Sexta-feira",
+    Sat: "Sábado",
+  };
+
+  for (let offsetDays = 0; offsetDays <= 7; offsetDays++) {
+    const probe = new Date(now.getTime() + offsetDays * 86_400_000);
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: TZ,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(probe);
+    const getDatePart = (type: string) => parts.find((p) => p.type === type)?.value || "";
+    const dateStr = `${getDatePart("year")}-${getDatePart("month")}-${getDatePart("day")}`;
+
+    const wd = new Intl.DateTimeFormat("en-US", {
+      timeZone: TZ,
+      weekday: "short",
+    }).formatToParts(probe).find((p) => p.type === "weekday")?.value || "";
+    const dayName = dayMap[wd] || "";
+
+    const sched = (schedulesJSON as Array<{ day?: string; active?: boolean; start?: string; end?: string }>).find(
+      (s) => s && s.day === dayName,
+    );
+    if (!sched || !sched.active || typeof sched.start !== "string") continue;
+    const startMatch = /^(\d{2}):(\d{2})$/.exec(sched.start.trim());
+    if (!startMatch) continue;
+
+    const candidate = new Date(`${dateStr}T${startMatch[1]}:${startMatch[2]}:00-03:00`);
+    if (!Number.isNaN(candidate.getTime()) && candidate.getTime() > now.getTime()) {
+      return candidate;
+    }
+  }
+
+  // Fallback conservador caso todos os 7 dias estejam inativos (evita spin de 2 min)
+  return new Date(now.getTime() + 60 * 60_000);
+}
+
 /** Intensidade do picote: 1 = picota pouco (mensagens maiores) · 5 = picota muito. */
 export type SplitIntensity = 1 | 2 | 3 | 4 | 5;
 

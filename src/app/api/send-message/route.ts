@@ -5,60 +5,10 @@ import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { registerManualSend } from "@/lib/manual-send-registry";
 import { isInstanceOwnedByClient, requireClientId } from "@/lib/tenant";
 
-// Mesmo bucket público usado pelo webhook de entrada (ver webhooks/whatsapp/route.ts).
-// Mantemos o upload para não inflar o DB com data URIs gigantes de áudio/imagem.
-const MEDIA_BUCKET = "whatsapp_media";
-let bucketReady: boolean | null = null;
-
-async function ensureMediaBucket(): Promise<boolean> {
-  if (bucketReady) return true;
-  try {
-    const { data: list } = await supabase.storage.listBuckets();
-    if (list?.some((b: any) => b.name === MEDIA_BUCKET)) {
-      bucketReady = true;
-      return true;
-    }
-    const { error: createErr } = await supabase.storage.createBucket(MEDIA_BUCKET, {
-      public: true,
-      fileSizeLimit: 50 * 1024 * 1024,
-    });
-    if (createErr && !/already exists/i.test(createErr.message)) return false;
-    bucketReady = true;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function uploadOutgoingMedia(
-  base64: string,
-  remoteJid: string,
-  mimetype: string,
-  fileName?: string
-): Promise<string | null> {
-  try {
-    if (!(await ensureMediaBucket())) return null;
-    const clean = base64.replace(/^data:.*?;base64,/, "");
-    const buffer = Buffer.from(clean, "base64");
-    const ext = fileName?.split(".").pop() || mimetype?.split("/")[1]?.split(";")[0] || "bin";
-    const path = `${remoteJid}/out-${Date.now()}.${ext}`;
-    const { error } = await supabase.storage
-      .from(MEDIA_BUCKET)
-      .upload(path, buffer, { contentType: mimetype || "application/octet-stream", upsert: true });
-    if (error) {
-      console.warn("[SEND-MESSAGE] upload falhou:", error.message);
-      return null;
-    }
-    return supabase.storage.from(MEDIA_BUCKET).getPublicUrl(path).data.publicUrl;
-  } catch (err: any) {
-    console.warn("[SEND-MESSAGE] upload erro:", err?.message);
-    return null;
-  }
-}
-
 function inferMimeForType(type: string, explicit?: string): string {
   if (explicit) return explicit;
   if (type === "image") return "image/jpeg";
+  if (type === "video") return "video/mp4";
   if (type === "audio") return "audio/ogg; codecs=opus";
   if (type === "document") return "application/pdf";
   return "application/octet-stream";
@@ -166,7 +116,8 @@ export async function POST(req: NextRequest) {
     if (media && media.base64) {
       outMimetype = inferMimeForType(media.type, media.mimetype);
       outMediaType = media.type === "document" ? "document" : media.type;
-      outMediaUrl = await uploadOutgoingMedia(media.base64, cleanJid, outMimetype, media.fileName);
+      const { uploadMediaBase64 } = await import("@/app/api/webhooks/shared-helpers");
+      outMediaUrl = await uploadMediaBase64(media.base64, cleanJid, outMimetype, ctx.clientId, media.fileName);
     }
 
     // Registra IMEDIATAMENTE que esta msg foi enviada manualmente.
@@ -315,7 +266,7 @@ export async function POST(req: NextRequest) {
     if (dashErr?.code === "PGRST204") {
       const minimal = {
         client_id: ctx.clientId,
-        remote_jid: remoteJid,
+        remote_jid: cleanJid,
         instance_name: instanceName,
         message_id: msgId,
         sender_type: 'human',
@@ -374,8 +325,8 @@ export async function POST(req: NextRequest) {
       mediaUrl: outMediaUrl,
     });
 
-  } catch (err: any) {
-    console.error("[SEND-MESSAGE] Erro:", err.message);
-    return NextResponse.json({ success: false, error: err.message || "Erro interno" }, { status: 500 });
+  } catch (err: unknown) {
+    console.error("[SEND-MESSAGE] Erro:", err instanceof Error ? err.message : err);
+    return NextResponse.json({ success: false, error: "Erro interno ao enviar mensagem" }, { status: 500 });
   }
 }

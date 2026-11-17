@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { supabase, supabaseAdmin } from "@/lib/supabase";
+import { supabaseAdmin } from "@/lib/supabase_admin";
 import { createHash } from "crypto";
 import { logTokenUsage } from "@/lib/token-usage";
 import { buildOrganizerSystemPrompt, extractJsonSafe, isTerminalColumn } from "@/lib/organizer-prompt";
 import { requireClientId } from "@/lib/tenant";
 import { hasInternalSecret } from "@/lib/internal-auth";
 
-const adminClient = supabaseAdmin || supabase;
+const adminClient = supabaseAdmin;
 
 /**
  * Hash determinístico das mensagens de um chat + status atual no Kanban.
@@ -77,6 +77,7 @@ export async function POST(req: NextRequest) {
     if (!runId) return;
     try {
       const duration = Date.now() - runStartedAt.getTime();
+      if (!adminClient) return;
       let q = adminClient.from("ai_organizer_runs").update({
         finished_at: new Date().toISOString(),
         duration_ms: duration,
@@ -107,8 +108,17 @@ export async function POST(req: NextRequest) {
   }
 
   try {
+    if (!adminClient) {
+      return NextResponse.json({ success: false, error: "DB indisponível" }, { status: 500 });
+    }
     const body = await req.json().catch(() => ({}));
     let { apiKey, model, provider } = body || {};
+    if (!isInternal && !sessionIsAdmin) {
+      // Cliente comum não pode injetar chave, modelo ou provedor customizado no request
+      apiKey = undefined;
+      model = undefined;
+      provider = undefined;
+    }
     const {
       triggered_by,
       clientId,
@@ -205,7 +215,7 @@ export async function POST(req: NextRequest) {
 
     // 1. Identificar conversas ativas na janela (ou targetJids específicos no modo realtime)
     const requestedJids = Array.isArray(targetJids)
-      ? targetJids.map((j) => String(j || "").trim()).filter(Boolean)
+      ? targetJids.map((j) => String(j || "").trim()).filter(Boolean).slice(0, 100)
       : [];
 
     let activeJids: string[] = [];
@@ -769,9 +779,10 @@ export async function POST(req: NextRequest) {
       run_id: runId,
       logs,
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
     console.error("Erro AI-Organizer:", err);
-    await finishRun("error", { error: err?.message?.slice(0, 500) });
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+    await finishRun("error", { error: errMsg.slice(0, 500) });
+    return NextResponse.json({ success: false, error: "Erro ao executar Organizador IA" }, { status: 500 });
   }
 }

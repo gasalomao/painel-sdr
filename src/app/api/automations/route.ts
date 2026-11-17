@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
-import { validateCampaignInstanceAccess } from "@/lib/campaign-instance-access";
+import { validateCampaignInstanceAccess, validateClientAgentAccess } from "@/lib/campaign-instance-access";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 import { parseMinReviews } from "@/lib/scraper-review-count";
 import {
@@ -31,8 +31,9 @@ export async function GET(req: NextRequest) {
     const { data, error } = await q;
     if (error) throw error;
     return NextResponse.json({ success: true, automations: data || [] });
-  } catch (e: any) {
-    return NextResponse.json({ success: false, error: e.message }, { status: 500 });
+  } catch (e: unknown) {
+    console.error("[automations/GET] Erro:", e instanceof Error ? e.message : e);
+    return NextResponse.json({ success: false, error: "Falha ao listar automações" }, { status: 500 });
   }
 }
 
@@ -128,11 +129,15 @@ export async function POST(req: NextRequest) {
     if (!access.ok) {
       return NextResponse.json({ success: false, error: access.error }, { status: access.status });
     }
+    const agentAccess = await validateClientAgentAccess(ctx.clientId, body.agent_id);
+    if (!agentAccess.ok) {
+      return NextResponse.json({ success: false, error: agentAccess.error }, { status: agentAccess.status });
+    }
 
     const row = {
       client_id: ctx.clientId,
       name: String(body.name).trim(),
-      agent_id: body.agent_id ? Number(body.agent_id) : null,
+      agent_id: agentAccess.agentId,
       instance_name: String(body.instance_name).trim(),
       niches: Array.isArray(body.niches) ? body.niches : [],
       regions: Array.isArray(body.regions) ? body.regions : [],
@@ -188,7 +193,8 @@ export async function POST(req: NextRequest) {
     }
     if (error) throw error;
     return NextResponse.json({ success: true, automation: data });
-  } catch (e: any) {
-    return NextResponse.json({ success: false, error: e.message }, { status: 500 });
+  } catch (e: unknown) {
+    console.error("[automations/POST] Erro:", e instanceof Error ? e.message : e);
+    return NextResponse.json({ success: false, error: "Falha ao criar automação" }, { status: 500 });
   }
 }

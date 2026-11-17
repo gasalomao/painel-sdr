@@ -6,24 +6,12 @@ import { ConversationList } from "./conversation-list";
 
 const mocks = vi.hoisted(() => ({
   fetch: vi.fn(),
+  photoSyncFetch: vi.fn(),
   toast: { info: vi.fn(), success: vi.fn(), error: vi.fn() },
-  supabaseData: {} as Record<string, any[]>,
+  inboxData: { sessions: [] as any[], messages: [] as any[], columns: [] as any[], leads: [] as any[] },
 }));
 vi.mock("sonner", () => ({ toast: mocks.toast }));
 vi.mock("@/components/ui/scroll-area", () => ({ ScrollArea: ({ children }: { children: React.ReactNode }) => <div>{children}</div> }));
-vi.mock("@/lib/supabase", () => ({
-  supabase: {
-    from: (table: string) => {
-      const data = mocks.supabaseData[table] ?? [];
-      const query = new Proxy({}, {
-        get: (_, key) => key === "then"
-          ? (resolve: (result: unknown) => void) => Promise.resolve(resolve({ data, error: null }))
-          : () => query
-      });
-      return query;
-    }
-  },
-}));
 
 const jid = "5511999990001@s.whatsapp.net";
 const oldPhoto = "https://pps.whatsapp.net/old.jpg";
@@ -37,8 +25,15 @@ const response = (body: unknown, status = 200) => new Response(JSON.stringify(bo
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.supabaseData = {};
-  mocks.fetch.mockReset();
+  mocks.inboxData = { sessions: [], messages: [], columns: [], leads: [] };
+  mocks.photoSyncFetch.mockReset();
+  mocks.fetch.mockReset().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.startsWith("/api/inbox/conversations")) {
+      return response({ ok: true, ...mocks.inboxData });
+    }
+    return mocks.photoSyncFetch(url, init);
+  });
   vi.stubGlobal("fetch", mocks.fetch);
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
@@ -61,17 +56,17 @@ describe("ConversationList sincronização manual de fotos", () => {
     { name: "HTTP 200 cancelado", status: 200, body: { success: false, partial: true, failed: 0, cancelled: true, avatars: { [jid]: oldPhoto } } },
     { name: "HTTP 200 inválido", status: 200, body: {} },
   ])("não anuncia sucesso quando a segunda chamada retorna $name", async ({ status, body }) => {
-    mocks.fetch.mockResolvedValueOnce(response({ success: true, updated: 2 })).mockResolvedValueOnce(response(body, status));
+    mocks.photoSyncFetch.mockResolvedValueOnce(response({ success: true, updated: 2 })).mockResolvedValueOnce(response(body, status));
     const loaded = await sync();
-    expect(mocks.fetch).toHaveBeenCalledTimes(2);
-    expect(JSON.parse(mocks.fetch.mock.calls[1][1].body)).toEqual({ jids: [jid], instance: "own", force: true });
+    expect(mocks.photoSyncFetch).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(mocks.photoSyncFetch.mock.calls[1][1].body)).toEqual({ jids: [jid], instance: "own", force: true });
     expect(mocks.toast.error).toHaveBeenCalledWith(expect.stringContaining("Falha ao sincronizar fotos"));
     expect(mocks.toast.success).not.toHaveBeenCalled();
     expect(loaded).not.toHaveBeenCalled();
   });
 
   it("reporta erro de rede da segunda chamada sem descartar a foto anterior", async () => {
-    mocks.fetch.mockResolvedValueOnce(response({ success: true, updated: 0 })).mockRejectedValueOnce(new TypeError("fetch failed"));
+    mocks.photoSyncFetch.mockResolvedValueOnce(response({ success: true, updated: 0 })).mockRejectedValueOnce(new TypeError("fetch failed"));
     const loaded = await sync();
     expect(mocks.toast.error).toHaveBeenCalled();
     expect(mocks.toast.success).not.toHaveBeenCalled();
@@ -79,15 +74,15 @@ describe("ConversationList sincronização manual de fotos", () => {
   });
 
   it("interrompe hidratação quando o bulk informa sucesso parcial", async () => {
-    mocks.fetch.mockResolvedValueOnce(response({ success: true, partial: true, failed: 1, updated: 1 }));
+    mocks.photoSyncFetch.mockResolvedValueOnce(response({ success: true, partial: true, failed: 1, updated: 1 }));
     await sync();
     expect(mocks.toast.error).toHaveBeenCalled();
     expect(mocks.toast.success).not.toHaveBeenCalled();
-    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+    expect(mocks.photoSyncFetch).toHaveBeenCalledTimes(1);
   });
 
   it("aplica avatares e anuncia sucesso somente após as duas chamadas concluírem", async () => {
-    mocks.fetch.mockResolvedValueOnce(response({ success: true, updated: 1 }))
+    mocks.photoSyncFetch.mockResolvedValueOnce(response({ success: true, updated: 1 }))
       .mockResolvedValueOnce(response({ success: true, partial: false, failed: 0, avatars: { [jid]: newPhoto } }));
     const loaded = await sync();
     expect(loaded).toHaveBeenCalledWith([expect.objectContaining({ contact: expect.objectContaining({ avatar_url: newPhoto }) })]);
@@ -130,9 +125,7 @@ describe("ConversationList filtro por coluna do Kanban", () => {
       photos: null,
       created_at: "2026-01-01",
     };
-    mocks.supabaseData = {
-      leads_extraidos: [uncontactedLead, contactedLead],
-    };
+    mocks.inboxData.leads = [uncontactedLead, contactedLead];
 
     const convWithChat: Conversation = {
       ...conversation,
@@ -186,6 +179,118 @@ describe("ConversationList filtro por coluna do Kanban", () => {
           avatar_url: "https://example.com/foto.jpg",
         }),
       })
+    );
+  });
+});
+
+describe("ConversationList hidratação inicial de avatares", () => {
+  it("não descarta conversas recém-carregadas quando conversations começa vazio", async () => {
+    const semFotoJid = "5511977776666@s.whatsapp.net";
+    mocks.inboxData.sessions = [
+      {
+        id: "sess-1",
+        contact_id: "c-1",
+        instance_name: "own",
+        bot_status: "bot_active",
+        unread_count: 1,
+        last_message: "Oi",
+        last_message_at: "2026-01-05T12:00:00Z",
+        contact: {
+          id: "c-1",
+          remote_jid: semFotoJid,
+          phone_number: "5511977776666",
+          name: "Carlos",
+          avatar_url: null,
+        },
+      },
+    ];
+    mocks.photoSyncFetch.mockResolvedValueOnce(
+      response({ success: true, avatars: { [semFotoJid]: newPhoto } })
+    );
+
+    const loaded = vi.fn();
+    render(
+      <ConversationList
+        activeConversationId={null}
+        onSelect={vi.fn()}
+        conversations={[]}
+        onConversationsLoaded={loaded}
+        clientId="a"
+        instances={[{ id: "1", instance_name: "own", status: "open" } as any]}
+      />
+    );
+
+    await waitFor(() => expect(loaded).toHaveBeenCalledTimes(2));
+    expect(loaded.mock.calls[0][0]).toHaveLength(1);
+    expect(loaded.mock.calls[1][0]).toEqual([
+      expect.objectContaining({
+        id: semFotoJid,
+        contact: expect.objectContaining({ avatar_url: newPhoto }),
+      }),
+    ]);
+  });
+
+  it("hidrata avatares quando instances chega depois do carregamento inicial", async () => {
+    const semFotoJid = "5511977775555@s.whatsapp.net";
+    const initialConv: Conversation = {
+      id: semFotoJid,
+      instance_name: "own",
+      user_id: "a",
+      contact_id: "c-2",
+      status: "open",
+      unread_count: 0,
+      created_at: "2026-01-01",
+      updated_at: "2026-01-01",
+      contact: {
+        id: "c-2",
+        account_id: "a",
+        user_id: "a",
+        remote_jid: semFotoJid,
+        phone: "5511977775555",
+        name: "Ana",
+        avatar_url: undefined,
+        created_at: "2026-01-01",
+        updated_at: "2026-01-01",
+      },
+    };
+    mocks.photoSyncFetch.mockResolvedValueOnce(
+      response({ success: true, avatars: { [semFotoJid]: newPhoto } })
+    );
+
+    const loaded = vi.fn();
+    const { rerender } = render(
+      <ConversationList
+        activeConversationId={null}
+        onSelect={vi.fn()}
+        conversations={[initialConv]}
+        onConversationsLoaded={loaded}
+        clientId="a"
+        instances={[]}
+      />
+    );
+
+    await waitFor(() => expect(loaded).toHaveBeenCalledTimes(1));
+    expect(mocks.photoSyncFetch).not.toHaveBeenCalled();
+
+    rerender(
+      <ConversationList
+        activeConversationId={null}
+        onSelect={vi.fn()}
+        conversations={[initialConv]}
+        onConversationsLoaded={loaded}
+        clientId="a"
+        instances={[{ id: "1", instance_name: "own", status: "open" } as any]}
+      />
+    );
+
+    await waitFor(() => expect(mocks.photoSyncFetch).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(loaded).toHaveBeenLastCalledWith([
+        expect.objectContaining({
+          id: semFotoJid,
+          contact: expect.objectContaining({ avatar_url: newPhoto }),
+        }),
+      ])
     );
   });
 });

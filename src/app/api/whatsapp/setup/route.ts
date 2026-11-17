@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { evolution } from "@/lib/evolution";
 import { requireClientId, clientIdFromInstance } from "@/lib/tenant";
 import { supabaseAdmin } from "@/lib/supabase_admin";
-import { isPrivateOrLocalHost } from "@/lib/url-guard";
+import { isUrlSafeForProd } from "@/lib/url-guard";
 import { randomBytes } from "node:crypto";
 
 export async function POST(req: NextRequest) {
@@ -42,19 +42,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Não foi possível determinar a APP_URL. Configure no .env.local" }, { status: 400 });
     }
 
-    // Em produção, exige HTTPS e bloqueia rede interna — defesa SSRF.
-    if (process.env.NODE_ENV === "production") {
-      try {
-        const u = new URL(finalAppUrl);
-        if (u.protocol !== "https:" || isPrivateOrLocalHost(u.hostname)) {
-          return NextResponse.json(
-            { error: "appUrl deve ser HTTPS pública (sem IPs privados nem localhost)" },
-            { status: 400 }
-          );
-        }
-      } catch {
-        return NextResponse.json({ error: "appUrl inválida" }, { status: 400 });
-      }
+    // Em produção, exige HTTPS pública válida sem IPs privados/loopback IPv4/IPv6 — defesa SSRF.
+    if (!isUrlSafeForProd(finalAppUrl)) {
+      return NextResponse.json(
+        { error: "appUrl deve ser HTTPS pública (sem IPs privados nem localhost)" },
+        { status: 400 }
+      );
     }
 
     const webhookUrl = `${finalAppUrl.endsWith("/") ? finalAppUrl.slice(0, -1) : finalAppUrl}/api/webhooks/whatsapp`;
@@ -101,8 +94,8 @@ export async function POST(req: NextRequest) {
       result,
       secured: !!webhookSecret,
     });
-  } catch (err: any) {
-    console.error("[SETUP-WHATSAPP] Erro:", err.message);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    console.error("[SETUP-WHATSAPP] Erro:", err instanceof Error ? err.message : err);
+    return NextResponse.json({ success: false, error: "Erro ao configurar webhook" }, { status: 500 });
   }
 }

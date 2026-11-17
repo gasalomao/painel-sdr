@@ -207,6 +207,10 @@ export type FreeSlotsOptions = {
   startHour?: number;
   /** Fim do expediente (hora cheia, padrão: 18 -> 18:00) */
   endHour?: number;
+  /** Início do expediente em formato HH:MM (sobrepõe startHour quando fornecido) */
+  startTime?: string;
+  /** Fim do expediente em formato HH:MM (sobrepõe endHour quando fornecido) */
+  endTime?: string;
   /** Passo entre horários sugeridos em minutos (padrão: 30) */
   stepMinutes?: number;
   /** Data de referência atual para filtrar horários do passado se targetDate for hoje */
@@ -214,6 +218,65 @@ export type FreeSlotsOptions = {
   /** Margem mínima de antecedência em minutos para agendar no mesmo dia (padrão: 30) */
   minBufferMinutes?: number;
 };
+
+export interface DayScheduleResolution {
+  closed: boolean;
+  weekdayName: string;
+  startTime: string;
+  endTime: string;
+}
+
+/**
+ * Resolve o expediente configurado no agente (`schedules`) para uma data específica `YYYY-MM-DD`.
+ * Quando `is24h` é falso e o dia está marcado como `active: false`, retorna `closed: true`.
+ */
+export function resolveDayScheduleForDate(
+  targetDate: string,
+  schedules?: unknown,
+  is24h?: boolean,
+): DayScheduleResolution {
+  const cleanDate = String(targetDate || "").slice(0, 10);
+  const ref = new Date(`${cleanDate}T12:00:00-03:00`);
+  const dayMap: Record<string, string> = {
+    Sun: "Domingo",
+    Mon: "Segunda-feira",
+    Tue: "Terça-feira",
+    Wed: "Quarta-feira",
+    Thu: "Quinta-feira",
+    Fri: "Sexta-feira",
+    Sat: "Sábado",
+  };
+  let weekdayName = "";
+  if (!isNaN(ref.getTime())) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Sao_Paulo",
+      weekday: "short",
+    }).formatToParts(ref);
+    const wd = parts.find((p) => p.type === "weekday")?.value || "";
+    weekdayName = dayMap[wd] || "";
+  }
+
+  if (!is24h && Array.isArray(schedules) && schedules.length > 0 && weekdayName) {
+    const match = (schedules as Array<{ day?: string; active?: boolean; start?: string; end?: string }>).find(
+      (s) => s && s.day === weekdayName,
+    );
+    if (match) {
+      if (!match.active) {
+        return { closed: true, weekdayName, startTime: "08:00", endTime: "18:00" };
+      }
+      const validTime = (t: unknown, fallback: string) =>
+        typeof t === "string" && /^\d{2}:\d{2}$/.test(t.trim()) ? t.trim() : fallback;
+      return {
+        closed: false,
+        weekdayName,
+        startTime: validTime(match.start, "08:00"),
+        endTime: validTime(match.end, "18:00"),
+      };
+    }
+  }
+
+  return { closed: false, weekdayName, startTime: "08:00", endTime: "18:00" };
+}
 
 /**
  * Calcula os horários livres num determinado dia a partir dos intervalos ocupados
@@ -229,6 +292,8 @@ export function calculateFreeSlots(options: FreeSlotsOptions): string[] {
     durationMinutes = 30,
     startHour = 8,
     endHour = 18,
+    startTime,
+    endTime,
     stepMinutes = 30,
     nowDate = new Date(),
     minBufferMinutes = 30,
@@ -244,7 +309,9 @@ export function calculateFreeSlots(options: FreeSlotsOptions): string[] {
 
   // Limite final do expediente na data (no fuso de Brasília, -03:00)
   const pad = (n: number) => String(n).padStart(2, "0");
-  const businessEnd = new Date(`${targetDate}T${pad(endHour)}:00:00-03:00`);
+  const startClock = startTime && /^\d{2}:\d{2}$/.test(startTime) ? startTime : `${pad(startHour)}:00`;
+  const endClock = endTime && /^\d{2}:\d{2}$/.test(endTime) ? endTime : `${pad(endHour)}:00`;
+  const businessEnd = new Date(`${targetDate}T${endClock}:00-03:00`);
   const businessEndMs = businessEnd.getTime();
   if (isNaN(businessEndMs)) return [];
 
@@ -258,7 +325,7 @@ export function calculateFreeSlots(options: FreeSlotsOptions): string[] {
   const freeSlots: string[] = [];
 
   // Itera minuto a minuto do expediente
-  const startDay = new Date(`${targetDate}T${pad(startHour)}:00:00-03:00`);
+  const startDay = new Date(`${targetDate}T${startClock}:00-03:00`);
   let currentStartMs = startDay.getTime();
   if (isNaN(currentStartMs)) return [];
 

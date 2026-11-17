@@ -5,45 +5,42 @@ import WhatsAppPage from "../page";
 
 const mocks = vi.hoisted(() => ({
   fetch: vi.fn(),
-  update: vi.fn(),
-  eq: vi.fn(),
+  from: vi.fn(),
 }));
 
 vi.mock("@/components/layout/header", () => ({ Header: () => <header>WhatsApp</header> }));
 vi.mock("@/lib/use-session", () => ({ useClientSession: () => ({ clientId: "demo1" }) }));
 vi.mock("@/lib/supabase", () => ({
   supabase: {
-    from: (table: string) => {
-      let mutation = false;
-      const query = {
-        select: () => query,
-        order: () => query,
-        eq: (column: string, value: unknown) => { mocks.eq(column, value); return query; },
-        update: (value: unknown) => { mutation = true; mocks.update(value); return query; },
-        then: (resolve: (value: unknown) => unknown) => Promise.resolve({
-          data: mutation ? null : table === "channel_connections"
-            ? [{ id: "connection-1", instance_name: "demo1_suporte", agent_id: 1, status: "close", provider: "evolution" }]
-            : [{ id: 1, name: "Comercial" }, { id: 2, name: "Suporte" }],
-          error: null,
-        }).then(resolve),
-      };
-      return query;
-    },
+    from: mocks.from,
   },
 }));
 
 beforeEach(() => {
   mocks.fetch.mockReset();
-  mocks.update.mockClear();
-  mocks.eq.mockClear();
+  mocks.from.mockClear();
   vi.stubGlobal("fetch", mocks.fetch);
   mocks.fetch.mockImplementation(async (input: string, init?: RequestInit) => {
-    const body = init?.body ? JSON.parse(String(init.body)) as { action?: string } : {};
-    const data = input.includes("/proxy") ? { success: true, proxy: { enabled: false } }
-      : input.includes("/config/ngrok") ? { url: "https://painel.exemplo.test" }
-      : body.action === "connect" ? { success: true, qrCode: "data:image/png;base64,cXI=" }
-      : input.includes("/instance/delete") ? { ok: true, deleted: {}, evolution: true }
-      : { success: true, state: "close" };
+    const method = (init?.method || "GET").toUpperCase();
+    const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+    const data =
+      input.startsWith("/api/instances") && method === "GET"
+        ? {
+            ok: true,
+            instances: [{ id: "connection-1", instance_name: "demo1_suporte", agent_id: 1, status: "close", provider: "evolution" }],
+            agents: [{ id: 1, name: "Comercial" }, { id: 2, name: "Suporte" }],
+          }
+        : input.startsWith("/api/instances") && method === "PATCH"
+          ? { ok: true, instance_name: body.instance_name, agent_id: body.agent_id }
+          : input.includes("/proxy")
+            ? { success: true, proxy: { enabled: false } }
+            : input.includes("/config/ngrok")
+              ? { url: "https://painel.exemplo.test" }
+              : body.action === "connect"
+                ? { success: true, qrCode: "data:image/png;base64,cXI=" }
+                : input.includes("/instance/delete")
+                  ? { ok: true, deleted: {}, evolution: true }
+                  : { success: true, state: "close" };
     return new Response(JSON.stringify(data));
   });
   vi.spyOn(window, "alert").mockImplementation(() => {});
@@ -56,12 +53,20 @@ afterEach(() => {
 });
 
 describe("WhatsApp — apresentação preserva os fluxos existentes", () => {
-  it("gera o QR da conexão correta e mantém o seletor de agente acessível", async () => {
+  it("gera o QR da conexão correta e mantém o seletor de agente acessível via BFF", async () => {
     render(<WhatsAppPage />);
     const select = await screen.findByLabelText("Agente responsável");
     fireEvent.change(select, { target: { value: "2" } });
-    await waitFor(() => expect(mocks.update).toHaveBeenCalledWith({ agent_id: 2 }));
-    expect(mocks.eq).toHaveBeenCalledWith("client_id", "demo1");
+    await waitFor(() =>
+      expect(mocks.fetch).toHaveBeenCalledWith(
+        "/api/instances",
+        expect.objectContaining({
+          method: "PATCH",
+          body: JSON.stringify({ instance_name: "demo1_suporte", agent_id: 2 }),
+        }),
+      ),
+    );
+    expect(mocks.from).not.toHaveBeenCalled();
     fireEvent.click(await screen.findByRole("button", { name: "Conectar com QR Code" }));
     expect(await screen.findByAltText("QR Code para conectar demo1_suporte")).toBeTruthy();
     expect(mocks.fetch).toHaveBeenCalledWith("/api/whatsapp", expect.objectContaining({

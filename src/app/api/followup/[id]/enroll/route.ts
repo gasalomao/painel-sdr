@@ -60,9 +60,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     }
 
     const r = await enrollLeads({ campaignId: id, leadIds, clientId: camp.client_id });
-    if (!r.ok) return NextResponse.json({ success: false, error: r.error }, { status: 500 });
+    if (!r.ok) {
+      console.error("[followup/enroll] Erro:", r.error);
+      return NextResponse.json({ success: false, error: "Falha ao inscrever leads no follow-up" }, { status: 500 });
+    }
     return NextResponse.json({ success: true, enrolled: r.enrolled });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    console.error("[followup/enroll] Erro inesperado:", err instanceof Error ? err.message : err);
+    return NextResponse.json({ success: false, error: "Erro interno ao inscrever no follow-up" }, { status: 500 });
   }
 }

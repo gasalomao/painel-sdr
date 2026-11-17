@@ -26,10 +26,27 @@ describe("isPrivateOrLocalHost", () => {
     expect(isPrivateOrLocalHost("169.254.169.254")).toBe(true); // AWS metadata
   });
 
-  it("bloqueia IPv6 loopback e ULA", () => {
+  it("bloqueia IPv6 loopback, link-local, ULA, colchetes e IPv4-mapeado", () => {
     expect(isPrivateOrLocalHost("::1")).toBe(true);
+    expect(isPrivateOrLocalHost("[::1]")).toBe(true);
+    expect(isPrivateOrLocalHost("[::]")).toBe(true);
     expect(isPrivateOrLocalHost("fc00::1")).toBe(true);
     expect(isPrivateOrLocalHost("fd12:3456::1")).toBe(true);
+    expect(isPrivateOrLocalHost("[fd12:3456::1]")).toBe(true);
+    expect(isPrivateOrLocalHost("[fe80::1%eth0]")).toBe(true);
+    expect(isPrivateOrLocalHost("::ffff:127.0.0.1")).toBe(true);
+    expect(isPrivateOrLocalHost("[::ffff:7f00:1]")).toBe(true);
+    expect(isPrivateOrLocalHost("[::ffff:a9fe:a9fe]")).toBe(true);
+    expect(isPrivateOrLocalHost("[::ffff:808:808]")).toBe(false); // 8.8.8.8
+  });
+
+  it("bloqueia CGNAT 100.64.0.0/10 e domínios .local/.internal", () => {
+    expect(isPrivateOrLocalHost("100.64.0.1")).toBe(true);
+    expect(isPrivateOrLocalHost("100.127.255.255")).toBe(true);
+    expect(isPrivateOrLocalHost("100.63.0.1")).toBe(false);
+    expect(isPrivateOrLocalHost("100.128.0.1")).toBe(false);
+    expect(isPrivateOrLocalHost("metadata.google.internal")).toBe(true);
+    expect(isPrivateOrLocalHost("printer.local")).toBe(true);
   });
 
   it("permite hosts públicos", () => {
@@ -76,12 +93,15 @@ describe("isUrlSafeForProd", () => {
     expect(isUrlSafeForProd("https://example.com")).toBe(true);
   });
 
-  it("em prod exige HTTPS + host público", () => {
+  it("em prod exige HTTPS + host público (inclui defesa IPv6/mapeado)", () => {
     vi.stubEnv("NODE_ENV", "production");
     expect(isUrlSafeForProd("https://example.com")).toBe(true);
     expect(isUrlSafeForProd("http://example.com")).toBe(false); // HTTP
     expect(isUrlSafeForProd("https://127.0.0.1")).toBe(false); // privado
     expect(isUrlSafeForProd("https://10.0.0.1")).toBe(false);
+    expect(isUrlSafeForProd("https://[::1]/hook")).toBe(false);
+    expect(isUrlSafeForProd("https://[::ffff:127.0.0.1]/hook")).toBe(false);
+    expect(isUrlSafeForProd("https://metadata.google.internal/computeMetadata")).toBe(false);
     expect(isUrlSafeForProd("notaurl")).toBe(false);
   });
 });

@@ -35,8 +35,11 @@ export async function evaluatePreviewAgreement(opts: {
   messages: ConversationMessage[];
   customPrompt?: string | null;
   modelRef?: string | null;
+  geminiApiKey?: string | null;
+  openrouterApiKey?: string | null;
+  nvidiaApiKey?: string | null;
 }): Promise<AgreementEvaluationResult> {
-  const { messages, customPrompt, modelRef } = opts;
+  const { messages, customPrompt, modelRef, geminiApiKey, openrouterApiKey, nvidiaApiKey } = opts;
 
   // Filtra e pega as últimas 5 mensagens mais relevantes
   const recent = (messages || [])
@@ -92,6 +95,9 @@ export async function evaluatePreviewAgreement(opts: {
       temperature: 0.1,
       maxOutputTokens: 80,
       reasoningMode: 0,
+      geminiApiKey,
+      openrouterApiKey,
+      nvidiaApiKey,
     });
 
     const rawText = (aiRes.text || "").trim();
@@ -109,6 +115,9 @@ export async function evaluatePreviewAgreement(opts: {
         reason: String(reason),
         evaluatorMethod: "ai",
         tokensUsed: aiRes.usage?.totalTokens ?? 0,
+        usage: aiRes.usage,
+        modelUsed: aiRes.modelUsed,
+        provider: aiRes.provider,
       };
     }
   } catch (err: any) {

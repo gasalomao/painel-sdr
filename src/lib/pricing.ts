@@ -17,9 +17,8 @@
  */
 
 import { supabaseAdmin } from "@/lib/supabase_admin";
-import { supabase } from "@/lib/supabase";
 
-const adminClient = supabaseAdmin || supabase;
+const adminClient = supabaseAdmin;
 
 const SOURCE_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 const CACHE_KEY = "litellm_pricing";
@@ -94,6 +93,7 @@ function normalizeLiteLLM(raw: any): PricingMap {
 }
 
 async function loadFromDb(): Promise<CacheState | null> {
+  if (!adminClient) return null;
   try {
     const { data, error } = await adminClient
       .from("ai_pricing_cache")
@@ -113,6 +113,7 @@ async function loadFromDb(): Promise<CacheState | null> {
 }
 
 async function saveToDb(map: PricingMap): Promise<void> {
+  if (!adminClient) return;
   try {
     await adminClient.from("ai_pricing_cache").upsert({
       key: CACHE_KEY,
@@ -276,6 +277,7 @@ async function fetchFxRemote(): Promise<number> {
 }
 
 async function loadFxFromDb(): Promise<FxState | null> {
+  if (!adminClient) return null;
   try {
     const { data } = await adminClient
       .from("ai_pricing_cache")
@@ -291,6 +293,7 @@ async function loadFxFromDb(): Promise<FxState | null> {
 }
 
 async function saveFxToDb(rate: number) {
+  if (!adminClient) return;
   try {
     await adminClient.from("ai_pricing_cache").upsert({
       key: FX_CACHE_KEY,

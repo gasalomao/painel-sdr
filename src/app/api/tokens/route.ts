@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { supabase, supabaseAdmin } from "@/lib/supabase";
+import { supabaseAdmin } from "@/lib/supabase_admin";
 import { ensurePricing, lookupPriceSync, computeCost, getCacheState, ensureFxRate, getFxState } from "@/lib/pricing";
 import { requireClientId } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
-const adminClient = supabaseAdmin || supabase;
+const adminClient = supabaseAdmin;
 
 const SOURCES = ["agent", "disparo", "followup", "organizer", "other"] as const;
 
@@ -39,6 +39,9 @@ export async function GET(req: NextRequest) {
     const brlOverride = req.nextUrl.searchParams.get("brl");
     const brlRate = brlOverride ? Number(brlOverride) : fxState.rate;
 
+    if (!adminClient) {
+      return NextResponse.json({ success: false, error: "DB indisponível" }, { status: 500 });
+    }
     let q = adminClient.from("ai_token_usage").select("*").order("created_at", { ascending: false });
     if (!ctx.isAdmin) q = q.eq("client_id", ctx.clientId);
     if (fromIso) q = q.gte("created_at", fromIso);

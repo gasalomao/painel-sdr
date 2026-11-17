@@ -291,6 +291,72 @@ describe("/api/agent/settings BFF + agent-config-cache", () => {
     expect(state.updatedPayloads[0].target_model).toBe("google/gemini-2.5-pro");
   });
 
+  it("PATCH identity permite admin definir options.fallback_model e bloqueia não-admin", async () => {
+    state.auth.isAdmin = false;
+    const nonAdminReq = new NextRequest("http://localhost/api/agent/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agent_id: 10,
+        section: "identity",
+        name: "Vendedor A",
+        options: { fallback_model: "openrouter:openai/gpt-4o" },
+      }),
+    });
+    const res1 = await PATCH(nonAdminReq);
+    expect(res1.status).toBe(200);
+    expect((state.updatedPayloads[0].options as Record<string, unknown>).fallback_model).toBe("");
+
+    state.updatedPayloads = [];
+    state.auth.isAdmin = true;
+    const adminReq = new NextRequest("http://localhost/api/agent/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agent_id: 10,
+        section: "identity",
+        name: "Vendedor A",
+        options: { fallback_model: "openrouter:openai/gpt-4o-mini" },
+      }),
+    });
+    const res2 = await PATCH(adminReq);
+    expect(res2.status).toBe(200);
+    expect((state.updatedPayloads[0].options as Record<string, unknown>).fallback_model).toBe("openrouter:openai/gpt-4o-mini");
+  });
+
+  it("PATCH follow_up atualiza options.follow_up preservando segredos existentes", async () => {
+    const req = new NextRequest("http://localhost/api/agent/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agent_id: 10,
+        section: "follow_up",
+        follow_up: {
+          enabled: true,
+          follow_up_1h_enabled: true,
+          follow_up_1h_delay_minutes: 45,
+        },
+      }),
+    });
+
+    const res = await PATCH(req);
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    const savedOpts = state.updatedPayloads[0].options as Record<string, unknown>;
+    expect(savedOpts.follow_up).toEqual({
+      enabled: true,
+      follow_up_1h_enabled: true,
+      follow_up_1h_delay_minutes: 45,
+    });
+    expect(savedOpts.google_tokens).toEqual({ access_token: "ya29.secret", refresh_token: "1//secret-refresh" });
+    expect(json.agent.options.google_tokens).toBeUndefined();
+    expect(json.agent.options.follow_up).toEqual({
+      enabled: true,
+      follow_up_1h_enabled: true,
+      follow_up_1h_delay_minutes: 45,
+    });
+  });
+
   it("isola cross-tenant (404 em agente alheio, 403 em instância alheia, 409 em conflito interno, 400 ao deletar último agente)", async () => {
     const patchOther = await PATCH(
       new NextRequest("http://localhost/api/agent/settings", {

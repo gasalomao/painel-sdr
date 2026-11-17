@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
-import { verifySession } from "@/lib/auth";
+import { requireClientId } from "@/lib/tenant";
+import { resolveSafeUploadFormat } from "@/lib/media-upload-safety";
 
 export const dynamic = "force-dynamic";
 
@@ -24,9 +25,12 @@ async function ensureBucket() {
 
 export async function POST(req: NextRequest) {
   try {
-    const session = await verifySession(req);
-    if (!session) {
+    const session = await requireClientId(req);
+    if (!session.ok) {
       return NextResponse.json({ success: false, error: "Não autorizado" }, { status: 401 });
+    }
+    if (!supabase) {
+      return NextResponse.json({ success: false, error: "Storage indisponível" }, { status: 500 });
     }
 
     const formData = await req.formData();
@@ -44,13 +48,21 @@ export async function POST(req: NextRequest) {
 
     await ensureBucket();
 
+    const safeFormat = resolveSafeUploadFormat(file.name, file.type);
+    if (!safeFormat) {
+      return NextResponse.json(
+        { success: false, error: "Tipo de arquivo não permitido" },
+        { status: 415 }
+      );
+    }
+
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
-    const ext = file.name.split(".").pop() || "jpg";
-    const fileName = `kb_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.${ext}`;
+    const safeClientId = (session.clientId || "shared").replace(/[^a-zA-Z0-9_-]/g, "_");
+    const fileName = `${safeClientId}/kb_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.${safeFormat.ext}`;
 
     const { error: uploadErr } = await supabase.storage.from(MEDIA_BUCKET).upload(fileName, buffer, {
-      contentType: file.type || "image/jpeg",
+      contentType: safeFormat.contentType,
       upsert: true,
     });
 

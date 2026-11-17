@@ -51,14 +51,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Se o config global estava com enabled=false ou provider dessincronizado, corrige
-  if (cfg && (!cfg.enabled || cfg.provider !== provider)) {
-    await supabaseAdmin
-      .from("ai_organizer_config")
-      .update({ enabled: true, provider, model, updated_at: new Date().toISOString() })
-      .eq("id", 1);
-  }
-
   const baseUrl = process.env.INTERNAL_APP_URL || `http://localhost:${process.env.PORT || 3000}`;
   try {
     const r = await fetch(`${baseUrl}/api/ai-organize`, {
@@ -74,10 +66,12 @@ export async function POST(req: NextRequest) {
         triggered_by: "manual",
         clientId: ctx.clientId,
       }),
+      signal: AbortSignal.timeout(120_000),
     });
     const result = await r.json();
     if (!r.ok || result.success === false) {
-      return NextResponse.json({ ok: false, error: result.error || "Falha ao executar" }, { status: 500 });
+      console.error("[ORGANIZER/RUN-NOW] Falha:", result?.error);
+      return NextResponse.json({ ok: false, error: "Falha ao executar Organizador IA" }, { status: 500 });
     }
     return NextResponse.json({
       ok: true,
@@ -85,7 +79,8 @@ export async function POST(req: NextRequest) {
       message: result.message,
       batch_id: result.batch_id,
     });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || "Falha de rede no disparo" }, { status: 500 });
+  } catch (e: unknown) {
+    console.error("[ORGANIZER/RUN-NOW] Erro de rede:", e instanceof Error ? e.message : e);
+    return NextResponse.json({ ok: false, error: "Falha de comunicação ao iniciar Organizador IA" }, { status: 500 });
   }
 }

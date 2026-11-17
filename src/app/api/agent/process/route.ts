@@ -1,10 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
-import { SchemaType } from "@google/generative-ai";
-import { google } from "googleapis";
-import { getOAuthClientForAgentOptions } from "@/lib/google-calendar";
-import { getEffectiveStatus } from "@/lib/bot-status";
-import { isGroupJid } from "@/lib/bot-status";
+import { getEffectiveStatus, isGroupJid } from "@/lib/bot-status";
 import { leadRowToTemplateContext, renderTemplate } from "@/lib/template-vars";
 import { logTokenUsage } from "@/lib/token-usage";
 import { getEvolutionConfig } from "@/lib/evolution";
@@ -14,9 +10,9 @@ import { maskJid } from "@/lib/pii";
 import { resolveFunnelStage, checkSchedulesSync, resolveAgentOutput, splitMessage, normalizeSplitIntensity, minifyPromptMaster } from "@/lib/agent-format";
 import { detectBotOrUraLoop, isExplicitOptOutRequest, shouldAutoPauseAfterClosing, type GuardHistoryMessage } from "@/lib/agent-guards";
 import { isLeadOptedOut, recordLeadOptOut } from "@/lib/opt-out";
+import { buildLeadJidCandidates } from "@/lib/jid-utils";
 import { dropTrailingCurrentMessage, windowHistory, historyMessageContent, senderPrefix, historyRole, toGeminiTurns } from "@/lib/agent-history";
-import { parseAgendaDateTime, isDuplicateSlot, hasAgentOverlapConflict, calculateFreeSlots } from "@/lib/agenda-logic";
-import { indexKnowledgeDocument } from "@/lib/rag";
+import { parseAgendaDateTime } from "@/lib/agenda-logic";
 import { getAiKeys } from "@/lib/ai-keys";
 import { formatResultsForAI, needsFreshWebSearch, webSearch } from "@/lib/web-search";
 import { addAiUsage, aiUsageFromError, AiEmptyResponseError, parseModelRef, prependAiErrorUsage, providerDisplayName, providerOf, startAiChat, type AiProvider, type AiUsage } from "@/lib/ai-provider";
@@ -24,6 +20,17 @@ import { evaluatePreviewAgreement, DEFAULT_SITE_PREVIEW_PING_MESSAGE } from "@/l
 import { evaluateCustomGoal, normalizeCustomGoalConfig } from "@/lib/custom-goal-evaluator";
 import { promoteLeadBySystemSignal, scheduleRealtimeLeadEvaluation } from "@/lib/organizer-realtime";
 import { getCachedAgentStaticBundle } from "@/lib/agent-config-cache";
+import { buildAgentFunctionDeclarations } from "@/lib/agent/tool-declarations";
+import { buildAgentPromptBundle } from "@/lib/agent/prompt-builder";
+import { collectValidImageUrls, sanitizeHallucinatedImages, splitChunkSegmentsWithCaptions } from "@/lib/agent/image-whitelist";
+import { executeSearchKnowledgeBase, executeUpdateProductStock } from "@/lib/agent/rag-tool";
+import {
+  executeCancelGoogleCalendarEvent,
+  executeCheckGoogleCalendarAvailability,
+  executeListGoogleCalendarEvents,
+  executeScheduleGoogleCalendar,
+} from "@/lib/agent/calendar-tools";
+import { createWhatsAppDeliveryHelpers, loadRecentlySentMediaUrls } from "@/lib/agent/delivery";
 
 export const dynamic = 'force-dynamic';
 
@@ -92,7 +99,10 @@ export async function POST(req: NextRequest) {
 
   try {
     const payloadBody = await req.json();
-    const { remoteJid, isStatusUpdate, instanceName: reqInstanceName, text, isTestMode = false, testHistory = [], sessionId, testState, testLeadData, forceActive = false } = payloadBody;
+    const { remoteJid, alternateJid, isStatusUpdate, instanceName: reqInstanceName, text, isTestMode = false, testHistory = [], sessionId, testState, testLeadData, forceActive = false } = payloadBody;
+    const leadJidCandidates = typeof remoteJid === "string"
+      ? buildLeadJidCandidates(remoteJid, typeof alternateJid === "string" ? alternateJid : null)
+      : [];
     if (typeof isTestMode !== "boolean") {
       return NextResponse.json({ success: false, error: "isTestMode deve ser booleano." }, { status: 400 });
     }
@@ -244,11 +254,10 @@ export async function POST(req: NextRequest) {
           preloadedAgentConfig: sandboxAgentRes?.data || null,
        }),
        historyQuery,
-       // Lead e contato SÓ do tenant desta sessão (mesma paralelização de antes,
-       // agora com clientId já resolvido do channel).
+       // Lead e contato SÓ do tenant desta sessão (suporta @lid via alternateJid + variantes BR).
        !isTestMode ? supabase.from("leads_extraidos")
           .select("*")
-          .eq("remoteJid", remoteJid).eq("client_id", clientId).maybeSingle() : Promise.resolve({ data: null }),
+          .in("remoteJid", leadJidCandidates).eq("client_id", clientId).limit(1).maybeSingle() : Promise.resolve({ data: null }),
        !isTestMode ? supabase.from("contacts").select("push_name, phone_number").eq("remote_jid", remoteJid).eq("client_id", clientId).maybeSingle() : Promise.resolve({ data: null }),
     ]);
 
@@ -286,7 +295,7 @@ export async function POST(req: NextRequest) {
         };
     }
 
-    const historico = histRes.data || [];
+    let historico = histRes.data || [];
     const knowledgeTopics = staticBundle.knowledgeTopics;
     const hasCatalogOrPhotoKb = staticBundle.hasCatalogOrPhotoKb;
 
@@ -358,17 +367,18 @@ export async function POST(req: NextRequest) {
       }
 
       if (!isTestMode) {
+        const effectiveOptOutJid = (typeof alternateJid === "string" && alternateJid) || remoteJid;
         const requestedOptOut = Boolean(text && isExplicitOptOutRequest(text));
         if (requestedOptOut && remoteJid) {
           await recordLeadOptOut({
             clientId,
-            remoteJid,
+            remoteJid: effectiveOptOutJid,
             reason: text,
             sessionId: sessionId || null,
           }).catch(() => {});
           return NextResponse.json({ success: true, status: "lead_opt_out" });
         }
-        if (leadRow?.opt_out === true || (remoteJid && (await isLeadOptedOut(clientId, remoteJid)))) {
+        if (leadRow?.opt_out === true || (effectiveOptOutJid && (await isLeadOptedOut(clientId, effectiveOptOutJid)))) {
           return NextResponse.json({ success: true, status: "lead_opt_out" });
         }
       }
@@ -418,6 +428,8 @@ export async function POST(req: NextRequest) {
              await supabase.from("messages").insert({
                 client_id: clientId,
                 session_id: sessionId,
+                remote_jid: remoteJid,
+                instance_name: instanceName,
                 message_id: awayMsgId,
                 sender: "ai",
                 content: awayMsg,
@@ -436,6 +448,7 @@ export async function POST(req: NextRequest) {
     // ============================================================
     const bufferSeconds = agentConfig.options?.message_buffer_seconds || 0;
     let skipBufferWait = false;
+    let waitedInBuffer = false;
     let finalProcessText = text;
 
     if (!isTestMode && bufferSeconds > 0) {
@@ -500,6 +513,7 @@ export async function POST(req: NextRequest) {
 
        if (!skipBufferWait) {
           // Eu sou o Líder (insert direto OU roubo de lock órfão)
+          waitedInBuffer = true;
           console.log(`[BUFFER] LÍDER: Aguardando ${bufferSeconds}s para consolidar mensagens de ${maskJid(remoteJid)}...`);
           await new Promise(resolve => setTimeout(resolve, bufferSeconds * 1000));
 
@@ -526,9 +540,45 @@ export async function POST(req: NextRequest) {
     // Serializa a execução da IA por sessão (anti-resposta-dupla) — adquirida apenas
     // após o buffer para que o sleep não bloqueie a chegada de novas mensagens no lote
     if (!isTestMode) {
-       const { acquireSessionLock } = await import("@/lib/session-lock");
+       const { acquireSessionLock, hasActiveSessionLock } = await import("@/lib/session-lock");
        const lockKey = sessionId || `${clientId}:${remoteJid}`;
+       const hadLockContention = hasActiveSessionLock(lockKey);
        releaseSessionLock = await acquireSessionLock(lockKey);
+       // Se dormiu no buffer ou aguardou outra requisição no lock, recarrega `historico`
+       // e revalida se um humano assumiu a conversa nesse intervalo (0 tokens se pausado).
+       if (waitedInBuffer || hadLockContention) {
+          if (sessionId && !forceActive) {
+             const { data: sessAfterWait } = await supabase
+                .from("sessions")
+                .select("id, bot_status, resume_at, paused_by, instance_name")
+                .eq("id", sessionId)
+                .maybeSingle();
+             if (sessAfterWait) {
+                const effAfterWait = await getEffectiveStatus(sessAfterWait as any);
+                if (!effAfterWait.isActive) {
+                   console.log(`[AGENT] Pausa detectada após buffer/lock (${effAfterWait.reason}) — poupando tokens.`);
+                   await supabase.from("webhook_logs").insert({
+                      instance_name: instanceName,
+                      client_id: clientId,
+                      event: "AGENT_SKIP_PAUSED",
+                      payload: { remote_jid: maskJid(remoteJid), reason: effAfterWait.reason, stage: "post_buffer" },
+                      created_at: new Date().toISOString(),
+                   }).then(() => {}, () => {});
+                   return NextResponse.json({ success: true, status: "ai_paused", reason: effAfterWait.reason });
+                }
+             }
+          }
+          const { data: freshHist } = await supabase
+             .from("chats_dashboard")
+             .select("sender_type, content, created_at")
+             .eq("remote_jid", remoteJid)
+             .eq("client_id", clientId)
+             .order("created_at", { ascending: false })
+             .limit(HIST_LIMIT);
+          if (Array.isArray(freshHist)) {
+             historico = freshHist;
+          }
+       }
     }
 
     // 4. API KEYS (Gemini + OpenRouter). O provedor real é decidido pelo modelo
@@ -785,13 +835,14 @@ export async function POST(req: NextRequest) {
              : supabase
                  .from("leads_extraidos")
                  .select("id, nome_negocio, ramo_negocio, categoria, telefone, endereco, website, status, primeiro_contato_source, primeiro_contato_at, previa_status, link_previa, previa_ping_enviado_em, previa_link_enviado_em, intelligence")
-                 .eq("remoteJid", remoteJid)
+                 .in("remoteJid", leadJidCandidates)
                  .eq("client_id", clientId)
+                 .limit(1)
                  .maybeSingle(),
           supabase
             .from("campaign_targets")
             .select("rendered_message, sent_at, status, campaigns(name)")
-            .eq("remote_jid", remoteJid)
+            .in("remote_jid", leadJidCandidates)
             .eq("client_id", clientId)
             .order("sent_at", { ascending: false })
             .limit(1)
@@ -799,7 +850,7 @@ export async function POST(req: NextRequest) {
           supabase
             .from("followup_targets")
             .select("current_step, last_sent_at, last_rendered, status, followup_campaigns(name, steps)")
-            .eq("remote_jid", remoteJid)
+            .in("remote_jid", leadJidCandidates)
             .eq("client_id", clientId)
             .order("last_sent_at", { ascending: false })
             .limit(1)
@@ -908,7 +959,7 @@ export async function POST(req: NextRequest) {
               intelLines.push("(Use ESSE contexto pra adaptar tom e proposta. NÃO mencione literalmente que tem briefing.)");
               lines.push(intelLines.join("\n"));
             }
-          } catch (e) { /* não-fatal */ }
+          } catch { /* não-fatal */ }
         }
 
         if (lines.length > 0) {
@@ -934,7 +985,6 @@ export async function POST(req: NextRequest) {
     const calendarEnabled = !!agendaConfig.calendar_enabled;
     const calendarDuration = Number(agendaConfig.calendar_default_duration) || 30;
     const calendarOptionalFields: Record<string, boolean> = agendaConfig.calendar_optional_fields || {};
-    const calendarMeet = !!agendaConfig.calendar_generate_meet;
     const calendarAutoCapture = {
       telefone:    agendaConfig.calendar_auto_capture?.telefone    ?? true,
       empresa:     agendaConfig.calendar_auto_capture?.empresa     ?? true,
@@ -953,401 +1003,40 @@ export async function POST(req: NextRequest) {
     const webSearchEnabled = !!agendaConfig.web_search_enabled;
 
     // ============================================================
-    // REGRAS AUTO-INJETADAS — versão ENXUTA (estilo n8n tools).
-    // A instrução de "quando / como chamar" cada ferramenta vai
-    // DENTRO da descrição da própria tool — o Gemini só carrega isso
-    // quando decide usar a tool, não a cada turn. Aqui deixamos só
-    // uma frase-guia + listagem dos tópicos da KB que não foram
-    // injetados manualmente via {{kb:...}} no prompt.
+    // REGRAS AUTO-INJETADAS + PROMPT ESTÁVEL + TURN CONTEXT VOLÁTIL
+    // (Prefixo estável em promptMaster maximiza implicit caching; voláteis ficam em turnContextBlock.)
     // ============================================================
-    const autoRules: string[] = [];
-
-    const autoInjectedKbTitles = knowledgeTopics
-      .filter(kb => !manuallyInsertedKbTitles.has(kb.title))
-      .map(kb => kb.title);
-    if (autoInjectedKbTitles.length > 0) {
-      autoRules.push(`Base de conhecimento (tópicos): ${autoInjectedKbTitles.join(", ")}. Use a tool search_knowledge_base para consultar antes de responder sobre eles.`);
-    }
-
-    if (calendarEnabled) {
-      const askedFields = Object.entries(calendarOptionalFields).filter(([, v]) => v).map(([k]) => k);
-      const parts: string[] = [];
-      parts.push(`Agenda ativa. Para marcar: 1) check_google_calendar_availability, 2) schedule_google_calendar (duração padrão ${calendarDuration} min)`);
-      if (askedFields.length > 0) parts.push(`pergunte antes: ${askedFields.join(", ")}`);
-      parts.push("Para cancelar: 1) list_google_calendar_events, 2) cancel_google_calendar_event com o event_id retornado");
-      autoRules.push(parts.join(". ") + ".");
-    }
-
-    const autoRulesBlock = autoRules.length > 0
-      ? `# TOOLS DISPONÍVEIS:\n${autoRules.map(r => `- ${r}`).join("\n")}`
-      : "";
-
-    // PROMPT ESTÁVEL (systemInstruction) — só o que NÃO muda entre mensagens do
-    // mesmo agente. Mantê-lo byte-idêntico maximiza o implicit caching do Gemini
-    // 2.5 (90% de desconto nos tokens do prefixo em cache). Tudo que varia por
-    // lead / etapa / horário foi movido pro <turn_context>, anexado à MENSAGEM
-    // do cliente (fim do request) — onde conteúdo volátil deve ficar.
-    // ECONOMIA DE TOKENS: regras de catálogo/foto/anti-alucinação só fazem
-    // sentido quando o agente TEM base de conhecimento. Agentes SDR/atendimento
-    // sem KB economizam ~1.2k tokens por chamada sem perder nada dessas regras
-    // (nada de produto/preço pra alucinar sem KB). Com KB, entra TUDO (proteção
-    // de qualidade intacta).
-    const hasKnowledgeBase = knowledgeTopics.length > 0;
-
-    const directiveFotoBlock = hasCatalogOrPhotoKb ? `
-7. ENVIO DE FOTO/IMAGEM DE PRODUTO (CRÍTICO):
-   - Quando o cliente pedir foto/ver o produto, ou quando você for descrever um produto cuja ficha na base contiver uma linha "- **Foto Oficial**: [IMAGEM: URL]", você DEVE incluir a tag EXATA na sua resposta.
-   - COPIE a tag CARACTERE POR CARACTERE do que veio na base — não digite a URL solta, não use markdown ![](url), não coloque entre parênteses, não resuma.
-   - Formato VÁLIDO (único aceito): [IMAGEM: https://endereco.exato.da.base.jpg]
-   - Coloque a tag UMA vez, preferencialmente ao FINAL da mensagem.
-   - PROIBIDO inventar/modificar URL. Se a ficha do produto NÃO trouxe uma tag [IMAGEM:], NÃO escreva nenhuma — diga apenas que vai enviar a foto depois.
-   - Exemplo: a base trouxe "### PRODUTO: Camiseta Polo\\n- **Preço**: R$ 99\\n- **Foto Oficial**: [IMAGEM: https://cdn.loja.com/polo.jpg]" → sua resposta: "Tenho a Camiseta Polo por R$ 99! Olha a foto:\\n[IMAGEM: https://cdn.loja.com/polo.jpg]"
-` : "";
-
-    const catalogFormatBlock = hasCatalogOrPhotoKb ? `
-
-## FORMATO DE RESPOSTA COM MÚLTIPLOS PRODUTOS (CATÁLOGO, QUANDO APLICÁVEL):
-
-Quando a base contiver um catálogo de produtos e o cliente perguntar sobre VÁRIOS produtos ("quais modelos vc tem?", "me mostra o catálogo"), siga EXATAMENTE este formato:
-
-1. **NÃO liste mais que 6 produtos por mensagem**. Mais que isso cansa o cliente e parece spam. Se tiver mais, ofereça categorias ("temos 12 modelos, quer primeiro os de até R$3000 ou os Pro?").
-2. **Para cada produto**, escreva UM parágrafo curto com: Nome + Variação (cor/storage) + Preço + 1 detalhe relevante. Depois coloque a tag de imagem.
-3. **Formato exato** (respeite as quebras de linha). Use UM BLOCO por produto:
-
-   📱 [NOME DO PRODUTO]
-   [PREÇO à vista ou parcelamento]
-   [1 detalhe relevante: cores, specs, etc.]
-   [IMAGEM: URL_DA_FOTO]
-
-4. **A tag [IMAGEM: URL] DEVE vir DEPOIS do texto do produto** (na linha seguinte), nunca no meio de uma frase. O sistema usa o texto que vem ANTES da tag como legenda da foto.
-5. **Use UMA tag [IMAGEM: URL] por produto** — nunca duplique a mesma foto.
-6. **NUNCA repita o mesmo produto duas vezes** na mesma resposta.
-7. Se um produto da base NÃO tem foto vinculada, descreva normalmente sem a tag [IMAGEM:].
-8. Termine com uma pergunta de fechamento ("Qual desses te chamou atenção?", "Quer que eu detalhe algum?").` : "";
-
-    const antiHallucinationBlock = hasKnowledgeBase ? `
-<anti_hallucination_rules>
-## REGRA DE OURO — ZERO ALUCINAÇÃO NA BASE DE CONHECIMENTO (SERVIÇOS, PLANOS, FAQs, SCRIPTS, POLÍTICAS E PRODUTOS)
-
-Sua base de conhecimento (tool search_knowledge_base) é a ÚNICA fonte de verdade oficial da empresa. Tudo que você disser sobre serviços, planos, pacotes, metodologia, FAQs, argumentos de vendas/objeções, contratos, procedimentos, horários, prazos, garantias, políticas, produtos, preços, estoque ou especificações técnicas precisa vir DE LÁ — não da sua imaginação.
-
-### QUANDO CONSULTAR OBRIGATORIAMENTE:
-- Cliente pergunta sobre qualquer tópico listado na base de conhecimento, funcionamento de serviço, plano, pacote, metodologia ou procedimento → CONSULTE antes de responder.
-- Cliente traz uma dúvida frequente (FAQ), objeção comercial, regra contratual ou pergunta institucional → CONSULTE sempre.
-- Cliente pergunta "tem X?" / "vocês fazem/vendem Y?" / "como funciona Z?" → CONSULTE antes de responder.
-- Cliente pergunta preço, valor, taxa, mensalidade, parcelamento, desconto → CONSULTE sempre.
-- Cliente pergunta estoque, tamanho, cor, modelo ou disponibilidade → CONSULTE sempre.
-- Cliente pergunta horário, endereço, entrega, prazo, garantia, troca, cancelamento ou política → CONSULTE sempre.
-
-### PROIBIDO (MESMO QUE PAREÇA INOFENSIVO):
-- INVENTAR preço, mensalidade ou condição ("acho que é R$ XX" → NUNCA).
-- INVENTAR serviço, plano, regra, produto/modelo/cor ou cláusula que não está na base.
-- INVENTAR estoque ou disponibilidade sem consultar.
-- DAR "estimativa" de valor ou prazo se a base não tem.
-- CHUTAR especificações técnicas ou detalhes operacionais.
-
-### QUANDO A BASE NÃO TEM A RESPOSTA:
-- Seja honesto: "Vou confirmar essa informação pra você" / "Esse item específico não consta aqui no momento, vou verificar com a equipe".
-- NUNCA confirme algo ("sim, temos/fazemos") se a busca não retornou a informação.${catalogFormatBlock}
-</anti_hallucination_rules>
-` : `
-<anti_hallucination_rules>
-NÃO INVENTE informações sobre serviços, planos, produtos, preços, prazos, horários ou políticas da empresa que não estejam na conversa ou no contexto fornecido. Em dúvida, diga que vai verificar. Nunca chute valores nem prometa o que não pode confirmar.
-</anti_hallucination_rules>
-`;
-
-    const promptMaster = `
-<system_identity>
-Nome: ${agentConfig.name}
-Sua Função: ${agentConfig.role}
-Sua Personalidade: ${agentConfig.personality}
-Tom de voz: ${agentConfig.tone}
-</system_identity>
-
-<core_instructions>
-${processedMainPrompt}
-</core_instructions>
-
-<available_tools_and_rules>
-${autoRulesBlock}
-</available_tools_and_rules>
-
-<execution_directives>
-1. Aja EXCLUSIVAMENTE de acordo com sua <system_identity> e siga estritamente as <core_instructions>. Nunca revele que é uma inteligência artificial.
-2. FOCO ABSOLUTO: O seu objetivo imediato é ÚNICA E EXCLUSIVAMENTE cumprir as orientações do <current_funnel_stage> e extrair os dados listados em <data_collection_goals> (fornecidos junto da mensagem do cliente). Não se antecipe a etapas futuras.
-3. Utilize as ferramentas disponíveis em <available_tools_and_rules> sempre que as condições exigirem.
-4. O histórico da conversa e a mensagem atual do usuário serão fornecidos pelo sistema nativamente.
-5. CONTINUIDADE — NÃO RECOMECE: o <lead_context> (fornecido junto da mensagem) mostra exatamente o que o SDR já enviou (disparo inicial, follow-ups). Você JÁ se apresentou, JÁ disse o nome da empresa, JÁ tratou pelo nome do negócio. NÃO repita "Olá, sou da [empresa]" se isso já está no <lead_context>. Continue a conversa de onde parou. Use os dados de CRM (ramo, categoria, endereço) pra contextualizar — sem perguntar o que já está conhecido.
-6. Seja natural, humano e empático. Quando <core_instructions> mencionar placeholders como {{chave}}, utilize automaticamente o valor correspondente em <prompt_variables> (sem imprimir as chaves {{}}).
-${directiveFotoBlock}</execution_directives>
-${antiHallucinationBlock}`;
-
-    const promptVariablesBlock = promptVariablesLines.length > 0
-      ? `\n\n<prompt_variables>\n${promptVariablesLines.join("\n")}\n</prompt_variables>`
-      : "";
-
-    // CONTEXTO DO TURNO (volátil) — vai anexado à mensagem do cliente, NÃO ao
-    // systemInstruction. Assim o prefixo cacheável fica estável entre turnos.
-    const turnContextBlock = `<lead_context>
-${leadContextBlock || "(sem dados de CRM/disparo/follow-up para este lead)"}
-</lead_context>${promptVariablesBlock}
-
-<current_funnel_stage>
-${funilInstrucao}
-</current_funnel_stage>
-
-<data_collection_goals>
-${capturedVariablesPrompt}
-</data_collection_goals>`;
-
-    // 8. Tool Calls (MCP + RAG) — declarações DINÂMICAS baseadas em KB + Calendar config
-    const functionDeclarations: any[] = [];
-
-    // Ferramenta 1: RAG — descrição lista os tópicos disponíveis
-    if (knowledgeTopics.length > 0) {
-       const topicList = knowledgeTopics.map(k => `"${k.title}"`).join(", ");
-       functionDeclarations.push({
-          name: "search_knowledge_base",
-          description:
-             `Base de conhecimento OFICIAL da empresa (serviços, planos, FAQs, scripts de vendas/objeções, procedimentos, contratos, políticas, catálogo de produtos, preços e estoque). ` +
-             `Tópicos disponíveis: ${topicList}. ` +
-             `CHAMADA OBRIGATÓRIA quando o cliente perguntar sobre qualquer um dos tópicos disponíveis ou sobre: ` +
-             `COMO FUNCIONA, SERVIÇO, PLANO, PACOTE, METODOLOGIA, PROCEDIMENTO, DÚVIDA FREQUENTE (FAQ), OBJEÇÃO, CONTRATO, ` +
-             `PREÇO, VALOR, MENSALIDADE, PARCELAMENTO, DESCONTO, PRODUTO, MODELO, COR, TAMANHO, ESTOQUE, DISPONIBILIDADE, ` +
-             `HORÁRIO, ENDEREÇO, ENTREGA, PRAZO, GARANTIA, TROCA, RECLAMAÇÃO, POLÍTICA ou ESPECIFICAÇÃO TÉCNICA. ` +
-             `Também chame quando o cliente disser "tem X?" / "vocês fazem/vendem Y?" / "quanto custa" / "como funciona". ` +
-             `PROIBIDO responder sobre esses tópicos SEM chamar esta tool primeiro. ` +
-             `PROIBIDO INVENTAR informações que não vieram no retorno. ` +
-             `Se a base não retornar resultados, diga ao cliente que vai verificar — nunca chute.`,
-          parameters: {
-             type: SchemaType.OBJECT,
-             properties: {
-                 query: {
-                    type: SchemaType.STRING,
-                    description:
-                       `Termos da busca (3-6 palavras-chave). Use o vocabulário do cliente ou o tema da dúvida, ` +
-                       `não precisa bater literal com o título. Exemplos: ` +
-                       `"como funciona plano anual", "objeção preço caro", "prazo entrega site", ` +
-                       `"preço iPhone 15", "horário atendimento sábado", "política cancelamento".`,
-                 },
-             },
-             required: ["query"],
-          },
-       });
-
-       // Ferramenta 1.2: Atualização Automática de Estoque após Venda (só para agentes com catálogo/produto/estoque)
-       if (hasCatalogOrPhotoKb) {
-         functionDeclarations.push({
-            name: "update_product_stock",
-            description:
-               "Atualiza a quantidade em estoque de um produto na base de conhecimento quando uma venda for concluída ou confirmada pelo cliente. Reduz a quantidade disponível no banco de dados.",
-            parameters: {
-               type: SchemaType.OBJECT,
-               properties: {
-                  product_name: {
-                     type: SchemaType.STRING,
-                     description: "Nome do produto/modelo vendido (ex: 'iPhone 15 128GB', 'Camiseta Polo G', 'Apartamento 302')",
-                  },
-                  quantity_sold: {
-                     type: SchemaType.NUMBER,
-                     description: "Quantidade de unidades vendidas (padrão: 1)",
-                  },
-               },
-               required: ["product_name"],
-            },
-         });
-       }
-    }
-
-    // Ferramentas de Prospecção Autônoma e Fechamento de Sites (Sarah SDR / Closer)
-    if (agentConfig?.options?.site_preview_auto_detect) {
-      functionDeclarations.push({
-        name: "solicitar_previa_site",
-        description:
-          "Chame quando o cliente confirmar formalmente que aceita a proposta da prévia gratuita do site da empresa dele e concordar em olhar quando o link for enviado. Dispara o pipeline autônomo na VPS.",
-        parameters: {
-          type: SchemaType.OBJECT,
-          properties: {
-            confirmacao: {
-              type: SchemaType.STRING,
-              description: "A frase ou confirmação dita pelo cliente (ex: 'sim, pode mandar', 'combinado')",
-            },
-          },
-          required: ["confirmacao"],
-        },
-      });
-    }
-
-    if (
-      agentConfig?.options?.site_preview_auto_detect ||
-      leadRow?.previa_status === "PREVIA_PRONTA" ||
-      Boolean(leadRow?.link_previa)
-    ) {
-      functionDeclarations.push({
-         name: "agendar_reuniao_fechamento",
-         description:
-            "Chame quando o cliente concordar com um horário para a ligação rápida de 5 minutos no WhatsApp para alinhamento e fechamento do site.",
-         parameters: {
-            type: SchemaType.OBJECT,
-            properties: {
-               horario_confirmado: {
-                  type: SchemaType.STRING,
-                  description: "O horário exato combinado (ex: 'hoje às 16h30', 'amanhã às 10h')",
-               },
-               resumo_necessidades: {
-                  type: SchemaType.STRING,
-                  description: "Resumo de ajustes ou preferências mencionadas pelo cliente",
-               },
-            },
-            required: ["horario_confirmado"],
-         },
-      });
-    }
-
-    // Ferramenta 1.5: Web Search — opt-in pelo agente
-    if (webSearchEnabled) {
-       functionDeclarations.push({
-          name: "web_search",
-          description: "Busca rápida na internet (DuckDuckGo). Use quando precisar de informação atualizada que não está nem na conversa nem na base de conhecimento (notícias, dados, fatos recentes). NÃO use pra coisas inventadas.",
-          parameters: {
-             type: SchemaType.OBJECT,
-             properties: {
-                query: { type: SchemaType.STRING, description: "O que buscar — frase curta e específica" },
-             },
-             required: ["query"],
-          },
-       });
-       functionDeclarations.push({
-          name: "web_fetch",
-          description: "Acessa e lê o conteúdo completo de uma página web (URL). Use sempre após a busca (web_search) retornar links úteis, para ler o site oficial da empresa do lead, detalhes de notícias ou especificações completas de produtos.",
-          parameters: {
-             type: SchemaType.OBJECT,
-             properties: {
-                url: { type: SchemaType.STRING, description: "A URL completa do site para ler (ex: https://exemplo.com)" },
-             },
-             required: ["url"],
-          },
-       });
-    }
-
-    // Ferramenta 2: Google Calendar — schedule com duração padrão + campos opcionais
-    if (calendarEnabled) {
-       // Apenas Nome e E-mail são perguntas DIRETAS (controladas pelo checkbox).
-       // Telefone vem do JID server-side. Empresa e Necessidade a IA INFERE da conversa.
-       const askedFields = Object.entries(calendarOptionalFields).filter(([, v]) => v).map(([k]) => k);
-
-       const scheduleProps: Record<string, any> = {
-          summary: { type: SchemaType.STRING, description: "Título do evento. Ex: Reunião com [nome do cliente]" },
-          start_datetime: { type: SchemaType.STRING, description: "Data e hora de início ISO8601 (ex: 2026-04-25T14:00:00). PROIBIDO chutar — só usar horário confirmado via check_google_calendar_availability." },
-          duration_minutes: { type: SchemaType.NUMBER, description: `Duração em minutos. Padrão: ${calendarDuration}. Use esse valor a menos que o cliente peça outro.` },
-       };
-       // Inferidos só se o operador deixou ligado
-       if (calendarAutoCapture.empresa) {
-          scheduleProps.empresa = { type: SchemaType.STRING, description: "Empresa do cliente. NÃO PERGUNTE. Se foi mencionada na conversa, preencha; senão deixe vazio." };
-       }
-       if (calendarAutoCapture.necessidade) {
-          scheduleProps.necessidade = {
-             type: SchemaType.STRING,
-             description: `${necessidadeLabel}: resumo curto (1 linha) que o cliente quer/precisa. NÃO PERGUNTE diretamente — infira da conversa baseado no contexto do nicho.`,
-          };
-       }
-
-       // Campos perguntados explicitamente (Nome / E-mail)
-       const ASK_DESCS: Record<string, string> = {
-          nome:  "Nome completo do cliente. PERGUNTE diretamente antes de agendar.",
-          email: "E-mail do cliente. PERGUNTE diretamente — vira convidado oficial do evento.",
-       };
-       for (const f of askedFields) {
-          if (ASK_DESCS[f]) scheduleProps[f] = { type: SchemaType.STRING, description: ASK_DESCS[f] };
-       }
-
-       const askTxt = askedFields.length > 0
-          ? ` ANTES de chamar, PERGUNTE diretamente ao cliente: ${askedFields.join(", ")}.`
-          : "";
-       functionDeclarations.push({
-          name: "schedule_google_calendar",
-          description: `Agenda reunião no calendário (duração padrão ${calendarDuration} min). CHAME UMA ÚNICA VEZ por agendamento: depois que marcar, está marcado — NÃO chame de novo quando o cliente responder "ok", "combinado", "obrigada" etc (isso duplicaria o evento). PRÉ-REQUISITO OBRIGATÓRIO: você JÁ DEVE ter chamado check_google_calendar_availability nesta mesma conversa antes de criar o evento — proibido chutar horário. O horário (start_datetime) é no fuso de Brasília (America/Sao_Paulo); mande o horário que combinou com o cliente, sem converter.${askTxt} Empresa e necessidade você INFERE da conversa, NUNCA pergunta. Telefone é automático.`,
-          parameters: { type: SchemaType.OBJECT, properties: scheduleProps, required: ["summary", "start_datetime", ...askedFields] }
-       });
-
-       functionDeclarations.push({
-          name: "check_google_calendar_availability",
-          description: "Checa a agenda do vendedor informando os horários livres num determinado dia. OBRIGATÓRIO USAR antes de sugerir horários ao cliente.",
-          parameters: {
-             type: SchemaType.OBJECT,
-             properties: {
-                date: { type: SchemaType.STRING, description: "Data para checar disponibilidade no formato YYYY-MM-DD. Ex: 2026-04-25" }
-             },
-             required: ["date"]
-          }
-       });
-
-       functionDeclarations.push({
-          name: "list_google_calendar_events",
-          description: "Lista os eventos já agendados num intervalo de datas. Use QUANDO o cliente pedir pra cancelar/remarcar uma reunião, pra você descobrir o event_id dela. Retorna array com {id, summary, start, end, attendees}. Depois de listar, use cancel_google_calendar_event passando o id correto (o que bate com o que o cliente descreveu). NUNCA chute event_id.",
-          parameters: {
-             type: SchemaType.OBJECT,
-             properties: {
-                date_from: { type: SchemaType.STRING, description: "Data inicial (YYYY-MM-DD). Se o cliente só disse 'amanhã' ou 'sexta', use essa mesma data aqui." },
-                date_to:   { type: SchemaType.STRING, description: "Data final (YYYY-MM-DD). Opcional. Se omitir, considera só o date_from (único dia)." },
-             },
-             required: ["date_from"]
-          }
-       });
-
-       functionDeclarations.push({
-          name: "cancel_google_calendar_event",
-          description: "Cancela (deleta) um evento do Google Calendar. PRÉ-REQUISITO: você JÁ DEVE ter chamado list_google_calendar_events nesta conversa pra obter o event_id real — é PROIBIDO inventar event_id. Se a lista retornar vários eventos no período, confirme com o cliente qual antes de cancelar.",
-          parameters: {
-             type: SchemaType.OBJECT,
-             properties: {
-                event_id: { type: SchemaType.STRING, description: "ID exato do evento retornado por list_google_calendar_events. Copie o campo 'id' da listagem." },
-                reason:   { type: SchemaType.STRING, description: "Motivo opcional (ex: 'cliente não poderá comparecer'). Fica no log interno." },
-             },
-             required: ["event_id"]
-          }
-       });
-    }
-
-    // Ferramentas Customizadas (Webhooks N8N/Make)
-    const customTools = agentConfig.options?.custom_tools || [];
-    customTools.forEach((t: any) => {
-       functionDeclarations.push({
-          name: t.name,
-          description: t.description,
-          parameters: {
-             type: SchemaType.OBJECT,
-             properties: {
-                query: { type: SchemaType.STRING, description: "Argumento principal, formato livre a seu critério" }
-             },
-             required: ["query"]
-          }
-       });
+    const { promptMaster, turnContextBlock } = buildAgentPromptBundle({
+      agentConfig,
+      processedMainPrompt,
+      knowledgeTopics,
+      manuallyInsertedKbTitles,
+      hasCatalogOrPhotoKb,
+      calendarEnabled,
+      calendarDuration,
+      calendarOptionalFields,
+      leadContextBlock,
+      promptVariablesLines,
+      funilInstrucao,
+      capturedVariablesPrompt,
     });
 
-    // Tool de Funil e Variáveis
-    if (activeStage) {
-        const varsToCapture = activeStage.captured_variables;
-        if (Array.isArray(varsToCapture) && varsToCapture.length > 0) {
-           const properties: Record<string, any> = {};
-           varsToCapture.forEach(v => {
-              if (v.name) properties[v.name] = { type: SchemaType.STRING, description: v.description || v.name };
-           });
-           functionDeclarations.push({
-              name: "save_variables",
-              description: `Salva as variáveis que você extraiu do cliente na etapa atual. Chame assim que o cliente responder com as informações.`,
-              parameters: {
-                 type: SchemaType.OBJECT,
-                 properties,
-              }
-           });
-        }
-
-        functionDeclarations.push({
-           name: "complete_current_stage",
-           description: `Chame esta ferramenta apenas quando você considerar que concluiu o objetivo da etapa atual E já salvou todas as variáveis necessárias. Isso moverá o cliente para a próxima etapa.`,
-        });
-    }
+    // 8. Tool Calls (MCP + RAG) — declarações DINÂMICAS baseadas em KB + Calendar config
+    const customTools = (agentConfig.options?.custom_tools || []) as Array<{ name: string; description: string; webhook_url?: string }>;
+    const functionDeclarations = buildAgentFunctionDeclarations({
+      knowledgeTopics,
+      hasCatalogOrPhotoKb,
+      sitePreviewAutoDetect: Boolean(agentConfig?.options?.site_preview_auto_detect),
+      hasPreviaOrLink: leadRow?.previa_status === "PREVIA_PRONTA" || Boolean(leadRow?.link_previa),
+      webSearchEnabled,
+      calendarEnabled,
+      calendarDuration,
+      calendarOptionalFields,
+      calendarAutoCapture,
+      necessidadeLabel,
+      customTools,
+      activeStage: activeStage as { captured_variables?: Array<{ name?: string; description?: string }> } | null,
+    });
 
     // Inicializa o roteamento de provedor (Gemini ou OpenRouter) pelo modelo.
     const { resolveModel } = await import("@/lib/ai-default-model");
@@ -1357,9 +1046,10 @@ ${capturedVariablesPrompt}
     // admin explícita, não override arbitrário do caller. Logo: se target_model
     // estiver setado, usa direto (mapModelAsync valida/faz fallback); senão cai
     // no resolveModel com clientId (default do cliente ou global).
+    const { mapModelAsync } = await import("@/lib/ai-default-model");
     const agentTarget = (agentConfig.target_model || "").trim();
     const modelId = agentTarget
-      ? await (await import("@/lib/ai-default-model")).mapModelAsync(agentTarget)
+      ? await mapModelAsync(agentTarget)
       : await resolveModel(null, clientId);
     if (!modelId) {
       await supabase.from("webhook_logs").insert({
@@ -1371,10 +1061,17 @@ ${capturedVariablesPrompt}
       }).then(() => {}, () => {});
       return NextResponse.json({ success: false, error: "Modelo IA não configurado pelo admin" }, { status: 400 });
     }
+    const rawAgentFallback = String(agentConfig.options?.fallback_model || "").trim();
+    const resolvedAgentFallback =
+      rawAgentFallback && rawAgentFallback !== agentTarget
+        ? await mapModelAsync(rawAgentFallback).catch(() => null)
+        : null;
+    const agentFallbackModelRef =
+      resolvedAgentFallback && resolvedAgentFallback !== modelId ? resolvedAgentFallback : null;
     const agentProvider = providerOf(modelId);
     diagnosticModel = parseModelRef(modelId).model;
     diagnosticProvider = agentProvider;
-    console.log(`[AGENT] Usando modelo: ${modelId} (provider=${agentProvider})`);
+    console.log(`[AGENT] Usando modelo: ${modelId} (provider=${agentProvider}${agentFallbackModelRef ? `, reserva=${agentFallbackModelRef}` : ""})`);
 
     // OTIMIZAÇÃO SEGURA: Remove espaços horizontais excessivos preservando quebras de parágrafo (\n\n),
     // cabeçalhos Markdown e tags XML estruturadas.
@@ -1451,9 +1148,12 @@ ${capturedVariablesPrompt}
       geminiApiKey,
       openrouterApiKey,
       nvidiaApiKey,
+      fallbackModelRef: agentFallbackModelRef,
     });
 
     let turn = await session.sendUser(firstTurnMessage);
+    diagnosticModel = session.modelUsed();
+    diagnosticProvider = session.provider;
 
     let finalAnswer = turn.text;
 
@@ -1463,15 +1163,7 @@ ${capturedVariablesPrompt}
     //  (b) REMOVER qualquer URL de imagem que a IA inventou (anti-alucinação).
     // Só confiamos em fotos que existem de fato na base — nunca na imaginação do modelo.
     const validImageUrls = new Set<string>();
-    const collectImageUrls = (text: string) => {
-      if (!text) return;
-      const re = /(?:\[(?:IMAGEM|IMAGE|MEDIA|FOTO):\s*(https?:\/\/[^\s\]]+)\]|!\[[^\]]*\]\((https?:\/\/[^\s\)]+)\)|(https?:\/\/[^\s\]\)]+(?:\.(?:jpg|jpeg|png|webp|gif)|\/chat-media\/[^\s\]\)]+)))/gi;
-      let m: RegExpExecArray | null;
-      while ((m = re.exec(text)) !== null) {
-        const u = (m[1] || m[2] || m[3] || "").trim();
-        if (u) validImageUrls.add(u);
-      }
-    };
+    const collectImageUrls = (text: string) => collectValidImageUrls(text, validImageUrls);
     collectImageUrls(rawMainPrompt);
 
     // Acumula tokens dessa interação (1 inicial + N de tool-loop)
@@ -1507,186 +1199,24 @@ ${capturedVariablesPrompt}
        let functionResultRes: any = {};
 
        if (call.name === "search_knowledge_base") {
-          // RAG real: vector search (top-5 chunks por similaridade semântica).
-          // Fallback ILIKE só se vetor não achar NADA — cobre docs ainda não
-          // indexados (recém-criados antes do indexer rodar).
-          const raw = (typeof callArgs.query === "string" ? callArgs.query : (callArgs.query?.text || JSON.stringify(callArgs.query || ""))).trim().slice(0, 500);
-          let matches: any[] = [];
-          let searchMethod = "none";
-          let dbgError: string | null = null;
-
-           if (raw) {
-              try {
-                 const { searchKnowledge } = await import("@/lib/rag");
-                 // ⚠ THRESHOLD 0.35 — era 0.55 e PERDIA matches de catálogo.
-                 // Gemelli-embedding-001 (768-dim) produz similaridades 0.35-0.50
-                 // pra matches REAIS de catálogo (cliente pergunta "iPhone 15"
-                 // KB tem "iPhone 15 128GB"). 0.55 cortava metade das buscas → IA
-                 // caía no ILIKE (sem sinônimos) ou respondia sem consultar.
-                 // 0.35 equilibra precisão (sem lixo) + recall (sem perder item).
-                 //
-                 // ⚠ TOPK ADAPTATIVO: 10 (antes 5). Catálogo de loja tem MUITOS
-                 // variantes do mesmo produto (iPhone 15 128GB, 256GB, Pro, Pro
-                 // Max = 4 modelos). Se cliente pergunta "quais iPhones 15 vc
-                 // tem?" e topK=5, ele SÓ vê 5 variantes — perde venda dos outros.
-                 // 10 cobre 95% dos catálogos reais sem inflar tokens.
-                 //
-                 // BONUS: se a query parece listar tudo ("todos", "quais", "lista",
-                 // "catálogo", "modelos", "opções"), puxa mais 15 resultados.
-                 const listIntent = /\b(todos|todas|quais?|lista|listar|cat[aá]logo|modelos?|op[cç][oõ]es?|varia[a-z]+|vers[oõ]es?)\b/i.test(raw);
-                 const topK = listIntent ? 15 : 10;
-                 const hits = await searchKnowledge({
-                    query: raw,
-                    agentId,
-                    clientId,
-                    apiKey: finalApiKey,
-                    topK,
-                    minSimilarity: 0.35,
-                 });
-                if (hits.length > 0) {
-                   matches = hits.map((h) => ({
-                      title: h.title,
-                      content: h.content,
-                      similarity: h.similarity,
-                   }));
-                   searchMethod = "vector";
-                }
-             } catch (e: any) {
-                dbgError = e?.message;
-                console.warn("[RAG] vector search falhou, caindo no ILIKE:", e?.message);
-             }
-          }
-
-          // Fallback ILIKE — só se vector não retornou nada
-          if (matches.length === 0 && raw) {
-             const safeQuery = raw.toLowerCase().replace(/[%_,()]/g, " ").replace(/\s+/g, " ").trim();
-             if (safeQuery) {
-                let docs: any[] = [];
-                 const titleHit = await supabase.from("agent_knowledge")
-                    .select("id, title, content")
-                    .eq("agent_id", agentId)
-                    .or(`client_id.eq.${clientId},client_id.is.null`)
-                    .ilike("title", `%${safeQuery}%`)
-                    .limit(3);
-                 docs = titleHit.data || [];
-                 if (docs.length === 0) {
-                    const contentHit = await supabase.from("agent_knowledge")
-                       .select("id, title, content")
-                       .eq("agent_id", agentId)
-                       .or(`client_id.eq.${clientId},client_id.is.null`)
-                       .ilike("content", `%${safeQuery}%`)
-                       .limit(3);
-                   docs = contentHit.data || [];
-                }
-                if (docs.length > 0) {
-                   // Corta docs grandes (fallback antigo, mantido)
-                   const MAX = 1800;
-                   matches = docs.map((k: any) => ({
-                      title: k.title,
-                      content: (k.content || "").length > MAX
-                         ? (k.content || "").slice(0, MAX) + `\n[...truncado, doc tem ${(k.content || "").length} chars]`
-                         : (k.content || ""),
-                      similarity: null,
-                   }));
-                   searchMethod = "ilike-fallback";
-                }
-             }
-          }
-
-          if (matches.length > 0) {
-             // Coleta as URLs de imagem VÁLIDAS que vieram nos chunks do RAG.
-             // Só estas podem ser enviadas como foto — trava anti-alucinação.
-             for (const m of matches) collectImageUrls(String(m.content || ""));
-             functionResultRes = {
-                found: true,
-                method: searchMethod,
-                documents: matches.map((m) =>
-                   m.similarity != null
-                      ? `[${m.title} | relevância ${(m.similarity * 100).toFixed(0)}%]\n${m.content}`
-                      : `[${m.title}]\n${m.content}`
-                ),
-             };
-          } else {
-             functionResultRes = {
-                found: false,
-                message: `Nada na base corresponde a "${raw}". Diga ao cliente que vai verificar e voltar — NÃO INVENTE resposta.`,
-                ...(dbgError ? { _debug_error: dbgError } : {}),
-             };
-          }
-          callLogs.push({ role: "system", content: `[RAG] "${raw}" | method=${searchMethod} | hits=${matches.length}` });
+          functionResultRes = await executeSearchKnowledgeBase({
+            query: callArgs.query,
+            agentId,
+            clientId,
+            apiKey: finalApiKey,
+            onValidText: collectImageUrls,
+            callLogs,
+          });
        } else if (call.name === "update_product_stock") {
-          // Modo teste NÃO muta produção (estoque real era decrementado por
-          // conversa de teste no /agente).
-          if (isTestMode) {
-             functionResultRes = { simulated: true, message: "Modo teste: alteração de estoque suprimida." };
-             callLogs.push({ role: "system", content: `[TESTE] update_product_stock suprimido` });
-          } else {
-          const rawProd = String(callArgs.product_name || "").trim();
-          const qtySold = Number(callArgs.quantity_sold) || 1;
-          let updatedSuccess = false;
-
-          if (rawProd) {
-             // Pré-filtro ILIKE sem id.neq.null (que quebra em colunas UUID); filtra tenant no loop para não sobrescrever .or().
-             const likeTerm = rawProd.replace(/[%_,()"]/g, " ").trim();
-             if (likeTerm) {
-                const { data: docs } = await supabase
-                   .from("agent_knowledge")
-                   .select("id, title, content, client_id")
-                   .eq("agent_id", agentId)
-                   .or(`title.ilike.%${likeTerm}%,content.ilike.%${likeTerm}%`)
-                   .limit(20);
-
-                for (const d of docs || []) {
-                   if (d.client_id && d.client_id !== clientId) continue;
-                   if (!d.content) continue;
-                   const cleanName = rawProd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-                   const stockRegex = new RegExp(`(${cleanName}[\\s\\S]*?Estoque(?:\\s*Disponível)?:\\s*)(\\d+)`, "i");
-                   const genericRegex = new RegExp(`(Estoque(?:\\s*Disponível)?:\\s*)(\\d+)`, "i");
-                   const match = d.content.match(stockRegex) || (d.content.toLowerCase().includes(rawProd.toLowerCase()) ? d.content.match(genericRegex) : null);
-
-                   if (match) {
-                      const currentQty = parseInt(match[2], 10);
-                      const newQty = Math.max(0, currentQty - qtySold);
-                      const updatedContent = d.content.replace(match[0], `${match[1]}${newQty}`);
-
-                      await supabase
-                         .from("agent_knowledge")
-                         .update({ content: updatedContent })
-                         .eq("id", d.id)
-                         .eq("agent_id", agentId);
-
-                      indexKnowledgeDocument({
-                         knowledgeId: d.id,
-                         agentId,
-                         clientId: d.client_id,
-                         title: d.title || "",
-                         content: updatedContent,
-                         apiKey: finalApiKey,
-                      }).catch(() => {});
-
-                      functionResultRes = {
-                         success: true,
-                         product: rawProd,
-                         previousStock: currentQty,
-                         newStock: newQty,
-                         message: `Estoque do item "${rawProd}" atualizado de ${currentQty} para ${newQty} unidades disponíveis.`,
-                      };
-                      updatedSuccess = true;
-                      callLogs.push({ role: "system", content: `[Estoque Atualizado] "${rawProd}" (${currentQty} -> ${newQty})` });
-                      break;
-                   }
-                }
-             }
-          }
-
-          if (!updatedSuccess) {
-             functionResultRes = {
-                success: false,
-                message: `Item "${rawProd}" não encontrado para atualizar estoque.`,
-             };
-             callLogs.push({ role: "system", content: `[Estoque Erro] Item "${rawProd}" não encontrado` });
-          }
-          } // fim else !isTestMode
+          functionResultRes = await executeUpdateProductStock({
+            productName: callArgs.product_name,
+            quantitySold: callArgs.quantity_sold,
+            agentId,
+            clientId,
+            apiKey: finalApiKey,
+            isTestMode,
+            callLogs,
+          });
 } else if (call.name === "web_search") {
            const q = (typeof callArgs.query === "string" ? callArgs.query : (callArgs.query?.text || "")).trim();
            try {
@@ -1840,10 +1370,22 @@ ${capturedVariablesPrompt}
                 if (adminPhone) {
                    const adminJid = `${String(adminPhone).replace(/\D/g, "")}@s.whatsapp.net`;
                    const notifyMsg = `🎉 *REUNIÃO AGENDADA PELA SARAH!*\n\n🏢 Empresa: ${leadRow?.nome_negocio || "Lead"}\n📱 WhatsApp: ${remoteJid.replace(/@.*$/, "")}\n⏰ Horário: ${horario}\n🔗 Prévia: ${leadRow?.link_previa || "Ver no painel"}\n📝 Resumo: ${resumo || "Sem notas extras"}`;
+                   try {
+                      const { registerPendingAutomatedSend } = await import("@/lib/manual-send-registry");
+                      registerPendingAutomatedSend(instanceName, adminJid, notifyMsg);
+                   } catch { /* ignore */ }
                    const { sendMessage } = await import("@/lib/channel");
-                   await sendMessage(adminJid, notifyMsg, instanceName).catch((e: any) =>
-                      console.warn("[Agent/NotifyAdmin] falhou:", e?.message)
-                   );
+                   const notifyRes: any = await sendMessage(adminJid, notifyMsg, instanceName).catch((e: any) => {
+                      console.warn("[Agent/NotifyAdmin] falhou:", e?.message);
+                      return null;
+                   });
+                   const notifyMsgId = notifyRes?.messageId || notifyRes?.key?.id || notifyRes?.data?.key?.id;
+                   if (notifyMsgId) {
+                      try {
+                         const { registerAiSend } = await import("@/lib/manual-send-registry");
+                         registerAiSend(notifyMsgId);
+                      } catch { /* ignore */ }
+                   }
                 }
 
                 functionResultRes = {
@@ -1857,666 +1399,47 @@ ${capturedVariablesPrompt}
              }
           }
        } else if (call.name === "schedule_google_calendar") {
-          // Modo teste NÃO cria eventos reais no Google Calendar nem manda
-          // WhatsApp pro dono (acontecia em toda conversa de teste).
-          if (isTestMode) {
-             functionResultRes = { simulated: true, scheduled: false, message: "Modo teste: agendamento real suprimido. Confirme que deseja marcar." };
-             callLogs.push({ role: "system", content: `[TESTE] schedule_google_calendar suprimido` });
-          } else {
-          console.log("[MCP] Iniciando Agendamento no Google Calendar ->", callArgs);
-          functionResultRes = { scheduled: false, message: "Erro ao agendar no sistema." };
-
-          try {
-             const oauthTokens = typeof agentConfig.options.google_tokens === "string"
-                 ? JSON.parse(agentConfig.options.google_tokens)
-                 : agentConfig.options.google_tokens;
-
-             if (!oauthTokens?.refresh_token) {
-                 throw new Error("Agente não está conectado ao Google via OAuth. Conecte sua conta do Google Calendar primeiro.");
-             }
-
-             const auth = await getOAuthClientForAgentOptions(agentConfig.id, agentConfig.options);
-             const calendar = google.calendar({ version: 'v3', auth });
-
-             // TIMEZONE: a IA manda start_datetime "naive" (sem fuso), ex
-             // "2026-06-01T10:00:00". Num servidor em UTC, new Date() leria como
-             // 10:00 UTC e o dono (BRT -3) veria 07:00 — exatamente o bug
-             // relatado. Interpretamos SEMPRE como horário de Brasília quando
-             // não vier offset explícito.
-             const rawStart = String(callArgs.start_datetime || "").trim();
-             const startDt = parseAgendaDateTime(rawStart);
-             if (isNaN(startDt.getTime())) {
-                throw new Error(`Data/hora inválida recebida da IA: "${rawStart}"`);
-             }
-             const duration = Number(callArgs.duration_minutes) || calendarDuration;
-             const endDt = new Date(startDt.getTime() + duration * 60000);
-
-             // GUARD ANTI-DUPLICAÇÃO: quando o cliente manda várias mensagens
-             // seguidas ("combinado", "pode ser?", "obrigada"), cada uma reabre
-             // o agente e a IA pode chamar schedule_google_calendar de novo —
-             // criando evento duplicado no Google + linha duplicada + vários
-             // resumos pro dono (bug relatado: 3 eventos pro mesmo contato).
-             // Se já existe agendamento CONFIRMADO pro mesmo contato no MESMO
-             // horário (±2min), NÃO recria. (Só mesmo-horário: remarcar pra um
-             // horário DIFERENTE é legítimo e tratado adiante cancelando o
-             // antigo — por isso NÃO bloqueamos por "criado há pouco".)
-             const { data: dupRows } = await supabase
-                .from("appointments")
-                .select("id, title, start_at, created_at")
-                .eq("client_id", clientId)
-                .eq("remote_jid", remoteJid)
-                .eq("status", "confirmed")
-                .order("created_at", { ascending: false })
-                .limit(10);
-             // Duplicado = mesmo contato já confirmado no MESMO horário (±2min).
-             const dup = isDuplicateSlot(dupRows as any, startDt.getTime())
-                ? (dupRows || []).find((r: any) => Math.abs(new Date(r.start_at).getTime() - startDt.getTime()) <= 2 * 60_000)
-                : null;
-
-             // CONFLITO DE SLOT (OUTRO contato): o banco tem índice único
-             // (agent_id, start_at) pra status ativo — o MESMO agente não pode
-             // ter 2 agendamentos no mesmo horário. Checamos ANTES de criar no
-             // Google: se o slot exato já é de OUTRO número, NÃO criamos (senão
-             // o Google teria o evento mas o insert no painel falharia em
-             // silêncio = evento órfão sem lembrete). Instruímos a IA a oferecer
-             // outro horário. Não bloqueia o próprio contato (isso é o `dup`).
-             let slotConflict = false;
-             if (agentConfig.id) {
-                // Busca agendamentos ativos do agente que SE SOBREPÕEM ao novo
-                // intervalo [startDt, endDt): start_at < fim novo E end_at >
-                // início novo. Pega sobreposição parcial, não só horário igual.
-                const { data: slotRows } = await supabase
-                   .from("appointments")
-                   .select("id, remote_jid, start_at, end_at")
-                   .eq("agent_id", agentConfig.id)
-                   .in("status", ["confirmed", "tentative"])
-                   .lt("start_at", endDt.toISOString())
-                   .gt("end_at", startDt.toISOString())
-                   .limit(20);
-                slotConflict = hasAgentOverlapConflict(slotRows as any, startDt.getTime(), endDt.getTime(), remoteJid);
-             }
-
-             // Reaproveita contexto do lead no CRM já carregado (ou consulta apenas se ausente)
-             const calLeadRow = leadRow ?? (await supabase
-                .from("leads_extraidos")
-                .select("id, nome_negocio, ramo_negocio, website, email")
-                .eq("client_id", clientId)
-                .eq("remoteJid", remoteJid)
-                .maybeSingle()).data;
-
-             const phoneFromJid = remoteJid.replace(/@.*$/, "").replace(/\D/g, "");
-             const clientName = (callArgs.nome as string) || (calLeadRow?.nome_negocio as string) || phoneFromJid;
-             const companyName = (callArgs.empresa as string) || (calLeadRow?.nome_negocio as string) || null;
-             const attendeeEmail = String(callArgs.email || calLeadRow?.email || "").trim();
-
-             // Descrição estruturada profissional pro Google Calendar do vendedor
-             const descLines = [
-               `📅 AGENDAMENTO SDR — ${agentConfig.name || "Assistente IA"}`,
-               `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-               `👤 Convidado: ${callArgs.nome || clientName || "Não informado"}`,
-             ];
-             if (calendarAutoCapture.telefone) {
-               descLines.push(`📱 WhatsApp: ${phoneFromJid}`);
-             }
-             if (attendeeEmail) {
-               descLines.push(`✉️ E-mail: ${attendeeEmail}`);
-             }
-             if (companyName) {
-               descLines.push(`🏢 Empresa: ${companyName}${calLeadRow?.ramo_negocio ? ` (${calLeadRow.ramo_negocio})` : ""}`);
-             }
-             if (calendarAutoCapture.necessidade && (callArgs.necessidade || callArgs.summary)) {
-               descLines.push(`🎯 ${necessidadeLabel}: ${callArgs.necessidade || callArgs.summary}`);
-             }
-             if (calLeadRow?.website) {
-               descLines.push(`🌐 Website: ${calLeadRow.website}`);
-             }
-
-             if (dup) {
-                console.log(`[Agent/Schedule] Duplicado evitado (appt ${dup.id}) — NÃO recria.`);
-                functionResultRes = {
-                   scheduled: true,
-                   already_scheduled: true,
-                   message: `O cliente JÁ TEM um agendamento confirmado ("${dup.title}"). NÃO crie outro nem chame esta ferramenta de novo — apenas confirme com o cliente que está tudo certo, de forma natural.`,
-                };
-                callLogs.push({ role: "system", content: `[Google Calendar] Duplicado evitado (appt ${dup.id})` });
-             } else if (slotConflict) {
-                console.log(`[Agent/Schedule] Slot ${startDt.toISOString()} já ocupado por outro contato — oferecer outro horário.`);
-                functionResultRes = {
-                   scheduled: false,
-                   slot_taken: true,
-                   message: `Esse horário acabou de ser ocupado por outro cliente. Chame check_google_calendar_availability e ofereça um horário livre DIFERENTE — não insista nesse mesmo horário.`,
-                };
-                callLogs.push({ role: "system", content: `[Google Calendar] Slot ocupado por outro contato (${startDt.toISOString()})` });
-             } else {
-             // Corrida: 2 requests passam na checagem de slot ao mesmo tempo. O
-             // índice único (agent_id,start_at) barra o 2º insert (23505); aí
-             // desfazemos o evento no Google pra não sobrar órfão.
-             let raceConflict = false;
-             const baseSummary = (callArgs.summary as string) || "Reunião";
-             const eventSummary = companyName && callArgs.nome
-                 ? `${baseSummary} — ${callArgs.nome} (${companyName})`
-                 : `${baseSummary} — ${clientName}`;
-
-             const eventBody: any = {
-                 summary: eventSummary,
-                 start: { dateTime: startDt.toISOString(), timeZone: "America/Sao_Paulo" },
-                 end: { dateTime: endDt.toISOString(), timeZone: "America/Sao_Paulo" },
-                 description: descLines.join("\n"),
-             };
-
-             // Se o cliente passou e-mail, vira convidado oficial no Google Calendar
-             if (attendeeEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(attendeeEmail)) {
-                 eventBody.attendees = [{
-                     email: attendeeEmail,
-                     displayName: (callArgs.nome as string) || clientName || undefined,
-                 }];
-             }
-
-             const shouldGenerateMeet = !!agentConfig.options?.calendar_generate_meet;
-             if (shouldGenerateMeet) {
-                 eventBody.conferenceData = {
-                     createRequest: {
-                         requestId: `meet-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                         conferenceSolutionKey: { type: "hangoutsMeet" }
-                     }
-                 };
-             }
-
-             const instRes = await calendar.events.insert({
-                 calendarId: 'primary',
-                 conferenceDataVersion: shouldGenerateMeet ? 1 : 0,
-                 sendUpdates: (eventBody.attendees && eventBody.attendees.length > 0) ? 'all' : 'none',
-                 requestBody: eventBody
-             });
-
-             const evId = instRes.data.id || null;
-             const meetUri = instRes.data.conferenceData?.entryPoints?.find((e: any) => e.entryPointType === 'video')?.uri
-                 || (instRes.data as any).hangoutLink
-                 || null;
-             const meetLinkStr = meetUri ? ` Link do Google Meet: ${meetUri}` : "";
-
-             // Notifica o dono se configurado em scheduler_config.notify_owner (evita duplicar se owner_summary_enabled estiver ativo).
-             // Best-effort: se falhar, segue normal.
-             try {
-                 const sched = (agentConfig.scheduler_config || {}) as any;
-                 if (sched.notify_owner && sched.owner_phone && !sched.owner_summary_enabled) {
-                     const ownerJid = `${String(sched.owner_phone).replace(/\D/g, "")}@s.whatsapp.net`;
-                     const startBR = startDt.toLocaleString("pt-BR", {
-                         weekday: "short",
-                         day: "2-digit",
-                         month: "2-digit",
-                         year: "numeric",
-                         hour: "2-digit",
-                         minute: "2-digit",
-                         timeZone: "America/Sao_Paulo",
-                     });
-                     const ownerLines = [
-                         `📅 *Novo Agendamento Confirmado via IA!*`,
-                         `━━━━━━━━━━━━━━━━━━━━━━━━━`,
-                         `👤 *Cliente:* ${callArgs.nome || clientName || "Não informado"}`,
-                         `📱 *WhatsApp:* ${phoneFromJid}`,
-                         attendeeEmail ? `✉️ *E-mail:* ${attendeeEmail}` : "",
-                         companyName ? `🏢 *Empresa:* ${companyName}` : "",
-                         `🕒 *Data/Hora:* ${startBR} (${duration} min)`,
-                         `🎯 *Pauta:* ${callArgs.necessidade || callArgs.summary || "Reunião Comercial"}`,
-                         meetUri ? `🎥 *Google Meet:* ${meetUri}` : "",
-                         `🤖 *Agente:* ${agentConfig.name || "IA"}`,
-                     ].filter(Boolean);
-                     const ownerMsg = ownerLines.join("\n");
-                     const { sendMessage } = await import("@/lib/channel");
-                     await sendMessage(ownerJid, ownerMsg, instanceName).catch((e: any) =>
-                         console.warn("[Agent/NotifyOwner] falhou:", e?.message)
-                     );
-                 }
-             } catch (notifyErr: any) {
-                 console.warn("[Agent/NotifyOwner] erro inesperado:", notifyErr?.message);
-             }
-
-             // Persiste em public.appointments pra alimentar /calendario, worker
-             // de lembrete, e organizer auto-promote do kanban pós-horário.
-             try {
-                 if (evId) {
-                    const insertPayload: any = {
-                       client_id: clientId,
-                       agent_id: agentConfig.id || null,
-                       lead_id: leadRow?.id || null,
-                       remote_jid: remoteJid,
-                       instance_name: instanceName,
-                       google_event_id: evId,
-                       calendar_id: "primary",
-                       title: eventBody.summary,
-                       description: eventBody.description || null,
-                       service_name: (callArgs.necessidade as string) || (callArgs.summary as string) || null,
-                       start_at: startDt.toISOString(),
-                       end_at: endDt.toISOString(),
-                       status: "confirmed",
-                       created_by: "ia",
-                       // Colunas espelho do Google Calendar
-                       html_link: instRes.data.htmlLink || null,
-                       conference_data: instRes.data.conferenceData || null,
-                       location: instRes.data.location || meetUri || null,
-                       attendees: attendeeEmail ? [{ email: attendeeEmail, displayName: (callArgs.nome as string) || clientName }] : [],
-                       organizer_email: instRes.data.organizer?.email || null,
-                       metadata: {
-                          attendee_name: (callArgs.nome as string) || null,
-                          attendee_email: attendeeEmail || null,
-                          meet_link: meetUri,
-                       },
-                    };
-
-                    let { error: apptInsErr } = await supabase.from("appointments").insert(insertPayload);
-                    if (apptInsErr) {
-                       const msg = String(apptInsErr.message || "");
-                       const isSchemaMiss =
-                          (apptInsErr as any).code === "PGRST204" ||
-                          (apptInsErr as any).code === "42703" ||
-                          /does not exist/i.test(msg) ||
-                          /column .* of 'appointments'/i.test(msg) ||
-                          /Could not find the .* column/i.test(msg);
-
-                       if (isSchemaMiss) {
-                          // Fallback resiliente: remove colunas que podem não existir em bancos legados
-                          const fallbackPayload = { ...insertPayload };
-                          delete fallbackPayload.html_link;
-                          delete fallbackPayload.conference_data;
-                          delete fallbackPayload.location;
-                          delete fallbackPayload.attendees;
-                          delete fallbackPayload.organizer_email;
-                          ({ error: apptInsErr } = await supabase.from("appointments").insert(fallbackPayload));
-                       }
-                    }
-                    if (apptInsErr) {
-                       // 23505 = índice único (agent_id,start_at): outro contato
-                       // pegou o MESMO slot numa corrida. Desfaz o evento no
-                       // Google pra não sobrar órfão e pede outro horário.
-                       if ((apptInsErr as any).code === "23505") {
-                          raceConflict = true;
-                          await calendar.events.delete({ calendarId: "primary", eventId: evId, sendUpdates: "all" })
-                             .catch((delErr: any) => console.warn("[Agent/Schedule] rollback Google falhou:", delErr?.message));
-                          console.warn(`[Agent/Schedule] Corrida de slot ${startDt.toISOString()} — evento Google desfeito.`);
-                       } else {
-                          console.warn("[Agent/Schedule] Falha persistindo em appointments (não-fatal):", apptInsErr.message);
-                       }
-                    } else {
-                       // REMARCAÇÃO por conversa: se o cliente já tinha um
-                       // agendamento FUTURO confirmado e agora marcou outro
-                       // horário, cancelamos o antigo (Google + DB) pra não
-                       // sobrar evento duplicado nem disparar 2 lembretes. O
-                       // novo (recém-criado) é preservado pelo filtro de evId.
-                       try {
-                          const { data: oldAppts } = await supabase
-                             .from("appointments")
-                             .select("id, google_event_id")
-                             .eq("client_id", clientId)
-                             .eq("remote_jid", remoteJid)
-                             .eq("status", "confirmed")
-                             .gt("start_at", new Date().toISOString())
-                             .neq("google_event_id", evId);
-                          for (const old of (oldAppts || [])) {
-                             if (old.google_event_id) {
-                                await calendar.events.delete({ calendarId: "primary", eventId: old.google_event_id, sendUpdates: "all" })
-                                   .catch(() => {});
-                             }
-                             await supabase.from("appointments")
-                                .update({ status: "cancelled", cancelled_at: new Date().toISOString(), cancelled_reason: "Remarcado pelo cliente (novo horário)", google_event_id: null })
-                                .eq("id", old.id);
-                          }
-                          if ((oldAppts || []).length > 0) {
-                             console.log(`[Agent/Schedule] Remarcação: ${oldAppts!.length} agendamento(s) antigo(s) cancelado(s) pro contato ${maskJid(remoteJid)}.`);
-                          }
-                       } catch (reErr: any) {
-                          console.warn("[Agent/Schedule] cancelamento de agendamento antigo (remarcação) falhou:", reErr?.message);
-                       }
-                    }
-                 }
-             } catch (apptErr: any) {
-                 console.warn("[Agent/Schedule] Falha persistindo em appointments (não-fatal):", apptErr?.message);
-             }
-
-             if (raceConflict) {
-                // Slot tomado numa corrida — não manda resumo nem confirma.
-                functionResultRes = {
-                   scheduled: false,
-                   slot_taken: true,
-                   message: `Esse horário acabou de ser ocupado por outro cliente. Chame check_google_calendar_availability e ofereça um horário livre DIFERENTE — não confirme esse.`,
-                };
-             } else {
-             meetingScheduledInTurn = true;
-             await promoteLeadBySystemSignal({
-                clientId,
-                remoteJid,
-                signal: "calendar_scheduled",
-                reason: `Agendamento confirmado no Google Calendar: "${callArgs.summary}" (${callArgs.start_datetime}).`,
-                summary: (callArgs.necessidade as string) || `Reunião agendada para ${callArgs.start_datetime}.`,
-             }).catch(() => {});
-
-             // RESUMO IA PRO DONO — lê a conversa, gera um resumo e manda no
-             // WhatsApp do dono. Detecta reagendamento: se houve cancelamento
-             // recente (≤10min) pro mesmo contato, trata como remarcação.
-             try {
-                 let summaryKind: "agendamento" | "reagendamento" = "agendamento";
-                 const { data: recentCancel } = await supabase
-                     .from("appointments")
-                     .select("id")
-                     .eq("client_id", clientId)
-                     .eq("remote_jid", remoteJid)
-                     .eq("status", "cancelled")
-                     .gte("cancelled_at", new Date(Date.now() - 10 * 60_000).toISOString())
-                     .limit(1)
-                     .maybeSingle();
-                 if (recentCancel) summaryKind = "reagendamento";
-                 const { sendOwnerAppointmentSummary } = await import("@/lib/owner-summary");
-                 await sendOwnerAppointmentSummary({
-                     kind: summaryKind,
-                     agentConfig,
-                     clientId,
-                     remoteJid,
-                     instanceName,
-                     appointment: {
-                         title: eventBody.summary,
-                         service_name: (callArgs.necessidade as string) || (callArgs.summary as string) || null,
-                         start_at: startDt.toISOString(),
-                     },
-                 });
-             } catch (sumErr: any) {
-                 console.warn("[Agent/Schedule] resumo p/ dono falhou (não-fatal):", sumErr?.message);
-             }
-
-             // PAUSA PÓS-AGENDAMENTO: silencia a IA pra ESTE contato por X tempo
-             // depois de marcar, evitando bombardear o cliente logo após confirmar
-             // e dando uma janela pro atendente humano. Default 2h (120 min),
-             // configurável por agente em scheduler_config.pause_after_schedule_minutes
-             // (0 ou ausente = não pausa). Reusa o mecanismo de snooze existente
-             // (sessions.resume_at + gate de pausa) — auto-resume gratuito.
-             // Só roda quando o agendamento foi REALMENTE confirmado (o guard
-             // anti-chamada-dupla em ~1084 garante que é 1x por agendamento).
-             try {
-                 const schedPause = (agentConfig.scheduler_config || {}) as any;
-                 const pauseMin = Number(schedPause.pause_after_schedule_minutes);
-                 if (!isTestMode && sessionId && Number.isFinite(pauseMin) && pauseMin > 0) {
-                    const { snoozeSession } = await import("@/lib/bot-status");
-                    await snoozeSession(sessionId, pauseMin, "system").catch((e: any) =>
-                       console.warn("[Agent/Schedule] pausa pós-agendamento falhou (não-fatal):", e?.message));
-                    // Log de auditoria: rastreável em /api/webhooks/diagnose.
-                    supabase.from("webhook_logs").insert({
-                       instance_name: instanceName,
-                       client_id: clientId,
-                       event: "AGENT_SCHEDULE_PAUSE",
-                       payload: { remote_jid: maskJid(remoteJid), session_id: sessionId, pause_minutes: pauseMin },
-                       created_at: new Date().toISOString(),
-                    }).then(() => {}, () => {});
-                    console.log(`[Agent/Schedule] IA pausada por ${pauseMin}min p/ ${maskJid(remoteJid)} (pós-agendamento).`);
-                 }
-             } catch { /* não-fatal — o agendamento já está salvo */ }
-
-             const startBRFormatted = startDt.toLocaleDateString("pt-BR", {
-                 weekday: "long",
-                 day: "2-digit",
-                 month: "long",
-                 timeZone: "America/Sao_Paulo",
-             });
-             const timeBRFormatted = startDt.toLocaleTimeString("pt-BR", {
-                 hour: "2-digit",
-                 minute: "2-digit",
-                 timeZone: "America/Sao_Paulo",
-             });
-
-             const meetUrl = meetUri || (meetLinkStr ? (meetLinkStr.match(/https?:\/\/\S+/)?.[0] || "") : "");
-             const meetDirective = meetUrl
-                ? ` Link do Google Meet gerado: ${meetUrl}. OBRIGATÓRIO: inclua este link na sua mensagem de confirmação para o cliente.`
-                : "";
-             const emailDirective = attendeeEmail
-                ? ` Convite oficial do Google Calendar enviado para o e-mail: ${attendeeEmail}.`
-                : "";
-
-             functionResultRes = {
-                 scheduled: true,
-                 event_id: evId,
-                 meet_link: meetUrl || null,
-                 start_datetime: callArgs.start_datetime,
-                 date_formatted: startBRFormatted,
-                 time_formatted: timeBRFormatted,
-                 message: `Agendamento CONFIRMADO com sucesso para ${startBRFormatted} às ${timeBRFormatted}.${meetDirective}${emailDirective} Confirme com o cliente com simpatia e informe os detalhes.`
-             };
-             } // fim do if(!raceConflict)
-             } // fim do else (não-duplicado)
-          } catch (mcpErr: any) {
-             console.error("[MCP Error]:", mcpErr);
-             functionResultRes = { scheduled: false, message: `Falha na integração: ${mcpErr.message}. Peça desculpas ao cliente e avise que o sistema está indisponível.` };
-          }
-           callLogs.push({ role: "system", content: `[Google Calendar] O Agente tentou agendar: "${callArgs.summary}" | Status: ${functionResultRes.scheduled ? 'Sucesso' : 'Falha'}` });
-          } // fim else !isTestMode (schedule_google_calendar)
+          functionResultRes = await executeScheduleGoogleCalendar({
+            callArgs,
+            agentConfig,
+            clientId,
+            remoteJid,
+            instanceName,
+            sessionId,
+            isTestMode,
+            calendarDuration,
+            calendarAutoCapture,
+            necessidadeLabel,
+            leadRow,
+            callLogs,
+            onMeetingScheduled: () => {
+              meetingScheduledInTurn = true;
+            },
+          });
        } else if (call.name === "check_google_calendar_availability") {
-           console.log("[MCP] Checando disponibilidade no Google Calendar ->", callArgs);
-           functionResultRes = { available: false, message: "Erro ao consultar agenda." };
-           
-           try {
-               const oauthTokens = typeof agentConfig.options.google_tokens === "string"
-                   ? JSON.parse(agentConfig.options.google_tokens) : agentConfig.options.google_tokens;
-               
-               if (!oauthTokens?.refresh_token) throw new Error("Agente não autenticado no Google.");
-               const auth = await getOAuthClientForAgentOptions(agentConfig.id, agentConfig.options);
-               const calendar = google.calendar({ version: 'v3', auth });
-
-               const rawDate = String(callArgs.date || "").trim();
-               const targetDate = rawDate.slice(0, 10);
-               const timeMin = new Date(`${targetDate}T08:00:00-03:00`).toISOString();
-               const timeMax = new Date(`${targetDate}T18:00:00-03:00`).toISOString();
-
-               // 1. Consulta ocupação no Google Calendar
-               const freeBusyRes = await calendar.freebusy.query({
-                   requestBody: {
-                       timeMin,
-                       timeMax,
-                       items: [{ id: 'primary' }]
-                   }
-               });
-               const googleBusy = freeBusyRes.data.calendars?.['primary']?.busy || [];
-
-               // 2. Consulta também agendamentos ativos na tabela appointments do sistema
-               const { data: dbAppointments } = await supabase
-                   .from("appointments")
-                   .select("start_at, end_at")
-                   .eq("agent_id", agentConfig.id)
-                   .in("status", ["confirmed", "tentative"])
-                   .gte("start_at", `${targetDate}T00:00:00-03:00`)
-                   .lte("start_at", `${targetDate}T23:59:59-03:00`);
-
-               // 3. Unifica intervalos ocupados (Google + DB local)
-               const allBusy = [
-                   ...googleBusy.map((b: any) => ({ start: b.start, end: b.end })),
-                   ...(dbAppointments || []).map((a: any) => ({ start: a.start_at, end: a.end_at })),
-               ];
-
-               // 4. Calcula os horários livres com precisão no fuso de Brasília (economiza tokens e zera alucinações)
-               const freeSlots = calculateFreeSlots({
-                   targetDate,
-                   busyRanges: allBusy,
-                   durationMinutes: calendarDuration,
-                   startHour: 8,
-                   endHour: 18,
-                   stepMinutes: 30,
-                   nowDate: new Date(),
-                   minBufferMinutes: 30,
-               });
-
-               if (freeSlots.length > 0) {
-                   const suggested = freeSlots.slice(0, 8).join(", ");
-                   functionResultRes = {
-                       available: true,
-                       free_slots: freeSlots,
-                       message: `Na data ${targetDate}, os seguintes horários estão LIVRES para reunião de ${calendarDuration} min: ${suggested}. Sugira 2 opções destes horários livres ao cliente com simpatia.`
-                   };
-               } else {
-                   functionResultRes = {
-                       available: false,
-                       free_slots: [],
-                       message: `Na data ${targetDate}, a agenda está sem horários livres no expediente comercial (08h às 18h). Pergunte se o cliente prefere outro dia (como no dia seguinte ou na semana seguinte).`
-                   };
-               }
-           } catch (mcpErr: any) {
-               console.error("[MCP FreeBusy Error]:", mcpErr);
-               functionResultRes = { available: false, message: `Falha na consulta de tempo: ${mcpErr.message}` };
-           }
-           callLogs.push({ role: "system", content: `[Google Calendar] Disponibilidade consultada para ${callArgs.date} | Status: ${functionResultRes.available ? 'OK' : 'Falha'}` });
+          functionResultRes = await executeCheckGoogleCalendarAvailability({
+            callArgs,
+            agentConfig,
+            calendarDuration,
+            callLogs,
+          });
        } else if (call.name === "list_google_calendar_events") {
-           console.log("[MCP] Listando eventos do Google Calendar ->", callArgs);
-           functionResultRes = { found: false, events: [], message: "Erro ao listar eventos." };
-           try {
-               const oauthTokens = typeof agentConfig.options.google_tokens === "string"
-                   ? JSON.parse(agentConfig.options.google_tokens) : agentConfig.options.google_tokens;
-               if (!oauthTokens?.refresh_token) throw new Error("Agente não autenticado no Google.");
-               const auth = await getOAuthClientForAgentOptions(agentConfig.id, agentConfig.options);
-               const calendar = google.calendar({ version: 'v3', auth });
-
-               const dFrom = callArgs.date_from as string;
-               const dTo   = (callArgs.date_to as string) || dFrom;
-               const timeMin = new Date(`${dFrom}T00:00:00-03:00`).toISOString();
-               const timeMax = new Date(`${dTo}T23:59:59-03:00`).toISOString();
-
-               // S1 (Isolamento por contato/tenant): lista SOMENTE eventos vinculados a este
-               // tenant e a este contato em `appointments`, sem expor compromissos de outros leads.
-               const digits = (v: string | null | undefined) => (v || "").replace(/\D/g, "");
-               const contactDigits = digits(remoteJid);
-               const { data: contactAppts } = await supabase
-                   .from("appointments")
-                   .select("google_event_id, remote_jid")
-                   .eq("client_id", clientId)
-                   .in("status", ["confirmed", "tentative"])
-                   .gte("start_at", timeMin)
-                   .lte("start_at", timeMax)
-                   .not("google_event_id", "is", null);
-
-               const ownedEventIds = new Set(
-                   (contactAppts || [])
-                       .filter((a: any) => a.google_event_id && digits(a.remote_jid) === contactDigits)
-                       .map((a: any) => String(a.google_event_id))
-               );
-
-               if (ownedEventIds.size === 0) {
-                   functionResultRes = {
-                       found: false,
-                       events: [],
-                       message: `Nenhum evento deste contato encontrado entre ${dFrom} e ${dTo}. Avise o cliente que não há reunião marcada nesse período.`,
-                   };
-               } else {
-                   const list = await calendar.events.list({
-                       calendarId: 'primary',
-                       timeMin,
-                       timeMax,
-                       singleEvents: true,
-                       orderBy: 'startTime',
-                       maxResults: 30,
-                   });
-
-                   const events = (list.data.items || [])
-                       .filter((e: any) => e?.id && ownedEventIds.has(String(e.id)))
-                       .map((e: any) => ({
-                           id: e.id,
-                           summary: e.summary || "(sem título)",
-                           start: e.start?.dateTime || e.start?.date,
-                           end:   e.end?.dateTime   || e.end?.date,
-                       }));
-
-                   functionResultRes = events.length > 0
-                       ? { found: true, events, message: `${events.length} evento(s) encontrado(s) entre ${dFrom} e ${dTo}.` }
-                       : { found: false, events: [], message: `Nenhum evento deste contato encontrado entre ${dFrom} e ${dTo}. Avise o cliente que não tem reunião nesse período.` };
-               }
-           } catch (mcpErr: any) {
-               console.error("[MCP List Error]:", mcpErr);
-               functionResultRes = { found: false, events: [], message: `Falha ao listar agenda: ${mcpErr.message}` };
-           }
-           callLogs.push({ role: "system", content: `[Google Calendar] List ${callArgs.date_from}..${callArgs.date_to || callArgs.date_from} | ${functionResultRes.events?.length || 0} evento(s)` });
+          functionResultRes = await executeListGoogleCalendarEvents({
+            callArgs,
+            agentConfig,
+            clientId,
+            remoteJid,
+            callLogs,
+          });
        } else if (call.name === "cancel_google_calendar_event") {
-           console.log("[MCP] Cancelando evento do Google Calendar ->", callArgs);
-           functionResultRes = { cancelled: false, message: "Erro ao cancelar evento." };
-           try {
-               const oauthTokens = typeof agentConfig.options.google_tokens === "string"
-                   ? JSON.parse(agentConfig.options.google_tokens) : agentConfig.options.google_tokens;
-               if (!oauthTokens?.refresh_token) throw new Error("Agente não autenticado no Google.");
-               const auth = await getOAuthClientForAgentOptions(agentConfig.id, agentConfig.options);
-               const calendar = google.calendar({ version: 'v3', auth });
-
-                const eventId = String(callArgs.event_id || "").trim();
-                if (!eventId) throw new Error("event_id vazio. Chame list_google_calendar_events primeiro.");
-
-                // Escopo por contato: o evento só pode ser cancelado se existir um
-                // appointment DESTE tenant vinculado ao contato atual da conversa.
-                const digits = (v: string | null | undefined) => (v || "").replace(/\D/g, "");
-                const { data: apptRow, error: apptLookupErr } = await supabase
-                    .from("appointments")
-                    .select("id, remote_jid, title, service_name, start_at")
-                    .eq("client_id", clientId)
-                    .eq("google_event_id", eventId)
-                    .maybeSingle();
-                if (apptLookupErr) throw new Error("Falha ao validar ownership do evento.");
-                const wrongTenant = !apptRow;
-                const wrongContact = !wrongTenant && digits(apptRow.remote_jid) !== digits(remoteJid);
-                if (wrongTenant || wrongContact) {
-                    functionResultRes = { cancelled: false, message: wrongTenant
-                        ? "Evento não pertence a esta conversa/agenda local. Peça ao cliente pra confirmar a data e chame list_google_calendar_events de novo."
-                        : "Esse evento pertence a outro contato. Só posso cancelar compromissos desta conversa." };
-                    callLogs.push({ role: "system", content: `[Google Calendar] Cancel ${eventId} | Recusado: ${wrongTenant ? "sem appointment do contato" : "outro contato"}` });
-                } else {
-
-                await calendar.events.delete({
-                    calendarId: 'primary',
-                    eventId,
-                    sendUpdates: 'all',
-                });
-
-                // Atualiza appointments local (se existe) pra refletir cancelamento.
-                // .select() captura os dados ANTES de zerar — usados no resumo IA.
-                let cancelledAppt: any = null;
-                try {
-                   const { data: cancelledRows } = await supabase
-                      .from("appointments")
-                      .update({
-                         status: "cancelled",
-                         cancelled_at: new Date().toISOString(),
-                         cancelled_reason: (callArgs.reason as string) || "Cancelado pela IA via WhatsApp",
-                         google_event_id: null,
-                      })
-                      .eq("client_id", clientId)
-                      .eq("id", apptRow.id)
-                      .select("title, service_name, start_at");
-                   cancelledAppt = cancelledRows?.[0] || null;
-                } catch (apptErr: any) {
-                   console.warn("[Agent/Cancel] Falha atualizando appointments:", apptErr?.message);
-                }
-
-               // RESUMO IA PRO DONO — cancelamento. Lê a conversa e avisa o dono.
-               try {
-                  const { sendOwnerAppointmentSummary } = await import("@/lib/owner-summary");
-                  await sendOwnerAppointmentSummary({
-                     kind: "cancelamento",
-                     agentConfig,
-                     clientId,
-                     remoteJid,
-                     instanceName,
-                     appointment: {
-                        title: cancelledAppt?.title || null,
-                        service_name: cancelledAppt?.service_name || null,
-                        start_at: cancelledAppt?.start_at || null,
-                     },
-                  });
-               } catch (sumErr: any) {
-                  console.warn("[Agent/Cancel] resumo p/ dono falhou (não-fatal):", sumErr?.message);
-               }
-
-               functionResultRes = {
-                   cancelled: true,
-                   message: `Evento ${eventId} cancelado com sucesso. Avise o cliente que a reunião foi desmarcada${callArgs.reason ? ` (motivo: ${callArgs.reason})` : ""}.`
-               };
-                }
-           } catch (mcpErr: any) {
-               console.error("[MCP Cancel Error]:", mcpErr);
-               const msg = /not found|resource.*not.*exist/i.test(mcpErr.message)
-                   ? "Esse evento não foi encontrado. Peça ao cliente pra confirmar a data e chame list_google_calendar_events de novo."
-                   : `Falha ao cancelar: ${mcpErr.message}`;
-               functionResultRes = { cancelled: false, message: msg };
-           }
-           callLogs.push({ role: "system", content: `[Google Calendar] Cancel ${callArgs.event_id} | Status: ${functionResultRes.cancelled ? 'Sucesso' : 'Falha'}` });
+          functionResultRes = await executeCancelGoogleCalendarEvent({
+            callArgs,
+            agentConfig,
+            clientId,
+            remoteJid,
+            instanceName,
+            callLogs,
+          });
        } else if (call.name === "save_variables") {
           console.log("[MCP] Salvando Variáveis ->", callArgs);
           try {
@@ -2589,7 +1512,7 @@ ${capturedVariablesPrompt}
                    // SSRF guard: URL vem de config do tenant — bloqueia scheme
                    // inválido e hosts/IPs internos (metadata, rede privada).
                     const { fetchPublicHttpUrl } = await import("@/lib/safe-url");
-                    const reqWb = await fetchPublicHttpUrl(matchTool.webhook_url, {
+                    const reqWb = await fetchPublicHttpUrl(matchTool.webhook_url || "", {
                      method: "POST",
                      headers: { "Content-Type": "application/json" },
                      body: JSON.stringify({ query: callArgs.query, remoteJid, instanceName }),
@@ -2663,6 +1586,7 @@ ${capturedVariablesPrompt}
           geminiApiKey,
           openrouterApiKey,
           nvidiaApiKey,
+          fallbackModelRef: agentFallbackModelRef,
         });
         const synthTurn = await synthSession.sendUser(
           `Resultados das ferramentas já executadas:\n${compactToolData}\n\nVocê já executou todas as ferramentas disponíveis neste turno. Responda agora diretamente ao cliente em texto claro e natural usando apenas os dados obtidos acima (sem chamar ferramentas).`,
@@ -2681,6 +1605,26 @@ ${capturedVariablesPrompt}
       } catch (synthErr: any) {
         console.warn("[AGENT] Síntese final sem tools falhou:", synthErr?.message);
       }
+    }
+
+    // Atualiza diagnóstico final (em caso de failover no sendToolResults) e registra failover se ocorreu
+    diagnosticModel = session.modelUsed();
+    diagnosticProvider = session.provider;
+    const requestedModelParsed = parseModelRef(modelId).model;
+    if (diagnosticModel !== requestedModelParsed && !isTestMode) {
+      supabase.from("webhook_logs").insert({
+        instance_name: instanceName,
+        client_id: clientId,
+        event: "AGENT_MODEL_FAILOVER",
+        payload: {
+          agent_id: agentId,
+          remote_jid: maskJid(remoteJid),
+          requested_model: modelId,
+          used_provider: diagnosticProvider,
+          used_model: diagnosticModel,
+        },
+        created_at: new Date().toISOString(),
+      }).then(() => {}, () => {});
     }
 
     // Loga consumo total de tokens dessa interação
@@ -2738,21 +1682,26 @@ ${capturedVariablesPrompt}
       return NextResponse.json({ success: true, ai_responded: false, suppressed: outputDecision.suppressed });
     }
 
-    finalAnswer = outputDecision.text;
+    finalAnswer = sanitizeHallucinatedImages(outputDecision.text, validImageUrls);
 
-    // Normaliza qualquer imagem em markdown (![alt](url)) ou URL solta válida para [IMAGEM: url]
-    // e REMOVE tags [IMAGEM: ...] fora da whitelist `validImageUrls` (trava anti-alucinação real).
-    finalAnswer = finalAnswer.replace(/!\[[^\]]*\]\((https?:\/\/[^\s\)]+)\)/gi, "[IMAGEM: $1]");
-    finalAnswer = finalAnswer.replace(/\[(?:IMAGEM|IMAGE|MEDIA|FOTO):\s*(https?:\/\/[^\s\]]+)\]/gi, (_full, rawUrl) => {
-      const cleanUrl = String(rawUrl).trim();
-      return validImageUrls.has(cleanUrl) ? `[IMAGEM: ${cleanUrl}]` : "";
-    });
-    for (const validUrl of validImageUrls) {
-      if (finalAnswer.includes(validUrl) && !new RegExp(`\\[(?:IMAGEM|IMAGE|MEDIA|FOTO):\\s*${validUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\]`, "i").test(finalAnswer)) {
-        finalAnswer = finalAnswer.replace(validUrl, `\n[IMAGEM: ${validUrl}]\n`);
-      }
+    // Se só restou vazio após remover tags [IMAGEM: ...] inválidas, suprime sem disparar envio.
+    if (!finalAnswer) {
+      await supabase.from("webhook_logs").insert({
+        instance_name: instanceName,
+        client_id: clientId,
+        event: "AGENT_EMPTY_OUTPUT",
+        payload: {
+          agent_id: agentId,
+          remote_jid: maskJid(remoteJid),
+          model: session.modelUsed(),
+          completion_tokens: totalCompletion,
+          tool_iterations: toolIterations,
+          reason: "stripped_invalid_images",
+        },
+        created_at: new Date().toISOString(),
+      }).then(() => {}, () => {});
+      return NextResponse.json({ success: true, ai_responded: false, suppressed: "empty_output" });
     }
-    finalAnswer = finalAnswer.replace(/\n{3,}/g, "\n\n").trim();
 
     // Se o lead está em PREVIA_PRONTA, rastreia envio de Ping e Link
     if (leadRow?.previa_status === "PREVIA_PRONTA") {
@@ -2838,7 +1787,24 @@ ${capturedVariablesPrompt}
           messages: messagesToEval,
           customPrompt: agentConfig?.options?.site_preview_eval_prompt,
           modelRef: agentConfig?.options?.site_preview_eval_model || cheapEvalModel || agentConfig?.target_model,
+          geminiApiKey,
+          openrouterApiKey,
+          nvidiaApiKey,
         });
+
+        if (evalResult.usage && evalResult.usage.totalTokens > 0) {
+          await logAgentUsage(evalResult.usage, {
+            agentId,
+            agentLabel: agentConfig?.name || `Agente #${agentId}`,
+            clientId,
+            fallbackModel: evalResult.modelUsed || session.modelUsed(),
+            fallbackProvider: evalResult.provider || session.provider,
+            remoteJid,
+            instanceName,
+            isTestMode,
+            extraMetadata: { evaluator: "site_preview_agreement", agreed: evalResult.agreed },
+          }).catch(() => {});
+        }
 
         if (evalResult.agreed) {
           previaSiteRequestedInTurn = true;
@@ -3124,405 +2090,87 @@ ${capturedVariablesPrompt}
     const messageChunks = humanize ? splitMessage(finalAnswer, splitIntensity) : [finalAnswer];
     console.log(`[AGENT] Enviando ${messageChunks.length} chunks para ${maskJid(remoteJid)} (Humanize: ${humanize}, picote: ${splitIntensity})`);
 
-    // ============================================================
-    // DEDUP BASEADO EM TEMPO (não mais "pra sempre").
-    // ANTES: qualquer foto já enviada na conversa era SUPRIMIDA pra sempre.
-    //   → Cliente pedia "me manda foto do iPhone 15" DE NOVO depois de 1h e
-    //     a foto não vinha (bug crítico pra vendas).
-    // AGORA: só suprime se foi enviada nos últimos 5min (default). Impede
-    //   duplicação imediata (IA repete 2x no mesmo turno) mas permite
-    //   reenvio legítimo quando cliente pede explicitamente mais tarde.
-    // ============================================================
     const dedupProductMedia = agentConfig?.options?.dedup_product_media ?? true;
     const dedupWindowMs = Number(agentConfig?.options?.dedup_media_window_minutes) > 0
       ? Number(agentConfig?.options?.dedup_media_window_minutes) * 60_000
-      : 5 * 60_000; // 5 minutos default
-    const sentMediaRecently = new Map<string, number>(); // url → timestamp ms
+      : 5 * 60_000;
+    const sentMediaRecently = await loadRecentlySentMediaUrls({
+      enabled: dedupProductMedia,
+      windowMs: dedupWindowMs,
+      sessionId,
+      remoteJid,
+      clientId,
+    });
 
-    if (dedupProductMedia && (sessionId || remoteJid)) {
-      try {
-        const sinceIso = new Date(Date.now() - dedupWindowMs).toISOString();
-        const { data: pastMsgs } = sessionId
-          ? await supabase
-              .from("messages")
-              .select("media_url, content, created_at")
-              .eq("client_id", clientId)
-              .eq("session_id", sessionId)
-              .eq("sender", "ai")
-              .gte("created_at", sinceIso)
-          : await supabase
-              .from("chats_dashboard")
-              .select("media_url, content, created_at")
-              .eq("client_id", clientId)
-              .eq("remote_jid", remoteJid)
-              .eq("sender_type", "ai")
-              .gte("created_at", sinceIso);
+    const customerInboundCount = Array.isArray(historico)
+      ? historico.filter((h: { sender_type?: string | null }) => h?.sender_type === "customer").length
+      : 0;
 
-        for (const pm of pastMsgs || []) {
-          if (pm.media_url) {
-            const ts = pm.created_at ? new Date(pm.created_at).getTime() : 0;
-            sentMediaRecently.set(pm.media_url.trim(), ts);
-          }
-          if (pm.content) {
-            const pastTagMatches = Array.from(pm.content.matchAll(/https?:\/\/[^\s\]]+\.(?:jpg|jpeg|png|webp|gif)/gi));
-            for (const ptm of pastTagMatches as any[]) {
-              if (ptm && ptm[0]) {
-                const ts = pm.created_at ? new Date(pm.created_at).getTime() : 0;
-                sentMediaRecently.set(String(ptm[0]).trim(), ts);
-              }
-            }
-          }
-        }
-      } catch (err: any) {
-        console.warn("[AGENT] Erro ao consultar histórico de mídias para dedup:", err?.message);
-      }
-    }
-
-    // Helper pra enviar UMA foto com caption (legenda).
-    // Retorna true se enviado com sucesso, false caso contrário.
-    const sendProductPhoto = async (mediaUrl: string, caption: string): Promise<boolean> => {
-      try {
-        const mediaRes = await channelMod.sendMedia(
-          remoteJid,
-          caption,
-          {
-            mediaUrl,
-            url: mediaUrl,
-            type: "image",
-            mimetype: /\.(jpg|jpeg)$/i.test(mediaUrl) ? "image/jpeg"
-              : /\.png$/i.test(mediaUrl) ? "image/png"
-              : /\.webp$/i.test(mediaUrl) ? "image/webp"
-              : /\.gif$/i.test(mediaUrl) ? "image/gif"
-              : "image/jpeg",
-            fileName: mediaUrl.split("/").pop()?.split("?")[0] || `produto-${Date.now()}.jpg`,
-          },
-          instanceName
-        );
-        if (mediaRes?.ok === false) {
-          console.warn(`[AGENT] Provider rejeitou mídia (${mediaRes.error}). URL: ${mediaUrl}`);
-        }
-        const mediaMsgId = mediaRes?.messageId || (mediaRes as any)?.key?.id || `agent-media-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        try {
-          const { registerAiSend } = await import("@/lib/manual-send-registry");
-          registerAiSend(mediaMsgId);
-        } catch { /* ignore */ }
-
-        sentMediaRecently.set(mediaUrl, Date.now());
-        const nowIsoMedia = new Date().toISOString();
-        if (sessionId) {
-          await supabase.from("messages").insert({
-            client_id: clientId,
-            session_id: sessionId,
-            message_id: mediaMsgId,
-            sender: "ai",
-            content: caption || mediaUrl,
-            media_category: "image",
-            media_url: mediaUrl,
-            delivery_status: mediaRes?.ok === false ? "error" : "sent",
-            created_at: nowIsoMedia,
-          }).then(() => {}, () => {});
-        }
-
-        await supabase.from("chats_dashboard").insert({
-          message_id: mediaMsgId,
-          remote_jid: remoteJid,
-          sender_type: "ai",
-          content: caption || `[Imagem] ${mediaUrl}`,
-          status_envio: mediaRes?.ok === false ? "error" : "sent",
-          instance_name: instanceName,
-          client_id: clientId,
-          media_url: mediaUrl,
-          media_type: "image",
-          created_at: nowIsoMedia,
-        }).then(() => {}, () => {});
-        return mediaRes?.ok !== false;
-      } catch (mErr: any) {
-        console.warn("[AGENT] Falha ao enviar foto vinculada de produto:", mErr?.message);
-        return false;
-      }
-    };
-
-    // Reporta falhas críticas/rate-limit ou confirmações do Agente para a saúde do chip sem bloquear o turno.
-    const reportAgentSendOutcome = (ok: boolean, errorMsg?: unknown) => {
-      if (isTestMode || !clientId || !instanceName) return;
-      if (ok) {
-        import("@/lib/warmup/warmup-engine")
-          .then((m) => m.recordWebhookDeliveryFeedback?.({ clientId, instanceName, statusText: "delivered" }))
-          .catch(() => {});
-        return;
-      }
-      const errStr = String(errorMsg || "");
-      if (/429|rate|timeout|timed out|econn|disconnect|closed|50[0-4]/i.test(errStr)) {
-        import("@/lib/warmup/warmup-engine")
-          .then((m) => m.recordWebhookDeliveryFeedback?.({ clientId, instanceName, statusText: "error" }))
-          .catch(() => {});
-      }
-    };
-
-    // Helper pra enviar e PERSISTIR um texto (seja intro, produto, ou closing).
-    // Retorna o msgId gerado (ou null em erro).
-    const sendAndPersistText = async (text: string, customDelayMs?: number): Promise<string | null> => {
-      if (!text.trim()) return null;
-      const effectiveDelayMs = Math.max(1, Math.round(customDelayMs ?? (typingDelaySeconds * 1000)));
-      const customerInboundCount = Array.isArray(historico)
-        ? historico.filter((h: { sender_type?: string | null }) => h?.sender_type === "customer").length
-        : 0;
-      const sendOptions = !isTestMode && customerInboundCount <= 1
-        ? { delay: effectiveDelayMs, linkPreview: false }
-        : { delay: effectiveDelayMs };
-      try {
-        try {
-          const { registerPendingAutomatedSend } = await import("@/lib/manual-send-registry");
-          registerPendingAutomatedSend(instanceName, remoteJid, text);
-        } catch { /* ignore */ }
-
-        let sendResult: any = await channelMod.sendMessage(remoteJid, text, instanceName, sendOptions);
-
-        const checkInstanceError = (res: any) => {
-          if (!res || res.ok === false) {
-            const errStr = String(res?.error || "").toLowerCase();
-            return errStr.includes("does not exist") || errStr.includes("not found") || errStr.includes("404");
-          }
-          return false;
-        };
-
-        if (checkInstanceError(sendResult) && !isTestMode) {
-          console.warn(`[AGENT] Instância "${instanceName}" falhou (não existe/404). Tentando auto-migrar conexão...`);
-          const { data: activeConns } = await supabase
-            .from("channel_connections")
-            .select("instance_name")
-            .eq("client_id", clientId)
-            .in("status", ["open", "CONNECTED", "connected"])
-            .limit(1);
-
-          const altInstance = activeConns?.[0]?.instance_name;
-          if (altInstance && altInstance !== instanceName) {
-            console.log(`[AGENT] Auto-migrando sessão ${sessionId} de "${instanceName}" para "${altInstance}" ativo.`);
-            await supabase.from("sessions").update({ instance_name: altInstance }).eq("id", sessionId);
-            instanceName = altInstance;
-
-            try {
-              const { registerPendingAutomatedSend } = await import("@/lib/manual-send-registry");
-              registerPendingAutomatedSend(instanceName, remoteJid, text);
-            } catch {}
-
-            sendResult = await channelMod.sendMessage(remoteJid, text, instanceName, sendOptions);
-          }
-        }
-
-        const msgId = sendResult?.key?.id
-          || sendResult?.data?.key?.id
-          || sendResult?.messageId
-          || `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        try {
-          const { registerAiSend } = await import("@/lib/manual-send-registry");
-          registerAiSend(msgId);
-        } catch { /* ignore */ }
-        lastSendResult = sendResult;
-
-        const nowIso = new Date().toISOString();
-        if (sessionId) {
-          await supabase.from("messages").insert({
-            client_id: clientId,
-            session_id: sessionId,
-            message_id: msgId,
-            sender: "ai",
-            content: text,
-            delivery_status: sendResult?.ok === false ? "error" : "sent",
-            created_at: nowIso,
-          }).then(() => {}, () => {});
-        }
-        await supabase.from("chats_dashboard").insert({
-          message_id: msgId,
-          remote_jid: remoteJid,
-          sender_type: "ai",
-          content: text,
-          status_envio: sendResult?.ok === false ? "error" : "sent",
-          instance_name: instanceName,
-          client_id: clientId,
-          created_at: nowIso,
-        }).then(() => {}, () => {});
-
-        if (sendResult?.ok === false) {
-          anySendError = sendResult.error || "Falha no envio";
-          reportAgentSendOutcome(false, sendResult.error);
-        } else {
-          reportAgentSendOutcome(true);
-        }
-        return msgId;
-      } catch (err: any) {
-        const msg = String(err?.message || err || "").toLowerCase();
-        const is404 = msg.includes("does not exist") || msg.includes("not found") || msg.includes("404");
-        if (is404 && !isTestMode) {
-          try {
-            console.warn(`[AGENT] Instância "${instanceName}" falhou (catch não existe/404). Tentando auto-migrar conexão...`);
-            const { data: activeConns } = await supabase
-              .from("channel_connections")
-              .select("instance_name")
-              .eq("client_id", clientId)
-              .in("status", ["open", "CONNECTED", "connected"])
-              .limit(1);
-
-            const altInstance = activeConns?.[0]?.instance_name;
-            if (altInstance && altInstance !== instanceName) {
-              console.log(`[AGENT] Auto-migrando sessão ${sessionId} de "${instanceName}" para "${altInstance}" ativo.`);
-              await supabase.from("sessions").update({ instance_name: altInstance }).eq("id", sessionId).eq("client_id", clientId);
-              instanceName = altInstance;
-
-              const sendResult: any = await channelMod.sendMessage(remoteJid, text, instanceName, sendOptions);
-              const msgId = sendResult?.key?.id || sendResult?.messageId || `agent-${Date.now()}`;
-              // FIX: resend pós-migração não registrava o msgId como envio da IA
-              // → eco voltava classificado "human" → bot pausado 30min injustamente.
-              try {
-                const { registerAiSend } = await import("@/lib/manual-send-registry");
-                registerAiSend(msgId);
-              } catch { /* ignore */ }
-              const nowIso = new Date().toISOString();
-              if (sessionId) {
-                await supabase.from("messages").insert({
-                  client_id: clientId,
-                  session_id: sessionId,
-                  message_id: msgId,
-                  sender: "ai",
-                  content: text,
-                  delivery_status: "sent",
-                  created_at: nowIso,
-                }).then(() => {}, () => {});
-              }
-              await supabase.from("chats_dashboard").insert({
-                message_id: msgId,
-                remote_jid: remoteJid,
-                sender_type: "ai",
-                content: text,
-                status_envio: "sent",
-                instance_name: instanceName,
-                client_id: clientId,
-                created_at: nowIso,
-              }).then(() => {}, () => {});
-              reportAgentSendOutcome(true);
-              return msgId;
-            }
-          } catch (migErr: any) {
-            console.error("[AGENT] Falha na auto-migração de instância:", migErr.message);
-          }
-        }
-        console.error(`[AGENT] Falha ao enviar texto:`, err.message);
-        anySendError = err.message;
-        reportAgentSendOutcome(false, err?.message);
-        return null;
-      }
-    };
+    const delivery = createWhatsAppDeliveryHelpers({
+      channelMod: channelMod as unknown as import("@/lib/agent/delivery").ChannelSenderModule,
+      remoteJid,
+      clientId,
+      initialInstanceName: instanceName,
+      sessionId,
+      isTestMode,
+      typingDelaySeconds,
+      customerInboundCount,
+      sentMediaRecently,
+    });
 
     for (let i = 0; i < messageChunks.length; i++) {
-        const chunkText = messageChunks[i];
+      const chunkText = messageChunks[i];
+      const { segments, hasImages } = splitChunkSegmentsWithCaptions(chunkText);
 
-        // ============================================================
-        // NOVA ORDENAÇÃO DE ENVIO: texto + imagem INTERCALADOS.
-        // ANTES: enviava TODAS as imagens primeiro, depois o texto.
-        //   → Cliente recebia 5 fotos sem contexto, depois o texto "Temos
-        //     estes iPhones". Péssimo pra venda (confusão visual).
-        // AGORA: cada produto vira um "bloco" com texto + foto juntos.
-        //   → Cliente vê "iPhone 15 128GB - R$ 5000" + foto dele na sequência.
-        // ============================================================
-        const mediaTagRegex = /\[(?:IMAGEM|IMAGE|MEDIA|FOTO):\s*(https?:\/\/[^\s\]]+)\]/gi;
-
-        // PASSO 1: divide o chunk em segmentos ORDENADOS.
-        // Cada segmento é ou "texto" ou "imagem" (URL).
-        type Segment =
-          | { kind: "text"; content: string }
-          | { kind: "image"; url: string; caption: string };
-        const segments: Segment[] = [];
-        let lastIndex = 0;
-        let m: RegExpExecArray | null;
-        const re = new RegExp(mediaTagRegex.source, "gi");
-        while ((m = re.exec(chunkText)) !== null) {
-          const before = chunkText.slice(lastIndex, m.index).trim();
-          if (before) segments.push({ kind: "text", content: before });
-          segments.push({ kind: "image", url: m[1].trim(), caption: "" });
-          lastIndex = m.index + m[0].length;
+      if (!hasImages) {
+        if (i > 0) {
+          const chunkDelayMs = calculateChunkTypingMs(chunkText.length);
+          await new Promise((r) => setTimeout(r, chunkDelayMs));
+          await delivery.sendAndPersistText(chunkText, 1000);
+        } else {
+          await delivery.sendAndPersistText(chunkText, Math.max(1, Math.round(typingDelaySeconds * 1000)));
         }
-        const tail = chunkText.slice(lastIndex).trim();
-        if (tail) segments.push({ kind: "text", content: tail });
+        continue;
+      }
 
-        // CASO: chunk NÃO tem imagem. Fluxo simples — manda texto e persiste.
-        if (!segments.some(s => s.kind === "image")) {
-          // Delay de digitação em chunks 2+ (sem duplicar sleep no Node + provider).
-          if (i > 0) {
-            const chunkDelayMs = calculateChunkTypingMs(chunkText.length);
-            await new Promise(r => setTimeout(r, chunkDelayMs));
-            await sendAndPersistText(chunkText, 1000);
-          } else {
-            await sendAndPersistText(chunkText, Math.max(1, Math.round(typingDelaySeconds * 1000)));
+      let photosSent = 0;
+      const MAX_PHOTOS_PER_TURN = 10;
+      for (const s of segments) {
+        if (s.kind === "text") {
+          if (s.consumed || !s.content.trim()) continue;
+          const chunkDelayMs = calculateChunkTypingMs(s.content.length);
+          await new Promise((r) => setTimeout(r, chunkDelayMs));
+          await delivery.sendAndPersistText(s.content, 1000);
+        } else {
+          if (photosSent >= MAX_PHOTOS_PER_TURN) {
+            console.warn(`[AGENT] Limite de ${MAX_PHOTOS_PER_TURN} fotos/turno atingido — pulando FOTO; textos restantes ainda são enviados.`);
+            continue;
           }
-          continue;
-        }
-
-        // PASSO 2: resolve captions inteligentes.
-        // Texto curto ANTES de uma imagem vira a CAPTION dela (legenda).
-        // Assim a foto chega com a descrição correta no WhatsApp.
-        for (let idx = 0; idx < segments.length; idx++) {
-          const s = segments[idx];
-          if (s.kind !== "image") continue;
-          if (idx === 0) continue;
-          const prev = segments[idx - 1];
-          if (prev.kind !== "text") continue;
-          if ((prev as any)._consumed) continue;
-          const lines = prev.content.split(/\n+/).filter(Boolean);
-          const lastLine = lines[lines.length - 1] || "";
-          if (lines.length <= 3 && prev.content.length <= 250) {
-            // Texto inteiro curto vira caption.
-            s.caption = prev.content;
-            (prev as any)._consumed = true;
-          } else if (lastLine.length > 0 && lastLine.length <= 200) {
-            // Só a última linha vira caption.
-            s.caption = lastLine;
-            lines.pop();
-            prev.content = lines.join("\n").trim();
-            if (!prev.content) (prev as any)._consumed = true;
+          const lastSentTs = sentMediaRecently.get(s.url);
+          const recent = lastSentTs && (Date.now() - lastSentTs < dedupWindowMs);
+          if (dedupProductMedia && recent) {
+            console.log(`[AGENT] Mídia ${s.url} enviada há ${Math.round((Date.now() - (lastSentTs || 0)) / 1000)}s - suprimindo duplicação imediata.`);
+            continue;
+          }
+          if (photosSent > 0) {
+            await new Promise((r) => setTimeout(r, 2000));
+          }
+          console.log(`[AGENT] Enviando foto ${photosSent + 1}: ${s.url}${s.caption ? ` (caption: "${s.caption.slice(0, 50)}...")` : ""}`);
+          const sentOk = await delivery.sendProductPhoto(s.url, s.caption);
+          if (sentOk) {
+            photosSent++;
+          } else if (s.caption) {
+            console.warn("[AGENT] Foto falhou — enviando caption como texto.");
+            await delivery.sendAndPersistText(s.caption);
           }
         }
-
-        // PASSO 3: envia segmentos NA ORDEM.
-        let photosSent = 0;
-        const MAX_PHOTOS_PER_TURN = 10; // anti-spam / WhatsApp ban protection
-        for (const s of segments) {
-          if (s.kind === "text") {
-            if ((s as any)._consumed) continue;
-            if (!s.content.trim()) continue;
-            // Delay natural de digitação (2-5s), sem duplicar o sleep no provider.
-            const chunkDelayMs = calculateChunkTypingMs(s.content.length);
-            await new Promise(r => setTimeout(r, chunkDelayMs));
-            await sendAndPersistText(s.content, 1000);
-          } else {
-            // Segmento de imagem.
-            if (photosSent >= MAX_PHOTOS_PER_TURN) {
-              console.warn(`[AGENT] Limite de ${MAX_PHOTOS_PER_TURN} fotos/turno atingido — pulando FOTO; textos restantes ainda são enviados.`);
-              continue;
-            }
-            // Dedup baseado em tempo.
-            const lastSentTs = sentMediaRecently.get(s.url);
-            const recent = lastSentTs && (Date.now() - lastSentTs < dedupWindowMs);
-            if (dedupProductMedia && recent) {
-              console.log(`[AGENT] Mídia ${s.url} enviada há ${Math.round((Date.now() - (lastSentTs || 0)) / 1000)}s - suprimindo duplicação imediata.`);
-              continue;
-            }
-            // Delay entre fotos: 2s (evita burst que parece spam).
-            if (photosSent > 0) {
-              await new Promise(r => setTimeout(r, 2000));
-            }
-            console.log(`[AGENT] Enviando foto ${photosSent + 1}: ${s.url}${s.caption ? ` (caption: "${s.caption.slice(0, 50)}...")` : ""}`);
-            const sentOk = await sendProductPhoto(s.url, s.caption);
-            if (sentOk) {
-              photosSent++;
-            } else if (s.caption) {
-              // Foto falhou mas a caption era conteúdo real (preço/descrição)
-              // — cai pro texto em vez de perder a informação.
-              console.warn("[AGENT] Foto falhou — enviando caption como texto.");
-              await sendAndPersistText(s.caption);
-            }
-          }
-        }
+      }
     }
+
+    const finalDeliveryState = delivery.getState();
+    instanceName = finalDeliveryState.instanceName;
+    lastSendResult = finalDeliveryState.lastSendResult;
+    anySendError = finalDeliveryState.anySendError;
 
     // Log de resultado (resumo) — fire-and-forget: resposta já pode voltar.
     supabase.from("webhook_logs").insert({
@@ -3611,7 +2259,7 @@ ${capturedVariablesPrompt}
          payload: { agent_id: diagnosticAgentId, error: err.message, stack: err.stack?.slice(0, 300) },
          created_at: new Date().toISOString()
       });
-    } catch (_) { /* ignore logging errors */ }
+    } catch { /* ignore logging errors */ }
     return NextResponse.json({ success: false, error: err.message });
   } finally {
     releaseSessionLock?.();

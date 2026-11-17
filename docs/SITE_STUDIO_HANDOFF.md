@@ -1,10 +1,36 @@
-# Site Studio — passagem de trabalho (atualizado em 08/10/2026)
+# Site Studio — passagem de trabalho (atualizado em 11/11/2026)
 
-Estado: **EM DESENVOLVIMENTO; 1607 TESTES OFFLINE E 36 JORNADAS DE PREVIEW APROVADOS; QA DO EDITOR AINDA NÃO EXECUTADO; ENTREGA COMPLETA PENDENTE**. Este arquivo permite retomar sem acesso à conversa. Ler também `AGENTS.md`, `docs/SITE_STUDIO_PROGRESSO.md`, `docs/SITE_STUDIO.md` e plano aprovado `C:\Users\Salomão\.claude\plans\modular-brewing-pudding.md`.
+Estado: **EM DESENVOLVIMENTO; HARNESS REAL DO EDITOR (`6/6`) + PREVIEW (`18/18`) + SUÍTE OFFLINE (`3222 PASS / 31 SKIPPED`) + BUILD DE PRODUÇÃO APROVADOS; PARCIAL DE CRIAÇÃO, ASSETS PRIVADOS NO BROWSER, QA COM HISTÓRICO/BINÁRIOS E VALIDAÇÃO NO PROJETO REAL PENDENTES**. Este arquivo permite retomar sem acesso à conversa. Ler também `AGENTS.md`, `docs/SITE_STUDIO_PROGRESSO.md`, `docs/SITE_STUDIO.md` e plano aprovado `C:\Users\Salomão\.claude\plans\modular-brewing-pudding.md`.
 
 ## RETOMADA AUTOMÁTICA — ler primeiro
 
-O usuário pediu salvar todo o progresso para reabrir Claude Code e dizer **“continue onde estava”**. Nessa situação, retomar Site Studio nesta árvore original, sem pedir que reconte a conversa. Esta seção prevalece sobre TODOs, bloqueios e afirmações históricas abaixo.
+O usuário pediu salvar todo o progresso para retomar com **“continue”** / **“continue onde estava”**. Nessa situação, retomar Site Studio nesta árvore original, sem pedir que reconte a conversa. Esta seção prevalece sobre TODOs, bloqueios e afirmações históricas abaixo.
+
+### Harness real do Editor (`SiteProjectPage`) + correções SSE/polling (11/11/2026) — Validado
+
+1. **Montagem da página real no harness Vite/Playwright (`scripts/site-editor-*`):**
+   - Removida a cópia sintética (`EditorFixture`) de `scripts/site-editor-fixture.tsx`: o fixture agora carrega `src/app/globals.css` e monta os componentes reais `SitesLayout` (`src/app/sites/layout.tsx`) + `SiteProjectPage` (`src/app/sites/[projectId]/page.tsx`) dentro do mesmo shell de viewport (`h-[100dvh] overflow-hidden`) usado por `src/app/layout.tsx`, evitando o loop de `ResizeObserver` no `SitePreview`.
+   - Criados 4 stubs mínimos e estáveis em `scripts/site-editor-next-stubs/` (`dynamic.tsx`, `image.tsx`, `link.tsx`, `navigation.ts` com `STATIC_ROUTER` singleton para não abortar `loadRuns` a cada render) e mapeados no `resolve.alias` de `scripts/site-editor-server.mjs`, sem DB, env real nem código gerado executado no host.
+
+2. **Correções reais em `src/app/sites/[projectId]/page.tsx`:**
+   - `loadRuns`: ao receber checkpoint com `run_id` ou `base_revision_id` divergente da revisão do snapshot atual, agora limpa `checkpointEtag.current = null` e `setCheckpointPreview(null)` em vez de manter rascunho obsoleto de run anterior na prévia.
+   - `queued`: limpa `setCheckpointPreview(null)` ao enfileirar um novo run.
+   - `useEffect` do listener SSE (`EventSource`): dependência alterada de `[activeRun, working, base]` para `[activeRunId, working, base, draftScope]` (evitando reconectar o `EventSource` a cada poll de 1,2s); adicionados `AbortController`, sequência local anti-corrida, `If-None-Match` (`304`), validação estrita de `checkpoint.run_id` / `checkpoint.base_revision_id` e proteção explícita contra sobrescrever rascunhos manuais (`getSiteDraft(draftScope, "files") || getSiteDraft(draftScope, "project")`).
+
+3. **Suites e gates validados após o último edit:**
+   - `npm run sites:test-editor` (`scripts/site-editor.browser.ts` com mocks de rota `/api/auth/session` + `/api/sites/test-project/...` usando envelope `{ checkpoint }` real): **6 passed (1.3m)** sem erros de página nem recarregamentos completos (`mainNavigations === 1`):
+     1) polling de checkpoint confirmado atualiza Preview (`[data-preview-state="accepted"] iframe`) usando `ETag` / `304`, mantendo aba `"Código"` na revisão canônica;
+     2) proteção de rascunho manual em `"Código"` quando resposta atrasada de `GET /files?run_id=...` (mantida aberta durante erro+`"Recarregar projeto"` até a edição manual) chega depois, preservando editor sujo e botão `"Publicar"` desabilitado;
+     3) descarte de checkpoints com `run_id` incorreto ou `base_revision_id` obsoleto sem deixar prévia antiga visível;
+     4) atualização em tempo real via SSE `file_written` mantendo apenas 1 conexão `EventSource` entre múltiplos polls de `/runs`;
+     5) recarregamento canônico em `status: "completed"`;
+     6) limpeza da prévia de checkpoint de volta à revisão canônica ao clicar `"Cancelar"`.
+   - `npm run sites:test-preview`: **18 passed (2.0m)**.
+   - `npx --no-install tsc --noEmit --incremental false`: código 0.
+   - `npx eslint src/app/sites/[projectId]/page.tsx scripts/site-editor-server.mjs scripts/site-editor-fixture.tsx scripts/site-editor.browser.ts scripts/site-editor-next-stubs`: código 0 (0 erros, 0 avisos).
+   - `npm test`: **197 arquivos passaram | 18 skipped (215)**; **3222 testes passaram | 31 skipped (3253)** (inclui testes PGlite SQL reais; opt-ins pagos/live mantidos skipped).
+   - `npm run build`: código 0 (`build-setup-sql` + `next build` completos).
+   - `git diff --check`: código 0.
 
 ### Integração OpenCode CLI + Impeccable (31/10/2026) — Validado em Produção
 
@@ -55,13 +81,11 @@ O usuário pediu salvar todo o progresso para reabrir Claude Code e dizer **“c
 
 ### Próximo trabalho exato
 
-1. **Ponto exato de parada: integrar e executar `scripts/site-editor.browser.ts`.** O arquivo contém dois testes Playwright preliminares para polling de checkpoint e proteção do rascunho manual, mas NÃO foi executado,tipado,lintado ou revisado. O harness ainda não renderiza o Editor: `/?editor` segue fixture somente SitePreview; `scripts/site-preview.playwright.config.ts` inclui apenas `site-preview.browser.ts`; não existem aliases/stubs Next navigation/dynamic/Link/Image. Usar a página/componente real,sem copiar sua lógica para fixture,com APIs sintéticas e sem DB/env Next real. Corrigir o segundo teste: “Atualizar estado” pode apenas atualizar deployments e NÃO comprova novo fetch de checkpoint; exigir evidência da request e da resposta tardia. Cobrir polling/canônico/dirty/stale/revisão/terminal/cancelamento;lease continua pendência distinta. Architect `a4e6c33769757493b` falhou por API,sem plano entregue. Não há tarefa conhecida em execução ao salvar este checkpoint. Não modificar fixture durante browser.
-2. `site-preview.tsx`:dois runtimes immutable idUUID,promoção mesmo nó,sonda createRoot CJS mantendo main real,Probe efeito+task+2rAF;comprovação montagem inicial,não readiness assíncrona geral/QA. Deadline60s pausa document.hidden;erro candidato conserva accepted;erro tardio após promoção mostra diagnóstico,sem rollback imediato. Review React HIGH caughtError corrigido RED/GREEN;incomplete desmontava accepted,corrigido+teste novo. Security achados stale antes rAF/status coercion/markerHTML corrigidos por versionref layout/strict strings/lastIndexOf e confirmados review geral final. Regressões timeout/stale/malformed/promoção identidade+estado/preparação/entrysemrootPASS. Restam limites múltiplasroots/Suspense/hydrateRoot eassetsprivados,sem prometer prontidão geral. Não declarar garantia contínua irrestrita.
-3. JSON/CSS/SVG eviewportidentidade/geometria já browserPASS (`bw9vg7t15`focado,`bwp37mib1`36jornadas). Restam assetsprivados/URLsrenovadas eeditorpolling. Confirmar limites do CRA adaptado ao contrato Vite antes de substituí-lo. Preview atual ainda usa create-react-app/bootstrap confiável; migrar para Nodebox/Vite só após compatibilidade e evidência real. As quatro jornadas não validam polling da página autenticada nem assets privados.
-4. Runner criação/recuperação implementado `scripts/test-site-creation.ts`+2 unit GREEN,retomada de snapshot em memória;live completo NÃO aprovado. NVIDIA free terminou timeout após7 chats/152610 tokens conservadores;parcial preservado em `test-results/site-creation-nemotron.json.partial.json`. Fonte contém `class` em TSX e telefone inventado. AST diagnóstico `class`/`for` incluindo SVG camelCase concluído:47 tools GREEN,tsc/lint e review geral aprovados;suíte/coverage final `bw5shjvdc` coletada acima. A parcial NÃO foi reparada,nem validada por TypeScript/build/render/QA;`passed:true` antigo não significa isso. Recuperar a fixture existente,não recriar site,não repetir criação cegamente/ampliar quota,não usar fallback pago.
-5. Projeto real permanece bloqueado pelo link `/sites/<projectId>` e tenant autenticado. Não descobrir/listar tenants ou inventar IDs; diagnóstico inicial read-only. Não recriar projeto existente do zero.
-6. Depois: assets privados/renovação de URLs em browser;relatório completo de QA reprovado com binários/histórico sem associar candidato à revisão válida;otimizar snapshots sem enfraquecer consumo durável;testes lease/cancelamento;revisões finais geral/TypeScript/segurança. Provider de cobertura já instalado e autorizado,total lib/sites≥80%,mas componentes/página/API e alguns arquivos individuais NÃO têm essa comprovação. Vulnerabilidades não resolvidas:audit produção anterior9,total após instalação25 (1 baixa,7 moderadas,13 altas,4 críticas);não usar auditfixforce. Reinício worker só após identificar processo e confirmar escopo.
-7. Atualizar handoff/progresso por incremento e rodar testes/tsc/lint/build/diffcheck. Sem commit/publicação/migration remota.
+1. **Concluído em 11/11/2026:** integração e execução de `scripts/site-editor.browser.ts` montando o `SiteProjectPage` real via aliases Vite/Next, correções de staleness e SSE em `src/app/sites/[projectId]/page.tsx`, e aprovação dos 6 cenários reais (`npm run sites:test-editor` `6/6`) + `sites:test-preview` (`18/18`), `tsc`, `eslint` focado, `npm test` e `npm run build`.
+2. **Próximo passo imediato — recuperar/validar parcial de criação (`test-results/site-creation-nemotron.json.partial.json`):** corrigir `class` em TSX / telefone inventado na parcial preservada, submeter a TypeScript/build/render/QA reais sem repetir criação cegamente, ampliar quota ou usar fallback pago (E2B segue `0/3`).
+3. **Validações ainda pendentes de browser/QA/segurança:** assets privados e renovação de URLs no browser; relatório completo de QA reprovado com binários/histórico sem associar candidato à revisão válida; otimização de snapshots sem enfraquecer consumo durável; testes de lease/cancelamento; cobertura dos componentes/página/API; vulnerabilidades de dependências (`npm audit`, sem `audit fix --force` automático) e revisões finais TypeScript/segurança.
+4. **Projeto real:** diagnóstico read-only do projeto existente continua aguardando o link `/sites/<projectId>` com tenant autenticado (sem descobrir/listar tenants nem recriar projeto do zero).
+5. Atualizar handoff/progresso por incremento e manter alterações não commitadas até pedido explícito do usuário (`AGENTS.md`), sem publicação nem migration remota sem opt-in.
 
 ### Checkpoint de pausa solicitado pelo usuário — 08/10/2026
 

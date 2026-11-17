@@ -2505,6 +2505,149 @@ END $$;
 COMMIT;
 
 
+-- Apenas preparar: executar manualmente no SQL Editor quando autorizado.
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS public.dashboard_tasks (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id uuid NOT NULL REFERENCES public.clients(id) ON DELETE CASCADE,
+  text text NOT NULL CHECK (char_length(btrim(text, E' \\t\\n\\r\\f\\013')) BETWEEN 1 AND 1000 AND char_length(text) <= 1000),
+  due_at timestamptz NOT NULL,
+  completed_at timestamptz,
+  lead_id integer REFERENCES public.leads_extraidos(id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS dashboard_tasks_pending_idx
+  ON public.dashboard_tasks(client_id, due_at, id) WHERE completed_at IS NULL;
+CREATE INDEX IF NOT EXISTS dashboard_tasks_completed_idx
+  ON public.dashboard_tasks(client_id, completed_at DESC, id) WHERE completed_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS dashboard_tasks_lead_idx
+  ON public.dashboard_tasks(lead_id) WHERE lead_id IS NOT NULL;
+
+-- FK por id não garante o tenant. Verificação SQL também protege escritas fora da API.
+CREATE OR REPLACE FUNCTION public.dashboard_tasks_guard()
+RETURNS trigger LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE
+  lead_client_id uuid;
+BEGIN
+  IF NEW.lead_id IS NOT NULL THEN
+    SELECT client_id INTO lead_client_id FROM public.leads_extraidos WHERE id = NEW.lead_id FOR SHARE;
+    IF lead_client_id IS DISTINCT FROM NEW.client_id THEN
+      RAISE EXCEPTION 'dashboard_tasks_lead_tenant' USING ERRCODE = '23503';
+    END IF;
+  END IF;
+  IF TG_OP = 'UPDATE' THEN
+    -- O lock de linha do UPDATE torna conclusões concorrentes idempotentes.
+    IF OLD.completed_at IS NOT NULL AND NEW.completed_at IS NOT NULL THEN
+      NEW.completed_at := OLD.completed_at;
+    END IF;
+    NEW.updated_at := now();
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS dashboard_tasks_guard ON public.dashboard_tasks;
+CREATE TRIGGER dashboard_tasks_guard BEFORE INSERT OR UPDATE ON public.dashboard_tasks
+  FOR EACH ROW EXECUTE FUNCTION public.dashboard_tasks_guard();
+
+-- Não permitir que uma transferência de lead torne tarefas existentes estrangeiras.
+-- SECURITY DEFINER verifica os vínculos mesmo para updates do lead sujeitos a RLS.
+CREATE OR REPLACE FUNCTION public.dashboard_tasks_lead_scope_guard()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+BEGIN
+  IF NEW.client_id IS DISTINCT FROM OLD.client_id AND EXISTS (
+    SELECT 1 FROM public.dashboard_tasks WHERE lead_id = OLD.id AND client_id IS DISTINCT FROM NEW.client_id
+  ) THEN
+    RAISE EXCEPTION 'dashboard_tasks_lead_tenant' USING ERRCODE = '23503';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS dashboard_tasks_lead_scope_guard ON public.leads_extraidos;
+CREATE TRIGGER dashboard_tasks_lead_scope_guard BEFORE UPDATE OF client_id ON public.leads_extraidos
+  FOR EACH ROW EXECUTE FUNCTION public.dashboard_tasks_lead_scope_guard();
+
+ALTER TABLE public.dashboard_tasks ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.dashboard_tasks FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.dashboard_tasks_guard() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.dashboard_tasks_lead_scope_guard() FROM PUBLIC;
+DO $$
+DECLARE role_name text;
+BEGIN
+  FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+      EXECUTE format('REVOKE ALL ON public.dashboard_tasks FROM %I', role_name);
+      EXECUTE format('REVOKE ALL ON FUNCTION public.dashboard_tasks_guard() FROM %I', role_name);
+      EXECUTE format('REVOKE ALL ON FUNCTION public.dashboard_tasks_lead_scope_guard() FROM %I', role_name);
+    END IF;
+  END LOOP;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    GRANT SELECT, INSERT, UPDATE, DELETE ON public.dashboard_tasks TO service_role;
+    GRANT EXECUTE ON FUNCTION public.dashboard_tasks_guard() TO service_role;
+  END IF;
+END;
+$$;
+
+COMMIT;
+
+
+-- MIGRATION: Follow-ups Automáticos Multi-Agente Multi-Tenant
+-- Incremental: nunca descartar follow-ups existentes.
+BEGIN;
+CREATE TABLE IF NOT EXISTS public.agent_followups (
+    id BIGSERIAL PRIMARY KEY,
+    client_id TEXT NOT NULL,
+    agent_id INTEGER NOT NULL,
+    session_id BIGINT,
+    remote_jid TEXT NOT NULL,
+    contact_id BIGINT,
+    lead_id BIGINT,
+    current_step INTEGER NOT NULL DEFAULT 1,
+    max_step INTEGER NOT NULL DEFAULT 4,
+    next_send_at TIMESTAMPTZ NOT NULL,
+    last_sent_at TIMESTAMPTZ,
+    status TEXT NOT NULL DEFAULT 'pending',
+    error_message TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT agent_followups_status_check CHECK (status IN ('pending', 'sent', 'cancelled', 'completed', 'failed')),
+    CONSTRAINT agent_followups_step_check CHECK (current_step >= 1 AND current_step <= max_step)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_followups_client_id ON public.agent_followups(client_id);
+CREATE INDEX IF NOT EXISTS idx_agent_followups_agent_id ON public.agent_followups(agent_id);
+CREATE INDEX IF NOT EXISTS idx_agent_followups_status ON public.agent_followups(status);
+CREATE INDEX IF NOT EXISTS idx_agent_followups_next_send_at ON public.agent_followups(next_send_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_agent_followups_worker_query ON public.agent_followups(status, next_send_at, agent_id, client_id) WHERE status = 'pending';
+CREATE OR REPLACE FUNCTION public.update_agent_followups_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS agent_followups_updated_at ON public.agent_followups;
+CREATE TRIGGER agent_followups_updated_at BEFORE UPDATE ON public.agent_followups
+    FOR EACH ROW EXECUTE FUNCTION public.update_agent_followups_updated_at();
+-- Acesso somente pelo servidor; APIs validam tenant da sessão.
+ALTER TABLE public.agent_followups ENABLE ROW LEVEL SECURITY;
+DO $$ DECLARE p record;
+BEGIN
+    FOR p IN SELECT policyname FROM pg_policies WHERE schemaname = 'public' AND tablename = 'agent_followups' LOOP
+        EXECUTE format('DROP POLICY %I ON public.agent_followups', p.policyname);
+    END LOOP;
+END $$;
+REVOKE ALL ON public.agent_followups FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON SEQUENCE public.agent_followups_id_seq FROM PUBLIC, anon, authenticated;
+GRANT ALL ON public.agent_followups TO service_role;
+GRANT USAGE, SELECT ON SEQUENCE public.agent_followups_id_seq TO service_role;
+CREATE POLICY agent_followups_server_only ON public.agent_followups FOR ALL TO service_role USING (true) WITH CHECK (true);
+COMMIT;
+SELECT 'Tabela agent_followups criada com sucesso!' as resultado;
+
+
 -- Migration: Ativar Impeccable Design como skill global
 -- Este módulo força design autoral e anti-template em todos os projetos
 
@@ -2548,6 +2691,331 @@ INSERT INTO public.website_skills (
   priority = EXCLUDED.priority,
   tags = EXCLUDED.tags,
   updated_at = now();
+
+COMMIT;
+
+
+-- Tabela de configuração de backup
+CREATE TABLE IF NOT EXISTS backup_config (
+    id BIGSERIAL PRIMARY KEY,
+    client_id TEXT NOT NULL UNIQUE,
+
+    -- Google Drive Auth
+    google_access_token TEXT,
+    google_refresh_token TEXT,
+    google_token_expiry TIMESTAMPTZ,
+    google_drive_folder_id TEXT,
+
+    -- Configurações de backup
+    enabled BOOLEAN DEFAULT false,
+    interval_hours INTEGER DEFAULT 24, -- backup a cada X horas
+    retention_days INTEGER DEFAULT 7, -- manter backups por X dias
+
+    -- Último backup
+    last_backup_at TIMESTAMPTZ,
+    last_backup_size_bytes BIGINT,
+    last_backup_status TEXT, -- 'success', 'failed', 'running'
+    last_backup_error TEXT,
+
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Histórico de backups
+CREATE TABLE IF NOT EXISTS backup_history (
+    id BIGSERIAL PRIMARY KEY,
+    client_id TEXT NOT NULL,
+
+    -- Informações do arquivo
+    drive_file_id TEXT NOT NULL,
+    drive_file_name TEXT NOT NULL,
+    file_size_bytes BIGINT,
+
+    -- Metadados
+    backup_type TEXT DEFAULT 'automatic', -- 'automatic', 'manual'
+    status TEXT DEFAULT 'success', -- 'success', 'failed'
+    error_message TEXT,
+
+    -- Timestamps
+    started_at TIMESTAMPTZ NOT NULL,
+    completed_at TIMESTAMPTZ,
+
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Índices
+CREATE INDEX IF NOT EXISTS idx_backup_config_client_id ON backup_config(client_id);
+CREATE INDEX IF NOT EXISTS idx_backup_history_client_id ON backup_history(client_id);
+CREATE INDEX IF NOT EXISTS idx_backup_history_created_at ON backup_history(created_at);
+
+-- RLS
+ALTER TABLE backup_config ENABLE ROW LEVEL SECURITY;
+ALTER TABLE backup_history ENABLE ROW LEVEL SECURITY;
+
+-- Tokens OAuth somente no servidor. Instalações anteriores precisam da migration 020.
+DROP POLICY IF EXISTS backup_config_all ON backup_config;
+DROP POLICY IF EXISTS backup_history_all ON backup_history;
+CREATE POLICY backup_config_all ON backup_config FOR ALL TO service_role USING (true) WITH CHECK (true);
+CREATE POLICY backup_history_all ON backup_history FOR ALL TO service_role USING (true) WITH CHECK (true);
+REVOKE ALL ON backup_config, backup_history FROM anon, authenticated;
+
+
+-- Incremental: mantém dados/configurações anteriores. Executar somente após aprovação.
+BEGIN;
+ALTER TABLE public.backup_config ADD COLUMN IF NOT EXISTS next_backup_at timestamptz;
+ALTER TABLE public.backup_config ADD COLUMN IF NOT EXISTS encrypted_tokens text;
+ALTER TABLE public.backup_history ADD COLUMN IF NOT EXISTS run_id uuid;
+
+CREATE TABLE IF NOT EXISTS public.backup_runs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id text NOT NULL,
+  backup_type text NOT NULL CHECK (backup_type IN ('manual','automatic')),
+  status text NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','running','success','failed')),
+  stage text NOT NULL DEFAULT 'queued',
+  worker_id uuid,
+  heartbeat_at timestamptz,
+  error_message text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  completed_at timestamptz
+);
+CREATE TABLE IF NOT EXISTS public.backup_events (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  run_id uuid NOT NULL REFERENCES public.backup_runs(id) ON DELETE CASCADE,
+  level text NOT NULL DEFAULT 'info' CHECK (level IN ('info','error','warning')),
+  message text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS backup_events_run_idx ON public.backup_events(run_id,id);
+-- Uma única exportação global, independentemente do cliente/replica.
+CREATE UNIQUE INDEX IF NOT EXISTS backup_one_active_idx ON public.backup_runs ((true)) WHERE status IN ('queued','running');
+
+DO $$ DECLARE t text; p record;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['backup_config','backup_history','backup_runs','backup_events'] LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
+    FOR p IN SELECT policyname FROM pg_policies WHERE schemaname='public' AND tablename=t LOOP
+      EXECUTE format('DROP POLICY %I ON public.%I', p.policyname,t);
+    END LOOP;
+    EXECUTE format('REVOKE ALL ON public.%I FROM anon, authenticated',t);
+    EXECUTE format('GRANT ALL ON public.%I TO service_role',t);
+    EXECUTE format('CREATE POLICY backup_server_only ON public.%I FOR ALL TO service_role USING (true) WITH CHECK (true)',t);
+  END LOOP;
+END $$;
+
+GRANT USAGE, SELECT ON SEQUENCE public.backup_events_id_seq TO service_role;
+GRANT USAGE, SELECT ON SEQUENCE public.backup_config_id_seq, public.backup_history_id_seq TO service_role;
+
+CREATE OR REPLACE FUNCTION public.claim_backup_run(p_worker uuid)
+RETURNS SETOF public.backup_runs LANGUAGE plpgsql SECURITY DEFINER SET search_path=public AS $$
+DECLARE selected uuid;
+BEGIN
+  -- Não roubar uma execução expirada: marcar falha exige confirmação de processo encerrado.
+  SELECT id INTO selected FROM public.backup_runs WHERE status='queued' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED;
+  IF selected IS NOT NULL THEN
+    RETURN QUERY UPDATE public.backup_runs SET status='running',stage='starting',worker_id=p_worker,heartbeat_at=now() WHERE id=selected RETURNING *;
+  END IF;
+END $$;
+REVOKE ALL ON FUNCTION public.claim_backup_run(uuid) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.claim_backup_run(uuid) TO service_role;
+COMMIT;
+
+
+-- Incremental; aplicação em banco real exige aprovação específica.
+BEGIN;
+ALTER TABLE public.agent_followups
+ ADD COLUMN IF NOT EXISTS instance_name text,
+ ADD COLUMN IF NOT EXISTS initial_sent_at timestamptz,
+ ADD COLUMN IF NOT EXISTS session_uuid uuid,
+ ADD COLUMN IF NOT EXISTS contact_uuid uuid,
+ ADD COLUMN IF NOT EXISTS claim_id uuid,
+ ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz,
+ ADD COLUMN IF NOT EXISTS attempt_id uuid,
+ ADD COLUMN IF NOT EXISTS send_started_at timestamptz,
+ ADD COLUMN IF NOT EXISTS send_content text,
+ ADD COLUMN IF NOT EXISTS prepared_next_delay_minutes integer,
+ ADD COLUMN IF NOT EXISTS provider_message_id text,
+ ADD COLUMN IF NOT EXISTS last_attempt_id uuid,
+ ADD COLUMN IF NOT EXISTS last_claim_id uuid,
+ ADD COLUMN IF NOT EXISTS last_completed_step integer;
+ALTER TABLE public.agent_followups DROP CONSTRAINT IF EXISTS agent_followups_status_check;
+ALTER TABLE public.agent_followups ADD CONSTRAINT agent_followups_status_check CHECK
+ (status IN ('pending','sent','processing','sending','ambiguous','cancelled','completed','failed'));
+UPDATE public.agent_followups SET status='ambiguous',error_message='Execução legada exige reconciliação antes de qualquer envio.'
+ WHERE status='sent' OR (status IN ('pending','processing') AND (initial_sent_at IS NULL OR instance_name IS NULL OR session_uuid IS NULL));
+DO $$ BEGIN
+ IF EXISTS (SELECT 1 FROM public.agent_followups WHERE status IN ('pending','processing','sending','ambiguous')
+  GROUP BY client_id,agent_id,remote_jid HAVING count(*)>1) THEN
+  RAISE EXCEPTION 'duplicate_active_followups: reconcilie duplicatas sem apagar registros';
+ END IF;
+END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS agent_followups_one_active_idx ON public.agent_followups(client_id,agent_id,remote_jid)
+ WHERE status IN ('pending','processing','sending','ambiguous');
+ALTER TABLE public.agent_followups ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.agent_followups FROM PUBLIC,anon,authenticated;
+REVOKE ALL ON SEQUENCE public.agent_followups_id_seq FROM PUBLIC,anon,authenticated;
+GRANT ALL ON public.agent_followups TO service_role;
+GRANT USAGE,SELECT ON SEQUENCE public.agent_followups_id_seq TO service_role;
+
+CREATE OR REPLACE FUNCTION public.enqueue_agent_followup(p_client uuid,p_agent integer,p_session uuid,p_jid text,p_instance text,p_initial_sent_at timestamptz,p_contact uuid DEFAULT NULL,p_lead bigint DEFAULT NULL)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=public AS $$
+DECLARE a public.agent_settings%ROWTYPE; f public.agent_followups%ROWTYPE; delay_minutes integer;
+BEGIN
+ IF p_client IS NULL OR p_agent IS NULL OR p_agent<=0 OR p_jid IS NULL OR p_jid !~ '^[1-9][0-9]{7,19}@s[.]whatsapp[.]net$'
+ OR p_instance IS NULL OR btrim(p_instance)='' OR p_initial_sent_at IS NULL OR p_initial_sent_at>clock_timestamp()+interval '1 minute' THEN RAISE EXCEPTION 'followup_invalid_input'; END IF;
+ SELECT * INTO a FROM public.agent_settings WHERE id=p_agent AND client_id=p_client;
+ IF NOT FOUND OR a.is_active IS DISTINCT FROM true OR a.options->'follow_up'->'enabled' IS DISTINCT FROM 'true'::jsonb THEN RAISE EXCEPTION 'followup_agent_disabled'; END IF;
+ IF NOT EXISTS (SELECT 1 FROM public.channel_connections WHERE client_id=p_client AND agent_id=p_agent AND instance_name=p_instance) THEN RAISE EXCEPTION 'followup_channel_not_owned'; END IF;
+ IF coalesce(a.options->'follow_up'->>'follow_up_1h_delay_minutes','') !~ '^[0-9]{1,6}$' THEN RAISE EXCEPTION 'followup_invalid_delay'; END IF;
+ delay_minutes:=(a.options->'follow_up'->>'follow_up_1h_delay_minutes')::integer;
+ IF delay_minutes NOT BETWEEN 1 AND 10080 THEN RAISE EXCEPTION 'followup_invalid_delay'; END IF;
+ IF NOT EXISTS (SELECT 1 FROM public.sessions s JOIN public.contacts c ON c.id=s.contact_id AND c.client_id=s.client_id
+  WHERE s.id=p_session AND s.client_id=p_client AND s.agent_id=p_agent AND s.instance_name=p_instance AND c.remote_jid=p_jid
+  AND (p_contact IS NULL OR s.contact_id=p_contact)) THEN RAISE EXCEPTION 'followup_session_not_owned'; END IF;
+ INSERT INTO public.agent_followups(client_id,agent_id,session_uuid,remote_jid,instance_name,initial_sent_at,contact_uuid,lead_id,next_send_at)
+ VALUES(p_client::text,p_agent,p_session,p_jid,p_instance,p_initial_sent_at,p_contact,p_lead,p_initial_sent_at+make_interval(mins=>delay_minutes))
+ ON CONFLICT(client_id,agent_id,remote_jid) WHERE status IN ('pending','processing','sending','ambiguous') DO NOTHING RETURNING * INTO f;
+ IF NOT FOUND THEN SELECT * INTO f FROM public.agent_followups WHERE client_id=p_client::text AND agent_id=p_agent AND remote_jid=p_jid AND status IN ('pending','processing','sending','ambiguous'); END IF;
+ IF f.id IS NULL THEN RAISE EXCEPTION 'followup_enqueue_not_confirmed'; END IF;
+ RETURN to_jsonb(f);
+END $$;
+
+CREATE OR REPLACE FUNCTION public.claim_agent_followup(p_claim uuid,p_lease_seconds integer DEFAULT 120)
+RETURNS SETOF public.agent_followups LANGUAGE plpgsql SECURITY DEFINER SET search_path=public AS $$
+DECLARE selected bigint;
+BEGIN
+ IF p_claim IS NULL OR p_lease_seconds IS NULL OR p_lease_seconds NOT BETWEEN 30 AND 300 THEN RAISE EXCEPTION 'followup_invalid_claim'; END IF;
+ SELECT id INTO selected FROM public.agent_followups WHERE (status='pending' AND next_send_at<=clock_timestamp())
+ OR (status='processing' AND lease_expires_at<=clock_timestamp() AND send_started_at IS NULL)
+ ORDER BY next_send_at,id LIMIT 1 FOR UPDATE SKIP LOCKED;
+ IF selected IS NOT NULL THEN RETURN QUERY UPDATE public.agent_followups SET status='processing',claim_id=p_claim,
+ lease_expires_at=clock_timestamp()+make_interval(secs=>p_lease_seconds),attempt_id=NULL,send_started_at=NULL,send_content=NULL,prepared_next_delay_minutes=NULL,updated_at=clock_timestamp()
+ WHERE id=selected RETURNING *; END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.prepare_agent_followup(p_id bigint,p_client uuid,p_agent integer,p_step integer,p_claim uuid,p_attempt uuid,p_content text)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=public AS $$
+DECLARE f public.agent_followups%ROWTYPE; a public.agent_settings%ROWTYPE; cfg jsonb; step_name text; next_name text; next_delay integer:=0;
+BEGIN
+ SELECT * INTO f FROM public.agent_followups WHERE id=p_id AND client_id=p_client::text AND agent_id=p_agent AND current_step=p_step AND claim_id=p_claim AND status='processing' AND lease_expires_at>clock_timestamp() FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'followup_claim_lost'; END IF;
+ IF p_attempt IS NULL OR p_step NOT BETWEEN 1 AND 4 OR f.max_step NOT BETWEEN p_step AND 4 OR f.initial_sent_at IS NULL OR f.instance_name IS NULL
+ OR f.remote_jid !~ '^[1-9][0-9]{7,19}@s[.]whatsapp[.]net$' THEN RAISE EXCEPTION 'followup_invalid_input'; END IF;
+ SELECT * INTO a FROM public.agent_settings WHERE id=p_agent AND client_id=p_client FOR SHARE;
+ IF NOT FOUND OR a.is_active IS DISTINCT FROM true OR a.options->'follow_up'->'enabled' IS DISTINCT FROM 'true'::jsonb
+ OR NOT EXISTS (SELECT 1 FROM public.channel_connections WHERE client_id=p_client AND agent_id=p_agent AND instance_name=f.instance_name)
+ OR EXISTS (SELECT 1 FROM public.chats_dashboard WHERE client_id=p_client AND remote_jid=f.remote_jid AND instance_name=f.instance_name AND is_from_me IS FALSE AND created_at>=f.initial_sent_at)
+ OR NOT EXISTS (SELECT 1 FROM public.sessions s JOIN public.contacts c ON c.id=s.contact_id AND c.client_id=s.client_id
+  WHERE s.id=f.session_uuid AND s.client_id=p_client AND s.agent_id=p_agent AND c.remote_jid=f.remote_jid AND s.instance_name=f.instance_name
+  AND (s.bot_status='bot_active' OR (s.bot_status='human_takeover' AND s.resume_at<=clock_timestamp())))
+ OR EXISTS (SELECT 1 FROM public.app_settings WHERE key IN ('global_ai_paused_until','global_ai_paused_until:'||f.instance_name)
+  AND value IS NOT NULL AND value<>'' AND CASE WHEN value='forever' THEN true ELSE value::timestamptz>clock_timestamp() END)
+ OR EXISTS (SELECT 1 FROM public.ai_control WHERE remote_jid=f.remote_jid AND is_paused IS TRUE AND (paused_until IS NULL OR paused_until>clock_timestamp())) THEN
+  UPDATE public.agent_followups SET status='cancelled',claim_id=NULL,lease_expires_at=NULL,error_message=NULL,updated_at=clock_timestamp() WHERE id=p_id RETURNING * INTO f;
+  RETURN jsonb_build_object('action','cancelled','followup',to_jsonb(f));
+ END IF;
+ cfg:=a.options->'follow_up';
+ step_name:=CASE p_step WHEN 1 THEN '1h' WHEN 2 THEN '4h' WHEN 3 THEN '24h' WHEN 4 THEN '48h' END;
+ IF p_step<f.max_step THEN
+  next_name:=CASE p_step WHEN 1 THEN '4h' WHEN 2 THEN '24h' WHEN 3 THEN '48h' END;
+  IF coalesce(cfg->>('follow_up_'||next_name||'_delay_minutes'),'') !~ '^[0-9]{1,6}$' THEN RAISE EXCEPTION 'followup_invalid_delay'; END IF;
+  next_delay:=(cfg->>('follow_up_'||next_name||'_delay_minutes'))::integer;
+  IF next_delay NOT BETWEEN 1 AND 10080 THEN RAISE EXCEPTION 'followup_invalid_delay'; END IF;
+ END IF;
+ IF cfg->('follow_up_'||step_name||'_enabled') IS DISTINCT FROM 'true'::jsonb THEN
+  UPDATE public.agent_followups SET status=CASE WHEN p_step<max_step THEN 'pending' ELSE 'completed' END,
+   current_step=CASE WHEN p_step<max_step THEN p_step+1 ELSE p_step END,next_send_at=clock_timestamp()+make_interval(mins=>next_delay),
+   claim_id=NULL,lease_expires_at=NULL,error_message=NULL,updated_at=clock_timestamp() WHERE id=p_id RETURNING * INTO f;
+  RETURN jsonb_build_object('action','skipped','followup',to_jsonb(f));
+ END IF;
+ IF jsonb_typeof(cfg->('follow_up_'||step_name||'_template')) IS DISTINCT FROM 'string'
+ OR btrim(coalesce(cfg->>('follow_up_'||step_name||'_template'),''))='' OR p_content IS NULL OR btrim(p_content)='' OR length(p_content)>4000 THEN RAISE EXCEPTION 'followup_invalid_content'; END IF;
+ UPDATE public.agent_followups SET status='sending',attempt_id=p_attempt,send_started_at=clock_timestamp(),send_content=p_content,prepared_next_delay_minutes=next_delay,error_message=NULL,updated_at=clock_timestamp() WHERE id=p_id RETURNING * INTO f;
+ RETURN jsonb_build_object('action','send','followup',to_jsonb(f));
+END $$;
+
+CREATE OR REPLACE FUNCTION public.finish_agent_followup(p_id bigint,p_client uuid,p_agent integer,p_step integer,p_claim uuid,p_attempt uuid,p_provider_id text)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=public AS $$
+DECLARE f public.agent_followups%ROWTYPE; h public.chats_dashboard%ROWTYPE; sent_at timestamptz;
+BEGIN
+ IF p_claim IS NULL OR p_attempt IS NULL OR p_provider_id IS NULL OR btrim(p_provider_id)='' OR length(p_provider_id)>300 THEN RAISE EXCEPTION 'followup_invalid_result'; END IF;
+ SELECT * INTO f FROM public.agent_followups WHERE id=p_id AND client_id=p_client::text AND agent_id=p_agent FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'followup_claim_lost'; END IF;
+ IF f.last_attempt_id=p_attempt THEN
+  IF f.last_claim_id IS DISTINCT FROM p_claim OR f.last_completed_step IS DISTINCT FROM p_step OR f.provider_message_id IS DISTINCT FROM p_provider_id THEN RAISE EXCEPTION 'followup_attempt_mismatch'; END IF;
+  RETURN to_jsonb(f);
+ END IF;
+ IF f.status NOT IN ('sending','ambiguous') OR f.claim_id IS DISTINCT FROM p_claim OR f.attempt_id IS DISTINCT FROM p_attempt OR f.current_step IS DISTINCT FROM p_step OR f.send_started_at IS NULL OR f.send_content IS NULL THEN RAISE EXCEPTION 'followup_claim_lost'; END IF;
+ sent_at:=f.send_started_at;
+ -- Uma intenção persistida nunca é substituída; confirmação tardia pode concluir.
+ INSERT INTO public.chats_dashboard(client_id,remote_jid,instance_name,message_id,content,sender_type,is_from_me,message_type,created_at)
+ VALUES(p_client,f.remote_jid,f.instance_name,p_provider_id,f.send_content,'ai',true,'text',sent_at) ON CONFLICT(client_id,message_id) DO NOTHING;
+ SELECT * INTO h FROM public.chats_dashboard WHERE client_id=p_client AND message_id=p_provider_id;
+ IF NOT FOUND OR h.remote_jid IS DISTINCT FROM f.remote_jid OR h.instance_name IS DISTINCT FROM f.instance_name OR h.content IS DISTINCT FROM f.send_content OR h.is_from_me IS DISTINCT FROM true THEN RAISE EXCEPTION 'followup_history_conflict'; END IF;
+ UPDATE public.agent_followups SET status=CASE WHEN p_step<max_step THEN 'pending' ELSE 'completed' END,
+ current_step=CASE WHEN p_step<max_step THEN p_step+1 ELSE p_step END,last_sent_at=sent_at,next_send_at=sent_at+make_interval(mins=>coalesce(prepared_next_delay_minutes,0)),
+ provider_message_id=p_provider_id,last_attempt_id=p_attempt,last_claim_id=p_claim,last_completed_step=p_step,
+ claim_id=NULL,lease_expires_at=NULL,attempt_id=NULL,send_started_at=NULL,send_content=NULL,prepared_next_delay_minutes=NULL,error_message=NULL,updated_at=sent_at WHERE id=p_id RETURNING * INTO f;
+ RETURN to_jsonb(f);
+END $$;
+
+CREATE OR REPLACE FUNCTION public.release_agent_followup(p_id bigint,p_client uuid,p_agent integer,p_step integer,p_claim uuid,p_status text,p_error text)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=public AS $$
+DECLARE f public.agent_followups%ROWTYPE;
+BEGIN
+ SELECT * INTO f FROM public.agent_followups WHERE id=p_id AND client_id=p_client::text AND agent_id=p_agent AND current_step=p_step AND claim_id=p_claim FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'followup_claim_lost'; END IF;
+ IF f.status IN ('sending','ambiguous') THEN
+  IF p_status IS DISTINCT FROM 'ambiguous' THEN RAISE EXCEPTION 'followup_replay_blocked'; END IF;
+  UPDATE public.agent_followups SET status='ambiguous',error_message='Resultado do envio desconhecido. Reconciliação obrigatória; reenvio automático bloqueado.',updated_at=clock_timestamp() WHERE id=p_id RETURNING * INTO f;
+ ELSE
+  IF f.status IS DISTINCT FROM 'processing' OR f.lease_expires_at IS NULL OR f.lease_expires_at<=clock_timestamp() OR p_status IS NULL OR p_status NOT IN ('pending','cancelled','failed') THEN RAISE EXCEPTION 'followup_claim_lost'; END IF;
+  UPDATE public.agent_followups SET status=p_status,claim_id=NULL,lease_expires_at=NULL,
+  error_message=CASE WHEN p_status='failed' THEN 'Preparação do follow-up falhou; nenhum envio foi confirmado.' ELSE NULL END,updated_at=clock_timestamp() WHERE id=p_id RETURNING * INTO f;
+ END IF;
+ RETURN to_jsonb(f);
+END $$;
+
+DO $$ DECLARE signature text;
+BEGIN
+ FOREACH signature IN ARRAY ARRAY[
+  'enqueue_agent_followup(uuid,integer,uuid,text,text,timestamptz,uuid,bigint)',
+  'claim_agent_followup(uuid,integer)',
+  'prepare_agent_followup(bigint,uuid,integer,integer,uuid,uuid,text)',
+  'finish_agent_followup(bigint,uuid,integer,integer,uuid,uuid,text)',
+  'release_agent_followup(bigint,uuid,integer,integer,uuid,text,text)'
+ ] LOOP
+  EXECUTE 'REVOKE ALL ON FUNCTION public.'||signature||' FROM PUBLIC,anon,authenticated';
+  EXECUTE 'GRANT EXECUTE ON FUNCTION public.'||signature||' TO service_role';
+ END LOOP;
+END $$;
+COMMIT;
+
+
+-- Diagnósticos independentes da fila/lock de backup. Aplicar manualmente, somente após aprovação.
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS public.backup_diagnostics (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id text NOT NULL,
+  status text NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'success', 'failed', 'warning')),
+  checks jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(checks) = 'array'),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  completed_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS backup_diagnostics_client_created_idx
+  ON public.backup_diagnostics (client_id, created_at DESC);
+
+ALTER TABLE public.backup_diagnostics ENABLE ROW LEVEL SECURITY;
+DO $$ DECLARE p record;
+BEGIN
+  FOR p IN SELECT policyname FROM pg_policies WHERE schemaname = 'public' AND tablename = 'backup_diagnostics' LOOP
+    EXECUTE format('DROP POLICY %I ON public.backup_diagnostics', p.policyname);
+  END LOOP;
+END $$;
+REVOKE ALL ON public.backup_diagnostics FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.backup_diagnostics TO service_role;
+CREATE POLICY backup_diagnostics_server_only ON public.backup_diagnostics
+  FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 COMMIT;
 
@@ -3246,4 +3714,58 @@ DO $$ BEGIN
       FOR ALL USING (client_id = (SELECT auth.uid()) OR (SELECT current_setting('role', true)) = 'service_role');
   END IF;
 END $$;
+
+
+-- Reagendamento seguro de follow-up pendente fora do horário comercial.
+-- Evita re-claim a cada 2 minutos enquanto aguarda abertura do expediente.
+CREATE OR REPLACE FUNCTION public.reschedule_agent_followup(
+  p_id bigint,
+  p_client uuid,
+  p_agent integer,
+  p_step integer,
+  p_claim uuid,
+  p_next_send_at timestamptz
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  f public.agent_followups%ROWTYPE;
+BEGIN
+  IF p_claim IS NULL OR p_next_send_at IS NULL OR p_next_send_at <= clock_timestamp() THEN
+    RAISE EXCEPTION 'followup_invalid_reschedule';
+  END IF;
+
+  SELECT * INTO f
+  FROM public.agent_followups
+  WHERE id = p_id
+    AND client_id = p_client::text
+    AND agent_id = p_agent
+    AND current_step = p_step
+    AND claim_id = p_claim
+    AND status = 'processing'
+    AND lease_expires_at > clock_timestamp()
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'followup_claim_lost';
+  END IF;
+
+  UPDATE public.agent_followups
+  SET status = 'pending',
+      next_send_at = p_next_send_at,
+      claim_id = NULL,
+      lease_expires_at = NULL,
+      error_message = NULL,
+      updated_at = clock_timestamp()
+  WHERE id = p_id
+  RETURNING * INTO f;
+
+  RETURN to_jsonb(f);
+END $$;
+
+REVOKE ALL ON FUNCTION public.reschedule_agent_followup(bigint, uuid, integer, integer, uuid, timestamptz) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.reschedule_agent_followup(bigint, uuid, integer, integer, uuid, timestamptz) TO service_role;
 `;

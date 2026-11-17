@@ -34,11 +34,21 @@ function sanitizeNvidiaAccounts(
   return out;
 }
 
+function normalizeHttpEndpointUrl(rawUrl: string): string | null {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    return parsed.toString().replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Sanitiza a lista de conexões vinda da UI e PRESERVA as chaves secretas: como
  * o GET mascara as chaves (só manda `has_api_key`), quando a UI reenvia uma
  * conexão SEM chave nós mantemos a que já está salva, casando por `id`. Conexões
- * sem base_url são descartadas; ids ausentes/duplicados ganham um id novo.
+ * sem base_url válida (http/https) são descartadas; ids ausentes/duplicados ganham um id novo.
  */
 function sanitizeEndpoints(
   incoming: any[],
@@ -48,8 +58,10 @@ function sanitizeEndpoints(
   const usedIds = new Set<string>();
   for (let i = 0; i < incoming.length; i++) {
     const e = incoming[i] || {};
-    const base_url = String(e.base_url ?? e.baseUrl ?? "").trim();
-    if (!base_url) continue; // sem URL não é conexão
+    const rawBaseUrl = String(e.base_url ?? e.baseUrl ?? "").trim();
+    if (!rawBaseUrl) continue; // sem URL não é conexão
+    const base_url = normalizeHttpEndpointUrl(rawBaseUrl);
+    if (!base_url) continue;
     let id = String(e.id ?? "").trim();
     if (!id || usedIds.has(id)) {
       id = (globalThis as any).crypto?.randomUUID?.() || `g_${Date.now()}_${i}`;
@@ -66,8 +78,10 @@ function sanitizeEndpoints(
   return out;
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
+    const ctx = await requireClientId(req);
+    if (!ctx.ok) return ctx.response;
     // Lê em 3 camadas pra retrocompat: (1) com gateway_endpoints; se a coluna
     // não existir, (2) com as colunas single do gateway; se nem essas, (3) só o
     // básico. Assim bancos em qualquer estágio de migração funcionam.
@@ -144,35 +158,39 @@ export async function GET() {
       isPrimary: idx === 0,
     }));
 
+    const baseConfig = {
+      enabled: !!data?.enabled,
+      model: data?.model || null,
+      provider: data?.provider || "Gemini",
+      execution_hour: typeof data?.execution_hour === "number" ? data.execution_hour : 20,
+      last_run: data?.last_run || null,
+      has_api_key: !!(data?.api_key && String(data.api_key).trim().length > 0),
+      has_nvidia_key: hasNvidiaKey || nvidiaAccountsList.length > 0,
+      has_openrouter_key: !!(data?.openrouter_api_key && String(data.openrouter_api_key).trim().length > 0) || openrouterKeysList.length > 0,
+      has_gateway_key: !!(data?.gateway_api_key && String(data.gateway_api_key).trim().length > 0),
+      gateway_configured: endpoints.length > 0,
+    };
+
+    if (!ctx.isAdmin) {
+      return NextResponse.json({ success: true, config: baseConfig });
+    }
+
     return NextResponse.json({
       success: true,
       config: {
-        enabled: !!data?.enabled,
-        model: data?.model || null,
-        provider: data?.provider || "Gemini",
-        execution_hour: typeof data?.execution_hour === "number" ? data.execution_hour : 20,
-        last_run: data?.last_run || null,
-        has_api_key: !!(data?.api_key && String(data.api_key).trim().length > 0),
-        has_nvidia_key: hasNvidiaKey || nvidiaAccountsList.length > 0,
+        ...baseConfig,
         nvidia_accounts_count: nvidiaAccountsList.length,
         nvidia_accounts: maskedNvidiaAccounts,
-        has_openrouter_key: !!(data?.openrouter_api_key && String(data.openrouter_api_key).trim().length > 0) || openrouterKeysList.length > 0,
         openrouter_keys_count: openrouterKeysList.length,
         openrouter_keys: maskedOpenrouterKeys,
-        // Gateway de Assinatura. base_url e fallback NÃO são segredo (URL local +
-        // nome de modelo) → devolve o valor pra UI popular o form. A chave do
-        // gateway é secreta → só devolve um booleano.
         gateway_base_url: data?.gateway_base_url || null,
         gateway_fallback_model: data?.gateway_fallback_model || null,
-        has_gateway_key: !!(data?.gateway_api_key && String(data.gateway_api_key).trim().length > 0),
-        // "Configurado" agora = existe ao menos UMA conexão (legada ou na lista).
-        gateway_configured: endpoints.length > 0,
-        // TODAS as conexões (Gemini + Claude + ChatGPT ao mesmo tempo, etc.).
         gateway_endpoints: endpoints,
       },
     });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    console.error("[AI-ORGANIZE/CONFIG/GET] Erro:", err instanceof Error ? err.message : err);
+    return NextResponse.json({ success: false, error: "Falha ao ler configuração" }, { status: 500 });
   }
 }
 
@@ -180,37 +198,15 @@ export async function PATCH(req: NextRequest) {
   try {
     const ctx = await requireClientId(req);
     if (!ctx.ok) return ctx.response;
-
-    const body = await req.json();
-    const update: Record<string, any> = { id: 1, updated_at: new Date().toISOString() };
-
-    // Campos sensíveis (modelo/provedor/api_key/enabled global/gateway) — APENAS
-    // admin. Cliente comum não pode trocar nada disso, pra evitar inflar custo.
-    // Pro gateway usamos `typeof === "string"` (mesmo vazio) como gatilho, pra
-    // que tentar LIMPAR (desconectar) também caia na trava de admin.
-    const wantsModelChange = (typeof body.model === "string" && body.model.trim())
-      || (typeof body.provider === "string" && body.provider.trim())
-      || (typeof body.api_key === "string" && body.api_key.trim())
-      || (typeof body.nvidia_api_key === "string")
-      || Array.isArray(body.nvidia_accounts)
-      || (typeof body.add_nvidia_account === "object" && body.add_nvidia_account !== null)
-      || (typeof body.remove_nvidia_account_id === "string" && body.remove_nvidia_account_id.trim())
-      || (typeof body.openrouter_api_key === "string" && body.openrouter_api_key.trim())
-      || Array.isArray(body.openrouter_keys)
-      || (typeof body.add_openrouter_key === "string" && body.add_openrouter_key.trim())
-      || (typeof body.remove_openrouter_key_index === "number")
-      || (typeof body.reorder_openrouter_key_index === "number" && typeof body.reorder_openrouter_key_to === "number")
-      || (typeof body.gateway_base_url === "string")
-      || (typeof body.gateway_api_key === "string")
-      || (typeof body.gateway_fallback_model === "string")
-      || Array.isArray(body.gateway_endpoints)
-      || (typeof body.enabled === "boolean");
-    if (wantsModelChange && !ctx.isAdmin) {
+    if (!ctx.isAdmin) {
       return NextResponse.json(
-        { success: false, error: "Apenas admin pode alterar modelo, provedor, API key, gateway ou ligar/desligar global." },
+        { success: false, error: "Apenas admin pode alterar configuração global de IA e agendamento." },
         { status: 403 }
       );
     }
+
+    const body = await req.json();
+    const update: Record<string, any> = { id: 1, updated_at: new Date().toISOString() };
 
     if (typeof body.enabled === "boolean") update.enabled = body.enabled;
     if (typeof body.model === "string" && body.model.trim()) update.model = body.model.trim();
@@ -346,7 +342,19 @@ export async function PATCH(req: NextRequest) {
     // pra LIMPAR (desconectar). Vazio → null no banco.
     let gatewayChanged = false;
     if (typeof body.gateway_base_url === "string") {
-      update.gateway_base_url = body.gateway_base_url.trim() || null;
+      const trimmedGateway = body.gateway_base_url.trim();
+      if (trimmedGateway) {
+        const validGateway = normalizeHttpEndpointUrl(trimmedGateway);
+        if (!validGateway) {
+          return NextResponse.json(
+            { success: false, error: "gateway_base_url deve ser uma URL http/https válida." },
+            { status: 400 }
+          );
+        }
+        update.gateway_base_url = validGateway;
+      } else {
+        update.gateway_base_url = null;
+      }
       gatewayChanged = true;
     }
     if (typeof body.gateway_api_key === "string") {
@@ -473,7 +481,8 @@ export async function PATCH(req: NextRequest) {
     }
 
     return NextResponse.json({ success: true, ...(warning ? { warning } : {}) });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    console.error("[AI-ORGANIZE/CONFIG/PATCH] Erro:", err instanceof Error ? err.message : err);
+    return NextResponse.json({ success: false, error: "Falha ao salvar configuração" }, { status: 500 });
   }
 }

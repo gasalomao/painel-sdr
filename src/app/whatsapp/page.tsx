@@ -2,7 +2,6 @@
 
 import { useEffect, useState, useRef, useCallback } from "react";
 import { Header } from "@/components/layout/header";
-import { supabase } from "@/lib/supabase";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -322,15 +321,13 @@ export default function WhatsAppPage() {
       if (statusMap[instanceName]?.state === state) return;
       setStatusMap(prev => ({ ...prev, [instanceName]: { state, owner, profileName } }));
 
-      // Persiste no banco se o estado for válido - escopado por client_id
-      // pra não atualizar instância de outro tenant caso RLS esteja frouxa.
+      // Persiste status no servidor — escopado por client_id na sessão
       if (state === "open" || state === "close") {
-        let q = supabase
-          .from("channel_connections")
-          .update({ status: state })
-          .eq("instance_name", instanceName);
-        if (clientId) q = q.eq("client_id", clientId);
-        await q;
+        await fetch("/api/instances", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ instance_name: instanceName, status: state }),
+        }).catch(() => {});
       }
     } catch {
       setStatusMap(prev => ({ ...prev, [instanceName]: { state: "error" } }));
@@ -402,39 +399,22 @@ export default function WhatsAppPage() {
     }
   };
 
-  // Load tudo (connections + agents + status)
+  // Load tudo (connections + agents + status) via BFF seguro
   const loadData = useCallback(async () => {
     if (!clientId) return;
     try {
       setLoading(true);
-      // SECURITY: nunca select("*" — provider_config carrega webhook_secret e
-      // possíveis API keys que não podem ir pro browser.
-      // ponytail: phone_number/owner_phone/updated_at não existem na tabela
-      // (owner_phone vive em provider_config->owner_phone) — selecioná-los
-      // faz o Postgres errar 42703 e a lista vir vazia.
-      const { data: conns, error: connsErr } = await supabase
-          .from("channel_connections")
-          // provider_config->phone_number_id: extrai SÓ o campo de exibição do
-          // JSON — webhook_secret continua fora do browser.
-          .select("id, instance_name, client_id, agent_id, status, created_at, provider, provider_config->phone_number_id")
-          .eq("client_id", clientId)
-          .order("created_at");
-
-      if (connsErr) console.error("[WhatsApp] Falha ao carregar conexões:", connsErr.message);
-
-      if (conns) {
-        setConnections(conns);
-        conns.forEach(c => checkStatus(c.instance_name));
-      } else {
+      const res = await fetch("/api/instances?include_agents=1&scope=tenant", { cache: "no-store" });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.ok) {
+        console.error("[WhatsApp] Falha ao carregar conexões:", data?.error || res.status);
         setConnections([]);
+        return;
       }
-
-      const { data: agentsData } = await supabase
-        .from("agent_settings")
-        .select("id, name")
-        .eq("client_id", clientId);
-      
-      if (agentsData) setAgents(agentsData);
+      const conns = Array.isArray(data.instances) ? data.instances : [];
+      setConnections(conns);
+      conns.forEach((c: { instance_name: string }) => checkStatus(c.instance_name));
+      if (Array.isArray(data.agents)) setAgents(data.agents);
     } catch (err) {
       console.error(err);
     } finally {
@@ -507,46 +487,15 @@ export default function WhatsAppPage() {
     const clientId = session?.clientId;
     if (!clientId) return alert("Sessão inválida");
 
-    // Nome interno único para a Evolution/DB: prefixo_nome
-    // Isso permite que múltiplos clientes usem o mesmo nome amigável (ex: "vendas")
-    const internalName = `${clientId.substring(0, 5)}_${novaInstancia}`;
-
-    // Verifica se ja nao existe PARA ESTE CLIENTE — filtra por tenant pra não
-    // colidir com instância de outro cliente que tenha o mesmo nome interno.
-    let existQ = supabase
-      .from("channel_connections")
-      .select("id")
-      .eq("instance_name", internalName);
-    if (clientId) existQ = existQ.eq("client_id", clientId);
-    const { data: existing } = await existQ.maybeSingle();
-
-    if (existing) {
-      return alert("Você já tem uma instancia com esse nome!");
-    }
-
-    let targetAgentId = agents.length > 0 ? agents[0].id : null;
-
-    // Se o cliente não tem nenhum agente, cria um padrão agora pra não dar erro de vínculo
-    if (!targetAgentId && clientId) {
-      const { data: newAg, error: agErr } = await supabase
-        .from("agent_settings")
-        .insert({ 
-          client_id: clientId, 
-          name: "Agente Principal", 
-          main_prompt: "Você é o assistente virtual oficial da empresa. Seu objetivo é qualificar leads e agendar reuniões.",
-          is_active: true 
-        })
-        .select("id")
-        .single();
-      if (!agErr && newAg) targetAgentId = newAg.id;
-    }
-
-    const { error } = await supabase.from("channel_connections").insert({
-      instance_name: internalName,
-      agent_id: targetAgentId, 
-      client_id: clientId
+    const res = await fetch("/api/instances", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ raw_name: novaInstancia }),
     });
-    if (error) return alert(error.message);
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.ok) {
+      return alert(data?.error || "Erro ao criar instância");
+    }
 
     setNovaInstancia("");
     loadData();
@@ -680,9 +629,16 @@ export default function WhatsAppPage() {
   };
 
   const updateAgentMapping = async (instanceName: string, agentId: string) => {
-    let q = supabase.from("channel_connections").update({ agent_id: Number(agentId) }).eq("instance_name", instanceName);
-    if (clientId) q = q.eq("client_id", clientId);
-    await q;
+    const res = await fetch("/api/instances", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instance_name: instanceName, agent_id: Number(agentId) }),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json?.ok) {
+      alert(json?.error || "Erro ao vincular agente");
+      return;
+    }
     loadData();
   };
 

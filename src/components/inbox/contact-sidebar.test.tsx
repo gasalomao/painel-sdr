@@ -8,26 +8,12 @@ const mocks = vi.hoisted(() => ({
   fetch: vi.fn(),
   tagsFetch: vi.fn(),
   appointmentsFetch: vi.fn(),
-  writes: [] as { payload: Record<string, unknown>; filters: [string, unknown][] }[],
+  writes: [] as { contactId: string; payload: Record<string, unknown> }[],
   writeResult: null as Promise<unknown> | null,
   toast: { success: vi.fn(), error: vi.fn() },
 }));
 vi.mock("sonner", () => ({ toast: mocks.toast }));
 vi.mock("@/components/ui/scroll-area", () => ({ ScrollArea: ({ children }: { children: React.ReactNode }) => <div>{children}</div> }));
-vi.mock("@/lib/supabase", () => ({
-  supabase: { from: () => {
-    let write: typeof mocks.writes[number] | undefined;
-    const query = {
-      select: () => query, order: () => query, limit: () => query,
-      maybeSingle: () => query, single: () => query,
-      update: (payload: Record<string, unknown>) => { write = { payload, filters: [] }; mocks.writes.push(write); return query; },
-      eq: (key: string, value: unknown) => { write?.filters.push([key, value]); return query; },
-      then: (resolve: (result: unknown) => unknown) => (write && mocks.writeResult
-        ? mocks.writeResult : Promise.resolve({ data: write ? { id: "contact-a" } : null, error: null })).then(resolve),
-    };
-    return query;
-  } },
-}));
 
 const contact: Contact = {
   id: "11111111-1111-4111-8111-111111111111", user_id: "tenant-a", account_id: "tenant-a", name: "Vidraçaria Geral",
@@ -50,9 +36,22 @@ beforeEach(() => {
   mocks.fetch.mockImplementation(async () => found());
   mocks.tagsFetch.mockImplementation(async () => response({ tags: ["fazer_site", "fazer_video", "Reunião"] }));
   mocks.appointmentsFetch.mockImplementation(async () => response({ ok: true, appointments: [] }));
-  vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+  vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
     if (url.startsWith("/api/contacts/tags")) return mocks.tagsFetch(url, init);
     if (url.startsWith("/api/appointments")) return mocks.appointmentsFetch(url, init);
+    if (url.startsWith("/api/inbox/sessions")) return response({ ok: true, session: null });
+    if (url.startsWith("/api/contacts/") && url !== "/api/contacts/crm" && init?.method === "PATCH") {
+      const contactId = decodeURIComponent(url.replace("/api/contacts/", ""));
+      const payload = init.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+      mocks.writes.push({ contactId, payload });
+      if (mocks.writeResult) {
+        const resData = (await mocks.writeResult) as { data?: unknown; error?: { message?: string } | null };
+        if (resData?.error) return response({ ok: false, error: resData.error.message || "offline" }, 500);
+        if (!resData?.data) return response({ ok: false, error: "Contato não encontrado" }, 404);
+        return response({ ok: true, contact: resData.data }, 200);
+      }
+      return response({ ok: true, contact: { id: contactId } }, 200);
+    }
     return mocks.fetch(url, init);
   });
 });
@@ -71,7 +70,7 @@ describe("ContactSidebar tags", () => {
     fireEvent.input(input, { inputType: "insertText", target: { value: "site" } });
     fireEvent.click(await screen.findByRole("option", { name: "fazer_site" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Remover tag fazer_site" })).toBeDefined());
-    expect(mocks.writes[0]).toEqual({ payload: { tags: ["fazer_site"] }, filters: expect.arrayContaining([["id", contact.id], ["client_id", "tenant-a"]]) });
+    expect(mocks.writes[0]).toEqual({ contactId: contact.id, payload: { tags: ["fazer_site"] } });
     expect(input).toHaveValue("");
     expect(mocks.fetch).toHaveBeenCalledTimes(1);
     fireEvent.input(input, { inputType: "insertText", target: { value: "reuniao" } });
@@ -228,7 +227,7 @@ describe("ContactSidebar concorrência", () => {
     expect(screen.getByRole("button", { name: "Remover tag nova" })).toBeDefined();
     expect(screen.getByLabelText("Anotações do contato")).toHaveValue("Salva");
     expect(mocks.writes).toHaveLength(2);
-    expect(mocks.writes[0]).toEqual({ payload: { notes: "Salva" }, filters: [["id", contact.id], ["client_id", "tenant-a"]] });
+    expect(mocks.writes[0]).toEqual({ contactId: contact.id, payload: { notes: "Salva" } });
     expect(mocks.fetch).toHaveBeenCalledTimes(1);
   });
 

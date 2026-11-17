@@ -19,6 +19,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { analyzeLead } from "@/lib/lead-intelligence";
 import { requireClientId } from "@/lib/tenant";
+import { getAiKeys } from "@/lib/ai-keys";
 
 /** Mantém apenas IDs cujo client_id bate com o do auth. */
 async function filterLeadIdsByOwnership(ids: number[], clientId: string): Promise<number[]> {
@@ -36,24 +37,18 @@ export const dynamic = "force-dynamic";
 // damos margem confortável até o limite do Next standalone.
 export const maxDuration = 300;
 
-async function getApiKey(): Promise<string | null> {
-  const { data } = await supabaseAdmin
-    .from("ai_organizer_config")
-    .select("api_key")
-    .eq("id", 1)
-    .maybeSingle();
-  return data?.api_key || null;
-}
-
-/** True se há QUALQUER chave de IA (Gemini OU OpenRouter) configurada. */
-async function hasAnyAiKey(): Promise<boolean> {
-  const { data } = await supabaseAdmin
-    .from("ai_organizer_config")
-    .select("api_key, openrouter_api_key")
-    .eq("id", 1)
-    .maybeSingle();
-  return !!(data?.api_key && String(data.api_key).trim())
-    || !!((data as any)?.openrouter_api_key && String((data as any).openrouter_api_key).trim());
+async function hasAnyAiKey(): Promise<{ ok: boolean; geminiKey: string | null }> {
+  const keys = await getAiKeys();
+  const ok = Boolean(
+    keys.gemini ||
+    keys.openrouter ||
+    keys.openrouterKeys?.length ||
+    keys.nvidia ||
+    keys.nvidiaAccounts?.length ||
+    keys.gatewayBaseUrl ||
+    keys.gatewayEndpoints?.length
+  );
+  return { ok, geminiKey: keys.gemini || null };
 }
 
 /** Modelo configurado em /configuracoes pra Lead Intelligence. Default: 2.5-flash. */
@@ -76,21 +71,29 @@ export async function POST(req: NextRequest) {
     if (!auth.ok) return auth.response;
     const body = await req.json().catch(() => ({}));
     const force = !!body.force;
-    // Prioridade: model do body > app_settings > default. Permite override por
-    // chamada (ex: futuro batch que queira usar 2.5-pro pra qualidade extra).
-    const model = body.model || (await getConfiguredModel());
+    // SaaS guard: apenas admin pode escolher modelo em runtime via body; cliente comum usa o configurado.
+    const adminModelOverride =
+      auth.isAdmin && typeof body.model === "string" && body.model.trim()
+        ? body.model.trim()
+        : null;
+    const model = adminModelOverride || (await getConfiguredModel());
 
-    const apiKey = await getApiKey();
-    if (!(await hasAnyAiKey())) {
+    const cred = await hasAnyAiKey();
+    if (!cred.ok) {
       return NextResponse.json(
-        { success: false, error: "Nenhuma API Key de IA configurada. Salve Gemini ou OpenRouter em Configurações." },
+        { success: false, error: "Nenhuma API Key de IA configurada. Salve em Configurações." },
         { status: 400 },
       );
     }
+    const apiKey = cred.geminiKey;
 
     // ───────── Modo single ─────────
-    if (body.lead_id) {
-      const owned = await filterLeadIdsByOwnership([Number(body.lead_id)], auth.clientId);
+    if (body.lead_id !== undefined && body.lead_id !== null) {
+      const leadIdNum = Number(body.lead_id);
+      if (!Number.isInteger(leadIdNum) || leadIdNum <= 0) {
+        return NextResponse.json({ success: false, error: "lead_id inválido" }, { status: 400 });
+      }
+      const owned = await filterLeadIdsByOwnership([leadIdNum], auth.clientId);
       if (owned.length === 0) return NextResponse.json({ success: false, error: "Lead não encontrado" }, { status: 404 });
       const r = await analyzeLead({ leadId: owned[0], apiKey, model, force, clientId: auth.clientId });
       if ("error" in r) return NextResponse.json({ success: false, error: r.error }, { status: 500 });
@@ -134,7 +137,8 @@ export async function POST(req: NextRequest) {
     }
 
     return NextResponse.json({ success: false, error: "Forneça lead_id ou lead_ids" }, { status: 400 });
-  } catch (e: any) {
-    return NextResponse.json({ success: false, error: e?.message || String(e) }, { status: 500 });
+  } catch (e: unknown) {
+    console.error("[leads/analyze] Erro inesperado:", e instanceof Error ? e.message : e);
+    return NextResponse.json({ success: false, error: "Erro interno ao analisar leads" }, { status: 500 });
   }
 }

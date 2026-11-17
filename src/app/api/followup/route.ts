@@ -13,7 +13,10 @@ export async function GET(req: NextRequest) {
   let q = supabase.from("followup_campaigns").select("*").order("created_at", { ascending: false });
   if (!ctx.isAdmin) q = q.eq("client_id", ctx.clientId);
   const { data, error } = await q;
-  if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  if (error) {
+    console.error("[followup/GET] Erro:", error.message);
+    return NextResponse.json({ success: false, error: "Falha ao listar campanhas de follow-up" }, { status: 500 });
+  }
   return NextResponse.json({ success: true, campaigns: data });
 }
 
@@ -106,7 +109,10 @@ export async function POST(req: NextRequest) {
       })
       .select()
       .single();
-    if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    if (error) {
+      console.error("[followup/POST] Erro:", error.message);
+      return NextResponse.json({ success: false, error: "Falha ao criar campanha de follow-up" }, { status: 500 });
+    }
     try {
       await supabase
         .from("system_config")
@@ -116,7 +122,8 @@ export async function POST(req: NextRequest) {
         );
     } catch {}
     return NextResponse.json({ success: true, campaign: data });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    console.error("[followup/POST] Erro inesperado:", err instanceof Error ? err.message : err);
+    return NextResponse.json({ success: false, error: "Erro interno ao criar follow-up" }, { status: 500 });
   }
 }

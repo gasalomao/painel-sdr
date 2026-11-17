@@ -245,31 +245,30 @@ export async function summarizeMiddleMessages(
       updated_at: new Date().toISOString(),
     };
 
-    // Atualiza em memória e persiste fazendo merge com DB atual (evita sobrescrever variáveis de save_variables)
+    // Atualiza em memória e persiste fazendo merge antes de retornar (evita corrida com save_variables)
     if (opts?.sessionVariables && typeof opts.sessionVariables === "object") {
       opts.sessionVariables._history_summary = summaryEntry;
     }
     if (opts?.sessionId && supabaseAdmin) {
-      Promise.resolve(
-        supabaseAdmin
+      try {
+        const { data: latest } = await supabaseAdmin
           .from("sessions")
           .select("variables")
           .eq("id", opts.sessionId)
           .eq("client_id", clientId)
-          .maybeSingle(),
-      )
-        .then(({ data: latest }) => {
-          const base =
-            latest?.variables && typeof latest.variables === "object"
-              ? (latest.variables as Record<string, any>)
-              : opts?.sessionVariables || {};
-          return supabaseAdmin
-            .from("sessions")
-            .update({ variables: { ...base, _history_summary: summaryEntry } })
-            .eq("id", opts.sessionId!)
-            .eq("client_id", clientId);
-        })
-        .catch(() => {});
+          .maybeSingle();
+        const base =
+          latest?.variables && typeof latest.variables === "object"
+            ? (latest.variables as Record<string, any>)
+            : opts?.sessionVariables || {};
+        await supabaseAdmin
+          .from("sessions")
+          .update({ variables: { ...base, _history_summary: summaryEntry } })
+          .eq("id", opts.sessionId)
+          .eq("client_id", clientId);
+      } catch {
+        // Persistência de cache é best-effort
+      }
     }
 
     const rem = formatRemainderCompact(remainderSlice);

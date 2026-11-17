@@ -116,6 +116,7 @@ export type InfoTabProps = {
   tomAgente: string; setTomAgente: (v: string) => void;
   isActiveAgente: boolean; setIsActiveAgente: (v: boolean) => void;
   targetModel: string; setTargetModel: (v: string) => void;
+  fallbackModel?: string; setFallbackModel?: (v: string) => void;
   modelOptions: GroupableModel[];
   isAdmin?: boolean;  // só admin vê/altera modelo de IA (controle de custo)
   defaultAiModel?: string | null;  // modelo padrão da conta definido pelo admin
@@ -594,6 +595,31 @@ export function InfoTab(p: InfoTabProps) {
                   ? <>{p.modelOptions.length} modelos disponíveis · só o admin altera. O agente usa ferramentas (agenda, base de conhecimento) — prefira modelos sem o aviso &quot;sem ferramentas&quot;.</>
                   : <>Lista de modelos vazia. Configure a chave do Gemini ou OpenRouter em <a href="/configuracoes" className="text-primary underline decoration-dotted">Configurações</a>.</>}
               </p>
+
+              {p.setFallbackModel && (
+                <div className="pt-2 space-y-1.5">
+                  <label htmlFor="agent-fallback-model" className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Modelo Reserva (Failover Automático)
+                  </label>
+                  <select
+                    id="agent-fallback-model"
+                    value={p.fallbackModel || ""}
+                    onChange={(e) => p.setFallbackModel?.(e.target.value)}
+                    className="w-full bg-white/5 border-white/10 text-white h-10 rounded-xl text-xs px-3 focus:outline-none"
+                  >
+                    <option value="" className="bg-neutral-900">Automático (cascata cross-provider)</option>
+                    {p.fallbackModel && !p.modelOptions.some((m) => m.id === p.fallbackModel) && (
+                      <option key={p.fallbackModel} value={p.fallbackModel} className="bg-neutral-900">
+                        {p.fallbackModel} (salvo)
+                      </option>
+                    )}
+                    <ModelOptions models={p.modelOptions} markNoTools />
+                  </select>
+                  <p className="text-[10px] text-muted-foreground px-1">
+                    Acionado automaticamente se o modelo principal sofrer erro de conta, cota ou indisponibilidade.
+                  </p>
+                </div>
+              )}
             </div>
           ) : (
             <p className="text-[10px] text-muted-foreground px-1">

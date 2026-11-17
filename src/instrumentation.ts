@@ -42,11 +42,10 @@ export async function register() {
   }
   globalThis.schedulerStarted = true;
 
-  // IMPORTANTE: usa o admin client pra contornar RLS. Com o anon, se a policy
-  // de ai_organizer_config bloquear leitura, o scheduler silenciosamente nunca
-  // dispara.
-  const { supabaseAdmin, supabase: anonSb } = await import("@/lib/supabase");
-  const supabase = supabaseAdmin || anonSb;
+  // IMPORTANTE: usa apenas o admin client pra contornar RLS. Sem
+  // SUPABASE_SERVICE_ROLE_KEY, evita fallback anônimo silencioso.
+  const { supabaseAdmin } = await import("@/lib/supabase_admin");
+  const supabase = supabaseAdmin;
 
   // Dispara o Organizador pra UM cliente específico.
   const runOrganizerForClient = async (
@@ -57,7 +56,7 @@ export async function register() {
   ) => {
     try {
       console.log(`[SCHEDULER] ⏰ [${clientName}] Disparando Organizer IA [${cfg.provider}/${cfg.model}] — trigger=${triggerLabel}...`);
-      const baseUrl = process.env.INTERNAL_APP_URL || "http://localhost:3000";
+      const baseUrl = process.env.INTERNAL_APP_URL || `http://localhost:${process.env.PORT || 3000}`;
       const { getInternalSecret, INTERNAL_SECRET_HEADER } = await import("@/lib/internal-auth");
       const response = await fetch(`${baseUrl}/api/ai-organize`, {
         method: "POST",
@@ -72,6 +71,7 @@ export async function register() {
           triggered_by: triggerLabel,
           clientId,
         }),
+        signal: AbortSignal.timeout(120_000),
       });
       if (response.ok) {
         const result = await response.json();
@@ -111,6 +111,10 @@ export async function register() {
       }
 
       // 2) Clientes elegíveis
+      if (!supabase) {
+        console.warn("[SCHEDULER] SUPABASE_SERVICE_ROLE_KEY ausente — pulando tick.");
+        return;
+      }
       const { data: clients, error: clientsErr } = await supabase
         .from("clients")
         .select("id, name, organizer_execution_hour, organizer_last_run, organizer_enabled")
@@ -175,23 +179,27 @@ export async function register() {
   // de todos os agentes (multi-agente, multi-tenant).
   // Verifica se lead respondeu, envia mensagem e agenda próximo.
   // ============================================================
-  console.log("[AGENT FOLLOWUP] Iniciando ticker (120s).");
   if (globalThis.agentFollowupTickerId) clearInterval(globalThis.agentFollowupTickerId);
-  if (process.env.AGENT_FOLLOWUP_WORKER_ENABLED === "true") globalThis.agentFollowupTickerId = setInterval(async () => {
-    if (globalThis.agentFollowupTicking) {
-      console.log("[AGENT FOLLOWUP] tick anterior em andamento, pulando.");
-      return;
-    }
-    globalThis.agentFollowupTicking = true;
-    try {
-      const { runFollowUpWorker } = await import("@/workers/agent-followup-worker");
-      await runFollowUpWorker();
-    } catch (e) {
-      console.error("[AGENT FOLLOWUP] tick falhou:", (e as Error).message);
-    } finally {
-      globalThis.agentFollowupTicking = false;
-    }
-  }, 1000 * 120); // 2 minutos
+  if (process.env.AGENT_FOLLOWUP_WORKER_ENABLED === "true") {
+    console.log("[AGENT FOLLOWUP] Iniciando ticker (120s).");
+    globalThis.agentFollowupTickerId = setInterval(async () => {
+      if (globalThis.agentFollowupTicking) {
+        console.log("[AGENT FOLLOWUP] tick anterior em andamento, pulando.");
+        return;
+      }
+      globalThis.agentFollowupTicking = true;
+      try {
+        const { runFollowUpWorker } = await import("@/workers/agent-followup-worker");
+        await runFollowUpWorker();
+      } catch (e) {
+        console.error("[AGENT FOLLOWUP] tick falhou:", (e as Error).message);
+      } finally {
+        globalThis.agentFollowupTicking = false;
+      }
+    }, 1000 * 120); // 2 minutos
+  } else {
+    console.info("[AGENT FOLLOWUP] Ticker desativado (defina AGENT_FOLLOWUP_WORKER_ENABLED=true para ativar).");
+  }
 
   // ============================================================
   // AUTOMAÇÃO: orquestrador scrape → disparo → follow-up.
@@ -348,6 +356,8 @@ export async function register() {
     globalThis.backupTickerId = setInterval(() => { void tickBackup(); }, 60_000);
   }
 
+  const workerControllers: AbortController[] = [];
+
   // ============================================================
   // SITE STUDIO — Worker de criação e edição de sites por IA
   // ============================================================
@@ -356,11 +366,12 @@ export async function register() {
   if (!globalThis.sitesWorkerStarted && (process.env.SITES_WORKER_ENABLED === "true" || process.env.NODE_ENV === "development")) {
     globalThis.sitesWorkerStarted = true;
     process.env.SITES_WORKER_ENABLED = "true";
+    const workerController = new AbortController();
+    workerControllers.push(workerController);
     void (async () => {
       try {
         console.log("[SCHEDULER] 🌐 Iniciando Site Studio Worker in-process...");
         const { startWebsiteWorker } = await import("@/lib/sites/worker");
-        const workerController = new AbortController();
         await startWebsiteWorker(workerController.signal);
       } catch (err: unknown) {
         globalThis.sitesWorkerStarted = false;
@@ -376,11 +387,12 @@ export async function register() {
   if (!globalThis.autonomousSiteWorkerStarted && (process.env.AUTONOMOUS_SITE_WORKER_ENABLED === "true" || process.env.NODE_ENV === "development")) {
     globalThis.autonomousSiteWorkerStarted = true;
     process.env.AUTONOMOUS_SITE_WORKER_ENABLED = "true";
+    const workerController = new AbortController();
+    workerControllers.push(workerController);
     void (async () => {
       try {
         console.log("[SCHEDULER] 🤖 Iniciando Autonomous Site Worker in-process...");
         const { startAutonomousSiteWorker } = await import("@/lib/sites/autonomous-worker-engine");
-        const workerController = new AbortController();
         await startAutonomousSiteWorker(workerController.signal);
       } catch (err: unknown) {
         globalThis.autonomousSiteWorkerStarted = false;
@@ -405,4 +417,26 @@ export async function register() {
       globalThis.warmupTicking = false;
     }
   }, 1000 * 60); // 1 minuto
+
+  const stopBackgroundWorkers = () => {
+    for (const timer of [
+      globalThis.organizerWatcherId,
+      globalThis.agentFollowupTickerId,
+      globalThis.automationTickerId,
+      globalThis.campaignTickerId,
+      globalThis.followupTickerId,
+      globalThis.appointmentTickerId,
+      globalThis.backupTickerId,
+      globalThis.warmupTickerId,
+    ]) {
+      if (timer) clearInterval(timer);
+    }
+    for (const controller of workerControllers) {
+      controller.abort();
+    }
+    globalThis.schedulerStarted = false;
+  };
+  const runtimeProcess = Reflect.get(globalThis, "process") as NodeJS.Process | undefined;
+  runtimeProcess?.once?.("SIGTERM", stopBackgroundWorkers);
+  runtimeProcess?.once?.("SIGINT", stopBackgroundWorkers);
 }

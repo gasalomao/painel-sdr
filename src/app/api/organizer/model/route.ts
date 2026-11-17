@@ -38,7 +38,8 @@ export async function POST(req: NextRequest) {
     .eq("id", 1);
 
   if (error) {
-    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    console.error("[organizer/model] Erro:", error.message);
+    return NextResponse.json({ ok: false, error: "Falha ao atualizar modelo global" }, { status: 500 });
   }
   invalidateOrganizerConfigCache();
   return NextResponse.json({ ok: true, model, provider });

@@ -21,32 +21,41 @@ export async function GET(req: NextRequest) {
   if (!ctx.ok) return ctx.response;
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
 
-  const limit = Math.min(Number(req.nextUrl.searchParams.get("limit") || 50), 200);
+  const limit = Math.min(Number(req.nextUrl.searchParams.get("limit") || 200), 500);
+  const statusNovo = req.nextUrl.searchParams.get("status_novo");
+
+  const scopeToTenant = !ctx.isAdmin || ctx.impersonating;
 
   let histQ = supabaseAdmin
     .from("historico_ia_leads")
-    .select("id, remote_jid, nome_negocio, status_antigo, status_novo, razao, resumo, batch_id, created_at")
+    .select("id, client_id, remote_jid, nome_negocio, status_antigo, status_novo, razao, resumo, batch_id, created_at")
     .order("created_at", { ascending: false })
+    .order("id", { ascending: false })
     .limit(limit);
-  if (!ctx.isAdmin) histQ = histQ.eq("client_id", ctx.clientId);
+  if (scopeToTenant) histQ = histQ.eq("client_id", ctx.clientId);
+  if (statusNovo && statusNovo !== "all") {
+    histQ = histQ.eq("status_novo", statusNovo);
+  }
 
   let runsQ = supabaseAdmin
     .from("ai_organizer_runs")
-    .select("id, batch_id, triggered_by, started_at, finished_at, duration_ms, model, chats_analyzed, leads_moved, status, summary")
+    .select("id, batch_id, triggered_by, started_at, finished_at, duration_ms, model, provider, chats_analyzed, leads_moved, status, error, summary")
     .order("started_at", { ascending: false })
-    .limit(20);
-  if (!ctx.isAdmin) runsQ = runsQ.eq("client_id", ctx.clientId);
+    .limit(30);
+  if (scopeToTenant) runsQ = runsQ.eq("client_id", ctx.clientId);
 
   const [{ data: history, error: histErr }, { data: runs }] = await Promise.all([histQ, runsQ]);
-  if (histErr) return NextResponse.json({ ok: false, error: histErr.message }, { status: 500 });
+  if (histErr) {
+    console.error("[organizer/history/GET] Erro:", histErr.message);
+    return NextResponse.json({ ok: false, error: "Falha ao carregar histórico" }, { status: 500 });
+  }
   return NextResponse.json({ ok: true, history: history || [], runs: runs || [] });
 }
 
 /**
- * DELETE /api/organizer/history          → apaga TODO o histórico do cliente atual
- * DELETE /api/organizer/history?id=123   → apaga só esse item (com ownership check)
- *
- * Cliente só apaga o próprio; admin apaga qualquer (do sistema todo se sem id).
+ * DELETE /api/organizer/history              → apaga TODO o histórico do cliente atual
+ * DELETE /api/organizer/history?id=123       → apaga só esse item (com ownership check)
+ * DELETE /api/organizer/history?batch_id=xyz → apaga um lote inteiro (ou legacy para NULL)
  */
 export async function DELETE(req: NextRequest) {
   const ctx = await requireClientId(req);
@@ -54,23 +63,52 @@ export async function DELETE(req: NextRequest) {
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
 
   const idParam = req.nextUrl.searchParams.get("id");
+  const batchParam = req.nextUrl.searchParams.get("batch_id");
 
   if (idParam) {
     const id = Number(idParam);
     if (!Number.isInteger(id)) {
       return NextResponse.json({ ok: false, error: "id inválido" }, { status: 400 });
     }
-    let q = supabaseAdmin.from("historico_ia_leads").delete().eq("id", id);
-    if (!ctx.isAdmin) q = q.eq("client_id", ctx.clientId);
-    const { data, error } = await q.select("id");
-    if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    const { data, error } = await supabaseAdmin
+      .from("historico_ia_leads")
+      .delete()
+      .eq("id", id)
+      .eq("client_id", ctx.clientId)
+      .select("id");
+    if (error) {
+      console.error("[organizer/history/DELETE id] Erro:", error.message);
+      return NextResponse.json({ ok: false, error: "Falha ao apagar registro" }, { status: 500 });
+    }
     return NextResponse.json({ ok: true, deleted: data?.length ?? 0 });
   }
 
-  let q = supabaseAdmin.from("historico_ia_leads").delete();
-  if (!ctx.isAdmin) q = q.eq("client_id", ctx.clientId);
-  else q = q.gte("id", 0);
-  const { data, error } = await q.select("id");
-  if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+  if (batchParam) {
+    let q = supabaseAdmin
+      .from("historico_ia_leads")
+      .delete()
+      .eq("client_id", ctx.clientId);
+    if (batchParam === "legacy") {
+      q = q.is("batch_id", null);
+    } else {
+      q = q.eq("batch_id", batchParam);
+    }
+    const { data, error } = await q.select("id");
+    if (error) {
+      console.error("[organizer/history/DELETE batch] Erro:", error.message);
+      return NextResponse.json({ ok: false, error: "Falha ao apagar lote do histórico" }, { status: 500 });
+    }
+    return NextResponse.json({ ok: true, deleted: data?.length ?? 0 });
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("historico_ia_leads")
+    .delete()
+    .eq("client_id", ctx.clientId)
+    .select("id");
+  if (error) {
+    console.error("[organizer/history/DELETE all] Erro:", error.message);
+    return NextResponse.json({ ok: false, error: "Falha ao limpar histórico" }, { status: 500 });
+  }
   return NextResponse.json({ ok: true, deleted: data?.length ?? 0 });
 }

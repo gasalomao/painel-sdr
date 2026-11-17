@@ -11,9 +11,8 @@
 
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
-import { createClient } from "@supabase/supabase-js";
-import type { NextRequest } from "next/server";
 import { getOrganizerConfig } from "@/lib/organizer-config-cache";
+import { resolveSafeUploadFormat } from "@/lib/media-upload-safety";
 
 // ============================================================================
 // EXTRAÇÃO DE MENSAGEM (formato whatsmeow — igual nos dois provedores)
@@ -173,8 +172,11 @@ export async function ensureMediaBucket(): Promise<boolean> {
   try {
     const { data, error } = await supabase.storage.getBucket("whatsapp_media");
     if (error || !data) {
-      const { error: createErr } = await supabase.storage.createBucket("whatsapp_media", { public: true });
-      if (createErr) {
+      const { error: createErr } = await supabase.storage.createBucket("whatsapp_media", {
+        public: true,
+        fileSizeLimit: 50 * 1024 * 1024,
+      });
+      if (createErr && !/already exists/i.test(createErr.message)) {
         console.warn("[Bucket] Falha ao criar:", createErr.message);
         return false;
       }
@@ -187,23 +189,38 @@ export async function ensureMediaBucket(): Promise<boolean> {
   }
 }
 
-export async function uploadMediaBase64(base64: string, remoteJid: string, mimetype: string): Promise<string | null> {
+export async function uploadMediaBase64(
+  base64: string,
+  remoteJid: string,
+  mimetype: string,
+  clientId?: string | null,
+  fileName?: string
+): Promise<string | null> {
   try {
-    const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");
-    const buf = Buffer.from(cleanBase64, "base64");
-    const ext = (mimetype || "").split("/")[1]?.split(";")[0] || "bin";
-    const fileName = `${remoteJid.replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}.${ext}`;
+    const safeFormat = resolveSafeUploadFormat(fileName || "", mimetype);
+    if (!safeFormat) {
+      console.warn(`[Media Upload] Tipo de mídia bloqueado ou desconhecido (${mimetype || "vazio"}) — upload ignorado.`);
+      return null;
+    }
+
     const ok = await ensureMediaBucket();
     if (!ok) return null;
-    const { data, error } = await supabase.storage.from("whatsapp_media").upload(fileName, buf, {
-      contentType: mimetype || "application/octet-stream",
-      upsert: false,
+
+    const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");
+    const buf = Buffer.from(cleanBase64, "base64");
+    const safeClientPrefix = (clientId || "shared").replace(/[^a-zA-Z0-9_-]/g, "_");
+    const safeJid = (remoteJid || "unknown").replace(/[^a-zA-Z0-9@._-]/g, "_");
+    const storagePath = `${safeClientPrefix}/${safeJid}/${Date.now()}.${safeFormat.ext}`;
+
+    const { error } = await supabase.storage.from("whatsapp_media").upload(storagePath, buf, {
+      contentType: safeFormat.contentType,
+      upsert: true,
     });
     if (error) {
       console.warn("[Media Upload] Falha:", error.message);
       return null;
     }
-    const { data: pub } = supabase.storage.from("whatsapp_media").getPublicUrl(fileName);
+    const { data: pub } = supabase.storage.from("whatsapp_media").getPublicUrl(storagePath);
     return pub?.publicUrl || null;
   } catch (err: any) {
     console.error("[Media Upload] Erro:", err);
@@ -348,58 +365,131 @@ export async function transcribeAudio(
   return r?.text ?? null;
 }
 
+async function callOpenRouterVisionFallback(opts: {
+  contentParts: Array<Record<string, unknown>>;
+  clientId?: string | null;
+  sourceLabel: string;
+  kind: string;
+  metadata?: Record<string, unknown>;
+}): Promise<string | null> {
+  try {
+    const { getAiKeys } = await import("@/lib/ai-keys");
+    const keys = await getAiKeys().catch(() => null);
+    const orKey = keys?.openrouter || process.env.OPENROUTER_API_KEY || null;
+    if (!orKey) return null;
+
+    const model = process.env.DEFAULT_VISION_OPENROUTER_MODEL || "google/gemini-2.5-flash";
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${orKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content: opts.contentParts }],
+        max_tokens: 300,
+        temperature: 0.1,
+      }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!res.ok) return null;
+    const json = await res.json().catch(() => null);
+    const text = String(json?.choices?.[0]?.message?.content || "").trim();
+    if (!text) return null;
+
+    const u = json?.usage;
+    if (u && (Number(u.total_tokens) > 0 || Number(u.prompt_tokens) > 0)) {
+      import("@/lib/token-usage")
+        .then(({ logTokenUsage }) =>
+          logTokenUsage({
+            source: "other",
+            sourceLabel: opts.sourceLabel,
+            model,
+            provider: "OpenRouter",
+            promptTokens: Number(u.prompt_tokens) || 0,
+            completionTokens: Number(u.completion_tokens) || 0,
+            totalTokens: Number(u.total_tokens) || (Number(u.prompt_tokens) || 0) + (Number(u.completion_tokens) || 0),
+            clientId: opts.clientId || undefined,
+            metadata: opts.metadata,
+          }),
+        )
+        .catch(() => {});
+    }
+    return text;
+  } catch {
+    return null;
+  }
+}
+
 export async function describeImage(
   base64: string,
   mimetype: string,
   clientId?: string | null,
 ): Promise<string | null> {
+  const promptText =
+    "Descreva brevemente (1-2 frases, PT-BR) o que aparece nesta imagem. Se for um documento/print com texto, extraia o texto principal. Sem prefixo nem explicação.";
   try {
     const { GoogleGenerativeAI } = await import("@google/generative-ai");
     const cfg = await getOrganizerConfig();
-    const apiKey = cfg?.api_key;
-    if (!apiKey) return null;
+    const { getAiKeys } = await import("@/lib/ai-keys");
+    const keys = await getAiKeys().catch(() => null);
+    const apiKey = cfg?.api_key || keys?.gemini || process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_API_KEY;
     const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");
     const effMime = sanitizeMimetype(mimetype, "image/jpeg");
-    const { buildFallbackChain } = await import("@/lib/gemini-model-discovery");
-    const chain = await buildFallbackChain();
-    const genAI = new GoogleGenerativeAI(apiKey);
-    for (const modelName of chain) {
-      try {
-        const model = genAI.getGenerativeModel({
-          model: modelName,
-          generationConfig: { thinkingConfig: { thinkingBudget: 0 } } as any,
-        });
-        const result = await model.generateContent([
-          { inlineData: { data: cleanBase64, mimeType: effMime } },
-          { text: "Descreva brevemente (1-2 frases, PT-BR) o que aparece nesta imagem. Se for um documento/print com texto, extraia o texto principal. Sem prefixo nem explicação." },
-        ]);
-        const text = result.response.text().trim();
-        if (text) {
-          import("@/lib/token-usage")
-            .then(({ logTokenUsage, extractGeminiUsage }) => {
-              const u = extractGeminiUsage(result);
-              if (u.totalTokens > 0) {
-                return logTokenUsage({
-                  source: "other",
-                  sourceLabel: "Descrição de imagem",
-                  model: modelName,
-                  promptTokens: u.promptTokens,
-                  completionTokens: u.completionTokens,
-                  totalTokens: u.totalTokens,
-                  clientId: clientId || undefined,
-                  metadata: { kind: "image_description", mime: effMime },
-                });
-              }
-            })
-            .catch(() => {});
-          return text;
+
+    if (apiKey) {
+      const { buildFallbackChain } = await import("@/lib/gemini-model-discovery");
+      const chain = await buildFallbackChain();
+      const genAI = new GoogleGenerativeAI(apiKey);
+      for (const modelName of chain) {
+        try {
+          const model = genAI.getGenerativeModel({
+            model: modelName,
+            generationConfig: { thinkingConfig: { thinkingBudget: 0 } } as any,
+          });
+          const result = await model.generateContent([
+            { inlineData: { data: cleanBase64, mimeType: effMime } },
+            { text: promptText },
+          ]);
+          const text = result.response.text().trim();
+          if (text) {
+            import("@/lib/token-usage")
+              .then(({ logTokenUsage, extractGeminiUsage }) => {
+                const u = extractGeminiUsage(result);
+                if (u.totalTokens > 0) {
+                  return logTokenUsage({
+                    source: "other",
+                    sourceLabel: "Descrição de imagem",
+                    model: modelName,
+                    promptTokens: u.promptTokens,
+                    completionTokens: u.completionTokens,
+                    totalTokens: u.totalTokens,
+                    clientId: clientId || undefined,
+                    metadata: { kind: "image_description", mime: effMime },
+                  });
+                }
+              })
+              .catch(() => {});
+            return text;
+          }
+        } catch (err: any) {
+          const msg = String(err?.message || err);
+          if (/API key|invalid.*key|unauthorized|401|403.*api/i.test(msg) && !/model/i.test(msg)) break;
         }
-      } catch (err: any) {
-        const msg = String(err?.message || err);
-        if (/API key|invalid.*key|unauthorized|401|403.*api/i.test(msg) && !/model/i.test(msg)) return null;
       }
     }
-    return null;
+
+    return await callOpenRouterVisionFallback({
+      contentParts: [
+        { type: "text", text: promptText },
+        { type: "image_url", image_url: { url: `data:${effMime};base64,${cleanBase64}` } },
+      ],
+      clientId,
+      sourceLabel: "Descrição de imagem",
+      kind: "image_description",
+      metadata: { kind: "image_description", mime: effMime },
+    });
   } catch {
     return null;
   }
@@ -412,10 +502,6 @@ export async function describeDocument(
   clientId?: string | null,
 ): Promise<string | null> {
   try {
-    const { GoogleGenerativeAI } = await import("@google/generative-ai");
-    const cfg = await getOrganizerConfig();
-    const apiKey = cfg?.api_key;
-    if (!apiKey) return null;
     const cleanMime = sanitizeMimetype(mimetype, "application/pdf");
     const supportedDocs = /^(application\/pdf|text\/|application\/(json|rtf|x-javascript|x-python-code|x-typescript))/i;
     if (!supportedDocs.test(cleanMime)) return null;
@@ -424,53 +510,85 @@ export async function describeDocument(
     const sizeBytes = Math.ceil(cleanBase64.length * 0.75);
     if (sizeBytes > 20 * 1024 * 1024) return null;
 
-    const { buildFallbackChain } = await import("@/lib/gemini-model-discovery");
-    const chain = await buildFallbackChain();
-    const genAI = new GoogleGenerativeAI(apiKey);
     const filenameHint = fileName ? ` (arquivo: ${fileName})` : "";
-    for (const modelName of chain) {
-      try {
-        const model = genAI.getGenerativeModel({
-          model: modelName,
-          generationConfig: { thinkingConfig: { thinkingBudget: 0 } } as any,
-        });
-        const result = await model.generateContent([
-          { inlineData: { data: cleanBase64, mimeType: cleanMime } },
-          {
-            text:
-              `Você recebeu um documento${filenameHint}. ` +
-              "Gere um resumo executivo em PT-BR (até 4 frases) do conteúdo principal. " +
-              "Se o documento tiver dados estruturados (tabela, contrato, NF, currículo, proposta), " +
-              "liste os pontos-chave em bullets curtos. Sem preâmbulo, sem 'aqui está o resumo'.",
-          },
-        ]);
-        const text = result.response.text().trim();
-        if (text) {
-          import("@/lib/token-usage")
-            .then(({ logTokenUsage, extractGeminiUsage }) => {
-              const u = extractGeminiUsage(result);
-              if (u.totalTokens > 0) {
-                return logTokenUsage({
-                  source: "other",
-                  sourceLabel: "Extração de documento",
-                  model: modelName,
-                  promptTokens: u.promptTokens,
-                  completionTokens: u.completionTokens,
-                  totalTokens: u.totalTokens,
-                  clientId: clientId || undefined,
-                  metadata: { kind: "document_extraction", mime: cleanMime, fileName, sizeBytes },
-                });
-              }
-            })
-            .catch(() => {});
-          return text;
+    const promptText =
+      `Você recebeu um documento${filenameHint}. ` +
+      "Gere um resumo executivo em PT-BR (até 4 frases) do conteúdo principal. " +
+      "Se o documento tiver dados estruturados (tabela, contrato, NF, currículo, proposta), " +
+      "liste os pontos-chave em bullets curtos. Sem preâmbulo, sem 'aqui está o resumo'.";
+
+    const { GoogleGenerativeAI } = await import("@google/generative-ai");
+    const cfg = await getOrganizerConfig();
+    const { getAiKeys } = await import("@/lib/ai-keys");
+    const keys = await getAiKeys().catch(() => null);
+    const apiKey = cfg?.api_key || keys?.gemini || process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_API_KEY;
+
+    if (apiKey) {
+      const { buildFallbackChain } = await import("@/lib/gemini-model-discovery");
+      const chain = await buildFallbackChain();
+      const genAI = new GoogleGenerativeAI(apiKey);
+      for (const modelName of chain) {
+        try {
+          const model = genAI.getGenerativeModel({
+            model: modelName,
+            generationConfig: { thinkingConfig: { thinkingBudget: 0 } } as any,
+          });
+          const result = await model.generateContent([
+            { inlineData: { data: cleanBase64, mimeType: cleanMime } },
+            { text: promptText },
+          ]);
+          const text = result.response.text().trim();
+          if (text) {
+            import("@/lib/token-usage")
+              .then(({ logTokenUsage, extractGeminiUsage }) => {
+                const u = extractGeminiUsage(result);
+                if (u.totalTokens > 0) {
+                  return logTokenUsage({
+                    source: "other",
+                    sourceLabel: "Extração de documento",
+                    model: modelName,
+                    promptTokens: u.promptTokens,
+                    completionTokens: u.completionTokens,
+                    totalTokens: u.totalTokens,
+                    clientId: clientId || undefined,
+                    metadata: { kind: "document_extraction", mime: cleanMime, fileName, sizeBytes },
+                  });
+                }
+              })
+              .catch(() => {});
+            return text;
+          }
+        } catch (err: any) {
+          const msg = String(err?.message || err);
+          if (/API key|invalid.*key|unauthorized|401|403.*api/i.test(msg) && !/model/i.test(msg)) break;
         }
-      } catch (err: any) {
-        const msg = String(err?.message || err);
-        if (/API key|invalid.*key|unauthorized|401|403.*api/i.test(msg) && !/model/i.test(msg)) return null;
       }
     }
-    return null;
+
+    // Fallback para contas OpenRouter-only: texto puro vai decodificado direto; PDF vai via bloco `file`.
+    if (/^(text\/|application\/(json|rtf|x-javascript|x-python-code|x-typescript))/i.test(cleanMime)) {
+      const decodedText = Buffer.from(cleanBase64, "base64").toString("utf8").slice(0, 12_000);
+      if (decodedText.trim()) {
+        return await callOpenRouterVisionFallback({
+          contentParts: [{ type: "text", text: `${promptText}\n\nConteúdo:\n${decodedText}` }],
+          clientId,
+          sourceLabel: "Extração de documento",
+          kind: "document_extraction",
+          metadata: { kind: "document_extraction", mime: cleanMime, fileName, sizeBytes },
+        });
+      }
+    }
+
+    return await callOpenRouterVisionFallback({
+      contentParts: [
+        { type: "text", text: promptText },
+        { type: "file", file: { filename: fileName || "documento.pdf", file_data: `data:${cleanMime};base64,${cleanBase64}` } },
+      ],
+      clientId,
+      sourceLabel: "Extração de documento",
+      kind: "document_extraction",
+      metadata: { kind: "document_extraction", mime: cleanMime, fileName, sizeBytes },
+    });
   } catch {
     return null;
   }
@@ -482,17 +600,37 @@ export async function describeDocument(
 
 export async function findOrCreateContact(remoteJid: string, pushName: string | undefined, clientId: string) {
   try {
-    const { data: existing } = await supabase
+    let existing: { id: string; push_name?: string | null; phone_number?: string | null; remote_jid?: string | null } | null = null;
+    const exactRes = await supabase
       .from("contacts")
-      .select("id, push_name, phone_number")
+      .select("id, push_name, phone_number, remote_jid")
       .eq("remote_jid", remoteJid)
       .eq("client_id", clientId)
       .maybeSingle();
+    existing = exactRes.data;
+
+    if (!existing) {
+      try {
+        const { buildLeadJidCandidates } = await import("@/lib/jid-utils");
+        const candidates = buildLeadJidCandidates(remoteJid).filter((c) => c !== remoteJid);
+        if (candidates.length > 0) {
+          const altRes = await supabase
+            .from("contacts")
+            .select("id, push_name, phone_number, remote_jid")
+            .eq("client_id", clientId)
+            .in("remote_jid", candidates)
+            .limit(1);
+          if (altRes.data && altRes.data.length > 0) {
+            existing = altRes.data[0];
+          }
+        }
+      } catch { /* fallback seguro para mocks sem .in() */ }
+    }
 
     if (existing) {
       // Atualiza pushName se mudou.
       if (pushName && pushName !== existing.push_name) {
-        await supabase.from("contacts").update({ push_name: pushName }).eq("id", existing.id);
+        await supabase.from("contacts").update({ push_name: pushName }).eq("id", existing.id).eq("client_id", clientId);
       }
       return existing;
     }

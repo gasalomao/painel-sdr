@@ -13,6 +13,7 @@
 
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { logTokenUsage } from "@/lib/token-usage";
+import { isPrivateOrLocalUrl } from "@/lib/url-guard";
 
 export interface LeadIntelligenceSources {
   /** Trecho do site oficial que foi usado como contexto (até 1500 chars). */
@@ -215,8 +216,76 @@ function isPrivacyBoilerplate(text: string): boolean {
  *
  * Retorna Markdown já limpo. Latência ~2-8s por página (vale pelo conteúdo renderizado).
  */
+const MAX_SCRAPE_REDIRECTS = 3;
+
+function hostMatchesSuffix(hostname: string, suffix: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  const cleanSuffix = suffix.toLowerCase().replace(/^\.+|\.+$/g, "");
+  if (!host || !cleanSuffix) return false;
+  return host === cleanSuffix || host.endsWith(`.${cleanSuffix}`);
+}
+
+export function isSafePublicScrapeUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return false;
+    }
+    return !isPrivateOrLocalUrl(parsed.toString());
+  } catch {
+    return false;
+  }
+}
+
+export async function fetchPublicTextSafe(
+  rawUrl: string,
+  opts?: {
+    timeoutMs?: number;
+    headers?: Record<string, string>;
+    allowedHostSuffix?: string;
+  },
+): Promise<string | null> {
+  const timeoutMs = opts?.timeoutMs ?? 8000;
+  let currentUrl = rawUrl;
+
+  try {
+    for (let hop = 0; hop <= MAX_SCRAPE_REDIRECTS; hop++) {
+      if (!isSafePublicScrapeUrl(currentUrl)) return null;
+
+      if (opts?.allowedHostSuffix) {
+        const parsed = new URL(currentUrl);
+        if (!hostMatchesSuffix(parsed.hostname, opts.allowedHostSuffix)) {
+          return null;
+        }
+      }
+
+      const res = await fetch(currentUrl, {
+        redirect: "manual",
+        signal: AbortSignal.timeout(timeoutMs),
+        headers: opts?.headers,
+      });
+
+      if (res.status >= 300 && res.status < 400) {
+        const location = res.headers.get("location");
+        res.body?.cancel?.().catch(() => {});
+        if (!location || hop === MAX_SCRAPE_REDIRECTS) {
+          return null;
+        }
+        currentUrl = new URL(location, currentUrl).toString();
+        continue;
+      }
+
+      if (!res.ok) return null;
+      return await res.text();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function jinaReaderFetch(url: string): Promise<{ markdown: string; title?: string } | null> {
-  if (!url || !url.startsWith("http")) return null;
+  if (!url || !isSafePublicScrapeUrl(url)) return null;
   const key = process.env.JINA_API_KEY;
   const t0 = Date.now();
   try {
@@ -253,6 +322,7 @@ async function jinaReaderFetch(url: string): Promise<{ markdown: string; title?:
  * em sites particularmente difíceis (Cloudflare agressivo).
  */
 async function firecrawlScrape(url: string): Promise<string | null> {
+  if (!url || !isSafePublicScrapeUrl(url)) return null;
   const key = process.env.FIRECRAWL_API_KEY;
   if (!key) return null;
   const t0 = Date.now();
@@ -531,7 +601,7 @@ async function deepScrapeWebsite(
   rootUrl: string | null,
   budget: { maxPages?: number; maxChars?: number; perPageChars?: number } = {},
 ): Promise<{ text: string; visited: string[] }> {
-  if (!rootUrl || !rootUrl.startsWith("http")) return { text: "", visited: [] };
+  if (!rootUrl || !isSafePublicScrapeUrl(rootUrl)) return { text: "", visited: [] };
   // Defaults agressivos: até 25 páginas, 50k chars total, 4k por página.
   // Empresa típica de PME tem 5-15 páginas — cabe TUDO incluindo schema.org,
   // alts, iframes, markdown JS-rendered. Sites grandes ficam limitados ao top-N
@@ -547,16 +617,15 @@ async function deepScrapeWebsite(
 
   const fetchHtml = async (u: string): Promise<string> => {
     try {
-      const r = await fetch(u, {
-        signal: AbortSignal.timeout(8000),
-        redirect: "follow",
-        headers: {
-          "User-Agent": "Mozilla/5.0 (compatible; LeadIntel/1.0)",
-          "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-        },
-      });
-      if (!r.ok) return "";
-      return r.text();
+      return (
+        (await fetchPublicTextSafe(u, {
+          timeoutMs: 8000,
+          headers: {
+            "User-Agent": "Mozilla/5.0 (compatible; LeadIntel/1.0)",
+            "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+          },
+        })) || ""
+      );
     } catch { return ""; }
   };
 
@@ -962,16 +1031,15 @@ async function discoverPresence(
 async function scrapeInstagram(url: string | null): Promise<string> {
   if (!url) return "";
   try {
-    const r = await fetch(url, {
-      signal: AbortSignal.timeout(8000),
-      redirect: "follow",
+    const html = await fetchPublicTextSafe(url, {
+      timeoutMs: 8000,
+      allowedHostSuffix: "instagram.com",
       headers: {
         "User-Agent": "Mozilla/5.0 (compatible; facebookexternalhit/1.1; +http://www.facebook.com/externalhit_uatext.php)",
         "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
       },
     });
-    if (!r.ok) return "";
-    const html = await r.text();
+    if (!html) return "";
     // og:description tem "X seguidores, Y seguindo, Z posts - Veja fotos... de @user (Bio)".
     const og = html.match(/<meta[^>]*property="og:description"[^>]*content="([^"]+)"/i);
     const desc = html.match(/<meta[^>]*name="description"[^>]*content="([^"]+)"/i);

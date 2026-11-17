@@ -5,7 +5,7 @@ import DashboardPage from "@/app/page";
 vi.mock("@/components/layout/header", () => ({ Header: () => <header>Dashboard</header> }));
 vi.mock("@/components/dashboard-reminders-widget", () => ({ DashboardRemindersWidget: () => <section aria-label="Tarefas e lembretes" /> }));
 vi.mock("@/components/dashboard-calendar-widget", () => ({ DashboardCalendarWidget: () => <section aria-label="Próximos agendamentos" /> }));
-const { from, scopedQueries } = vi.hoisted(() => ({ from: vi.fn(), scopedQueries: [] as string[] }));
+const { from, summaryCalls } = vi.hoisted(() => ({ from: vi.fn(), summaryCalls: [] as string[] }));
 vi.mock("@/lib/supabase", () => ({ supabase: { from } }));
 let features: Record<string, boolean>;
 let empty: boolean;
@@ -13,31 +13,32 @@ let empty: boolean;
 beforeEach(() => {
   features = {};
   empty = false;
-  scopedQueries.length = 0;
-  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ authenticated: true, clientId: "client-a", name: "Marina Teste", features }), { status: 200 })));
-  from.mockImplementation((table: string) => {
-    let head = false;
-    const query = {
-      select: (_fields: string, options?: { head?: boolean }) => { head = !!options?.head; return query; },
-      gte: () => query,
-      lt: () => query,
-      in: () => query,
-      order: () => query,
-      limit: () => query,
-      eq: (field: string, value: string) => { if (field === "client_id" && value === "client-a") scopedQueries.push(table); return query; },
-      then: (resolve: (value: unknown) => void) => resolve({
-        count: empty ? 0 : 4,
-        data: empty || head ? [] : table === "leads_extraidos" ? [{ id: 7, nome_negocio: "Clínica Horizonte", ramo_negocio: "Saúde", created_at: "2026-10-19T10:00:00Z" }] : table === "chats_dashboard" ? [{ remote_jid: "contact-1" }, { remote_jid: "contact-1" }, { remote_jid: "contact-2" }] : [],
-        error: null,
-      }),
-    };
-    return query;
-  });
+  summaryCalls.length = 0;
+  from.mockClear();
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.startsWith("/api/dashboard/summary")) {
+      summaryCalls.push(url);
+      return new Response(
+        JSON.stringify({
+          success: true,
+          metrics: empty
+            ? { totalLeads: 0, leadsHoje: 0, conversasHoje: 0, agendamentosHoje: 0, instanciasOnline: 0, disparosAtivos: 0, followUpCampanhas: 0, iaInteracoesHoje: 0 }
+            : { totalLeads: 4, leadsHoje: 4, conversasHoje: 2, agendamentosHoje: 4, instanciasOnline: 4, disparosAtivos: 4, followUpCampanhas: 4, iaInteracoesHoje: 4 },
+          recentLeads: empty
+            ? []
+            : [{ id: 7, nome_negocio: "Clínica Horizonte", ramo_negocio: "Saúde", created_at: "2026-10-19T10:00:00Z" }],
+        }),
+        { status: 200 },
+      );
+    }
+    return new Response(JSON.stringify({ authenticated: true, clientId: "client-a", name: "Marina Teste", features }), { status: 200 });
+  }));
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe("Dashboard — regressão do refinamento visual", () => {
-  it("preserva métricas, links, widgets e escopo do cliente", async () => {
+  it("preserva métricas, links, widgets e usa BFF seguro sem queries diretas no browser", async () => {
     const { container } = render(<DashboardPage />);
     await screen.findByRole("link", { name: /Clínica Horizonte/ });
     const summary = screen.getByRole("region", { name: "Resumo da operação" });
@@ -47,7 +48,8 @@ describe("Dashboard — regressão do refinamento visual", () => {
     expect(screen.getByRole("link", { name: /Clínica Horizonte/ }).getAttribute("href")).toBe("/leads?openLeadId=7");
     expect(screen.getByRole("region", { name: "Tarefas e lembretes" })).toBeDefined();
     expect(screen.getByRole("region", { name: "Próximos agendamentos" })).toBeDefined();
-    expect(scopedQueries).toHaveLength(9);
+    expect(summaryCalls).toHaveLength(1);
+    expect(from).not.toHaveBeenCalled();
     expect(container.querySelector("a button, button a")).toBeNull();
   });
 

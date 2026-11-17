@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { evolution } from "@/lib/evolution";
-import { supabase } from "@/lib/supabase";
+import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { requireClientId, clientIdFromInstance } from "@/lib/tenant";
 
 /**
@@ -11,22 +11,43 @@ export async function POST(req: NextRequest) {
   try {
     const auth = await requireClientId(req);
     if (!auth.ok) return auth.response;
-    const { remoteJid, count = 20, instanceName } = await req.json();
+    if (!supabase) return NextResponse.json({ error: "DB indisponível" }, { status: 500 });
+    const body = await req.json();
+    const { remoteJid, count = 20, instanceName } = body;
+    const safeCount = Math.min(200, Math.max(1, Number.parseInt(String(count ?? 20), 10) || 20));
 
     if (!remoteJid) {
       return NextResponse.json({ error: "remoteJid é obrigatório" }, { status: 400 });
     }
 
-    // Se a instância foi informada, valida ownership; se não, mantém comportamento legado
-    // mas escopa o insert com client_id.
-    if (instanceName) {
-      const owner = await clientIdFromInstance(instanceName);
+    let targetInstance = typeof instanceName === "string" ? instanceName.trim() : "";
+
+    // Se a instância foi informada, valida ownership; senão, tenta resolver uma instância do próprio tenant
+    // antes de acionar a Evolution API, preservando fallback caso não haja conexão cadastrada.
+    if (targetInstance) {
+      const owner = await clientIdFromInstance(targetInstance);
       if (owner !== auth.clientId) {
         return NextResponse.json({ error: "Instância não pertence a este cliente" }, { status: 403 });
       }
+    } else {
+      try {
+        const { data: conn } = await supabase
+          .from("channel_connections")
+          .select("instance_name")
+          .eq("client_id", auth.clientId)
+          .limit(1)
+          .maybeSingle();
+        if ((conn as { instance_name?: string } | null)?.instance_name) {
+          targetInstance = String((conn as { instance_name: string }).instance_name);
+        }
+      } catch {
+        // Segue sem targetInstance em mocks legados sem channel_connections.limit()
+      }
     }
 
-    const evoData = await evolution.findMessages(remoteJid, count);
+    const evoData = targetInstance
+      ? await evolution.findMessages(remoteJid, safeCount, targetInstance)
+      : await evolution.findMessages(remoteJid, safeCount);
     
     // A Evolution pode retornar em vários formatos
     const messages = evoData?.records || evoData?.messages || (Array.isArray(evoData) ? evoData : []);
@@ -40,10 +61,13 @@ export async function POST(req: NextRequest) {
       .map((msg: any) => msg.key?.id)
       .filter((id: string) => id);
     
-    const { data: existingMsgs } = await supabase
-      .from("chats_dashboard")
-      .select("message_id")
-      .in("message_id", msgIds);
+    const { data: existingMsgs } = msgIds.length > 0
+      ? await supabase
+          .from("chats_dashboard")
+          .select("message_id")
+          .eq("client_id", auth.clientId)
+          .in("message_id", msgIds)
+      : { data: [] };
     
     const existingIds = new Set((existingMsgs || []).map(m => m.message_id));
 
@@ -84,6 +108,7 @@ export async function POST(req: NextRequest) {
         
         return {
             client_id: auth.clientId,
+            ...(targetInstance ? { instance_name: targetInstance } : {}),
             message_id: msg.key?.id,
             remote_jid: msg.key?.remoteJid || remoteJid,
             sender_type: senderType,

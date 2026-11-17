@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { evolution } from "@/lib/evolution";
 import { evolutionGo } from "@/lib/providers/evolution-go";
-import { verifySession } from "@/lib/auth";
+import { requireClientId } from "@/lib/tenant";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import * as channel from "@/lib/channel";
 
@@ -12,11 +12,12 @@ export const dynamic = 'force-dynamic';
  * - "evolution_go" → usa Evolution GO (Go/whatsmeow)
  * - outros        → usa Evolution API legada (default)
  */
-async function resolveProvider(instanceName: string) {
-  const { data } = await supabaseAdmin
+async function resolveProvider(instanceName: string, clientId: string) {
+  const { data } = await supabaseAdmin!
     .from("channel_connections")
     .select("provider")
     .eq("instance_name", instanceName)
+    .eq("client_id", clientId)
     .maybeSingle();
   return (data?.provider === "evolution_go") ? "evolution_go" : "evolution";
 }
@@ -49,16 +50,19 @@ function normalizeFetchInstances(raw: any) {
 }
 
 export async function GET(req: NextRequest) {
-  const session = await verifySession(req);
-  if (!session) {
+  const session = await requireClientId(req);
+  if (!session.ok) {
     return NextResponse.json({ success: false, error: "Não autorizado" }, { status: 401 });
+  }
+  if (!supabaseAdmin) {
+    return NextResponse.json({ success: false, error: "DB indisponível" }, { status: 500 });
   }
 
   try {
     // 1) Pega as instâncias que pertencem a este cliente no banco local
     const { data: myConns } = await supabaseAdmin
       .from("channel_connections")
-      .select("instance_name")
+      .select("instance_name, provider")
       .eq("client_id", session.clientId);
     
     const myInstanceNames = new Set((myConns || []).map(c => c.instance_name));
@@ -191,36 +195,59 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({ success: true, state: statusData.state, data: statusData.data });
   } catch (err) {
-    return NextResponse.json({ success: false, error: (err as Error).message }, { status: 500 });
+    console.error("[WhatsApp/GET] Erro:", err instanceof Error ? err.message : err);
+    return NextResponse.json({ success: false, error: "Erro ao consultar instâncias WhatsApp" }, { status: 500 });
   }
 }
 
 export async function POST(req: NextRequest) {
-  const session = await verifySession(req);
-  if (!session) {
+  const session = await requireClientId(req);
+  if (!session.ok) {
     return NextResponse.json({ success: false, error: "Não autorizado" }, { status: 401 });
+  }
+  if (!supabaseAdmin) {
+    return NextResponse.json({ success: false, error: "DB indisponível" }, { status: 500 });
   }
 
   try {
-    const { action, instanceName } = await req.json();
+    const body = await req.json();
+    const action = typeof body?.action === "string" ? body.action.trim() : "";
+    const instanceName = typeof body?.instanceName === "string" ? body.instanceName.trim() : "";
 
-    // 1) Verifica se a instância pertence ao cliente (exceto na criação, onde o nome é novo)
-    if (action !== "connect") {
-       const { data: own } = await supabaseAdmin
-         .from("channel_connections")
-         .select("id")
-         .eq("instance_name", instanceName)
-         .eq("client_id", session.clientId)
-         .maybeSingle();
-       if (!own) {
-         return NextResponse.json({ success: false, error: "Instância não pertence a esta conta" }, { status: 403 });
-       }
+    if (!instanceName) {
+      return NextResponse.json({ success: false, error: "instanceName obrigatório" }, { status: 400 });
     }
 
-    const providerType = await resolveProvider(instanceName);
+    // 1) Verifica propriedade ANTES de chamar qualquer provedor (incluindo "connect")
+    const { data: existingConn } = await supabaseAdmin
+      .from("channel_connections")
+      .select("id, client_id, provider")
+      .eq("instance_name", instanceName)
+      .maybeSingle();
+
+    if (action !== "connect") {
+      if (!existingConn || existingConn.client_id !== session.clientId) {
+        return NextResponse.json({ success: false, error: "Instância não pertence a esta conta" }, { status: 403 });
+      }
+    } else if (existingConn && existingConn.client_id !== session.clientId) {
+      return NextResponse.json({ success: false, error: "Este nome de instância já está em uso por outra conta." }, { status: 403 });
+    }
+
+    const providerType = existingConn?.provider === "evolution_go"
+      ? "evolution_go"
+      : await resolveProvider(instanceName, session.clientId);
 
     switch (action) {
       case "connect": {
+        if (!existingConn) {
+          await supabaseAdmin.from("channel_connections").insert({
+            instance_name: instanceName,
+            client_id: session.clientId,
+            provider: "evolution",
+            status: "connecting",
+          });
+        }
+
         // Já conectado? Não regera QR — devolve o estado pra UI mostrar "online".
         const pre = await channel.getStatus(instanceName);
         if (pre.state === "open") {
@@ -236,26 +263,6 @@ export async function POST(req: NextRequest) {
             .maybeSingle();
           if (data?.value && !data.value.includes("localhost")) publicUrl = data.value;
         } catch {}
-
-        // Se for criação, garante que o client_id seja salvo na channel_connections
-        const { data: existingConn } = await supabaseAdmin
-          .from("channel_connections")
-          .select("id, client_id")
-          .eq("instance_name", instanceName)
-          .maybeSingle();
-        
-        if (!existingConn) {
-          await supabaseAdmin.from("channel_connections").insert({
-            instance_name: instanceName,
-            client_id: session.clientId,
-            status: "connecting"
-          });
-        } else {
-            // Se já existe mas é de outro cliente, erro
-            if (existingConn.client_id !== session.clientId) {
-              return NextResponse.json({ success: false, error: "Este nome de instância já está em uso por outra conta." }, { status: 400 });
-            }
-        }
 
         console.log(`[WhatsApp/Connect] Solicitando conexão para: ${instanceName} (provider: ${providerType})`);
 
@@ -306,7 +313,10 @@ export async function POST(req: NextRequest) {
 
             // Advanced settings.
             try {
-              const allRes = await fetch(`${goUrl}/instance/all`, { headers: goHeaders });
+              const allRes = await fetch(`${goUrl}/instance/all`, {
+                headers: goHeaders,
+                signal: AbortSignal.timeout(10_000),
+              });
               const allJson = await allRes.json().catch(() => ({}));
               const list = allJson?.data || [];
               const match = list.find((x:any) => x.name === instanceName);
@@ -314,6 +324,7 @@ export async function POST(req: NextRequest) {
                 await fetch(`${goUrl}/instance/${match.id}/advanced-settings`, {
                   method: "PUT", headers: goHeaders,
                   body: JSON.stringify({ alwaysOnline: true, readMessages: true, rejectCall: true, ignoreGroups: true, ignoreStatus: true }),
+                  signal: AbortSignal.timeout(10_000),
                 });
               }
             } catch {}
@@ -353,6 +364,7 @@ export async function POST(req: NextRequest) {
             await fetch(`${goUrl}/instance/disconnect`, {
               method: "POST",
               headers: { "Content-Type": "application/json", apikey: goKey, token: goKey },
+              signal: AbortSignal.timeout(10_000),
             }).catch(() => {});
           }
         }
@@ -371,6 +383,7 @@ export async function POST(req: NextRequest) {
           if (goUrl) {
             const allRes = await fetch(`${goUrl}/instance/all`, {
               headers: { "Content-Type": "application/json", apikey: goKey, token: goKey },
+              signal: AbortSignal.timeout(10_000),
             });
             const allJson = await allRes.json().catch(() => ({}));
             const list = allJson?.data || [];
@@ -379,6 +392,7 @@ export async function POST(req: NextRequest) {
               await fetch(`${goUrl}/instance/delete/${match.id}`, {
                 method: "DELETE",
                 headers: { "Content-Type": "application/json", apikey: goKey, token: goKey },
+                signal: AbortSignal.timeout(10_000),
               }).catch(() => {});
             }
           }
@@ -397,6 +411,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "Ação inválida" }, { status: 400 });
     }
   } catch (err) {
-    return NextResponse.json({ success: false, error: (err as Error).message }, { status: 500 });
+    console.error("[WhatsApp/POST] Erro:", err instanceof Error ? err.message : err);
+    return NextResponse.json({ success: false, error: "Erro interno na operação WhatsApp" }, { status: 500 });
   }
 }

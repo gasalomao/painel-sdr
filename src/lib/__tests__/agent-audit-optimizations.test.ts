@@ -392,4 +392,46 @@ describe("Auditoria IA — regressões /api/agent/process", () => {
     expect(secondAdvance.funnel_completed).toBe(true);
     expect(state.writes.some((w) => w.table === "sessions" && w.action === "update" && w.payload.current_stage_id === null)).toBe(true);
   });
+
+  it("suprime resposta quando filtro anti-alucinação de imagens remove o único conteúdo e localiza lead via alternateJid", async () => {
+    state.rows.leads_extraidos = {
+      id: 88,
+      remoteJid: "5511988887777@s.whatsapp.net",
+      nome_negocio: "Padaria Central",
+      ramo_negocio: "Alimentação",
+      status: "novo",
+    };
+
+    const capturedTurns: string[] = [];
+    state.startAiChat.mockResolvedValue({
+      provider: "gemini",
+      modelUsed: () => "gemini-2.5-flash",
+      sendUser: vi.fn(async (msg: string) => {
+        capturedTurns.push(msg);
+        return {
+          text: "[IMAGEM: https://malicious-invented.example.com/fake.jpg]",
+          toolCalls: [],
+          usage: USAGE,
+        };
+      }),
+      sendToolResults: vi.fn(),
+    });
+
+    const res = await POST(makeReq({
+      instanceName: "inst-a",
+      remoteJid: "998877665544@lid",
+      alternateJid: "5511988887777@s.whatsapp.net",
+      text: "Me manda a foto",
+      isTestMode: false,
+    }, false));
+
+    // Confirmou lookup CRM via @lid + alternateJid e bloqueou envio vazio pós-sanitização de imagem
+    const leadQuery = state.rows.leads_extraidos as { nome_negocio: string };
+    expect(leadQuery.nome_negocio).toBe("Padaria Central");
+    expect(capturedTurns[0]).toContain("Padaria Central");
+    expect(await res.json()).toEqual({ success: true, ai_responded: false, suppressed: "empty_output" });
+    expect(state.sendMessage).not.toHaveBeenCalled();
+    expect(state.sendMedia).not.toHaveBeenCalled();
+    expect(state.writes.some((w) => w.table === "webhook_logs" && w.payload.event === "AGENT_EMPTY_OUTPUT")).toBe(true);
+  });
 });

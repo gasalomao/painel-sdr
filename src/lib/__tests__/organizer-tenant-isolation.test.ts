@@ -106,6 +106,20 @@ vi.mock("@/lib/supabase", () => ({
 vi.mock("@/lib/tenant", () => ({ requireClientId: mocks.requireClientId }));
 vi.mock("@/lib/internal-auth", () => ({ hasInternalSecret: mocks.hasInternalSecret }));
 vi.mock("@/lib/token-usage", () => ({ logTokenUsage: vi.fn() }));
+vi.mock("@/lib/ai-keys", () => ({
+  getAiKeys: vi.fn(async () => ({
+    gemini: "server-gemini-key",
+    openrouter: "",
+    openrouterKeys: [],
+    nvidia: "",
+    nvidiaAccounts: [],
+    gatewayBaseUrl: "",
+    gatewayApiKey: "",
+    gatewayFallbackModel: "",
+    gatewayEndpoints: [],
+    defaultAiModel: "gemini-2.5-flash",
+  })),
+}));
 vi.mock("@/lib/ai-provider", () => ({
   providerOf: vi.fn(() => "gemini"),
   providerDisplayName: vi.fn(() => "Google Gemini"),

@@ -9,12 +9,12 @@
  * Lê em lotes de 1000 pra não estourar memória.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { supabase, supabaseAdmin } from "@/lib/supabase";
+import { supabaseAdmin } from "@/lib/supabase_admin";
 import { ensurePricing, lookupPriceSync, computeCost } from "@/lib/pricing";
 import { requireClientId } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
-const adminClient = supabaseAdmin || supabase;
+const adminClient = supabaseAdmin;
 
 export async function POST(req: NextRequest) {
   const auth = await requireClientId(req);
@@ -30,6 +30,9 @@ export async function POST(req: NextRequest) {
   let from = 0;
 
   while (true) {
+    if (!adminClient) {
+      return NextResponse.json({ success: false, error: "DB indisponível" }, { status: 500 });
+    }
     const { data, error } = await adminClient
       .from("ai_token_usage")
       .select("id, model, prompt_tokens, completion_tokens, cost_usd")

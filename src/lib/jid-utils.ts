@@ -44,3 +44,46 @@ export function getBrazilPhoneVariants(jidOrPhone?: string | null): string[] {
 
   return Array.from(variants);
 }
+
+/**
+ * Extrai um JID real (`@s.whatsapp.net`) a partir de `remoteJidAlt`/`senderPn` quando
+ * o webhook entrega `remoteJid` mascarado em `@lid`.
+ */
+export function resolveAlternateWhatsappJid(
+  remoteJid?: string | null,
+  remoteJidAlt?: string | null,
+  senderPn?: string | null,
+): string | null {
+  if (!remoteJid || !remoteJid.includes("@lid")) return null;
+  for (const candidate of [remoteJidAlt, senderPn]) {
+    if (!candidate || candidate.includes("@lid") || candidate.includes("@g.us")) continue;
+    const normalized = normalizeJid(candidate);
+    if (normalized && normalized.endsWith("@s.whatsapp.net")) return normalized;
+  }
+  return null;
+}
+
+/**
+ * Monta todos os identificadores candidatos (JID original + @s.whatsapp.net alternativo + variantes BR)
+ * para localizar o lead no CRM mesmo em conversas iniciadas via `@lid` ou variação do 9º dígito.
+ */
+export function buildLeadJidCandidates(
+  remoteJid: string,
+  alternateJid?: string | null,
+): string[] {
+  const candidates = new Set<string>();
+  if (remoteJid) candidates.add(remoteJid);
+  if (alternateJid) candidates.add(alternateJid);
+  const phoneSource =
+    alternateJid ||
+    (remoteJid && !remoteJid.includes("@lid") && !remoteJid.includes("@g.us") ? remoteJid : null);
+  if (phoneSource) {
+    for (const digits of getBrazilPhoneVariants(phoneSource)) {
+      if (digits.length >= 10) {
+        candidates.add(digits);
+        candidates.add(`${digits}@s.whatsapp.net`);
+      }
+    }
+  }
+  return Array.from(candidates);
+}

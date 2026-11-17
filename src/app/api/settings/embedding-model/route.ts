@@ -14,13 +14,22 @@ export const dynamic = "force-dynamic";
 const KEY = "rag_embedding_model";
 const DEFAULT_MODEL = "gemini-embedding-001";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
+    const ctx = await requireClientId(req);
+    if (!ctx.ok) return ctx.response;
+    if (!ctx.isAdmin) {
+      return NextResponse.json(
+        { success: false, error: "Apenas admin pode consultar o modelo de embeddings." },
+        { status: 403 }
+      );
+    }
     const { data } = await supabaseAdmin
       .from("app_settings").select("value").eq("key", KEY).maybeSingle();
     return NextResponse.json({ success: true, model: data?.value || DEFAULT_MODEL });
-  } catch (e: any) {
-    return NextResponse.json({ success: false, error: e?.message || String(e) }, { status: 500 });
+  } catch (e: unknown) {
+    console.error("[settings/embedding-model/GET] Erro:", e instanceof Error ? e.message : e);
+    return NextResponse.json({ success: false, error: "Falha ao carregar modelo de embeddings" }, { status: 500 });
   }
 }
 
@@ -47,7 +56,8 @@ export async function PATCH(req: NextRequest) {
     } catch { /* não-fatal */ }
 
     return NextResponse.json({ success: true, model });
-  } catch (e: any) {
-    return NextResponse.json({ success: false, error: e?.message || String(e) }, { status: 500 });
+  } catch (e: unknown) {
+    console.error("[settings/embedding-model/PATCH] Erro:", e instanceof Error ? e.message : e);
+    return NextResponse.json({ success: false, error: "Falha ao salvar modelo de embeddings" }, { status: 500 });
   }
 }

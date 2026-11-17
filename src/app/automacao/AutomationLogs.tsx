@@ -2,8 +2,9 @@
 
 import { useEffect, useLayoutEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/lib/supabase";
+import { useClientSession } from "@/lib/use-session";
 import { cn } from "@/lib/utils";
-import { Loader2, MapPin, Zap, Repeat, MessageSquare, AlertTriangle, Activity, Send, ArrowDown, Globe, Sparkles, type LucideIcon } from "lucide-react";
+import { Loader2, MapPin, Zap, Repeat, MessageSquare, AlertTriangle, Activity, Send, ArrowDown, Globe, type LucideIcon } from "lucide-react";
 import styles from "./automacao.module.css";
 
 type LogEntry = {
@@ -76,6 +77,7 @@ export function AutomationLogs({
   startedAt: string | null;
   scraping: boolean;
 }) {
+  const { clientId } = useClientSession();
   const [entries, setEntries] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [scrapeFeed, setScrapeFeed] = useState<{ id: number; nome_negocio: string | null; created_at: string }[]>([]);
@@ -84,112 +86,19 @@ export function AutomationLogs({
     // silent=true: re-fetch de fundo (realtime/polling) — não pisca o
     // "Carregando histórico…". Só o fetch inicial mostra o loading.
     if (!opts?.silent) setLoading(true);
-    const merged: LogEntry[] = [];
-
-    // 1) automation_logs
-    const { data: alogs } = await supabase
-      .from("automation_logs")
-      .select("id, kind, level, message, remote_jid, created_at")
-      .eq("automation_id", automationId)
-      .order("created_at", { ascending: false })
-      .limit(500);
-    for (const r of alogs || []) {
-      merged.push({
-        id: `a:${r.id}`,
-        ts: r.created_at,
-        kind: r.kind as LogEntry["kind"],
-        level: r.level as LogEntry["level"],
-        message: r.message,
-        remote_jid: r.remote_jid,
+    try {
+      const res = await fetch(`/api/automations/${encodeURIComponent(automationId)}/logs`, {
+        cache: "no-store",
       });
-    }
-
-    // 2) campaign_logs (disparos)
-    if (campaignId) {
-      const { data: clogs } = await supabase
-        .from("campaign_logs")
-        .select("id, message, level, created_at")
-        .eq("campaign_id", campaignId)
-        .order("created_at", { ascending: false })
-        .limit(500);
-      for (const r of clogs || []) {
-        merged.push({
-          id: `c:${r.id}`,
-          ts: r.created_at,
-          kind: "dispatch",
-          level: (r.level as LogEntry["level"]) || "info",
-          message: r.message,
-        });
+      const json = await res.json().catch(() => null);
+      if (res.ok && json?.ok) {
+        setScrapeFeed(Array.isArray(json.scrapeFeed) ? json.scrapeFeed : []);
+        setEntries(Array.isArray(json.entries) ? json.entries : []);
       }
+    } finally {
+      setLoading(false);
     }
-
-    // 3) followup_logs
-    if (followupCampaignId) {
-      const { data: flogs } = await supabase
-        .from("followup_logs")
-        .select("id, message, level, created_at")
-        .eq("followup_campaign_id", followupCampaignId)
-        .order("created_at", { ascending: false })
-        .limit(500);
-      for (const r of flogs || []) {
-        merged.push({
-          id: `f:${r.id}`,
-          ts: r.created_at,
-          kind: "followup",
-          level: (r.level as LogEntry["level"]) || "info",
-          message: r.message,
-        });
-      }
-    }
-
-    // 4) Leads colhidos durante o scrape (mostra os mais recentes)
-    if (startedAt) {
-      const { data: leads } = await supabase
-        .from("leads_extraidos")
-        .select("id, nome_negocio, created_at")
-        .gte("created_at", startedAt)
-        .order("created_at", { ascending: false })
-        .limit(50);
-      setScrapeFeed(leads || []);
-      // We no longer push fake 'scrape' logs here because the scraper-engine 
-      // already logs real events (e.g., "[CRM] Lead salvo") to automation_logs.
-    }
-
-    // 5) Respostas dos clientes nos remote_jids dos targets desta automação
-    if (campaignId) {
-      const { data: tgts } = await supabase
-        .from("campaign_targets")
-        .select("remote_jid")
-        .eq("campaign_id", campaignId);
-      const jids = (tgts || []).map((t: any) => t.remote_jid).filter(Boolean);
-      if (jids.length > 0) {
-        const { data: replies } = await supabase
-          .from("chats_dashboard")
-          .select("id, remote_jid, content, created_at")
-          .in("remote_jid", jids)
-          .eq("sender_type", "customer")
-          .order("created_at", { ascending: false })
-          .limit(100);
-        for (const r of replies || []) {
-          merged.push({
-            id: `r:${r.id}`,
-            ts: r.created_at,
-            kind: "reply",
-            level: "success",
-            message: `💬 Cliente respondeu: "${(r.content || "").slice(0, 100)}${(r.content || "").length > 100 ? "…" : ""}"`,
-            remote_jid: r.remote_jid,
-          });
-        }
-      }
-    }
-
-    // Ordena ASC (mais antigo no topo, mais novo embaixo) — formato chat.
-    // Antes era DESC e novos logs surgiam no topo, "empurrando" a lista pra
-    // baixo a cada evento — sensação de "pulando". Agora é estável.
-    merged.sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
-    setEntries(merged.slice(-800));  // mantém últimos 800
-    setLoading(false);
-  }, [automationId, campaignId, followupCampaignId, startedAt]);
+  }, [automationId]);
 
   // Fetch-on-mount: setLoading(true) síncrono antes do await é intencional (spinner imediato).
   // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -245,29 +154,36 @@ export function AutomationLogs({
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => fetchAll({ silent: true }), 600);
     };
+    if (!clientId || typeof supabase?.channel !== "function") {
+      return () => {
+        if (timer) clearTimeout(timer);
+      };
+    }
+    const clientFilter = `client_id=eq.${clientId}`;
+    const isMyEvent = (p: any) => !p?.new?.client_id || p.new.client_id === clientId;
     const ch = supabase
-      .channel(`auto-logs-${automationId}`)
+      .channel(`auto-logs-${clientId}-${automationId}`)
       .on("postgres_changes",
         { event: "INSERT", schema: "public", table: "automation_logs", filter: `automation_id=eq.${automationId}` },
-        debouncedFetch)
+        (p: any) => { if (isMyEvent(p)) debouncedFetch(); })
       .on("postgres_changes",
-        { event: "INSERT", schema: "public", table: "campaign_logs" },
-        (p: any) => { if (p.new?.campaign_id === campaignId) debouncedFetch(); })
+        { event: "INSERT", schema: "public", table: "campaign_logs", filter: clientFilter },
+        (p: any) => { if (isMyEvent(p) && p.new?.campaign_id === campaignId) debouncedFetch(); })
       .on("postgres_changes",
-        { event: "INSERT", schema: "public", table: "followup_logs" },
-        (p: any) => { if (p.new?.followup_campaign_id === followupCampaignId) debouncedFetch(); })
+        { event: "INSERT", schema: "public", table: "followup_logs", filter: clientFilter },
+        (p: any) => { if (isMyEvent(p) && p.new?.followup_campaign_id === followupCampaignId) debouncedFetch(); })
       .on("postgres_changes",
-        { event: "INSERT", schema: "public", table: "leads_extraidos" },
-        () => { if (scraping) debouncedFetch(); })
+        { event: "INSERT", schema: "public", table: "leads_extraidos", filter: clientFilter },
+        (p: any) => { if (isMyEvent(p) && scraping) debouncedFetch(); })
       .on("postgres_changes",
-        { event: "INSERT", schema: "public", table: "chats_dashboard" },
-        (p: any) => { if (p.new?.sender_type === "customer") debouncedFetch(); })
+        { event: "INSERT", schema: "public", table: "chats_dashboard", filter: clientFilter },
+        (p: any) => { if (isMyEvent(p) && p.new?.sender_type === "customer") debouncedFetch(); })
       .subscribe();
     return () => {
       if (timer) clearTimeout(timer);
       supabase.removeChannel(ch);
     };
-  }, [automationId, campaignId, followupCampaignId, scraping, fetchAll]);
+  }, [automationId, campaignId, followupCampaignId, scraping, clientId, fetchAll]);
 
   // Fallback de polling — o painel NÃO pode depender só do realtime do
   // Supabase. Se `automation_logs` não estiver na publication

@@ -27,6 +27,8 @@ import {
 import { TEMPLATE_VARIABLES, renderTemplate } from "@/lib/template-vars";
 import { AUTO_POOL_INSTANCE, formatInstanceLabel, isAutoPoolInstance } from "@/lib/campaign-pool";
 import { supabase } from "@/lib/supabase";
+import { mergeRealtimeLog } from "@/lib/realtime-logs";
+import { useClientSession } from "@/lib/use-session";
 import { cn } from "@/lib/utils";
 
 type Step = { day_offset: number; template: string };
@@ -80,6 +82,7 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 export default function FollowUpPage(): ReactElement {
+  const { clientId } = useClientSession();
   const [campaigns, setCampaigns] = useState<FollowupCampaign[]>([]);
   const gwAccounts = useGatewayAccounts();
   const [loading, setLoading] = useState(true);
@@ -167,37 +170,31 @@ export default function FollowUpPage(): ReactElement {
 
   const loadInstances = useCallback(async () => {
     try {
-      const sessRes = await fetch("/api/auth/session");
-      const session = await sessRes.json();
+      const [sessRes, instRes, evoRes, kanbanRes] = await Promise.all([
+        fetch("/api/auth/session"),
+        fetch("/api/instances?scope=tenant", { cache: "no-store" }),
+        fetch("/api/whatsapp?instances=true"),
+        fetch("/api/kanban-columns", { cache: "no-store" }),
+      ]);
+      const session = await sessRes.json().catch(() => null);
       setIsAdmin(!!session?.isAdmin && !session?.impersonating);
       setDefaultAiModel(session?.defaultAiModel || null);
 
-      let connQuery = supabase.from("channel_connections").select("instance_name");
-      if (session?.clientId) {
-         connQuery = connQuery.eq("client_id", session.clientId);
-      }
-      const { data: conns } = await connQuery;
-      const myInstances = new Set((conns || []).map((c: any) => c.instance_name));
+      const instJson = await instRes.json().catch(() => null);
+      const conns = Array.isArray(instJson?.instances) ? instJson.instances : [];
+      const myInstances = new Set(conns.map((c: { instance_name?: string; instanceName?: string }) => c.instance_name || c.instanceName).filter(Boolean));
 
-      const r = await fetch("/api/whatsapp?instances=true");
-      const d = await r.json();
-      if (d.success && d.instances) {
+      const d = await evoRes.json().catch(() => null);
+      if (d?.success && d.instances) {
         const filtered = d.instances.filter((i: any) => myInstances.has(i.instanceName));
         setInstances(filtered);
         if (!instanceName && filtered[0]) setInstanceName(filtered[0].instanceName);
       }
 
-      // Carrega colunas do kanban do cliente — usadas no dropdown de
-      // "qual coluna abastece essa campanha". Permite trabalhar com
-      // kanban customizado feito via Organizador IA.
+      // Carrega colunas do kanban do cliente via BFF
       try {
-        let kanbanQ = supabase
-          .from("kanban_columns")
-          .select("status_key, label, color, order_index")
-          .order("order_index", { ascending: true });
-        if (session?.clientId) kanbanQ = kanbanQ.eq("client_id", session.clientId);
-        const { data: cols } = await kanbanQ;
-        if (cols && cols.length > 0) setKanbanCols(cols as any);
+        const kb = await kanbanRes.json().catch(() => null);
+        if (Array.isArray(kb?.columns) && kb.columns.length > 0) setKanbanCols(kb.columns as any);
       } catch {}
     } catch {}
   }, [instanceName]);
@@ -228,22 +225,9 @@ export default function FollowUpPage(): ReactElement {
   }, []);
 
   const loadAvailableLeads = useCallback(async () => {
-    const sessRes = await fetch("/api/auth/session");
-    const session = await sessRes.json();
-    
-    // Pega os leads em follow-up (mais úteis para preview) + alguns recentes como fallback
-    let query = supabase
-      .from("leads_extraidos")
-      .select("id, remoteJid, nome_negocio, ramo_negocio, status")
-      .order("created_at", { ascending: false })
-      .limit(200);
-      
-    if (session?.clientId) {
-       query = query.eq("client_id", session.clientId);
-    }
-    
-    const { data } = await query;
-    setAvailableLeads(data || []);
+    const res = await fetch("/api/leads/lookup?mode=followup_available", { cache: "no-store" });
+    const data = await res.json().catch(() => null);
+    setAvailableLeads(Array.isArray(data?.leads) ? data.leads : []);
   }, []);
 
   useEffect(() => {
@@ -262,26 +246,29 @@ export default function FollowUpPage(): ReactElement {
     if (!activeLogCampaignId) { setLogs([]); return; }
     let cancelled = false;
     async function fetchInitial() {
-      const { data } = await supabase
-        .from("followup_logs")
-        .select("*")
-        .eq("followup_campaign_id", activeLogCampaignId)
-        .order("created_at", { ascending: true })
-        .limit(100);
-      if (!cancelled) setLogs((data as any) || []);
+      const res = await fetch(`/api/followup/logs?campaign_id=${encodeURIComponent(activeLogCampaignId!)}`, { cache: "no-store" });
+      const json = await res.json().catch(() => null);
+      if (!cancelled && res.ok && json?.success) setLogs(Array.isArray(json.logs) ? json.logs : []);
     }
     fetchInitial();
-    const channel = supabase
-      .channel(`followup-logs-${activeLogCampaignId}`)
-      .on("postgres_changes", {
-        event: "INSERT", schema: "public", table: "followup_logs",
-        filter: `followup_campaign_id=eq.${activeLogCampaignId}`,
-      }, (payload) => {
-        setLogs(prev => [...prev, payload.new as any].slice(-100));
-      })
-      .subscribe();
-    return () => { cancelled = true; supabase.removeChannel(channel); };
-  }, [activeLogCampaignId]);
+    const logPoll = setInterval(() => {
+      if (!cancelled && !document.hidden) fetchInitial();
+    }, 4000);
+    const channel = typeof supabase?.channel === "function"
+      ? supabase
+          .channel(`followup-logs-${activeLogCampaignId}`)
+          .on("postgres_changes", {
+            event: "INSERT", schema: "public", table: "followup_logs",
+            filter: `followup_campaign_id=eq.${activeLogCampaignId}`,
+          }, (payload) => {
+            const incoming = payload.new as any;
+            if (clientId && incoming?.client_id && incoming.client_id !== clientId) return;
+            setLogs((prev) => mergeRealtimeLog(prev, incoming, 100));
+          })
+          .subscribe()
+      : null;
+    return () => { cancelled = true; clearInterval(logPoll); if (channel) supabase.removeChannel(channel); };
+  }, [activeLogCampaignId, clientId]);
 
   // Último log por campanha ativa (card "Agora…")
   useEffect(() => {
@@ -289,31 +276,29 @@ export default function FollowUpPage(): ReactElement {
     if (activeIds.length === 0) return;
     let cancelled = false;
     async function fetchLatest() {
-      const { data } = await supabase
-        .from("followup_logs")
-        .select("*")
-        .in("followup_campaign_id", activeIds)
-        .order("created_at", { ascending: false })
-        .limit(activeIds.length * 3);
-      if (cancelled || !data) return;
-      const byId: Record<string, FollowupLog> = {};
-      for (const row of data as any[]) {
-        if (!byId[row.followup_campaign_id]) byId[row.followup_campaign_id] = row;
-      }
-      setLatestLogByCampaign(prev => ({ ...prev, ...byId }));
+      const res = await fetch(`/api/followup/logs?latest_ids=${encodeURIComponent(activeIds.join(","))}`, { cache: "no-store" });
+      const json = await res.json().catch(() => null);
+      if (cancelled || !res.ok || !json?.latestById) return;
+      setLatestLogByCampaign(prev => ({ ...prev, ...json.latestById }));
     }
     fetchLatest();
     const t = setInterval(fetchLatest, 5000);
-    const channel = supabase
-      .channel(`followup-latest-${activeIds.join("-")}`)
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "followup_logs" }, (payload) => {
-        const row = payload.new as any;
-        if (!activeIds.includes(row.followup_campaign_id)) return;
-        setLatestLogByCampaign(prev => ({ ...prev, [row.followup_campaign_id]: row }));
-      })
-      .subscribe();
-    return () => { cancelled = true; clearInterval(t); supabase.removeChannel(channel); };
-  }, [campaigns]);
+    const channel = clientId && typeof supabase?.channel === "function"
+      ? supabase
+          .channel(`followup-latest-${clientId}-${activeIds.join("-")}`)
+          .on(
+            "postgres_changes",
+            { event: "INSERT", schema: "public", table: "followup_logs", filter: `client_id=eq.${clientId}` },
+            (payload) => {
+              const row = payload.new as any;
+              if (row?.client_id !== clientId || !activeIds.includes(row.followup_campaign_id)) return;
+              setLatestLogByCampaign(prev => ({ ...prev, [row.followup_campaign_id]: row }));
+            }
+          )
+          .subscribe()
+      : null;
+    return () => { cancelled = true; clearInterval(t); if (channel) supabase.removeChannel(channel); };
+  }, [campaigns, clientId]);
 
   // Histórico de envios (targets) do card ativo
   async function loadHistTargets(campaignId: string) {
@@ -399,34 +384,9 @@ export default function FollowUpPage(): ReactElement {
     setPickerOpen(true);
     setPickerLoading(true);
     try {
-      const sessRes = await fetch("/api/auth/session");
-      const session = await sessRes.json();
-
-      // Prioriza leads em status follow-up; traz também demais (pro usuário escolher à vontade)
-      let q1 = supabase
-        .from("leads_extraidos")
-        .select("id, remoteJid, nome_negocio, ramo_negocio, status, created_at")
-        .eq("status", "follow-up")
-        .order("created_at", { ascending: false })
-        .limit(1000);
-        
-      let q2 = supabase
-        .from("leads_extraidos")
-        .select("id, remoteJid, nome_negocio, ramo_negocio, status, created_at")
-        .neq("status", "follow-up")
-        .not("status", "in", "(fechado,sem_interesse,descartado)")
-        .order("created_at", { ascending: false })
-        .limit(500);
-
-      if (session?.clientId) {
-        q1 = q1.eq("client_id", session.clientId);
-        q2 = q2.eq("client_id", session.clientId);
-      }
-      
-      const [{ data: a }, { data: b }] = await Promise.all([q1, q2]);
-      
-      const merged = [...(a || []), ...(b || [])];
-      setPickerLeads(merged);
+      const res = await fetch("/api/leads/lookup?mode=followup_picker", { cache: "no-store" });
+      const json = await res.json().catch(() => null);
+      setPickerLeads(Array.isArray(json?.leads) ? json.leads : []);
     } finally {
       setPickerLoading(false);
     }

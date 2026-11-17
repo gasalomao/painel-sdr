@@ -35,11 +35,22 @@ const campaign = {
 
 function mockRequests(campaigns: Record<string, unknown>[] = []): void {
   fetchMock.mockImplementation(async (input, init) => {
-    if (init?.method === "POST" || init?.method === "PATCH") return Response.json({ success: true, campaign: { id: "new-campaign", total_targets: 1 } });
-    if (input === "/api/auth/session") return Response.json({ authenticated: true, clientId: "client-test", isAdmin: true });
-    if (input === "/api/campaigns") return Response.json({ success: true, campaigns });
-    if (input === "/api/ai-models") return Response.json({ success: true, models: [{ id: "modelo-teste", name: "Modelo de teste" }] });
-    if (String(input).startsWith("/api/campaigns/")) return Response.json({ success: true, targets: [{ id: "target-test", nome_negocio: "Empresa de teste", remote_jid: "5527999990000@s.whatsapp.net", status: "sent", rendered_message: "Olá, Empresa de teste!" }] });
+    const url = String(input);
+    if (init?.method === "POST" || init?.method === "PATCH" || init?.method === "DELETE") {
+      return Response.json({ success: true, campaign: { id: "new-campaign", total_targets: 1 } });
+    }
+    if (url === "/api/auth/session") return Response.json({ authenticated: true, clientId: "client-test", isAdmin: true });
+    if (url.startsWith("/api/instances")) return Response.json({ ok: true, instances: [{ instance_name: "Comercial" }] });
+    if (url.startsWith("/api/leads/lookup")) {
+      return Response.json({
+        ok: true,
+        leads: [{ id: 7, remoteJid: "5527999990000@s.whatsapp.net", nome_negocio: "Empresa de teste", ramo_negocio: "Serviços", status: "novo" }],
+      });
+    }
+    if (url === "/api/campaigns") return Response.json({ success: true, campaigns });
+    if (url.startsWith("/api/campaigns/logs")) return Response.json({ success: true, logs: [], latestById: {} });
+    if (url === "/api/ai-models") return Response.json({ success: true, models: [{ id: "modelo-teste", name: "Modelo de teste" }] });
+    if (url.startsWith("/api/campaigns/")) return Response.json({ success: true, targets: [{ id: "target-test", nome_negocio: "Empresa de teste", remote_jid: "5527999990000@s.whatsapp.net", status: "sent", rendered_message: "Olá, Empresa de teste!" }] });
     return Response.json({ success: true, instances: [{ instanceName: "Comercial" }] });
   });
 }

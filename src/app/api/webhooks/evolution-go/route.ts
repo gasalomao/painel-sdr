@@ -31,12 +31,14 @@ import {
 } from "../shared-helpers";
 
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
-import { isAiSend, isManualSend, isPendingAutomatedSend } from "@/lib/manual-send-registry";
+import { isAiSend, isManualSend, isPendingAutomatedSend, isPendingAutomatedMedia } from "@/lib/manual-send-registry";
 import { safeSecretEqual, shouldLogOnce } from "@/lib/webhook-security";
 import { shouldSkipGroupActions, resolveTranscriptionConfig } from "@/lib/bot-status";
 import { evolution } from "@/lib/evolution";
 import { handleIncomingOptOutIfDetected } from "@/lib/opt-out";
 import { detectWarmupPeerTraffic } from "@/lib/warmup/warmup-firewall";
+import { maskJid } from "@/lib/pii";
+import { resolveAlternateWhatsappJid } from "@/lib/jid-utils";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -131,7 +133,8 @@ export async function POST(req: NextRequest) {
         await supabase
           .from("channel_connections")
           .update({ status: state })
-          .eq("instance_name", instanceName);
+          .eq("instance_name", instanceName)
+          .eq("client_id", clientId);
 
         if (state === "close") {
           const statusReason = raw?.statusReason ?? raw?.reason ?? raw?.error ?? null;
@@ -144,6 +147,13 @@ export async function POST(req: NextRequest) {
               })
             )
             .catch(() => {});
+        } else if (state === "open") {
+          try {
+            const { autoLinkAgentOnConnect } = await import("@/lib/auto-link-agent");
+            await autoLinkAgentOnConnect(instanceName);
+          } catch (e) {
+            console.warn("[evo-go-webhook] auto-link falhou:", (e as Error).message);
+          }
         }
       }
       return NextResponse.json({ ok: true, event: "connection_update", state: state || rawState || "unknown" });
@@ -198,12 +208,14 @@ export async function POST(req: NextRequest) {
     const pushName = raw.pushName || raw.push_name || "";
 
     // Bloqueia tráfego 1x1 entre chips em aquecimento (recebido OU fromMe=true).
+    const remoteJidAlt = key.remoteJidAlt || key.senderPn || null;
+    const altWhatsappJid = resolveAlternateWhatsappJid(remoteJid, remoteJidAlt, null);
     const warmupCheck = await detectWarmupPeerTraffic({
       clientId,
       instanceName,
       messageId,
       remoteJid,
-      remoteJidAlt: key.remoteJidAlt || key.senderPn || null,
+      remoteJidAlt,
     });
     if (warmupCheck.blocked) {
       seenMessageIds.add(dedupeKey);
@@ -219,6 +231,7 @@ export async function POST(req: NextRequest) {
     const contact = await findOrCreateContact(remoteJid, pushName || undefined, clientId);
     if (contact) {
       healLeadNameFromPushName(remoteJid, pushName || undefined, clientId);
+      if (altWhatsappJid) healLeadNameFromPushName(altWhatsappJid, pushName || undefined, clientId);
     }
     const session = contact
       ? await findOrCreateSession(contact.id, instanceName, remoteJid, clientId)
@@ -236,13 +249,18 @@ export async function POST(req: NextRequest) {
     // Não bloqueia o processamento da mensagem. Só busca se o contato
     // não tem foto ou a URL está stale (>24h).
     if (!fromMe && instanceName) {
-      refreshProfilePicIfStale(remoteJid, instanceName, clientId).catch(() => {});
+      refreshProfilePicIfStale(altWhatsappJid || remoteJid, instanceName, clientId).catch(() => {});
     }
 
     // ===== Classificar sender (anti-eco: distingue IA / humano / cliente) =====
+    const isMediaMessage = ["image", "audio", "video", "document"].includes(msgType);
     let sender: "customer" | "ai" | "human" = "customer";
     if (fromMe) {
-      if (isAiSend(messageId) || isPendingAutomatedSend(instanceName, remoteJid, text || "")) {
+      if (
+        isAiSend(messageId) ||
+        isPendingAutomatedSend(instanceName, remoteJid, text || "") ||
+        (isMediaMessage && isPendingAutomatedMedia(instanceName, remoteJid))
+      ) {
         sender = "ai";
       } else if (isManualSend(messageId)) {
         sender = "human";
@@ -276,7 +294,12 @@ export async function POST(req: NextRequest) {
     if (sender !== "ai" && base64Media) {
       try {
         // Upload da mídia.
-        mediaUrl = await uploadMediaBase64(base64Media, remoteJid, sanitizeMimetype(mimetype || "", "application/octet-stream"));
+        mediaUrl = await uploadMediaBase64(
+          base64Media,
+          remoteJid,
+          sanitizeMimetype(mimetype || "", "application/octet-stream"),
+          clientId
+        );
 
         // Transcrição/descrição baseada no tipo (áudio transcreve inclusive para envio do operador/fromMe).
         if (msgType === "audio" && !groupDisabled && transcriptionMethod !== "disabled") {
@@ -398,8 +421,9 @@ export async function POST(req: NextRequest) {
     // ===== Auto-pausa só quando HUMANO responde (eco da IA não pausa) =====
     if (fromMe && sender === "human" && session?.id) {
       try {
-        // Salvaguarda anti-eco: mensagem IDÊNTICA da IA nos últimos 30s = eco.
+        // Salvaguarda anti-eco: mensagem IDÊNTICA (ou mídia recente) da IA nos últimos 30s = eco.
         let isEchoOfAi = false;
+        const recentSinceIso = new Date(Date.now() - 30_000).toISOString();
         if (text) {
           const { data: recentAi } = await supabase
             .from("chats_dashboard")
@@ -408,9 +432,20 @@ export async function POST(req: NextRequest) {
             .eq("client_id", clientId)
             .eq("sender_type", "ai")
             .eq("content", text)
-            .gte("created_at", new Date(Date.now() - 30_000).toISOString())
+            .gte("created_at", recentSinceIso)
             .limit(1);
           isEchoOfAi = !!(recentAi && recentAi.length > 0);
+        } else if (["image", "document"].includes(msgType)) {
+          const { data: recentAiMedia } = await supabase
+            .from("chats_dashboard")
+            .select("id")
+            .eq("remote_jid", remoteJid)
+            .eq("client_id", clientId)
+            .eq("sender_type", "ai")
+            .eq("media_type", msgType)
+            .gte("created_at", recentSinceIso)
+            .limit(1);
+          isEchoOfAi = !!(recentAiMedia && recentAiMedia.length > 0);
         }
         if (!isEchoOfAi) {
           const { applyHumanAutoPause } = await import("@/lib/bot-status");
@@ -428,7 +463,7 @@ export async function POST(req: NextRequest) {
     if (!fromMe && effectiveCustomerText && remoteJid) {
       optedOutInTurn = await handleIncomingOptOutIfDetected({
         clientId,
-        remoteJid,
+        remoteJid: altWhatsappJid || remoteJid,
         messageText: effectiveCustomerText,
         sessionId: session?.id || null,
       }).catch(() => false);
@@ -438,7 +473,7 @@ export async function POST(req: NextRequest) {
     }
 
     // ===== Disparar agente IA (mensagens do cliente com texto/mídia; reações ou opt-out NÃO disparam IA) =====
-    if (!fromMe && !optedOutInTurn && msgType !== "reaction" && (text || msgType === "audio" || msgType === "image") && session?.id && !groupDisabled) {
+    if (!fromMe && !optedOutInTurn && msgType !== "reaction" && (text || msgType === "audio" || msgType === "image" || msgType === "document") && session?.id && !groupDisabled) {
       // FIX crítico: usar getEffectiveStatus de verdade — antes lia
       // `_effective_active` (nunca setado aqui) e bot_status cru, então o
       // snooze expirava e a IA ficava MUDA para sempre, e a pausa por
@@ -452,8 +487,9 @@ export async function POST(req: NextRequest) {
             .from("webhook_logs")
             .insert({
               instance_name: instanceName,
+              client_id: clientId,
               event: "AGENT_DISPATCH_NO_SECRET",
-              payload: { hint: "AUTH_SECRET ou SUPABASE_SERVICE_ROLE_KEY vazio; /api/agent/process vai rejeitar 401", remote_jid: remoteJid },
+              payload: { hint: "AUTH_SECRET ou SUPABASE_SERVICE_ROLE_KEY vazio; /api/agent/process vai rejeitar 401", remote_jid: maskJid(remoteJid) },
               created_at: new Date().toISOString(),
             })
             .then(() => {}, () => {});
@@ -469,6 +505,7 @@ export async function POST(req: NextRequest) {
               body: JSON.stringify({
                 instanceName,
                 remoteJid,
+                ...(altWhatsappJid ? { alternateJid: altWhatsappJid } : {}),
                 // Áudio: manda a TRANSCRIÇÃO (contexto real p/ IA). Placeholder
                 // só quando a transcrição falhou de verdade.
                 text: text || enrichedContent || mediaPlaceholder(msgType),
@@ -484,6 +521,7 @@ export async function POST(req: NextRequest) {
               .from("webhook_logs")
               .insert({
                 instance_name: instanceName,
+                client_id: clientId,
                 event: "AGENT_DISPATCH_FETCH_FAIL",
                 payload: { error: String(e?.message || e), via: "direct-call" },
                 created_at: new Date().toISOString(),
@@ -496,8 +534,9 @@ export async function POST(req: NextRequest) {
           .from("webhook_logs")
           .insert({
             instance_name: instanceName,
+            client_id: clientId,
             event: "AGENT_SKIP_PAUSED",
-            payload: { remoteJid, bot_status: eff.status, reason: eff.reason, message_saved: true },
+            payload: { remote_jid: maskJid(remoteJid), bot_status: eff.status, reason: eff.reason, message_saved: true },
             created_at: new Date().toISOString(),
           })
           .then(() => {}, () => {});

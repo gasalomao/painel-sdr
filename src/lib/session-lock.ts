@@ -34,7 +34,11 @@ export async function withSessionLock<T>(sessionId: string, fn: () => Promise<T>
   }
 }
 
-/** Visibilidade p/ testes. */
+/** Visibilidade p/ testes e detecção de contenção. */
 export function __pendingLocks(): number {
   return locks.size;
+}
+
+export function hasActiveSessionLock(sessionId: string): boolean {
+  return locks.has(sessionId);
 }

@@ -62,6 +62,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "Instância não pertence a este cliente" }, { status: 403 });
   }
 
+  const tenantId = typeof conn.client_id === "string" && conn.client_id.trim() ? conn.client_id.trim() : null;
+
   // 2) Refusa apagar conectada sem force
   if (conn.status === "open" && !force) {
     return NextResponse.json(
@@ -75,16 +77,25 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // 3) Conta o que vai ser deletado (pro feedback no front)
-  const [chatsCnt, sessionsCnt, logsCnt] = await Promise.all([
-    supabaseAdmin.from("chats_dashboard").select("id", { count: "exact", head: true }).eq("instance_name", instanceName),
-    supabaseAdmin.from("sessions").select("id", { count: "exact", head: true }).eq("instance_name", instanceName),
-    supabaseAdmin.from("webhook_logs").select("id", { count: "exact", head: true }).eq("instance_name", instanceName),
+  // 3) Conta o que vai ser deletado dentro do tenant dono da instância
+  const countScoped = async (table: string): Promise<number> => {
+    let q = supabaseAdmin!
+      .from(table)
+      .select("id", { count: "exact", head: true })
+      .eq("instance_name", instanceName);
+    if (tenantId) q = q.eq("client_id", tenantId);
+    const { count } = await q;
+    return count || 0;
+  };
+  const [chatsCount, sessionsCount, logsCount] = await Promise.all([
+    countScoped("chats_dashboard"),
+    countScoped("sessions"),
+    countScoped("webhook_logs"),
   ]);
   const counts = {
-    chats: chatsCnt.count || 0,
-    sessions: sessionsCnt.count || 0,
-    logs: logsCnt.count || 0,
+    chats: chatsCount,
+    sessions: sessionsCount,
+    logs: logsCount,
   };
 
   // 4) Tenta apagar da Evolution VPS — best-effort. Se falhar (ex: já não
@@ -95,8 +106,9 @@ export async function POST(req: NextRequest) {
     try {
       await evolution.deleteInstance(instanceName);
       evolutionOk = true;
-    } catch (e: any) {
-      evolutionError = String(e?.message || e).slice(0, 200);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      evolutionError = msg.slice(0, 200);
       console.warn(`[delete] Evolution deleteInstance falhou (continuando):`, evolutionError);
     }
   } else {
@@ -104,15 +116,17 @@ export async function POST(req: NextRequest) {
     evolutionOk = true;
   }
 
-  // 5) Cleanup no banco
-  const errors: any[] = [];
+  // 5) Cleanup no banco (sempre escopado por client_id do tenant dono)
+  const errors: Array<{ step: string; error: string }> = [];
 
   const drop = async (
     table: string,
     column: string,
     label: string
   ) => {
-    const { error } = await supabaseAdmin!.from(table).delete().eq(column, instanceName);
+    let q = supabaseAdmin!.from(table).delete().eq(column, instanceName);
+    if (tenantId) q = q.eq("client_id", tenantId);
+    const { error } = await q;
     if (error) errors.push({ step: label, error: error.message });
   };
 
@@ -130,11 +144,16 @@ export async function POST(req: NextRequest) {
     if (phone) {
       const phoneInstanceName = `phone:${phone}`;
       console.log(`[delete] Mapeando histórico da instância ${instanceName} para ${phoneInstanceName}`);
-      await Promise.all([
-        supabaseAdmin.from("chats_dashboard").update({ instance_name: phoneInstanceName }).eq("instance_name", instanceName),
-        supabaseAdmin.from("sessions").update({ instance_name: phoneInstanceName }).eq("instance_name", instanceName),
-        supabaseAdmin.from("messages").update({ instance_name: phoneInstanceName }).eq("instance_name", instanceName),
-      ]);
+      const remap = async (table: string) => {
+        let q = supabaseAdmin!
+          .from(table)
+          .update({ instance_name: phoneInstanceName })
+          .eq("instance_name", instanceName);
+        if (tenantId) q = q.eq("client_id", tenantId);
+        const { error } = await q;
+        if (error) errors.push({ step: `${table}_remap`, error: error.message });
+      };
+      await Promise.all([remap("chats_dashboard"), remap("sessions"), remap("messages")]);
     }
   }
 
@@ -143,6 +162,7 @@ export async function POST(req: NextRequest) {
   {
     let q = supabaseAdmin.from("channel_connections").delete().eq("instance_name", instanceName);
     if (!auth.isAdmin) q = q.eq("client_id", auth.clientId);
+    else if (tenantId) q = q.eq("client_id", tenantId);
     const { error } = await q;
     if (error) errors.push({ step: "channel_connections", error: error.message });
   }
