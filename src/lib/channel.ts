@@ -377,6 +377,35 @@ export async function checkNumbersDetailed(
 
 export const checkWhatsAppNumbersDetailed = checkNumbersDetailed;
 
+export interface WhatsAppProfileInfo {
+  isBusiness: boolean;
+  description?: string;
+  category?: string;
+  websites?: string[];
+  email?: string;
+}
+
+/**
+ * Consulta se um número possui perfil WhatsApp Business vs. Pessoal na Evolution API v2.
+ */
+export async function fetchWhatsAppProfileInfo(
+  numberOrJid: string,
+  instanceName?: string
+): Promise<WhatsAppProfileInfo | null> {
+  try {
+    if (instanceName) {
+      const ch = await resolveChannel(instanceName);
+      if (ch.provider !== "evolution" && ch.provider !== "evolution_v2") {
+        return null;
+      }
+    }
+    const { evolution } = await import("@/lib/evolution");
+    return await evolution.fetchWhatsAppProfileInfo(numberOrJid, instanceName);
+  } catch {
+    return null;
+  }
+}
+
 export function extractPhone(jid: string): string {
   if (!jid) return "";
   const match = jid.match(/(\d+)/);

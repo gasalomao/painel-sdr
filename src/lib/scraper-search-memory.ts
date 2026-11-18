@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { parseMinReviews } from "@/lib/scraper-review-count";
-import { parseGoogleYear, parseMaxReviews, parseRatingBound } from "@/lib/scraper-lead-filters";
+import {
+  parseGoogleYear,
+  parseMaxReviews,
+  parseMinCapitalSocial,
+  parseRatingBound,
+  parseSiteFilterMode,
+} from "@/lib/scraper-lead-filters";
 import { normRegionName } from "@/lib/geo-regions";
 
 const TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -49,6 +55,33 @@ function eligibilityFilters(filters: Record<string, unknown>): Record<string, un
   const googleYearTo = parseGoogleYear(filters.googleYearTo);
   if (googleYearTo === null) throw new Error("Ano final no Google inválido.");
   if (googleYearTo > 0) eligibility.googleYearTo = googleYearTo;
+
+  if (filters.filterClosedBusinesses !== undefined && typeof filters.filterClosedBusinesses !== "boolean") {
+    throw new Error("Filtro filterClosedBusinesses inválido.");
+  }
+  if (filters.filterClosedBusinesses === true) eligibility.filterClosedBusinesses = true;
+
+  if (filters.excludeMei !== undefined && typeof filters.excludeMei !== "boolean") {
+    throw new Error("Filtro excludeMei inválido.");
+  }
+  if (filters.excludeMei === true) eligibility.excludeMei = true;
+
+  if (filters.excludeFranchises !== undefined && typeof filters.excludeFranchises !== "boolean") {
+    throw new Error("Filtro excludeFranchises inválido.");
+  }
+  if (filters.excludeFranchises === true) eligibility.excludeFranchises = true;
+
+  const minCapitalSocial = parseMinCapitalSocial(filters.minCapitalSocial);
+  if (minCapitalSocial === null) throw new Error("Capital social mínimo inválido.");
+  if (minCapitalSocial > 0) eligibility.minCapitalSocial = minCapitalSocial;
+
+  const siteFilterMode = parseSiteFilterMode(filters.siteFilterMode);
+  if (siteFilterMode === null) throw new Error("Modo de filtro de site inválido.");
+  // Se siteFilterMode é "no_site" e filterWithWebsite é true, mantém o hash idêntico ao legado.
+  if (siteFilterMode !== "any" && !(siteFilterMode === "no_site" && eligibility.filterWithWebsite === true)) {
+    eligibility.siteFilterMode = siteFilterMode;
+  }
+
   return eligibility;
 }
 

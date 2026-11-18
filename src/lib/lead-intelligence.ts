@@ -67,6 +67,7 @@ export interface LeadInput {
   website?: string | null;
   avaliacao?: number | string | null;
   reviews?: number | string | null;
+  business_details?: Record<string, unknown> | null;
 }
 
 /** TTL pra reanálise. 30 dias — lead pode ter mudado de status, contratado concorrente, etc. */
@@ -1264,6 +1265,19 @@ function buildUserPrompt(
   if (avalNum > 0) lines.push(`- Avaliação Google: ${lead.avaliacao}/5 (${lead.reviews || "?"} reviews) → reputação ${reputacao}`);
   lines.push(`- Porte inferido (por nº reviews): ${porte}`);
 
+  const enr = (lead.business_details as Record<string, unknown> | null | undefined)?.enrichment as Record<string, unknown> | undefined;
+  if (enr && typeof enr === "object") {
+    lines.push("\n# DADOS OFICIAIS AUDITADOS (RECEITA FEDERAL + SAÚDE TÉCNICA DO SITE)");
+    if (enr.siteStatusLabel || enr.siteDiagnostico) {
+      lines.push(`- Saúde do Site: ${enr.siteStatusLabel || ""} (${enr.siteDiagnostico || ""})`);
+    }
+    if (enr.cnpj) lines.push(`- CNPJ: ${enr.cnpj} · Situação: ${enr.situacaoCadastral || "ATIVA"}`);
+    if (enr.porte) lines.push(`- Porte na Receita: ${enr.porte}${enr.capitalSocial ? ` · Capital Social: R$ ${Number(enr.capitalSocial).toLocaleString("pt-BR")}` : ""}`);
+    if (enr.anosEmpresa) lines.push(`- Tempo de CNPJ ativo: ${enr.anosEmpresa} anos`);
+    if (enr.socioDecisor) lines.push(`- Sócio Decisor (QSA): ${enr.socioDecisor}`);
+    if (enr.telefoneSocio) lines.push(`- WhatsApp direto localizado: ${enr.telefoneSocio} (${enr.whatsappSource || "enriquecimento"})`);
+  }
+
   // Site — crawl multi-página estruturado em seções (## HOME, ## SOBRE, ## SERVICOS, ...).
   if (ctx.websiteText) {
     const tag = ctx.websiteDiscovered ? " (descoberto via busca)" : "";
@@ -1329,7 +1343,7 @@ export async function analyzeLead(opts: {
 }): Promise<AnalyzeResult | { error: string }> {
   const { data: lead, error } = await supabaseAdmin
     .from("leads_extraidos")
-    .select("id, client_id, \"remoteJid\", nome_negocio, ramo_negocio, categoria, endereco, website, avaliacao, reviews, intelligence, intelligence_at, icp_score, lead_type")
+    .select("id, client_id, \"remoteJid\", nome_negocio, ramo_negocio, categoria, endereco, website, avaliacao, reviews, business_details, intelligence, intelligence_at, icp_score, lead_type")
     .eq("id", opts.leadId)
     .maybeSingle();
   if (error || !lead) return { error: error?.message || "Lead não encontrado" };

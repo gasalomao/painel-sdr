@@ -10,15 +10,18 @@ import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { supabase } from "@/lib/supabase";
 import { useClientSession } from "@/lib/use-session";
 import { cn } from "@/lib/utils";
+import { Switch } from "@/components/ui/switch";
 import { parseMinReviews } from "@/lib/scraper-review-count";
 import {
   parseGoogleYear,
   parseMaxReviews,
+  parseMinCapitalSocial,
   parseRatingBound,
   validateGoogleYearRange,
   validateRatingRange,
   validateReviewCountRange,
 } from "@/lib/scraper-lead-filters";
+import type { SiteFilterMode } from "@/lib/scraper-lead-enrichment";
 import {
   Play, Pause, Trash2, Plus, Loader2, ChevronDown, ChevronRight, ChevronLeft, X,
   CheckCircle2, XCircle, Bot, MapPin, Zap, Repeat, Clock, Save, AlertTriangle, Pencil,
@@ -87,6 +90,14 @@ const FALLBACK_MODELS: GeminiModel[] = [];
 const MIN_REVIEWS_HELP = "Quantidade de pessoas que deram estrelas, com ou sem comentário. Não filtra pela nota. 0 = sem mínimo.";
 const MIN_REVIEWS_ERROR = "Informe um inteiro entre 0 e 2147483647.";
 const INSTAGRAM_FILTER_HELP = "Exige perfil informado no Google Maps; não busca no site.";
+
+const SITE_FILTER_MODE_OPTIONS: { value: SiteFilterMode; label: string }[] = [
+  { value: "any", label: "Todos" },
+  { value: "no_site", label: "Sem site" },
+  { value: "broken_or_no_site", label: "Sem site + Quebrado" },
+  { value: "only_broken_or_weak", label: "Só Site Quebrado/Fraco" },
+  { value: "only_active_site", label: "Só Site Ativo" },
+];
 
 // safeJson: parse defensivo. Se a rota retornar HTML (404 do Next, redirect,
 // página de erro), `r.json()` joga "Unexpected token '<'". Isso aqui captura
@@ -158,6 +169,7 @@ export default function AutomacaoPage() {
   const [maxRating, setMaxRating] = useState("0");
   const [googleYearFrom, setGoogleYearFrom] = useState("0");
   const [googleYearTo, setGoogleYearTo] = useState("0");
+  const [minCapitalSocial, setMinCapitalSocial] = useState("0");
   const [extraFiltersError, setExtraFiltersError] = useState("");
   // Configurações de delay de presença "digitando..." (Evolution API)
   const [typingDelayMode, setTypingDelayMode] = useState<"fixed" | "random">("random");
@@ -196,7 +208,29 @@ export default function AutomacaoPage() {
       agent_id: null,
       niches: [],
       regions: [],
-      scrape_filters: { filterEmpty: true, filterDuplicates: true, filterLandlines: true, minReviews: 0, filterWithInstagram: false, filterWithWebsite: false, captureAllReviews: false, antiban_mixer: true, reviews_ai: { enabled: false, model: null, prompt: null } },
+      scrape_filters: {
+        filterEmpty: true,
+        filterDuplicates: true,
+        filterLandlines: true,
+        minReviews: 0,
+        filterWithInstagram: false,
+        filterWithWebsite: false,
+        captureAllReviews: false,
+        turboMode: true,
+        filterClosedBusinesses: true,
+        auditSiteHealth: true,
+        siteFilterMode: "any",
+        enrichCnpj: true,
+        prioritizePartnerPhone: true,
+        validateWhatsApp: true,
+        excludeMei: false,
+        excludeFranchises: false,
+        huntPartnerDirectPhone: false,
+        expandNeighborhoods: false,
+        prioritize_by_score: true,
+        antiban_mixer: true,
+        reviews_ai: { enabled: false, model: null, prompt: null },
+      },
       scrape_max_leads: 100,
       dispatch_template: "{{saudacao}}! Tudo bem? {{nome_empresa}}?",
       // Defaults SEGUROS WhatsApp: 60-180s aleatório (média ~2 min, ~30 envios/h)
@@ -351,6 +385,7 @@ export default function AutomacaoPage() {
     setMaxRating("0");
     setGoogleYearFrom("0");
     setGoogleYearTo("0");
+    setMinCapitalSocial("0");
     setExtraFiltersError("");
     setTypingDelayMode("random");
     setTypingDelaySeconds(10);
@@ -378,6 +413,18 @@ export default function AutomacaoPage() {
           minReviews: 0, filterWithInstagram: false, filterWithWebsite: false,
           ...(a.scrape_filters || {}),
           captureAllReviews: a.scrape_filters?.captureAllReviews ?? false,
+          turboMode: a.scrape_filters?.turboMode ?? true,
+          filterClosedBusinesses: a.scrape_filters?.filterClosedBusinesses ?? true,
+          auditSiteHealth: a.scrape_filters?.auditSiteHealth ?? true,
+          siteFilterMode: a.scrape_filters?.siteFilterMode ?? (a.scrape_filters?.filterWithWebsite ? "no_site" : "any"),
+          enrichCnpj: a.scrape_filters?.enrichCnpj ?? true,
+          prioritizePartnerPhone: a.scrape_filters?.prioritizePartnerPhone ?? true,
+          validateWhatsApp: a.scrape_filters?.validateWhatsApp ?? true,
+          excludeMei: a.scrape_filters?.excludeMei ?? false,
+          excludeFranchises: a.scrape_filters?.excludeFranchises ?? false,
+          huntPartnerDirectPhone: a.scrape_filters?.huntPartnerDirectPhone ?? false,
+          expandNeighborhoods: a.scrape_filters?.expandNeighborhoods ?? false,
+          prioritize_by_score: a.scrape_filters?.prioritize_by_score ?? true,
           reviews_ai: { enabled: false, model: null, prompt: null, ...(a.scrape_filters?.reviews_ai || {}) },
         },
       followup_steps: Array.isArray(a.followup_steps) ? a.followup_steps : [],
@@ -391,6 +438,7 @@ export default function AutomacaoPage() {
     setMaxRating(String(a.scrape_filters?.maxRating ?? 0));
     setGoogleYearFrom(String(a.scrape_filters?.googleYearFrom ?? 0));
     setGoogleYearTo(String(a.scrape_filters?.googleYearTo ?? 0));
+    setMinCapitalSocial(String(a.scrape_filters?.minCapitalSocial ?? 0));
     setExtraFiltersError("");
     setFormStep(0);
     setShowForm(true);
@@ -414,6 +462,7 @@ export default function AutomacaoPage() {
     setMaxRating("0");
     setGoogleYearFrom("0");
     setGoogleYearTo("0");
+    setMinCapitalSocial("0");
     setExtraFiltersError("");
   }
 
@@ -425,6 +474,7 @@ export default function AutomacaoPage() {
     const parsedMaxRating = captureLocked ? 0 : parseRatingBound(maxRating);
     const parsedYearFrom = captureLocked ? 0 : parseGoogleYear(googleYearFrom);
     const parsedYearTo = captureLocked ? 0 : parseGoogleYear(googleYearTo);
+    const parsedMinCapital = captureLocked ? 0 : parseMinCapitalSocial(minCapitalSocial);
     let extraErr = "";
     if (!captureLocked) {
       if (parsedMaxReviews === null) extraErr = "Máximo de avaliações deve ser um inteiro entre 0 e 2147483647.";
@@ -443,6 +493,9 @@ export default function AutomacaoPage() {
       } else if (!extraErr && parsedYearFrom !== null && parsedYearTo !== null) {
         const yrErr = validateGoogleYearRange(parsedYearFrom, parsedYearTo);
         if (yrErr) extraErr = yrErr;
+      }
+      if (!extraErr && parsedMinCapital === null) {
+        extraErr = "Capital social mínimo deve ser um número maior ou igual a 0.";
       }
     }
     setExtraFiltersError(extraErr);
@@ -475,6 +528,8 @@ export default function AutomacaoPage() {
         else delete scrape_filters.googleYearFrom;
         if (parsedYearTo && parsedYearTo > 0) scrape_filters.googleYearTo = parsedYearTo;
         else delete scrape_filters.googleYearTo;
+        if (parsedMinCapital && parsedMinCapital > 0) scrape_filters.minCapitalSocial = parsedMinCapital;
+        else delete scrape_filters.minCapitalSocial;
       }
       if (formData.scrape_filters?.typing_delay || formData.scrape_filters?.typing_delay_mode) {
         scrape_filters.typing_delay_mode = typingDelayMode;
@@ -833,7 +888,6 @@ export default function AutomacaoPage() {
                     { key: "filterEmpty",      label: "Pular sem telefone" },
                     { key: "filterDuplicates", label: "Pular duplicados" },
                     { key: "filterLandlines",  label: "Pular fixos" },
-                    { key: "filterWithWebsite", label: "Capturar somente leads sem site" },
                   ].map(f => (
                     <label key={f.key} className="flex items-center gap-1.5 text-[11px] cursor-pointer">
                       <input type="checkbox"
@@ -842,6 +896,25 @@ export default function AutomacaoPage() {
                       {f.label}
                     </label>
                   ))}
+                  <label className="flex items-center gap-1.5 text-[11px] cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={!!formData.scrape_filters?.filterWithWebsite}
+                      onChange={e => {
+                        const checked = e.target.checked;
+                        const prevMode = (formData.scrape_filters?.siteFilterMode || "any") as SiteFilterMode;
+                        setFormData({
+                          ...formData,
+                          scrape_filters: {
+                            ...formData.scrape_filters,
+                            filterWithWebsite: checked,
+                            siteFilterMode: checked ? "no_site" : (prevMode === "no_site" ? "any" : prevMode),
+                          },
+                        });
+                      }}
+                    />
+                    Capturar somente leads sem site
+                  </label>
                   <div className="w-full sm:w-auto sm:ml-auto flex items-center gap-2">
                     <label htmlFor="automation-limit">Limite de leads</label>
                     <NumberInput id="automation-limit" min={1} max={5000} fallback={100}
@@ -851,6 +924,206 @@ export default function AutomacaoPage() {
                   </div>
                 </div>
                 <p className={styles.fieldHint}>Somente leads elegíveis e salvos contam para o limite. A captura continua enquanto estiver abaixo da meta, retomando ou ampliando a busca antes do disparo.</p>
+
+                {/* Modo Turbo VPS, Saúde do Site & Decisor (Custo Zero) */}
+                <div className="rounded-lg border border-cyan-500/25 bg-cyan-500/[0.04] p-3 space-y-2.5">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-cyan-200">
+                    <Zap className="w-3.5 h-3.5 text-cyan-400" />
+                    Modo Turbo VPS, Saúde do Site &amp; Decisor (Custo Zero)
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <label htmlFor="automation-turbo-mode" className="text-xs text-white/90 cursor-pointer block">Modo Turbo VPS (alta velocidade e economia de RAM)</label>
+                        <span className="text-[10px] text-white/45">Reutiliza aba, bloqueia mídia pesada e pula duplicados via cache em RAM.</span>
+                      </div>
+                      <Switch
+                        id="automation-turbo-mode"
+                        disabled={captureLocked}
+                        checked={formData.scrape_filters?.turboMode !== false}
+                        onCheckedChange={v => setFormData({ ...formData, scrape_filters: { ...formData.scrape_filters, turboMode: v } })}
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <label htmlFor="automation-filter-closed" className="text-xs text-white/90 cursor-pointer block">Descartar empresas fechadas ou CNPJ baixado/inapto</label>
+                        <span className="text-[10px] text-white/45">Evita disparos para empresas encerradas no Maps ou inativas na Receita Federal.</span>
+                      </div>
+                      <Switch
+                        id="automation-filter-closed"
+                        disabled={captureLocked}
+                        checked={formData.scrape_filters?.filterClosedBusinesses !== false}
+                        onCheckedChange={v => setFormData({ ...formData, scrape_filters: { ...formData.scrape_filters, filterClosedBusinesses: v } })}
+                      />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <label htmlFor="automation-audit-site" className="text-xs text-white/90 cursor-pointer block">Auditar saúde do site (quebrado, SSL vencido, erro 500 ou fraco)</label>
+                          <span className="text-[10px] text-white/45">Protegido contra falso positivo Cloudflare; gera diagnóstico para o template e agente IA.</span>
+                        </div>
+                        <Switch
+                          id="automation-audit-site"
+                          disabled={captureLocked}
+                          checked={formData.scrape_filters?.auditSiteHealth !== false}
+                          onCheckedChange={v => setFormData({ ...formData, scrape_filters: { ...formData.scrape_filters, auditSiteHealth: v } })}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <span className="text-[11px] text-white/60 block">Filtro por saúde do site:</span>
+                        <div className="flex flex-wrap gap-1" role="radiogroup" aria-label="Filtro por saúde do site na automação">
+                          {SITE_FILTER_MODE_OPTIONS.map(opt => {
+                            const curMode = (formData.scrape_filters?.siteFilterMode || (formData.scrape_filters?.filterWithWebsite ? "no_site" : "any")) as SiteFilterMode;
+                            const active = curMode === opt.value;
+                            return (
+                              <button
+                                key={opt.value}
+                                type="button"
+                                role="radio"
+                                aria-checked={active}
+                                disabled={captureLocked}
+                                onClick={() => setFormData({
+                                  ...formData,
+                                  scrape_filters: {
+                                    ...formData.scrape_filters,
+                                    siteFilterMode: opt.value,
+                                    filterWithWebsite: opt.value === "no_site",
+                                  },
+                                })}
+                                className={cn(
+                                  "text-[10px] px-2 py-1 rounded border transition-colors cursor-pointer disabled:opacity-50",
+                                  active
+                                    ? "bg-cyan-500/20 border-cyan-400/50 text-cyan-100 font-medium"
+                                    : "bg-black/40 border-white/10 text-zinc-400 hover:text-white",
+                                )}
+                              >
+                                {opt.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <label htmlFor="automation-enrich-cnpj" className="text-xs text-white/90 cursor-pointer block">Enriquecer CNPJ e Sócio Decisor grátis (Receita + RDAP)</label>
+                          <span className="text-[10px] text-white/45">Preenche sócio-administrador, CNPJ, porte e idade da empresa para personalização.</span>
+                        </div>
+                        <Switch
+                          id="automation-enrich-cnpj"
+                          disabled={captureLocked}
+                          checked={formData.scrape_filters?.enrichCnpj !== false}
+                          onCheckedChange={v => setFormData({ ...formData, scrape_filters: { ...formData.scrape_filters, enrichCnpj: v } })}
+                        />
+                      </div>
+                      {formData.scrape_filters?.enrichCnpj !== false && (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 p-2 rounded bg-black/30 border border-white/10">
+                          <label htmlFor="automation-exclude-mei" className="flex items-center justify-between gap-2 text-xs text-white/80 cursor-pointer">
+                            <span>Ignorar MEI (focar ME, EPP e Ltda)</span>
+                            <input
+                              id="automation-exclude-mei"
+                              type="checkbox"
+                              disabled={captureLocked}
+                              checked={!!formData.scrape_filters?.excludeMei}
+                              onChange={e => setFormData({ ...formData, scrape_filters: { ...formData.scrape_filters, excludeMei: e.target.checked } })}
+                              className="w-4 h-4 accent-primary cursor-pointer"
+                            />
+                          </label>
+                          <div className="flex items-center justify-between gap-2">
+                            <label htmlFor="automation-min-capital" className="text-xs text-white/60">Capital mínimo (R$)</label>
+                            <Input
+                              id="automation-min-capital"
+                              disabled={captureLocked}
+                              type="number"
+                              min={0}
+                              step={1000}
+                              value={minCapitalSocial}
+                              onChange={e => { setMinCapitalSocial(e.target.value); setExtraFiltersError(""); }}
+                              className="bg-black/40 border-white/10 w-28 h-8 text-xs"
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2">
+                      <label htmlFor="automation-partner-phone" className="text-xs text-white/90 cursor-pointer">Priorizar WhatsApp oculto do site / celular do sócio</label>
+                      <Switch
+                        id="automation-partner-phone"
+                        disabled={captureLocked}
+                        checked={formData.scrape_filters?.prioritizePartnerPhone !== false}
+                        onCheckedChange={v => setFormData({ ...formData, scrape_filters: { ...formData.scrape_filters, prioritizePartnerPhone: v } })}
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2">
+                      <label htmlFor="automation-validate-wa" className="text-xs text-white/90 cursor-pointer">Validar WhatsApp ativo na Evolution (recupera fixos Business)</label>
+                      <Switch
+                        id="automation-validate-wa"
+                        disabled={captureLocked}
+                        checked={formData.scrape_filters?.validateWhatsApp !== false}
+                        onCheckedChange={v => setFormData({ ...formData, scrape_filters: { ...formData.scrape_filters, validateWhatsApp: v } })}
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <label htmlFor="automation-hunt-partner" className="text-xs text-white/90 cursor-pointer block">Modo Direto no Dono (9º dígito Anatel + WhatsApp pessoal do sócio)</label>
+                        <span className="text-[10px] text-white/45">Cruza Receita + web e separa WhatsApp Pessoal do Sócio vs WhatsApp Business da Recepção.</span>
+                      </div>
+                      <Switch
+                        id="automation-hunt-partner"
+                        disabled={captureLocked}
+                        checked={Boolean(formData.scrape_filters?.huntPartnerDirectPhone)}
+                        onCheckedChange={v => setFormData({ ...formData, scrape_filters: { ...formData.scrape_filters, huntPartnerDirectPhone: v } })}
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <label htmlFor="automation-exclude-franchises" className="text-xs text-white/90 cursor-pointer block">Ignorar grandes redes e franquias</label>
+                        <span className="text-[10px] text-white/45">Descarta redes conhecidas (Smart Fit, OdontoCompany, Drogasil, S/A) para focar em negócios locais.</span>
+                      </div>
+                      <Switch
+                        id="automation-exclude-franchises"
+                        disabled={captureLocked}
+                        checked={Boolean(formData.scrape_filters?.excludeFranchises)}
+                        onCheckedChange={v => setFormData({ ...formData, scrape_filters: { ...formData.scrape_filters, excludeFranchises: v } })}
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <label htmlFor="automation-expand-neighborhoods" className="text-xs text-white/90 cursor-pointer block">Busca profunda por bairros (anti-teto 120 leads)</label>
+                        <span className="text-[10px] text-white/45">Subdivide grandes cidades pelos principais bairros comerciais quando a busca atinge o limite por consulta.</span>
+                      </div>
+                      <Switch
+                        id="automation-expand-neighborhoods"
+                        disabled={captureLocked}
+                        checked={Boolean(formData.scrape_filters?.expandNeighborhoods)}
+                        onCheckedChange={v => setFormData({ ...formData, scrape_filters: { ...formData.scrape_filters, expandNeighborhoods: v } })}
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <label htmlFor="automation-prioritize-score" className="text-xs text-white/90 cursor-pointer block">Priorizar fila de disparo por Score ICP</label>
+                        <span className="text-[10px] text-white/45">Dispara primeiro para leads com maior Score ICP, WhatsApp direto do sócio e site quebrado/anúncios.</span>
+                      </div>
+                      <Switch
+                        id="automation-prioritize-score"
+                        disabled={captureLocked}
+                        checked={formData.scrape_filters?.prioritize_by_score !== false}
+                        onCheckedChange={v => setFormData({ ...formData, scrape_filters: { ...formData.scrape_filters, prioritize_by_score: v } })}
+                      />
+                    </div>
+                  </div>
+                </div>
                 <div className="space-y-1">
                   <label htmlFor="automation-capture-all-reviews" className="flex items-center gap-1.5 text-[11px] cursor-pointer">
                     <input id="automation-capture-all-reviews" type="checkbox"
@@ -987,6 +1260,16 @@ export default function AutomacaoPage() {
                       { key: "telefone",      label: "Telefone",     hint: "Número limpo" },
                       { key: "data",          label: "Data",         hint: "DD/MM/AAAA" },
                       { key: "hora",          label: "Hora",         hint: "HH:MM" },
+                      { key: "primeiro_nome_socio", label: "1º Nome Sócio", hint: "Primeiro nome do sócio-administrador" },
+                      { key: "nome_socio",    label: "Sócio Decisor", hint: "Nome completo do sócio-administrador (Receita)" },
+                      { key: "diagnostico_site", label: "Diagnóstico Site", hint: "Diagnóstico técnico do site" },
+                      { key: "cnpj",          label: "CNPJ",         hint: "CNPJ da empresa" },
+                      { key: "porte_receita", label: "Porte Receita", hint: "MEI / ME / EPP / Ltda" },
+                      { key: "anos_empresa",  label: "Anos CNPJ",    hint: "Idade da empresa em anos" },
+                      { key: "abertura_inteligente", label: "Abertura Inteligente", hint: "Abordagem adaptada para Sócio Direto vs Recepção" },
+                      { key: "empresa_curta", label: "Empresa Curta", hint: "Nome limpo sem LTDA/EPP/cidade" },
+                      { key: "servico_principal", label: "Serviço Principal", hint: "Especialidade principal sem ruído" },
+                      { key: "canal_whatsapp", label: "Canal WhatsApp", hint: "WhatsApp direto do sócio ou Recepção" },
                     ].map(v => (
                       <button
                         key={v.key} type="button" title={v.hint}

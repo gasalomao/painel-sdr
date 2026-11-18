@@ -67,9 +67,9 @@ export async function cheapModelForSummary(opts?: SummarizeHistoryOptions): Prom
   const openrouterKey = opts?.openrouterApiKey || keys?.openrouter || null;
   const nvidiaKey = opts?.nvidiaApiKey || keys?.nvidia || null;
 
-  // Se o agente usa Gateway/OpenCode, prioriza o gateway; para Combo, prefere chaves baratas diretas se houver.
+  // Se o agente usa Gateway/OpenCode ou modelo :free explícito, prioriza ele para não cair em provedor pago/off-line.
   const pref = (opts?.preferredModelRef || "").trim();
-  if (pref && pref.startsWith("gateway:")) {
+  if (pref && (pref.startsWith("gateway:") || pref.endsWith(":free"))) {
     return {
       modelRef: pref,
       geminiApiKey: geminiKey,

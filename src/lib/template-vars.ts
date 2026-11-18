@@ -221,6 +221,31 @@ function formatOpeningHours(raw: unknown): string {
   return "";
 }
 
+const GOOGLE_MAPS_UI_NOISE_LABEL_RE =
+  /^(?:salvo|salvos|favoritos?|rotas?|compartilhar|enviar para (?:o )?smartphone|ligar|website|card[aá]pio|menu|mais|fechar)$/i;
+
+function stripGoogleUiGlyphs(raw: string): string {
+  const cleaned = raw
+    .replace(/[\uE000-\uF8FF]/g, "")
+    .replace(/^[•·|/\-\s]+|[•·|/\-\s]+$/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return GOOGLE_MAPS_UI_NOISE_LABEL_RE.test(cleaned) ? "" : cleaned;
+}
+
+function deriveShortCompanyName(rawName: string | null | undefined): string {
+  if (!rawName || typeof rawName !== "string") return "";
+  let cleaned = rawName.trim();
+  cleaned = cleaned.replace(/\s+-\s+.+$/, "").trim();
+  cleaned = cleaned.replace(/\s+\|\s+.+$/, "").trim();
+  cleaned = cleaned
+    .replace(/\b(LTDA\.?|EIRELI|MEI|EPP|S\.?\/?A\.?|S\.A\.|COM[ÉE]RCIO(?:\s+DE)?|SERVI[ÇC]OS(?:\s+DE)?|M\.?E\.?)\b/gi, "")
+    .replace(/[.,;:/\\-]+$/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return cleaned || rawName.trim();
+}
+
 function formatStringList(raw: unknown, separator = ", "): string {
   if (!raw) return "";
   if (typeof raw === "string") return raw.trim();
@@ -432,16 +457,116 @@ export function renderTemplate(
     (typeof bd.descricao === "string" ? bd.descricao : "") ||
     (typeof bd.about === "string" ? bd.about : "")
   ).trim();
-  const servicosGoogleVal = (
+  const rawServicesList = Array.isArray(bd.services || bd.servicos)
+    ? ((bd.services || bd.servicos) as unknown[])
+        .map((item) => (typeof item === "string" ? stripGoogleUiGlyphs(item) : item != null ? stripGoogleUiGlyphs(String(item)) : ""))
+        .filter(Boolean)
+    : [];
+  const servicosGoogleVal = stripGoogleUiGlyphs(
     ctx.servicos_google ||
-    formatStringList(bd.services || bd.servicos)
-  ).trim();
+      rawServicesList.join(", ") ||
+      (typeof bd.services === "string"
+        ? bd.services
+        : typeof bd.servicos === "string"
+          ? bd.servicos
+          : ""),
+  );
   const subcategoriasVal = formatStringList(bd.subcategorias);
   const menuUrlVal = (ctx.menu_url || (typeof bd.menuUrl === "string" ? bd.menuUrl : "")).trim();
   const reservaUrlVal = (ctx.reserva_url || (typeof bd.reservaUrl === "string" ? bd.reservaUrl : "")).trim();
 
-  // Proprietário, reivindicação, status e fotos
-  const proprietarioVal = (ctx.proprietario || ctx.owner_name || "").trim();
+  // Proprietário / Sócio Decisor / Saúde do Site / Receita Federal (enrichment gratuito)
+  const enr = bd.enrichment && typeof bd.enrichment === "object"
+    ? (bd.enrichment as Record<string, unknown>)
+    : {};
+  const proprietarioVal = (
+    ctx.proprietario ||
+    ctx.owner_name ||
+    (typeof enr.socioDecisor === "string" ? enr.socioDecisor : "")
+  ).trim();
+  const nomeSocioVal = (
+    (typeof enr.socioDecisor === "string" ? enr.socioDecisor : "") ||
+    proprietarioVal
+  ).trim();
+  const primeiroNomeSocioVal = (
+    (typeof enr.primeiroNomeSocio === "string" ? enr.primeiroNomeSocio : "") ||
+    firstName(nomeSocioVal)
+  ).trim();
+  const rawCnpj = typeof enr.cnpj === "string" ? enr.cnpj.replace(/\D/g, "") : "";
+  const cnpjVal = rawCnpj.length === 14
+    ? `${rawCnpj.slice(0, 2)}.${rawCnpj.slice(2, 5)}.${rawCnpj.slice(5, 8)}/${rawCnpj.slice(8, 12)}-${rawCnpj.slice(12, 14)}`
+    : (typeof enr.cnpj === "string" ? enr.cnpj.trim() : "");
+  const razaoSocialVal = typeof enr.razaoSocial === "string" ? enr.razaoSocial.trim() : "";
+  const porteReceitaVal = typeof enr.porte === "string" ? enr.porte.trim() : "";
+  const capitalNum = typeof enr.capitalSocial === "number" ? enr.capitalSocial : Number(enr.capitalSocial);
+  const capitalSocialVal = Number.isFinite(capitalNum) && capitalNum > 0
+    ? `R$ ${Math.round(capitalNum).toLocaleString("pt-BR")}`
+    : "";
+  const anosNum = typeof enr.anosEmpresa === "number" ? enr.anosEmpresa : Number(enr.anosEmpresa);
+  const anosEmpresaVal =
+    Number.isFinite(anosNum) && anosNum >= 0
+      ? anosNum === 0
+        ? "menos de 1 ano"
+        : `${Math.floor(anosNum)} anos`
+      : "";
+  const statusSiteVal = typeof enr.siteStatusLabel === "string" ? enr.siteStatusLabel.trim() : "";
+  const diagnosticoSiteVal = typeof enr.siteDiagnostico === "string" ? enr.siteDiagnostico.trim() : "";
+  const telefoneSocioVal = typeof enr.telefoneSocio === "string" ? enr.telefoneSocio.trim() : "";
+  const empresaCurtaVal =
+    (typeof enr.empresaCurta === "string" && enr.empresaCurta.trim()) ||
+    deriveShortCompanyName(ctx.nome_negocio);
+  const servicoPrincipalVal =
+    stripGoogleUiGlyphs(typeof enr.servicoPrincipal === "string" ? enr.servicoPrincipal : "") ||
+    rawServicesList[0] ||
+    stripGoogleUiGlyphs(servicosGoogleVal ? servicosGoogleVal.split(",")[0] : "") ||
+    stripGoogleUiGlyphs(ctx.categoria || "") ||
+    stripGoogleUiGlyphs(ctx.ramo_negocio || "");
+  const rawChannelType =
+    typeof enr.whatsappChannelType === "string" ? enr.whatsappChannelType.trim() : "";
+  const canalWhatsappVal =
+    rawChannelType === "socio_direto"
+      ? "WhatsApp direto do sócio"
+      : rawChannelType === "provavel_socio"
+        ? "Provável celular do sócio"
+        : rawChannelType === "recepcao_comercial"
+          ? "Recepção / comercial"
+          : phone
+            ? "Comercial / indefinido"
+            : "";
+  const telefoneRecepcaoVal =
+    typeof enr.telefoneRecepcao === "string" ? enr.telefoneRecepcao.trim() : "";
+  const trafficTagsList = Array.isArray(enr.trafficTags)
+    ? enr.trafficTags.filter(
+        (tag): tag is string => typeof tag === "string" && tag.trim().length > 0,
+      )
+    : [];
+  const sinalAnunciosVal =
+    trafficTagsList.length > 0
+      ? `Investe em tráfego pago (${trafficTagsList.join(", ")})`
+      : enr.hasPaidTrafficTag === true
+        ? "Investe em tráfego pago"
+        : "";
+  const managementToolsList = Array.isArray(enr.managementTools)
+    ? enr.managementTools.filter(
+        (tool): tool is string => typeof tool === "string" && tool.trim().length > 0,
+      )
+    : [];
+  const sistemasAtuaisVal = managementToolsList.join(", ");
+  const saudacaoNow = greetingFor(now);
+  const targetCompanyLabel = empresaCurtaVal || ctx.nome_negocio || "empresa";
+  const aberturaInteligenteVal =
+    (rawChannelType === "socio_direto" || rawChannelType === "provavel_socio") &&
+    primeiroNomeSocioVal
+      ? `${saudacaoNow} ${primeiroNomeSocioVal}, tudo bem? Falo com você mesmo sobre a ${targetCompanyLabel}?`
+      : rawChannelType === "recepcao_comercial" && primeiroNomeSocioVal
+        ? `${saudacaoNow}, tudo bem? Por gentileza, você consegue direcionar um recado rápido para ${primeiroNomeSocioVal}, responsável pela ${targetCompanyLabel}?`
+        : primeiroNomeSocioVal
+          ? `${saudacaoNow}, tudo bem? Por gentileza, consigo falar com ${primeiroNomeSocioVal} da ${targetCompanyLabel}?`
+          : `${saudacaoNow}, tudo bem? Estou falando com o responsável pela ${targetCompanyLabel}?`;
+  const scoreQualificacaoVal =
+    typeof enr.qualificationScore === "number" && Number.isFinite(enr.qualificationScore)
+      ? String(Math.round(enr.qualificationScore))
+      : "";
   const reivindicadoVal = formatClaimed(ctx.claimed, ctx.reivindicado);
   const situacaoEmpresaVal = (ctx.situacao_empresa || ctx.business_status || "").trim();
   const totalFotosVal =
@@ -547,6 +672,28 @@ export function renderTemplate(
     proprietario: proprietarioVal,
     dono: proprietarioVal,
     owner_name: proprietarioVal,
+    nome_socio: nomeSocioVal,
+    socio_decisor: nomeSocioVal,
+    primeiro_nome_socio: primeiroNomeSocioVal,
+    cnpj: cnpjVal,
+    razao_social: razaoSocialVal,
+    porte_receita: porteReceitaVal,
+    porte: porteReceitaVal,
+    capital_social: capitalSocialVal,
+    anos_empresa: anosEmpresaVal,
+    status_site: statusSiteVal,
+    diagnostico_site: diagnosticoSiteVal,
+    telefone_socio: telefoneSocioVal,
+    score_qualificacao: scoreQualificacaoVal,
+    empresa_curta: empresaCurtaVal,
+    nome_curto: empresaCurtaVal,
+    servico_principal: servicoPrincipalVal,
+    especialidade: servicoPrincipalVal,
+    canal_whatsapp: canalWhatsappVal,
+    telefone_recepcao: telefoneRecepcaoVal,
+    sinal_anuncios: sinalAnunciosVal,
+    sistemas_atuais: sistemasAtuaisVal,
+    abertura_inteligente: aberturaInteligenteVal,
     reivindicado: reivindicadoVal,
     perfil_reivindicado: reivindicadoVal,
     claimed: reivindicadoVal,
@@ -642,7 +789,21 @@ export const PROMPT_VARIABLES = [
   { key: "aberto_agora", label: "Aberto agora", hint: "Status de abertura no Google Maps" },
   { key: "faixa_preco", label: "Faixa de preço", hint: "Faixa de preço informada no Google Maps (alias: {{preco}})" },
   { key: "atributos", label: "Atributos Maps", hint: "Diferenciais do negócio no Maps (Entrega, Acessibilidade, etc.)" },
-  { key: "proprietario", label: "Proprietário", hint: "Nome do dono/proprietário no Google Maps (alias: {{dono}})" },
+  { key: "proprietario", label: "Proprietário", hint: "Nome do dono/proprietário no Google Maps ou QSA (alias: {{dono}})" },
+  { key: "primeiro_nome_socio", label: "1º nome sócio", hint: "Primeiro nome do Sócio-Administrador descoberto pelo CNPJ" },
+  { key: "nome_socio", label: "Sócio decisor", hint: "Nome completo do Sócio-Administrador (QSA Receita)" },
+  { key: "diagnostico_site", label: "Diagnóstico site", hint: "Falha detectada no site (ex: fora do ar, SSL vencido, lento)" },
+  { key: "empresa_curta", label: "Empresa curta", hint: "Nome limpo da empresa sem LTDA/EPP/cidade (alias: {{nome_curto}})" },
+  { key: "servico_principal", label: "Serviço principal", hint: "Especialidade principal limpa sem glifos do Maps (alias: {{especialidade}})" },
+  { key: "canal_whatsapp", label: "Canal WhatsApp", hint: "Classificação do número: WhatsApp direto do sócio ou Recepção" },
+  { key: "telefone_recepcao", label: "Tel. recepção", hint: "Número backup da recepção quando o WhatsApp principal for direto do sócio" },
+  { key: "sinal_anuncios", label: "Sinal tráfego pago", hint: "Indica se o site possui Google Ads / Meta Pixel ativo" },
+  { key: "sistemas_atuais", label: "Sistemas atuais", hint: "Ferramentas detectadas no site (Doctoralia, Clinicorp, Trinks, RD Station, HubSpot)" },
+  { key: "abertura_inteligente", label: "Abertura inteligente", hint: "Saudação adaptada automaticamente para Sócio Direto vs Recepção" },
+  { key: "cnpj", label: "CNPJ", hint: "CNPJ formatado validado na Receita" },
+  { key: "porte_receita", label: "Porte CNPJ", hint: "Porte oficial na Receita Federal (MEI, ME, EPP, Demais)" },
+  { key: "capital_social", label: "Capital social", hint: "Capital social registrado na Receita Federal" },
+  { key: "anos_empresa", label: "Anos CNPJ", hint: "Tempo de atividade da empresa na Receita" },
   { key: "reivindicado", label: "Perfil reivindicado", hint: "Se a empresa reivindicou o perfil no Google (Sim/Não)" },
   { key: "total_fotos", label: "Total de fotos", hint: "Quantidade de fotos no Google Maps" },
   { key: "topicos_avaliacoes", label: "Tópicos avaliações", hint: "Temas mais mencionados nas avaliações do Google" },

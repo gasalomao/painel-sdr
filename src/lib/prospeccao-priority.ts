@@ -13,13 +13,14 @@
  *
  * Empate permanece (worker desempata por created_at ASC).
  */
-export type ProspecOrderBy = "reviews" | "rating" | "created_at";
+export type ProspecOrderBy = "reviews" | "rating" | "created_at" | "qualification";
 export type ProspecOrderDir = "asc" | "desc";
 
 export type ProspecLeadInput = {
   avaliacao?: string | number | null;
   reviews?: string | number | null;
   created_at?: string | null;
+  business_details?: Record<string, unknown> | null;
 };
 
 export function computePriority(
@@ -28,7 +29,25 @@ export function computePriority(
   order_dir: ProspecOrderDir = "desc"
 ): number {
   let score = 0;
-  if (order_by === "reviews") {
+  if (order_by === "qualification") {
+    const enr = lead.business_details?.enrichment as Record<string, unknown> | undefined;
+    const rawScore = Number(enr?.qualificationScore);
+    const baseScore =
+      Number.isFinite(rawScore) && rawScore > 0
+        ? Math.round(rawScore)
+        : (() => {
+            const rv = parseInt(String(lead.reviews ?? "0"), 10) || 0;
+            const rt = parseFloat(String(lead.avaliacao ?? "0")) || 0;
+            return Math.min(100, Math.round((rv >= 50 ? 20 : rv >= 10 ? 10 : 0) + rt * 10));
+          })();
+    let priority = baseScore * 10;
+    const channelType = typeof enr?.whatsappChannelType === "string" ? enr.whatsappChannelType : "";
+    if (channelType === "socio_direto") priority += 3;
+    else if (channelType === "provavel_socio") priority += 2;
+    if (enr?.hasPaidTrafficTag === true) priority += 1;
+    if (Array.isArray(enr?.managementTools) && enr.managementTools.length > 0) priority += 1;
+    score = priority;
+  } else if (order_by === "reviews") {
     score = parseInt(String(lead.reviews ?? "0"), 10) || 0;
   } else if (order_by === "rating") {
     score = Math.round((parseFloat(String(lead.avaliacao ?? "0")) || 0) * 100); // 2 casas Precisão int

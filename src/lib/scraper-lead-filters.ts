@@ -1,4 +1,60 @@
 import { parseGoogleReviewCount } from "./scraper-review-count";
+import type { SiteFilterMode, SiteHealthStatus } from "./scraper-lead-enrichment";
+
+export const SITE_FILTER_MODES = [
+  "any",
+  "no_site",
+  "broken_or_no_site",
+  "only_broken_or_weak",
+  "only_active_site",
+] as const satisfies readonly SiteFilterMode[];
+
+export function parseSiteFilterMode(value: unknown): SiteFilterMode | null {
+  if (value === undefined || value === null || value === "") return "any";
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim() as SiteFilterMode;
+  return (SITE_FILTER_MODES as readonly string[]).includes(trimmed) ? trimmed : null;
+}
+
+export function parseMinCapitalSocial(value: unknown): number | null {
+  if (value === undefined || value === null || value === "") return 0;
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1_000_000_000) {
+    return Math.round(value);
+  }
+  if (typeof value === "string" && /^\d+(?:[.,]\d+)?$/.test(value.trim())) {
+    const parsed = Number(value.trim().replace(",", "."));
+    return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1_000_000_000 ? Math.round(parsed) : null;
+  }
+  return null;
+}
+
+export function matchesSiteFilterMode(
+  status: SiteHealthStatus,
+  mode: SiteFilterMode,
+): { pass: boolean; reason: string } {
+  switch (mode) {
+    case "any":
+      return { pass: true, reason: "" };
+    case "no_site":
+      return status === "no_site"
+        ? { pass: true, reason: "" }
+        : { pass: false, reason: "Com site" };
+    case "broken_or_no_site":
+      return status === "no_site" || status === "broken_site" || status === "weak_site"
+        ? { pass: true, reason: "" }
+        : { pass: false, reason: "Site já ativo e saudável" };
+    case "only_broken_or_weak":
+      if (status === "broken_site" || status === "weak_site") return { pass: true, reason: "" };
+      return status === "no_site"
+        ? { pass: false, reason: "Sem site" }
+        : { pass: false, reason: "Site já ativo e saudável" };
+    case "only_active_site":
+      if (status === "active_site" || status === "weak_site") return { pass: true, reason: "" };
+      return status === "no_site"
+        ? { pass: false, reason: "Sem site" }
+        : { pass: false, reason: "Site fora do ar/quebrado" };
+  }
+}
 
 export const MIN_GOOGLE_YEAR = 1900;
 

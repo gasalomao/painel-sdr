@@ -21,7 +21,9 @@ import { parseMinReviews } from "@/lib/scraper-review-count";
 import {
   parseGoogleYear,
   parseMaxReviews,
+  parseMinCapitalSocial,
   parseRatingBound,
+  parseSiteFilterMode,
   validateGoogleYearRange,
   validateRatingRange,
   validateReviewCountRange,
@@ -115,6 +117,31 @@ export async function POST(req: NextRequest) {
       if (body.filterWithInstagram !== undefined && typeof body.filterWithInstagram !== "boolean") {
         return NextResponse.json({ error: "filterWithInstagram deve ser um booleano." }, { status: 400 });
       }
+      const optionalBooleanFields = [
+        ["turboMode", "turboMode"],
+        ["filterClosedBusinesses", "filterClosedBusinesses"],
+        ["auditSiteHealth", "auditSiteHealth"],
+        ["enrichCnpj", "enrichCnpj"],
+        ["prioritizePartnerPhone", "prioritizePartnerPhone"],
+        ["validateWhatsApp", "validateWhatsApp"],
+        ["excludeMei", "excludeMei"],
+        ["excludeFranchises", "excludeFranchises"],
+        ["huntPartnerDirectPhone", "huntPartnerDirectPhone"],
+        ["expandNeighborhoods", "expandNeighborhoods"],
+      ] as const;
+      for (const [key, label] of optionalBooleanFields) {
+        if (body[key] !== undefined && typeof body[key] !== "boolean") {
+          return NextResponse.json({ error: `${label} deve ser um booleano.` }, { status: 400 });
+        }
+      }
+      const siteFilterMode = parseSiteFilterMode(body.siteFilterMode);
+      if (siteFilterMode === null) {
+        return NextResponse.json({ error: "siteFilterMode inválido." }, { status: 400 });
+      }
+      const minCapitalSocial = parseMinCapitalSocial(body.minCapitalSocial);
+      if (minCapitalSocial === null) {
+        return NextResponse.json({ error: "minCapitalSocial deve ser um número >= 0." }, { status: 400 });
+      }
       const r = startScraperRun({
         niches: body.niches,
         regions: body.regions,
@@ -127,6 +154,18 @@ export async function POST(req: NextRequest) {
         filterWithWebsite: body.filterWithWebsite === true,
         filterWithInstagram: body.filterWithInstagram === true,
         captureAllReviews: body.captureAllReviews === true,
+        ...(body.turboMode !== undefined ? { turboMode: body.turboMode } : {}),
+        ...(body.filterClosedBusinesses !== undefined ? { filterClosedBusinesses: body.filterClosedBusinesses } : {}),
+        ...(body.auditSiteHealth !== undefined ? { auditSiteHealth: body.auditSiteHealth } : {}),
+        ...(body.siteFilterMode !== undefined ? { siteFilterMode } : {}),
+        ...(body.enrichCnpj !== undefined ? { enrichCnpj: body.enrichCnpj } : {}),
+        ...(body.prioritizePartnerPhone !== undefined ? { prioritizePartnerPhone: body.prioritizePartnerPhone } : {}),
+        ...(body.validateWhatsApp !== undefined ? { validateWhatsApp: body.validateWhatsApp } : {}),
+        ...(body.excludeMei !== undefined ? { excludeMei: body.excludeMei } : {}),
+        ...(body.excludeFranchises !== undefined ? { excludeFranchises: body.excludeFranchises } : {}),
+        ...(body.huntPartnerDirectPhone !== undefined ? { huntPartnerDirectPhone: body.huntPartnerDirectPhone } : {}),
+        ...(body.expandNeighborhoods !== undefined ? { expandNeighborhoods: body.expandNeighborhoods } : {}),
+        ...(minCapitalSocial > 0 ? { minCapitalSocial } : {}),
         minReviews,
         maxReviews,
         minRating,

@@ -29,11 +29,13 @@ import { parseMinReviews } from "@/lib/scraper-review-count";
 import {
   parseGoogleYear,
   parseMaxReviews,
+  parseMinCapitalSocial,
   parseRatingBound,
   validateGoogleYearRange,
   validateRatingRange,
   validateReviewCountRange,
 } from "@/lib/scraper-lead-filters";
+import type { LeadEnrichmentData, SiteFilterMode } from "@/lib/scraper-lead-enrichment";
 import { AutomationLogs } from "../automacao/AutomationLogs";
 import styles from "./prospeccao-sites.module.css";
 
@@ -50,6 +52,8 @@ type Lead = {
   maps_url: string | null;
   place_id: string | null;
   year_established?: string | null;
+  owner_name?: string | null;
+  enrichment?: LeadEnrichmentData | null;
   created_at: string;
   opt_out: boolean;
   primeiro_contato_source: string | null;
@@ -120,6 +124,8 @@ const INSTAGRAM_FILTER_HELP = "Exige perfil informado no Google Maps; não busca
 
 const HAS_WEBSITE_LABELS: Record<string, string> = {
   only_empty: "Sem site",
+  broken_or_empty: "Sem site + Quebrado",
+  broken_or_weak: "Site quebrado / fraco",
   all: "Todos os sites",
   only_with: "Com site",
 };
@@ -127,12 +133,28 @@ const HAS_WEBSITE_LABELS: Record<string, string> = {
 const SORT_LABELS: Record<string, string> = {
   reviews: "Avaliações",
   rating: "Nota",
+  qualification: "Score qualificação",
   created_at: "Data captura",
 };
+
+const SITE_FILTER_MODE_OPTIONS: { value: SiteFilterMode; label: string }[] = [
+  { value: "any", label: "Todos" },
+  { value: "no_site", label: "Sem site" },
+  { value: "broken_or_no_site", label: "Sem site + Quebrado" },
+  { value: "only_broken_or_weak", label: "Só Site Quebrado/Fraco" },
+  { value: "only_active_site", label: "Só Site Ativo" },
+];
 
 const ORDER_LABELS: Record<string, string> = {
   desc: "Maior → menor",
   asc: "Menor → maior",
+};
+
+const CHANNEL_FILTER_LABELS: Record<string, string> = {
+  all: "Todos os canais",
+  owner_direct: "Direto no Sócio",
+  reception: "Recepção / Secretária",
+  paid_traffic: "Investe em Anúncios",
 };
 
 /**
@@ -208,6 +230,18 @@ export default function ProspeccaoSitesPage() {
   const [captureAllReviews, setCaptureAllReviews] = useState(false);
   const [filterWithWebsite, setFilterWithWebsite] = useState(false);
   const [filterWithInstagram, setFilterWithInstagram] = useState(false);
+  const [turboMode, setTurboMode] = useState(true);
+  const [filterClosedBusinesses, setFilterClosedBusinesses] = useState(true);
+  const [auditSiteHealth, setAuditSiteHealth] = useState(true);
+  const [siteFilterMode, setSiteFilterMode] = useState<SiteFilterMode>("any");
+  const [enrichCnpj, setEnrichCnpj] = useState(true);
+  const [prioritizePartnerPhone, setPrioritizePartnerPhone] = useState(true);
+  const [validateWhatsApp, setValidateWhatsApp] = useState(true);
+  const [excludeMei, setExcludeMei] = useState(false);
+  const [excludeFranchises, setExcludeFranchises] = useState(false);
+  const [huntPartnerDirectPhone, setHuntPartnerDirectPhone] = useState(false);
+  const [expandNeighborhoods, setExpandNeighborhoods] = useState(false);
+  const [minCapitalSocial, setMinCapitalSocial] = useState("0");
   const [minReviews, setMinReviews] = useState("0");
   const [minReviewsError, setMinReviewsError] = useState(false);
   const [maxReviews, setMaxReviews] = useState("0");
@@ -261,6 +295,7 @@ export default function ProspeccaoSitesPage() {
     const parsedMaxRating = parseRatingBound(maxRating);
     const parsedYearFrom = parseGoogleYear(googleYearFrom);
     const parsedYearTo = parseGoogleYear(googleYearTo);
+    const parsedMinCapital = parseMinCapitalSocial(minCapitalSocial);
     let extraErr = "";
     if (parsedMaxReviews === null) extraErr = "Máximo de avaliações deve ser um inteiro entre 0 e 2147483647.";
     else if (minimum !== null) {
@@ -278,6 +313,9 @@ export default function ProspeccaoSitesPage() {
     } else if (!extraErr && parsedYearFrom !== null && parsedYearTo !== null) {
       const yrErr = validateGoogleYearRange(parsedYearFrom, parsedYearTo);
       if (yrErr) extraErr = yrErr;
+    }
+    if (!extraErr && parsedMinCapital === null) {
+      extraErr = "Capital social mínimo deve ser um número maior ou igual a 0.";
     }
     setExtraFiltersError(extraErr);
     if (minimum === null || extraErr) return;
@@ -302,6 +340,18 @@ export default function ProspeccaoSitesPage() {
           filterLandlines,
           filterWithWebsite,
           filterWithInstagram,
+          turboMode,
+          filterClosedBusinesses,
+          auditSiteHealth,
+          siteFilterMode,
+          enrichCnpj,
+          prioritizePartnerPhone,
+          validateWhatsApp,
+          excludeMei,
+          excludeFranchises,
+          huntPartnerDirectPhone,
+          expandNeighborhoods,
+          ...(parsedMinCapital && parsedMinCapital > 0 ? { minCapitalSocial: parsedMinCapital } : {}),
           minReviews: minimum,
           ...(parsedMaxReviews && parsedMaxReviews > 0 ? { maxReviews: parsedMaxReviews } : {}),
           ...(parsedMinRating && parsedMinRating > 0 ? { minRating: parsedMinRating } : {}),
@@ -344,7 +394,7 @@ export default function ProspeccaoSitesPage() {
   const [page, setPage] = useState(0);
   const [limit] = useState(50);
   const [loadingLeads, setLoadingLeads] = useState(false);
-  const [sort, setSort] = useState<"reviews" | "rating" | "created_at">("reviews");
+  const [sort, setSort] = useState<"reviews" | "rating" | "qualification" | "created_at">("qualification");
   const [order, setOrder] = useState<"asc" | "desc">("desc");
   const [ramoFilter, setRamoFilter] = useState("");
   const [regionFilter, setRegionFilter] = useState("");
@@ -354,7 +404,8 @@ export default function ProspeccaoSitesPage() {
   const [reviewsMax, setReviewsMax] = useState("");
   const [leadYearFrom, setLeadYearFrom] = useState("");
   const [leadYearTo, setLeadYearTo] = useState("");
-  const [hasWebsite, setHasWebsite] = useState<"only_empty" | "all" | "only_with">("only_empty");
+  const [hasWebsite, setHasWebsite] = useState<"only_empty" | "broken_or_empty" | "broken_or_weak" | "all" | "only_with">("only_empty");
+  const [channelFilter, setChannelFilter] = useState<"all" | "owner_direct" | "reception" | "paid_traffic">("all");
   const [showOptOut, setShowOptOut] = useState(false);
   const [disparoFilter, setDisparoFilter] = useState<"all" | "pending" | "sent">("all");
   const [disparoJids, setDisparoJids] = useState<Set<string>>(new Set());
@@ -370,6 +421,7 @@ export default function ProspeccaoSitesPage() {
         order,
         ignore_opt_out: showOptOut ? "false" : "true",
         hasWebsite,
+        ...(channelFilter !== "all" ? { channel: channelFilter } : {}),
       });
       if (ramoFilter) params.set("ramo", ramoFilter);
       if (regionFilter) params.set("region", regionFilter);
@@ -391,7 +443,7 @@ export default function ProspeccaoSitesPage() {
       } catch { /* fallback to primeiro_contato_source */ }
     } catch (e) { console.error("fetchLeads", e); }
     finally { setLoadingLeads(false); }
-  }, [page, limit, sort, order, ramoFilter, regionFilter, showOptOut, hasWebsite, ratingMin, ratingMax, reviewsMin, reviewsMax, leadYearFrom, leadYearTo]);
+  }, [page, limit, sort, order, ramoFilter, regionFilter, showOptOut, hasWebsite, channelFilter, ratingMin, ratingMax, reviewsMin, reviewsMax, leadYearFrom, leadYearTo]);
 
   useEffect(() => { fetchLeads(); }, [fetchLeads]);
 
@@ -410,8 +462,14 @@ export default function ProspeccaoSitesPage() {
       if (disparoFilter === "pending" && isDisparado) return false;
       if (disparoFilter === "sent" && !isDisparado) return false;
       const hasW = !!(l.website && l.website.trim());
+      const sh = l.enrichment?.siteHealth;
       if (hasWebsite === "only_empty" && hasW) return false;
       if (hasWebsite === "only_with" && !hasW) return false;
+      if (hasWebsite === "broken_or_weak" && sh !== "broken_site" && sh !== "weak_site") return false;
+      if (hasWebsite === "broken_or_empty" && hasW && sh !== "broken_site" && sh !== "weak_site") return false;
+      if (channelFilter === "owner_direct" && l.enrichment?.whatsappChannelType !== "socio_direto" && l.enrichment?.whatsappChannelType !== "provavel_socio") return false;
+      if (channelFilter === "reception" && l.enrichment?.whatsappChannelType !== "recepcao_comercial") return false;
+      if (channelFilter === "paid_traffic" && !l.enrichment?.hasPaidTrafficTag) return false;
       if (ratingMin) {
         const r = parseFloat(l.rating || "0");
         if (isNaN(r) || r < Number(ratingMin)) return false;
@@ -436,7 +494,7 @@ export default function ProspeccaoSitesPage() {
       }
       return true;
     });
-  }, [leads, hasWebsite, ratingMin, ratingMax, reviewsMin, reviewsMax, leadYearFrom, leadYearTo, disparoFilter, disparoJids]);
+  }, [leads, hasWebsite, channelFilter, ratingMin, ratingMax, reviewsMin, reviewsMax, leadYearFrom, leadYearTo, disparoFilter, disparoJids]);
 
   // Ranking: reviews desc default. Score = reviews * rating (proxy importância)
   const rankedLeads = useMemo(() => {
@@ -445,6 +503,9 @@ export default function ProspeccaoSitesPage() {
       const rb = parseInt(b.reviews || "0", 10) || 0;
       const sa = parseFloat(a.rating || "0") || 0;
       const sb = parseFloat(b.rating || "0") || 0;
+      const qa = a.enrichment?.qualificationScore ?? 0;
+      const qb = b.enrichment?.qualificationScore ?? 0;
+      if (sort === "qualification") return order === "desc" ? qb - qa : qa - qb;
       if (sort === "reviews") return order === "desc" ? rb - ra : ra - rb;
       if (sort === "rating")  return order === "desc" ? sb - sa : sa - sb;
       return order === "desc"
@@ -631,6 +692,19 @@ export default function ProspeccaoSitesPage() {
   const [autoFilterLandlines, setAutoFilterLandlines] = useState(false);
   const [autoFilterWithWebsite, setAutoFilterWithWebsite] = useState(true);
   const [autoFilterWithInstagram, setAutoFilterWithInstagram] = useState(false);
+  const [autoTurboMode, setAutoTurboMode] = useState(true);
+  const [autoFilterClosedBusinesses, setAutoFilterClosedBusinesses] = useState(true);
+  const [autoAuditSiteHealth, setAutoAuditSiteHealth] = useState(true);
+  const [autoSiteFilterMode, setAutoSiteFilterMode] = useState<SiteFilterMode>("no_site");
+  const [autoEnrichCnpj, setAutoEnrichCnpj] = useState(true);
+  const [autoPrioritizePartnerPhone, setAutoPrioritizePartnerPhone] = useState(true);
+  const [autoValidateWhatsApp, setAutoValidateWhatsApp] = useState(true);
+  const [autoExcludeMei, setAutoExcludeMei] = useState(false);
+  const [autoExcludeFranchises, setAutoExcludeFranchises] = useState(false);
+  const [autoHuntPartnerDirectPhone, setAutoHuntPartnerDirectPhone] = useState(false);
+  const [autoExpandNeighborhoods, setAutoExpandNeighborhoods] = useState(false);
+  const [autoPrioritizeByScore, setAutoPrioritizeByScore] = useState(true);
+  const [autoMinCapitalSocial, setAutoMinCapitalSocial] = useState("0");
   const [autoMinReviews, setAutoMinReviews] = useState("0");
   const [autoMinReviewsError, setAutoMinReviewsError] = useState(false);
   const [autoMaxReviews, setAutoMaxReviews] = useState("0");
@@ -741,6 +815,7 @@ export default function ProspeccaoSitesPage() {
     const parsedMaxRating = parseRatingBound(autoMaxRating);
     const parsedYearFrom = parseGoogleYear(autoGoogleYearFrom);
     const parsedYearTo = parseGoogleYear(autoGoogleYearTo);
+    const parsedMinCapital = parseMinCapitalSocial(autoMinCapitalSocial);
     let extraErr = "";
     if (parsedMaxReviews === null) extraErr = "Máximo de avaliações deve ser um inteiro entre 0 e 2147483647.";
     else if (minimum !== null) {
@@ -758,6 +833,9 @@ export default function ProspeccaoSitesPage() {
     } else if (!extraErr && parsedYearFrom !== null && parsedYearTo !== null) {
       const yrErr = validateGoogleYearRange(parsedYearFrom, parsedYearTo);
       if (yrErr) extraErr = yrErr;
+    }
+    if (!extraErr && parsedMinCapital === null) {
+      extraErr = "Capital social mínimo deve ser um número maior ou igual a 0.";
     }
     setAutoExtraFiltersError(extraErr);
     if (minimum === null || extraErr) return;
@@ -788,6 +866,19 @@ export default function ProspeccaoSitesPage() {
             filterLandlines: autoFilterLandlines,
             filterWithWebsite: autoFilterWithWebsite,
             filterWithInstagram: autoFilterWithInstagram,
+            turboMode: autoTurboMode,
+            filterClosedBusinesses: autoFilterClosedBusinesses,
+            auditSiteHealth: autoAuditSiteHealth,
+            siteFilterMode: autoSiteFilterMode,
+            enrichCnpj: autoEnrichCnpj,
+            prioritizePartnerPhone: autoPrioritizePartnerPhone,
+            validateWhatsApp: autoValidateWhatsApp,
+            excludeMei: autoExcludeMei,
+            excludeFranchises: autoExcludeFranchises,
+            huntPartnerDirectPhone: autoHuntPartnerDirectPhone,
+            expandNeighborhoods: autoExpandNeighborhoods,
+            prioritize_by_score: autoPrioritizeByScore,
+            ...(parsedMinCapital && parsedMinCapital > 0 ? { minCapitalSocial: parsedMinCapital } : {}),
             minReviews: minimum,
             ...(parsedMaxReviews && parsedMaxReviews > 0 ? { maxReviews: parsedMaxReviews } : {}),
             ...(parsedMinRating && parsedMinRating > 0 ? { minRating: parsedMinRating } : {}),
@@ -1017,6 +1108,8 @@ export default function ProspeccaoSitesPage() {
       avaliacao: lead.rating || "",
       reviews: lead.reviews || "",
       website: lead.website || "",
+      owner_name: lead.owner_name || lead.enrichment?.socioDecisor || "",
+      business_details: lead.enrichment ? { enrichment: lead.enrichment } : null,
       variables: { vendedor },
     };
     return renderTemplate(template, ctx, { spintax: true });
@@ -1375,13 +1468,145 @@ export default function ProspeccaoSitesPage() {
                     { label: "Remover leads sem telefone", value: filterEmpty, set: setFilterEmpty },
                     { label: "Remover telefones duplicados", value: filterDuplicates, set: setFilterDuplicates },
                     { label: "Remover telefones fixos", value: filterLandlines, set: setFilterLandlines },
-                    { label: "Capturar somente leads sem site", value: filterWithWebsite, set: setFilterWithWebsite },
                   ].map((f) => (
                     <label key={f.label} className={styles.checkboxRow}>
                       <span>{f.label}</span>
                       <input type="checkbox" checked={f.value} onChange={(e) => f.set(e.target.checked)} />
                     </label>
                   ))}
+
+                  <label className={styles.checkboxRow}>
+                    <span>Capturar somente leads sem site</span>
+                    <input
+                      type="checkbox"
+                      checked={filterWithWebsite}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setFilterWithWebsite(checked);
+                        setSiteFilterMode(prev => checked ? "no_site" : (prev === "no_site" ? "any" : prev));
+                      }}
+                    />
+                  </label>
+
+                  {/* Modo Turbo VPS, Saúde do Site & Decisor (Custo Zero) */}
+                  <div className="rounded-lg border border-cyan-500/25 bg-cyan-500/[0.04] p-3 space-y-2.5">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-cyan-200">
+                      <Zap className="w-3.5 h-3.5 text-cyan-400" />
+                      Modo Turbo VPS, Saúde do Site &amp; Decisor (Custo Zero)
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <label htmlFor="ps-turbo-mode" className="text-xs text-white/90 cursor-pointer block">Modo Turbo VPS (alta velocidade e economia de RAM)</label>
+                          <span className="text-[10px] text-white/45">Reutiliza aba, bloqueia mídia pesada e pula duplicados via cache em RAM.</span>
+                        </div>
+                        <Switch id="ps-turbo-mode" checked={turboMode} onCheckedChange={setTurboMode} />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <label htmlFor="ps-filter-closed" className="text-xs text-white/90 cursor-pointer block">Descartar empresas fechadas ou CNPJ baixado/inapto</label>
+                          <span className="text-[10px] text-white/45">Rejeita empresas encerradas no Maps ou inativas na Receita Federal.</span>
+                        </div>
+                        <Switch id="ps-filter-closed" checked={filterClosedBusinesses} onCheckedChange={setFilterClosedBusinesses} />
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <label htmlFor="ps-audit-site" className="text-xs text-white/90 cursor-pointer block">Auditar saúde do site (quebrado, SSL vencido, erro 500 ou fraco)</label>
+                            <span className="text-[10px] text-white/45">Protegido contra falso positivo Cloudflare; gera diagnóstico comercial.</span>
+                          </div>
+                          <Switch id="ps-audit-site" checked={auditSiteHealth} onCheckedChange={setAuditSiteHealth} />
+                        </div>
+                        <div className="space-y-1">
+                          <span className="text-[11px] text-white/60 block">Filtro por saúde do site:</span>
+                          <div className="flex flex-wrap gap-1" role="radiogroup" aria-label="Filtro por saúde do site na captura">
+                            {SITE_FILTER_MODE_OPTIONS.map((opt) => {
+                              const active = siteFilterMode === opt.value;
+                              return (
+                                <button
+                                  key={opt.value}
+                                  type="button"
+                                  role="radio"
+                                  aria-checked={active}
+                                  onClick={() => {
+                                    setSiteFilterMode(opt.value);
+                                    setFilterWithWebsite(opt.value === "no_site");
+                                  }}
+                                  className={cn(
+                                    "text-[10px] px-2 py-1 rounded border transition-colors cursor-pointer",
+                                    active
+                                      ? "bg-primary/20 border-primary/50 text-white font-medium"
+                                      : "bg-black/40 border-white/10 text-white/60 hover:text-white",
+                                  )}
+                                >
+                                  {opt.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <label htmlFor="ps-enrich-cnpj" className="text-xs text-white/90 cursor-pointer block">Enriquecer CNPJ e Sócio Decisor grátis (Receita + RDAP)</label>
+                            <span className="text-[10px] text-white/45">Consulta gratuita em cascata (BrasilAPI → OpenCNPJ → MinhaReceita).</span>
+                          </div>
+                          <Switch id="ps-enrich-cnpj" checked={enrichCnpj} onCheckedChange={setEnrichCnpj} />
+                        </div>
+                        {enrichCnpj && (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 p-2 rounded bg-black/30 border border-white/10">
+                            <label htmlFor="ps-exclude-mei" className="flex items-center justify-between gap-2 text-xs text-white/80 cursor-pointer">
+                              <span>Ignorar MEI (focar ME, EPP e Ltda)</span>
+                              <input id="ps-exclude-mei" type="checkbox" checked={excludeMei} onChange={(e) => setExcludeMei(e.target.checked)} className="w-4 h-4 accent-primary cursor-pointer" />
+                            </label>
+                            <div className="flex items-center justify-between gap-2">
+                              <label htmlFor="ps-min-capital" className="text-xs text-white/60">Capital mínimo (R$)</label>
+                              <Input id="ps-min-capital" type="number" min={0} step={1000} value={minCapitalSocial} onChange={(e) => { setMinCapitalSocial(e.target.value); setExtraFiltersError(""); }} className="w-28 h-8 text-xs" />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2">
+                        <label htmlFor="ps-partner-phone" className="text-xs text-white/90 cursor-pointer">Priorizar WhatsApp oculto do site / celular do sócio</label>
+                        <Switch id="ps-partner-phone" checked={prioritizePartnerPhone} onCheckedChange={setPrioritizePartnerPhone} />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2">
+                        <label htmlFor="ps-validate-wa" className="text-xs text-white/90 cursor-pointer">Validar WhatsApp ativo na Evolution (recupera fixos Business)</label>
+                        <Switch id="ps-validate-wa" checked={validateWhatsApp} onCheckedChange={setValidateWhatsApp} />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <label htmlFor="ps-hunt-partner" className="text-xs text-white/90 cursor-pointer block">Modo Direto no Dono</label>
+                          <span className="text-[10px] text-white/45">9º dígito Anatel + WhatsApp Pessoal do sócio vs Recepção</span>
+                        </div>
+                        <Switch id="ps-hunt-partner" aria-label="Modo Direto no Dono" checked={huntPartnerDirectPhone} onCheckedChange={setHuntPartnerDirectPhone} />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <label htmlFor="ps-exclude-franchises" className="text-xs text-white/90 cursor-pointer block">Ignorar grandes redes e franquias</label>
+                          <span className="text-[10px] text-white/45">Descarta redes conhecidas e S/A para focar decisores locais</span>
+                        </div>
+                        <Switch id="ps-exclude-franchises" aria-label="Ignorar grandes redes e franquias" checked={excludeFranchises} onCheckedChange={setExcludeFranchises} />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <label htmlFor="ps-expand-neighborhoods" className="text-xs text-white/90 cursor-pointer block">Busca profunda por bairros</label>
+                          <span className="text-[10px] text-white/45">Subdivide cidades em bairros para furar o teto de 120 leads</span>
+                        </div>
+                        <Switch id="ps-expand-neighborhoods" aria-label="Busca profunda por bairros" checked={expandNeighborhoods} onCheckedChange={setExpandNeighborhoods} />
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
                 <div className={styles.captureLimit}>
@@ -1508,18 +1733,30 @@ export default function ProspeccaoSitesPage() {
                   <label>No Google desde (ano)<Input aria-label="No Google desde (ano) nos leads" placeholder="Ex.: 2019" type="number" min="1900" max={new Date().getFullYear() + 1} value={leadYearFrom} onChange={(e) => setLeadYearFrom(e.target.value)} /></label>
                   <label>Até o ano (Google)<Input aria-label="Até o ano no Google nos leads" placeholder={`Ex.: ${new Date().getFullYear()}`} type="number" min="1900" max={new Date().getFullYear() + 1} value={leadYearTo} onChange={(e) => setLeadYearTo(e.target.value)} /></label>
                   <div className={styles.selectField}><span>Presença de site</span><Select value={hasWebsite} onValueChange={(v: string | null) => setHasWebsite((v as any) || "only_empty")}>
-                    <SelectTrigger aria-label="Presença de site" className="w-40"><SelectValue placeholder="Presença site">{HAS_WEBSITE_LABELS[hasWebsite] || "Presença site"}</SelectValue></SelectTrigger>
+                    <SelectTrigger aria-label="Presença de site" className="w-44"><SelectValue placeholder="Presença site">{HAS_WEBSITE_LABELS[hasWebsite] || "Presença site"}</SelectValue></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="only_empty">Sem site</SelectItem>
+                      <SelectItem value="broken_or_empty">Sem site + Quebrado</SelectItem>
+                      <SelectItem value="broken_or_weak">Site quebrado / fraco</SelectItem>
                       <SelectItem value="all">Todos os sites</SelectItem>
                       <SelectItem value="only_with">Com site</SelectItem>
                     </SelectContent>
                   </Select></div>
+                  <div className={styles.selectField}><span>Canal WhatsApp</span><Select value={channelFilter} onValueChange={(v: string | null) => setChannelFilter((v as any) || "all")}>
+                    <SelectTrigger aria-label="Canal WhatsApp" className="w-44"><SelectValue placeholder="Canal WhatsApp">{CHANNEL_FILTER_LABELS[channelFilter] || "Todos os canais"}</SelectValue></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">Todos os canais</SelectItem>
+                      <SelectItem value="owner_direct">Direto no Sócio</SelectItem>
+                      <SelectItem value="reception">Recepção / Secretária</SelectItem>
+                      <SelectItem value="paid_traffic">Investe em Anúncios</SelectItem>
+                    </SelectContent>
+                  </Select></div>
                   <div className={styles.selectField}><span>Ordenar por</span><Select value={sort} onValueChange={(v: string | null) => setSort((v as any) || "reviews")}>
-                    <SelectTrigger aria-label="Ordenar por" className="w-36"><SelectValue placeholder="Ordenar por">{SORT_LABELS[sort] || "Avaliações"}</SelectValue></SelectTrigger>
+                    <SelectTrigger aria-label="Ordenar por" className="w-40"><SelectValue placeholder="Ordenar por">{SORT_LABELS[sort] || "Avaliações"}</SelectValue></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="reviews">Avaliações</SelectItem>
                       <SelectItem value="rating">Nota</SelectItem>
+                      <SelectItem value="qualification">Score qualificação</SelectItem>
                       <SelectItem value="created_at">Data captura</SelectItem>
                     </SelectContent>
                   </Select></div>
@@ -1568,7 +1805,7 @@ export default function ProspeccaoSitesPage() {
                   </Button>
                 )}
               </div>
-              <span>{selected.size} selecionados · ordenado por {sort === "reviews" ? "avaliações" : sort === "rating" ? "nota" : "data captura"}</span>
+              <span>{selected.size} selecionados · ordenado por {sort === "reviews" ? "avaliações" : sort === "rating" ? "nota" : sort === "qualification" ? "score qualificação" : "data captura"}</span>
             </div>
 
             {/* Table */}
@@ -1628,6 +1865,50 @@ export default function ProspeccaoSitesPage() {
                                   <ExternalLink className="w-3.5 h-3.5 text-blue-400 shrink-0 opacity-80 group-hover/link:opacity-100 group-hover/link:translate-x-0.5 transition-all" />
                                 </a>
                               </div>
+                              {(l.enrichment || l.owner_name) && (
+                                <div className="flex flex-wrap gap-1 mt-1 font-normal">
+                                  {l.enrichment?.qualificationScore != null && (
+                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-cyan-300 border-cyan-500/30 bg-cyan-500/10">
+                                      Score {l.enrichment.qualificationScore}
+                                    </Badge>
+                                  )}
+                                  {(l.enrichment?.primeiroNomeSocio || l.enrichment?.socioDecisor || l.owner_name) && (
+                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-emerald-300 border-emerald-500/30 bg-emerald-500/10">
+                                      Sócio: {l.enrichment?.primeiroNomeSocio || l.enrichment?.socioDecisor || l.owner_name}
+                                    </Badge>
+                                  )}
+                                  {l.enrichment?.porte && (
+                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-white/70 border-white/15">
+                                      {l.enrichment.porte}
+                                    </Badge>
+                                  )}
+                                  {(l.enrichment?.whatsappChannelType === "socio_direto" || l.enrichment?.whatsappChannelType === "provavel_socio") && (
+                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-emerald-200 border-emerald-400/40 bg-emerald-500/15">
+                                      Direto Sócio
+                                    </Badge>
+                                  )}
+                                  {l.enrichment?.whatsappChannelType === "recepcao_comercial" && (
+                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-amber-200 border-amber-400/40 bg-amber-500/10">
+                                      Recepção
+                                    </Badge>
+                                  )}
+                                  {l.enrichment?.hasPaidTrafficTag && (
+                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-fuchsia-200 border-fuchsia-400/40 bg-fuchsia-500/10" title={l.enrichment.trafficTags?.join(", ") || "Investe em tráfego pago"}>
+                                      Ads
+                                    </Badge>
+                                  )}
+                                  {l.enrichment?.managementTools && l.enrichment.managementTools.length > 0 && (
+                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-sky-200 border-sky-400/40 bg-sky-500/10" title={l.enrichment.managementTools.join(", ")}>
+                                      Sistemas: {l.enrichment.managementTools.slice(0, 2).join(", ")}
+                                    </Badge>
+                                  )}
+                                  {l.enrichment?.abandonedCopyrightYear && (
+                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-orange-200 border-orange-400/40 bg-orange-500/10" title={`Rodapé desatualizado (${l.enrichment.abandonedCopyrightYear})`}>
+                                      © {l.enrichment.abandonedCopyrightYear}
+                                    </Badge>
+                                  )}
+                                </div>
+                              )}
                             </td>
                             <td className="p-2">{l.ramo_negocio || "—"}</td>
                             <td className="p-2 font-mono text-green-300">{l.telefone || l.remoteJid.split("@")[0]}</td>
@@ -1649,7 +1930,15 @@ export default function ProspeccaoSitesPage() {
                               )}
                             </td>
                             <td className="p-2">
-                              {hasW ? (
+                              {l.enrichment?.siteHealth === "broken_site" ? (
+                                <Badge variant="outline" className="text-red-300 border-red-500/40 bg-red-500/10" title={l.enrichment.siteDiagnostico || "Site fora do ar ou quebrado"}>
+                                  Quebrado
+                                </Badge>
+                              ) : l.enrichment?.siteHealth === "weak_site" ? (
+                                <Badge variant="outline" className="text-amber-300 border-amber-500/40 bg-amber-500/10" title={l.enrichment.siteDiagnostico || "Site fraco / sem SSL"}>
+                                  Fraco
+                                </Badge>
+                              ) : hasW ? (
                                 <Badge variant="outline" className="text-green-400 border-green-500/30">
                                   <Link2 className="w-3 h-3 mr-1" />tem
                                 </Badge>
@@ -1796,6 +2085,15 @@ export default function ProspeccaoSitesPage() {
                         { key: "resumo_avaliacoes", label: "Resumo aval.",  hint: "Resumo IA das avaliações do Google (reviews-ai)" },
                         { key: "telefone",          label: "Telefone",      hint: "Número limpo" },
                         { key: "vendedor",          label: "Vendedor",      hint: "Nome do vendedor preenchido abaixo" },
+                        { key: "primeiro_nome_socio", label: "1º Nome Sócio", hint: "Primeiro nome do sócio-administrador" },
+                        { key: "nome_socio",        label: "Sócio Decisor", hint: "Nome completo do sócio-administrador (Receita)" },
+                        { key: "diagnostico_site",  label: "Diagnóstico Site", hint: "Diagnóstico técnico do site" },
+                        { key: "porte_receita",     label: "Porte Receita", hint: "MEI / ME / EPP / Ltda" },
+                        { key: "anos_empresa",      label: "Anos CNPJ",     hint: "Idade da empresa em anos" },
+                        { key: "abertura_inteligente", label: "Abertura Inteligente", hint: "Abordagem adaptada para Sócio Direto vs Recepção" },
+                        { key: "empresa_curta",     label: "Empresa Curta", hint: "Nome limpo sem LTDA/EPP/cidade" },
+                        { key: "servico_principal", label: "Serviço Principal", hint: "Especialidade principal sem ruído" },
+                        { key: "canal_whatsapp",    label: "Canal WhatsApp", hint: "WhatsApp direto do sócio ou Recepção" },
                       ].map(v => (
                         <button
                           key={v.key} type="button" title={v.hint}
@@ -1821,10 +2119,11 @@ export default function ProspeccaoSitesPage() {
                     <Input aria-label="Nota mínima" placeholder="Nota mín (0-5)" type="number" step="0.1" min="0" max="5" value={ratingMin} onChange={(e) => setRatingMin(e.target.value)} className="w-28" />
                     <Input aria-label="Mínimo de avaliações dos leads" placeholder="Avaliações mín" type="number" min="0" value={reviewsMin} onChange={(e) => setReviewsMin(e.target.value)} className="w-32" />
                     <Select value={sort} onValueChange={(v: string | null) => setSort((v as any) || "reviews")}>
-                      <SelectTrigger aria-label="Ordenar por" className="w-36"><SelectValue placeholder="Ordenar por">{SORT_LABELS[sort] || "Avaliações"}</SelectValue></SelectTrigger>
+                      <SelectTrigger aria-label="Ordenar por" className="w-40"><SelectValue placeholder="Ordenar por">{SORT_LABELS[sort] || "Avaliações"}</SelectValue></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="reviews">Avaliações</SelectItem>
                         <SelectItem value="rating">Nota</SelectItem>
+                        <SelectItem value="qualification">Score qualificação</SelectItem>
                         <SelectItem value="created_at">Data captura</SelectItem>
                       </SelectContent>
                     </Select>
@@ -2445,13 +2744,153 @@ export default function ProspeccaoSitesPage() {
                     { label: "Remover leads sem telefone", value: autoFilterEmpty, set: setAutoFilterEmpty },
                     { label: "Remover telefones duplicados", value: autoFilterDuplicates, set: setAutoFilterDuplicates },
                     { label: "Remover telefones fixos", value: autoFilterLandlines, set: setAutoFilterLandlines },
-                    { label: "Capturar somente leads sem site", value: autoFilterWithWebsite, set: setAutoFilterWithWebsite },
                   ].map((f) => (
                     <label key={f.label} className={styles.checkboxRow}>
                       <span>{f.label}</span>
                       <input type="checkbox" checked={f.value} onChange={(e) => f.set(e.target.checked)} />
                     </label>
                   ))}
+
+                  <label className={styles.checkboxRow}>
+                    <span>Capturar somente leads sem site</span>
+                    <input
+                      type="checkbox"
+                      checked={autoFilterWithWebsite}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setAutoFilterWithWebsite(checked);
+                        setAutoSiteFilterMode(prev => checked ? "no_site" : (prev === "no_site" ? "any" : prev));
+                      }}
+                    />
+                  </label>
+
+                  {/* Modo Turbo VPS, Saúde do Site & Decisor (Custo Zero) */}
+                  <div className="rounded-lg border border-cyan-500/25 bg-cyan-500/[0.04] p-3 space-y-2.5">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-cyan-200">
+                      <Zap className="w-3.5 h-3.5 text-cyan-400" />
+                      Modo Turbo VPS, Saúde do Site &amp; Decisor (Custo Zero)
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <label htmlFor="auto-turbo-mode" className="text-xs text-white/90 cursor-pointer block">Modo Turbo VPS (alta velocidade e economia de RAM)</label>
+                          <span className="text-[10px] text-white/45">Reutiliza aba, bloqueia mídia pesada e pula duplicados via cache em RAM.</span>
+                        </div>
+                        <Switch id="auto-turbo-mode" checked={autoTurboMode} onCheckedChange={setAutoTurboMode} />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <label htmlFor="auto-filter-closed" className="text-xs text-white/90 cursor-pointer block">Descartar empresas fechadas ou CNPJ baixado/inapto</label>
+                          <span className="text-[10px] text-white/45">Evita disparos para empresas encerradas no Maps ou inativas na Receita Federal.</span>
+                        </div>
+                        <Switch id="auto-filter-closed" checked={autoFilterClosedBusinesses} onCheckedChange={setAutoFilterClosedBusinesses} />
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <label htmlFor="auto-audit-site" className="text-xs text-white/90 cursor-pointer block">Auditar saúde do site (quebrado, SSL vencido, erro 500 ou fraco)</label>
+                            <span className="text-[10px] text-white/45">Protegido contra falso positivo Cloudflare; gera diagnóstico para o template/IA.</span>
+                          </div>
+                          <Switch id="auto-audit-site" checked={autoAuditSiteHealth} onCheckedChange={setAutoAuditSiteHealth} />
+                        </div>
+                        <div className="space-y-1">
+                          <span className="text-[11px] text-white/60 block">Filtro por saúde do site na automação:</span>
+                          <div className="flex flex-wrap gap-1" role="radiogroup" aria-label="Filtro por saúde do site na automação">
+                            {SITE_FILTER_MODE_OPTIONS.map((opt) => {
+                              const active = autoSiteFilterMode === opt.value;
+                              return (
+                                <button
+                                  key={opt.value}
+                                  type="button"
+                                  role="radio"
+                                  aria-checked={active}
+                                  onClick={() => {
+                                    setAutoSiteFilterMode(opt.value);
+                                    setAutoFilterWithWebsite(opt.value === "no_site");
+                                  }}
+                                  className={cn(
+                                    "text-[10px] px-2 py-1 rounded border transition-colors cursor-pointer",
+                                    active
+                                      ? "bg-primary/20 border-primary/50 text-white font-medium"
+                                      : "bg-black/40 border-white/10 text-white/60 hover:text-white",
+                                  )}
+                                >
+                                  {opt.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <label htmlFor="auto-enrich-cnpj" className="text-xs text-white/90 cursor-pointer block">Enriquecer CNPJ e Sócio Decisor grátis (Receita + RDAP)</label>
+                            <span className="text-[10px] text-white/45">Preenche nome do sócio, CNPJ, porte e idade da empresa antes dos disparos.</span>
+                          </div>
+                          <Switch id="auto-enrich-cnpj" checked={autoEnrichCnpj} onCheckedChange={setAutoEnrichCnpj} />
+                        </div>
+                        {autoEnrichCnpj && (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 p-2 rounded bg-black/30 border border-white/10">
+                            <label htmlFor="auto-exclude-mei" className="flex items-center justify-between gap-2 text-xs text-white/80 cursor-pointer">
+                              <span>Ignorar MEI (focar ME, EPP e Ltda)</span>
+                              <input id="auto-exclude-mei" type="checkbox" checked={autoExcludeMei} onChange={(e) => setAutoExcludeMei(e.target.checked)} className="w-4 h-4 accent-primary cursor-pointer" />
+                            </label>
+                            <div className="flex items-center justify-between gap-2">
+                              <label htmlFor="auto-min-capital" className="text-xs text-white/60">Capital mínimo (R$)</label>
+                              <Input id="auto-min-capital" type="number" min={0} step={1000} value={autoMinCapitalSocial} onChange={(e) => { setAutoMinCapitalSocial(e.target.value); setAutoExtraFiltersError(""); }} className="w-28 h-8 text-xs" />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2">
+                        <label htmlFor="auto-partner-phone" className="text-xs text-white/90 cursor-pointer">Priorizar WhatsApp oculto do site / celular do sócio</label>
+                        <Switch id="auto-partner-phone" checked={autoPrioritizePartnerPhone} onCheckedChange={setAutoPrioritizePartnerPhone} />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2">
+                        <label htmlFor="auto-validate-wa" className="text-xs text-white/90 cursor-pointer">Validar WhatsApp ativo na Evolution (recupera fixos Business)</label>
+                        <Switch id="auto-validate-wa" checked={autoValidateWhatsApp} onCheckedChange={setAutoValidateWhatsApp} />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <label htmlFor="auto-hunt-partner" className="text-xs text-white/90 cursor-pointer block">Modo Direto no Dono</label>
+                          <span className="text-[10px] text-white/45">9º dígito Anatel + WhatsApp Pessoal do sócio vs Recepção</span>
+                        </div>
+                        <Switch id="auto-hunt-partner" aria-label="Modo Direto no Dono na automação" checked={autoHuntPartnerDirectPhone} onCheckedChange={setAutoHuntPartnerDirectPhone} />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <label htmlFor="auto-exclude-franchises" className="text-xs text-white/90 cursor-pointer block">Ignorar grandes redes e franquias</label>
+                          <span className="text-[10px] text-white/45">Descarta redes conhecidas e S/A para focar decisores locais</span>
+                        </div>
+                        <Switch id="auto-exclude-franchises" aria-label="Ignorar grandes redes e franquias na automação" checked={autoExcludeFranchises} onCheckedChange={setAutoExcludeFranchises} />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <label htmlFor="auto-expand-neighborhoods" className="text-xs text-white/90 cursor-pointer block">Busca profunda por bairros</label>
+                          <span className="text-[10px] text-white/45">Subdivide cidades em bairros para furar o teto de 120 leads</span>
+                        </div>
+                        <Switch id="auto-expand-neighborhoods" aria-label="Busca profunda por bairros na automação" checked={autoExpandNeighborhoods} onCheckedChange={setAutoExpandNeighborhoods} />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <label htmlFor="auto-prioritize-score" className="text-xs text-white/90 cursor-pointer block">Priorizar fila por Score ICP</label>
+                          <span className="text-[10px] text-white/45">Envia primeiro para leads com maior Score ICP e sócio direto</span>
+                        </div>
+                        <Switch id="auto-prioritize-score" aria-label="Priorizar fila por Score ICP na automação" checked={autoPrioritizeByScore} onCheckedChange={setAutoPrioritizeByScore} />
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
                 {/* Template de disparo + variáveis */}
@@ -2473,6 +2912,15 @@ export default function ProspeccaoSitesPage() {
                       { key: "telefone",      label: "Telefone",     hint: "Número limpo" },
                       { key: "data",          label: "Data",         hint: "DD/MM/AAAA" },
                       { key: "hora",          label: "Hora",         hint: "HH:MM" },
+                      { key: "primeiro_nome_socio", label: "1º Nome Sócio", hint: "Primeiro nome do sócio-administrador" },
+                      { key: "nome_socio",    label: "Sócio Decisor", hint: "Nome completo do sócio-administrador (Receita)" },
+                      { key: "diagnostico_site", label: "Diagnóstico Site", hint: "Diagnóstico técnico do site" },
+                      { key: "porte_receita", label: "Porte Receita", hint: "MEI / ME / EPP / Ltda" },
+                      { key: "anos_empresa",  label: "Anos CNPJ",    hint: "Idade da empresa em anos" },
+                      { key: "abertura_inteligente", label: "Abertura Inteligente", hint: "Abordagem adaptada para Sócio Direto vs Recepção" },
+                      { key: "empresa_curta", label: "Empresa Curta", hint: "Nome limpo sem LTDA/EPP/cidade" },
+                      { key: "servico_principal", label: "Serviço Principal", hint: "Especialidade principal sem ruído" },
+                      { key: "canal_whatsapp", label: "Canal WhatsApp", hint: "WhatsApp direto do sócio ou Recepção" },
                     ].map(v => (
                       <button
                         key={v.key} type="button" title={v.hint}

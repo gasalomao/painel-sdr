@@ -76,6 +76,7 @@ export type PreviewSample = {
   link_previa?: string;
   email?: string;
   observacoes?: string;
+  business_details?: Record<string, unknown> | null;
 };
 
 export const DEFAULT_PREVIEW_SAMPLE: PreviewSample = {
@@ -110,6 +111,29 @@ export const DEFAULT_PREVIEW_SAMPLE: PreviewSample = {
   link_previa: "https://padaria-centro.vercel.app",
   email: "contato@padariacentro.com.br",
   observacoes: "Cliente com boa reputação no Google Maps",
+  business_details: {
+    services: ["Pães artesanais", "Confeitaria fina"],
+    enrichment: {
+      cnpj: "12345678000190",
+      razaoSocial: "PADARIA CENTRO LTDA",
+      socioDecisor: "Carlos Silva",
+      primeiroNomeSocio: "Carlos",
+      porte: "EPP",
+      capitalSocial: 80000,
+      anosEmpresa: 7,
+      siteStatusLabel: "Site lento / SSL vencido",
+      siteDiagnostico: "Certificado SSL expirado e carregamento acima de 6s no celular",
+      telefoneSocio: "11999998888",
+      telefoneRecepcao: "1132221100",
+      whatsappChannelType: "socio_direto",
+      hasPaidTrafficTag: true,
+      trafficTags: ["Meta Pixel", "Google Ads/GTM"],
+      managementTools: ["RD Station"],
+      empresaCurta: "Padaria Centro",
+      servicoPrincipal: "Pães artesanais",
+      qualificationScore: 84,
+    },
+  },
 };
 
 export function leadToPreviewSample(lead: PreviewLead): PreviewSample {
@@ -150,6 +174,7 @@ export function leadToPreviewSample(lead: PreviewLead): PreviewSample {
     link_previa: resolveKey("link_previa"),
     email: resolveKey("email"),
     observacoes: resolveKey("observacoes"),
+    business_details: lead.business_details ?? null,
   };
 }
 
@@ -330,7 +355,7 @@ export function LeadSelectorUI({
           <div key={k}>
             <label className="text-[9px] uppercase tracking-widest text-muted-foreground font-black">{label}</label>
             <input
-              value={sample[k] || ""}
+              value={typeof sample[k] === "string" ? sample[k] : ""}
               onChange={(e) => setSample({ ...sample, [k]: e.target.value })}
               className="w-full mt-0.5 bg-black/40 border border-white/10 rounded-md px-2 py-1 text-[11px] font-mono text-white focus:border-cyan-500/50 outline-none"
             />
@@ -356,7 +381,7 @@ export function LeadSelectorUI({
               <div key={k}>
                 <label className="text-[9px] uppercase tracking-widest text-muted-foreground font-black">{label}</label>
                 <input
-                  value={sample[k] || ""}
+                  value={typeof sample[k] === "string" ? sample[k] : ""}
                   onChange={(e) => setSample({ ...sample, [k]: e.target.value })}
                   className="w-full mt-0.5 bg-black/40 border border-white/10 rounded-md px-2 py-1 text-[11px] font-mono text-white focus:border-cyan-500/50 outline-none"
                 />

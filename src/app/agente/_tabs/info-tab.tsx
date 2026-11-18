@@ -203,6 +203,7 @@ export type InfoTabProps = {
 
   // Prévias de Sites IA
   sitePreviewAutoDetect: boolean; setSitePreviewAutoDetect: (v: boolean) => void;
+  sdrEnrichmentDossierEnabled: boolean; setSdrEnrichmentDossierEnabled: (v: boolean) => void;
   sitePreviewConfirmBeforeLink: boolean; setSitePreviewConfirmBeforeLink: (v: boolean) => void;
   sitePreviewEvalPrompt: string; setSitePreviewEvalPrompt: (v: string) => void;
   sitePreviewPingMessage: string; setSitePreviewPingMessage: (v: string) => void;
@@ -1350,6 +1351,15 @@ export function InfoTab(p: InfoTabProps) {
               <Globe className="w-4 h-4 text-emerald-400" />
               <span className="text-xs font-semibold text-white uppercase tracking-wider">Prévias de Sites IA (Pipeline Autônomo)</span>
             </div>
+
+            <ToggleRow
+              label="Dossiê Tático do Extrator V2.5 (Sócio, Diagnóstico de Site e Fura-Secretária)"
+              labelColor="text-cyan-400"
+              color="cyan"
+              checked={p.sdrEnrichmentDossierEnabled}
+              onChange={p.setSdrEnrichmentDossierEnabled}
+              hint={<>Injeta no contexto do lead o diagnóstico técnico real do site (fora do ar vs improvisado vs sem site), sócio-decisor, sinais de anúncios/sistemas e instrução anti-secretária sem quebrar o cache do prompt principal.</>}
+            />
 
             <ToggleRow
               label="Geração Automática de Prévia ao Detectar Aceite"

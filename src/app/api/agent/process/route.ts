@@ -22,6 +22,7 @@ import { promoteLeadBySystemSignal, scheduleRealtimeLeadEvaluation } from "@/lib
 import { getCachedAgentStaticBundle } from "@/lib/agent-config-cache";
 import { buildAgentFunctionDeclarations } from "@/lib/agent/tool-declarations";
 import { buildAgentPromptBundle } from "@/lib/agent/prompt-builder";
+import { buildSdrLeadDossierBlock } from "@/lib/agent/sdr-enrichment-dossier";
 import { collectValidImageUrls, sanitizeHallucinatedImages, splitChunkSegmentsWithCaptions } from "@/lib/agent/image-whitelist";
 import { executeSearchKnowledgeBase, executeUpdateProductStock } from "@/lib/agent/rag-tool";
 import {
@@ -72,6 +73,60 @@ async function logAgentUsage(
       ...context.extraMetadata,
     },
   })));
+}
+
+function appendSitePreviewContextLines(
+  lines: string[],
+  lead: Record<string, any>,
+  agentConfig: Record<string, any> | null,
+): void {
+  if (lead.previa_status) lines.push(`Status da Prévia de Site: ${lead.previa_status}`);
+  if (lead.link_previa) lines.push(`Link da Prévia: ${lead.link_previa}`);
+
+  // DIRETRIZES ESPECÍFICAS DA SARAH SDR & CLOSER PARA PROSPECÇÃO DE SITES
+  if (lead.previa_status === "PREVIA_PRONTA" && lead.link_previa) {
+    const pingEnviado = !!lead.previa_ping_enviado_em;
+    const confirmBeforeLink = agentConfig?.options?.site_preview_confirm_before_link ?? true;
+    const customPingTemplate = agentConfig?.options?.site_preview_ping_message || DEFAULT_SITE_PREVIEW_PING_MESSAGE;
+    const pingText = renderTemplate(customPingTemplate, { nome_negocio: lead.nome_negocio || "sua empresa" });
+
+    lines.push("");
+    lines.push("# 🎯 MODO SARAH CLOSER ATIVO (PRÉVIA PRONTA NO AR):");
+    lines.push(`- Link da prévia: ${lead.link_previa}`);
+    lines.push(`- Estratégia de envio: ${confirmBeforeLink ? "Confirmar disponibilidade antes do link (Duplo Vínculo)" : "Envio direto do link"}`);
+
+    if (confirmBeforeLink) {
+      lines.push(`- Pergunta de disponibilidade enviada anteriormente: ${pingEnviado ? "SIM" : "NÃO"}`);
+      if (!pingEnviado) {
+        lines.push(`- AÇÃO OBRIGATÓRIA NESTE TURNO: Envie a pergunta de disponibilidade perguntando se pode dar uma olhadinha agora: "${pingText}"`);
+        lines.push(`- REGRA CRÍTICA: NÃO envie o link da prévia neste turno. Aguarde a confirmação de que o cliente pode visualizar agora.`);
+      } else {
+        lines.push(`- AÇÃO OBRIGATÓRIA: O cliente respondeu à pergunta de disponibilidade! Envie agora o link (${lead.link_previa}) com a introdução: "Dá uma olhadinha aí no celular! Como é uma prévia inicial, montamos com o que encontramos disponível na internet só para você ter uma ideia de como a estrutura funciona, mas depois deixamos 100% do seu jeito, com as suas fotos e cores preferidas. Me conta: o que achou dessa ideia para a ${lead.nome_negocio || "empresa"}?"`);
+        lines.push(`- MATRIZ DE FECHAMENTO:`);
+        lines.push(`  1. ZERO PREÇO POR TEXTO: Nunca passe valores por mensagem.`);
+        lines.push(`  2. ZERO TERMOS TÉCNICOS: Proibido falar domínio, hospedagem, servidor ou DNS.`);
+        lines.push(`  3. REGRA DO DUPLO VÍNCULO: Agende uma call rápida de 2 a 5 min no WhatsApp.`);
+        lines.push(`  4. Se o cliente concordar com um horário, chame OBRIGATORIAMENTE a tool "agendar_reuniao_fechamento".`);
+      }
+    } else {
+      lines.push(`- AÇÃO OBRIGATÓRIA NESTE TURNO: Envie o link da prévia (${lead.link_previa}) diretamente para o cliente com a introdução: "Oi! Tudo bem? Finalizei a prévia do site da ${lead.nome_negocio || "sua empresa"} e já subi no ar para teste! Segue o link para dar uma olhadinha: ${lead.link_previa}. Me conta: o que achou dessa estrutura inicial?"`);
+      lines.push(`- MATRIZ DE FECHAMENTO:`);
+      lines.push(`  1. ZERO PREÇO POR TEXTO: Nunca passe valores por mensagem.`);
+      lines.push(`  2. ZERO TERMOS TÉCNICOS: Proibido falar domínio, hospedagem, servidor ou DNS.`);
+      lines.push(`  3. REGRA DO DUPLO VÍNCULO: Agende uma call rápida de 2 a 5 min no WhatsApp.`);
+      lines.push(`  4. Se o cliente concordar com um horário, chame OBRIGATORIAMENTE a tool "agendar_reuniao_fechamento".`);
+    }
+  } else if (lead.previa_status === "PREVIA_SOLICITADA") {
+    lines.push("");
+    lines.push("# 🎯 STATUS DA PRÉVIA: EM PRODUÇÃO NA VPS.");
+    lines.push("- O cliente já confirmou o pedido de prévia e o sistema está gerando o site. Se ele perguntar algo, avise que está sendo finalizado com todo o carinho e que em breve o link de teste será enviado aqui.");
+  } else if ((!lead.previa_status || lead.previa_status === "PREVIA_FALHOU" || lead.previa_status === "novo") && agentConfig?.options?.site_preview_auto_detect) {
+    lines.push("");
+    lines.push("# 🎯 MODO SARAH SDR ATIVO (QUALIFICAÇÃO E TRAVA ANTI-DESPERDÍCIO):");
+    lines.push(`- Se o cliente demonstrar interesse em ver a prévia gratuita, peça o aceite formal (Msg 8.1): "Show, já passei aqui para a nossa equipe montar a prévia da ${lead.nome_negocio || "empresa"}! Como a gente cria algo personalizado pro seu negócio mesmo, leva até 2 dias úteis para ficar pronto. Como o pessoal vai dedicar um tempo exclusivo nisso, quando a gente finalizar e te mandar o link por aqui você consegue dar uma olhadinha rápida para dizer o que achou?"`);
+    lines.push(`- Quando o cliente responder confirmando (Msg 8.2), responda: "Perfeito então, combinado! Assim que ficar pronto a gente já te chama aqui com o link. Bom trabalho por aí!" e chame OBRIGATORIAMENTE a tool "solicitar_previa_site".`);
+    lines.push(`- DETECÇÃO AUTOMÁTICA ATIVA: O sistema possui uma IA avaliadora dedicada em segundo plano. Assim que o cliente concordar com a prévia, o pipeline do OpenCode será acionado automaticamente.`);
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -840,7 +895,7 @@ export async function POST(req: NextRequest) {
              ? Promise.resolve({ data: leadRow })
              : supabase
                  .from("leads_extraidos")
-                 .select("id, nome_negocio, ramo_negocio, categoria, telefone, endereco, website, status, primeiro_contato_source, primeiro_contato_at, previa_status, link_previa, previa_ping_enviado_em, previa_link_enviado_em, intelligence")
+                 .select("id, nome_negocio, ramo_negocio, categoria, telefone, endereco, website, status, primeiro_contato_source, primeiro_contato_at, previa_status, link_previa, previa_ping_enviado_em, previa_link_enviado_em, intelligence, business_details, avaliacao, reviews, owner_name")
                  .in("remoteJid", leadJidCandidates)
                  .eq("client_id", clientId)
                  .limit(1)
@@ -881,52 +936,13 @@ export async function POST(req: NextRequest) {
             const dias = Math.floor((Date.now() - new Date(lead.primeiro_contato_at).getTime()) / 86400000);
             lines.push(`Primeiro contato: ${new Date(lead.primeiro_contato_at).toLocaleDateString("pt-BR")} (há ${dias} dia${dias === 1 ? "" : "s"})`);
           }
-          if (lead.previa_status)           lines.push(`Status da Prévia de Site: ${lead.previa_status}`);
-          if (lead.link_previa)             lines.push(`Link da Prévia: ${lead.link_previa}`);
+          appendSitePreviewContextLines(lines, lead, agentConfig);
 
-          // DIRETRIZES ESPECÍFICAS DA SARAH SDR & CLOSER PARA PROSPECÇÃO DE SITES
-          if (lead.previa_status === "PREVIA_PRONTA" && lead.link_previa) {
-            const pingEnviado = !!lead.previa_ping_enviado_em;
-            const confirmBeforeLink = agentConfig?.options?.site_preview_confirm_before_link ?? true;
-            const customPingTemplate = agentConfig?.options?.site_preview_ping_message || DEFAULT_SITE_PREVIEW_PING_MESSAGE;
-            const pingText = renderTemplate(customPingTemplate, { nome_negocio: lead.nome_negocio || "sua empresa" });
-
-            lines.push("");
-            lines.push("# 🎯 MODO SARAH CLOSER ATIVO (PRÉVIA PRONTA NO AR):");
-            lines.push(`- Link da prévia: ${lead.link_previa}`);
-            lines.push(`- Estratégia de envio: ${confirmBeforeLink ? "Confirmar disponibilidade antes do link (Duplo Vínculo)" : "Envio direto do link"}`);
-
-            if (confirmBeforeLink) {
-              lines.push(`- Pergunta de disponibilidade enviada anteriormente: ${pingEnviado ? "SIM" : "NÃO"}`);
-              if (!pingEnviado) {
-                lines.push(`- AÇÃO OBRIGATÓRIA NESTE TURNO: Envie a pergunta de disponibilidade perguntando se pode dar uma olhada agora: "${pingText}"`);
-                lines.push(`- REGRA CRÍTICA: NÃO envie o link da prévia neste turno. Aguarde a confirmação de que o cliente pode visualizar agora.`);
-              } else {
-                lines.push(`- AÇÃO OBRIGATÓRIA: O cliente respondeu à pergunta de disponibilidade! Envie agora o link (${lead.link_previa}) com a introdução: "Dá uma olhadinha aí no celular! Como é uma prévia inicial, montamos com o que encontramos disponível na internet só para você ter uma ideia de como a estrutura funciona, mas depois deixamos 100% do seu jeito, com as suas fotos e cores preferidas. Me conta: o que achou dessa ideia para a ${lead.nome_negocio || "empresa"}?"`);
-                lines.push(`- MATRIZ DE FECHAMENTO:`);
-                lines.push(`  1. ZERO PREÇO POR TEXTO: Nunca passe valores por mensagem.`);
-                lines.push(`  2. ZERO TERMOS TÉCNICOS: Proibido falar domínio, hospedagem, servidor ou DNS.`);
-                lines.push(`  3. REGRA DO DUPLO VÍNCULO: Agende uma call rápida de 2 a 5 min no WhatsApp.`);
-                lines.push(`  4. Se o cliente concordar com um horário, chame OBRIGATORIAMENTE a tool "agendar_reuniao_fechamento".`);
-              }
-            } else {
-              lines.push(`- AÇÃO OBRIGATÓRIA NESTE TURNO: Envie o link da prévia (${lead.link_previa}) diretamente para o cliente com a introdução: "Oi! Tudo bem? Finalizei a prévia do site da ${lead.nome_negocio || "sua empresa"} e já subi no ar para teste! Segue o link para dar uma olhadinha: ${lead.link_previa}. Me conta: o que achou dessa estrutura inicial?"`);
-              lines.push(`- MATRIZ DE FECHAMENTO:`);
-              lines.push(`  1. ZERO PREÇO POR TEXTO: Nunca passe valores por mensagem.`);
-              lines.push(`  2. ZERO TERMOS TÉCNICOS: Proibido falar domínio, hospedagem, servidor ou DNS.`);
-              lines.push(`  3. REGRA DO DUPLO VÍNCULO: Agende uma call rápida de 2 a 5 min no WhatsApp.`);
-              lines.push(`  4. Se o cliente concordar com um horário, chame OBRIGATORIAMENTE a tool "agendar_reuniao_fechamento".`);
+          if (agentConfig?.options?.sdr_enrichment_dossier_enabled) {
+            const dossierBlock = buildSdrLeadDossierBlock(lead);
+            if (dossierBlock) {
+              lines.push("", dossierBlock);
             }
-          } else if (lead.previa_status === "PREVIA_SOLICITADA") {
-            lines.push("");
-            lines.push("# 🎯 STATUS DA PRÉVIA: EM PRODUÇÃO NA VPS.");
-            lines.push("- O cliente já confirmou o pedido de prévia e o sistema está gerando o site. Se ele perguntar algo, avise que está sendo finalizado com todo o carinho e que em breve o link de teste será enviado aqui.");
-          } else if ((!lead.previa_status || lead.previa_status === "PREVIA_FALHOU" || lead.previa_status === "novo") && agentConfig?.options?.site_preview_auto_detect) {
-            lines.push("");
-            lines.push("# 🎯 MODO SARAH SDR ATIVO (QUALIFICAÇÃO E TRAVA ANTI-DESPERDÍCIO):");
-            lines.push(`- Se o cliente demonstrar interesse em ver a prévia gratuita, peça o aceite formal (Msg 8.1): "Show, já passei aqui para a nossa equipe montar a prévia da ${lead.nome_negocio || "empresa"}! Como a gente cria algo personalizado pro seu negócio mesmo, leva até 2 dias úteis para ficar pronto. Como o pessoal vai dedicar um tempo exclusivo nisso, quando a gente finalizar e te mandar o link por aqui você consegue dar uma olhadinha rápida para dizer o que achou?"`);
-            lines.push(`- Quando o cliente responder confirmando (Msg 8.2), responda: "Perfeito então, combinado! Assim que ficar pronto a gente já te chama aqui com o link. Bom trabalho por aí!" e chame OBRIGATORIAMENTE a tool "solicitar_previa_site".`);
-            lines.push(`- DETECÇÃO AUTOMÁTICA ATIVA: O sistema possui uma IA avaliadora dedicada em segundo plano. Assim que o cliente concordar com a prévia, o pipeline do OpenCode será acionado automaticamente.`);
           }
         }
         if (camp?.rendered_message && camp?.sent_at) {
@@ -982,6 +998,15 @@ export async function POST(req: NextRequest) {
         if (testLeadData.endereco) lines.push(`Endereço: ${testLeadData.endereco}`);
         if (testLeadData.website) lines.push(`Website: ${testLeadData.website}`);
         if (testLeadData.telefone) lines.push(`Telefone: ${testLeadData.telefone}`);
+        if (leadRow) {
+          appendSitePreviewContextLines(lines, leadRow, agentConfig);
+        }
+        if (agentConfig?.options?.sdr_enrichment_dossier_enabled) {
+          const dossierBlock = buildSdrLeadDossierBlock(leadRow || testLeadData);
+          if (dossierBlock) {
+            lines.push("", dossierBlock);
+          }
+        }
         if (lines.length > 0) {
             leadContextBlock = lines.join("\n");
         }
@@ -1751,9 +1776,37 @@ export async function POST(req: NextRequest) {
     const customGoalCfg = normalizeCustomGoalConfig(agentConfig?.options);
     const needsCustomGoalEval = Boolean(customGoalCfg.enabled && customGoalCfg.goalText);
 
-    // Resolve modelo econômico compartilhado para avaliadores leves (não queima modelo flagship/combo)
+    const historyForEval: Array<{ role: "user" | "agent"; content: string }> = isTestMode
+      ? testHistory.slice(-4).map((h: any) => ({
+          role: (h.role === "user" ? "user" : "agent") as "user" | "agent",
+          content: String(h.content || ""),
+        }))
+      : [...historico].reverse().slice(-4).map((h: any) => ({
+          role: (h.sender_type === "customer" || h.sender === "customer" ? "user" : "agent") as "user" | "agent",
+          content: String(h.content || ""),
+        }));
+
+    // Evita chamar IA avaliadora à toa no Turno 1 quando ainda não houve menção/oferta de prévia ou site
+    const hasPreviewOfferContext =
+      historyForEval.some((m) => /\b(pr[eé]via|rascunho|modelo|site|p[aá]gina|link)\b/i.test(m.content)) ||
+      /\b(pr[eé]via|fazer\s+(?:um|uma|o)\s+site|quero\s+(?:um\s+)?site|criar\s+(?:um\s+)?site|manda\s+o\s+link)\b/i.test(effectiveCustomerText);
+    const runPreviewEval = needsPreviewEval && hasPreviewOfferContext;
+
+    const recentHistoryForGoal = historyForEval.slice(-2);
+    const goalMessages = [
+      ...recentHistoryForGoal,
+      { role: "user" as const, content: effectiveCustomerText },
+      { role: "agent" as const, content: finalAnswer },
+    ];
+    const isTrivialGreetingOnly =
+      recentHistoryForGoal.length === 0 &&
+      /^(?:oi|ol[aá]|bom\s+dia|boa\s+tarde|boa\s+noite|tudo\s+bem\??|opa|ei|hello|hi)[!?. ]*$/i.test(effectiveCustomerText.trim()) &&
+      !/\b(oi|ol[aá]|sauda|responde|contato|mensagem)\b/i.test(customGoalCfg.goalText);
+    const runCustomGoalEval = needsCustomGoalEval && !isTrivialGreetingOnly;
+
+    // Resolve modelo econômico compartilhado apenas quando algum avaliador realmente vai rodar
     let cheapEvalModel: string | null = null;
-    if (needsPreviewEval || needsCustomGoalEval) {
+    if (runPreviewEval || runCustomGoalEval) {
       try {
         const { cheapModelForSummary } = await import("@/lib/history-summary");
         const cheapCfg = await cheapModelForSummary({
@@ -1768,159 +1821,121 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // =========================================================================
-    // DETECÇÃO AUTOMÁTICA DE ACEITE DA PRÉVIA VIA IA AVALIADORA LEVE
-    // =========================================================================
-    if (needsPreviewEval) {
-      try {
-        const historyForEval = isTestMode
-          ? testHistory.slice(-4).map((h: any) => ({
-              role: (h.role === "user" ? "user" : "agent") as "user" | "agent",
-              content: String(h.content || ""),
-            }))
-          : [...historico].reverse().slice(-4).map((h: any) => ({
-              role: (h.sender_type === "customer" || h.sender === "customer" ? "user" : "agent") as "user" | "agent",
-              content: String(h.content || ""),
-            }));
-
-        const messagesToEval = [
-          ...historyForEval,
-          { role: "user" as const, content: effectiveCustomerText },
-          { role: "agent" as const, content: finalAnswer },
-        ];
-
-        const evalResult = await evaluatePreviewAgreement({
-          messages: messagesToEval,
-          customPrompt: agentConfig?.options?.site_preview_eval_prompt,
-          modelRef: agentConfig?.options?.site_preview_eval_model || cheapEvalModel || agentConfig?.target_model,
-          geminiApiKey,
-          openrouterApiKey,
-          nvidiaApiKey,
-        });
-
-        if (evalResult.usage && evalResult.usage.totalTokens > 0) {
-          await logAgentUsage(evalResult.usage, {
-            agentId,
-            agentLabel: agentConfig?.name || `Agente #${agentId}`,
-            clientId,
-            fallbackModel: evalResult.modelUsed || session.modelUsed(),
-            fallbackProvider: evalResult.provider || session.provider,
-            remoteJid,
-            instanceName,
-            isTestMode,
-            extraMetadata: { evaluator: "site_preview_agreement", agreed: evalResult.agreed },
-          }).catch(() => {});
-        }
-
-        if (evalResult.agreed) {
-          previaSiteRequestedInTurn = true;
-          if (!leadRow) {
-            leadRow = { previa_status: "PREVIA_SOLICITADA" };
-          } else {
-            leadRow.previa_status = "PREVIA_SOLICITADA";
-          }
-          callLogs.push({
-            role: "system",
-            content: `[IA Avaliadora de Aceite] Aceite de prévia confirmado (${evalResult.confidence}, ${evalResult.evaluatorMethod}). Motivo: ${evalResult.reason}. Acionando pipeline do OpenCode.`,
-          });
-          if (!isTestMode) {
-            await supabase
-              .from("leads_extraidos")
-              .update({
-                previa_status: "PREVIA_SOLICITADA",
-                previa_solicitada_em: new Date().toISOString(),
-              })
-              .eq("client_id", clientId)
-              .eq("remoteJid", remoteJid);
-            await promoteLeadBySystemSignal({
-              clientId,
-              remoteJid,
-              signal: "site_preview_requested",
-              reason: `Aceite de prévia confirmado (${evalResult.reason}).`,
-              summary: `Cliente autorizou envio da prévia gratuita do site.`,
-            });
-          }
-        }
-      } catch (evalErr: any) {
-        console.warn("[AGENT] Falha na avaliação automática de aceite de prévia:", evalErr?.message);
-      }
-    }
-
-    // =========================================================================
-    // DETECÇÃO DE OBJETIVO PERSONALIZADO (MICRO-IA AVALIADORA 1-TOKEN)
-    // =========================================================================
+    // Executa avaliadores leves (Aceite de Prévia + Objetivo Personalizado) em paralelo sem somar latências
     let customGoalAchievedInTurn = false;
     let customGoalResumeAtIso: string | null = null;
-    let goalMessagesForTask: Array<{ role: "user" | "agent"; content: string }> = [];
+    const goalMessagesForTask: Array<{ role: "user" | "agent"; content: string }> = runCustomGoalEval ? goalMessages : [];
 
-    if (needsCustomGoalEval) {
-      try {
-        const recentHistoryForGoal = isTestMode
-          ? testHistory.slice(-2).map((h: any) => ({
-              role: (h.role === "user" ? "user" : "agent") as "user" | "agent",
-              content: String(h.content || ""),
-            }))
-          : [...historico].reverse().slice(-2).map((h: any) => ({
-              role: (h.sender_type === "customer" || h.sender === "customer" ? "user" : "agent") as "user" | "agent",
-              content: String(h.content || ""),
-            }));
-
-        const goalMessages = [
-          ...recentHistoryForGoal,
-          { role: "user" as const, content: effectiveCustomerText },
-          { role: "agent" as const, content: finalAnswer },
-        ];
-        goalMessagesForTask = goalMessages;
-
-        const isTrivialGreetingOnly =
-          recentHistoryForGoal.length === 0 &&
-          /^(?:oi|ol[aá]|bom\s+dia|boa\s+tarde|boa\s+noite|tudo\s+bem\??|opa|ei|hello|hi)[!?. ]*$/i.test(effectiveCustomerText.trim()) &&
-          !/\b(oi|ol[aá]|sauda|responde|contato|mensagem)\b/i.test(customGoalCfg.goalText);
-
-        if (!isTrivialGreetingOnly) {
-          const goalEval = await evaluateCustomGoal({
+    const [evalResult, goalEval] = await Promise.all([
+      runPreviewEval
+        ? evaluatePreviewAgreement({
+            messages: [
+              ...historyForEval,
+              { role: "user" as const, content: effectiveCustomerText },
+              { role: "agent" as const, content: finalAnswer },
+            ],
+            customPrompt: agentConfig?.options?.site_preview_eval_prompt,
+            modelRef: agentConfig?.options?.site_preview_eval_model || cheapEvalModel || agentConfig?.target_model,
+            geminiApiKey,
+            openrouterApiKey,
+            nvidiaApiKey,
+          }).catch((evalErr: any) => {
+            console.warn("[AGENT] Falha na avaliação automática de aceite de prévia:", evalErr?.message);
+            return null;
+          })
+        : Promise.resolve(null),
+      runCustomGoalEval
+        ? evaluateCustomGoal({
             goalText: customGoalCfg.goalText,
             messages: goalMessages,
             modelRef: agentConfig?.options?.custom_goal_eval_model || cheapEvalModel || modelId,
             geminiApiKey,
             openrouterApiKey,
             nvidiaApiKey,
-          });
+          }).catch((goalErr: any) => {
+            console.warn("[AGENT] Falha na avaliação de objetivo personalizado:", goalErr?.message);
+            return null;
+          })
+        : Promise.resolve(null),
+    ]);
 
-          if (goalEval.usage && goalEval.usage.totalTokens > 0) {
-            await logAgentUsage(goalEval.usage, {
-              agentId,
-              agentLabel: agentConfig?.name || `Agente #${agentId}`,
-              clientId,
-              fallbackModel: goalEval.modelUsed || session.modelUsed(),
-              fallbackProvider: goalEval.provider || session.provider,
-              remoteJid,
-              instanceName,
-              isTestMode,
-              extraMetadata: { evaluator: "custom_goal", achieved: goalEval.achieved },
-            }).catch(() => {});
-          }
+    if (evalResult) {
+      if (evalResult.usage && evalResult.usage.totalTokens > 0) {
+        await logAgentUsage(evalResult.usage, {
+          agentId,
+          agentLabel: agentConfig?.name || `Agente #${agentId}`,
+          clientId,
+          fallbackModel: evalResult.modelUsed || session.modelUsed(),
+          fallbackProvider: evalResult.provider || session.provider,
+          remoteJid,
+          instanceName,
+          isTestMode,
+          extraMetadata: { evaluator: "site_preview_agreement", agreed: evalResult.agreed },
+        }).catch(() => {});
+      }
 
-          if (goalEval.achieved) {
-            customGoalAchievedInTurn = true;
-            customGoalResumeAtIso =
-              customGoalCfg.pauseMode === "timed"
-                ? new Date(Date.now() + customGoalCfg.pauseMinutes * 60_000).toISOString()
-                : null;
-
-            const pauseDesc =
-              customGoalCfg.pauseMode === "indefinite"
-                ? "pausada por tempo indeterminado (até reativar manualmente)"
-                : `pausada por ${customGoalCfg.pauseMinutes} minuto(s)`;
-
-            callLogs.push({
-              role: "system",
-              content: `[Objetivo Personalizado] Meta alcançada: "${customGoalCfg.goalText}" (${goalEval.tokensUsed} tokens). IA ${pauseDesc} para este contato.`,
-            });
-          }
+      if (evalResult.agreed) {
+        previaSiteRequestedInTurn = true;
+        if (!leadRow) {
+          leadRow = { previa_status: "PREVIA_SOLICITADA" };
+        } else {
+          leadRow.previa_status = "PREVIA_SOLICITADA";
         }
-      } catch (goalErr: any) {
-        console.warn("[AGENT] Falha na avaliação de objetivo personalizado:", goalErr?.message);
+        callLogs.push({
+          role: "system",
+          content: `[IA Avaliadora de Aceite] Aceite de prévia confirmado (${evalResult.confidence}, ${evalResult.evaluatorMethod}). Motivo: ${evalResult.reason}. Acionando pipeline do OpenCode.`,
+        });
+        if (!isTestMode) {
+          await supabase
+            .from("leads_extraidos")
+            .update({
+              previa_status: "PREVIA_SOLICITADA",
+              previa_solicitada_em: new Date().toISOString(),
+            })
+            .eq("client_id", clientId)
+            .eq("remoteJid", remoteJid);
+          await promoteLeadBySystemSignal({
+            clientId,
+            remoteJid,
+            signal: "site_preview_requested",
+            reason: `Aceite de prévia confirmado (${evalResult.reason}).`,
+            summary: `Cliente autorizou envio da prévia gratuita do site.`,
+          });
+        }
+      }
+    }
+
+    if (goalEval) {
+      if (goalEval.usage && goalEval.usage.totalTokens > 0) {
+        await logAgentUsage(goalEval.usage, {
+          agentId,
+          agentLabel: agentConfig?.name || `Agente #${agentId}`,
+          clientId,
+          fallbackModel: goalEval.modelUsed || session.modelUsed(),
+          fallbackProvider: goalEval.provider || session.provider,
+          remoteJid,
+          instanceName,
+          isTestMode,
+          extraMetadata: { evaluator: "custom_goal", achieved: goalEval.achieved },
+        }).catch(() => {});
+      }
+
+      if (goalEval.achieved) {
+        customGoalAchievedInTurn = true;
+        customGoalResumeAtIso =
+          customGoalCfg.pauseMode === "timed"
+            ? new Date(Date.now() + customGoalCfg.pauseMinutes * 60_000).toISOString()
+            : null;
+
+        const pauseDesc =
+          customGoalCfg.pauseMode === "indefinite"
+            ? "pausada por tempo indeterminado (até reativar manualmente)"
+            : `pausada por ${customGoalCfg.pauseMinutes} minuto(s)`;
+
+        callLogs.push({
+          role: "system",
+          content: `[Objetivo Personalizado] Meta alcançada: "${customGoalCfg.goalText}" (${goalEval.tokensUsed} tokens). IA ${pauseDesc} para este contato.`,
+        });
       }
     }
 

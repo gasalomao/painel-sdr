@@ -798,6 +798,69 @@ export const evolution = {
     }
   },
 
+  /**
+   * Consulta perfil comercial (WhatsApp Business vs. Pessoal) via Evolution API v2.
+   * Falhas ou contas pessoais sem perfil Business retornam null ou isBusiness=false sem lançar exceção.
+   */
+  async fetchWhatsAppProfileInfo(
+    numberOrJid: string,
+    instance?: string
+  ): Promise<{
+    isBusiness: boolean;
+    description?: string;
+    category?: string;
+    websites?: string[];
+    email?: string;
+  } | null> {
+    const cleanDigits = String(numberOrJid || "").replace(/@.*$/, "").replace(/\D/g, "");
+    if (!cleanDigits) return null;
+    instance = await resolveInstance(instance).catch(() => "");
+    if (!instance) return null;
+
+    try {
+      const raw: unknown = await evoFetch(
+        `/chat/fetchBusinessProfile/${instance}`,
+        "POST",
+        { number: cleanDigits },
+        3500
+      );
+      if (!raw || typeof raw !== "object") return null;
+      const root = raw as Record<string, unknown>;
+      const profile =
+        root.data && typeof root.data === "object"
+          ? (root.data as Record<string, unknown>)
+          : root;
+
+      const description = typeof profile.description === "string" ? profile.description.trim() : undefined;
+      const category = typeof profile.category === "string" ? profile.category.trim() : undefined;
+      const email = typeof profile.email === "string" ? profile.email.trim() : undefined;
+      const rawWebsites = Array.isArray(profile.websites)
+        ? profile.websites
+        : typeof profile.website === "string"
+          ? [profile.website]
+          : [];
+      const websites = rawWebsites
+        .map((w) => String(w || "").trim())
+        .filter(Boolean);
+
+      const isBusiness = Boolean(
+        profile.isBusiness === true ||
+          profile.business === true ||
+          (profile.wid && (description || category || websites.length > 0))
+      );
+
+      return {
+        isBusiness,
+        ...(description ? { description } : {}),
+        ...(category ? { category } : {}),
+        ...(websites.length > 0 ? { websites } : {}),
+        ...(email ? { email } : {}),
+      };
+    } catch {
+      return null;
+    }
+  },
+
   // ================= GRUPOS & COMUNIDADES (AQUECIMENTO / SWARM) =================
   /**
    * Consulta informações de um link de convite de grupo antes de ingressar.

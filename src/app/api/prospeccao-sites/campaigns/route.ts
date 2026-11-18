@@ -47,13 +47,13 @@ export async function POST(req: NextRequest) {
       humanize_messages = false,
       antiban_mixer = true,
       weekend_guard = false,
-      order_by = "reviews",
+      order_by = "qualification",
       order_dir = "desc",
       min_reviews = 0,
       min_rating = 0,
     } = body;
 
-    const orderBy = (["reviews", "rating", "created_at"].includes(order_by) ? order_by : "reviews") as ProspecOrderBy;
+    const orderBy = (["reviews", "rating", "created_at", "qualification"].includes(order_by) ? order_by : "qualification") as ProspecOrderBy;
     const orderDir = (order_dir === "asc" ? "asc" : "desc") as ProspecOrderDir;
     const minReviews = Math.max(Number(min_reviews) || 0, 0);
     const minRating = Math.max(Number(min_rating) || 0, 0);
@@ -118,7 +118,7 @@ export async function POST(req: NextRequest) {
     const numericLeadIds = (lead_ids || []).map((id: any) => Number(id)).filter((n: number) => !isNaN(n) && n > 0);
     let leadsQuery = supabase
       .from("leads_extraidos")
-      .select("id, remoteJid, nome_negocio, ramo_negocio, telefone, opt_out, avaliacao, reviews, created_at")
+      .select("id, remoteJid, nome_negocio, ramo_negocio, telefone, opt_out, avaliacao, reviews, created_at, business_details")
       .in("id", numericLeadIds.length > 0 ? numericLeadIds : lead_ids);
 
     if (!ctx.isAdmin) {
@@ -138,7 +138,8 @@ export async function POST(req: NextRequest) {
         status: "pending",
         priority: computePriority(l, orderBy, orderDir),
         client_id: ctx.clientId,
-      }));
+      }))
+      .sort((a: any, b: any) => (b.priority || 0) - (a.priority || 0));
 
     if (targetsRows.length === 0) {
       return NextResponse.json({ success: false, error: "Nenhum lead válido (todos opt-out ou sem JID)" }, { status: 400 });

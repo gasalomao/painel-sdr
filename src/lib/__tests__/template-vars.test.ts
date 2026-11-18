@@ -216,4 +216,55 @@ describe("renderTemplate — variáveis do disparo e Google Maps", () => {
     const nested = resolveSpintax("{Bom dia {pessoal|equipe}|Olá amigos}");
     expect(["Bom dia pessoal", "Bom dia equipe", "Olá amigos"]).toContain(nested);
   });
+
+  it("resolve variáveis V2 (empresa_curta, servico_principal sem glifos, canal_whatsapp, abertura_inteligente)", () => {
+    const ownerRow = {
+      nome_negocio: "Clínica Sorriso Perfeito LTDA - Campinas",
+      categoria: "Clínica odontológica",
+      business_details: {
+        services: ["\ue5ca Implantes Dentários", "Lentes de Contato"],
+        enrichment: {
+          socioDecisor: "Marcos Andrade",
+          primeiroNomeSocio: "Marcos",
+          anosEmpresa: 0,
+          whatsappChannelType: "socio_direto",
+          telefoneRecepcao: "1932321000",
+          hasPaidTrafficTag: true,
+          trafficTags: ["Meta Pixel"],
+          empresaCurta: "Clínica Sorriso Perfeito",
+          servicoPrincipal: "\ue5ca Implantes Dentários",
+        },
+      },
+      now: tarde,
+    };
+    const ownerTpl = [
+      "{{empresa_curta}}",
+      "{{servico_principal}}",
+      "{{canal_whatsapp}}",
+      "{{telefone_recepcao}}",
+      "{{sinal_anuncios}}",
+      "{{anos_empresa}}",
+      "{{abertura_inteligente}}",
+    ].join(" | ");
+    const ownerOut = renderTemplate(ownerTpl, leadRowToTemplateContext(ownerRow, { now: tarde }));
+    expect(ownerOut).not.toContain("\ue5ca");
+    expect(ownerOut).toContain("Clínica Sorriso Perfeito | Implantes Dentários | WhatsApp direto do sócio | 1932321000 | Investe em tráfego pago (Meta Pixel) | menos de 1 ano");
+    expect(ownerOut).toContain("Boa tarde Marcos, tudo bem? Falo com você mesmo sobre a Clínica Sorriso Perfeito?");
+
+    const receptionRow = {
+      ...ownerRow,
+      business_details: {
+        enrichment: {
+          socioDecisor: "Fernanda Costa",
+          primeiroNomeSocio: "Fernanda",
+          whatsappChannelType: "recepcao_comercial",
+          empresaCurta: "Clínica Sorriso Perfeito",
+        },
+      },
+    };
+    const receptionOpening = renderTemplate("{{abertura_inteligente}}", leadRowToTemplateContext(receptionRow, { now: tarde }));
+    expect(receptionOpening).toBe(
+      "Boa tarde, tudo bem? Por gentileza, você consegue direcionar um recado rápido para Fernanda, responsável pela Clínica Sorriso Perfeito?",
+    );
+  });
 });

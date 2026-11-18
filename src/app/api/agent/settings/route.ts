@@ -316,6 +316,10 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
             })
           : [],
         site_preview_auto_detect: Boolean(incomingOpts.site_preview_auto_detect),
+        sdr_enrichment_dossier_enabled:
+          incomingOpts.sdr_enrichment_dossier_enabled !== undefined
+            ? Boolean(incomingOpts.sdr_enrichment_dossier_enabled)
+            : Boolean(existingOpts.sdr_enrichment_dossier_enabled),
         site_preview_confirm_before_link:
           incomingOpts.site_preview_confirm_before_link !== undefined
             ? Boolean(incomingOpts.site_preview_confirm_before_link)

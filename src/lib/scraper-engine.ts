@@ -16,19 +16,33 @@ import { readCaptureIds, readRejectedCaptureIds, updateAutomationCapture, type A
 import { getEvolutionConfig } from "@/lib/evolution";
 import { summarizeReviewsForLead } from "@/lib/reviews-ai";
 import { extractLocation } from "@/lib/lead-intelligence";
-import { isValidCityName, ufFromCep, computeExpansionCandidates, proximitySearchTerm, normRegionName } from "@/lib/geo-regions";
+import { isValidCityName, ufFromCep, computeExpansionCandidates, getNeighborhoodExpansionQueries, proximitySearchTerm, normRegionName } from "@/lib/geo-regions";
 import { fetchPublicHttpUrl } from "@/lib/safe-url";
 import { extractGoogleReviewCount, parseGoogleReviewCount, parseMinReviews, reviewCountFilterReason } from "@/lib/scraper-review-count";
 import {
   leadExtraFilterReason,
+  matchesSiteFilterMode,
   parseGoogleYear,
   parseMaxReviews,
+  parseMinCapitalSocial,
   parseRatingBound,
+  parseSiteFilterMode,
   resolveLeadGoogleYear,
   validateGoogleYearRange,
   validateRatingRange,
   validateReviewCountRange,
 } from "@/lib/scraper-lead-filters";
+import {
+  auditLeadWebsite,
+  cleanGoogleServicesList,
+  detectFranchiseOrChain,
+  enrichCapturedLead,
+  extractWhatsAppPhonesFromHtml,
+  seedTenantPhoneCnpjRoots,
+  type LeadEnrichmentData,
+  type SiteAuditResult,
+  type SiteFilterMode,
+} from "@/lib/scraper-lead-enrichment";
 import { normalizeInstagramProfile } from "@/lib/scraper-instagram";
 import { makeSearchKey, loadExhaustedSearches, markSearchExhausted } from "@/lib/scraper-search-memory";
 import os from "os";
@@ -124,6 +138,8 @@ export interface Lead {
     cep?: string;
     pais?: string;
   } | null;
+  /** Auditoria de saúde do site, CNPJ, sócio decisor e WhatsApp validado (custo zero). */
+  enrichment?: LeadEnrichmentData;
 }
 
 export interface ScraperSettings {
@@ -149,6 +165,30 @@ export interface ScraperSettings {
   /** Ano final em que o negócio está no Google ("até YYYY", 0 = até a data atual). */
   googleYearTo?: number;
   captureAllReviews?: boolean;
+  /** Modo Turbo VPS: bloqueia mídia na listagem, cacheia duplicatas em RAM e pula rolagem extra de reviews. */
+  turboMode?: boolean;
+  /** Ignora empresas fechadas no Maps ou com CNPJ baixado/inapto na Receita Federal. */
+  filterClosedBusinesses?: boolean;
+  /** Audita saúde técnica do site (fora do ar, SSL vencido, lento, improvisado) sem gastar IA. */
+  auditSiteHealth?: boolean;
+  /** Filtro detalhado de presença/saúde de site ("any" | "no_site" | "broken_or_no_site" | "only_broken_or_weak" | "only_active_site"). */
+  siteFilterMode?: SiteFilterMode;
+  /** Descobre CNPJ grátis (site HTML + RDAP Registro.br + Web Search) e consulta Receita/QSA em cascata. */
+  enrichCnpj?: boolean;
+  /** Caça WhatsApp direto (botão wa.me do site e celular de sócio do CNPJ filtrando contador). */
+  prioritizePartnerPhone?: boolean;
+  /** Valida existência real no WhatsApp via Evolution API (salva fixos com WhatsApp Business ativo). */
+  validateWhatsApp?: boolean;
+  /** Descarta MEIs quando CNPJ estiver disponível (foca em ME/EPP/LTDA). */
+  excludeMei?: boolean;
+  /** Capital social mínimo da empresa na Receita Federal (0 = sem mínimo). */
+  minCapitalSocial?: number;
+  /** Ignora grandes redes nacionais / franquias e sociedades anônimas. */
+  excludeFranchises?: boolean;
+  /** Caça celular direto do sócio (9º dígito Anatel + web + perfil WhatsApp pessoal vs Business). */
+  huntPartnerDirectPhone?: boolean;
+  /** Expande automaticamente para bairros da cidade antes de pular para cidades vizinhas. */
+  expandNeighborhoods?: boolean;
   /** Limite máximo de leads a captar antes de parar. Quando atingido, o scraper
    *  sai do loop limpo, fecha o navegador, e o worker detecta o cap no próximo
    *  tick e avança pra fase de disparo. Sem limite = sem parada por contagem. */
@@ -183,6 +223,7 @@ type RunContext = {
   leads: Lead[];
   niche: string;
   region: string;
+  validationInstance?: string;
 };
 
 let activeRun: RunContext | null = null;
@@ -303,6 +344,179 @@ function formatJid(phone: string): string {
   return `${clean}@s.whatsapp.net`;
 }
 
+export function resolveEffectiveSiteMode(settings: ScraperSettings): SiteFilterMode {
+  if (settings.siteFilterMode && settings.siteFilterMode !== "any") {
+    return settings.siteFilterMode;
+  }
+  return settings.filterWithWebsite === true ? "no_site" : "any";
+}
+
+function decodeGoogleRedirectUrl(rawUrl: string): string {
+  const url = String(rawUrl || "").trim();
+  if (!url) return "";
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname.includes("google.") && parsed.pathname === "/url") {
+      const target = parsed.searchParams.get("q") || parsed.searchParams.get("url");
+      if (target && /^https?:\/\//i.test(target)) return target;
+    }
+  } catch {
+    // Mantém URL original quando não parseável
+  }
+  return url;
+}
+
+async function runConcurrentPool<T, R>(
+  items: ReadonlyArray<T>,
+  concurrency: number,
+  worker: (item: T) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const results = new Array<R>(items.length);
+  let nextIdx = 0;
+  const count = Math.min(Math.max(1, concurrency), items.length);
+  await Promise.all(
+    Array.from({ length: count }, async () => {
+      while (nextIdx < items.length) {
+        const idx = nextIdx++;
+        results[idx] = await worker(items[idx]);
+      }
+    }),
+  );
+  return results;
+}
+
+interface CrmDedupeCache {
+  places: Set<string>;
+  placeIds: Set<string>;
+  jids: Set<string>;
+  localPhones: Set<string>;
+  addLead(identity: { placeUrl?: string; placeId?: string; jid?: string; phone?: string }): void;
+  hasPlace(placeKey: string): boolean;
+}
+
+async function preloadCrmDedupeCache(clientId: string): Promise<CrmDedupeCache> {
+  const places = new Set<string>();
+  const placeIds = new Set<string>();
+  const jids = new Set<string>();
+  const localPhones = new Set<string>();
+
+  const addPhone = (raw: unknown) => {
+    const digits = String(raw || "").replace(/\D/g, "");
+    if (!digits) return;
+    const local = digits.startsWith("55") && digits.length >= 12 ? digits.slice(2) : digits;
+    if (local.length >= 8) localPhones.add(local);
+    const full = digits.length >= 10 && digits.length <= 11 ? `55${digits}` : digits;
+    if (full.length >= 10) jids.add(`${full}@s.whatsapp.net`);
+  };
+
+  const client = supabaseAdmin;
+  if (client) {
+    try {
+      const accountingPairs: Array<{ phone: string; cnpj: string }> = [];
+      let selectWithDetails = true;
+      for (let offset = 0; offset < 10_000; offset += 1000) {
+        let rows: Array<Record<string, unknown>> | null = null;
+        let queryError: unknown = null;
+        if (selectWithDetails) {
+          const res = await client
+            .from("leads_extraidos")
+            .select("id,remoteJid,telefone,place_id,maps_url,business_details")
+            .eq("client_id", clientId)
+            .range(offset, offset + 999);
+          rows = res.data as Array<Record<string, unknown>> | null;
+          queryError = res.error;
+        } else {
+          const res = await client
+            .from("leads_extraidos")
+            .select("id,remoteJid,telefone,place_id,maps_url")
+            .eq("client_id", clientId)
+            .range(offset, offset + 999);
+          rows = res.data as Array<Record<string, unknown>> | null;
+          queryError = res.error;
+        }
+        if (queryError && selectWithDetails) {
+          selectWithDetails = false;
+          const retry = await client
+            .from("leads_extraidos")
+            .select("id,remoteJid,telefone,place_id,maps_url")
+            .eq("client_id", clientId)
+            .range(offset, offset + 999);
+          rows = retry.data as Array<Record<string, unknown>> | null;
+          queryError = retry.error;
+        }
+        if (queryError || !rows || rows.length === 0) break;
+        for (const row of rows) {
+          if (typeof row.remoteJid === "string" && row.remoteJid) {
+            jids.add(row.remoteJid);
+            addPhone(row.remoteJid.split("@")[0]);
+          }
+          if (row.telefone) addPhone(row.telefone);
+          if (typeof row.place_id === "string" && row.place_id) placeIds.add(row.place_id);
+          if (typeof row.maps_url === "string" && row.maps_url) {
+            const pk = placeUrlKey(row.maps_url);
+            if (pk) places.add(pk);
+          }
+          const bd = row.business_details;
+          if (bd && typeof bd === "object" && !Array.isArray(bd)) {
+            const enr = (bd as Record<string, unknown>).enrichment;
+            if (enr && typeof enr === "object" && !Array.isArray(enr)) {
+              const enrObj = enr as Record<string, unknown>;
+              const cnpj = typeof enrObj.cnpj === "string" ? enrObj.cnpj : "";
+              const telSocio = typeof enrObj.telefoneSocio === "string" ? enrObj.telefoneSocio : "";
+              if (cnpj && telSocio) {
+                accountingPairs.push({ phone: telSocio, cnpj });
+              }
+            }
+          }
+        }
+        if (rows.length < 1000) break;
+      }
+      if (accountingPairs.length > 0) {
+        seedTenantPhoneCnpjRoots(clientId, accountingPairs);
+      }
+
+      for (let offset = 0; offset < 10_000; offset += 1000) {
+        const { data, error } = await client
+          .from("contacts")
+          .select("id,remote_jid,phone_number")
+          .eq("client_id", clientId)
+          .range(offset, offset + 999);
+        if (error || !data || data.length === 0) break;
+        for (const row of data as Array<Record<string, unknown>>) {
+          if (typeof row.remote_jid === "string" && row.remote_jid) {
+            jids.add(row.remote_jid);
+            addPhone(row.remote_jid.split("@")[0]);
+          }
+          if (row.phone_number) addPhone(row.phone_number);
+        }
+        if (data.length < 1000) break;
+      }
+    } catch {
+      // Cache é otimização best-effort; checkCrmDuplicate tradicional continua ativo como rede de segurança.
+    }
+  }
+
+  return {
+    places,
+    placeIds,
+    jids,
+    localPhones,
+    addLead(identity) {
+      if (identity.placeUrl) {
+        const pk = placeUrlKey(identity.placeUrl);
+        if (pk) places.add(pk);
+      }
+      if (identity.placeId) placeIds.add(identity.placeId);
+      if (identity.jid) jids.add(identity.jid);
+      if (identity.phone) addPhone(identity.phone);
+    },
+    hasPlace(placeKey: string) {
+      return !!placeKey && places.has(placeKey);
+    },
+  };
+}
+
 /**
  * Filtros de lead (sem telefone / duplicado / fixo / com site) num ponto
  * único. Chamado ANTES da captura profunda de reviews (economiza o scroll
@@ -319,14 +533,28 @@ export function evaluateLeadFilters(
     averageRating?: string;
     yearEstablished?: string | number | null;
     cardStage?: boolean;
+    deferEmptyPhone?: boolean;
+    deferLandline?: boolean;
+    deferWebsiteCheck?: boolean;
+    businessStatus?: string;
   },
 ): { pass: boolean; reason: string } {
-  if (settings.filterEmpty && cleanPhone === "") return { pass: false, reason: "Sem telefone" };
+  if (settings.filterEmpty && cleanPhone === "" && !extra?.deferEmptyPhone) {
+    return { pass: false, reason: "Sem telefone" };
+  }
   if (settings.filterDuplicates && cleanPhone !== "" && existingLeads.find((l) => l.phones.replace(/\D/g, "") === cleanPhone)) {
     return { pass: false, reason: "Telefone duplicado" };
   }
-  if (settings.filterLandlines && cleanPhone !== "" && isLandline(cleanPhone)) return { pass: false, reason: "Telefone fixo" };
-  if (settings.filterWithWebsite && websiteStr) return { pass: false, reason: "Com site" };
+  if (settings.filterLandlines && cleanPhone !== "" && isLandline(cleanPhone) && !extra?.deferLandline) {
+    return { pass: false, reason: "Telefone fixo" };
+  }
+  const siteMode = resolveEffectiveSiteMode(settings);
+  if (!extra?.deferWebsiteCheck && siteMode === "no_site" && websiteStr) {
+    return { pass: false, reason: "Com site" };
+  }
+  if (settings.filterClosedBusinesses && extra?.businessStatus && /closed|fechado|encerrado/i.test(extra.businessStatus)) {
+    return { pass: false, reason: `Empresa fechada (${extra.businessStatus})` };
+  }
   const reviewReason = reviewCountFilterReason(reviewCount, settings.minReviews);
   if (reviewReason) return { pass: false, reason: reviewReason };
   if (settings.filterWithInstagram && !normalizeInstagramProfile(instagram)) return { pass: false, reason: "Sem Instagram" };
@@ -412,6 +640,14 @@ export function formatLeadForN8n(lead: Lead, search?: { niche: string; region: s
     distribuicao_estrelas: lead.distribuicaoEstrelas || null,
     // ---- Reviews completas (autor, nota, data, texto, fotos, respostaDono, util) ----
     reviews_detalhes: lead.reviewsDetalhes || null,
+    // ---- Enriquecimento gratuito (saúde do site, CNPJ, sócio decisor, score) ----
+    enrichment: lead.enrichment || null,
+    score_qualificacao: lead.enrichment?.qualificationScore ?? null,
+    saude_site: lead.enrichment?.siteHealth || "",
+    diagnostico_site: lead.enrichment?.siteDiagnostico || "",
+    cnpj: lead.enrichment?.cnpj || "",
+    nome_socio: lead.enrichment?.socioDecisor || lead.ownerName || "",
+    telefone_socio: lead.enrichment?.telefoneSocio || "",
   };
 }
 
@@ -590,7 +826,7 @@ async function saveLeadAndSync(lead: Lead, settings: ScraperSettings, run: RunCo
       featured_reviews: lead.featuredReviews || null,
       additional_categories: lead.additionalCategories || null,
       address_components: lead.addressComponents || null,
-      instance_name: (await getEvolutionConfig()).instance,
+      instance_name: run.validationInstance || (await getEvolutionConfig()).instance,
       status: hasWhatsApp ? "novo" : "sem_contato",
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -691,6 +927,8 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
   let scraperError: string | null = null;
   let searchFailed = false;
   let browser;
+  let reusableDetailsPage: any = null;
+  let reusableDetailsHits = 0;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let heartbeatPending: Promise<void> | undefined;
   let transientDetailError = false;
@@ -774,13 +1012,42 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
         "--use-mock-keychain",
         "--window-size=1280,800",
         "--lang=pt-BR,pt",
+        ...(settings.turboMode
+          ? ["--renderer-process-limit=2", "--js-flags=--max-old-space-size=512", "--mute-audio"]
+          : []),
       ],
     };
+
+    const effectiveSiteMode = resolveEffectiveSiteMode(settings);
+    const shouldAuditOrEnrich = Boolean(
+      settings.auditSiteHealth ||
+      settings.enrichCnpj ||
+      settings.prioritizePartnerPhone ||
+      settings.validateWhatsApp ||
+      (effectiveSiteMode !== "any" && effectiveSiteMode !== "no_site")
+    );
 
     browser = await puppeteerExtra.launch(launchOptions);
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
     await page.setExtraHTTPHeaders({ "Accept-Language": "pt-BR,pt;q=0.9" });
+    if (settings.turboMode && typeof page.setRequestInterception === "function") {
+      try {
+        await page.setRequestInterception(true);
+        page.on("request", (req: { resourceType: () => string; url?: () => string; abort: () => void; continue: () => void }) => {
+          const rt = req.resourceType();
+          const u = typeof req.url === "function" ? req.url() : "";
+          if (
+            ["image", "media", "font"].includes(rt) ||
+            /googleusercontent\.com|ggpht\.com|\/maps\/vt\/|streetview/i.test(u)
+          ) {
+            req.abort();
+          } else {
+            req.continue();
+          }
+        });
+      } catch {}
+    }
     try {
       if (typeof page.setCookie === "function") {
         await page.setCookie(
@@ -801,7 +1068,42 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
       ...(settings.maxRating && settings.maxRating > 0 ? { maxRating: settings.maxRating } : {}),
       ...(settings.googleYearFrom && settings.googleYearFrom > 0 ? { googleYearFrom: settings.googleYearFrom } : {}),
       ...(settings.googleYearTo && settings.googleYearTo > 0 ? { googleYearTo: settings.googleYearTo } : {}),
+      ...(settings.filterClosedBusinesses === true ? { filterClosedBusinesses: true } : {}),
+      ...(settings.excludeMei === true ? { excludeMei: true } : {}),
+      ...(settings.excludeFranchises === true ? { excludeFranchises: true } : {}),
+      ...(settings.minCapitalSocial && settings.minCapitalSocial > 0 ? { minCapitalSocial: settings.minCapitalSocial } : {}),
+      ...(effectiveSiteMode !== "any" ? { siteFilterMode: effectiveSiteMode } : {}),
     };
+    const crmDedupeCache =
+      settings.turboMode && effectiveFilters.filterDuplicates
+        ? await preloadCrmDedupeCache(run.clientId)
+        : null;
+    let validationInstance = "";
+    if (settings.validateWhatsApp) {
+      try {
+        if (supabaseAdmin) {
+          const { data: instRows } = await supabaseAdmin
+            .from("channel_connections")
+            .select("instance_name,status,provider,agent_id")
+            .eq("client_id", run.clientId);
+          const rows = (instRows as Array<{ instance_name?: string; status?: string; provider?: string; agent_id?: number | null }> | null) || [];
+          const isOpen = (r: { status?: string }) => /open|connect/i.test(String(r.status || ""));
+          const isEvo = (r: { provider?: string }) => !r.provider || /evolution/i.test(r.provider);
+          const best =
+            rows.find((r) => r.instance_name && isOpen(r) && isEvo(r) && r.agent_id != null) ||
+            rows.find((r) => r.instance_name && isOpen(r) && isEvo(r)) ||
+            rows.find((r) => r.instance_name && isOpen(r)) ||
+            rows.find((r) => Boolean(r.instance_name));
+          validationInstance = best?.instance_name || "";
+        }
+        if (!validationInstance) {
+          validationInstance = (await getEvolutionConfig()).instance || "";
+        }
+      } catch {
+        validationInstance = "";
+      }
+    }
+    run.validationInstance = validationInstance || undefined;
     const exhaustedSearches = await loadExhaustedSearches(run.clientId, effectiveFilters);
     const queue: { niche: string; region: string; proximity?: boolean }[] = [];
     for (const region of regions) for (const niche of niches) queue.push({ niche: niche.trim(), region: region.trim() });
@@ -825,6 +1127,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
     const norm = normRegionName;
     const searchedByNiche = new Map(niches.map(niche => [niche.trim(), new Set<string>(regions.map(region => norm(region)))]));
     const cityCounts = new Map<string, number>();
+    const neighborhoodCounts = new Map<string, number>();
     // ponytail: limita custo por tentativa, não o alcance geográfico; memória durável avança no retry.
     const queryBudget = 20;
     const attemptDeadline = Date.now() + 20 * 60_000;
@@ -1016,7 +1319,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
             const feed = document.querySelector('[role="feed"]');
             if (feed) feed.scrollBy(0, 1000);
           });
-          await sleep(2000);
+          await sleep(settings.turboMode && previousCardsInDom > 0 ? 900 : 2000);
 
           newLeads = await page.evaluate(() => {
             const items = Array.from(document.querySelectorAll(".Nv2PK"));
@@ -1033,6 +1336,128 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
           newLeads = [singlePlaceLead];
           scrolling = false;
           explicitlyExhausted = true;
+        }
+
+        // Batch extração de cards + pré-auditoria paralela HTTP (Modo Turbo VPS)
+        // Descarta sites saudáveis, fora da faixa e franquias ANTES de abrir detalhes no Chrome!
+        interface CardBatchSnapshot {
+          name: string;
+          fullAddress: string;
+          categories: string;
+          averageRating: string;
+          reviewCount: string;
+          reviewCountSources: string[];
+          website: string;
+        }
+        const batchCardsByUrl = new Map<string, CardBatchSnapshot>();
+        const preAuditByUrl = new Map<string, SiteAuditResult>();
+
+        if (hasFeed && settings.turboMode && newLeads.length > 0) {
+          const unseenUrls = newLeads
+            .filter((l) => {
+              const pk = placeUrlKey(l.url);
+              return !seenURLs.has(pk) && !extractedPlaces.has(pk) && !(pk && processedPlaceKeys.has(pk));
+            })
+            .map((l) => l.url);
+
+          if (unseenUrls.length > 0) {
+            const extractedBatch = await page.evaluate((targetUrls: string[]) => {
+              const want = new Set(targetUrls);
+              const out: Array<{ url: string; card: CardBatchSnapshot }> = [];
+              const items = Array.from(document.querySelectorAll(".Nv2PK"));
+              for (const item of items) {
+                const urlEl = item.querySelector("a");
+                const href = urlEl ? urlEl.getAttribute("href") || "" : "";
+                if (!href || !want.has(href)) continue;
+                const leadName = item.querySelector(".qBF1Pd")?.textContent?.trim() || "";
+                if (!leadName) continue;
+
+                const spans = Array.from(item.querySelectorAll(".W4Efsd > span")).map((s) => s.textContent?.trim() || "");
+                const category = spans.find((s) => s.length > 2 && !s.includes("·") && !s.match(/\d/)) || "";
+                const address = spans.find((s) => s.includes(",") || s.includes("Av.") || s.includes("Rua")) || spans[spans.length - 1] || "";
+                const textC = item.textContent || "";
+
+                let rating = "";
+                const ariaEl = item.querySelector('[role="img"][aria-label], [aria-label*="estrela" i], [aria-label*="star" i], [aria-label*="avalia" i], [aria-label*="rated" i]') as HTMLElement | null;
+                if (ariaEl) {
+                  const aria = ariaEl.getAttribute("aria-label") || "";
+                  const rm = aria.match(/(\d(?:[.,]\d{1,2})?)\s*(?:de\s*5\s*)?(?:estrela|star)/i)
+                    || aria.match(/(?:avalia(?:ç|c)(?:ã|a)o|rated|rating|nota)\s*[:\s]*(\d(?:[.,]\d{1,2})?)/i);
+                  if (rm) rating = (rm[1] || rm[2] || "").replace(",", ".");
+                }
+                if (!rating) {
+                  const rMatch = textC.match(/(\d(?:[.,]\d{1,2})?)\s*(?:·|\s)*\(([\d.,]+[kKmM]?)\)/i);
+                  if (rMatch) rating = rMatch[1].replace(",", ".");
+                }
+                if (!rating) {
+                  const rMatch2 = textC.match(/(\d\.\d{1,2}|\d,\d{1,2})\s*[\(]?\s*(\d[\d.,]*[kKmM]?)\s*[\)]?/);
+                  if (rMatch2 && parseFloat(rMatch2[1].replace(",", ".")) <= 5) rating = rMatch2[1].replace(",", ".");
+                }
+                if (!rating) {
+                  const rMatch3 = textC.match(/(\d(?:[.,]\d{1,2})?)\s*(?:estrela|star)/i);
+                  if (rMatch3) rating = rMatch3[1].replace(",", ".");
+                }
+                const websiteEl = item.querySelector('a[data-value="Website"], a[data-item-id="authority"]') as HTMLAnchorElement | null;
+                out.push({
+                  url: href,
+                  card: {
+                    name: leadName,
+                    fullAddress: address,
+                    categories: category || "Comércio",
+                    averageRating: rating,
+                    reviewCount: "",
+                    reviewCountSources: [
+                      ...Array.from(item.querySelectorAll(".UY7F9")).map((el) => el.textContent || ""),
+                      ...Array.from(item.querySelectorAll('[role="img"][aria-label]')).map((el) => el.getAttribute("aria-label") || ""),
+                      textC,
+                    ],
+                    website: websiteEl?.href || "",
+                  },
+                });
+              }
+              return out;
+            }, unseenUrls).catch(() => null);
+
+            if (Array.isArray(extractedBatch)) {
+              for (const row of extractedBatch) {
+                row.card.website = decodeGoogleRedirectUrl(row.card.website);
+                row.card.reviewCount = extractGoogleReviewCount(row.card.reviewCountSources);
+                batchCardsByUrl.set(row.url, row.card);
+              }
+            }
+
+            if (settings.auditSiteHealth || (effectiveSiteMode !== "any" && effectiveSiteMode !== "no_site")) {
+              const urlsToAudit: Array<{ url: string; website: string }> = [];
+              for (const lead of newLeads) {
+                const pk = placeUrlKey(lead.url);
+                if (crmDedupeCache?.hasPlace(pk)) continue;
+                const card = batchCardsByUrl.get(lead.url);
+                if (!card?.website) continue;
+                if (effectiveSiteMode === "no_site") continue;
+                if (reviewCountFilterReason(card.reviewCount, settings.minReviews, true)) continue;
+                if (leadExtraFilterReason({
+                  reviewCount: card.reviewCount,
+                  averageRating: card.averageRating,
+                  maxReviews: settings.maxReviews,
+                  minRating: settings.minRating,
+                  maxRating: settings.maxRating,
+                  cardStage: true,
+                })) continue;
+                if (settings.excludeFranchises && detectFranchiseOrChain({ name: lead.name, website: card.website }).isFranchise) continue;
+                urlsToAudit.push({ url: lead.url, website: card.website });
+              }
+              if (urlsToAudit.length > 0) {
+                await runConcurrentPool(urlsToAudit, 4, async (item) => {
+                  try {
+                    const audit = await auditLeadWebsite(item.website);
+                    preAuditByUrl.set(item.url, audit);
+                  } catch {
+                    // Fallback acontece no detalhe individual se necessário
+                  }
+                });
+              }
+            }
+          }
         }
 
         for (const lead of newLeads) {
@@ -1054,7 +1479,14 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
             await saveSearchCursor(false);
           };
 
-          const cardData = lead.cardData || await page.evaluate((leadName: string) => {
+          if (crmDedupeCache && crmDedupeCache.hasPlace(placeKey)) {
+            crmSkipped++;
+            sendRunLog(run, `⏭️ Já no CRM (cache rápido): ${lead.name}`, "info");
+            await markCandidateSeen();
+            continue;
+          }
+
+          const cardData = lead.cardData || batchCardsByUrl.get(lead.url) || await page.evaluate((leadName: string) => {
             const items = Array.from(document.querySelectorAll(".Nv2PK"));
             const item = items.find((el) => el.querySelector(".qBF1Pd")?.textContent?.trim() === leadName);
             if (!item) return null;
@@ -1114,6 +1546,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
           }, lead.name);
 
           if (!cardData) continue;
+          cardData.website = decodeGoogleRedirectUrl(cardData.website);
           cardData.reviewCount = extractGoogleReviewCount(cardData.reviewCountSources);
 
           // Colhe a cidade do endereço ANTES de qualquer descarte — até os
@@ -1125,9 +1558,17 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
             cityCounts.set(loc.cidade, (cityCounts.get(loc.cidade) || 0) + 1);
           }
 
-          // Descarte ULTRAPRECOCE: site já visível no card → nem abre o
-          // painel de detalhes (pula navegação + reviews + filtros).
-          if (settings.filterWithWebsite && cardData.website) {
+          // Descarte ULTRAPRECOCE: franquiados, site no card, faixa de avaliações/nota e saúde pré-auditada do site
+          if (settings.excludeFranchises) {
+            const franchiseCardCheck = detectFranchiseOrChain({ name: lead.name, website: cardData.website });
+            if (franchiseCardCheck.isFranchise) {
+              sendRunLog(run, `🚫 Descartado (${franchiseCardCheck.reason}): ${lead.name}`, "warning");
+              await markCandidateSeen();
+              continue;
+            }
+          }
+
+          if (effectiveSiteMode === "no_site" && cardData.website) {
             sendRunLog(run, `🚫 Descartado (Com site): ${lead.name}`, "warning");
             await markCandidateSeen();
             continue;
@@ -1138,6 +1579,30 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
             sendRunLog(run, `🚫 Descartado (${cardReviewReason}): ${lead.name}`, "warning");
             await markCandidateSeen();
             continue;
+          }
+
+          const cardExtraReason = leadExtraFilterReason({
+            reviewCount: cardData.reviewCount,
+            averageRating: cardData.averageRating,
+            maxReviews: settings.maxReviews,
+            minRating: settings.minRating,
+            maxRating: settings.maxRating,
+            cardStage: true,
+          });
+          if (cardExtraReason) {
+            sendRunLog(run, `🚫 Descartado (${cardExtraReason}): ${lead.name}`, "warning");
+            await markCandidateSeen();
+            continue;
+          }
+
+          const preCardAudit = preAuditByUrl.get(lead.url);
+          if (preCardAudit && effectiveSiteMode !== "any") {
+            const preSiteMatch = matchesSiteFilterMode(preCardAudit.status, effectiveSiteMode);
+            if (!preSiteMatch.pass) {
+              sendRunLog(run, `🚫 Descartado (${preSiteMatch.reason}): ${lead.name}`, "warning");
+              await markCandidateSeen();
+              continue;
+            }
           }
 
           let phoneStr = "";
@@ -1172,36 +1637,60 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
           let featuredReviews: string[] | undefined;
           let additionalCategories: string[] | undefined;
           let addressComponents: any = null;
+          let leadEnrichment: LeadEnrichmentData | undefined;
           let detailsPage;
           try {
             if (lead.url && browser) {
-              detailsPage = await browser.newPage();
-              try {
-                if (typeof detailsPage.setCookie === "function") {
-                  await detailsPage.setCookie(
-                    { name: "SOCS", value: "CAISNQgDEitnd3NfMjAyNDA2MTAtMF9SQzJfZXVyb3BlX3N0YXR1c19jYTFfMjAyNDA2MTAuMV9wMBoCcHQgAQ", domain: ".google.com", path: "/" },
-                    { name: "SOCS", value: "CAISNQgDEitnd3NfMjAyNDA2MTAtMF9SQzJfZXVyb3BlX3N0YXR1c19jYTFfMjAyNDA2MTAuMV9wMBoCcHQgAQ", domain: ".google.com.br", path: "/" },
-                  );
+              let pageCreatedNow = false;
+              if (settings.turboMode) {
+                if (reusableDetailsPage && reusableDetailsHits >= 25) {
+                  await reusableDetailsPage.close().catch(() => {});
+                  reusableDetailsPage = null;
+                  reusableDetailsHits = 0;
                 }
-              } catch {}
-              await detailsPage.setRequestInterception(true);
-              detailsPage.on("request", (req: { resourceType: () => string; abort: () => void; continue: () => void }) => {
-                if (["image", "stylesheet", "font"].includes(req.resourceType())) req.abort();
-                else req.continue();
-              });
-                await detailsPage.goto(lead.url, { waitUntil: "domcontentloaded", timeout: 15000 });
-                await sleep(2000);
-                // ---- Espera ativa pelo botão de telefone (lazy loading do Google Maps) ----
-                // O Google Maps carrega o painel de detalhes mas o botão "Ligar"
-                // pode demorar a aparecer. Tentamos até 5s esperando pelo elemento.
+                if (!reusableDetailsPage) {
+                  reusableDetailsPage = await browser.newPage();
+                  pageCreatedNow = true;
+                }
+                detailsPage = reusableDetailsPage;
+                reusableDetailsHits++;
+              } else {
+                detailsPage = await browser.newPage();
+                pageCreatedNow = true;
+              }
+              if (pageCreatedNow) {
                 try {
-                 await detailsPage.waitForSelector(
-                    '[data-item-id^="phone"], [data-tooltip*="telefone" i], [aria-label*="telefone" i], [aria-label*="phone" i], [aria-label*="Ligar" i], [aria-label*="Call" i]',
-                    { timeout: 5000 }
-                  );
-                } catch {
-                  // Se não achou nesse tempo, continua mesmo assim (fallbacks no evaluate resolverão).
-                }
+                  if (typeof detailsPage.setCookie === "function") {
+                    await detailsPage.setCookie(
+                      { name: "SOCS", value: "CAISNQgDEitnd3NfMjAyNDA2MTAtMF9SQzJfZXVyb3BlX3N0YXR1c19jYTFfMjAyNDA2MTAuMV9wMBoCcHQgAQ", domain: ".google.com", path: "/" },
+                      { name: "SOCS", value: "CAISNQgDEitnd3NfMjAyNDA2MTAtMF9SQzJfZXVyb3BlX3N0YXR1c19jYTFfMjAyNDA2MTAuMV9wMBoCcHQgAQ", domain: ".google.com.br", path: "/" },
+                    );
+                  }
+                } catch {}
+                await detailsPage.setRequestInterception(true);
+                detailsPage.on("request", (req: { resourceType: () => string; abort: () => void; continue: () => void }) => {
+                  if (["image", "stylesheet", "font", "media"].includes(req.resourceType())) req.abort();
+                  else req.continue();
+                });
+              }
+              await detailsPage.goto(lead.url, { waitUntil: "domcontentloaded", timeout: 15000 });
+              if (settings.turboMode) {
+                await detailsPage.waitForSelector("h1", { timeout: 3000 }).catch(() => {});
+                await sleep(400);
+              } else {
+                await sleep(2000);
+              }
+              // ---- Espera ativa pelo botão de telefone (lazy loading do Google Maps) ----
+              // O Google Maps carrega o painel de detalhes mas o botão "Ligar"
+              // pode demorar a aparecer. Tentamos esperando pelo elemento.
+              try {
+                await detailsPage.waitForSelector(
+                  '[data-item-id^="phone"], [data-tooltip*="telefone" i], [aria-label*="telefone" i], [aria-label*="phone" i], [aria-label*="Ligar" i], [aria-label*="Call" i]',
+                  { timeout: settings.turboMode ? 2200 : 5000 }
+                );
+              } catch {
+                // Se não achou nesse tempo, continua mesmo assim (fallbacks no evaluate resolverão).
+              }
 
               // ============================================================
               // FASE 1 — Captura do PAINEL PRINCIPAL (antes de qualquer
@@ -1446,12 +1935,23 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                   businessDetails.pessoasProcuramPor = itens.slice(0, 20);
                 }
 
-                // Serviços listados
+                // Serviços listados (limpando glifos PUA e botões da interface do Google Maps)
                 const serviceEls = Array.from(document.querySelectorAll('div[role="button"][aria-label*="serviço" i], li'));
                 const services: string[] = [];
                 for (const s of serviceEls) {
-                  const t = (s as HTMLElement).textContent?.trim() || "";
-                  if (t.length >= 3 && t.length <= 80 && !services.includes(t)) services.push(t);
+                  const t = ((s as HTMLElement).textContent || "")
+                    .replace(/[\uE000-\uF8FF]/g, "")
+                    .replace(/\s+/g, " ")
+                    .trim();
+                  if (
+                    t.length >= 3 &&
+                    t.length <= 80 &&
+                    !/^(?:salvos?|recentes?|baixar o aplicativo|compartilhar|rotas?|fechado|aberto)$/i.test(t) &&
+                    !/^\d{1,2}[:h]\d{2}/i.test(t) &&
+                    !services.includes(t)
+                  ) {
+                    services.push(t);
+                  }
                   if (services.length >= 30) break;
                 }
                 if (services.length) businessDetails.services = services;
@@ -1800,16 +2300,34 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                     cityCounts.set(key, (cityCounts.get(key) || 0) + 1);
                   }
                 }
+                if (typeof addressComponents?.bairro === "string") {
+                  const rawBairro = addressComponents.bairro.trim();
+                  if (rawBairro.length >= 3 && rawBairro.length <= 40 && isValidCityName(rawBairro)) {
+                    neighborhoodCounts.set(rawBairro, (neighborhoodCounts.get(rawBairro) || 0) + 1);
+                  }
+                }
+              }
+
+              if (Array.isArray(businessDetails?.services)) {
+                const { cleanList } = cleanGoogleServicesList(
+                  businessDetails.services,
+                  Array.isArray(cardData.categories) ? cardData.categories.join(", ") : cardData.categories,
+                  cardData.name,
+                );
+                if (cleanList.length > 0) businessDetails.services = cleanList;
+                else delete businessDetails.services;
               }
 
               // ============================================================
               // FILTROS ANTECIPADOS — logo após a FASE 1 (telefone + site já
               // conhecidos). Descarta ANTES da captura profunda de reviews:
               // não gastamos 10-30s de scroll em lead que será descartado.
-              // Se o filtro de ano no Google estiver ativo e o ano ainda não
-              // foi identificado (ou depende de ver avaliações mais antigas na FASE 2),
-              // aguarda a FASE 2 antes de descartar por ano ausente/recente.
               // ============================================================
+              const mapsWaUrl = String(businessDetails?.redesAdicionais?.whatsapp || "");
+              if (!phoneStr && mapsWaUrl) {
+                const mapsWaPhones = extractWhatsAppPhonesFromHtml(mapsWaUrl);
+                if (mapsWaPhones.length > 0) phoneStr = mapsWaPhones[0];
+              }
               const deferYearToPhase2 =
                 Boolean(settings.googleYearFrom || settings.googleYearTo) &&
                 (!yearEstablished || Boolean(settings.googleYearTo && Number(yearEstablished) > settings.googleYearTo));
@@ -1824,6 +2342,10 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                   averageRating: cardData.averageRating,
                   yearEstablished: deferYearToPhase2 ? undefined : yearEstablished,
                   cardStage: deferYearToPhase2,
+                  deferEmptyPhone: shouldAuditOrEnrich && Boolean(settings.prioritizePartnerPhone || settings.enrichCnpj),
+                  deferLandline: shouldAuditOrEnrich && Boolean(settings.validateWhatsApp || settings.prioritizePartnerPhone),
+                  deferWebsiteCheck: effectiveSiteMode !== "no_site" && effectiveSiteMode !== "any",
+                  businessStatus,
                 },
               );
               if (!earlyCheck.pass) {
@@ -1831,18 +2353,172 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 sendRunLog(run, `🚫 Descartado (${earlyCheck.reason}): ${lead.name}`, "warning");
               }
 
+              // Se modo exige site existente e o Maps não trouxe site nenhum, descarta antes de HTTP externo.
+              if (
+                !discardedByFilters &&
+                !websiteStr &&
+                (effectiveSiteMode === "only_broken_or_weak" || effectiveSiteMode === "only_active_site")
+              ) {
+                discardedByFilters = "Sem site";
+                sendRunLog(run, `🚫 Descartado (Sem site): ${lead.name}`, "warning");
+              }
+
               // ============================================================
-              // DUPLICATA DE CRM ANTECIPADA — logo após a FASE 1 (telefone
-              // já conhecido). Se o JID já está no CRM, descarta NA HORA e
-              // pula a FASE 2 (reviews profundas = 10-30s de scroll caro).
+              // DUPLICATA DE CRM ANTECIPADA — logo após a FASE 1
               // ============================================================
               if (!discardedByFilters) {
                 const earlyJid = formatJid(phoneStr);
-                const earlyDup = await checkCrmDuplicate(earlyJid, currentClientId, { phones: phoneStr, mapsUrl: mapsUrl || lead.url, placeId });
-                if (earlyDup) {
+                const cachedDup =
+                  crmDedupeCache && effectiveFilters.filterDuplicates
+                    ? (earlyJid && crmDedupeCache.jids.has(earlyJid)) ||
+                      (placeId && crmDedupeCache.placeIds.has(placeId)) ||
+                      crmDedupeCache.hasPlace(mapsUrl || lead.url)
+                    : false;
+                if (cachedDup) {
                   crmSkipped++;
-                  sendRunLog(run, `⏭️ Já no CRM (${earlyDup}): ${lead.name}`, "info");
-                  discardedByFilters = `Já no CRM (${earlyDup})`;
+                  sendRunLog(run, `⏭️ Já no CRM (cache rápido): ${lead.name}`, "info");
+                  discardedByFilters = "Já no CRM";
+                } else {
+                  const earlyDup = await checkCrmDuplicate(earlyJid, currentClientId, { phones: phoneStr, mapsUrl: mapsUrl || lead.url, placeId });
+                  if (earlyDup) {
+                    crmSkipped++;
+                    sendRunLog(run, `⏭️ Já no CRM (${earlyDup}): ${lead.name}`, "info");
+                    discardedByFilters = `Já no CRM (${earlyDup})`;
+                  }
+                }
+              }
+
+              // ============================================================
+              // AUDITORIA DO SITE, CNPJ, SÓCIO DECISOR & WHATSAPP (CUSTO ZERO)
+              // ============================================================
+              if (!discardedByFilters && shouldAuditOrEnrich) {
+                const detailLoc = extractLocation(addressComponents?.cidade ? `${addressComponents.cidade}, ${addressComponents.estado || ""}` : cardData.fullAddress);
+                const cityForCnpj = String(addressComponents?.cidade || detailLoc.cidade || loc.cidade || "").trim();
+                const ufForCnpj = String(addressComponents?.estado || (cep ? ufFromCep(cep) : "") || detailLoc.estado || loc.estado || "").trim().toUpperCase();
+
+                const checkWhatsAppFn =
+                  settings.validateWhatsApp && validationInstance
+                    ? async (numbers: string[]) => {
+                        const { checkWhatsAppNumbersDetailed } = await import("@/lib/channel");
+                        return checkWhatsAppNumbersDetailed(numbers, validationInstance);
+                      }
+                    : undefined;
+
+                const checkBusinessProfileFn =
+                  settings.validateWhatsApp && settings.huntPartnerDirectPhone && validationInstance
+                    ? async (phoneOrJid: string) => {
+                        const { fetchWhatsAppProfileInfo } = await import("@/lib/channel");
+                        return fetchWhatsAppProfileInfo(phoneOrJid, validationInstance);
+                      }
+                    : undefined;
+
+                const canReusePreAudit =
+                  !!preCardAudit &&
+                  !!cardData.website &&
+                  (!websiteStr || decodeGoogleRedirectUrl(websiteStr) === cardData.website);
+
+                const enr = await enrichCapturedLead({
+                  tenantId: currentClientId,
+                  name: cardData.name,
+                  phone: phoneStr,
+                  mapsWhatsAppUrl: mapsWaUrl,
+                  website: websiteStr,
+                  instagram: instagramStr,
+                  categories: Array.isArray(cardData.categories) ? cardData.categories.join(", ") : cardData.categories,
+                  fullAddress: cardData.fullAddress,
+                  cep: cep || addressComponents?.cep || "",
+                  cidade: cityForCnpj,
+                  uf: ufForCnpj,
+                  averageRating: cardData.averageRating,
+                  reviewCount: cardData.reviewCount,
+                  claimed,
+                  ownerName,
+                  services: Array.isArray(businessDetails?.services) ? businessDetails.services : undefined,
+                  reviews: reviewsDetalhes,
+                  precomputedSiteAudit: canReusePreAudit ? preCardAudit : undefined,
+                  options: {
+                    auditSiteHealth: settings.auditSiteHealth === true || effectiveSiteMode !== "any",
+                    enrichCnpj: settings.enrichCnpj === true,
+                    prioritizePartnerPhone: settings.prioritizePartnerPhone === true,
+                    validateWhatsApp: settings.validateWhatsApp === true,
+                    huntPartnerDirectPhone: settings.huntPartnerDirectPhone === true,
+                  },
+                  checkWhatsAppFn,
+                  checkBusinessProfileFn,
+                });
+
+                const siteMatch = matchesSiteFilterMode(enr.siteAudit.status, effectiveSiteMode);
+                if (!siteMatch.pass) {
+                  discardedByFilters = siteMatch.reason;
+                  sendRunLog(run, `🚫 Descartado (${siteMatch.reason}): ${lead.name}`, "warning");
+                } else if (settings.filterClosedBusinesses && enr.cnpjResult && !enr.cnpjResult.isAtiva) {
+                  discardedByFilters = `CNPJ inativo (${enr.cnpjResult.situacaoCadastral})`;
+                  sendRunLog(run, `🚫 Descartado (${discardedByFilters}): ${lead.name}`, "warning");
+                } else if (settings.excludeMei && enr.cnpjResult?.isMei) {
+                  discardedByFilters = "MEI descartado pelo filtro";
+                  sendRunLog(run, `🚫 Descartado (${discardedByFilters}): ${lead.name}`, "warning");
+                } else if (
+                  settings.excludeFranchises &&
+                  (enr.enrichment.isFranchise ||
+                    detectFranchiseOrChain({
+                      name: cardData.name,
+                      website: websiteStr,
+                      razaoSocial: enr.cnpjResult?.razaoSocial,
+                      capitalSocial: enr.cnpjResult?.capitalSocial,
+                    }).isFranchise)
+                ) {
+                  discardedByFilters = "Franquia / grande rede descartada";
+                  sendRunLog(run, `🚫 Descartado (${discardedByFilters}): ${lead.name}`, "warning");
+                } else if (
+                  settings.minCapitalSocial &&
+                  settings.minCapitalSocial > 0 &&
+                  (!enr.cnpjResult || enr.cnpjResult.capitalSocial < settings.minCapitalSocial)
+                ) {
+                  discardedByFilters = enr.cnpjResult
+                    ? `Capital social R$ ${enr.cnpjResult.capitalSocial} abaixo de R$ ${settings.minCapitalSocial}`
+                    : "CNPJ/Capital social não confirmado";
+                  sendRunLog(run, `🚫 Descartado (${discardedByFilters}): ${lead.name}`, "warning");
+                } else {
+                  if (enr.bestPhone) phoneStr = enr.bestPhone;
+                  const cleanBest = phoneStr.replace(/\D/g, "");
+                  if (settings.filterEmpty && !cleanBest) {
+                    discardedByFilters = "Sem telefone";
+                    sendRunLog(run, `🚫 Descartado (Sem telefone): ${lead.name}`, "warning");
+                  } else if (settings.validateWhatsApp && enr.noActiveWhatsApp) {
+                    discardedByFilters = "Sem WhatsApp ativo";
+                    sendRunLog(run, `🚫 Descartado (Sem WhatsApp ativo): ${lead.name}`, "warning");
+                  } else if (settings.filterLandlines && cleanBest && isLandline(cleanBest) && !enr.usedLandlineWithWhatsApp) {
+                    discardedByFilters = "Telefone fixo";
+                    sendRunLog(run, `🚫 Descartado (Telefone fixo): ${lead.name}`, "warning");
+                  } else if (
+                    effectiveFilters.filterDuplicates &&
+                    cleanBest &&
+                    leadsStore.some((l) => l.phones.replace(/\D/g, "") === cleanBest)
+                  ) {
+                    discardedByFilters = "Telefone duplicado";
+                    sendRunLog(run, `🚫 Descartado (Telefone duplicado): ${lead.name}`, "warning");
+                  }
+                }
+
+                if (!discardedByFilters) {
+                  leadEnrichment = enr.enrichment;
+                  if (enr.enrichment.socioDecisor && !ownerName) {
+                    ownerName = enr.enrichment.socioDecisor;
+                  }
+                  businessDetails = { ...(businessDetails || {}), enrichment: enr.enrichment };
+                  const extraTags = [
+                    enr.enrichment.siteHealth === "broken_site" ? `🔴 ${enr.enrichment.siteStatusLabel}` : null,
+                    enr.enrichment.primeiroNomeSocio ? `👤 Sócio: ${enr.enrichment.primeiroNomeSocio}` : null,
+                    enr.enrichment.whatsappChannelType === "socio_direto"
+                      ? "🎯 Direto Sócio"
+                      : enr.enrichment.whatsappChannelType === "recepcao_comercial"
+                        ? "🏢 Recepção"
+                        : null,
+                    enr.enrichment.hasPaidTrafficTag ? "📣 Pixel/Ads" : null,
+                    enr.usedLandlineWithWhatsApp ? "📱 Fixo c/ WA Business" : null,
+                    `⭐ Score ${enr.enrichment.qualificationScore}`,
+                  ].filter(Boolean).join(" · ");
+                  if (extraTags) sendRunLog(run, `🔍 ${lead.name} → ${extraTags}`, "info");
                 }
               }
 
@@ -1851,7 +2527,10 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
               // ============================================================
               const hasYearFilter = Boolean(settings.googleYearFrom || settings.googleYearTo);
               const reviewLimit = settings.captureAllReviews ? Number.MAX_SAFE_INTEGER : hasYearFilter ? 200 : 50;
-              if (!discardedByFilters && (settings.captureAllReviews || hasYearFilter || reviewsDetalhes.length < reviewLimit)) {
+              const shouldScrollReviews = settings.turboMode
+                ? Boolean(settings.captureAllReviews) || deferYearToPhase2
+                : Boolean(settings.captureAllReviews) || hasYearFilter || reviewsDetalhes.length < reviewLimit;
+              if (!discardedByFilters && shouldScrollReviews) {
                 try {
                   // ---- Abrir a lista de reviews (UI nova 2025+ do Maps) ----
                   // A UI nova NÃO tem [role="feed"] na aba Avaliações: as
@@ -2107,13 +2786,20 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
               }
             }
           } catch (error) {
+            if (settings.turboMode && reusableDetailsPage) {
+              await reusableDetailsPage.close().catch(() => {});
+              reusableDetailsPage = null;
+              reusableDetailsHits = 0;
+            }
             // Não persistir um painel incompleto nem consumir definitivamente o candidato.
             transientDetailError = true;
             processedPlaceKeys.delete(placeKey);
             if (!run.keepRunning || !isCurrentRun()) break;
             throw error;
           } finally {
-            if (detailsPage) await detailsPage.close().catch(() => {});
+            if (detailsPage && (!settings.turboMode || detailsPage !== reusableDetailsPage)) {
+              await detailsPage.close().catch(() => {});
+            }
           }
 
           const cleanPhone = phoneStr.replace(/\D/g, "");
@@ -2125,6 +2811,9 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
             : evaluateLeadFilters(cleanPhone, websiteStr, settings, leadsStore, cardData.reviewCount, instagramStr, {
                 averageRating: cardData.averageRating,
                 yearEstablished,
+                deferLandline: !!leadEnrichment?.whatsappVerified && isLandline(cleanPhone),
+                deferWebsiteCheck: effectiveSiteMode !== "no_site" && effectiveSiteMode !== "any",
+                businessStatus,
               });
 
           if (finalCheck.pass) {
@@ -2196,10 +2885,12 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 featuredReviews,
                 additionalCategories,
                 addressComponents,
+                enrichment: leadEnrichment,
               };
               if (!isCurrentRun() || !run.keepRunning) break;
               const savedLeadId = await saveLeadAndSync(finalLead, settings, run);
               if (!savedLeadId || !isCurrentRun() || !run.keepRunning) continue;
+              crmDedupeCache?.addLead({ placeUrl: mapsUrl || lead.url, placeId, jid, phone: cleanPhone });
               leadsStore.push(finalLead);
               broadcastToClient(run.clientId, { event: "new_lead", lead: finalLead, count: run.automationId ? run.captureCount : leadsStore.length });
               await markCandidateSeen();
@@ -2244,7 +2935,12 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
           const isEnd = await page.evaluate(() => {
             const feed = document.querySelector('[role="feed"]');
             if (!feed) return false;
-            return feed.textContent?.includes("Você chegou ao final") || feed.textContent?.includes("final da lista") || false;
+            const txt = feed.textContent || "";
+            return txt.includes("Você chegou ao final") ||
+              txt.includes("Você chegou ao fim") ||
+              txt.includes("fim da lista") ||
+              txt.includes("final da lista") ||
+              /you've\s+reached\s+the\s+end|end\s+of\s+(?:the\s+)?list/i.test(txt);
           });
           if (isEnd) {
             explicitlyExhausted = true;
@@ -2254,7 +2950,13 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
             const madeProgress = extractedPlaces.size > previousExtractedSize || newLeads.length > previousCardsInDom;
             emptyScrolls = madeProgress ? 0 : emptyScrolls + 1;
             previousCardsInDom = newLeads.length;
-            if (emptyScrolls >= 10) throw new Error(`Resultados sem progresso para "${searchTerm}"; retomar após espera.`);
+            if (settings.turboMode && emptyScrolls >= 5 && extractedPlaces.size > 0) {
+              explicitlyExhausted = true;
+              scrolling = false;
+              sendRunLog(run, `Fim natural dos resultados em "${searchTerm}" (${extractedPlaces.size} verificados).`, "info");
+            } else if (emptyScrolls >= 10) {
+              throw new Error(`Resultados sem progresso para "${searchTerm}"; retomar após espera.`);
+            }
           }
         }
       }
@@ -2276,13 +2978,8 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
 
       // ─── PONTO DE EXPANSÃO ───
       // Roda SÓ na última busca da fila: se ainda falta lead pro limite e
-      // há orçamento nesta tentativa, enfileira o nicho nas cidades vizinhas reais.
-      // Camadas (em ordem):
-      //  1) Região metropolitana oficial (dictionary) quando conhecida;
-      //  2) Cidades vizinhas colhidas dos endereços reais (painel de detalhes
-      //     do Google — universal, qualquer cidade do Brasil);
-      //  3) Fallback universal: busca de proximidade ("{nicho} perto de
-      //     {região}") alimenta a camada 2, então expande em seguida.
+      // há orçamento nesta tentativa, aprofunda por bairros (quando habilitado)
+      // antes de expandir o nicho nas cidades vizinhas reais.
       if (
         i === queue.length - 1 &&
         maxLeads > 0 &&
@@ -2291,25 +2988,48 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
         queriesExecuted < queryBudget
       ) {
         const additions: { niche: string; region: string }[] = [];
-        for (const niche of niches.map(value => value.trim())) {
-          const searchedRegions = searchedByNiche.get(niche)!;
-          // Sempre usa a origem, nunca a última cidade expandida (evita deriva geográfica).
-          for (let scanned = 0; scanned < 6000; scanned += 5) {
-            const candidates = computeExpansionCandidates({ regions, cityCounts, alreadySearched: searchedRegions, limit: 5 });
-            if (!candidates.length) break;
-            let added = false;
-            for (const region of candidates) {
-              searchedRegions.add(norm(region));
-              if (exhaustedSearches.has(makeSearchKey(niche, region, effectiveFilters))) continue;
-              additions.push({ niche, region });
-              added = true;
+        let expansionKind: "bairros" | "cidades" = "cidades";
+
+        if (settings.expandNeighborhoods) {
+          for (const niche of niches.map(value => value.trim())) {
+            const searchedRegions = searchedByNiche.get(niche)!;
+            for (const originRegion of regions) {
+              const bairros = getNeighborhoodExpansionQueries(originRegion, neighborhoodCounts, searchedRegions, 4);
+              for (const region of bairros) {
+                searchedRegions.add(norm(region));
+                if (exhaustedSearches.has(makeSearchKey(niche, region, effectiveFilters))) continue;
+                additions.push({ niche, region });
+              }
             }
-            if (added) break;
+          }
+          if (additions.length > 0) expansionKind = "bairros";
+        }
+
+        if (additions.length === 0) {
+          for (const niche of niches.map(value => value.trim())) {
+            const searchedRegions = searchedByNiche.get(niche)!;
+            // Sempre usa a origem, nunca a última cidade expandida (evita deriva geográfica).
+            for (let scanned = 0; scanned < 6000; scanned += 5) {
+              const candidates = computeExpansionCandidates({ regions, cityCounts, alreadySearched: searchedRegions, limit: 5 });
+              if (!candidates.length) break;
+              let added = false;
+              for (const region of candidates) {
+                searchedRegions.add(norm(region));
+                if (exhaustedSearches.has(makeSearchKey(niche, region, effectiveFilters))) continue;
+                additions.push({ niche, region });
+                added = true;
+              }
+              if (added) break;
+            }
           }
         }
         if (additions.length > 0) {
           queue.push(...additions);
-          sendRunLog(run, `🧭 ${leadsStore.length}/${maxLeads} leads — expandindo nas proximidades: ${[...new Set(additions.map(item => item.region))].join(", ")}.`, "info");
+          sendRunLog(
+            run,
+            `🧭 ${leadsStore.length}/${maxLeads} leads — ${expansionKind === "bairros" ? "busca profunda nos bairros" : "expandindo nas proximidades"}: ${[...new Set(additions.map(item => item.region))].join(", ")}.`,
+            "info",
+          );
         } else {
           // Sem candidato conhecido — semeia UMA busca de proximidade por região,
           // cujos resultados (endereços reais do painel de detalhes) colhem as
@@ -2361,6 +3081,7 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
     if (!retryManual) run.isStopping = true;
     if (heartbeat) clearInterval(heartbeat);
     if (heartbeatPending) await heartbeatPending;
+    if (reusableDetailsPage) await reusableDetailsPage.close().catch(() => {});
     if (browser) await browser.close().catch(() => {});
     while (run.isPaused && run.keepRunning && isCurrentRun()) await sleep(1000);
     // Run SUBSTITUÍDO por forceRestart: só fecha o próprio browser e sai.
@@ -2474,6 +3195,18 @@ export interface StartOpts {
   /** Ano final em que o negócio está no Google ("até YYYY", 0 = até a data atual). */
   googleYearTo?: number;
   captureAllReviews?: boolean;
+  turboMode?: boolean;
+  filterClosedBusinesses?: boolean;
+  auditSiteHealth?: boolean;
+  siteFilterMode?: SiteFilterMode;
+  enrichCnpj?: boolean;
+  prioritizePartnerPhone?: boolean;
+  validateWhatsApp?: boolean;
+  excludeMei?: boolean;
+  excludeFranchises?: boolean;
+  huntPartnerDirectPhone?: boolean;
+  expandNeighborhoods?: boolean;
+  minCapitalSocial?: number;
   /** Limite de leads — quando atingido o scraper sai limpo. */
   maxLeads?: number;
   automation_id?: string | null;
@@ -2527,10 +3260,24 @@ export function startScraperRun(opts: StartOpts): { ok: boolean; error?: string;
     ["filterEmpty", "Filtro de telefone"], ["filterDuplicates", "Filtro de duplicatas"],
     ["filterLandlines", "Filtro de telefone fixo"], ["filterWithWebsite", "Filtro de site"],
     ["filterWithInstagram", "Somente com Instagram"],
+    ["turboMode", "Modo Turbo VPS"],
+    ["filterClosedBusinesses", "Ignorar empresas fechadas"],
+    ["auditSiteHealth", "Auditoria de saúde do site"],
+    ["enrichCnpj", "Enriquecimento gratuito CNPJ"],
+    ["prioritizePartnerPhone", "Priorizar WhatsApp do sócio/site"],
+    ["validateWhatsApp", "Validar WhatsApp na Evolution"],
+    ["excludeMei", "Ignorar MEI"],
+    ["excludeFranchises", "Ignorar grandes redes e franquias"],
+    ["huntPartnerDirectPhone", "Modo Direto no Dono"],
+    ["expandNeighborhoods", "Busca profunda por bairros"],
   ] as const;
   for (const [key, label] of booleanFilters) {
     if (opts[key] !== undefined && typeof opts[key] !== "boolean") return { ok: false, error: `${label} deve ser um booleano.` };
   }
+  const siteFilterMode = parseSiteFilterMode(opts.siteFilterMode);
+  if (siteFilterMode === null) return { ok: false, error: "Modo de filtro de site inválido." };
+  const minCapitalSocial = parseMinCapitalSocial(opts.minCapitalSocial);
+  if (minCapitalSocial === null) return { ok: false, error: "Capital social mínimo deve ser um número >= 0." };
   if (activeRun) {
     if (!hasRunAccess(clientId, automationId)) {
       return { ok: false, busy: true, error: "O extrator está ocupado por outra captura." };
@@ -2587,6 +3334,18 @@ export function startScraperRun(opts: StartOpts): { ok: boolean; error?: string;
     googleYearFrom,
     googleYearTo,
     captureAllReviews: opts.captureAllReviews,
+    turboMode: opts.turboMode === true,
+    filterClosedBusinesses: opts.filterClosedBusinesses === true,
+    auditSiteHealth: opts.auditSiteHealth === true,
+    siteFilterMode,
+    enrichCnpj: opts.enrichCnpj === true,
+    prioritizePartnerPhone: opts.prioritizePartnerPhone === true,
+    validateWhatsApp: opts.validateWhatsApp === true,
+    excludeMei: opts.excludeMei === true,
+    excludeFranchises: opts.excludeFranchises === true,
+    huntPartnerDirectPhone: opts.huntPartnerDirectPhone === true,
+    expandNeighborhoods: opts.expandNeighborhoods === true,
+    minCapitalSocial,
     maxLeads: opts.maxLeads,
     reviews_ai: opts.reviews_ai,
     topup: opts.topup,

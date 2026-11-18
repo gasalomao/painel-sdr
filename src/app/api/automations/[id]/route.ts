@@ -8,7 +8,9 @@ import { parseMinReviews } from "@/lib/scraper-review-count";
 import {
   parseGoogleYear,
   parseMaxReviews,
+  parseMinCapitalSocial,
   parseRatingBound,
+  parseSiteFilterMode,
   validateGoogleYearRange,
   validateRatingRange,
   validateReviewCountRange,
@@ -132,6 +134,29 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
       }
       if (filters.filterWithInstagram !== undefined && typeof filters.filterWithInstagram !== "boolean") {
         return NextResponse.json({ success: false, error: "filterWithInstagram deve ser um booleano." }, { status: 400 });
+      }
+      for (const flagKey of [
+        "turboMode",
+        "filterClosedBusinesses",
+        "auditSiteHealth",
+        "enrichCnpj",
+        "prioritizePartnerPhone",
+        "validateWhatsApp",
+        "excludeMei",
+        "excludeFranchises",
+        "huntPartnerDirectPhone",
+        "expandNeighborhoods",
+        "prioritize_by_score",
+      ] as const) {
+        if (filters[flagKey] !== undefined && typeof filters[flagKey] !== "boolean") {
+          return NextResponse.json({ success: false, error: `${flagKey} deve ser um booleano.` }, { status: 400 });
+        }
+      }
+      if (parseSiteFilterMode(filters.siteFilterMode) === null) {
+        return NextResponse.json({ success: false, error: "siteFilterMode inválido." }, { status: 400 });
+      }
+      if (parseMinCapitalSocial(filters.minCapitalSocial) === null) {
+        return NextResponse.json({ success: false, error: "minCapitalSocial deve ser um número >= 0." }, { status: 400 });
       }
     }
     // SaaS guard: cliente comum não escolhe modelo no PATCH.

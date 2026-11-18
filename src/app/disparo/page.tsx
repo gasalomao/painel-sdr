@@ -95,6 +95,7 @@ export default function DisparoPage() {
   const [humanizeMessages, setHumanizeMessages] = useState(false);
   const [antibanMixer, setAntibanMixer] = useState(true);
   const [weekendGuard, setWeekendGuard] = useState(false);
+  const [prioritizeByScore, setPrioritizeByScore] = useState(true);
   const [spintaxSeed, setSpintaxSeed] = useState(0);
   const [useWebSearch, setUseWebSearch] = useState(false);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
@@ -450,6 +451,7 @@ export default function DisparoPage() {
     setHumanizeMessages(false);
     setAntibanMixer(true);
     setWeekendGuard(false);
+    setPrioritizeByScore(true);
     setUseWebSearch(false);
     setMediaUrl(null); setMediaType(null); setMediaFileName(null); setMediaMimetype(null); setMediaCaption("");
     // NÃO limpa aiModel — mantém o último escolhido pra próxima campanha
@@ -511,6 +513,7 @@ export default function DisparoPage() {
         humanize_messages: humanizeMessages,
         antiban_mixer: antibanMixer,
         weekend_guard: weekendGuard,
+        prioritize_by_score: prioritizeByScore,
         ai_model: personalizeWithAI ? aiModel : null,
         ai_prompt: personalizeWithAI ? (aiPrompt.trim() || null) : null,
         media_url: mediaUrl,
@@ -1052,6 +1055,13 @@ export default function DisparoPage() {
                       <span>
                         <strong>Modo Comercial B2B (Proteção Fim de Semana)</strong>
                         <small id="campaign-weekend-help">Pausa disparos frios aos domingos e reduz o ritmo pela metade aos sábados para evitar denúncias de empresas fora do expediente.</small>
+                      </span>
+                    </label>
+                    <label className={styles.option}>
+                      <input type="checkbox" checked={prioritizeByScore} onChange={e => setPrioritizeByScore(e.target.checked)} aria-label="Priorizar fila por Score ICP" aria-describedby="campaign-priority-help" />
+                      <span>
+                        <strong>Priorizar fila por Score ICP</strong>
+                        <small id="campaign-priority-help">Envia primeiro os leads com maior pontuação de oportunidade, sócio direto localizado e site quebrado/anúncios.</small>
                       </span>
                     </label>
                     <div className={styles.media}>

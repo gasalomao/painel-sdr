@@ -2817,6 +2817,133 @@ const results = await webSearch(q, 8);
   return finalText;
 }
 
+export interface CampaignMessagePreviewResult {
+  renderedTemplate: string;
+  mixedMessage: string;
+  finalMessage: string;
+  chunks: string[];
+  usedAi: boolean;
+  channelType: string;
+}
+
+/**
+ * Gera uma prévia fiel de disparo (dry-run) usando exatamente o mesmo pipeline
+ * de `renderTemplate`, Misturador Anti-Ban, `personalizeWithAI`, guardião
+ * Two-Step Handshake e `splitMessage` — sem enviar WhatsApp nem gravar no DB.
+ */
+export async function previewCampaignMessageGeneration(opts: {
+  lead: Record<string, unknown>;
+  clientId: string;
+  messageTemplate: string;
+  personalizeWithAi?: boolean;
+  aiModel?: string | null;
+  aiPrompt?: string | null;
+  useWebSearch?: boolean;
+  antibanMixer?: boolean;
+  humanizeMessages?: boolean;
+  now?: Date;
+}): Promise<CampaignMessagePreviewResult> {
+  const now = opts.now || new Date();
+  const lead = opts.lead || {};
+  const bd =
+    lead.business_details && typeof lead.business_details === "object"
+      ? (lead.business_details as Record<string, unknown>)
+      : {};
+  const enr =
+    bd.enrichment && typeof bd.enrichment === "object"
+      ? (bd.enrichment as Record<string, unknown>)
+      : {};
+  const channelType =
+    typeof enr.whatsappChannelType === "string" ? enr.whatsappChannelType : "indefinido";
+
+  const rawCompanyName =
+    typeof lead.nome_negocio === "string"
+      ? lead.nome_negocio
+      : typeof lead.name === "string"
+        ? lead.name
+        : "";
+  const effectiveCompanyName = opts.antibanMixer
+    ? cleanCompanyNameForApproach(rawCompanyName) || rawCompanyName
+    : rawCompanyName;
+  const ramoNegocio =
+    typeof lead.ramo_negocio === "string"
+      ? lead.ramo_negocio
+      : typeof lead.categoria === "string"
+        ? lead.categoria
+        : "";
+
+  const renderCtx = leadRowToTemplateContext(lead, {
+    remoteJid: typeof lead.remoteJid === "string" ? lead.remoteJid : undefined,
+    nome_negocio: effectiveCompanyName || rawCompanyName,
+    ramo_negocio: ramoNegocio,
+    now,
+  });
+
+  const renderedTemplate = renderTemplate(opts.messageTemplate, renderCtx, { spintax: true });
+  let text = renderedTemplate;
+
+  if (opts.antibanMixer) {
+    text = applyAntiBanMixer({
+      template: opts.messageTemplate,
+      renderedText: text,
+      companyName: effectiveCompanyName || rawCompanyName,
+      now,
+      scopeKey: "dryrun-preview",
+    });
+  }
+  const mixedMessage = text;
+
+  let usedAi = false;
+  if (opts.personalizeWithAi) {
+    const aiText = await personalizeWithAI({
+      baseMessage: text,
+      model: opts.aiModel || "gemini-1.5-flash",
+      customPrompt: opts.aiPrompt ? renderTemplate(opts.aiPrompt, renderCtx) : null,
+      nomeEmpresa: effectiveCompanyName || rawCompanyName,
+      ramo: ramoNegocio,
+      useWebSearch: Boolean(opts.useWebSearch),
+      campaignId: undefined,
+      campaignName: "Dry-Run Preview",
+      remoteJid: typeof lead.remoteJid === "string" ? lead.remoteJid : undefined,
+      clientId: opts.clientId,
+    });
+    if (aiText && aiText.trim()) {
+      text = aiText.trim();
+      usedAi = true;
+    }
+  }
+
+  text = renderTemplate(text, renderCtx, { spintax: true });
+  if (/\{\{.*?\}\}|\{.*?\}/.test(text)) {
+    text = text
+      .replace(/\{\{\s*[\w-]+\s*\}\}/g, "")
+      .replace(/\{\s*[\w-]+\s*\}/g, "")
+      .replace(/[ \t]{2,}/g, " ")
+      .replace(/\s+([.,!?])/g, "$1")
+      .trim();
+  }
+
+  text = enforceShortHandshakeGuard({
+    template: opts.messageTemplate,
+    candidateText: text,
+    companyName: effectiveCompanyName || rawCompanyName,
+    now,
+    scopeKey: "dryrun-preview",
+  });
+
+  const chunks = opts.humanizeMessages ? splitMessage(text) : [text];
+  if (chunks.length === 0) chunks.push(text);
+
+  return {
+    renderedTemplate,
+    mixedMessage,
+    finalMessage: text,
+    chunks,
+    usedAi,
+    channelType,
+  };
+}
+
 export async function resetCampaign(campaignId: string): Promise<{ ok: boolean; error?: string }> {
   const { error: tErr } = await supabase
     .from("campaign_targets")

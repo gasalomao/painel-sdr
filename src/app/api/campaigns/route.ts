@@ -3,6 +3,7 @@ import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 import { requireClientId } from "@/lib/tenant";
 import { validateCampaignInstanceAccess, validateClientAgentAccess } from "@/lib/campaign-instance-access";
+import { computePriority } from "@/lib/prospeccao-priority";
 
 export const dynamic = "force-dynamic";
 
@@ -54,6 +55,7 @@ export async function POST(req: NextRequest) {
       humanize_messages = false,
       antiban_mixer = true,
       weekend_guard = false,
+      prioritize_by_score = true,
       ai_model = null,
       ai_prompt = null,
       media_url = null,
@@ -82,19 +84,44 @@ export async function POST(req: NextRequest) {
     }
 
     const requestedLeadIds = Array.isArray(lead_ids) ? [...new Set(lead_ids.map(Number).filter(Number.isInteger))] : [];
-    let selectedLeads: Array<{ id: number; remoteJid: string; nome_negocio: string | null; ramo_negocio: string | null }> = [];
+    const useScorePriority = prioritize_by_score !== false;
+    type SelectedCampaignLead = {
+      id: number;
+      remoteJid: string;
+      nome_negocio: string | null;
+      ramo_negocio: string | null;
+      avaliacao?: string | number | null;
+      reviews?: string | number | null;
+      created_at?: string | null;
+      business_details?: Record<string, unknown> | null;
+    };
+    let selectedLeads: SelectedCampaignLead[] = [];
     if (requestedLeadIds.length > 0) {
-      const { data: leads, error: leadsError } = await supabase
+      let { data: leads, error: leadsError } = await supabase
         .from("leads_extraidos")
-        .select("id, remoteJid, nome_negocio, ramo_negocio")
+        .select("id, remoteJid, nome_negocio, ramo_negocio, avaliacao, reviews, created_at, business_details")
         .eq("client_id", session.clientId)
         .in("id", requestedLeadIds);
+      if (leadsError && (leadsError.code === "PGRST204" || /business_details|avaliacao|reviews/i.test(leadsError.message))) {
+        const retry = await supabase
+          .from("leads_extraidos")
+          .select("id, remoteJid, nome_negocio, ramo_negocio")
+          .eq("client_id", session.clientId)
+          .in("id", requestedLeadIds);
+        leads = retry.data as typeof leads;
+        leadsError = retry.error;
+      }
       if (leadsError) {
         return NextResponse.json({ success: false, error: leadsError.message }, { status: 500 });
       }
-      selectedLeads = leads || [];
+      selectedLeads = (leads || []) as SelectedCampaignLead[];
       if (selectedLeads.length !== requestedLeadIds.length) {
         return NextResponse.json({ success: false, error: "Um ou mais leads não pertencem a este cliente" }, { status: 403 });
+      }
+      if (useScorePriority) {
+        selectedLeads = [...selectedLeads].sort(
+          (a, b) => computePriority(b, "qualification", "desc") - computePriority(a, "qualification", "desc"),
+        );
       }
     }
 
@@ -136,7 +163,7 @@ export async function POST(req: NextRequest) {
         ], { onConflict: "key" });
     } catch {}
 
-    // Resolve leads → targets
+    // Resolve leads → targets (priorizados por Score ICP quando habilitado)
     const targetsRows: Array<Record<string, unknown>> = selectedLeads
       .filter((lead) => !!lead.remoteJid)
       .map((lead) => ({
@@ -146,6 +173,7 @@ export async function POST(req: NextRequest) {
         nome_negocio: lead.nome_negocio,
         ramo_negocio: lead.ramo_negocio,
         status: "pending",
+        ...(useScorePriority ? { priority: computePriority(lead, "qualification", "desc") } : {}),
       }));
     if (Array.isArray(remote_jids)) {
       for (const value of remote_jids) {
@@ -157,8 +185,17 @@ export async function POST(req: NextRequest) {
     }
 
     if (targetsRows.length > 0) {
-      // upsert pra não falhar se houver duplicado
-      const { error: tErr } = await supabase.from("campaign_targets").upsert(targetsRows, { onConflict: "campaign_id,remote_jid", ignoreDuplicates: true });
+      // upsert pra não falhar se houver duplicado; retry sem priority caso a coluna ainda não exista no banco
+      let { error: tErr } = await supabase.from("campaign_targets").upsert(targetsRows, { onConflict: "campaign_id,remote_jid", ignoreDuplicates: true });
+      if (tErr && tErr.code === "PGRST204") {
+        const fallbackRows = targetsRows.map((row) => {
+          const rest = { ...row };
+          delete rest.priority;
+          return rest;
+        });
+        const retry = await supabase.from("campaign_targets").upsert(fallbackRows, { onConflict: "campaign_id,remote_jid", ignoreDuplicates: true });
+        tErr = retry.error;
+      }
       if (tErr) {
         console.error("[campaigns/POST] Erro targets:", tErr.message);
         await supabase.from("campaigns").delete().eq("id", camp.id).eq("client_id", session.clientId);

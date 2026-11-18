@@ -26,6 +26,7 @@ import { requireAutomationClientId as requireClientId } from "@/lib/automation-l
 import { summarizeReviewsForLead } from "@/lib/reviews-ai";
 import * as channel from "@/lib/channel";
 import { isAutoPoolInstance } from "@/lib/campaign-pool";
+import { computePriority } from "@/lib/prospeccao-priority";
 
 type AutomationRow = any;
 
@@ -254,6 +255,18 @@ async function startScrapingPhase(a: AutomationRow): Promise<void> {
       ...(filters.maxRating !== undefined ? { maxRating: filters.maxRating as number } : {}),
       ...(filters.googleYearFrom !== undefined ? { googleYearFrom: filters.googleYearFrom as number } : {}),
       ...(filters.googleYearTo !== undefined ? { googleYearTo: filters.googleYearTo as number } : {}),
+      ...(filters.turboMode !== undefined ? { turboMode: filters.turboMode === true } : {}),
+      ...(filters.filterClosedBusinesses !== undefined ? { filterClosedBusinesses: filters.filterClosedBusinesses === true } : {}),
+      ...(filters.auditSiteHealth !== undefined ? { auditSiteHealth: filters.auditSiteHealth === true } : {}),
+      ...(typeof filters.siteFilterMode === "string" ? { siteFilterMode: filters.siteFilterMode as any } : {}),
+      ...(filters.enrichCnpj !== undefined ? { enrichCnpj: filters.enrichCnpj === true } : {}),
+      ...(filters.prioritizePartnerPhone !== undefined ? { prioritizePartnerPhone: filters.prioritizePartnerPhone === true } : {}),
+      ...(filters.validateWhatsApp !== undefined ? { validateWhatsApp: filters.validateWhatsApp === true } : {}),
+      ...(filters.excludeMei !== undefined ? { excludeMei: filters.excludeMei === true } : {}),
+      ...(filters.excludeFranchises !== undefined ? { excludeFranchises: filters.excludeFranchises === true } : {}),
+      ...(filters.huntPartnerDirectPhone !== undefined ? { huntPartnerDirectPhone: filters.huntPartnerDirectPhone === true } : {}),
+      ...(filters.expandNeighborhoods !== undefined ? { expandNeighborhoods: filters.expandNeighborhoods === true } : {}),
+      ...(typeof filters.minCapitalSocial === "number" && filters.minCapitalSocial > 0 ? { minCapitalSocial: filters.minCapitalSocial } : {}),
       captureAllReviews: filters.captureAllReviews === true,
       webhookEnabled: false,
       maxLeads: captureGoal(row) - validCaptureIds(filters).length,
@@ -628,18 +641,41 @@ async function startDispatchPhase(
     } catch {}
   }
 
-  // 2) campaign_targets
-  const targets = leads.map(l => ({
+  // 2) campaign_targets (prioriza por Score ICP V2.5 quando habilitado)
+  const prioritizeByScore = a.scrape_filters?.prioritize_by_score !== false;
+  const sortedLeads = prioritizeByScore
+    ? [...leads].sort(
+        (la, lb) =>
+          computePriority(lb as Record<string, unknown>, "qualification", "desc") -
+          computePriority(la as Record<string, unknown>, "qualification", "desc"),
+      )
+    : leads;
+
+  const targets = sortedLeads.map((l) => ({
     campaign_id: camp.id,
     client_id: clientId,
     remote_jid: l.remoteJid,
     nome_negocio: l.nome_negocio,
     ramo_negocio: l.ramo_negocio,
     status: "pending",
+    ...(prioritizeByScore
+      ? { priority: computePriority(l as Record<string, unknown>, "qualification", "desc") }
+      : {}),
   }));
-  const { error: tErr } = await supabase
+  let { error: tErr } = await supabase
     .from("campaign_targets")
     .upsert(targets, { onConflict: "campaign_id,remote_jid", ignoreDuplicates: true });
+  if (tErr && tErr.code === "PGRST204") {
+    const fallbackTargets = targets.map((row) => {
+      const rest: Record<string, unknown> = { ...row };
+      delete rest.priority;
+      return rest;
+    });
+    const retry = await supabase
+      .from("campaign_targets")
+      .upsert(fallbackTargets, { onConflict: "campaign_id,remote_jid", ignoreDuplicates: true });
+    tErr = retry.error;
+  }
   if (tErr) return markError(a.id, `Falha criando targets: ${tErr.message}`);
 
   // 3) start
@@ -656,7 +692,16 @@ async function startDispatchPhase(
   );
 }
 
-type CapturedLead = { id: number; remoteJid: string; nome_negocio: string | null; ramo_negocio: string | null };
+type CapturedLead = {
+  id: number;
+  remoteJid: string;
+  nome_negocio: string | null;
+  ramo_negocio: string | null;
+  avaliacao?: string | number | null;
+  reviews?: string | number | null;
+  created_at?: string | null;
+  business_details?: Record<string, unknown> | null;
+};
 
 /** Só IDs persistidos desta captura, sempre no tenant; nunca uma faixa temporal do CRM. */
 async function selectCapturedLeads(a: AutomationRow): Promise<CapturedLead[]> {
@@ -665,9 +710,23 @@ async function selectCapturedLeads(a: AutomationRow): Promise<CapturedLead[]> {
   const leads: CapturedLead[] = [];
   const seen = new Set<string>();
   for (let i = 0; i < ids.length; i += 500) {
-    const { data, error } = await supabase.from("leads_extraidos")
-      .select("id, remoteJid, nome_negocio, ramo_negocio, status, opt_out")
-      .eq("client_id", clientId).in("id", ids.slice(i, i + 500)).not("remoteJid", "is", null);
+    const chunkIds = ids.slice(i, i + 500);
+    let { data, error } = await supabase
+      .from("leads_extraidos")
+      .select("id, remoteJid, nome_negocio, ramo_negocio, status, opt_out, avaliacao, reviews, created_at, business_details")
+      .eq("client_id", clientId)
+      .in("id", chunkIds)
+      .not("remoteJid", "is", null);
+    if (error && (error.code === "PGRST204" || /business_details|avaliacao|reviews/i.test(error.message))) {
+      const retry = await supabase
+        .from("leads_extraidos")
+        .select("id, remoteJid, nome_negocio, ramo_negocio, status, opt_out")
+        .eq("client_id", clientId)
+        .in("id", chunkIds)
+        .not("remoteJid", "is", null);
+      data = retry.data as typeof data;
+      error = retry.error;
+    }
     if (error) throw new Error(`Falha lendo leads colhidos: ${error.message}`);
     for (const lead of data || []) {
       if (!lead.remoteJid || lead.status === "invalid_number" || lead.status === "descartado" || lead.opt_out === true || seen.has(lead.remoteJid)) continue;

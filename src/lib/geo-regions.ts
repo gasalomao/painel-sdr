@@ -219,3 +219,71 @@ export function computeExpansionCandidates(opts: {
     .slice(0, Math.floor(limit))
     .map(({ city }) => `${city[0]} - ${city[1]}`);
 }
+
+const MAJOR_CITY_NEIGHBORHOODS: Record<string, ReadonlyArray<string>> = Object.assign(Object.create(null), {
+  "campinas sp": ["Cambuí", "Taquaral", "Barão Geraldo", "Jardim Guanabara", "Castelo", "Ouro Verde", "Sousas", "Botafogo"],
+  "sao paulo sp": ["Moema", "Pinheiros", "Tatuapé", "Santana", "Vila Mariana", "Santo Amaro", "Lapa", "Itaim Bibi", "Perdizes", "Morumbi"],
+  "sao bernardo do campo sp": ["Rudge Ramos", "Baeta Neves", "Paulicéia", "Assunção", "Jordanópolis", "Nova Petrópolis", "Alves Dias"],
+  "santo andre sp": ["Jardim", "Vila Assunção", "Campestre", "Parque das Nações", "Vila Pires", "Utinga"],
+  "sorocaba sp": ["Campolim", "Mangal", "Santa Rosália", "Trujillo", "Wanel Ville", "Além Ponte", "Éden"],
+  "ribeirao preto sp": ["Jardim Paulista", "Ribeirânia", "Nova Aliança", "Campos Elíseos", "Vila Seixas"],
+  "guarulhos sp": ["Vila Augusta", "Gopoúva", "Macedo", "Jardim Maia", "Picanço", "Bonsucesso"],
+  "sao jose dos campos sp": ["Jardim Aquarius", "Vila Ema", "Vila Adyana", "Jardim Satélite", "Bosque dos Eucaliptos"],
+  "osasco sp": ["Vila Yara", "Bela Vista", "Presidente Altino", "Km 18", "Jardim das Flores"],
+  "jundiai sp": ["Anhangabaú", "Vila Arens", "Eloy Chaves", "Chácara Urbana", "Ponte São João"],
+  "rio de janeiro rj": ["Barra da Tijuca", "Tijuca", "Botafogo", "Copacabana", "Méier", "Campo Grande", "Jacarepaguá"],
+  "belo horizonte mg": ["Savassi", "Lourdes", "Pampulha", "Barreiro", "Funcionários", "Buritis", "Sion"],
+  "curitiba pr": ["Batel", "Água Verde", "Portão", "Santa Felicidade", "Bigorrilho", "Bacacheri"],
+  "vitoria es": ["Praia do Canto", "Jardim da Penha", "Jardim Camburi", "Bento Ferreira", "Enseada do Suá"],
+  "vila velha es": ["Praia da Costa", "Itapuã", "Coqueiral de Itaparica", "Glória", "Ibes"],
+  "serra es": ["Laranjeiras", "Parque Residencial Laranjeiras", "Jardim Limoeiro", "Jacaraípe"],
+  "porto alegre rs": ["Moinhos de Vento", "Bela Vista", "Menino Deus", "Petrópolis", "Passo d'Areia"],
+  "goiania go": ["Setor Bueno", "Setor Marista", "Setor Oeste", "Jardim Goiás", "Setor Pedro Ludovico"],
+  "brasilia df": ["Asa Sul", "Asa Norte", "Águas Claras", "Taguatinga", "Sudoeste"],
+  "salvador ba": ["Pituba", "Caminho das Árvores", "Barra", "Itaigara", "Brotas"],
+  "fortaleza ce": ["Aldeota", "Meireles", "Fátima", "Messejana", "Cocó"],
+  "recife pe": ["Boa Viagem", "Espinheiro", "Casa Forte", "Graças", "Pina"],
+});
+
+/**
+ * Gera sub-regiões por bairros para contornar o limite de ~120 resultados centrais do Google Maps
+ * e descobrir empresas de bairro (onde o decisor atende diretamente).
+ */
+export function getNeighborhoodExpansionQueries(
+  region: string,
+  dynamicBairros?: ReadonlyMap<string, number>,
+  alreadySearched?: ReadonlySet<string>,
+  limit = 6,
+): string[] {
+  if (!Number.isFinite(limit) || limit < 1) return [];
+  const city = resolveMunicipality(region);
+  if (!city) return [];
+
+  const canonicalCity = `${city[0]} - ${city[1]}`;
+  const key = cityKey(city);
+  const preset = MAJOR_CITY_NEIGHBORHOODS[key] || [];
+  const dynamicSorted = dynamicBairros
+    ? [...dynamicBairros.entries()]
+        .filter(([b]) => {
+          const clean = b.trim();
+          return clean.length >= 3 && clean.length <= 40 && normalizeKey(clean) !== normalizeKey(city[0]);
+        })
+        .sort((a, b) => b[1] - a[1])
+        .map(([b]) => b.trim())
+    : [];
+
+  const candidates: string[] = [];
+  const seenBairros = new Set<string>();
+  for (const bairro of [...dynamicSorted, ...preset]) {
+    const bNorm = normalizeKey(bairro);
+    if (!bNorm || bNorm === "centro" && seenBairros.has("centro")) continue;
+    if (seenBairros.has(bNorm)) continue;
+    seenBairros.add(bNorm);
+    const fullRegion = `${bairro}, ${canonicalCity}`;
+    if (alreadySearched?.has(normalizeKey(fullRegion))) continue;
+    candidates.push(fullRegion);
+    if (candidates.length >= Math.floor(limit)) break;
+  }
+
+  return candidates;
+}

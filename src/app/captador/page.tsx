@@ -19,7 +19,7 @@ import {
   MapPin, Rocket, Square, Filter, Loader2, CheckCircle2, XCircle, Terminal, Bot, ChevronRight,
   Download, Trash2, Send, ToggleLeft, Eye, Star, Clock, Link2, MapPinned,
   Building2, Search, Phone, ExternalLink, Copy, Check, Sparkles, AlertCircle,
-  SlidersHorizontal, ChevronDown, Globe, MessageCircle,
+  SlidersHorizontal, ChevronDown, Globe, MessageCircle, Zap, ShieldCheck, UserCheck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ModelOptions } from "@/components/ai-module-shared";
@@ -28,11 +28,13 @@ import { parseMinReviews } from "@/lib/scraper-review-count";
 import {
   parseGoogleYear,
   parseMaxReviews,
+  parseMinCapitalSocial,
   parseRatingBound,
   validateGoogleYearRange,
   validateRatingRange,
   validateReviewCountRange,
 } from "@/lib/scraper-lead-filters";
+import type { LeadEnrichmentData, SiteFilterMode } from "@/lib/scraper-lead-enrichment";
 
 // ponytail: cores locais enquanto o tema global expuser canais HSL; remover após normalizar os tokens globais.
 const CAPTADOR_COLORS = {
@@ -143,6 +145,7 @@ interface BusinessDetails {
   lng?: string;
   placeId?: string;
   atualizadoEm?: string;
+  enrichment?: LeadEnrichmentData;
 }
 
 interface Lead {
@@ -173,7 +176,26 @@ interface Lead {
   distribuicaoEstrelas?: Record<string, number>;
   cep?: string;
   yearEstablished?: string;
+  ownerName?: string;
+  enrichment?: LeadEnrichmentData;
 }
+
+function getLeadEnrichment(lead: Lead): LeadEnrichmentData | undefined {
+  return lead.enrichment || lead.businessDetails?.enrichment;
+}
+
+function formatBrl(value?: number): string {
+  if (!value || value <= 0) return "—";
+  return value.toLocaleString("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 });
+}
+
+const SITE_FILTER_MODE_OPTIONS: { value: SiteFilterMode; label: string }[] = [
+  { value: "any", label: "Todos" },
+  { value: "no_site", label: "Sem site" },
+  { value: "broken_or_no_site", label: "Sem site + Quebrado" },
+  { value: "only_broken_or_weak", label: "Só Site Quebrado/Fraco" },
+  { value: "only_active_site", label: "Só Site Ativo" },
+];
 
 interface LogEntry {
   message: string;
@@ -219,6 +241,18 @@ export default function CaptadorPage() {
   const [captureAllReviews, setCaptureAllReviews] = useState(false);
   const [filterWithWebsite, setFilterWithWebsite] = useState(false);
   const [filterWithInstagram, setFilterWithInstagram] = useState(false);
+  const [turboMode, setTurboMode] = useState(true);
+  const [filterClosedBusinesses, setFilterClosedBusinesses] = useState(true);
+  const [auditSiteHealth, setAuditSiteHealth] = useState(true);
+  const [siteFilterMode, setSiteFilterMode] = useState<SiteFilterMode>("any");
+  const [enrichCnpj, setEnrichCnpj] = useState(true);
+  const [prioritizePartnerPhone, setPrioritizePartnerPhone] = useState(true);
+  const [validateWhatsApp, setValidateWhatsApp] = useState(true);
+  const [excludeMei, setExcludeMei] = useState(false);
+  const [excludeFranchises, setExcludeFranchises] = useState(false);
+  const [huntPartnerDirectPhone, setHuntPartnerDirectPhone] = useState(false);
+  const [expandNeighborhoods, setExpandNeighborhoods] = useState(false);
+  const [minCapitalSocial, setMinCapitalSocial] = useState("0");
   const [minReviews, setMinReviews] = useState("0");
   const [minReviewsError, setMinReviewsError] = useState(false);
   const [maxReviews, setMaxReviews] = useState("0");
@@ -334,6 +368,7 @@ export default function CaptadorPage() {
     const parsedMaxRating = parseRatingBound(maxRating);
     const parsedYearFrom = parseGoogleYear(googleYearFrom);
     const parsedYearTo = parseGoogleYear(googleYearTo);
+    const parsedMinCapital = parseMinCapitalSocial(minCapitalSocial);
     let extraErr = "";
     if (parsedMaxReviews === null) extraErr = "Máximo de avaliações deve ser um inteiro entre 0 e 2147483647.";
     else if (minimum !== null) {
@@ -351,6 +386,9 @@ export default function CaptadorPage() {
     } else if (!extraErr && parsedYearFrom !== null && parsedYearTo !== null) {
       const yrRangeErr = validateGoogleYearRange(parsedYearFrom, parsedYearTo);
       if (yrRangeErr) extraErr = yrRangeErr;
+    }
+    if (!extraErr && parsedMinCapital === null) {
+      extraErr = "Capital social mínimo deve ser um número maior ou igual a 0.";
     }
     setExtraFiltersError(extraErr);
     if (minimum === null || invalidGoal || extraErr) return;
@@ -381,6 +419,18 @@ export default function CaptadorPage() {
           filterLandlines,
           filterWithWebsite,
           filterWithInstagram,
+          turboMode,
+          filterClosedBusinesses,
+          auditSiteHealth,
+          siteFilterMode,
+          enrichCnpj,
+          prioritizePartnerPhone,
+          validateWhatsApp,
+          excludeMei,
+          excludeFranchises,
+          huntPartnerDirectPhone,
+          expandNeighborhoods,
+          ...(parsedMinCapital && parsedMinCapital > 0 ? { minCapitalSocial: parsedMinCapital } : {}),
           minReviews: minimum,
           ...(parsedMaxReviews && parsedMaxReviews > 0 ? { maxReviews: parsedMaxReviews } : {}),
           ...(parsedMinRating && parsedMinRating > 0 ? { minRating: parsedMinRating } : {}),
@@ -529,9 +579,13 @@ export default function CaptadorPage() {
       "Horários", "Atributos", "Subcategorias", "Serviços", "Pessoas Procuram Por",
       "Descrição", "Atualizado Em", "Qtd Fotos", "Qtd Reviews Detalhadas",
       "5★", "4★", "3★", "2★", "1★", "Extraído Em",
+      "Score Qualificação", "Status do Site", "Diagnóstico do Site", "CNPJ", "Razão Social",
+      "Porte", "Capital Social", "Anos Empresa", "Sócio Decisor", "Telefone Sócio", "Fonte WhatsApp",
+      "Canal WhatsApp", "Tel. Recepção (Backup)", "Tráfego Pago", "Serviço Principal", "Sistemas Atuais",
     ];
     const rows = leads.map((l) => {
       const bd = l.businessDetails || {};
+      const enrich = getLeadEnrichment(l);
       const dist = l.distribuicaoEstrelas || {};
       const redes = bd.redesAdicionais || {};
       const redesStr = Object.entries(redes).map(([k, v]) => `${k}: ${v}`).join(" | ");
@@ -551,6 +605,30 @@ export default function CaptadorPage() {
         dist["5estrelas"] || "", dist["4estrelas"] || "", dist["3estrelas"] || "",
         dist["2estrelas"] || "", dist["1estrelas"] || "",
         l.extractedAt,
+        enrich?.qualificationScore ?? "",
+        enrich?.siteStatusLabel || "",
+        enrich?.siteDiagnostico || "",
+        enrich?.cnpj || "",
+        enrich?.razaoSocial || "",
+        enrich?.porte || "",
+        enrich?.capitalSocial ?? "",
+        enrich?.anosEmpresa ?? "",
+        enrich?.socioDecisor || l.ownerName || "",
+        enrich?.telefoneSocio || "",
+        enrich?.whatsappSource || "",
+        enrich?.whatsappChannelType === "socio_direto"
+          ? "WhatsApp direto do sócio"
+          : enrich?.whatsappChannelType === "provavel_socio"
+            ? "Provável celular do sócio"
+            : enrich?.whatsappChannelType === "recepcao_comercial"
+              ? "Recepção / Secretária"
+              : "",
+        enrich?.telefoneRecepcao || "",
+        enrich?.hasPaidTrafficTag
+          ? (enrich?.trafficTags?.length ? enrich.trafficTags.join(", ") : "Sim")
+          : "",
+        enrich?.servicoPrincipal || "",
+        enrich?.managementTools?.length ? enrich.managementTools.join(", ") : "",
       ];
     });
     const wsLeads = XLSX.utils.aoa_to_sheet([header, ...rows]);
@@ -615,13 +693,19 @@ export default function CaptadorPage() {
   const filteredLeads = useMemo(() => {
     if (!searchQuery.trim()) return leads;
     const q = searchQuery.toLowerCase().trim();
-    return leads.filter(l =>
-      (l.name && l.name.toLowerCase().includes(q)) ||
-      (l.phones && l.phones.includes(q)) ||
-      (l.categories && l.categories.toString().toLowerCase().includes(q)) ||
-      (l.fullAddress && l.fullAddress.toLowerCase().includes(q)) ||
-      (l.website && l.website.toLowerCase().includes(q))
-    );
+    return leads.filter(l => {
+      const enrich = getLeadEnrichment(l);
+      return (
+        (l.name && l.name.toLowerCase().includes(q)) ||
+        (l.phones && l.phones.includes(q)) ||
+        (l.categories && l.categories.toString().toLowerCase().includes(q)) ||
+        (l.fullAddress && l.fullAddress.toLowerCase().includes(q)) ||
+        (l.website && l.website.toLowerCase().includes(q)) ||
+        (enrich?.socioDecisor && enrich.socioDecisor.toLowerCase().includes(q)) ||
+        (enrich?.cnpj && enrich.cnpj.toLowerCase().includes(q)) ||
+        (enrich?.razaoSocial && enrich.razaoSocial.toLowerCase().includes(q))
+      );
+    });
   }, [leads, searchQuery]);
 
   return (
@@ -1119,8 +1203,7 @@ export default function CaptadorPage() {
                       {[
                         { label: "Remover leads sem telefone", value: filterEmpty, set: setFilterEmpty, desc: "Descarta empresas sem número cadastrado no Maps" },
                         { label: "Remover telefones duplicados", value: filterDuplicates, set: setFilterDuplicates, desc: "Garante que o mesmo número não entre duas vezes" },
-                        { label: "Remover telefones fixos", value: filterLandlines, set: setFilterLandlines, desc: "Prioriza celulares com WhatsApp habilitado" },
-                        { label: "Capturar somente leads sem site", value: filterWithWebsite, set: setFilterWithWebsite, desc: "Perfeito para prospecção de criação de sites" },
+                        { label: "Remover telefones fixos", value: filterLandlines, set: setFilterLandlines, desc: "Prioriza celulares com WhatsApp habilitado (mantém fixo se tiver WhatsApp Business validado)" },
                       ].map((f) => (
                         <div key={f.label} className="p-2.5 rounded-lg border border-border/40 hover:bg-secondary/30 transition-colors">
                           <label className="flex items-center justify-between gap-3 cursor-pointer">
@@ -1136,6 +1219,280 @@ export default function CaptadorPage() {
                           <p className="text-[11px] text-muted-foreground mt-0.5">{f.desc}</p>
                         </div>
                       ))}
+
+                      <div className="p-2.5 rounded-lg border border-border/40 hover:bg-secondary/30 transition-colors">
+                        <label className="flex items-center justify-between gap-3 cursor-pointer">
+                          <span className="text-xs font-medium text-foreground select-none">Capturar somente leads sem site</span>
+                          <input
+                            type="checkbox"
+                            disabled={isRunning}
+                            checked={filterWithWebsite}
+                            onChange={e => {
+                              const checked = e.target.checked;
+                              setFilterWithWebsite(checked);
+                              setSiteFilterMode(prev => checked ? "no_site" : (prev === "no_site" ? "any" : prev));
+                            }}
+                            className="w-4 h-4 rounded accent-primary cursor-pointer shrink-0"
+                          />
+                        </label>
+                        <p className="text-[11px] text-muted-foreground mt-0.5">Perfeito para prospecção de criação de sites</p>
+                      </div>
+                    </div>
+
+                    {/* Modo Turbo VPS, Saúde do Site & Decisor (Custo Zero) */}
+                    <div className="p-3.5 rounded-lg border border-primary/25 bg-primary/[0.04] space-y-3">
+                      <div className="flex items-center gap-2">
+                        <Zap className="w-4 h-4 text-primary shrink-0" />
+                        <div>
+                          <h4 className="text-xs font-semibold text-foreground">
+                            Modo Turbo VPS, Saúde do Site &amp; Decisor (Custo Zero)
+                          </h4>
+                          <p className="text-[11px] text-muted-foreground">
+                            Ligue ou desligue cada recurso livremente — zero gasto com API paga e baixo consumo de RAM na VPS.
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2.5 pt-1 border-t border-border/40">
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <label htmlFor="captador-turbo-mode" className="text-xs font-medium cursor-pointer">
+                              Modo Turbo VPS (alta velocidade e economia de RAM)
+                            </label>
+                            <p className="text-[11px] text-muted-foreground">
+                              Reutiliza 1 aba de detalhes (reciclada a cada 25 empresas), bloqueia mídia/tiles pesados e evita aberturas duplicadas com cache do CRM em memória.
+                            </p>
+                          </div>
+                          <Switch
+                            id="captador-turbo-mode"
+                            aria-label="Modo Turbo VPS (alta velocidade e economia de RAM)"
+                            disabled={isRunning}
+                            checked={turboMode}
+                            onCheckedChange={setTurboMode}
+                            size="sm"
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <label htmlFor="captador-filter-closed" className="text-xs font-medium cursor-pointer flex items-center gap-1.5">
+                              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                              Descartar empresas fechadas ou CNPJ baixado/inapto
+                            </label>
+                            <p className="text-[11px] text-muted-foreground">
+                              Evita desperdiçar disparos com empresas encerradas no Google Maps ou inativas na Receita Federal.
+                            </p>
+                          </div>
+                          <Switch
+                            id="captador-filter-closed"
+                            aria-label="Descartar empresas fechadas ou CNPJ baixado/inapto"
+                            disabled={isRunning}
+                            checked={filterClosedBusinesses}
+                            onCheckedChange={setFilterClosedBusinesses}
+                            size="sm"
+                          />
+                        </div>
+
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <div>
+                              <label htmlFor="captador-audit-site" className="text-xs font-medium cursor-pointer flex items-center gap-1.5">
+                                <Globe className="w-3.5 h-3.5 text-amber-400" />
+                                Auditar saúde do site (detectar fora do ar, SSL vencido, erro 500 ou fraco)
+                              </label>
+                              <p className="text-[11px] text-muted-foreground">
+                                Lê apenas os primeiros 64KB com proteção contra falso positivo do Cloudflare e gera argumento técnico de venda.
+                              </p>
+                            </div>
+                            <Switch
+                              id="captador-audit-site"
+                              aria-label="Auditar saúde do site (detectar fora do ar, SSL vencido, erro 500 ou fraco)"
+                              disabled={isRunning}
+                              checked={auditSiteHealth}
+                              onCheckedChange={setAuditSiteHealth}
+                              size="sm"
+                            />
+                          </div>
+
+                          <div className="space-y-1 pl-0.5">
+                            <span className="text-[11px] text-muted-foreground block">Filtro por saúde do site:</span>
+                            <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Filtro por saúde do site">
+                              {SITE_FILTER_MODE_OPTIONS.map((opt) => {
+                                const active = siteFilterMode === opt.value;
+                                return (
+                                  <button
+                                    key={opt.value}
+                                    type="button"
+                                    role="radio"
+                                    aria-checked={active}
+                                    disabled={isRunning}
+                                    onClick={() => {
+                                      setSiteFilterMode(opt.value);
+                                      setFilterWithWebsite(opt.value === "no_site");
+                                    }}
+                                    className={cn(
+                                      "text-[11px] px-2.5 py-1 rounded-md border transition-colors cursor-pointer disabled:opacity-50",
+                                      active
+                                        ? "bg-primary/20 border-primary/60 text-foreground font-medium"
+                                        : "bg-secondary/40 hover:bg-secondary border-border/50 text-muted-foreground hover:text-foreground",
+                                    )}
+                                  >
+                                    {opt.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <div>
+                              <label htmlFor="captador-enrich-cnpj" className="text-xs font-medium cursor-pointer flex items-center gap-1.5">
+                                <UserCheck className="w-3.5 h-3.5 text-cyan-400" />
+                                Enriquecer CNPJ e Sócio-Administrador gratuitamente (Receita + RDAP)
+                              </label>
+                              <p className="text-[11px] text-muted-foreground">
+                                Descobre CNPJ via site/RDAP Registro.br/busca e consulta Receita Federal grátis (BrasilAPI → OpenCNPJ → MinhaReceita) para obter Sócio, Porte e Capital Social.
+                              </p>
+                            </div>
+                            <Switch
+                              id="captador-enrich-cnpj"
+                              aria-label="Enriquecer CNPJ e Sócio-Administrador gratuitamente (Receita + RDAP)"
+                              disabled={isRunning}
+                              checked={enrichCnpj}
+                              onCheckedChange={setEnrichCnpj}
+                              size="sm"
+                            />
+                          </div>
+
+                          {enrichCnpj && (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 p-2.5 rounded-md bg-background/50 border border-border/40">
+                              <label htmlFor="captador-exclude-mei" className="flex items-center justify-between gap-2 cursor-pointer">
+                                <span className="text-[11px] font-medium text-foreground">Ignorar MEI (focar ME, EPP e Ltda)</span>
+                                <input
+                                  id="captador-exclude-mei"
+                                  type="checkbox"
+                                  disabled={isRunning}
+                                  checked={excludeMei}
+                                  onChange={e => setExcludeMei(e.target.checked)}
+                                  className="w-4 h-4 rounded accent-primary cursor-pointer"
+                                />
+                              </label>
+                              <div className="flex items-center justify-between gap-2">
+                                <label htmlFor="captador-min-capital" className="text-[11px] text-muted-foreground">
+                                  Capital social mínimo (R$)
+                                </label>
+                                <Input
+                                  id="captador-min-capital"
+                                  disabled={isRunning}
+                                  type="number"
+                                  min={0}
+                                  step={1000}
+                                  value={minCapitalSocial}
+                                  onChange={e => { setMinCapitalSocial(e.target.value); setExtraFiltersError(""); }}
+                                  className="w-28 h-7 text-right font-mono text-xs bg-background"
+                                />
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <label htmlFor="captador-partner-phone" className="text-xs font-medium cursor-pointer">
+                              Priorizar WhatsApp oculto do site ou celular direto do sócio
+                            </label>
+                            <p className="text-[11px] text-muted-foreground">
+                              Captura links wa.me ocultos no rodapé e celulares diretos na Receita (descartando telefones de contabilidade).
+                            </p>
+                          </div>
+                          <Switch
+                            id="captador-partner-phone"
+                            aria-label="Priorizar WhatsApp oculto do site ou celular direto do sócio"
+                            disabled={isRunning}
+                            checked={prioritizePartnerPhone}
+                            onCheckedChange={setPrioritizePartnerPhone}
+                            size="sm"
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <label htmlFor="captador-validate-wa" className="text-xs font-medium cursor-pointer">
+                              Validar WhatsApp ativo na Evolution (recupera fixos com WhatsApp Business)
+                            </label>
+                            <p className="text-[11px] text-muted-foreground">
+                              Confirma gratuitamente no chip conectado se o telefone comercial ou do sócio recebe WhatsApp de verdade.
+                            </p>
+                          </div>
+                          <Switch
+                            id="captador-validate-wa"
+                            aria-label="Validar WhatsApp ativo na Evolution (recupera fixos com WhatsApp Business)"
+                            disabled={isRunning}
+                            checked={validateWhatsApp}
+                            onCheckedChange={setValidateWhatsApp}
+                            size="sm"
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <label htmlFor="captador-hunt-partner" className="text-xs font-medium cursor-pointer">
+                              Modo Direto no Dono (9º dígito Anatel + WhatsApp pessoal)
+                            </label>
+                            <p className="text-[11px] text-muted-foreground">
+                              Testa o 9º dígito nos celulares antigos da Receita, busca o sócio na web e separa WhatsApp Pessoal vs Recepção.
+                            </p>
+                          </div>
+                          <Switch
+                            id="captador-hunt-partner"
+                            aria-label="Modo Direto no Dono"
+                            disabled={isRunning}
+                            checked={huntPartnerDirectPhone}
+                            onCheckedChange={setHuntPartnerDirectPhone}
+                            size="sm"
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <label htmlFor="captador-exclude-franchises" className="text-xs font-medium cursor-pointer">
+                              Ignorar grandes redes e franquias
+                            </label>
+                            <p className="text-[11px] text-muted-foreground">
+                              Descarta Smart Fit, OdontoCompany, Drogasil, carimbo S/A e grandes redes para focar em decisores locais.
+                            </p>
+                          </div>
+                          <Switch
+                            id="captador-exclude-franchises"
+                            aria-label="Ignorar grandes redes e franquias"
+                            disabled={isRunning}
+                            checked={excludeFranchises}
+                            onCheckedChange={setExcludeFranchises}
+                            size="sm"
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <label htmlFor="captador-expand-neighborhoods" className="text-xs font-medium cursor-pointer">
+                              Busca profunda por bairros (furar teto de 120 leads)
+                            </label>
+                            <p className="text-[11px] text-muted-foreground">
+                              Subdivide grandes cidades pelos principais bairros comerciais quando a busca atinge o teto por consulta.
+                            </p>
+                          </div>
+                          <Switch
+                            id="captador-expand-neighborhoods"
+                            aria-label="Busca profunda por bairros"
+                            disabled={isRunning}
+                            checked={expandNeighborhoods}
+                            onCheckedChange={setExpandNeighborhoods}
+                            size="sm"
+                          />
+                        </div>
+                      </div>
                     </div>
                   </div>
 
@@ -1517,33 +1874,101 @@ export default function CaptadorPage() {
                         </TableRow>
                       ) : (
                         filteredLeads.map((lead, i) => {
-                          const temExtras = (lead.reviewsDetalhes?.length || 0) + (lead.photos?.length || 0) + (lead.businessDetails ? 1 : 0) + (lead.attributes?.length || 0) > 0;
+                          const enrich = getLeadEnrichment(lead);
+                          const temExtras = (lead.reviewsDetalhes?.length || 0) + (lead.photos?.length || 0) + (lead.businessDetails ? 1 : 0) + (lead.attributes?.length || 0) + (enrich ? 1 : 0) > 0;
                           const waUrl = getWhatsAppUrl(lead.phones);
+                          const siteHealthClass =
+                            enrich?.siteHealth === "broken_site"
+                              ? "text-red-400 border-red-500/40 bg-red-500/10"
+                              : enrich?.siteHealth === "weak_site"
+                                ? "text-amber-300 border-amber-500/40 bg-amber-500/10"
+                                : enrich?.siteHealth === "active_site"
+                                  ? "text-emerald-300 border-emerald-500/30 bg-emerald-500/10"
+                                  : "text-muted-foreground border-border/50 bg-secondary/40";
                           return (
                             <TableRow key={i} className="border-border/30 text-xs hover:bg-secondary/20 transition-colors">
-                              <TableCell className="font-medium max-w-[220px]">
+                              <TableCell className="font-medium max-w-[240px]">
                                 <div className="truncate font-semibold text-foreground" title={lead.name}>
                                   {lead.name}
                                 </div>
                                 {lead.priceRange && (
                                   <span className="text-[10px] text-muted-foreground/70">{lead.priceRange}</span>
                                 )}
+                                {enrich && (
+                                  <div className="flex flex-wrap items-center gap-1 mt-1">
+                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-cyan-500/30 text-cyan-300 bg-cyan-500/10">
+                                      Score {enrich.qualificationScore}
+                                    </Badge>
+                                    {(enrich.primeiroNomeSocio || enrich.socioDecisor || lead.ownerName) && (
+                                      <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-emerald-500/30 text-emerald-300 bg-emerald-500/10">
+                                        Sócio: {enrich.primeiroNomeSocio || enrich.socioDecisor || lead.ownerName}
+                                      </Badge>
+                                    )}
+                                    {(enrich.porte || enrich.anosEmpresa) && (
+                                      <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-border/60 text-muted-foreground">
+                                        {[enrich.porte, enrich.anosEmpresa ? `${enrich.anosEmpresa}a` : ""].filter(Boolean).join(" · ")}
+                                      </Badge>
+                                    )}
+                                    {(enrich.whatsappChannelType === "socio_direto" || enrich.whatsappChannelType === "provavel_socio") && (
+                                      <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-emerald-400/40 text-emerald-200 bg-emerald-500/15">
+                                        Direto Sócio
+                                      </Badge>
+                                    )}
+                                    {enrich.whatsappChannelType === "recepcao_comercial" && (
+                                      <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-amber-400/40 text-amber-200 bg-amber-500/10">
+                                        Recepção
+                                      </Badge>
+                                    )}
+                                    {enrich.hasPaidTrafficTag && (
+                                      <Badge
+                                        variant="outline"
+                                        className="text-[9px] px-1.5 py-0 border-fuchsia-400/40 text-fuchsia-200 bg-fuchsia-500/10"
+                                        title={enrich.trafficTags?.join(", ") || "Investe em tráfego pago"}
+                                      >
+                                        Ads
+                                      </Badge>
+                                    )}
+                                    {enrich.managementTools && enrich.managementTools.length > 0 && (
+                                      <Badge
+                                        variant="outline"
+                                        className="text-[9px] px-1.5 py-0 border-sky-400/40 text-sky-200 bg-sky-500/10"
+                                        title={enrich.managementTools.join(", ")}
+                                      >
+                                        Sistemas: {enrich.managementTools.slice(0, 2).join(", ")}
+                                      </Badge>
+                                    )}
+                                    {enrich.abandonedCopyrightYear && (
+                                      <Badge
+                                        variant="outline"
+                                        className="text-[9px] px-1.5 py-0 border-orange-400/40 text-orange-200 bg-orange-500/10"
+                                        title={`Rodapé com copyright antigo (${enrich.abandonedCopyrightYear})`}
+                                      >
+                                        © {enrich.abandonedCopyrightYear}
+                                      </Badge>
+                                    )}
+                                  </div>
+                                )}
                               </TableCell>
                               <TableCell className="whitespace-nowrap">
                                 {lead.phones ? (
-                                  <div className="flex items-center gap-1.5 font-mono text-emerald-400">
-                                    <span>{formatPhoneNumber(lead.phones)}</span>
-                                    <CopyButton text={lead.phones} title="Copiar telefone" />
-                                    {waUrl && (
-                                      <a
-                                        href={waUrl}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="text-muted-foreground hover:text-emerald-400 transition-colors p-1"
-                                        title="Abrir no WhatsApp"
-                                      >
-                                        <MessageCircle className="w-3 h-3" />
-                                      </a>
+                                  <div>
+                                    <div className="flex items-center gap-1.5 font-mono text-emerald-400">
+                                      <span>{formatPhoneNumber(lead.phones)}</span>
+                                      <CopyButton text={lead.phones} title="Copiar telefone" />
+                                      {waUrl && (
+                                        <a
+                                          href={waUrl}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="text-muted-foreground hover:text-emerald-400 transition-colors p-1"
+                                          title="Abrir no WhatsApp"
+                                        >
+                                          <MessageCircle className="w-3 h-3" />
+                                        </a>
+                                      )}
+                                    </div>
+                                    {enrich?.whatsappVerified && (
+                                      <span className="block text-[9px] text-emerald-400/80 mt-0.5">WhatsApp validado</span>
                                     )}
                                   </div>
                                 ) : (
@@ -1592,19 +2017,32 @@ export default function CaptadorPage() {
                                   {temExtras ? "Ver" : "—"}
                                 </Button>
                               </TableCell>
-                              <TableCell className="max-w-[150px] truncate">
+                              <TableCell className="max-w-[170px]">
                                 {lead.website ? (
-                                  <a
-                                    href={lead.website}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="text-primary hover:underline inline-flex items-center gap-1 font-medium"
-                                  >
-                                    {safeHostname(lead.website)}
-                                    <ExternalLink className="w-2.5 h-2.5 shrink-0 opacity-60" />
-                                  </a>
+                                  <div className="space-y-1">
+                                    <a
+                                      href={lead.website}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="text-primary hover:underline inline-flex items-center gap-1 font-medium truncate max-w-full"
+                                    >
+                                      <span className="truncate">{safeHostname(lead.website)}</span>
+                                      <ExternalLink className="w-2.5 h-2.5 shrink-0 opacity-60" />
+                                    </a>
+                                    {enrich?.siteStatusLabel && (
+                                      <Badge variant="outline" className={cn("block w-fit text-[9px] px-1.5 py-0", siteHealthClass)} title={enrich.siteDiagnostico}>
+                                        {enrich.siteStatusLabel}
+                                      </Badge>
+                                    )}
+                                  </div>
                                 ) : (
-                                  <span className="text-muted-foreground/40">—</span>
+                                  enrich?.siteStatusLabel ? (
+                                    <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0", siteHealthClass)}>
+                                      {enrich.siteStatusLabel}
+                                    </Badge>
+                                  ) : (
+                                    <span className="text-muted-foreground/40">—</span>
+                                  )
                                 )}
                               </TableCell>
                               <TableCell className="text-muted-foreground whitespace-nowrap text-[11px]">
@@ -1630,7 +2068,8 @@ export default function CaptadorPage() {
                     </div>
                   ) : (
                     filteredLeads.map((lead, i) => {
-                      const temExtras = (lead.reviewsDetalhes?.length || 0) + (lead.photos?.length || 0) + (lead.businessDetails ? 1 : 0) + (lead.attributes?.length || 0) > 0;
+                      const enrich = getLeadEnrichment(lead);
+                      const temExtras = (lead.reviewsDetalhes?.length || 0) + (lead.photos?.length || 0) + (lead.businessDetails ? 1 : 0) + (lead.attributes?.length || 0) + (enrich ? 1 : 0) > 0;
                       return (
                         <div key={i} className="py-2.5 flex flex-col gap-2 text-xs">
                           <div className="flex justify-between items-start gap-2">
@@ -1639,6 +2078,57 @@ export default function CaptadorPage() {
                               {lead.phones ? formatPhoneNumber(lead.phones) : "—"}
                             </span>
                           </div>
+                          {enrich && (
+                            <div className="flex flex-wrap gap-1">
+                              <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-cyan-500/30 text-cyan-300">
+                                Score {enrich.qualificationScore}
+                              </Badge>
+                              <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-border/60">
+                                {enrich.siteStatusLabel}
+                              </Badge>
+                              {(enrich.primeiroNomeSocio || enrich.socioDecisor || lead.ownerName) && (
+                                <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-emerald-500/30 text-emerald-300">
+                                  Sócio: {enrich.primeiroNomeSocio || enrich.socioDecisor || lead.ownerName}
+                                </Badge>
+                              )}
+                              {(enrich.whatsappChannelType === "socio_direto" || enrich.whatsappChannelType === "provavel_socio") && (
+                                <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-emerald-400/40 text-emerald-200 bg-emerald-500/15">
+                                  Direto Sócio
+                                </Badge>
+                              )}
+                              {enrich.whatsappChannelType === "recepcao_comercial" && (
+                                <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-amber-400/40 text-amber-200 bg-amber-500/10">
+                                  Recepção
+                                </Badge>
+                              )}
+                              {enrich.hasPaidTrafficTag && (
+                                <Badge
+                                  variant="outline"
+                                  className="text-[9px] px-1.5 py-0 border-fuchsia-400/40 text-fuchsia-200 bg-fuchsia-500/10"
+                                  title={enrich.trafficTags?.join(", ") || "Investe em tráfego pago"}
+                                >
+                                  Ads
+                                </Badge>
+                              )}
+                              {enrich.managementTools && enrich.managementTools.length > 0 && (
+                                <Badge
+                                  variant="outline"
+                                  className="text-[9px] px-1.5 py-0 border-sky-400/40 text-sky-200 bg-sky-500/10"
+                                  title={enrich.managementTools.join(", ")}
+                                >
+                                  Sistemas: {enrich.managementTools.slice(0, 2).join(", ")}
+                                </Badge>
+                              )}
+                              {enrich.abandonedCopyrightYear && (
+                                <Badge
+                                  variant="outline"
+                                  className="text-[9px] px-1.5 py-0 border-orange-400/40 text-orange-200 bg-orange-500/10"
+                                >
+                                  © {enrich.abandonedCopyrightYear}
+                                </Badge>
+                              )}
+                            </div>
+                          )}
                           <div className="grid grid-cols-2 gap-1 text-muted-foreground">
                             <div className="col-span-2"><strong className="text-foreground/80">Cat:</strong> {lead.categories || "—"}</div>
                             <div><strong className="text-foreground/80">Rating:</strong> {lead.averageRating ? `${lead.averageRating} ⭐` : "—"}</div>
@@ -1729,11 +2219,14 @@ export default function CaptadorPage() {
 function LeadDetailContent({ lead }: { lead: Lead }) {
   const [modalTab, setModalTab] = useState<"geral" | "reviews" | "fotos" | "detalhes">("geral");
   const bd = lead.businessDetails || {};
+  const enrich = getLeadEnrichment(lead);
   const redes = bd.redesAdicionais || {};
   const dist = lead.distribuicaoEstrelas || {};
   const distKeys = ["5estrelas", "4estrelas", "3estrelas", "2estrelas", "1estrelas"];
   const totalDist = Object.values(dist).reduce((s, v) => s + (v || 0), 0);
   const waUrl = getWhatsAppUrl(lead.phones);
+  const partnerWaUrl = enrich?.telefoneSocio ? getWhatsAppUrl(enrich.telefoneSocio) : null;
+  const receptionWaUrl = enrich?.telefoneRecepcao ? getWhatsAppUrl(enrich.telefoneRecepcao) : null;
 
   return (
     <div className="space-y-4">
@@ -1888,6 +2381,128 @@ function LeadDetailContent({ lead }: { lead: Lead }) {
               </div>
             </div>
           </div>
+
+          {enrich && (
+            <div className="p-3.5 rounded-lg border border-cyan-500/30 bg-cyan-500/[0.04] space-y-3">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="text-[10px] uppercase font-semibold text-cyan-300 flex items-center gap-1.5">
+                  <ShieldCheck className="w-3.5 h-3.5" /> Diagnóstico Técnico do Site &amp; Quadro Societário (Receita Federal)
+                </span>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Badge variant="outline" className="text-[10px] border-cyan-500/40 text-cyan-200 bg-cyan-500/10">
+                    Score {enrich.qualificationScore}/100
+                  </Badge>
+                  <Badge variant="outline" className="text-[10px] border-border/60">
+                    {enrich.siteStatusLabel}
+                  </Badge>
+                  {(enrich.whatsappChannelType === "socio_direto" || enrich.whatsappChannelType === "provavel_socio") && (
+                    <Badge variant="outline" className="text-[10px] border-emerald-400/40 text-emerald-200 bg-emerald-500/15">
+                      Direto Sócio
+                    </Badge>
+                  )}
+                  {enrich.whatsappChannelType === "recepcao_comercial" && (
+                    <Badge variant="outline" className="text-[10px] border-amber-400/40 text-amber-200 bg-amber-500/10">
+                      Recepção
+                    </Badge>
+                  )}
+                  {enrich.hasPaidTrafficTag && (
+                    <Badge variant="outline" className="text-[10px] border-fuchsia-400/40 text-fuchsia-200 bg-fuchsia-500/10">
+                      {enrich.trafficTags?.length ? `Ads: ${enrich.trafficTags.join(", ")}` : "Tráfego Pago"}
+                    </Badge>
+                  )}
+                  {enrich.managementTools && enrich.managementTools.length > 0 && (
+                    <Badge variant="outline" className="text-[10px] border-sky-400/40 text-sky-200 bg-sky-500/10">
+                      Sistemas: {enrich.managementTools.join(", ")}
+                    </Badge>
+                  )}
+                  {enrich.abandonedCopyrightYear && (
+                    <Badge variant="outline" className="text-[10px] border-orange-400/40 text-orange-200 bg-orange-500/10">
+                      Copyright {enrich.abandonedCopyrightYear}
+                    </Badge>
+                  )}
+                </div>
+              </div>
+
+              {enrich.siteDiagnostico && (
+                <p className="text-xs text-foreground/90 leading-relaxed bg-background/50 p-2 rounded border border-border/40">
+                  {enrich.siteDiagnostico}
+                </p>
+              )}
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                {enrich.cnpj && <DetailRow label="CNPJ" value={enrich.cnpj} mono />}
+                {enrich.razaoSocial && <DetailRow label="Razão Social" value={enrich.razaoSocial} />}
+                {enrich.situacaoCadastral && <DetailRow label="Situação Receita" value={enrich.situacaoCadastral} />}
+                {enrich.porte && <DetailRow label="Porte" value={enrich.porte} />}
+                {enrich.capitalSocial != null && enrich.capitalSocial > 0 && (
+                  <DetailRow label="Capital Social" value={formatBrl(enrich.capitalSocial)} mono />
+                )}
+                {enrich.anosEmpresa != null && (
+                  <DetailRow label="Tempo de CNPJ" value={`${enrich.anosEmpresa} ano(s)`} />
+                )}
+                {(enrich.socioDecisor || lead.ownerName) && (
+                  <DetailRow label="Sócio-Administrador Decisor" value={enrich.socioDecisor || lead.ownerName || ""} />
+                )}
+                {enrich.servicoPrincipal && (
+                  <DetailRow label="Serviço Principal" value={enrich.servicoPrincipal} />
+                )}
+                {enrich.managementTools && enrich.managementTools.length > 0 && (
+                  <DetailRow label="Sistemas Detectados" value={enrich.managementTools.join(", ")} />
+                )}
+                {enrich.discoveredRealWebsite && (
+                  <DetailRow label="Site Descoberto (Link-in-Bio)" value={enrich.discoveredRealWebsite} />
+                )}
+                {enrich.telefoneSocio && (
+                  <div className="flex flex-col gap-0.5 p-2 rounded bg-secondary/20 border border-border/40">
+                    <span className="text-[10px] uppercase font-semibold text-muted-foreground">Telefone Sócio</span>
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-xs font-mono text-emerald-300">{formatPhoneNumber(enrich.telefoneSocio)}</span>
+                      {partnerWaUrl && (
+                        <a
+                          href={partnerWaUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title="WhatsApp do sócio"
+                          className="text-emerald-300 hover:text-emerald-200"
+                        >
+                          <MessageCircle className="w-3.5 h-3.5" />
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {enrich.telefoneRecepcao && (
+                  <div className="flex flex-col gap-0.5 p-2 rounded bg-secondary/20 border border-border/40">
+                    <span className="text-[10px] uppercase font-semibold text-muted-foreground">Tel. Recepção (Backup)</span>
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-xs font-mono text-amber-300">{formatPhoneNumber(enrich.telefoneRecepcao)}</span>
+                      {receptionWaUrl && (
+                        <a
+                          href={receptionWaUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title="WhatsApp da recepção"
+                          className="text-amber-300 hover:text-amber-200"
+                        >
+                          <MessageCircle className="w-3.5 h-3.5" />
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {enrich.qualificationReasons?.length > 0 && (
+                <div className="flex flex-wrap gap-1 pt-0.5">
+                  {enrich.qualificationReasons.map((reason, idx) => (
+                    <Badge key={idx} variant="secondary" className="text-[10px] font-normal">
+                      {reason}
+                    </Badge>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Redes Sociais */}
           {(lead.instagram || lead.facebook || Object.keys(redes).length > 0) && (

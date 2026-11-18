@@ -38,6 +38,7 @@ export async function GET(req: NextRequest) {
   const googleYearFrom = parseInt(url.searchParams.get("googleYearFrom") || "0", 10) || 0;
   const googleYearTo = parseInt(url.searchParams.get("googleYearTo") || "0", 10) || 0;
   const hasWebsite = url.searchParams.get("hasWebsite") || "only_empty";
+  const channelFilter = (url.searchParams.get("channel") || "all").trim();
   const ignoreOptOut = url.searchParams.get("ignore_opt_out") !== "false";
 
   // Coluna real em leads_extraidos é `avaliacao` (numeric), não `rating`.
@@ -47,7 +48,7 @@ export async function GET(req: NextRequest) {
     sort === "reviews" ? "reviews" :
     "created_at";
 
-  const baseSelect = "id, remoteJid, nome_negocio, telefone, ramo_negocio, endereco, avaliacao, reviews, website, maps_url, place_id, year_established, created_at, opt_out, primeiro_contato_source, primeiro_contato_at, resumo_avaliacoes, previa_status, link_previa, previa_qa_score, previa_error, reuniao_horario_confirmado, reuniao_resumo, previa_pronta_em";
+  const baseSelect = "id, remoteJid, nome_negocio, telefone, ramo_negocio, endereco, avaliacao, reviews, website, maps_url, place_id, year_established, owner_name, business_details, created_at, opt_out, primeiro_contato_source, primeiro_contato_at, resumo_avaliacoes, previa_status, link_previa, previa_qa_score, previa_error, reuniao_horario_confirmado, reuniao_resumo, previa_pronta_em";
 
   // Disparo status: return set of remote_jids that received a sent disparo
   if (url.searchParams.get("disparo_status")) {
@@ -69,6 +70,11 @@ export async function GET(req: NextRequest) {
       .eq("client_id", ctx.clientId) as any;
     if (hasWebsite === "only_empty") qq = qq.or("website.is.null,website.eq.");
     else if (hasWebsite === "only_with") qq = qq.not("website", "is", null).neq("website", "");
+    else if (hasWebsite === "broken_or_weak") qq = qq.or("business_details->enrichment->>siteHealth.eq.broken_site,business_details->enrichment->>siteHealth.eq.weak_site");
+    else if (hasWebsite === "broken_or_empty") qq = qq.or("website.is.null,website.eq.,business_details->enrichment->>siteHealth.eq.broken_site,business_details->enrichment->>siteHealth.eq.weak_site");
+    if (channelFilter === "owner_direct") qq = qq.in("business_details->enrichment->>whatsappChannelType", ["socio_direto", "provavel_socio"]);
+    else if (channelFilter === "reception") qq = qq.eq("business_details->enrichment->>whatsappChannelType", "recepcao_comercial");
+    else if (channelFilter === "paid_traffic") qq = qq.eq("business_details->enrichment->>hasPaidTrafficTag", "true");
     if (ignoreOptOut) qq = qq.eq("opt_out", false);
     if (ratingMin > 0) qq = qq.gte("avaliacao", ratingMin);
     if (ratingMax > 0) qq = qq.lte("avaliacao", ratingMax);
@@ -94,8 +100,8 @@ export async function GET(req: NextRequest) {
     const rr = await buildQuery(baseSelect.replace(", resumo_avaliacoes", "").replace(", previa_status, link_previa, previa_qa_score, previa_error, reuniao_horario_confirmado, reuniao_resumo, previa_pronta_em", ""));
     data = rr.data; error = rr.error; count = rr.count;
   }
-  // ponytail: se coluna maps_url/place_id/year_established não existe no DB, retry sem elas
-  if (error && /maps_url|place_id|year_established/.test(error.message)) {
+  // ponytail: se coluna maps_url/place_id/year_established/business_details/owner_name não existe no DB, retry sem elas
+  if (error && /maps_url|place_id|year_established|business_details|owner_name/.test(error.message)) {
     const fallbackSelect = "id, remoteJid, nome_negocio, telefone, ramo_negocio, endereco, avaliacao, reviews, website, created_at, opt_out, primeiro_contato_source, primeiro_contato_at";
     const r2 = await buildQuery(fallbackSelect, false);
     data = r2.data; error = r2.error; count = r2.count;
@@ -106,6 +112,7 @@ export async function GET(req: NextRequest) {
   const leads = (data || []).map((l: any) => ({
     ...l,
     rating: l.avaliacao != null ? String(l.avaliacao) : null,
+    enrichment: l.business_details?.enrichment ?? null,
     primeiro_contato_source: l.primeiro_contato_source ?? null,
     primeiro_contato_at: l.primeiro_contato_at ?? null,
   }));
