@@ -14,10 +14,11 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Phone, Clock, Star, Plus, MoreVertical, Pencil, Trash2, MapPin, Download, Loader2 } from "lucide-react";
+import { Phone, Clock, Star, Plus, MoreVertical, Pencil, Trash2, MapPin, Download, Loader2, UserCheck, AlertTriangle, Megaphone, ShieldCheck, Globe } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useClientSession } from "@/lib/use-session";
 import { LeadAvatar } from "@/components/leads/lead-avatar";
+import type { LeadCrmSummary } from "@/lib/crm-lead-profile";
 import { downloadLeadMapsKit } from "@/lib/lead-maps-kit-client";
 
 export interface KanbanColumnDef {
@@ -51,6 +52,7 @@ interface Lead {
   primeiro_contato_at: string | null;
   profilePicUrl?: string | null;
   profile_pic_url?: string | null;
+  crm_summary?: LeadCrmSummary | null;
 }
 
 function mapsUrlFor(lead: Pick<Lead, "maps_url" | "nome_negocio" | "endereco">): string {
@@ -303,7 +305,7 @@ export default function KanbanBoard({ leads, columns, onLeadClick, formatPhone, 
             <Plus className="w-4 h-4" /> Nova Coluna
           </button>
         </div>
-        <DragOverlay dropAnimation={{ duration: 150, easing: "cubic-bezier(0.18, 0.67, 0.6, 1.22)" }}>
+        <DragOverlay dropAnimation={{ duration: 150, easing: "cubic-bezier(0.22, 1, 0.36, 1)" }}>
           {activeId ? (
             <KanbanCard lead={localLeads.find((l) => l.id === activeId)} isOverlay formatPhone={formatPhone} />
           ) : null}
@@ -551,18 +553,71 @@ function KanbanCard({ lead, onClick, isOverlay, formatPhone }: any) {
         </div>
 
         <div className="flex flex-wrap gap-1.5 mt-2.5 items-center justify-between">
-          <Badge variant="outline" className="text-[9px] font-bold tracking-wider py-0 px-2 border-white/10 bg-black/40 text-neutral-300 rounded-md max-w-[140px] truncate">
+          <Badge variant="outline" className="text-[9px] font-bold tracking-wider py-0 px-2 border-[#303a32] bg-[#111612] text-[#c5d2c8] rounded-md max-w-[140px] truncate">
             {lead.ramo_negocio ? (lead.ramo_negocio.length > 20 ? lead.ramo_negocio.substring(0, 20) + '…' : lead.ramo_negocio) : "GERAL"}
           </Badge>
 
           {lead.rating && (
-            <div className="flex items-center gap-0.5 bg-amber-500/10 px-1.5 py-0.5 rounded-md border border-amber-500/20">
-              <Star className="w-2.5 h-2.5 text-amber-400 fill-amber-400" />
-              <span className="text-[9px] font-bold text-amber-400">{lead.rating}</span>
-              {lead.reviews && <span className="text-[8px] text-amber-400/60">({lead.reviews})</span>}
+            <div className="flex items-center gap-0.5 bg-[#292112] px-1.5 py-0.5 rounded-md border border-[#52411f] tabular-nums">
+              <Star className="w-2.5 h-2.5 text-[#fcd34d] fill-[#fcd34d]" />
+              <span className="text-[9px] font-bold text-[#fcd34d]">{lead.rating}</span>
+              {lead.reviews && <span className="text-[8px] text-[#fcd34d]/80">({lead.reviews})</span>}
             </div>
           )}
         </div>
+
+        {lead.crm_summary ? (() => {
+          const s = lead.crm_summary as LeadCrmSummary;
+          const chips: React.ReactNode[] = [];
+          if (s.canalWhatsapp === "socio_direto" || s.canalWhatsapp === "provavel_socio") {
+            chips.push(
+              <span key="socio" className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-medium bg-[#142920] text-[#6ee7b7] border border-[#274d3c] truncate max-w-[125px]">
+                <UserCheck className="w-2.5 h-2.5 shrink-0" />
+                {s.primeiroNomeSocio ? `Sócio: ${s.primeiroNomeSocio}` : "Sócio"}
+              </span>,
+            );
+          } else if (s.socioDecisor) {
+            chips.push(
+              <span key="decisor" className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-medium bg-[#12232e] text-[#7dd3fc] border border-[#234659] truncate max-w-[125px]">
+                <UserCheck className="w-2.5 h-2.5 shrink-0" />
+                {s.primeiroNomeSocio || "Decisor"}
+              </span>,
+            );
+          }
+          if (s.siteHealth === "broken_site") {
+            chips.push(
+              <span key="site" className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-medium bg-[#2b171b] text-[#fda4af] border border-[#572b33]">
+                <AlertTriangle className="w-2.5 h-2.5 shrink-0" />
+                Site falho
+              </span>,
+            );
+          } else if (s.siteHealth === "no_site") {
+            chips.push(
+              <span key="site" className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-medium bg-[#292112] text-[#fcd34d] border border-[#52411f]">
+                <Globe className="w-2.5 h-2.5 shrink-0" />
+                Sem site
+              </span>,
+            );
+          } else if (s.hasPaidTraffic && chips.length < 2) {
+            chips.push(
+              <span key="ads" className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-medium bg-[#12232e] text-[#7dd3fc] border border-[#234659]">
+                <Megaphone className="w-2.5 h-2.5 shrink-0" />
+                Ads
+              </span>,
+            );
+          }
+          if (chips.length < 2 && s.qualificationScore !== null && s.qualificationScore >= 70) {
+            chips.push(
+              <span key="icp" className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-medium bg-[#142920] text-[#6ee7b7] border border-[#274d3c] tabular-nums">
+                <ShieldCheck className="w-2.5 h-2.5 shrink-0" />
+                ICP {s.qualificationScore}
+              </span>,
+            );
+          }
+          return chips.length > 0 ? (
+            <div className="flex flex-wrap gap-1 mt-2">{chips.slice(0, 2)}</div>
+          ) : null;
+        })() : null}
 
         {lead.next_follow_up && (
           <div className={cn(

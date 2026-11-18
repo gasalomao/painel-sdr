@@ -320,6 +320,16 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
           incomingOpts.sdr_enrichment_dossier_enabled !== undefined
             ? Boolean(incomingOpts.sdr_enrichment_dossier_enabled)
             : Boolean(existingOpts.sdr_enrichment_dossier_enabled),
+        sdr_enrichment_dossier_mode:
+          incomingOpts.sdr_enrichment_dossier_mode === "strategic" ||
+          incomingOpts.sdr_enrichment_dossier_mode === "full" ||
+          incomingOpts.sdr_enrichment_dossier_mode === "off"
+            ? incomingOpts.sdr_enrichment_dossier_mode
+            : existingOpts.sdr_enrichment_dossier_mode === "strategic" ||
+                existingOpts.sdr_enrichment_dossier_mode === "full" ||
+                existingOpts.sdr_enrichment_dossier_mode === "off"
+              ? existingOpts.sdr_enrichment_dossier_mode
+              : undefined,
         site_preview_confirm_before_link:
           incomingOpts.site_preview_confirm_before_link !== undefined
             ? Boolean(incomingOpts.site_preview_confirm_before_link)

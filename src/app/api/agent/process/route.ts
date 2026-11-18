@@ -23,6 +23,7 @@ import { getCachedAgentStaticBundle } from "@/lib/agent-config-cache";
 import { buildAgentFunctionDeclarations } from "@/lib/agent/tool-declarations";
 import { buildAgentPromptBundle } from "@/lib/agent/prompt-builder";
 import { buildSdrLeadDossierBlock } from "@/lib/agent/sdr-enrichment-dossier";
+import { resolveEffectiveAiDossierMode } from "@/lib/crm-lead-profile";
 import { collectValidImageUrls, sanitizeHallucinatedImages, splitChunkSegmentsWithCaptions } from "@/lib/agent/image-whitelist";
 import { executeSearchKnowledgeBase, executeUpdateProductStock } from "@/lib/agent/rag-tool";
 import {
@@ -938,8 +939,12 @@ export async function POST(req: NextRequest) {
           }
           appendSitePreviewContextLines(lines, lead, agentConfig);
 
-          if (agentConfig?.options?.sdr_enrichment_dossier_enabled) {
-            const dossierBlock = buildSdrLeadDossierBlock(lead);
+          const effectiveDossierMode = resolveEffectiveAiDossierMode(
+            lead as Record<string, unknown>,
+            agentConfig?.options as Record<string, unknown> | undefined,
+          );
+          if (effectiveDossierMode !== "off") {
+            const dossierBlock = buildSdrLeadDossierBlock(lead, effectiveDossierMode);
             if (dossierBlock) {
               lines.push("", dossierBlock);
             }
@@ -1001,8 +1006,12 @@ export async function POST(req: NextRequest) {
         if (leadRow) {
           appendSitePreviewContextLines(lines, leadRow, agentConfig);
         }
-        if (agentConfig?.options?.sdr_enrichment_dossier_enabled) {
-          const dossierBlock = buildSdrLeadDossierBlock(leadRow || testLeadData);
+        const testEffectiveMode = resolveEffectiveAiDossierMode(
+          (leadRow || testLeadData) as Record<string, unknown>,
+          agentConfig?.options as Record<string, unknown> | undefined,
+        );
+        if (testEffectiveMode !== "off") {
+          const dossierBlock = buildSdrLeadDossierBlock(leadRow || testLeadData, testEffectiveMode);
           if (dossierBlock) {
             lines.push("", dossierBlock);
           }

@@ -7,6 +7,29 @@
 
 import { isPrivateOrLocalUrl } from "@/lib/url-guard";
 import { webSearch, type SearchResult } from "@/lib/web-search";
+import {
+  expandBrPhoneCheckVariants,
+  formatCnpj,
+  isAnatel8DigitMobile,
+  isBrMobileDigits,
+  isEffectiveBrMobile,
+  isValidBusinessEmail,
+  isValidCnpj,
+  normalizeBrPhoneDigits,
+  toModern13DigitBrMobile,
+} from "@/lib/br-crm-utils";
+
+export {
+  expandBrPhoneCheckVariants,
+  formatCnpj,
+  isAnatel8DigitMobile,
+  isBrMobileDigits,
+  isEffectiveBrMobile,
+  isValidBusinessEmail,
+  isValidCnpj,
+  normalizeBrPhoneDigits,
+  toModern13DigitBrMobile,
+};
 
 export type SiteHealthStatus = "no_site" | "broken_site" | "weak_site" | "active_site";
 
@@ -27,6 +50,7 @@ export interface SiteAuditResult {
   responseTimeMs?: number;
   extractedWhatsApps: string[];
   extractedCnpjs: string[];
+  extractedEmails?: string[];
   hasPaidTrafficTag?: boolean;
   trafficTags?: string[];
   discoveredRealWebsite?: string;
@@ -57,9 +81,11 @@ export interface CnpjEnrichmentResult {
   uf?: string;
   cep?: string;
   email?: string;
+  cnaeDescricao?: string;
   telefonesReceita: string[];
   socioDecisor?: string;
   primeiroNomeSocio?: string;
+  faixaEtariaSocio?: string;
   socios: CnpjPartner[];
   source: CnpjSource;
   rdapFrozen?: boolean;
@@ -94,10 +120,15 @@ export interface LeadEnrichmentData {
   anosEmpresa?: number;
   socioDecisor?: string;
   primeiroNomeSocio?: string;
+  faixaEtariaSocio?: string;
   socios?: CnpjPartner[];
+  cnaeDescricao?: string;
+  emailValidado?: string;
+  emailSource?: "site_html" | "cnpj_receita";
   telefoneSocio?: string;
   telefoneMapsOriginal?: string;
   telefoneRecepcao?: string;
+  telefonesAlternativos?: Array<{ telefone: string; label: string }>;
   whatsappSource?: WhatsAppSource;
   whatsappVerified?: boolean;
   whatsappChannelType?: WhatsAppChannelType;
@@ -222,6 +253,7 @@ const GLOBAL_TENANT_SCOPE = "__global__";
 const rdapDomainCache = new Map<string, RdapCacheEntry>();
 const cnpjDataCache = new Map<string, CnpjEnrichmentResult | null>();
 const tenantPhoneToCnpjRoots = new Map<string, Map<string, Set<string>>>();
+const tenantEmailToCnpjRoots = new Map<string, Map<string, Set<string>>>();
 const partnerPhoneSearchCache = new Map<string, string[]>();
 
 function setLru<K, V>(map: Map<K, V>, key: K, val: V, max: number): void {
@@ -237,6 +269,7 @@ export function clearEnrichmentCachesForTest(): void {
   rdapDomainCache.clear();
   cnpjDataCache.clear();
   tenantPhoneToCnpjRoots.clear();
+  tenantEmailToCnpjRoots.clear();
   partnerPhoneSearchCache.clear();
 }
 
@@ -248,6 +281,16 @@ function getTenantPhoneMap(tenantId?: string): Map<string, Set<string>> {
     tenantPhoneToCnpjRoots.set(scope, phoneMap);
   }
   return phoneMap;
+}
+
+function getTenantEmailMap(tenantId?: string): Map<string, Set<string>> {
+  const scope = String(tenantId || "").trim() || GLOBAL_TENANT_SCOPE;
+  let emailMap = tenantEmailToCnpjRoots.get(scope);
+  if (!emailMap) {
+    emailMap = new Map<string, Set<string>>();
+    tenantEmailToCnpjRoots.set(scope, emailMap);
+  }
+  return emailMap;
 }
 
 function canonicalAccountingPhoneKey(digits: string): string {
@@ -269,17 +312,33 @@ function recordPhoneCnpjRoot(digits: string, cnpj: string, tenantId = GLOBAL_TEN
   roots.add(root);
 }
 
+function recordEmailCnpjRoot(rawEmail: string, cnpj: string, tenantId = GLOBAL_TENANT_SCOPE): void {
+  const email = String(rawEmail || "").trim().toLowerCase();
+  const root = String(cnpj || "").replace(/\D/g, "").slice(0, 8);
+  if (!email || !email.includes("@") || root.length !== 8) return;
+  const emailMap = getTenantEmailMap(tenantId);
+  let roots = emailMap.get(email);
+  if (!roots) {
+    roots = new Set<string>();
+    setLru(emailMap, email, roots, MAX_PHONE_ROOT_ENTRIES);
+  }
+  roots.add(root);
+}
+
 /**
- * Semeia a memória anti-contador de um tenant com pares telefone+CNPJ já persistidos no CRM.
+ * Semeia a memória anti-contador de um tenant com pares telefone/email + CNPJ já persistidos no CRM.
  */
 export function seedTenantPhoneCnpjRoots(
   tenantId: string,
-  entries: ReadonlyArray<{ phone: string; cnpj: string }>,
+  entries: ReadonlyArray<{ phone?: string; email?: string; cnpj: string }>,
 ): void {
   const scope = String(tenantId || "").trim() || GLOBAL_TENANT_SCOPE;
   for (const entry of entries) {
     if (entry.phone && entry.cnpj) {
       recordPhoneCnpjRoot(entry.phone, entry.cnpj, scope);
+    }
+    if (entry.email && entry.cnpj) {
+      recordEmailCnpjRoot(entry.email, entry.cnpj, scope);
     }
   }
 }
@@ -292,97 +351,49 @@ export function isLikelyAccountingPhone(digits: string, tenantId = GLOBAL_TENANT
   return !!scopedRoots && scopedRoots.size >= 2;
 }
 
-/**
- * Normaliza telefone BR para dígitos com DDI 55 quando aplicável (10 ou 11 dígitos locais).
- */
-export function normalizeBrPhoneDigits(raw: string): string {
-  let digits = String(raw || "").replace(/\D/g, "");
-  if (!digits) return "";
-  if (digits.startsWith("0") && digits.length >= 11 && digits.length <= 12) {
-    digits = digits.slice(1);
-  }
-  if (digits.length === 10 || digits.length === 11) {
-    return `55${digits}`;
-  }
-  if (digits.startsWith("55") && (digits.length === 12 || digits.length === 13)) {
-    return digits;
-  }
-  return "";
-}
+const ACCOUNTING_EMAIL_RE =
+  /(?:contabil|contador|contabilidade|escritorio|assessoria|fiscal|tributar|bpo|legalizacao|aberturaempresa)/i;
 
-export function isBrMobileDigits(digitsWithDdi: string): boolean {
-  const clean = normalizeBrPhoneDigits(digitsWithDdi);
-  if (clean.length === 13 && clean.startsWith("55")) {
-    return clean[4] === "9";
-  }
-  return false;
+export function isLikelyAccountingEmail(rawEmail: string, tenantId = GLOBAL_TENANT_SCOPE): boolean {
+  const email = String(rawEmail || "").trim().toLowerCase();
+  if (!isValidBusinessEmail(email)) return true;
+  if (ACCOUNTING_EMAIL_RE.test(email)) return true;
+  const scope = String(tenantId || "").trim() || GLOBAL_TENANT_SCOPE;
+  const scopedRoots = tenantEmailToCnpjRoots.get(scope)?.get(email);
+  return !!scopedRoots && scopedRoots.size >= 2;
 }
 
 /**
- * Identifica celulares cadastrados na Receita Federal ainda no formato antigo de 8 dígitos
- * (regra Anatel: prefixo 6, 7, 8 ou 9 é SMP móvel; 2..5 é fixo STFC).
+ * Extrai e-mails comerciais reais de páginas HTML (priorizando links mailto:).
  */
-export function isAnatel8DigitMobile(digitsWithDdi: string): boolean {
-  const clean = normalizeBrPhoneDigits(digitsWithDdi);
-  return clean.length === 12 && clean.startsWith("55") && /^[6789]/.test(clean.slice(4));
-}
-
-/**
- * Reconstrói o 9º dígito para celulares de 8 dígitos vindos da Receita Federal.
- */
-export function toModern13DigitBrMobile(digitsWithDdi: string): string {
-  const clean = normalizeBrPhoneDigits(digitsWithDdi);
-  if (!clean) return "";
-  if (isAnatel8DigitMobile(clean)) {
-    return `${clean.slice(0, 4)}9${clean.slice(4)}`;
-  }
-  return clean;
-}
-
-export function isEffectiveBrMobile(digitsWithDdi: string): boolean {
-  return isBrMobileDigits(digitsWithDdi) || isAnatel8DigitMobile(digitsWithDdi);
-}
-
-/**
- * Gera variantes para consulta na Evolution API sem multiplicar chamadas para números já em 13 dígitos.
- */
-export function expandBrPhoneCheckVariants(digitsWithDdi: string): string[] {
-  const clean = normalizeBrPhoneDigits(digitsWithDdi);
-  if (!clean) return [];
-  if (isAnatel8DigitMobile(clean)) {
-    return [toModern13DigitBrMobile(clean), clean];
-  }
-  return [clean];
-}
-
-/**
- * Valida CNPJ brasileiro com o algoritmo oficial Módulo-11 (2 dígitos verificadores).
- */
-export function isValidCnpj(raw: string): boolean {
-  const cnpj = String(raw || "").replace(/\D/g, "");
-  if (cnpj.length !== 14) return false;
-  if (/^(\d)\1{13}$/.test(cnpj)) return false;
-
-  const calcDigit = (sliceLen: number): number => {
-    let weight = sliceLen - 7;
-    let sum = 0;
-    for (let i = 0; i < sliceLen; i++) {
-      sum += Number(cnpj[i]) * weight;
-      weight = weight === 2 ? 9 : weight - 1;
+export function extractEmailsFromHtml(html: string): string[] {
+  if (!html) return [];
+  const found: string[] = [];
+  const push = (raw: string) => {
+    const clean = decodeURIComponent(raw || "")
+      .replace(/^mailto:/i, "")
+      .split("?")[0]
+      .trim()
+      .toLowerCase();
+    if (isValidBusinessEmail(clean) && !ACCOUNTING_EMAIL_RE.test(clean) && !found.includes(clean)) {
+      found.push(clean);
     }
-    const mod = sum % 11;
-    return mod < 2 ? 0 : 11 - mod;
   };
 
-  const d1 = calcDigit(12);
-  const d2 = calcDigit(13);
-  return d1 === Number(cnpj[12]) && d2 === Number(cnpj[13]);
-}
+  const mailtoRe = /href\s*=\s*["']mailto:([^"'<>#\s]+)["']/gi;
+  let m: RegExpExecArray | null;
+  while ((m = mailtoRe.exec(html)) !== null) {
+    push(m[1] || "");
+    if (found.length >= 3) return found;
+  }
 
-export function formatCnpj(raw: string): string {
-  const d = String(raw || "").replace(/\D/g, "");
-  if (d.length !== 14) return raw;
-  return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-${d.slice(12, 14)}`;
+  const visibleText = html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ");
+  const emailRe = /\b([a-z0-9._%+-]{2,64}@[a-z0-9.-]+\.[a-z]{2,10})\b/gi;
+  while ((m = emailRe.exec(visibleText)) !== null) {
+    push(m[1] || "");
+    if (found.length >= 3) break;
+  }
+  return found;
 }
 
 /**
@@ -470,7 +481,7 @@ export function pickManagingPartner(
   socios: CnpjPartner[],
   razaoSocial?: string,
   isMei?: boolean,
-): { fullName: string; firstName: string } | null {
+): { fullName: string; firstName: string; faixaEtaria?: string } | null {
   const humanPartners = (socios || []).filter(
     (s) => s.nome && !isCorporateEntityPartner(s.nome, s.qualificacao || ""),
   );
@@ -483,8 +494,11 @@ export function pickManagingPartner(
   if (preferred) {
     const fullName = toTitleCasePtBr(preferred.nome);
     const firstName = fullName.split(/\s+/)[0] || "";
+    const faixaEtaria = typeof preferred.faixaEtaria === "string" && preferred.faixaEtaria.trim()
+      ? preferred.faixaEtaria.trim()
+      : undefined;
     if (fullName && firstName.length >= 2) {
-      return { fullName, firstName };
+      return { fullName, firstName, ...(faixaEtaria ? { faixaEtaria } : {}) };
     }
   }
 
@@ -1131,6 +1145,7 @@ export async function auditLeadWebsite(
 
   const extractedWhatsApps = extractWhatsAppPhonesFromHtml(html);
   const extractedCnpjs = extractCnpjsFromText(html);
+  const extractedEmails = extractEmailsFromHtml(html);
   const trafficTags = detectPaidTrafficTags(html);
   let managementTools = detectManagementTools(html);
   let abandonedCopyrightYear = detectAbandonedCopyrightYear(html);
@@ -1162,6 +1177,9 @@ export async function auditLeadWebsite(
           for (const wa of extractWhatsAppPhonesFromHtml(subHtml)) {
             if (!extractedWhatsApps.includes(wa)) extractedWhatsApps.push(wa);
           }
+          for (const em of extractEmailsFromHtml(subHtml)) {
+            if (!extractedEmails.includes(em)) extractedEmails.push(em);
+          }
           for (const t of detectPaidTrafficTags(subHtml)) {
             if (!trafficTags.includes(t)) trafficTags.push(t);
           }
@@ -1183,6 +1201,7 @@ export async function auditLeadWebsite(
 
   const hasPaidTrafficTag = trafficTags.length > 0;
   const auditExtras = {
+    ...(extractedEmails.length > 0 ? { extractedEmails } : {}),
     ...(hasPaidTrafficTag ? { hasPaidTrafficTag, trafficTags } : {}),
     ...(discoveredRealWebsite ? { discoveredRealWebsite } : {}),
     ...(managementTools.length > 0 ? { managementTools } : {}),
@@ -1541,6 +1560,12 @@ function normalizeBrasilApiOrMinhaReceita(
   const razaoSocial = String(raw.razao_social || "").trim();
   const partner = pickManagingPartner(socios, razaoSocial, isMei);
   const dataInicio = typeof raw.data_inicio_atividade === "string" ? raw.data_inicio_atividade : undefined;
+  const rawEmail = typeof raw.email === "string" ? raw.email.trim().toLowerCase() : undefined;
+  if (rawEmail) recordEmailCnpjRoot(rawEmail, cnpj, tenantId);
+  const cnaeDescricao =
+    typeof raw.cnae_fiscal_descricao === "string" && raw.cnae_fiscal_descricao.trim()
+      ? raw.cnae_fiscal_descricao.trim()
+      : undefined;
 
   return {
     cnpj,
@@ -1556,10 +1581,12 @@ function normalizeBrasilApiOrMinhaReceita(
     municipio: typeof raw.municipio === "string" ? raw.municipio.trim() : undefined,
     uf: typeof raw.uf === "string" ? raw.uf.trim().toUpperCase() : undefined,
     cep: typeof raw.cep === "string" ? raw.cep.replace(/\D/g, "") : undefined,
-    email: typeof raw.email === "string" ? raw.email.trim().toLowerCase() : undefined,
+    email: rawEmail,
+    ...(cnaeDescricao ? { cnaeDescricao } : {}),
     telefonesReceita: telefones,
     socioDecisor: partner?.fullName,
     primeiroNomeSocio: partner?.firstName,
+    ...(partner?.faixaEtaria ? { faixaEtariaSocio: partner.faixaEtaria } : {}),
     socios,
     source,
   };
@@ -1612,6 +1639,14 @@ function normalizeOpenCnpj(
     typeof raw.capital_social === "string"
       ? Number(raw.capital_social.replace(/\./g, "").replace(",", "."))
       : Number(raw.capital_social);
+  const rawEmail = typeof raw.email === "string" ? raw.email.trim().toLowerCase() : undefined;
+  if (rawEmail) recordEmailCnpjRoot(rawEmail, cnpj, tenantId);
+  const cnaeDescricao =
+    typeof raw.cnae_principal_descricao === "string" && raw.cnae_principal_descricao.trim()
+      ? raw.cnae_principal_descricao.trim()
+      : typeof raw.descricao_cnae === "string" && raw.descricao_cnae.trim()
+        ? raw.descricao_cnae.trim()
+        : undefined;
 
   return {
     cnpj,
@@ -1627,10 +1662,12 @@ function normalizeOpenCnpj(
     municipio: typeof raw.municipio === "string" ? raw.municipio.trim() : undefined,
     uf: typeof raw.uf === "string" ? raw.uf.trim().toUpperCase() : undefined,
     cep: typeof raw.cep === "string" ? raw.cep.replace(/\D/g, "") : undefined,
-    email: typeof raw.email === "string" ? raw.email.trim().toLowerCase() : undefined,
+    email: rawEmail,
+    ...(cnaeDescricao ? { cnaeDescricao } : {}),
     telefonesReceita: telefones,
     socioDecisor: partner?.fullName,
     primeiroNomeSocio: partner?.firstName,
+    ...(partner?.faixaEtaria ? { faixaEtariaSocio: partner.faixaEtaria } : {}),
     socios,
     source,
   };
@@ -2280,6 +2317,7 @@ export async function enrichCapturedLead(input: EnrichLeadInput): Promise<Enrich
     if (realAudit) {
       const mergedWhatsApps = Array.from(new Set([...siteAudit.extractedWhatsApps, ...realAudit.extractedWhatsApps]));
       const mergedCnpjs = Array.from(new Set([...siteAudit.extractedCnpjs, ...realAudit.extractedCnpjs]));
+      const mergedEmails = Array.from(new Set([...(siteAudit.extractedEmails || []), ...(realAudit.extractedEmails || [])]));
       const mergedTags = Array.from(new Set([...(siteAudit.trafficTags || []), ...(realAudit.trafficTags || [])]));
       const mergedTools = Array.from(new Set([...(siteAudit.managementTools || []), ...(realAudit.managementTools || [])]));
       siteAudit = {
@@ -2287,6 +2325,7 @@ export async function enrichCapturedLead(input: EnrichLeadInput): Promise<Enrich
         discoveredRealWebsite: bioUrl,
         extractedWhatsApps: mergedWhatsApps,
         extractedCnpjs: mergedCnpjs,
+        ...(mergedEmails.length > 0 ? { extractedEmails: mergedEmails } : {}),
         ...(mergedTags.length > 0 ? { hasPaidTrafficTag: true, trafficTags: mergedTags } : {}),
         ...(mergedTools.length > 0 ? { managementTools: mergedTools } : {}),
         ...(realAudit.abandonedCopyrightYear || siteAudit.abandonedCopyrightYear
@@ -2526,6 +2565,36 @@ export async function enrichCapturedLead(input: EnrichLeadInput): Promise<Enrich
       ? backupCommercial
       : undefined;
 
+  // Coleta telefones alternativos limpos (sem duplicar bestPhone nem incluir contador)
+  const telefonesAlternativos: Array<{ telefone: string; label: string }> = [];
+  const seenAltPhones = new Set<string>(bestModern ? [bestModern] : []);
+  const pushAltPhone = (rawTel: string | undefined, label: string) => {
+    if (!rawTel) return;
+    const norm = normalizeBrPhoneDigits(rawTel);
+    if (!norm || isLikelyAccountingPhone(norm, tenantId)) return;
+    const modern = toModern13DigitBrMobile(norm) || norm;
+    if (seenAltPhones.has(modern) || telefonesAlternativos.length >= 3) return;
+    seenAltPhones.add(modern);
+    telefonesAlternativos.push({ telefone: modern, label });
+  };
+  pushAltPhone(telefoneRecepcao || mapsPhoneDigits, "Recepção / Maps");
+  for (const wa of siteAudit.extractedWhatsApps) pushAltPhone(wa, "WhatsApp Site");
+  pushAltPhone(partnerWhatsAppFound, "Sócio / Receita");
+  for (const recTel of receitaCandidates) pushAltPhone(recTel, "Receita Federal");
+
+  // E-mail validado: prioridade 1 = HTML do site oficial; prioridade 2 = CNPJ (com trava anti-contador)
+  const htmlEmail = (siteAudit.extractedEmails || []).find((em) => !isLikelyAccountingEmail(em, tenantId));
+  const cnpjValidEmail =
+    cnpjResult?.email && !isLikelyAccountingEmail(cnpjResult.email, tenantId)
+      ? cnpjResult.email
+      : undefined;
+  const emailValidado = htmlEmail || cnpjValidEmail;
+  const emailSource: "site_html" | "cnpj_receita" | undefined = htmlEmail
+    ? "site_html"
+    : cnpjValidEmail
+      ? "cnpj_receita"
+      : undefined;
+
   const { hasReceptionist, ownerActiveOnMaps, channelType } = detectReceptionistSignals({
     categories: input.categories,
     reviews: input.reviews,
@@ -2579,10 +2648,14 @@ export async function enrichCapturedLead(input: EnrichLeadInput): Promise<Enrich
     anosEmpresa: cnpjResult?.anosEmpresa,
     socioDecisor,
     primeiroNomeSocio,
+    ...(cnpjResult?.faixaEtariaSocio ? { faixaEtariaSocio: cnpjResult.faixaEtariaSocio } : {}),
     socios: cnpjResult?.socios,
+    ...(cnpjResult?.cnaeDescricao ? { cnaeDescricao: cnpjResult.cnaeDescricao } : {}),
+    ...(emailValidado ? { emailValidado, emailSource } : {}),
     telefoneSocio: partnerWhatsAppFound || undefined,
     telefoneMapsOriginal: mapsPhoneDigits || undefined,
     ...(telefoneRecepcao ? { telefoneRecepcao } : {}),
+    ...(telefonesAlternativos.length > 0 ? { telefonesAlternativos } : {}),
     whatsappSource: bestPhone ? whatsappSource : undefined,
     whatsappVerified: input.options.validateWhatsApp ? whatsappVerified : undefined,
     whatsappChannelType: channelType,

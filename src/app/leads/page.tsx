@@ -17,11 +17,13 @@ import {
     ExternalLink, Star, LayoutGrid, List,
     Trash2, Filter, Bot, X, CheckSquare, Loader2, UserPlus,
     MapPin, Send, CheckCircle2, RotateCw,
+    UserCheck, AlertTriangle, Megaphone, ShieldCheck, Globe, Building2, BookOpen, RefreshCw,
 } from "lucide-react";
 import { toast } from "sonner";
 import { LeadDrawer } from "@/components/leads/lead-drawer";
 import { AddLeadDialog } from "@/components/add-lead-dialog";
 import { LeadAvatar } from "@/components/leads/lead-avatar";
+import { extractFullLeadCrmDossier, type LeadCrmSummary } from "@/lib/crm-lead-profile";
 import { syncLeadPhotosSequentially, type SyncProgressState } from "@/lib/lead-photo-sync";
 import { downloadLeadMapsKit } from "@/lib/lead-maps-kit-client";
 import { getPhotoJid, safePhotoUrl } from "@/lib/whatsapp-photo-utils";
@@ -78,6 +80,74 @@ interface Lead {
   created_at: string;
   primeiro_contato_source: string | null;
   primeiro_contato_at: string | null;
+  email?: string | null;
+  owner_name?: string | null;
+  crm_summary?: LeadCrmSummary | null;
+  business_details?: Record<string, unknown> | null;
+}
+
+type SignalFilterValue = "all" | "partner_direct" | "site_opportunity" | "paid_traffic" | "high_icp";
+const SIGNAL_FILTER_LABELS: Record<SignalFilterValue, string> = {
+  all: "Todos os sinais",
+  partner_direct: "WhatsApp do sócio",
+  site_opportunity: "Sem site / site falho",
+  paid_traffic: "Com tráfego pago",
+  high_icp: "Score ICP 70+",
+};
+
+function renderDiscreteLeadPills(summary?: LeadCrmSummary | null): React.ReactNode {
+  if (!summary) return null;
+  const pills: React.ReactNode[] = [];
+  if (summary.canalWhatsapp === "socio_direto" || summary.canalWhatsapp === "provavel_socio") {
+    pills.push(
+      <span key="socio" className={styles.microMint} title={summary.socioDecisor ? `Decisor: ${summary.socioDecisor}` : "Contato direto do sócio"}>
+        <UserCheck className="w-2.5 h-2.5" />
+        {summary.primeiroNomeSocio ? `Sócio: ${summary.primeiroNomeSocio}` : "Sócio"}
+      </span>,
+    );
+  } else if (summary.socioDecisor) {
+    pills.push(
+      <span key="decisor" className={styles.microSky} title={`Sócio identificado: ${summary.socioDecisor}`}>
+        <UserCheck className="w-2.5 h-2.5" />
+        {summary.primeiroNomeSocio || "Decisor"}
+      </span>,
+    );
+  }
+
+  if (summary.siteHealth === "broken_site") {
+    pills.push(
+      <span key="site" className={styles.microRose} title={summary.siteStatusLabel || "Site com falha"}>
+        <AlertTriangle className="w-2.5 h-2.5" />
+        Site falho
+      </span>,
+    );
+  } else if (summary.siteHealth === "no_site") {
+    pills.push(
+      <span key="site" className={styles.microAmber} title="Sem site próprio vinculado">
+        <Globe className="w-2.5 h-2.5" />
+        Sem site
+      </span>,
+    );
+  } else if (summary.hasPaidTraffic && pills.length < 2) {
+    pills.push(
+      <span key="ads" className={styles.microSky} title={summary.trafficTags.join(", ") || "Investe em tráfego pago"}>
+        <Megaphone className="w-2.5 h-2.5" />
+        Ads
+      </span>,
+    );
+  }
+
+  if (pills.length < 2 && summary.qualificationScore !== null && summary.qualificationScore >= 70) {
+    pills.push(
+      <span key="icp" className={styles.microMint} title="Score de qualificação comercial">
+        <ShieldCheck className="w-2.5 h-2.5" />
+        ICP {summary.qualificationScore}
+      </span>,
+    );
+  }
+
+  if (pills.length === 0) return null;
+  return <div className={styles.signalRow}>{pills.slice(0, 2)}</div>;
 }
 
 // helper: constroi URL Maps canônica — usa maps_url salvo (place_id embutido);
@@ -118,6 +188,7 @@ export default function LeadsPage() {
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
   const [viewMode, setViewMode] = useState<"list" | "kanban">("list");
   const [disparoFilter, setDisparoFilter] = useState<"all" | "pending" | "sent">("all");
+  const [signalFilter, setSignalFilter] = useState<SignalFilterValue>("all");
   const [disparoJids, setDisparoJids] = useState<Set<string>>(new Set());
   const [downloadingKitIds, setDownloadingKitIds] = useState<Set<number>>(new Set());
   const [syncProgress, setSyncProgress] = useState<SyncProgressState | null>(null);
@@ -324,7 +395,7 @@ export default function LeadsPage() {
   useEffect(() => {
     setSelectedIds(new Set());
     setSelectAllAcrossPages(false);
-  }, [page, search, categoryFilter, clientId, viewMode, disparoFilter]);
+  }, [page, search, categoryFilter, clientId, viewMode, disparoFilter, signalFilter]);
 
 
 
@@ -340,6 +411,7 @@ export default function LeadsPage() {
         category: categoryFilter,
         disparo: disparoFilter,
       });
+      if (signalFilter !== "all") params.set("signal", signalFilter);
       if (search) params.set("search", search);
 
       const res = await fetch(`/api/leads?${params.toString()}`);
@@ -424,7 +496,7 @@ export default function LeadsPage() {
         setLoading(false);
       }
     }
-  }, [page, search, viewMode, categoryFilter, clientId, disparoFilter]);
+  }, [page, search, viewMode, categoryFilter, clientId, disparoFilter, signalFilter]);
 
   useEffect(() => {
     fetchLeads();
@@ -449,13 +521,28 @@ export default function LeadsPage() {
     const data = Array.isArray(payload.leads) ? (payload.leads as Lead[]) : null;
     if (!data) return;
 
-    const rows = data.map((l: Lead) => ({
-      "Nome do Negócio": l.nome_negocio || "",
-      "Telefone": l.telefone || formatPhone(l.remoteJid),
-      "Categoria": l.ramo_negocio || "",
-      "Avaliação": l.rating || "",
-      "Data Extração": new Date(l.created_at).toLocaleDateString("pt-BR"),
-    }));
+    const rows = data.map((l: Lead) => {
+      const d = extractFullLeadCrmDossier(l as unknown as Record<string, unknown>);
+      return {
+        "Nome do Negócio": l.nome_negocio || "",
+        "Sócio / Decisor": d.socioDecisor || "",
+        "Canal WhatsApp": d.canalLabel || "",
+        "Telefone Principal": l.telefone || formatPhone(l.remoteJid),
+        "Telefone Reserva": d.telefoneAlternativoFormatted || "",
+        "CNPJ": d.cnpj || "",
+        "Porte": d.porte || "",
+        "E-mail": d.emailValidado || l.email || "",
+        "Categoria": l.ramo_negocio || "",
+        "Especialidade": d.servicoPrincipal || "",
+        "Saúde do Site": d.siteStatusLabel || (l.website ? "Com site" : "Sem site"),
+        "Website": l.website || d.discoveredRealWebsite || "",
+        "Score ICP": d.qualificationScore ?? "",
+        "Avaliação": l.rating || "",
+        "Etapa": statusLabel(l.status),
+        "Endereço": l.endereco || "",
+        "Data Extração": new Date(l.created_at).toLocaleDateString("pt-BR"),
+      };
+    });
 
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
@@ -519,11 +606,12 @@ export default function LeadsPage() {
       }
   };
   const totalPages = Math.ceil(total / PAGE_SIZE);
-  const hasFilters = search !== "" || categoryFilter !== "all" || disparoFilter !== "all";
+  const hasFilters = search !== "" || categoryFilter !== "all" || disparoFilter !== "all" || signalFilter !== "all";
   const clearFilters = () => {
     setSearch("");
     setCategoryFilter("all");
     setDisparoFilter("all");
+    setSignalFilter("all");
     setPage(0);
   };
   const statusLabel = (status: string | null | undefined): string => {
@@ -557,14 +645,14 @@ export default function LeadsPage() {
                 <Input
                   type="search"
                   aria-label="Buscar clientes"
-                  placeholder="Buscar nome ou telefone"
+                  placeholder="Buscar nome, sócio, CNPJ ou telefone"
                   value={search}
                   onChange={(e) => { setSearch(e.target.value); setPage(0); }}
                   className={styles.searchInput}
                 />
               </div>
               
-              <Select value={categoryFilter} onValueChange={(val) => setCategoryFilter(val as string || "all")}>
+              <Select value={categoryFilter} onValueChange={(val) => { setCategoryFilter(val as string || "all"); setPage(0); }}>
                   <SelectTrigger className={styles.categoryFilter} aria-label="Filtrar por categoria">
                       <Filter className="size-4 text-muted-foreground" />
                       <SelectValue>{categoryFilter === "all" ? "Todas as categorias" : categoryFilter}</SelectValue>
@@ -574,6 +662,20 @@ export default function LeadsPage() {
                       {categories.map(c => (
                           <SelectItem key={c} value={c}>{c}</SelectItem>
                       ))}
+                  </SelectContent>
+              </Select>
+
+              <Select value={signalFilter} onValueChange={(val) => { setSignalFilter((val as SignalFilterValue) || "all"); setPage(0); }}>
+                  <SelectTrigger className={styles.signalFilter} aria-label="Filtrar por sinais comerciais">
+                      <ShieldCheck className="size-4 text-muted-foreground" />
+                      <SelectValue>{SIGNAL_FILTER_LABELS[signalFilter]}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent className="border-[#3b483e] bg-[#181d19] text-[#edf2ee]">
+                      <SelectItem value="all">Todos os sinais</SelectItem>
+                      <SelectItem value="partner_direct">WhatsApp do sócio</SelectItem>
+                      <SelectItem value="site_opportunity">Sem site / site falho</SelectItem>
+                      <SelectItem value="paid_traffic">Com tráfego pago</SelectItem>
+                      <SelectItem value="high_icp">Score ICP 70+</SelectItem>
                   </SelectContent>
               </Select>
               {hasFilters && (
@@ -868,6 +970,7 @@ export default function LeadsPage() {
                                     )}
                                   </div>
                                   <div className={styles.stage} data-status={lead.status || "novo"}>{statusLabel(lead.status)}</div>
+                                  {renderDiscreteLeadPills(lead.crm_summary)}
                                 </div>
                               </div>
                           </TableCell>
@@ -989,6 +1092,7 @@ export default function LeadsPage() {
                         </div>
                         <div className={styles.mobilePhone}><Phone className="size-3" />{lead.telefone || formatPhone(lead.remoteJid)}</div>
                         <div className={styles.stage} data-status={lead.status || "novo"}>{statusLabel(lead.status)}</div>
+                        {renderDiscreteLeadPills(lead.crm_summary)}
                       </div>
                       <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
                     </button>
@@ -1173,45 +1277,44 @@ function LeadIntelligenceSection({ lead, onUpdated }: { lead: any; onUpdated: (u
   // Sem briefing ainda → CTA pra gerar.
   if (!intel) {
     return (
-      <div className="p-4 rounded-2xl bg-gradient-to-br from-cyan-500/10 to-purple-500/10 border border-cyan-500/20">
-        <p className="text-[10px] font-black text-cyan-300 uppercase mb-2 flex items-center gap-2">
-          <Bot className="w-3.5 h-3.5" /> Lead Intelligence
+      <div className={styles.intelPanel}>
+        <h4 className="text-xs font-semibold text-[#edf2ee] mb-1.5 flex items-center gap-2">
+          <Bot className="w-3.5 h-3.5 text-[#6ee7b7]" /> Análise estratégica com IA
+        </h4>
+        <p className="text-xs text-[#a5b1a8] leading-relaxed mb-3">
+          Cruza o site, presença no Maps, concorrentes locais e dossiê societário para sugerir ângulo de abordagem e dores prováveis.
         </p>
-        <p className="text-xs text-cyan-100/80 leading-relaxed mb-3">
-          IA analisa o site, dados Maps e nicho do lead e te entrega um briefing estratégico em 10s. Reutilizado depois pelo disparo/automação pra personalizar mensagens automaticamente.
-        </p>
-        <Button onClick={() => analyze(false)} disabled={analyzing} className="w-full h-10 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-100 font-bold text-xs gap-2">
+        <Button onClick={() => analyze(false)} disabled={analyzing} className={cn(styles.intelActionBtn, "gap-2")}>
           {analyzing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Bot className="w-3.5 h-3.5" />}
           {analyzing ? "Analisando..." : "Analisar com IA"}
         </Button>
-        {error && <p className="text-[10px] text-red-300 mt-2">{error}</p>}
+        {error && <p className="text-xs text-[#fda4af] mt-2">{error}</p>}
       </div>
     );
   }
 
   const tipoLabel: Record<string, string> = {
-    b2b_recurring: "B2B Recorrente 💎",
+    b2b_recurring: "B2B Recorrente",
     b2c_oneshot: "B2C One-shot",
     mixed: "B2B + B2C",
     unknown: "Indefinido",
   };
   const scoreColor =
-    intel.icp_score >= 80 ? "text-emerald-300 bg-emerald-500/15 border-emerald-500/30" :
-    intel.icp_score >= 60 ? "text-cyan-300 bg-cyan-500/15 border-cyan-500/30" :
-    intel.icp_score >= 40 ? "text-amber-300 bg-amber-500/15 border-amber-500/30" :
-                            "text-red-300 bg-red-500/15 border-red-500/30";
+    intel.icp_score >= 70 ? styles.microMint :
+    intel.icp_score >= 45 ? styles.microSky :
+                            styles.microAmber;
 
   return (
-    <div className="p-4 rounded-2xl bg-gradient-to-br from-cyan-500/10 to-purple-500/10 border border-cyan-500/20 space-y-3">
+    <div className={cn(styles.intelPanel, "space-y-3")}>
       <div className="flex items-center justify-between gap-2 flex-wrap">
-        <p className="text-[10px] font-black text-cyan-300 uppercase flex items-center gap-2">
-          <Bot className="w-3.5 h-3.5" /> Lead Intelligence
-        </p>
-        <div className="flex items-center gap-2">
-          <span className={cn("px-2 py-0.5 rounded-md text-[10px] font-black border", scoreColor)}>
+        <h4 className="text-xs font-semibold text-[#edf2ee] flex items-center gap-2">
+          <Bot className="w-3.5 h-3.5 text-[#6ee7b7]" /> Briefing estratégico IA
+        </h4>
+        <div className="flex items-center gap-1.5">
+          <span className={scoreColor}>
             ICP {intel.icp_score}/100
           </span>
-          <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-white/5 border border-white/10 text-white/80">
+          <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-[#111612] border border-[#303a32] text-[#c5d2c8]">
             {tipoLabel[intel.lead_type] || intel.lead_type}
           </span>
         </div>
@@ -1219,109 +1322,111 @@ function LeadIntelligenceSection({ lead, onUpdated }: { lead: any; onUpdated: (u
 
       {intel.dores?.length > 0 && (
         <div>
-          <p className="text-[9px] uppercase font-bold text-muted-foreground mb-1">Dores prováveis</p>
-          <ul className="text-[11px] text-white/85 space-y-0.5">
-            {intel.dores.slice(0, 4).map((d: string, i: number) => <li key={i}>• {d}</li>)}
+          <p className="text-[11px] font-medium text-[#a5b1a8] mb-1">Dores prováveis</p>
+          <ul className="text-xs text-[#edf2ee] space-y-1 pl-3 list-disc">
+            {intel.dores.slice(0, 4).map((d: string, i: number) => <li key={i}>{d}</li>)}
           </ul>
         </div>
       )}
 
       {intel.abordagem && (
         <div>
-          <p className="text-[9px] uppercase font-bold text-muted-foreground mb-1">Ângulo recomendado</p>
-          <p className="text-[11px] text-cyan-100/90 italic">{intel.abordagem}</p>
+          <p className="text-[11px] font-medium text-[#a5b1a8] mb-1">Ângulo recomendado</p>
+          <p className="text-xs text-[#d5e0d7] leading-relaxed">{intel.abordagem}</p>
         </div>
       )}
 
       {intel.decisor && intel.decisor !== "não identificado" && (
-        <div className="text-[10px] text-white/70">
-          <span className="font-bold">Decisor:</span> {intel.decisor}
+        <div className="text-xs text-[#c5d2c8]">
+          <span className="font-semibold text-[#edf2ee]">Decisor inferido:</span> {intel.decisor}
         </div>
       )}
 
       {intel.alerta && (
-        <div className="p-2 rounded-md bg-amber-500/10 border border-amber-500/30 text-[10px] text-amber-200">
-          ⚠ {intel.alerta}
+        <div className="p-2.5 rounded-lg bg-[#292112] border border-[#52411f] text-xs text-[#fcd34d] flex items-start gap-2">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          <span>{intel.alerta}</span>
         </div>
       )}
 
       {intel.briefing_md && (
-        <details className="text-[11px]">
-          <summary className="cursor-pointer text-cyan-300 hover:text-cyan-200 font-bold">Ver briefing completo</summary>
-          <pre className="mt-2 p-2 rounded-md bg-black/40 border border-white/5 text-white/85 whitespace-pre-wrap font-sans leading-relaxed">{intel.briefing_md}</pre>
+        <details className="text-xs">
+          <summary className="cursor-pointer text-[#6ee7b7] hover:underline font-medium">Ver briefing completo</summary>
+          <pre className="mt-2 p-2.5 rounded-lg bg-[#111612] border border-[#303a32] text-[#d5e0d7] whitespace-pre-wrap font-sans leading-relaxed">{intel.briefing_md}</pre>
         </details>
       )}
 
-      {/* FONTES — transparência: mostra exatamente o que a IA leu pra chegar
-          nas conclusões acima. Usuário pode auditar / questionar. */}
       {intel.sources && (
-        <details className="text-[11px]">
-          <summary className="cursor-pointer text-cyan-300/80 hover:text-cyan-200 font-bold">📚 Fontes consultadas pela IA</summary>
-          <div className="mt-2 space-y-3">
+        <details className="text-xs">
+          <summary className="cursor-pointer text-[#a5b1a8] hover:text-[#edf2ee] font-medium inline-flex items-center gap-1.5">
+            <BookOpen className="w-3.5 h-3.5 inline" /> Fontes consultadas pela IA
+          </summary>
+          <div className="mt-2 space-y-2.5">
             {intel.sources.model_used && (
-              <p className="text-[9px] text-muted-foreground font-mono">
+              <p className="text-[11px] text-[#a5b1a8] font-mono">
                 Modelo usado: <strong>{intel.sources.model_used}</strong>
               </p>
             )}
             {intel.sources.site_excerpt && (
-              <div className="p-2 rounded-md bg-black/40 border border-white/5">
-                <p className="text-[9px] uppercase font-bold text-emerald-300 mb-1">🌐 Site oficial</p>
+              <div className="p-2.5 rounded-lg bg-[#111612] border border-[#303a32]">
+                <p className="text-[11px] font-semibold text-[#6ee7b7] mb-1 flex items-center gap-1.5">
+                  <Globe className="w-3 h-3" /> Site oficial
+                </p>
                 {intel.sources.site_url && (
-                  <a href={intel.sources.site_url} target="_blank" rel="noreferrer" className="text-[9px] text-emerald-400 underline break-all">{intel.sources.site_url}</a>
+                  <a href={intel.sources.site_url} target="_blank" rel="noreferrer" className="text-[11px] text-[#6ee7b7] underline break-all">{intel.sources.site_url}</a>
                 )}
-                <p className="text-[10px] text-white/70 mt-1 italic line-clamp-6">&quot;{intel.sources.site_excerpt}&quot;</p>
+                <p className="text-[11px] text-[#c5d2c8] mt-1 line-clamp-6">&quot;{intel.sources.site_excerpt}&quot;</p>
               </div>
             )}
             {Array.isArray(intel.sources.search_lead) && intel.sources.search_lead.length > 0 && (
-              <div className="p-2 rounded-md bg-black/40 border border-white/5">
-                <p className="text-[9px] uppercase font-bold text-cyan-300 mb-1">🔎 Busca web sobre o lead ({intel.sources.search_lead.length})</p>
+              <div className="p-2.5 rounded-lg bg-[#111612] border border-[#303a32]">
+                <p className="text-[11px] font-semibold text-[#7dd3fc] mb-1 flex items-center gap-1.5">
+                  <Search className="w-3 h-3" /> Busca web ({intel.sources.search_lead.length})
+                </p>
                 <ul className="space-y-1.5">
                   {intel.sources.search_lead.map((r: any, i: number) => (
-                    <li key={i} className="text-[10px]">
-                      <a href={r.url} target="_blank" rel="noreferrer" className="text-cyan-400 underline font-bold">{r.title || r.url}</a>
-                      {r.snippet && <p className="text-white/60 mt-0.5">{r.snippet}</p>}
+                    <li key={i} className="text-[11px]">
+                      <a href={r.url} target="_blank" rel="noreferrer" className="text-[#7dd3fc] underline font-medium">{r.title || r.url}</a>
+                      {r.snippet && <p className="text-[#a5b1a8] mt-0.5">{r.snippet}</p>}
                     </li>
                   ))}
                 </ul>
               </div>
             )}
             {Array.isArray(intel.sources.search_competitors) && intel.sources.search_competitors.length > 0 && (
-              <div className="p-2 rounded-md bg-black/40 border border-white/5">
-                <p className="text-[9px] uppercase font-bold text-purple-300 mb-1">🏢 Concorrentes / top players ({intel.sources.search_competitors.length})</p>
+              <div className="p-2.5 rounded-lg bg-[#111612] border border-[#303a32]">
+                <p className="text-[11px] font-semibold text-[#c5d2c8] mb-1 flex items-center gap-1.5">
+                  <Building2 className="w-3 h-3" /> Concorrentes locais ({intel.sources.search_competitors.length})
+                </p>
                 <ul className="space-y-1.5">
                   {intel.sources.search_competitors.map((r: any, i: number) => (
-                    <li key={i} className="text-[10px]">
-                      <a href={r.url} target="_blank" rel="noreferrer" className="text-purple-400 underline font-bold">{r.title || r.url}</a>
-                      {r.snippet && <p className="text-white/60 mt-0.5">{r.snippet}</p>}
+                    <li key={i} className="text-[11px]">
+                      <a href={r.url} target="_blank" rel="noreferrer" className="text-[#6ee7b7] underline font-medium">{r.title || r.url}</a>
+                      {r.snippet && <p className="text-[#a5b1a8] mt-0.5">{r.snippet}</p>}
                     </li>
                   ))}
                 </ul>
               </div>
             )}
-            {!intel.sources.site_excerpt &&
-             (!intel.sources.search_lead || intel.sources.search_lead.length === 0) &&
-             (!intel.sources.search_competitors || intel.sources.search_competitors.length === 0) && (
-              <p className="text-[10px] text-amber-300/80 italic">
-                ⚠ Nenhuma fonte externa coletada. A análise se baseou só nos dados do Google Maps. Pode ser que o site bloqueou crawler ou a busca DDG não retornou nada.
-              </p>
-            )}
           </div>
         </details>
       )}
 
-      <div className="flex items-center justify-between pt-2 border-t border-white/5">
-        <p className="text-[9px] font-mono text-muted-foreground">
+      <div className="flex items-center justify-between pt-2 border-t border-[#303a32]">
+        <p className="text-[11px] text-[#a5b1a8] tabular-nums">
           {fetchedAt ? `Analisado em ${new Date(fetchedAt).toLocaleString("pt-BR")}` : ""}
         </p>
         <button
+          type="button"
           onClick={() => analyze(true)}
           disabled={analyzing}
-          className="text-[10px] font-bold text-cyan-300 hover:text-cyan-100 disabled:opacity-50"
+          className="text-xs font-medium text-[#6ee7b7] hover:underline disabled:opacity-50 inline-flex items-center gap-1.5"
         >
-          {analyzing ? "Reanalisando..." : "🔄 Reanalisar"}
+          <RefreshCw className={cn("w-3 h-3", analyzing && "animate-spin")} />
+          {analyzing ? "Reanalisando..." : "Reanalisar"}
         </button>
       </div>
-      {error && <p className="text-[10px] text-red-300">{error}</p>}
+      {error && <p className="text-xs text-[#fda4af]">{error}</p>}
     </div>
   );
 }

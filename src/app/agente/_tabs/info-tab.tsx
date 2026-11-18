@@ -204,6 +204,8 @@ export type InfoTabProps = {
   // Prévias de Sites IA
   sitePreviewAutoDetect: boolean; setSitePreviewAutoDetect: (v: boolean) => void;
   sdrEnrichmentDossierEnabled: boolean; setSdrEnrichmentDossierEnabled: (v: boolean) => void;
+  sdrEnrichmentDossierMode?: "strategic" | "full";
+  setSdrEnrichmentDossierMode?: (v: "strategic" | "full") => void;
   sitePreviewConfirmBeforeLink: boolean; setSitePreviewConfirmBeforeLink: (v: boolean) => void;
   sitePreviewEvalPrompt: string; setSitePreviewEvalPrompt: (v: string) => void;
   sitePreviewPingMessage: string; setSitePreviewPingMessage: (v: string) => void;
@@ -1358,8 +1360,48 @@ export function InfoTab(p: InfoTabProps) {
               color="cyan"
               checked={p.sdrEnrichmentDossierEnabled}
               onChange={p.setSdrEnrichmentDossierEnabled}
-              hint={<>Injeta no contexto do lead o diagnóstico técnico real do site (fora do ar vs improvisado vs sem site), sócio-decisor, sinais de anúncios/sistemas e instrução anti-secretária sem quebrar o cache do prompt principal.</>}
+              hint={<>Injeta no contexto do lead o diagnóstico técnico real do site (fora do ar vs improvisado vs sem site), sócio-decisor, sinais de anúncios/sistemas e instrução anti-secretária sem quebrar o cache do prompt principal. Você também pode sobrescrever individualmente na ficha de qualquer lead.</>}
             />
+
+            {p.sdrEnrichmentDossierEnabled && p.setSdrEnrichmentDossierMode && (
+              <div className="rounded-lg bg-[#111612] border border-[#303a32] p-3 space-y-2">
+                <span className="text-xs font-medium text-[#edf2ee] block">
+                  Modo de uso do dossiê pela IA
+                </span>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    aria-pressed={(p.sdrEnrichmentDossierMode ?? "strategic") === "strategic"}
+                    onClick={() => p.setSdrEnrichmentDossierMode?.("strategic")}
+                    className={`rounded-md p-2.5 text-left border transition-colors cursor-pointer ${
+                      (p.sdrEnrichmentDossierMode ?? "strategic") === "strategic"
+                        ? "bg-[#162b21] border-[#2f5e49] text-[#6ee7b7]"
+                        : "bg-[#181d19] border-[#303a32] text-[#a5b1a8] hover:text-[#edf2ee]"
+                    }`}
+                  >
+                    <span className="text-xs font-semibold block">Bastidores discretos (Recomendado)</span>
+                    <span className="text-[11px] opacity-85 block mt-0.5">
+                      Calibra postura, fura-secretária e diagnóstico do site sem expor dados societários.
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={p.sdrEnrichmentDossierMode === "full"}
+                    onClick={() => p.setSdrEnrichmentDossierMode?.("full")}
+                    className={`rounded-md p-2.5 text-left border transition-colors cursor-pointer ${
+                      p.sdrEnrichmentDossierMode === "full"
+                        ? "bg-[#162b21] border-[#2f5e49] text-[#6ee7b7]"
+                        : "bg-[#181d19] border-[#303a32] text-[#a5b1a8] hover:text-[#edf2ee]"
+                    }`}
+                  >
+                    <span className="text-xs font-semibold block">Personalização completa</span>
+                    <span className="text-[11px] opacity-85 block mt-0.5">
+                      Inclui atividade principal, tempo no Google e tópicos elogiados nas avaliações.
+                    </span>
+                  </button>
+                </div>
+              </div>
+            )}
 
             <ToggleRow
               label="Geração Automática de Prévia ao Detectar Aceite"

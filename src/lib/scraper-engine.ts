@@ -413,7 +413,7 @@ async function preloadCrmDedupeCache(clientId: string): Promise<CrmDedupeCache> 
   const client = supabaseAdmin;
   if (client) {
     try {
-      const accountingPairs: Array<{ phone: string; cnpj: string }> = [];
+      const accountingPairs: Array<{ phone?: string; email?: string; cnpj: string }> = [];
       let selectWithDetails = true;
       for (let offset = 0; offset < 10_000; offset += 1000) {
         let rows: Array<Record<string, unknown>> | null = null;
@@ -464,8 +464,9 @@ async function preloadCrmDedupeCache(clientId: string): Promise<CrmDedupeCache> 
               const enrObj = enr as Record<string, unknown>;
               const cnpj = typeof enrObj.cnpj === "string" ? enrObj.cnpj : "";
               const telSocio = typeof enrObj.telefoneSocio === "string" ? enrObj.telefoneSocio : "";
-              if (cnpj && telSocio) {
-                accountingPairs.push({ phone: telSocio, cnpj });
+              const emailEnr = typeof enrObj.emailValidado === "string" ? enrObj.emailValidado : "";
+              if (cnpj && (telSocio || emailEnr)) {
+                accountingPairs.push({ phone: telSocio || undefined, email: emailEnr || undefined, cnpj });
               }
             }
           }
@@ -790,6 +791,7 @@ async function saveLeadAndSync(lead: Lead, settings: ScraperSettings, run: RunCo
       remoteJid: lead.remoteJid || null,
       nome_negocio: lead.name,
       telefone: lead.phones,
+      ...(lead.enrichment?.emailValidado ? { email: lead.enrichment.emailValidado } : {}),
       ramo_negocio: lead.categories,
       endereco: lead.fullAddress,
       avaliacao: lead.averageRating ? Number(lead.averageRating) || null : null,
@@ -845,7 +847,7 @@ async function saveLeadAndSync(lead: Lead, settings: ScraperSettings, run: RunCo
     if (insError && insError.code === "PGRST204" && !run.automationId) {
       const minimal: any = { ...fullPayload };
       const maybeMissing = [
-        "instagram", "facebook",
+        "email", "instagram", "facebook",
         "reviews_detalhes", "business_details", "opening_hours", "attributes",
         "price_range", "open_now", "photos", "maps_url",
         "place_id", "plus_code", "lat", "lng", "cep", "distribuicao_estrelas",

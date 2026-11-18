@@ -42,6 +42,8 @@ export type PreviewLead = {
   email?: string | null;
   observacoes?: string | null;
   status?: string | null;
+  resumo_ia?: string | null;
+  intelligence?: Record<string, unknown> | null;
 };
 
 export type PreviewSample = {
@@ -76,6 +78,8 @@ export type PreviewSample = {
   link_previa?: string;
   email?: string;
   observacoes?: string;
+  resumo_ia?: string;
+  intelligence?: Record<string, unknown> | null;
   business_details?: Record<string, unknown> | null;
 };
 
@@ -111,18 +115,26 @@ export const DEFAULT_PREVIEW_SAMPLE: PreviewSample = {
   link_previa: "https://padaria-centro.vercel.app",
   email: "contato@padariacentro.com.br",
   observacoes: "Cliente com boa reputação no Google Maps",
+  resumo_ia: "Negócio tradicional com alta demanda matinal e oportunidade de pedidos digitais.",
+  intelligence: {
+    dores: ["Dependência de balcão presencial", "Site desatualizado no celular"],
+    abordagem: "Mostrar página rápida com cardápio e encomendas direto no WhatsApp.",
+  },
   business_details: {
     services: ["Pães artesanais", "Confeitaria fina"],
     enrichment: {
       cnpj: "12345678000190",
       razaoSocial: "PADARIA CENTRO LTDA",
+      cnaeDescricao: "Fabricação de produtos de padaria e confeitaria com predominância de produção própria",
       socioDecisor: "Carlos Silva",
       primeiroNomeSocio: "Carlos",
+      faixaEtariaSocio: "41 a 50 anos",
       porte: "EPP",
       capitalSocial: 80000,
       anosEmpresa: 7,
       siteStatusLabel: "Site lento / SSL vencido",
       siteDiagnostico: "Certificado SSL expirado e carregamento acima de 6s no celular",
+      discoveredRealWebsite: "https://padariacentro.com.br",
       telefoneSocio: "11999998888",
       telefoneRecepcao: "1132221100",
       whatsappChannelType: "socio_direto",
@@ -132,6 +144,7 @@ export const DEFAULT_PREVIEW_SAMPLE: PreviewSample = {
       empresaCurta: "Padaria Centro",
       servicoPrincipal: "Pães artesanais",
       qualificationScore: 84,
+      qualificationReasons: ["7 anos de CNPJ", "127 avaliações Google", "Investe em anúncios"],
     },
   },
 };
@@ -174,6 +187,8 @@ export function leadToPreviewSample(lead: PreviewLead): PreviewSample {
     link_previa: resolveKey("link_previa"),
     email: resolveKey("email"),
     observacoes: resolveKey("observacoes"),
+    resumo_ia: lead.resumo_ia || undefined,
+    intelligence: lead.intelligence ?? null,
     business_details: lead.business_details ?? null,
   };
 }

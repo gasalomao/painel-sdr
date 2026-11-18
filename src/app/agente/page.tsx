@@ -125,6 +125,7 @@ export default function AgentePage() {
   // ============= PRÉVIAS DE SITES IA =============
   const [sitePreviewAutoDetect, setSitePreviewAutoDetect] = useState(false);
   const [sdrEnrichmentDossierEnabled, setSdrEnrichmentDossierEnabled] = useState(false);
+  const [sdrEnrichmentDossierMode, setSdrEnrichmentDossierMode] = useState<"strategic" | "full">("strategic");
   const [sitePreviewConfirmBeforeLink, setSitePreviewConfirmBeforeLink] = useState(true);
   const [sitePreviewEvalPrompt, setSitePreviewEvalPrompt] = useState(DEFAULT_SITE_PREVIEW_EVAL_PROMPT);
   const [sitePreviewPingMessage, setSitePreviewPingMessage] = useState(DEFAULT_SITE_PREVIEW_PING_MESSAGE);
@@ -375,6 +376,7 @@ export default function AgentePage() {
 
       setSitePreviewAutoDetect(opts.site_preview_auto_detect ?? false);
       setSdrEnrichmentDossierEnabled(Boolean(opts.sdr_enrichment_dossier_enabled));
+      setSdrEnrichmentDossierMode(opts.sdr_enrichment_dossier_mode === "full" ? "full" : "strategic");
       setSitePreviewConfirmBeforeLink(opts.site_preview_confirm_before_link ?? true);
       setSitePreviewEvalPrompt(opts.site_preview_eval_prompt || DEFAULT_SITE_PREVIEW_EVAL_PROMPT);
       setSitePreviewPingMessage(opts.site_preview_ping_message || DEFAULT_SITE_PREVIEW_PING_MESSAGE);
@@ -635,6 +637,7 @@ export default function AgentePage() {
             custom_tools: customTools.filter((t) => t.name.trim() && t.webhook_url.trim()),
             site_preview_auto_detect: sitePreviewAutoDetect,
             sdr_enrichment_dossier_enabled: sdrEnrichmentDossierEnabled,
+            sdr_enrichment_dossier_mode: sdrEnrichmentDossierEnabled ? sdrEnrichmentDossierMode : "off",
             site_preview_confirm_before_link: sitePreviewConfirmBeforeLink,
             site_preview_eval_prompt: sitePreviewEvalPrompt,
             site_preview_ping_message: sitePreviewPingMessage,
@@ -1447,6 +1450,8 @@ export default function AgentePage() {
                 setSitePreviewAutoDetect={setSitePreviewAutoDetect}
                 sdrEnrichmentDossierEnabled={sdrEnrichmentDossierEnabled}
                 setSdrEnrichmentDossierEnabled={setSdrEnrichmentDossierEnabled}
+                sdrEnrichmentDossierMode={sdrEnrichmentDossierMode}
+                setSdrEnrichmentDossierMode={setSdrEnrichmentDossierMode}
                 sitePreviewConfirmBeforeLink={sitePreviewConfirmBeforeLink}
                 setSitePreviewConfirmBeforeLink={setSitePreviewConfirmBeforeLink}
                 sitePreviewEvalPrompt={sitePreviewEvalPrompt}

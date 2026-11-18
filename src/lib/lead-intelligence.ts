@@ -12,6 +12,7 @@
  */
 
 import { supabaseAdmin } from "@/lib/supabase_admin";
+import { sanitizePromptSignal } from "@/lib/crm-lead-profile";
 import { logTokenUsage } from "@/lib/token-usage";
 import { isPrivateOrLocalUrl } from "@/lib/url-guard";
 
@@ -1265,17 +1266,65 @@ function buildUserPrompt(
   if (avalNum > 0) lines.push(`- Avaliação Google: ${lead.avaliacao}/5 (${lead.reviews || "?"} reviews) → reputação ${reputacao}`);
   lines.push(`- Porte inferido (por nº reviews): ${porte}`);
 
-  const enr = (lead.business_details as Record<string, unknown> | null | undefined)?.enrichment as Record<string, unknown> | undefined;
-  if (enr && typeof enr === "object") {
-    lines.push("\n# DADOS OFICIAIS AUDITADOS (RECEITA FEDERAL + SAÚDE TÉCNICA DO SITE)");
+  const bdObj = (lead.business_details as Record<string, unknown> | null | undefined) || {};
+  const rawEnr = bdObj.enrichment as Record<string, unknown> | undefined;
+  const crmOverrides = bdObj.crm_overrides as Record<string, unknown> | undefined;
+  const enr: Record<string, unknown> | undefined = rawEnr || crmOverrides
+    ? {
+        ...(rawEnr || {}),
+        ...(crmOverrides && Object.prototype.hasOwnProperty.call(crmOverrides, "socioDecisor")
+          ? { socioDecisor: crmOverrides.socioDecisor }
+          : {}),
+        ...(crmOverrides && Object.prototype.hasOwnProperty.call(crmOverrides, "cnpj")
+          ? { cnpj: crmOverrides.cnpj }
+          : {}),
+        ...(crmOverrides && Object.prototype.hasOwnProperty.call(crmOverrides, "porte")
+          ? { porte: crmOverrides.porte }
+          : {}),
+        ...(crmOverrides && Object.prototype.hasOwnProperty.call(crmOverrides, "servicoPrincipal")
+          ? { servicoPrincipal: crmOverrides.servicoPrincipal }
+          : {}),
+      }
+    : undefined;
+  if (enr && typeof enr === "object" && Object.keys(enr).length > 0) {
+    lines.push("\n# DADOS OFICIAIS AUDITADOS (RECEITA FEDERAL + SAÚDE TÉCNICA DO SITE + CRM)");
     if (enr.siteStatusLabel || enr.siteDiagnostico) {
-      lines.push(`- Saúde do Site: ${enr.siteStatusLabel || ""} (${enr.siteDiagnostico || ""})`);
+      lines.push(
+        `- Saúde do Site: ${sanitizePromptSignal(enr.siteStatusLabel, 100)} (${sanitizePromptSignal(enr.siteDiagnostico, 160)})`,
+      );
     }
-    if (enr.cnpj) lines.push(`- CNPJ: ${enr.cnpj} · Situação: ${enr.situacaoCadastral || "ATIVA"}`);
-    if (enr.porte) lines.push(`- Porte na Receita: ${enr.porte}${enr.capitalSocial ? ` · Capital Social: R$ ${Number(enr.capitalSocial).toLocaleString("pt-BR")}` : ""}`);
-    if (enr.anosEmpresa) lines.push(`- Tempo de CNPJ ativo: ${enr.anosEmpresa} anos`);
-    if (enr.socioDecisor) lines.push(`- Sócio Decisor (QSA): ${enr.socioDecisor}`);
-    if (enr.telefoneSocio) lines.push(`- WhatsApp direto localizado: ${enr.telefoneSocio} (${enr.whatsappSource || "enriquecimento"})`);
+    if (enr.abandonedCopyrightYear) {
+      lines.push(`- Rodapé do site parado em: © ${Number(enr.abandonedCopyrightYear)}`);
+    }
+    if (enr.cnpj) {
+      lines.push(`- CNPJ: ${sanitizePromptSignal(enr.cnpj, 24)} · Situação: ${sanitizePromptSignal(enr.situacaoCadastral || "ATIVA", 40)}`);
+    }
+    if (enr.cnaeDescricao) {
+      lines.push(`- Atividade principal registrada (CNAE): ${sanitizePromptSignal(enr.cnaeDescricao, 140)}`);
+    }
+    if (enr.porte) {
+      lines.push(
+        `- Porte na Receita: ${sanitizePromptSignal(enr.porte, 50)}${
+          enr.capitalSocial ? ` · Capital Social: R$ ${Number(enr.capitalSocial).toLocaleString("pt-BR")}` : ""
+        }`,
+      );
+    }
+    if (enr.anosEmpresa) lines.push(`- Tempo de CNPJ ativo: ${Number(enr.anosEmpresa)} anos`);
+    if (enr.socioDecisor) {
+      lines.push(`- Sócio Decisor confirmado: ${sanitizePromptSignal(enr.socioDecisor, 120)}`);
+    }
+    if (enr.servicoPrincipal) {
+      lines.push(`- Especialidade principal mapeada: ${sanitizePromptSignal(enr.servicoPrincipal, 120)}`);
+    }
+    if (Array.isArray(enr.trafficTags) && enr.trafficTags.length > 0) {
+      lines.push(`- Tráfego pago detectado no site: ${enr.trafficTags.map((t: unknown) => sanitizePromptSignal(t, 40)).filter(Boolean).join(", ")}`);
+    }
+    if (Array.isArray(enr.managementTools) && enr.managementTools.length > 0) {
+      lines.push(`- Sistemas de gestão/agenda detectados: ${enr.managementTools.map((t: unknown) => sanitizePromptSignal(t, 40)).filter(Boolean).join(", ")}`);
+    }
+    if (enr.telefoneSocio) {
+      lines.push(`- WhatsApp direto localizado: ${sanitizePromptSignal(enr.telefoneSocio, 24)} (${sanitizePromptSignal(enr.whatsappSource || "enriquecimento", 30)})`);
+    }
   }
 
   // Site — crawl multi-página estruturado em seções (## HOME, ## SOBRE, ## SERVICOS, ...).
@@ -1388,9 +1437,16 @@ export async function analyzeLead(opts: {
   liLog(tag, `📍 ${cidade || "?"}/${estado || "?"} · 🌐 site: ${lead.website || "(não cadastrado)"}`);
   liLog(tag, `🔍 queries — lead: "${queryLead}" · concorrentes: "${queryConcorrentes}"`);
 
+  const discoveredFromAudit =
+    typeof ((lead.business_details as Record<string, unknown> | null | undefined)?.enrichment as Record<string, unknown> | undefined)
+      ?.discoveredRealWebsite === "string"
+      ? (((lead.business_details as Record<string, unknown>).enrichment as Record<string, unknown>).discoveredRealWebsite as string).trim()
+      : "";
+  const effectiveSeedWebsite = discoveredFromAudit || lead.website || null;
+
   // Estágio 1.
   const [websiteCadastradoCrawl, searchLeadRaw, searchCompetitorsRaw] = await Promise.all([
-    deepScrapeWebsite(lead.website || null),
+    deepScrapeWebsite(effectiveSeedWebsite),
     queryLead ? webSearch(queryLead, 6) : Promise.resolve([]),
     queryConcorrentes ? webSearch(queryConcorrentes, 5) : Promise.resolve([]),
   ]);

@@ -119,6 +119,8 @@ export type TemplateContext = {
   categorias_adicionais?: string | null;
   distribuicao_estrelas?: unknown;
   reviews_detalhes?: unknown;
+  resumo_ia?: string | null;
+  intelligence?: Record<string, unknown> | null;
   // Vars dinâmicas capturadas pelo funil (sessions.variables)
   // — também usado pra injetar dados de agendamento ({hora_agendamento},
   // {data_agendamento}, {servico}, {meet_link}, etc.)
@@ -361,6 +363,8 @@ export function leadRowToTemplateContext(
     categorias_adicionais: l.categorias_adicionais ?? extra.categorias_adicionais ?? null,
     distribuicao_estrelas: l.distribuicao_estrelas ?? extra.distribuicao_estrelas ?? null,
     reviews_detalhes: l.reviews_detalhes ?? extra.reviews_detalhes ?? null,
+    resumo_ia: l.resumo_ia ?? extra.resumo_ia ?? null,
+    intelligence: l.intelligence ?? extra.intelligence ?? null,
     variables: extra.variables ?? l.variables ?? null,
     now: extra.now ?? l.now,
   };
@@ -475,11 +479,35 @@ export function renderTemplate(
   const menuUrlVal = (ctx.menu_url || (typeof bd.menuUrl === "string" ? bd.menuUrl : "")).trim();
   const reservaUrlVal = (ctx.reserva_url || (typeof bd.reservaUrl === "string" ? bd.reservaUrl : "")).trim();
 
-  // Proprietário / Sócio Decisor / Saúde do Site / Receita Federal (enrichment gratuito)
-  const enr = bd.enrichment && typeof bd.enrichment === "object"
+  // Proprietário / Sócio Decisor / Saúde do Site / Receita Federal (enrichment gratuito + crm_overrides)
+  const rawEnr = bd.enrichment && typeof bd.enrichment === "object"
     ? (bd.enrichment as Record<string, unknown>)
     : {};
+  const overrides = bd.crm_overrides && typeof bd.crm_overrides === "object"
+    ? (bd.crm_overrides as Record<string, unknown>)
+    : {};
+  const enr: Record<string, unknown> = {
+    ...rawEnr,
+    ...(Object.prototype.hasOwnProperty.call(overrides, "socioDecisor")
+      ? { socioDecisor: overrides.socioDecisor ?? "", primeiroNomeSocio: overrides.primeiroNomeSocio ?? "" }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(overrides, "canalWhatsapp")
+      ? { whatsappChannelType: overrides.canalWhatsapp ?? "" }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(overrides, "cnpj")
+      ? { cnpj: overrides.cnpj ?? "" }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(overrides, "porte")
+      ? { porte: overrides.porte ?? "" }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(overrides, "servicoPrincipal")
+      ? { servicoPrincipal: overrides.servicoPrincipal ?? "" }
+      : {}),
+  };
   const proprietarioVal = (
+    (Object.prototype.hasOwnProperty.call(overrides, "socioDecisor") && typeof overrides.socioDecisor === "string"
+      ? overrides.socioDecisor
+      : "") ||
     ctx.proprietario ||
     ctx.owner_name ||
     (typeof enr.socioDecisor === "string" ? enr.socioDecisor : "")
@@ -567,6 +595,55 @@ export function renderTemplate(
     typeof enr.qualificationScore === "number" && Number.isFinite(enr.qualificationScore)
       ? String(Math.round(enr.qualificationScore))
       : "";
+  const emailFinalVal = (
+    ctx.email ||
+    (typeof enr.emailValidado === "string" ? enr.emailValidado : "")
+  ).trim();
+  const altPhonesArr = Array.isArray(enr.telefonesAlternativos)
+    ? (enr.telefonesAlternativos as Array<{ telefone?: unknown }>)
+    : [];
+  const primaryDigitsOnly = phone.replace(/\D/g, "").slice(-10);
+  const altPhoneCandidates = [
+    typeof overrides.telefoneAlternativo === "string" ? overrides.telefoneAlternativo : "",
+    telefoneRecepcaoVal,
+    ...altPhonesArr.map((item) => (typeof item?.telefone === "string" ? item.telefone : "")),
+    telefoneSocioVal,
+    typeof enr.telefoneMapsOriginal === "string" ? enr.telefoneMapsOriginal : "",
+  ];
+  const telefoneAlternativoVal = (
+    altPhoneCandidates.find((cand) => {
+      const clean = cand.trim();
+      if (!clean) return false;
+      const candTail = clean.replace(/\D/g, "").slice(-10);
+      return !primaryDigitsOnly || candTail !== primaryDigitsOnly;
+    }) || ""
+  ).trim();
+  const faixaEtariaSocioVal = typeof enr.faixaEtariaSocio === "string" ? enr.faixaEtariaSocio.trim() : "";
+  const cnaePrincipalVal = typeof enr.cnaeDescricao === "string" ? enr.cnaeDescricao.trim() : "";
+  const siteRealVal = typeof enr.discoveredRealWebsite === "string"
+    ? enr.discoveredRealWebsite.trim()
+    : (ctx.website || "").trim();
+  const motivosScoreVal = Array.isArray(enr.qualificationReasons)
+    ? enr.qualificationReasons
+        .filter((r): r is string => typeof r === "string" && r.trim().length > 0)
+        .slice(0, 4)
+        .join(", ")
+    : "";
+  const tempoMercadoVal = anosEmpresaVal || (anoGoogleVal ? `desde ${anoGoogleVal}` : "");
+  const intelObj = ctx.intelligence && typeof ctx.intelligence === "object"
+    ? (ctx.intelligence as Record<string, unknown>)
+    : {};
+  const resumoIaVal = (
+    ctx.resumo_ia ||
+    (typeof intelObj.abordagem === "string" ? intelObj.abordagem : "")
+  ).trim();
+  const doresIaVal = Array.isArray(intelObj.dores)
+    ? intelObj.dores
+        .filter((d): d is string => typeof d === "string" && d.trim().length > 0)
+        .slice(0, 3)
+        .join("; ")
+    : "";
+  const anguloIaVal = typeof intelObj.abordagem === "string" ? intelObj.abordagem.trim() : "";
   const reivindicadoVal = formatClaimed(ctx.claimed, ctx.reivindicado);
   const situacaoEmpresaVal = (ctx.situacao_empresa || ctx.business_status || "").trim();
   const totalFotosVal =
@@ -613,7 +690,8 @@ export function renderTemplate(
     nome: nomeFinal,
     push_name: ctx.push_name || "",
     telefone: phone,
-    email: ctx.email || "",
+    email: emailFinalVal,
+    email_empresa: emailFinalVal,
     ramo: ctx.ramo_negocio || ctx.categoria || "",
     ramo_negocio: ctx.ramo_negocio || ctx.categoria || "",
     categoria: ctx.categoria || ctx.ramo_negocio || "",
@@ -691,6 +769,15 @@ export function renderTemplate(
     especialidade: servicoPrincipalVal,
     canal_whatsapp: canalWhatsappVal,
     telefone_recepcao: telefoneRecepcaoVal,
+    telefone_alternativo: telefoneAlternativoVal,
+    faixa_etaria_socio: faixaEtariaSocioVal,
+    cnae_principal: cnaePrincipalVal,
+    tempo_mercado: tempoMercadoVal,
+    site_real: siteRealVal,
+    motivos_score: motivosScoreVal,
+    resumo_ia: resumoIaVal,
+    dores_ia: doresIaVal,
+    angulo_ia: anguloIaVal,
     sinal_anuncios: sinalAnunciosVal,
     sistemas_atuais: sistemasAtuaisVal,
     abertura_inteligente: aberturaInteligenteVal,
@@ -797,6 +884,7 @@ export const PROMPT_VARIABLES = [
   { key: "servico_principal", label: "Serviço principal", hint: "Especialidade principal limpa sem glifos do Maps (alias: {{especialidade}})" },
   { key: "canal_whatsapp", label: "Canal WhatsApp", hint: "Classificação do número: WhatsApp direto do sócio ou Recepção" },
   { key: "telefone_recepcao", label: "Tel. recepção", hint: "Número backup da recepção quando o WhatsApp principal for direto do sócio" },
+  { key: "telefone_alternativo", label: "Tel. reserva", hint: "Segundo telefone validado do lead (recepção, site ou Receita)" },
   { key: "sinal_anuncios", label: "Sinal tráfego pago", hint: "Indica se o site possui Google Ads / Meta Pixel ativo" },
   { key: "sistemas_atuais", label: "Sistemas atuais", hint: "Ferramentas detectadas no site (Doctoralia, Clinicorp, Trinks, RD Station, HubSpot)" },
   { key: "abertura_inteligente", label: "Abertura inteligente", hint: "Saudação adaptada automaticamente para Sócio Direto vs Recepção" },
@@ -804,6 +892,11 @@ export const PROMPT_VARIABLES = [
   { key: "porte_receita", label: "Porte CNPJ", hint: "Porte oficial na Receita Federal (MEI, ME, EPP, Demais)" },
   { key: "capital_social", label: "Capital social", hint: "Capital social registrado na Receita Federal" },
   { key: "anos_empresa", label: "Anos CNPJ", hint: "Tempo de atividade da empresa na Receita" },
+  { key: "tempo_mercado", label: "Tempo de mercado", hint: "Anos de CNPJ ativo ou ano em que está no Google Maps" },
+  { key: "cnae_principal", label: "Atividade CNAE", hint: "Descrição oficial da atividade econômica principal" },
+  { key: "site_real", label: "Site real", hint: "Domínio próprio descoberto mesmo quando o Maps aponta para Linktree" },
+  { key: "dores_ia", label: "Dores IA", hint: "Dores identificadas pela análise Lead Intelligence" },
+  { key: "angulo_ia", label: "Ângulo IA", hint: "Ângulo comercial recomendado pelo Lead Intelligence" },
   { key: "reivindicado", label: "Perfil reivindicado", hint: "Se a empresa reivindicou o perfil no Google (Sim/Não)" },
   { key: "total_fotos", label: "Total de fotos", hint: "Quantidade de fotos no Google Maps" },
   { key: "topicos_avaliacoes", label: "Tópicos avaliações", hint: "Temas mais mencionados nas avaliações do Google" },

@@ -21,8 +21,12 @@ import {
   Trash2,
   Mic,
   Upload,
-  Loader2
+  Loader2,
+  Building2,
+  ChevronDown,
+  ExternalLink,
 } from "lucide-react";
+import type { LeadCrmDossier } from "@/lib/crm-lead-profile";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { toast } from "sonner";
@@ -156,6 +160,27 @@ function ContactSidebarContent({ contact, clientId, aiAgents = [], onContactUpda
   const currentCrm = crm?.selection === crmSelection ? crm : null;
   const lead = currentCrm?.lead ?? null;
   const kanbanColumns = currentCrm?.columns ?? [];
+  const [dossierOpen, setDossierOpen] = useState(false);
+  const [dossierLoading, setDossierLoading] = useState(false);
+  const [leadDossier, setLeadDossier] = useState<LeadCrmDossier | null>(null);
+
+  const handleToggleLeadDossier = useCallback(async (targetLeadId: number) => {
+    const nextOpen = !dossierOpen;
+    setDossierOpen(nextOpen);
+    if (!nextOpen || leadDossier || dossierLoading) return;
+    setDossierLoading(true);
+    try {
+      const res = await fetch(`/api/leads/${targetLeadId}/crm`);
+      const data = await res.json().catch(() => null);
+      if (mounted.current && res.ok && data?.crm_dossier) {
+        setLeadDossier(data.crm_dossier as LeadCrmDossier);
+      }
+    } catch {
+      // ignora falha secundária silenciosamente
+    } finally {
+      if (mounted.current) setDossierLoading(false);
+    }
+  }, [dossierOpen, leadDossier, dossierLoading]);
 
   // Estado do Agente de IA e Instância atribuídos à sessão
   const [assignedAgentId, setAssignedAgentId] = useState<string>("");
@@ -843,10 +868,94 @@ function ContactSidebarContent({ contact, clientId, aiAgents = [], onContactUpda
                       )}
                       {kanbanColumns.map((col) => (
                         <option key={col.status_key} value={col.status_key}>
-                          {col.label} {col.is_terminal ? "🔒" : ""}
+                          {col.label} {col.is_terminal ? "(Final)" : ""}
                         </option>
                       ))}
                     </select>
+                  </div>
+
+                  <div className="pt-2 border-t border-border/60 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void handleToggleLeadDossier(lead.id)}
+                        className="inline-flex items-center gap-1.5 text-[11px] font-medium text-primary hover:underline cursor-pointer"
+                      >
+                        <Building2 className="h-3 w-3" />
+                        <span>Raio-X empresarial</span>
+                        <ChevronDown className={cn("h-3 w-3 transition-transform", dossierOpen && "rotate-180")} />
+                      </button>
+
+                      <a
+                        href={`/leads?openLeadId=${lead.id}`}
+                        className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+                        title="Abrir ficha completa no CRM"
+                      >
+                        <span>Ficha CRM</span>
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </div>
+
+                    {dossierOpen && (
+                      <div className="rounded-md bg-card border border-border/70 p-2.5 text-[11px] space-y-1.5">
+                        {dossierLoading ? (
+                          <p className="text-muted-foreground flex items-center gap-1.5">
+                            <Loader2 className="h-3 w-3 animate-spin" /> Carregando dossiê...
+                          </p>
+                        ) : leadDossier && leadDossier.richSignalsCount > 0 ? (
+                          <>
+                            {leadDossier.socioDecisor && (
+                              <p className="text-foreground">
+                                <span className="text-muted-foreground">Sócio:</span>{" "}
+                                <strong className="font-semibold">{leadDossier.socioDecisor}</strong>
+                              </p>
+                            )}
+                            {leadDossier.canalLabel && (
+                              <p className="text-foreground">
+                                <span className="text-muted-foreground">Canal:</span> {leadDossier.canalLabel}
+                              </p>
+                            )}
+                            {leadDossier.telefoneAlternativoFormatted && (
+                              <p className="text-foreground tabular-nums">
+                                <span className="text-muted-foreground">Reserva:</span>{" "}
+                                {leadDossier.telefoneAlternativoFormatted}
+                              </p>
+                            )}
+                            {leadDossier.cnpj && (
+                              <p className="text-foreground tabular-nums">
+                                <span className="text-muted-foreground">CNPJ:</span> {leadDossier.cnpj}
+                              </p>
+                            )}
+                            {(leadDossier.porte || leadDossier.anosEmpresa !== null) && (
+                              <p className="text-foreground">
+                                <span className="text-muted-foreground">Perfil:</span>{" "}
+                                {[
+                                  leadDossier.porte,
+                                  leadDossier.anosEmpresa !== null ? `${leadDossier.anosEmpresa} anos` : null,
+                                ]
+                                  .filter(Boolean)
+                                  .join(" · ")}
+                              </p>
+                            )}
+                            {leadDossier.siteStatusLabel && (
+                              <p className="text-foreground">
+                                <span className="text-muted-foreground">Site:</span> {leadDossier.siteStatusLabel}
+                              </p>
+                            )}
+                            {leadDossier.qualificationScore !== null && (
+                              <p className="text-foreground tabular-nums">
+                                <span className="text-muted-foreground">Score ICP:</span>{" "}
+                                {leadDossier.qualificationScore}/100
+                              </p>
+                            )}
+                          </>
+                        ) : (
+                          <p className="text-muted-foreground">
+                            Sem dados extras auditados ainda. Abra a Ficha CRM para auditar CNPJ e site gratuitamente.
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               ) : currentCrm?.state === "ambiguous" ? (
