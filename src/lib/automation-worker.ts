@@ -668,9 +668,21 @@ async function startDispatchPhase(
   if (a.scrape_filters?.weekend_guard !== undefined) {
     try {
       await supabase
-        .from("system_config")
+        .from("app_settings")
         .upsert(
           { key: `campaign_weekend_guard:${camp.id}`, value: String(Boolean(a.scrape_filters.weekend_guard)) },
+          { onConflict: "key" }
+        );
+    } catch {}
+  }
+
+  // Liga/desliga da Proteção Anti-Ban escolhido na automação viaja para a campanha.
+  if (a.scrape_filters?.cold_shield !== undefined) {
+    try {
+      await supabase
+        .from("app_settings")
+        .upsert(
+          { key: `campaign_cold_shield:${camp.id}`, value: String(a.scrape_filters.cold_shield !== false) },
           { onConflict: "key" }
         );
     } catch {}
@@ -1031,6 +1043,19 @@ async function startFollowupPhase(a: AutomationRow): Promise<void> {
     .select("id")
     .single();
   if (fcErr || !fcamp?.id) return markError(a.id, `Falha criando follow-up: ${fcErr?.message}`);
+
+  // O liga/desliga da Proteção Anti-Ban da automação cobre também o follow-up
+  // que ela mesma cria (fluxo completo: disparo + cadência de retorno).
+  if (a.scrape_filters?.cold_shield !== undefined) {
+    try {
+      await supabase
+        .from("app_settings")
+        .upsert(
+          { key: `followup_cold_shield:${fcamp.id}`, value: String(a.scrape_filters.cold_shield !== false) },
+          { onConflict: "key" }
+        );
+    } catch {}
+  }
 
   // 2) Enrola enquanto a campanha está pausada; ativação somente após checkpoint.
   const remoteJids = targets.map(t => t.remote_jid).filter(Boolean);

@@ -132,9 +132,18 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     }
     if ("weekend_guard" in body) {
       await supabase
-        .from("system_config")
+        .from("app_settings")
         .upsert(
           { key: `followup_weekend_guard:${id}`, value: body.weekend_guard === true ? "true" : "false" },
+          { onConflict: "key" }
+        )
+        .then(() => undefined, () => undefined);
+    }
+    if ("cold_shield" in body) {
+      await supabase
+        .from("app_settings")
+        .upsert(
+          { key: `followup_cold_shield:${id}`, value: body.cold_shield !== false ? "true" : "false" },
           { onConflict: "key" }
         )
         .then(() => undefined, () => undefined);

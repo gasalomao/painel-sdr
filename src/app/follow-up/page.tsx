@@ -55,6 +55,8 @@ type FollowupCampaign = {
   created_at: string;
   last_error?: string | null;
   last_error_at?: string | null;
+  weekend_guard?: boolean;
+  cold_shield?: boolean;
 };
 
 type FollowupTarget = {
@@ -120,6 +122,7 @@ export default function FollowUpPage(): ReactElement {
   const [endHour, setEndHour] = useState(20);
   const [autoExecute, setAutoExecute] = useState(true);
   const [weekendGuard, setWeekendGuard] = useState(false);
+  const [coldShield, setColdShield] = useState(true);
 
   // Coluna do kanban que abastece a campanha. Default "follow-up" (estágio
   // padrão histórico). Quando o cliente cria kanban customizado via
@@ -328,6 +331,7 @@ export default function FollowUpPage(): ReactElement {
     setStartHour(9); setEndHour(20);
     setAutoExecute(true);
     setWeekendGuard(false);
+    setColdShield(true);
     setSourceStatus("follow-up");
   };
 
@@ -345,6 +349,7 @@ export default function FollowUpPage(): ReactElement {
     setEndHour(c.allowed_end_hour);
     setAutoExecute(!!c.auto_execute);
     setWeekendGuard(Boolean((c as { weekend_guard?: boolean }).weekend_guard));
+    setColdShield(c.cold_shield !== false);
     setSourceStatus((c as any).source_status || "follow-up");
     setShowForm(true);
   };
@@ -513,6 +518,7 @@ export default function FollowUpPage(): ReactElement {
         allowed_end_hour: endHour,
         auto_execute: autoExecute,
         weekend_guard: weekendGuard,
+        cold_shield: coldShield,
         source_status: sourceStatus,
       };
       const r = editingId
@@ -1327,6 +1333,10 @@ export default function FollowUpPage(): ReactElement {
               <div className={styles.optionRow}>
                 <div><label htmlFor="campaign-weekend-b2b" className={styles.fieldLabel}>Modo Comercial B2B (Proteção Fim de Semana)</label><p className={styles.helper}>Pausa follow-ups aos domingos e reduz o teto por hora pela metade aos sábados para preservar a reputação.</p></div>
                 <Switch id="campaign-weekend-b2b" checked={weekendGuard} onCheckedChange={setWeekendGuard} />
+              </div>
+              <div className={styles.optionRow}>
+                <div><label htmlFor="campaign-cold-shield" className={styles.fieldLabel}>Proteção Anti-Ban (cotas do chip e descanso de 15 min)</label><p className={styles.helper}>Ligada: respeita o teto por hora/dia do chip e adia 15 min quando o teto é atingido. Desligada: este follow-up ignora cotas, berçário, quarentena e pausas automáticas — envia no ritmo configurado. Aumenta o risco de bloqueio.</p></div>
+                <Switch id="campaign-cold-shield" checked={coldShield} onCheckedChange={setColdShield} />
               </div>
             </section>
           </div>

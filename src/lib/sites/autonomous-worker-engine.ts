@@ -7,6 +7,7 @@ import { deployToVercel } from "./vercel-deployer";
 import { inspectAutonomousSitePreview } from "./qa-inspector";
 import { renderTemplate } from "@/lib/template-vars";
 import { DEFAULT_SITE_PREVIEW_PING_MESSAGE } from "./agreement-detector";
+import { isSitePreviewAllowedForLead, resolveSitePreviewPolicyForLeads } from "./preview-policy";
 
 export interface AutonomousWorkerOptions {
   pollIntervalMs?: number;
@@ -393,6 +394,26 @@ export async function processSingleLeadPreview(lead: Record<string, unknown>): P
   const leadId = lead.id;
   if (!leadId) return false;
 
+  // Política: leads de fluxos somente disparo (Prospecção de Sites) não geram
+  // prévia, mesmo se estiverem marcados como PREVIA_SOLICITADA (fila antiga).
+  const policyClientId = String((lead as any).client_id || "");
+  const policyRemoteJid = String((lead as any).remoteJid || "");
+  if (policyClientId && policyRemoteJid) {
+    const allowed = await isSitePreviewAllowedForLead(policyClientId, policyRemoteJid).catch(() => true);
+    if (!allowed) {
+      console.log(
+        `[autonomous-worker] Lead #${leadId} ignorado: geração de prévia desativada (fluxo somente disparo).`,
+      );
+      await supabaseAdmin
+        .from("leads_extraidos")
+        .update({ previa_status: null })
+        .eq("id", leadId)
+        .eq("client_id", policyClientId)
+        .eq("previa_status", "PREVIA_SOLICITADA");
+      return false;
+    }
+  }
+
   const nome = typeof lead.nome_negocio === "string" ? lead.nome_negocio : "Empresa";
   console.log(`[autonomous-worker] Iniciando geração autônoma para lead #${leadId} ("${nome}")`);
   await logAutonomousSiteEvent(lead, `[Site IA] 🚀 Iniciando pipeline autônomo para #${leadId} ("${nome}")`, "info");
@@ -637,13 +658,50 @@ export async function startAutonomousSiteWorker(signal?: AbortSignal, pollInterv
         .eq("previa_status", "PREVIA_SOLICITADA")
         .lt("previa_tentativas", 3)
         .order("previa_solicitada_em", { ascending: true })
-        .limit(1);
+        .limit(20);
 
       if (error) {
         console.warn("[autonomous-worker] Erro ao consultar fila:", error.message);
       } else if (leads && leads.length > 0) {
-        const lead = leads[0];
-        await processSingleLeadPreview(lead);
+        // A fila pode conter leads de fluxos "somente disparo" (Prospecção de
+        // Sites). Eles saem da fila sem gerar site e não podem travar o worker:
+        // resolvemos a política em lote e escolhemos o primeiro lead liberado.
+        const policyByClient = new Map<string, Map<string, boolean>>();
+        let chosen: (typeof leads)[number] | null = null;
+        const blockedIds: number[] = [];
+
+        for (const lead of leads) {
+          const cid = String((lead as any).client_id || "");
+          const jid = String((lead as any).remoteJid || "");
+          let policy = policyByClient.get(cid);
+          if (!policy) {
+            const jidsForClient = leads
+              .filter((l: any) => String(l?.client_id || "") === cid)
+              .map((l: any) => String(l?.remoteJid || ""));
+            policy = await resolveSitePreviewPolicyForLeads(cid, jidsForClient).catch(
+              () => new Map<string, boolean>(),
+            );
+            policyByClient.set(cid, policy);
+          }
+          const allowed = !cid || !jid ? true : policy.get(jid) !== false;
+          if (!allowed) {
+            if ((lead as any).id) blockedIds.push(Number((lead as any).id));
+            continue;
+          }
+          if (!chosen) chosen = lead;
+        }
+
+        if (blockedIds.length > 0) {
+          await supabaseAdmin
+            .from("leads_extraidos")
+            .update({ previa_status: null })
+            .in("id", blockedIds)
+            .eq("previa_status", "PREVIA_SOLICITADA");
+        }
+
+        if (chosen) {
+          await processSingleLeadPreview(chosen);
+        }
       }
 
       // 2. Verifica cadência de follow-ups anti-vácuo (a cada 60s)

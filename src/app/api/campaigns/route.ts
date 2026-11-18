@@ -25,7 +25,41 @@ export async function GET(req: NextRequest) {
     console.error("[campaigns/GET] Erro:", error.message);
     return NextResponse.json({ success: false, error: "Falha ao listar campanhas" }, { status: 500 });
   }
-  return NextResponse.json({ success: true, campaigns: data });
+
+  // As opções anti-ban vivem em app_settings (chave por campanha). Sem este
+  // merge, reabrir a campanha para edição perderia o estado dos switches.
+  const campaigns = (data || []) as Array<Record<string, any>>;
+  const ids = campaigns.map((c) => c?.id).filter(Boolean);
+  const flagMap = new Map<string, string>();
+  if (ids.length > 0) {
+    const keys = ids.flatMap((id: string) => [
+      `campaign_antiban:${id}`,
+      `campaign_weekend_guard:${id}`,
+      `campaign_cold_shield:${id}`,
+    ]);
+    try {
+      const { data: cfgRows } = await supabase
+        .from("app_settings")
+        .select("key, value")
+        .in("key", keys);
+      for (const row of cfgRows || []) {
+        if (row?.key) flagMap.set(String(row.key), String(row.value ?? ""));
+      }
+    } catch {}
+  }
+  const readFlag = (id: string, name: string, fallback: boolean): boolean => {
+    const raw = flagMap.get(`${name}:${id}`);
+    if (raw === undefined) return fallback;
+    return raw === "true" || raw === "1";
+  };
+  for (const c of campaigns) {
+    if (!c?.id) continue;
+    c.antiban_mixer = readFlag(c.id, "campaign_antiban", true);
+    c.weekend_guard = readFlag(c.id, "campaign_weekend_guard", false);
+    c.cold_shield = readFlag(c.id, "campaign_cold_shield", true);
+  }
+
+  return NextResponse.json({ success: true, campaigns });
 }
 
 /** POST /api/campaigns — cria campanha + targets a partir dos remoteJids */
@@ -55,6 +89,7 @@ export async function POST(req: NextRequest) {
       humanize_messages = false,
       antiban_mixer = true,
       weekend_guard = false,
+      cold_shield = true,
       prioritize_by_score = true,
       ai_model = null,
       ai_prompt = null,
@@ -156,10 +191,11 @@ export async function POST(req: NextRequest) {
 
     try {
       await supabase
-        .from("system_config")
+        .from("app_settings")
         .upsert([
           { key: `campaign_antiban:${camp.id}`, value: String(Boolean(antiban_mixer)) },
           { key: `campaign_weekend_guard:${camp.id}`, value: String(Boolean(weekend_guard)) },
+          { key: `campaign_cold_shield:${camp.id}`, value: String(cold_shield !== false) },
         ], { onConflict: "key" });
     } catch {}
 

@@ -1241,7 +1241,7 @@ describe("consistência BR 9º dígito & Modo Comercial B2B no follow-up", () =>
       setTable("followup_campaigns", [makeCampaign()]);
       setTable("followup_targets", [makeTarget()]);
       setTable("leads_extraidos", [makeLead()]);
-      setTable("system_config", [{ key: "followup_weekend_guard:camp-001", value: "true" }]);
+      setTable("app_settings", [{ key: "followup_weekend_guard:camp-001", value: "true" }]);
 
       const { sendMessage } = await import("@/lib/channel");
       (sendMessage as any).mockClear();

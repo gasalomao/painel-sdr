@@ -409,6 +409,27 @@ Antes de escrever, faça essa análise mental (não devolva, é só pra você):
 // Core: processa um target
 // ============================================================
 
+/**
+ * Liga/desliga da Proteção Anti-Ban no follow-up.
+ * Fonte: app_settings `followup_cold_shield:<id>`; fallback flag no registro.
+ * Chave ausente = proteção LIGADA (comportamento histórico).
+ */
+async function resolveFollowupColdShield(camp: FollowupCampaign): Promise<boolean> {
+  try {
+    const { data } = await supabase
+      .from("app_settings")
+      .select("value")
+      .eq("key", `followup_cold_shield:${camp.id}`)
+      .maybeSingle();
+    if (data?.value !== undefined && data.value !== null) {
+      return data.value === "true" || data.value === "1";
+    }
+  } catch {}
+  const flag = (camp as unknown as { cold_shield?: boolean }).cold_shield;
+  if (flag !== undefined && flag !== null) return Boolean(flag);
+  return true;
+}
+
 async function processTarget(
   camp: FollowupCampaign,
   target: FollowupTarget,
@@ -611,6 +632,9 @@ async function processTarget(
     : syncGreetingToCurrentHour(text, new Date());
 
   // 4.5. Blindagem Anti-Ban compartilhada (Quarentena, Berçário Fase 1, Cota Horária e Pool Multi-Chip c/ Sticky Sender)
+  // Pode ser desligada por campanha — nesse caso o follow-up ignora cotas,
+  // quarentena e descansos e segue no ritmo configurado.
+  const coldShieldEnabled = await resolveFollowupColdShield(camp);
   let sendInstanceName = camp.instance_name;
   try {
     const cw: any = await import("@/lib/campaign-worker");
@@ -619,6 +643,7 @@ async function processTarget(
         targetRemoteJid: target.remote_jid,
         preferredInstanceName: leadFull?.instance_name || null,
         hourlyFactor,
+        bypassColdShield: !coldShieldEnabled,
       });
       if (!chipRes.ok) {
         const retryAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
@@ -642,7 +667,7 @@ async function processTarget(
       if (chipRes.instanceName) {
         sendInstanceName = chipRes.instanceName;
       }
-    } else if (!isAutoPoolInstance(camp.instance_name)) {
+    } else if (coldShieldEnabled && !isAutoPoolInstance(camp.instance_name)) {
       const { data: warmupCfg } = await supabase
         .from("whatsapp_warmup_configs")
         .select("is_quarantined, quarantine_until, health_score, stage")
@@ -781,7 +806,7 @@ async function processTarget(
       if (typeof cw.recordColdOutreachSend === "function") {
         cw.recordColdOutreachSend(sendInstanceName, Date.now(), camp.client_id);
       }
-      if (typeof cw.checkZeroReplyBrakeForInstance === "function") {
+      if (coldShieldEnabled && typeof cw.checkZeroReplyBrakeForInstance === "function") {
         const brakeRes = await cw.checkZeroReplyBrakeForInstance(camp.client_id, sendInstanceName, target.remote_jid);
         if (brakeRes?.brakeTriggered) {
           await addFollowupLog(
@@ -983,7 +1008,7 @@ export async function tickCampaign(campaignId: string, clientId: string): Promis
   if (!weekendGuardEnabled) {
     try {
       const { data: wgCfg } = await supabase
-        .from("system_config")
+        .from("app_settings")
         .select("value")
         .eq("key", `followup_weekend_guard:${camp.id}`)
         .maybeSingle();

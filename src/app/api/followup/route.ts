@@ -17,7 +17,37 @@ export async function GET(req: NextRequest) {
     console.error("[followup/GET] Erro:", error.message);
     return NextResponse.json({ success: false, error: "Falha ao listar campanhas de follow-up" }, { status: 500 });
   }
-  return NextResponse.json({ success: true, campaigns: data });
+  // Mescla os switches anti-ban gravados em app_settings, senão reabrir a
+  // campanha para edição mostraria os valores errados.
+  const campaigns = (data || []) as Array<Record<string, any>>;
+  const ids = campaigns.map((c) => c?.id).filter(Boolean);
+  const flagMap = new Map<string, string>();
+  if (ids.length > 0) {
+    try {
+      const keys = ids.flatMap((id: string) => [
+        `followup_weekend_guard:${id}`,
+        `followup_cold_shield:${id}`,
+      ]);
+      const { data: cfgRows } = await supabase
+        .from("app_settings")
+        .select("key, value")
+        .in("key", keys);
+      for (const row of cfgRows || []) {
+        if (row?.key) flagMap.set(String(row.key), String(row.value ?? ""));
+      }
+    } catch {}
+  }
+  const readFlag = (id: string, key: string, fallback: boolean): boolean => {
+    const raw = flagMap.get(`${key}:${id}`);
+    if (raw === undefined) return fallback;
+    return raw === "true" || raw === "1";
+  };
+  for (const c of campaigns) {
+    if (!c?.id) continue;
+    c.weekend_guard = readFlag(c.id, "followup_weekend_guard", false);
+    c.cold_shield = readFlag(c.id, "followup_cold_shield", true);
+  }
+  return NextResponse.json({ success: true, campaigns });
 }
 
 export async function POST(req: NextRequest) {
@@ -41,6 +71,7 @@ export async function POST(req: NextRequest) {
       allowed_end_hour = 20,
       auto_execute = false,
       weekend_guard = false,
+      cold_shield = true,
       // Coluna do kanban que abastece essa campanha — default "follow-up" pra
       // manter retrocompatibilidade com clientes/kanbans antigos.
       source_status = "follow-up",
@@ -115,11 +146,11 @@ export async function POST(req: NextRequest) {
     }
     try {
       await supabase
-        .from("system_config")
-        .upsert(
+        .from("app_settings")
+        .upsert([
           { key: `followup_weekend_guard:${data.id}`, value: String(Boolean(weekend_guard)) },
-          { onConflict: "key" }
-        );
+          { key: `followup_cold_shield:${data.id}`, value: String(cold_shield !== false) },
+        ], { onConflict: "key" });
     } catch {}
     return NextResponse.json({ success: true, campaign: data });
   } catch (err: unknown) {

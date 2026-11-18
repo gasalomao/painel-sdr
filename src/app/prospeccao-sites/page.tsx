@@ -555,29 +555,8 @@ export default function ProspeccaoSitesPage() {
     }
   };
 
-  const handleGerarPrevia = async (lead: Lead) => {
-    try {
-      const res = await fetch("/api/prospeccao-sites/previa", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ leadId: lead.id, action: "solicitar" }),
-      });
-      const data = await res.json();
-      if (data.ok) {
-        setLeads((prev) =>
-          prev.map((item) =>
-            item.id === lead.id
-              ? { ...item, previa_status: "PREVIA_SOLICITADA" }
-              : item
-          )
-        );
-      } else {
-        alert("Erro ao solicitar prévia: " + (data.error || "falha desconhecida"));
-      }
-    } catch (e: any) {
-      alert("Erro ao conectar com servidor: " + e.message);
-    }
-  };
+  // Geração de prévia removida desta tela: Prospecção de Sites é somente disparo.
+  // O site continua disponível pelo Site Studio (/sites) e por outros fluxos.
 
   // ----- Instâncias + Campaigns -----
   const [template, setTemplate] = useState(DEFAULT_TEMPLATE);
@@ -622,6 +601,7 @@ export default function ProspeccaoSitesPage() {
   const [humanizeMessages, setHumanizeMessages] = useState(false);
   const [antibanMixer, setAntibanMixer] = useState(true);
   const [weekendGuard, setWeekendGuard] = useState(false);
+  const [coldShield, setColdShield] = useState(true);
   const [spintaxSeed, setSpintaxSeed] = useState(0);
   const [aiModels, setAiModels] = useState<{ id: string; name?: string; provider?: string }[]>([]);
   const [aiModel, setAiModel] = useState("");
@@ -691,6 +671,7 @@ export default function ProspeccaoSitesPage() {
   const [autoHumanize, setAutoHumanize] = useState(false);
   const [autoAntibanMixer, setAutoAntibanMixer] = useState(true);
   const [autoWeekendGuard, setAutoWeekendGuard] = useState(false);
+  const [autoColdShield, setAutoColdShield] = useState(true);
   const [autoAiModel, setAutoAiModel] = useState("");
   const [autoAiPrompt, setAutoAiPrompt] = useState("");
   const [autoCaptureAllReviews, setAutoCaptureAllReviews] = useState(false);
@@ -912,6 +893,7 @@ export default function ProspeccaoSitesPage() {
             },
             antiban_mixer: autoAntibanMixer,
             weekend_guard: autoWeekendGuard,
+            cold_shield: autoColdShield,
           },
           scrape_max_leads: autoMaxLeads,
           dispatch_template: autoTemplate,
@@ -930,6 +912,7 @@ export default function ProspeccaoSitesPage() {
           followup_ai_prompt: (autoFollowup && autoFollowupAi) ? (autoFollowupAiPrompt || null) : null,
           allowed_start_hour: autoStartHour,
           allowed_end_hour: autoEndHour,
+          site_generation_enabled: false,
         }),
       });
       const j = await r.json();
@@ -1145,6 +1128,7 @@ export default function ProspeccaoSitesPage() {
           humanize_messages: humanizeMessages,
           antiban_mixer: antibanMixer,
           weekend_guard: weekendGuard,
+          cold_shield: coldShield,
           ai_model: personalizeWithAi ? (aiModel || null) : null,
           ai_prompt: personalizeWithAi ? (aiPrompt || null) : null,
           order_by: sort, order_dir: order,
@@ -2181,16 +2165,14 @@ export default function ProspeccaoSitesPage() {
                                   Falhou
                                 </Badge>
                               ) : (
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-6 px-2 text-[11px] text-white/50 hover:text-white hover:bg-white/10 gap-1"
-                                  onClick={() => handleGerarPrevia(l)}
-                                  title="Enfileirar geração autônoma de site na VPS"
+                                <Badge
+                                  variant="outline"
+                                  className="text-[11px] text-white/40 border-white/10 bg-white/5 gap-1"
+                                  title="Este módulo apenas envia o disparo. A geração de site fica no Site Studio."
                                 >
-                                  <Sparkles className="w-3 h-3 text-purple-400" />
-                                  Gerar
-                                </Button>
+                                  <Send className="w-3 h-3" />
+                                  Somente disparo
+                                </Badge>
                               )}
                             </td>
                             <td className="p-2">
@@ -2507,6 +2489,14 @@ export default function ProspeccaoSitesPage() {
                         <p className={styles.optionDesc}>Pausa disparos frios aos domingos e reduz o ritmo pela metade aos sábados.</p>
                       </div>
                       <Switch id="ps-disparo-weekend" aria-label="Modo Comercial B2B" checked={weekendGuard} onCheckedChange={setWeekendGuard} />
+                    </div>
+
+                    <div className={styles.optionRow}>
+                      <div className={styles.optionCopy}>
+                        <label htmlFor="ps-disparo-cold-shield" className={styles.optionTitle}>Proteção Anti-Ban (cotas do chip e descanso de 15 min)</label>
+                        <p className={styles.optionDesc}>Ligada: respeita o teto por hora/dia do chip e pausa 15 min quando o teto é atingido. Desligada: esta campanha ignora cotas, berçário, quarentena e pausas automáticas — dispara no ritmo configurado. Aumenta o risco de bloqueio.</p>
+                      </div>
+                      <Switch id="ps-disparo-cold-shield" aria-label="Proteção Anti-Ban" checked={coldShield} onCheckedChange={setColdShield} />
                     </div>
                   </div>
                   {disparoSyncNote && (
@@ -3503,6 +3493,14 @@ export default function ProspeccaoSitesPage() {
                           <p className={styles.optionDesc}>Pausa disparos frios aos domingos e reduz o teto por hora pela metade aos sábados.</p>
                         </div>
                         <Switch id="ps-auto-weekend" aria-label="Modo Comercial B2B na automação" checked={autoWeekendGuard} onCheckedChange={setAutoWeekendGuard} />
+                      </div>
+
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="ps-auto-cold-shield" className={styles.optionTitle}>Proteção Anti-Ban (cotas do chip e descanso de 15 min)</label>
+                          <p className={styles.optionDesc}>Ligada: respeita o teto por hora/dia do chip e pausa 15 min quando o teto é atingido. Desligada: esta automação ignora cotas, berçário, quarentena e pausas automáticas — dispara no ritmo configurado. Aumenta o risco de bloqueio.</p>
+                        </div>
+                        <Switch id="ps-auto-cold-shield" aria-label="Proteção Anti-Ban na automação" checked={autoColdShield} onCheckedChange={setAutoColdShield} />
                       </div>
                     </div>
                   </div>

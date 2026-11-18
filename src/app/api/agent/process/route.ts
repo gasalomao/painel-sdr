@@ -21,6 +21,7 @@ import { evaluateCustomGoal, normalizeCustomGoalConfig } from "@/lib/custom-goal
 import { promoteLeadBySystemSignal, scheduleRealtimeLeadEvaluation } from "@/lib/organizer-realtime";
 import { getCachedAgentStaticBundle } from "@/lib/agent-config-cache";
 import { buildAgentFunctionDeclarations } from "@/lib/agent/tool-declarations";
+import { isSitePreviewAllowedForLead } from "@/lib/sites/preview-policy";
 import { buildAgentPromptBundle } from "@/lib/agent/prompt-builder";
 import { buildSdrLeadDossierBlock } from "@/lib/agent/sdr-enrichment-dossier";
 import { resolveEffectiveAiDossierMode } from "@/lib/crm-lead-profile";
@@ -80,6 +81,7 @@ function appendSitePreviewContextLines(
   lines: string[],
   lead: Record<string, any>,
   agentConfig: Record<string, any> | null,
+  sitePreviewAutoDetect: boolean,
 ): void {
   if (lead.previa_status) lines.push(`Status da Prévia de Site: ${lead.previa_status}`);
   if (lead.link_previa) lines.push(`Link da Prévia: ${lead.link_previa}`);
@@ -121,7 +123,7 @@ function appendSitePreviewContextLines(
     lines.push("");
     lines.push("# 🎯 STATUS DA PRÉVIA: EM PRODUÇÃO NA VPS.");
     lines.push("- O cliente já confirmou o pedido de prévia e o sistema está gerando o site. Se ele perguntar algo, avise que está sendo finalizado com todo o carinho e que em breve o link de teste será enviado aqui.");
-  } else if ((!lead.previa_status || lead.previa_status === "PREVIA_FALHOU" || lead.previa_status === "novo") && agentConfig?.options?.site_preview_auto_detect) {
+  } else if ((!lead.previa_status || lead.previa_status === "PREVIA_FALHOU" || lead.previa_status === "novo") && sitePreviewAutoDetect) {
     lines.push("");
     lines.push("# 🎯 MODO SARAH SDR ATIVO (QUALIFICAÇÃO E TRAVA ANTI-DESPERDÍCIO):");
     lines.push(`- Se o cliente demonstrar interesse em ver a prévia gratuita, peça o aceite formal (Msg 8.1): "Show, já passei aqui para a nossa equipe montar a prévia da ${lead.nome_negocio || "empresa"}! Como a gente cria algo personalizado pro seu negócio mesmo, leva até 2 dias úteis para ficar pronto. Como o pessoal vai dedicar um tempo exclusivo nisso, quando a gente finalizar e te mandar o link por aqui você consegue dar uma olhadinha rápida para dizer o que achou?"`);
@@ -325,6 +327,13 @@ export async function POST(req: NextRequest) {
     const leadStages = staticBundle.leadStages;
     leadRow = (leadRes as any).data || null;
     contactRow = (contactRes as any).data || null;
+
+    // Política de prévia de site: a opção do agente só vale se o lead NÃO vier
+    // de um fluxo que é somente disparo (ex.: Prospecção de Sites).
+    const sitePreviewConfigured = Boolean(agentConfig?.options?.site_preview_auto_detect);
+    const effectiveSitePreviewAutoDetect = sitePreviewConfigured
+      ? await isSitePreviewAllowedForLead(clientId, remoteJid).catch(() => true)
+      : false;
 
     let previaSiteRequestedInTurn = false;
     let meetingScheduledInTurn = false;
@@ -937,7 +946,7 @@ export async function POST(req: NextRequest) {
             const dias = Math.floor((Date.now() - new Date(lead.primeiro_contato_at).getTime()) / 86400000);
             lines.push(`Primeiro contato: ${new Date(lead.primeiro_contato_at).toLocaleDateString("pt-BR")} (há ${dias} dia${dias === 1 ? "" : "s"})`);
           }
-          appendSitePreviewContextLines(lines, lead, agentConfig);
+          appendSitePreviewContextLines(lines, lead, agentConfig, effectiveSitePreviewAutoDetect);
 
           const effectiveDossierMode = resolveEffectiveAiDossierMode(
             lead as Record<string, unknown>,
@@ -1004,7 +1013,7 @@ export async function POST(req: NextRequest) {
         if (testLeadData.website) lines.push(`Website: ${testLeadData.website}`);
         if (testLeadData.telefone) lines.push(`Telefone: ${testLeadData.telefone}`);
         if (leadRow) {
-          appendSitePreviewContextLines(lines, leadRow, agentConfig);
+          appendSitePreviewContextLines(lines, leadRow, agentConfig, effectiveSitePreviewAutoDetect);
         }
         const testEffectiveMode = resolveEffectiveAiDossierMode(
           (leadRow || testLeadData) as Record<string, unknown>,
@@ -1066,7 +1075,7 @@ export async function POST(req: NextRequest) {
     const functionDeclarations = buildAgentFunctionDeclarations({
       knowledgeTopics,
       hasCatalogOrPhotoKb,
-      sitePreviewAutoDetect: Boolean(agentConfig?.options?.site_preview_auto_detect),
+      sitePreviewAutoDetect: effectiveSitePreviewAutoDetect,
       hasPreviaOrLink: leadRow?.previa_status === "PREVIA_PRONTA" || Boolean(leadRow?.link_previa),
       webSearchEnabled,
       calendarEnabled,
@@ -1291,6 +1300,13 @@ export async function POST(req: NextRequest) {
               callLogs.push({ role: "system", content: `[Web Fetch] ${u} | FALHA: ${e.message}` });
            }
        } else if (call.name === "solicitar_previa_site") {
+          if (!effectiveSitePreviewAutoDetect) {
+             functionResultRes = {
+                success: false,
+                error: "Geração de prévia desativada para este lead (fluxo somente disparo).",
+             };
+             callLogs.push({ role: "system", content: `[Prévia Site] Bloqueada pela política do lead (somente disparo).` });
+          } else {
           previaSiteRequestedInTurn = true;
           if (!leadRow) {
              leadRow = { previa_status: "PREVIA_SOLICITADA" };
@@ -1327,6 +1343,7 @@ export async function POST(req: NextRequest) {
              } catch (e: any) {
                 functionResultRes = { success: false, error: e?.message };
              }
+          }
           }
        } else if (call.name === "agendar_reuniao_fechamento") {
           const horario = String(callArgs.horario_confirmado || "").trim();
@@ -1777,7 +1794,7 @@ export async function POST(req: NextRequest) {
     }
 
     const effectiveCustomerText = String(finalProcessText || text || "");
-    const autoDetectEnabled = agentConfig?.options?.site_preview_auto_detect ?? false;
+    const autoDetectEnabled = effectiveSitePreviewAutoDetect;
     const needsPreviewEval =
       autoDetectEnabled &&
       !previaSiteRequestedInTurn &&

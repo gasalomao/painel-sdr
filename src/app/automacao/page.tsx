@@ -283,6 +283,7 @@ export default function AutomacaoPage() {
               expandNeighborhoods: next.expandNeighborhoods,
               prioritize_by_score: next.prioritizeByScore,
               antiban_mixer: next.antibanMixer !== false,
+              cold_shield: sf.cold_shield !== false,
               reviews_ai: {
                 enabled: next.reviewsAiEnabled,
                 model: nextReviewsModel,
@@ -321,6 +322,7 @@ export default function AutomacaoPage() {
         expandNeighborhoods: false,
         prioritize_by_score: true,
         antiban_mixer: true,
+        cold_shield: true,
         reviews_ai: { enabled: false, model: null, prompt: null },
       },
       scrape_max_leads: 100,
@@ -1767,6 +1769,25 @@ export default function AutomacaoPage() {
                         aria-describedby="automation-antiban-mixer-help"
                         checked={formData.scrape_filters?.antiban_mixer !== false}
                         onChange={e => applyAutomationFilterSync({ type: "antibanMixer", value: e.target.checked })}
+                        className={styles.toggleInput}
+                      />
+                    </div>
+
+                    <div className={styles.optionRow}>
+                      <div className={styles.optionCopy}>
+                        <label htmlFor="automation-cold-shield" className={styles.optionTitle}>Proteção Anti-Ban (cotas do chip e descanso de 15 min)</label>
+                        <p id="automation-cold-shield-help" className={styles.optionDesc}>Ligada: respeita o teto por hora/dia do chip e pausa 15 min quando o teto é atingido. Desligada: esta automação ignora cotas, berçário, quarentena e pausas automáticas — dispara no ritmo configurado. Aumenta o risco de bloqueio do número.</p>
+                      </div>
+                      <input
+                        id="automation-cold-shield"
+                        type="checkbox"
+                        aria-label="Proteção Anti-Ban"
+                        aria-describedby="automation-cold-shield-help"
+                        checked={formData.scrape_filters?.cold_shield !== false}
+                        onChange={e => setFormData({
+                          ...formData,
+                          scrape_filters: { ...(formData.scrape_filters || {}), cold_shield: e.target.checked },
+                        })}
                         className={styles.toggleInput}
                       />
                     </div>

@@ -47,6 +47,7 @@ export async function POST(req: NextRequest) {
       humanize_messages = false,
       antiban_mixer = true,
       weekend_guard = false,
+      cold_shield = true,
       order_by = "qualification",
       order_dir = "desc",
       min_reviews = 0,
@@ -107,10 +108,11 @@ export async function POST(req: NextRequest) {
     // Persiste opções anti-ban para campanhas manuais
     try {
       await supabase
-        .from("system_config")
+        .from("app_settings")
         .upsert([
           { key: `campaign_antiban:${camp.id}`, value: String(Boolean(antiban_mixer)) },
           { key: `campaign_weekend_guard:${camp.id}`, value: String(Boolean(weekend_guard)) },
+          { key: `campaign_cold_shield:${camp.id}`, value: String(cold_shield !== false) },
         ], { onConflict: "key" });
     } catch {}
 

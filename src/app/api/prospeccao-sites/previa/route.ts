@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
 import { processSingleLeadPreview } from "@/lib/sites/autonomous-worker-engine";
+import { isSitePreviewAllowedForLead } from "@/lib/sites/preview-policy";
 
 export const dynamic = "force-dynamic";
 
@@ -38,6 +39,22 @@ export async function POST(req: NextRequest) {
 
   if (findErr || !lead) {
     return NextResponse.json({ ok: false, error: "Lead não encontrado" }, { status: 404 });
+  }
+
+  // Leads de fluxos "somente disparo" (Prospecção de Sites) não geram prévia.
+  const previewAllowed = await isSitePreviewAllowedForLead(
+    ctx.clientId,
+    String((lead as any).remoteJid || ""),
+  ).catch(() => true);
+  if (!previewAllowed) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error:
+          "Geração de prévia desativada para este lead: o módulo de Prospecção de Sites é somente disparo.",
+      },
+      { status: 409 },
+    );
   }
 
   const action = body.action || "solicitar";

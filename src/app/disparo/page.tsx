@@ -61,6 +61,9 @@ type Campaign = {
   media_caption?: string | null;
   media_file_name?: string | null;
   media_mimetype?: string | null;
+  antiban_mixer?: boolean;
+  weekend_guard?: boolean;
+  cold_shield?: boolean;
 };
 
 const DEFAULT_AI_PROMPT = `Você é um SDR experiente fazendo uma primeira abordagem PROFISSIONAL via WhatsApp.
@@ -95,6 +98,7 @@ export default function DisparoPage() {
   const [humanizeMessages, setHumanizeMessages] = useState(false);
   const [antibanMixer, setAntibanMixer] = useState(true);
   const [weekendGuard, setWeekendGuard] = useState(false);
+  const [coldShield, setColdShield] = useState(true);
   const [prioritizeByScore, setPrioritizeByScore] = useState(true);
   const [spintaxSeed, setSpintaxSeed] = useState(0);
   const [useWebSearch, setUseWebSearch] = useState(false);
@@ -451,6 +455,7 @@ export default function DisparoPage() {
     setHumanizeMessages(false);
     setAntibanMixer(true);
     setWeekendGuard(false);
+    setColdShield(true);
     setPrioritizeByScore(true);
     setUseWebSearch(false);
     setMediaUrl(null); setMediaType(null); setMediaFileName(null); setMediaMimetype(null); setMediaCaption("");
@@ -472,6 +477,9 @@ export default function DisparoPage() {
     setPersonalizeWithAI(!!c.personalize_with_ai);
     setHumanizeMessages(!!c.humanize_messages);
     setUseWebSearch(!!c.use_web_search);
+    setAntibanMixer(c.antiban_mixer !== false);
+    setWeekendGuard(Boolean(c.weekend_guard));
+    setColdShield(c.cold_shield !== false);
     setAiModel(c.ai_model || "");
     setAiPrompt(c.ai_prompt || "");
     setMediaUrl(c.media_url ?? null);
@@ -513,6 +521,7 @@ export default function DisparoPage() {
         humanize_messages: humanizeMessages,
         antiban_mixer: antibanMixer,
         weekend_guard: weekendGuard,
+        cold_shield: coldShield,
         prioritize_by_score: prioritizeByScore,
         ai_model: personalizeWithAI ? aiModel : null,
         ai_prompt: personalizeWithAI ? (aiPrompt.trim() || null) : null,
@@ -1055,6 +1064,13 @@ export default function DisparoPage() {
                       <span>
                         <strong>Modo Comercial B2B (Proteção Fim de Semana)</strong>
                         <small id="campaign-weekend-help">Pausa disparos frios aos domingos e reduz o ritmo pela metade aos sábados para evitar denúncias de empresas fora do expediente.</small>
+                      </span>
+                    </label>
+                    <label className={styles.option}>
+                      <input type="checkbox" checked={coldShield} onChange={e => setColdShield(e.target.checked)} aria-label="Proteção Anti-Ban" aria-describedby="campaign-cold-shield-help" />
+                      <span>
+                        <strong>Proteção Anti-Ban (cotas do chip e descanso de 15 min)</strong>
+                        <small id="campaign-cold-shield-help">Ligada: respeita o teto de disparos por hora/dia do chip e pausa 15 min quando o teto é atingido. Desligada: esta campanha ignora cotas, berçário, quarentena e pausas automáticas — dispara no ritmo configurado. Aumenta o risco de bloqueio do número.</small>
                       </span>
                     </label>
                     <label className={styles.option}>

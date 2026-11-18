@@ -111,6 +111,7 @@ import {
   getColdOutreachPolicyForStage,
   getColdSendCounts,
   recordColdOutreachSend,
+  resolveCampaignColdShield,
   resolveHealthyCampaignChip,
 } from "../campaign-worker";
 import { AUTO_POOL_INSTANCE } from "../campaign-pool";
@@ -556,5 +557,83 @@ describe("Campaign Anti-Ban Shield (Meta Integrity Protection)", () => {
         nowMs,
       })
     ).toBeNull();
+  });
+
+  it("bypassColdShield libera chip no teto combinado e em quarentena (switch desligado na campanha)", async () => {
+    const clientId = "00000000-0000-0000-0000-00000000b001";
+    const baseNow = Date.now();
+    tables.whatsapp_warmup_configs.push(
+      {
+        client_id: clientId,
+        instance_name: "chip-no-teto",
+        phone_number: "5511961607626",
+        enabled: true,
+        stage: 2,
+        health_score: 100,
+        sent_today: 26, // Teto combinado Fase 2 = 32 -> restam 6
+      },
+      {
+        client_id: clientId,
+        instance_name: "chip-quarentena",
+        phone_number: "5511961607627",
+        enabled: true,
+        stage: 3,
+        health_score: 100,
+        is_quarantined: true,
+        quarantine_until: new Date(baseNow + 60 * 60 * 1000).toISOString(),
+      }
+    );
+
+    for (let i = 0; i < 6; i++) {
+      recordColdOutreachSend("chip-no-teto", baseNow - (i + 2) * 65 * 60 * 1000, clientId);
+    }
+
+    const blocked = await resolveHealthyCampaignChip(clientId, "chip-no-teto", { nowMs: baseNow });
+    expect(blocked.ok).toBe(false);
+    expect(blocked.reason).toBe("combined_daily_cap");
+
+    const bypassed = await resolveHealthyCampaignChip(clientId, "chip-no-teto", {
+      nowMs: baseNow,
+      bypassColdShield: true,
+    });
+    expect(bypassed.ok).toBe(true);
+    expect(bypassed.instanceName).toBe("chip-no-teto");
+
+    const quarantineBlocked = await resolveHealthyCampaignChip(clientId, "chip-quarentena", { nowMs: baseNow });
+    expect(quarantineBlocked.ok).toBe(false);
+    expect(quarantineBlocked.reason).toBe("quarantined");
+
+    const quarantineBypassed = await resolveHealthyCampaignChip(clientId, "chip-quarentena", {
+      nowMs: baseNow,
+      bypassColdShield: true,
+    });
+    expect(quarantineBypassed.ok).toBe(true);
+    expect(quarantineBypassed.instanceName).toBe("chip-quarentena");
+  });
+
+  it("computeCampaignNextDelayMs com bypassBatchBreak nunca aciona Coffee-Break", () => {
+    const inst = "chip-sem-freio";
+    for (let i = 0; i < 12; i++) recordColdOutreachSend(inst);
+
+    const calc = computeCampaignNextDelayMs({
+      instanceName: inst,
+      minIntervalSec: 20,
+      maxIntervalSec: 40,
+      bypassBatchBreak: true,
+    });
+    expect(calc.isCoffeeBreak).toBe(false);
+    expect(calc.batchCount).toBe(0);
+    expect(calc.delayMs).toBeGreaterThanOrEqual(20 * 1000);
+    expect(calc.delayMs).toBeLessThanOrEqual(40 * 1000);
+  });
+
+  it("resolveCampaignColdShield lê a chave da campanha e assume LIGADO quando ausente", async () => {
+    expect(await resolveCampaignColdShield({ id: "camp-sem-chave" })).toBe(true);
+
+    tables.app_settings.push({ key: "campaign_cold_shield:camp-off", value: "false" });
+    expect(await resolveCampaignColdShield({ id: "camp-off" })).toBe(false);
+
+    tables.app_settings.push({ key: "campaign_cold_shield:camp-on", value: "true" });
+    expect(await resolveCampaignColdShield({ id: "camp-on" })).toBe(true);
   });
 });

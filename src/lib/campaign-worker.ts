@@ -511,6 +511,8 @@ export function computeCampaignNextDelayMs(params: {
   minIntervalSec: number;
   maxIntervalSec: number;
   stageMinIntervalSec?: number;
+  /** Desliga o Coffee-Break de lote (Proteção Anti-Ban desativada na campanha). */
+  bypassBatchBreak?: boolean;
 }): { delayMs: number; isCoffeeBreak: boolean; batchCount: number } {
   const effectiveMin = Math.max(
     5,
@@ -518,6 +520,10 @@ export function computeCampaignNextDelayMs(params: {
     Number(params.stageMinIntervalSec) || 0
   );
   const effectiveMax = Math.max(effectiveMin + 15, Number(params.maxIntervalSec) || 60);
+
+  if (params.bypassBatchBreak) {
+    return { delayMs: jitterMs(effectiveMin, effectiveMax), isCoffeeBreak: false, batchCount: 0 };
+  }
 
   const state = _coldBatchStateByInstance.get(params.instanceName);
   if (state && state.countInBatch >= state.batchLimit) {
@@ -655,6 +661,10 @@ async function preflightCheck(campaignId: string): Promise<{ ok: boolean; error?
   if (!c) return { ok: false, error: "Campanha não encontrada no banco." };
   if (!c.client_id) return { ok: false, error: "Campanha sem client_id — vincule a campanha a um cliente antes de disparar." };
 
+  // Proteção Anti-Ban desligada nesta campanha? Então o preflight não bloqueia
+  // por cota, quarentena ou chip em berçário.
+  const coldShieldEnabled = await resolveCampaignColdShield(c);
+
   // Checa env
   const evoUrl = process.env.EVOLUTION_API_URL || "";
   if (!evoUrl || evoUrl.includes("url_aqui")) {
@@ -696,7 +706,9 @@ async function preflightCheck(campaignId: string): Promise<{ ok: boolean; error?
 
   // Checa se a instância existe e está conectada (ou se usa Pool Automático multi-chip)
   if (isAutoPoolInstance(c.instance_name)) {
-    const poolCheck = await resolveHealthyCampaignChip(c.client_id, c.instance_name);
+    const poolCheck = await resolveHealthyCampaignChip(c.client_id, c.instance_name, {
+      bypassColdShield: !coldShieldEnabled,
+    });
     if (!poolCheck.ok) {
       return {
         ok: false,
@@ -725,7 +737,8 @@ async function preflightCheck(campaignId: string): Promise<{ ok: boolean; error?
 
     // Proteção cruzada com Aquecedor de Chips: impede iniciar disparo frio em massa
     // se o chip estiver em quarentena preventiva (Circuit Breaker ativo).
-    try {
+    // Pulado quando a campanha desligou a Proteção Anti-Ban.
+    if (coldShieldEnabled) try {
       const { data: warmupCfg } = await supabase
         .from("whatsapp_warmup_configs")
         .select("is_quarantined, quarantine_until, quarantine_reason")
@@ -994,12 +1007,19 @@ export async function persistOutgoingMessage(opts: {
     console.error("[persist] chats_dashboard error:", e.message);
   }
 }
-const _lastSelectedInstanceByCampaign = new Map<string, { instanceName: string; stageMinIntervalSec?: number }>();
+const _lastSelectedInstanceByCampaign = new Map<string, { instanceName: string; stageMinIntervalSec?: number; coldShieldEnabled?: boolean }>();
 
 export async function resolveHealthyCampaignChip(
   clientId: string,
   primaryInstanceName: string,
-  nowMsOrOpts: number | { targetRemoteJid?: string | null; preferredInstanceName?: string | null; nowMs?: number; hourlyFactor?: number } = Date.now()
+  nowMsOrOpts: number | {
+    targetRemoteJid?: string | null;
+    preferredInstanceName?: string | null;
+    nowMs?: number;
+    hourlyFactor?: number;
+    /** Desliga a Proteção Anti-Ban (cotas, berçário, saúde, quarentena e freio de vácuo) só para este envio. */
+    bypassColdShield?: boolean;
+  } = Date.now()
 ): Promise<{
   ok: boolean;
   instanceName: string;
@@ -1017,6 +1037,8 @@ export async function resolveHealthyCampaignChip(
     typeof nowMsOrOpts === "object" && typeof nowMsOrOpts?.hourlyFactor === "number"
       ? Math.max(0, Math.min(1, nowMsOrOpts.hourlyFactor))
       : 1;
+  const bypassColdShield =
+    typeof nowMsOrOpts === "object" ? Boolean(nowMsOrOpts?.bypassColdShield) : false;
   const targetDdd = extractBrazilDdd(targetRemoteJid);
 
   try {
@@ -1081,6 +1103,11 @@ export async function resolveHealthyCampaignChip(
           : policy.hourlyColdCap;
       const ddd = extractBrazilDdd(row.phone_number || connPhoneByInstance.get(inst) || null);
 
+      if (bypassColdShield) {
+        // Proteção Anti-Ban desligada para esta campanha: o chip entra na fila
+        // mesmo com cota cheia, berçário, saúde baixa ou quarentena.
+        return { eligible: true, policy, hourlyCount, dailyCount, ddd };
+      }
       if (isQuarantined) {
         return { eligible: false, policy, hourlyCount, dailyCount, ddd, reason: "quarantined" };
       }
@@ -1294,6 +1321,42 @@ async function fetchLeadFullForCampaign(remoteJid: string, clientId: string): Pr
   return null;
 }
 
+/**
+ * Liga/desliga da Proteção Anti-Ban por campanha.
+ * Fonte de verdade: app_settings `campaign_cold_shield:<id>`; fallback para
+ * flag no próprio registro e para `scrape_filters.cold_shield` da automação
+ * de origem. Chave ausente = proteção LIGADA (comportamento histórico).
+ */
+export async function resolveCampaignColdShield(c: any): Promise<boolean> {
+  try {
+    if (c?.id) {
+      const { data } = await supabase
+        .from("app_settings")
+        .select("value")
+        .eq("key", `campaign_cold_shield:${c.id}`)
+        .maybeSingle();
+      if (data?.value !== undefined && data?.value !== null) {
+        return data.value === "true" || data.value === "1";
+      }
+    }
+  } catch {}
+  if (c?.cold_shield !== undefined && c?.cold_shield !== null) {
+    return Boolean(c.cold_shield);
+  }
+  try {
+    if (c?.automation_id) {
+      const { data: auto } = await supabase
+        .from("automations")
+        .select("scrape_filters")
+        .eq("id", c.automation_id)
+        .maybeSingle();
+      const flag = auto?.scrape_filters?.cold_shield;
+      if (flag !== undefined && flag !== null) return Boolean(flag);
+    }
+  } catch {}
+  return true;
+}
+
 async function resolveCampaignAntiBanContext(c: any): Promise<{
   linkedAuto: { scrape_filters?: any; agent_id?: number | null } | null;
   antibanMixerEnabled: boolean;
@@ -1315,7 +1378,7 @@ async function resolveCampaignAntiBanContext(c: any): Promise<{
       antibanMixerEnabled = Boolean(c.antiban_mixer);
     } else if (c?.id) {
       const { data: sysCfg } = await supabase
-        .from("system_config")
+        .from("app_settings")
         .select("value")
         .eq("key", `campaign_antiban:${c.id}`)
         .maybeSingle();
@@ -1352,6 +1415,9 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     return "stopped";
   }
 
+  // Liga/desliga da Proteção Anti-Ban escolhido na criação/edição da campanha.
+  const coldShieldEnabled = await resolveCampaignColdShield(c);
+
   if (!isWithinAllowedHour(c as any)) {
     const msg = `⏰ Fora do horário permitido — agora são ${nowHourBRT()}h, a janela é ${c.allowed_start_hour}h-${c.allowed_end_hour}h. O disparo retoma sozinho quando a janela abrir.`;
     console.log(`[CAMPAIGN ${c.name}] ${msg}`);
@@ -1373,7 +1439,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
   if (!weekendGuardEnabled) {
     try {
       const { data: wgCfg } = await supabase
-        .from("system_config")
+        .from("app_settings")
         .select("value")
         .eq("key", `campaign_weekend_guard:${c.id}`)
         .maybeSingle();
@@ -1458,6 +1524,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
   const chipResolution = await resolveHealthyCampaignChip(clientId, c.instance_name, {
     targetRemoteJid: candidate.remote_jid,
     hourlyFactor: weekendGuard.hourlyFactor,
+    bypassColdShield: !coldShieldEnabled,
   });
   if (!chipResolution.ok) {
     const restMsg =
@@ -1472,7 +1539,8 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
   const effectiveInstanceName = chipResolution.instanceName || c.instance_name;
   _lastSelectedInstanceByCampaign.set(campaignId, {
     instanceName: effectiveInstanceName,
-    stageMinIntervalSec: chipResolution.policy?.minSafeIntervalSec,
+    stageMinIntervalSec: coldShieldEnabled ? chipResolution.policy?.minSafeIntervalSec : undefined,
+    coldShieldEnabled,
   });
 
   if (chipResolution.rotated && effectiveInstanceName !== c.instance_name) {
@@ -1972,7 +2040,9 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
 
     // ───────── CONTABILIZAÇÃO ANTI-BAN & PULSO SIMBIÓTICO + FREIO DE VÁCUO SILENCIOSO ─────────
     const batchState = recordColdOutreachSend(effectiveInstanceName, Date.now(), clientId);
-    const brakeRes = await checkZeroReplyBrakeForInstance(clientId, effectiveInstanceName, sendJid);
+    const brakeRes = coldShieldEnabled
+      ? await checkZeroReplyBrakeForInstance(clientId, effectiveInstanceName, sendJid)
+      : { brakeTriggered: false, checkedCount: 0 };
     if (brakeRes.brakeTriggered) {
       await addCampaignLog(
         campaignId,
@@ -2227,11 +2297,13 @@ async function loop(campaignId: string) {
 
     const lastSel = _lastSelectedInstanceByCampaign.get(campaignId);
     const activeInstance = lastSel?.instanceName || (c as any)?.instance_name || "default";
+    const coldShieldOn = lastSel?.coldShieldEnabled !== false;
     const delayCalc = computeCampaignNextDelayMs({
       instanceName: activeInstance,
       minIntervalSec: Number(c?.min_interval_seconds || 30),
       maxIntervalSec: Number(c?.max_interval_seconds || 60),
-      stageMinIntervalSec: lastSel?.stageMinIntervalSec,
+      stageMinIntervalSec: coldShieldOn ? lastSel?.stageMinIntervalSec : undefined,
+      bypassBatchBreak: !coldShieldOn,
     });
 
     const secs = Math.round(delayCalc.delayMs / 1000);

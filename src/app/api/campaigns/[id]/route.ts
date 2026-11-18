@@ -116,7 +116,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
   if ("antiban_mixer" in body) {
     await supabase
-      .from("system_config")
+      .from("app_settings")
       .upsert(
         { key: `campaign_antiban:${id}`, value: body.antiban_mixer !== false ? "true" : "false" },
         { onConflict: "key" }
@@ -125,9 +125,18 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   }
   if ("weekend_guard" in body) {
     await supabase
-      .from("system_config")
+      .from("app_settings")
       .upsert(
         { key: `campaign_weekend_guard:${id}`, value: body.weekend_guard === true ? "true" : "false" },
+        { onConflict: "key" }
+      )
+      .then(() => undefined, () => undefined);
+  }
+  if ("cold_shield" in body) {
+    await supabase
+      .from("app_settings")
+      .upsert(
+        { key: `campaign_cold_shield:${id}`, value: body.cold_shield !== false ? "true" : "false" },
         { onConflict: "key" }
       )
       .then(() => undefined, () => undefined);
