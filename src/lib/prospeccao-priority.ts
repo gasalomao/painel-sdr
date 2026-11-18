@@ -41,6 +41,13 @@ export function computePriority(
             return Math.min(100, Math.round((rv >= 50 ? 20 : rv >= 10 ? 10 : 0) + rt * 10));
           })();
     let priority = baseScore * 10;
+    const siteHealth = typeof enr?.siteHealth === "string" ? enr.siteHealth : "";
+    const siteQuality = Number(enr?.siteQualityScore);
+    if (siteHealth === "broken_site" || siteHealth === "weak_site" || siteHealth === "no_site") {
+      priority += 5;
+    } else if (siteHealth === "active_site" && Number.isFinite(siteQuality) && siteQuality >= 80) {
+      priority -= 4;
+    }
     const channelType = typeof enr?.whatsappChannelType === "string" ? enr.whatsappChannelType : "";
     if (channelType === "socio_direto") priority += 3;
     else if (channelType === "provavel_socio") priority += 2;

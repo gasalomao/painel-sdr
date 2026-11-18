@@ -196,18 +196,26 @@ export function buildSdrLeadDossierBlock(
   }
 
   const siteParts: string[] = [];
+  const siteQualityScore = asNumber(enr.siteQualityScore);
+  const siteWeaknesses = asStringArray(enr.siteWeaknesses, 3);
   if (siteHealth === "broken_site") {
     siteParts.push(
       `Site QUEBRADO/COM FALHA (${siteDiagnostico || siteStatusLabel || "erro ao abrir"})`,
     );
   } else if (siteHealth === "weak_site") {
     siteParts.push(
-      `Site FRACO/IMPROVISADO (${siteDiagnostico || siteStatusLabel || "estrutura improvisada/lenta"})`,
+      `Site FRACO/DEFASADO (${siteDiagnostico || siteStatusLabel || "estrutura improvisada/lenta"})`,
     );
   } else if (siteHealth === "no_site") {
     siteParts.push(`Sem site próprio (${siteDiagnostico || siteStatusLabel || "apenas Google/redes sociais"})`);
   } else {
     siteParts.push(`Site ativo (${siteStatusLabel || "funcionando"})`);
+  }
+  if (siteQualityScore != null) {
+    siteParts.push(`Nota técnica ${Math.round(siteQualityScore)}/100`);
+  }
+  if (siteWeaknesses.length > 0) {
+    siteParts.push(`Pontos fracos: ${siteWeaknesses.join(", ")}`);
   }
   if (discoveredRealWebsite) {
     siteParts.push(`Domínio real achado via link-in-bio: ${discoveredRealWebsite}`);

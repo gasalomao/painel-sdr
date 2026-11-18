@@ -20,14 +20,17 @@ import { isValidCityName, ufFromCep, computeExpansionCandidates, getNeighborhood
 import { fetchPublicHttpUrl } from "@/lib/safe-url";
 import { extractGoogleReviewCount, parseGoogleReviewCount, parseMinReviews, reviewCountFilterReason } from "@/lib/scraper-review-count";
 import {
+  isNonWebsiteUrl,
   leadExtraFilterReason,
   matchesSiteFilterMode,
+  normalizeScraperSettingsForBackend,
   parseGoogleYear,
   parseMaxReviews,
   parseMinCapitalSocial,
   parseRatingBound,
   parseSiteFilterMode,
   resolveLeadGoogleYear,
+  resolveQualificationObjective,
   validateGoogleYearRange,
   validateRatingRange,
   validateReviewCountRange,
@@ -189,6 +192,10 @@ export interface ScraperSettings {
   huntPartnerDirectPhone?: boolean;
   /** Expande automaticamente para bairros da cidade antes de pular para cidades vizinhas. */
   expandNeighborhoods?: boolean;
+  /** Origem lógica da captura (ex.: "prospeccao-sites"). */
+  _source?: string;
+  /** Objetivo explícito da qualificação (site_sales | ai_automation | general). */
+  qualificationObjective?: "site_sales" | "ai_automation" | "general";
   /** Limite máximo de leads a captar antes de parar. Quando atingido, o scraper
    *  sai do loop limpo, fecha o navegador, e o worker detecta o cap no próximo
    *  tick e avança pra fase de disparo. Sem limite = sem parada por contagem. */
@@ -912,7 +919,8 @@ async function saveLeadAndSync(lead: Lead, settings: ScraperSettings, run: RunCo
   }
 }
 
-async function runScraper(niches: string[], regions: string[], settings: ScraperSettings, run: RunContext) {
+async function runScraper(niches: string[], regions: string[], rawSettings: ScraperSettings, run: RunContext) {
+  const settings = normalizeScraperSettingsForBackend(rawSettings as unknown as Record<string, unknown>) as unknown as ScraperSettings;
   const isCurrentRun = () => activeRun === run && run.generation === runGeneration;
   const leadsStore = run.leads;
   const currentClientId = run.clientId;
@@ -1015,7 +1023,11 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
         "--window-size=1280,800",
         "--lang=pt-BR,pt",
         ...(settings.turboMode
-          ? ["--renderer-process-limit=2", "--js-flags=--max-old-space-size=512", "--mute-audio"]
+          ? [
+              "--renderer-process-limit=2",
+              ...(settings.captureAllReviews ? [] : ["--js-flags=--max-old-space-size=512"]),
+              "--mute-audio",
+            ]
           : []),
       ],
     };
@@ -2355,10 +2367,10 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                 sendRunLog(run, `🚫 Descartado (${earlyCheck.reason}): ${lead.name}`, "warning");
               }
 
-              // Se modo exige site existente e o Maps não trouxe site nenhum, descarta antes de HTTP externo.
+              // Se modo exige site existente e o Maps não trouxe site próprio, descarta antes de HTTP externo.
               if (
                 !discardedByFilters &&
-                !websiteStr &&
+                (!websiteStr || isNonWebsiteUrl(websiteStr)) &&
                 (effectiveSiteMode === "only_broken_or_weak" || effectiveSiteMode === "only_active_site")
               ) {
                 discardedByFilters = "Sem site";
@@ -2419,6 +2431,14 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                   !!cardData.website &&
                   (!websiteStr || decodeGoogleRedirectUrl(websiteStr) === cardData.website);
 
+                const qualificationObjective = resolveQualificationObjective({
+                  source: settings._source,
+                  siteFilterMode: effectiveSiteMode,
+                  filterWithWebsite: settings.filterWithWebsite,
+                  isAutomation: Boolean(run.automationId),
+                  explicitObjective: settings.qualificationObjective,
+                });
+
                 const enr = await enrichCapturedLead({
                   tenantId: currentClientId,
                   name: cardData.name,
@@ -2444,10 +2464,15 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                     prioritizePartnerPhone: settings.prioritizePartnerPhone === true,
                     validateWhatsApp: settings.validateWhatsApp === true,
                     huntPartnerDirectPhone: settings.huntPartnerDirectPhone === true,
+                    qualificationObjective,
                   },
                   checkWhatsAppFn,
                   checkBusinessProfileFn,
                 });
+
+                if (!instagramStr && enr.siteAudit.extractedInstagram) {
+                  instagramStr = enr.siteAudit.extractedInstagram;
+                }
 
                 const siteMatch = matchesSiteFilterMode(enr.siteAudit.status, effectiveSiteMode);
                 if (!siteMatch.pass) {
@@ -2509,7 +2534,11 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                   }
                   businessDetails = { ...(businessDetails || {}), enrichment: enr.enrichment };
                   const extraTags = [
-                    enr.enrichment.siteHealth === "broken_site" ? `🔴 ${enr.enrichment.siteStatusLabel}` : null,
+                    enr.enrichment.siteHealth === "broken_site"
+                      ? `🔴 ${enr.enrichment.siteStatusLabel}`
+                      : enr.enrichment.siteHealth === "weak_site"
+                        ? `🟡 ${enr.enrichment.siteStatusLabel}`
+                        : null,
                     enr.enrichment.primeiroNomeSocio ? `👤 Sócio: ${enr.enrichment.primeiroNomeSocio}` : null,
                     enr.enrichment.whatsappChannelType === "socio_direto"
                       ? "🎯 Direto Sócio"
@@ -2779,6 +2808,10 @@ async function runScraper(niches: string[], regions: string[], settings: Scraper
                         `📝 ${reviewsDetalhes.length} avaliações capturadas${expected > 0 ? ` (de ~${expected} no Google)` : ""}: ${cardData.name}`,
                         "success",
                       );
+                    }
+                    if (settings.captureAllReviews && settings.turboMode) {
+                      // Força reciclagem da aba no próximo lead após rolagem pesada
+                      reusableDetailsHits = 25;
                     }
                   }
                 } catch (error) {
@@ -3209,6 +3242,8 @@ export interface StartOpts {
   huntPartnerDirectPhone?: boolean;
   expandNeighborhoods?: boolean;
   minCapitalSocial?: number;
+  _source?: string;
+  qualificationObjective?: "site_sales" | "ai_automation" | "general";
   /** Limite de leads — quando atingido o scraper sai limpo. */
   maxLeads?: number;
   automation_id?: string | null;
@@ -3348,6 +3383,8 @@ export function startScraperRun(opts: StartOpts): { ok: boolean; error?: string;
     huntPartnerDirectPhone: opts.huntPartnerDirectPhone === true,
     expandNeighborhoods: opts.expandNeighborhoods === true,
     minCapitalSocial,
+    ...(typeof opts._source === "string" ? { _source: opts._source } : {}),
+    ...(opts.qualificationObjective ? { qualificationObjective: opts.qualificationObjective } : {}),
     maxLeads: opts.maxLeads,
     reviews_ai: opts.reviews_ai,
     topup: opts.topup,

@@ -269,7 +269,7 @@ export async function fetchPublicTextSafe(
 
       if (res.status >= 300 && res.status < 400) {
         const location = res.headers.get("location");
-        res.body?.cancel?.().catch(() => {});
+        res.body?.cancel?.().catch(() => { });
         if (!location || hop === MAX_SCRAPE_REDIRECTS) {
           return null;
         }
@@ -442,7 +442,7 @@ function extractIframeSources(html: string, max = 10): string[] {
     const url = m[1].trim();
     if (!url) continue;
     let host = "";
-    try { host = new URL(url, "https://example.com").hostname; } catch {}
+    try { host = new URL(url, "https://example.com").hostname; } catch { }
     if (!host) continue;
     out.push(`${host}: ${url.slice(0, 200)}`);
   }
@@ -682,7 +682,7 @@ async function deepScrapeWebsite(
       let abs = "";
       try { abs = new URL(href, effectiveHomeUrl).toString(); } catch { continue; }
       abs = abs.split("#")[0];
-      try { const u = new URL(abs); abs = u.origin + u.pathname; } catch {}
+      try { const u = new URL(abs); abs = u.origin + u.pathname; } catch { }
       if (!abs.startsWith(origin)) continue;
       if (SKIP_PATHS.test(abs)) continue;
       if (abs === effectiveHomeUrl || abs === homeUrl) continue;
@@ -743,8 +743,8 @@ async function deepScrapeWebsite(
 
     const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, " ").trim() || "";
     const meta = html.match(/<meta[^>]*name="description"[^>]*content="([^"]+)"/i)?.[1]
-              || html.match(/<meta[^>]*property="og:description"[^>]*content="([^"]+)"/i)?.[1]
-              || "";
+      || html.match(/<meta[^>]*property="og:description"[^>]*content="([^"]+)"/i)?.[1]
+      || "";
     const ogTitle = html.match(/<meta[^>]*property="og:title"[^>]*content="([^"]+)"/i)?.[1] || "";
     const keywords = html.match(/<meta[^>]*name="keywords"[^>]*content="([^"]+)"/i)?.[1] || "";
     const jsonLd = formatJsonLd(extractJsonLd(html));
@@ -795,7 +795,7 @@ async function deepScrapeWebsite(
       if (segs.length > 0) {
         section = segs.slice(-2).join(" / ").toUpperCase().replace(/[-_]/g, " ").slice(0, 60);
       }
-    } catch {}
+    } catch { }
     const b = buildBlock(url, subRich[i], section);
     if (b) blocks.push(b);
   }
@@ -1118,6 +1118,23 @@ diretamente "compre IA", e SIM perguntar "como vocês lidam hoje com X?".
 ═══════════════════════════════════════════════════════════
 `;
 
+const SITE_SALES_SELLER_CONTEXT = `═══════ CONTEXTO DO VENDEDOR (LEIA ANTES DE TUDO) ═══════
+Quem está prospectando este lead VENDE SITES PROFISSIONAIS, LANDING PAGES DE ALTA CONVERSÃO E POSICIONAMENTO DIGITAL. Nossa oferta resolve:
+
+  • PRESENÇA PRÓPRIA E AUTORIDADE — tirar o negócio da dependência de apenas Instagram, Linktree, iFood, Doctoralia ou Maps, dando um site profissional rápido e com domínio próprio.
+
+  • SITE QUEBRADO, LENTO OU ANTIGO — recuperar credibilidade quando o site atual dá erro, está sem HTTPS ("Site não seguro"), desconfigurado no celular ou parado no tempo.
+
+  • CONVERSÃO EM CLIENTES / WHATSAPP — transformar visitantes do Google Maps e de anúncios pagos em pedidos de orçamento/agendamento com botão direto de WhatsApp, prova social e SEO local.
+
+═══════ COMO ISSO MUDA SUA ANÁLISE ═══════
+As "dores" e o "icp_score" DEVEM refletir o potencial de compra de um SITE / LANDING PAGE profissional:
+  • Score ALTO (80+): negócio estabelecido (boas reviews/CNPJ ativo/faturamento claro) que hoje está SEM site, com site FORA DO AR, sem versão mobile, sem WhatsApp de conversão, ou pagando tráfego pago pra página fraca.
+  • Score MÉDIO-BAIXO: empresa que JÁ possui site moderno, rápido, responsivo e com conversão forte.
+  • NUNCA recomende "vender chatbot de IA" aqui se o gargalo principal for presença/conversão de site; foque no ganho de autoridade, agendamentos e aproveitamento da demanda do Google.
+═══════════════════════════════════════════════════════════
+`;
+
 const SYSTEM_PROMPT = `Você é um analista B2B sênior. Recebe dados públicos de um negócio e produz um BRIEFING ESTRATÉGICO pra um SDR usar antes do primeiro contato.
 
 ═══════ HIERARQUIA DE EVIDÊNCIA (CRÍTICO) ═══════
@@ -1271,26 +1288,32 @@ function buildUserPrompt(
   const crmOverrides = bdObj.crm_overrides as Record<string, unknown> | undefined;
   const enr: Record<string, unknown> | undefined = rawEnr || crmOverrides
     ? {
-        ...(rawEnr || {}),
-        ...(crmOverrides && Object.prototype.hasOwnProperty.call(crmOverrides, "socioDecisor")
-          ? { socioDecisor: crmOverrides.socioDecisor }
-          : {}),
-        ...(crmOverrides && Object.prototype.hasOwnProperty.call(crmOverrides, "cnpj")
-          ? { cnpj: crmOverrides.cnpj }
-          : {}),
-        ...(crmOverrides && Object.prototype.hasOwnProperty.call(crmOverrides, "porte")
-          ? { porte: crmOverrides.porte }
-          : {}),
-        ...(crmOverrides && Object.prototype.hasOwnProperty.call(crmOverrides, "servicoPrincipal")
-          ? { servicoPrincipal: crmOverrides.servicoPrincipal }
-          : {}),
-      }
+      ...(rawEnr || {}),
+      ...(crmOverrides && Object.prototype.hasOwnProperty.call(crmOverrides, "socioDecisor")
+        ? { socioDecisor: crmOverrides.socioDecisor }
+        : {}),
+      ...(crmOverrides && Object.prototype.hasOwnProperty.call(crmOverrides, "cnpj")
+        ? { cnpj: crmOverrides.cnpj }
+        : {}),
+      ...(crmOverrides && Object.prototype.hasOwnProperty.call(crmOverrides, "porte")
+        ? { porte: crmOverrides.porte }
+        : {}),
+      ...(crmOverrides && Object.prototype.hasOwnProperty.call(crmOverrides, "servicoPrincipal")
+        ? { servicoPrincipal: crmOverrides.servicoPrincipal }
+        : {}),
+    }
     : undefined;
   if (enr && typeof enr === "object" && Object.keys(enr).length > 0) {
     lines.push("\n# DADOS OFICIAIS AUDITADOS (RECEITA FEDERAL + SAÚDE TÉCNICA DO SITE + CRM)");
     if (enr.siteStatusLabel || enr.siteDiagnostico) {
+      const qualScoreStr = typeof enr.siteQualityScore === "number" ? ` · Nota técnica ${Math.round(enr.siteQualityScore)}/100` : "";
       lines.push(
-        `- Saúde do Site: ${sanitizePromptSignal(enr.siteStatusLabel, 100)} (${sanitizePromptSignal(enr.siteDiagnostico, 160)})`,
+        `- Saúde do Site: ${sanitizePromptSignal(enr.siteStatusLabel, 100)} (${sanitizePromptSignal(enr.siteDiagnostico, 160)})${qualScoreStr}`,
+      );
+    }
+    if (Array.isArray(enr.siteWeaknesses) && enr.siteWeaknesses.length > 0) {
+      lines.push(
+        `- Falhas detectadas no site: ${enr.siteWeaknesses.slice(0, 4).map((w: unknown) => sanitizePromptSignal(w, 80)).filter(Boolean).join("; ")}`,
       );
     }
     if (enr.abandonedCopyrightYear) {
@@ -1304,8 +1327,7 @@ function buildUserPrompt(
     }
     if (enr.porte) {
       lines.push(
-        `- Porte na Receita: ${sanitizePromptSignal(enr.porte, 50)}${
-          enr.capitalSocial ? ` · Capital Social: R$ ${Number(enr.capitalSocial).toLocaleString("pt-BR")}` : ""
+        `- Porte na Receita: ${sanitizePromptSignal(enr.porte, 50)}${enr.capitalSocial ? ` · Capital Social: R$ ${Number(enr.capitalSocial).toLocaleString("pt-BR")}` : ""
         }`,
       );
     }
@@ -1388,6 +1410,7 @@ export async function analyzeLead(opts: {
   force?: boolean;
   /** Override do contexto do vendedor. Default: AUTOMAÇÃO COM IA. */
   sellerContext?: string;
+  objective?: "site_sales" | "ai_automation" | "general";
   clientId?: string;
 }): Promise<AnalyzeResult | { error: string }> {
   const { data: lead, error } = await supabaseAdmin
@@ -1526,10 +1549,19 @@ export async function analyzeLead(opts: {
   const supportsNativeThinking = provider === "gemini" && /gemini-(2\.5|3)/i.test(model);
   const thinkingBudget: number | null | undefined = supportsNativeThinking ? -1 : undefined;
 
-  // Contexto do vendedor: prioridade opts > app_settings > default.
+  const leadEnr = (lead.business_details as Record<string, unknown> | null | undefined)?.enrichment as Record<string, unknown> | undefined;
+  const resolvedObjective =
+    opts.objective ||
+    (leadEnr?.qualificationObjective === "site_sales" || leadEnr?.qualificationObjective === "ai_automation"
+      ? leadEnr.qualificationObjective
+      : undefined);
+
+  // Contexto do vendedor: prioridade opts > app_settings > objective/default.
   // Sem isso, a IA inventa dores que não vendemos. Esse bloco vai NA FRENTE de
   // todo o resto pra dominar a interpretação dos dados.
-  let sellerContext = opts.sellerContext || DEFAULT_SELLER_CONTEXT;
+  let sellerContext =
+    opts.sellerContext ||
+    (resolvedObjective === "site_sales" ? SITE_SALES_SELLER_CONTEXT : DEFAULT_SELLER_CONTEXT);
   if (!opts.sellerContext) {
     try {
       const { data } = await supabaseAdmin
@@ -1540,7 +1572,7 @@ export async function analyzeLead(opts: {
       if (data?.value && typeof data.value === "string" && data.value.trim().length > 50) {
         sellerContext = data.value;
       }
-    } catch {}
+    } catch { }
   }
 
   const userPromptBase = buildUserPrompt(
@@ -1590,7 +1622,7 @@ export async function analyzeLead(opts: {
         totalTokens: thinkOut.usage.totalTokens,
         clientId: opts.clientId || lead.client_id || undefined,
       });
-    } catch {}
+    } catch { }
   } catch (e: any) {
     liLog(tag, `🧠 PASS 1 FALHOU: ${e?.message || e} — seguindo só com pass 2`);
     reflexao = ""; // se falhar, segue só com o JSON pass — não bloqueia
@@ -1631,7 +1663,7 @@ export async function analyzeLead(opts: {
       totalTokens: jsonOut.usage.totalTokens,
       clientId: opts.clientId || lead.client_id || undefined,
     });
-  } catch {}
+  } catch { }
 
   let parsed: LeadIntelligence;
   try {

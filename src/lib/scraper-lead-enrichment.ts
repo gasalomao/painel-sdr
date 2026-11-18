@@ -8,6 +8,15 @@
 import { isPrivateOrLocalUrl } from "@/lib/url-guard";
 import { webSearch, type SearchResult } from "@/lib/web-search";
 import {
+  SOCIAL_ONLY_HOSTS,
+  IMPROVISED_HOSTS,
+  classifyNonOwnWebsiteUrl,
+  matchesDomainList,
+  type QualificationObjective,
+  type SiteFilterMode,
+  type SiteHealthStatus,
+} from "@/lib/scraper-filter-sync";
+import {
   expandBrPhoneCheckVariants,
   formatCnpj,
   isAnatel8DigitMobile,
@@ -29,16 +38,10 @@ export {
   isValidCnpj,
   normalizeBrPhoneDigits,
   toModern13DigitBrMobile,
+  type QualificationObjective,
+  type SiteFilterMode,
+  type SiteHealthStatus,
 };
-
-export type SiteHealthStatus = "no_site" | "broken_site" | "weak_site" | "active_site";
-
-export type SiteFilterMode =
-  | "any"
-  | "no_site"
-  | "broken_or_no_site"
-  | "only_broken_or_weak"
-  | "only_active_site";
 
 export interface SiteAuditResult {
   status: SiteHealthStatus;
@@ -51,11 +54,18 @@ export interface SiteAuditResult {
   extractedWhatsApps: string[];
   extractedCnpjs: string[];
   extractedEmails?: string[];
+  extractedInstagram?: string;
   hasPaidTrafficTag?: boolean;
   trafficTags?: string[];
   discoveredRealWebsite?: string;
   managementTools?: string[];
   abandonedCopyrightYear?: number;
+  siteQualityScore?: number;
+  siteWeaknesses?: string[];
+  siteStrengths?: string[];
+  hasMobileViewport?: boolean;
+  hasSsl?: boolean;
+  hasClearCta?: boolean;
 }
 
 export interface CnpjPartner {
@@ -143,6 +153,9 @@ export interface LeadEnrichmentData {
   empresaCurta?: string;
   servicoPrincipal?: string;
   recommendedApproach?: string;
+  siteQualityScore?: number;
+  siteWeaknesses?: string[];
+  qualificationObjective?: QualificationObjective;
   qualificationScore: number;
   qualificationReasons: string[];
   enrichedAt: string;
@@ -182,6 +195,7 @@ export interface EnrichLeadInput {
     prioritizePartnerPhone: boolean;
     validateWhatsApp: boolean;
     huntPartnerDirectPhone?: boolean;
+    qualificationObjective?: QualificationObjective;
   };
   fetchImpl?: FetchLike;
   searchFn?: SearchLike;
@@ -202,47 +216,11 @@ export interface EnrichLeadOutput {
 
 const MAX_CACHE_ENTRIES = 500;
 const MAX_PHONE_ROOT_ENTRIES = 1000;
-const MAX_SITE_HTML_BYTES = 64 * 1024;
-const SITE_AUDIT_TIMEOUT_MS = 4000;
+const MAX_SITE_HTML_BYTES = 256 * 1024;
+const SITE_AUDIT_TIMEOUT_MS = 4500;
 const RDAP_TIMEOUT_MS = 3500;
 const CNPJ_TIMEOUT_MS = 4000;
 const MAX_REDIRECTS = 4;
-
-const SOCIAL_ONLY_HOSTS = [
-  "instagram.com",
-  "facebook.com",
-  "fb.com",
-  "wa.me",
-  "whatsapp.com",
-  "api.whatsapp.com",
-  "t.me",
-  "youtube.com",
-  "youtu.be",
-  "tiktok.com",
-  "linkedin.com",
-];
-
-const IMPROVISED_HOSTS = [
-  "linktr.ee",
-  "bio.site",
-  "beacons.ai",
-  "canva.site",
-  "sites.google.com",
-  "wixsite.com",
-  "blogspot.com",
-  "wordpress.com",
-  "carrd.co",
-  "linkbio.co",
-  "taplink.cc",
-  "milkshake.app",
-  "shor.by",
-  "lnk.bio",
-  "flow.page",
-  "campsite.bio",
-  "bento.me",
-  "solo.to",
-  "bit.ly",
-];
 
 interface RdapCacheEntry {
   cnpj: string | null;
@@ -530,8 +508,8 @@ function getHostname(rawUrl: string): string {
   }
 }
 
-function matchesHostList(host: string, list: string[]): boolean {
-  return list.some((item) => host === item || host.endsWith(`.${item}`));
+function matchesHostList(host: string, list: readonly string[]): boolean {
+  return matchesDomainList(host, list);
 }
 
 async function readUpToBytes(res: Response, maxBytes: number): Promise<string> {
@@ -611,15 +589,29 @@ function describeNetworkError(err: unknown): { code: string; label: string; diag
   };
 }
 
-function isCloudflareChallenge(res: Response): boolean {
+function isWafOrBotChallenge(res: Response): boolean {
+  if (res.status !== 403 && res.status !== 429 && res.status !== 503) {
+    return false;
+  }
   const cfRay = res.headers.get("cf-ray");
+  const cfMitigated = (res.headers.get("cf-mitigated") || "").toLowerCase();
   const server = (res.headers.get("server") || "").toLowerCase();
-  return (res.status === 403 || res.status === 503) && (!!cfRay || server.includes("cloudflare"));
+  const poweredBy = (res.headers.get("x-powered-by") || "").toLowerCase();
+  return (
+    !!cfRay ||
+    cfMitigated.includes("challenge") ||
+    server.includes("cloudflare") ||
+    server.includes("sucuri") ||
+    server.includes("cloudfront") ||
+    server.includes("akamai") ||
+    server.includes("imperva") ||
+    poweredBy.includes("sucuri")
+  );
 }
 
 function detectBrokenHtmlPattern(html: string): { code: string; label: string; diag: string } | null {
   const lower = html.toLowerCase();
-  if (/cgi-sys\/suspendedpage|conta suspensa|account suspended/.test(lower)) {
+  if (/cgi-sys\/suspendedpage|conta suspensa|account suspended|este site est[aá] suspenso|site suspenso/.test(lower)) {
     return {
       code: "account_suspended",
       label: "Hospedagem suspensa",
@@ -633,28 +625,277 @@ function detectBrokenHtmlPattern(html: string): { code: string; label: string; d
       diag: "quebrado exibindo erro de conexão com o banco de dados",
     };
   }
-  if (/<title>\s*index of \//i.test(html) || /<h1>\s*index of \//i.test(html)) {
+  if (/there has been a critical error on this website|h[aá] um erro cr[ií]tico no seu site|fatal error:\s+uncaught|parse error:\s+syntax error/i.test(html)) {
+    return {
+      code: "fatal_cms_error",
+      label: "Erro crítico no site",
+      diag: "quebrado exibindo erro crítico/PHP na tela",
+    };
+  }
+  if (/<title>\s*index of \//i.test(html) || /<h1>\s*index of \//i.test(html) || /cgi-sys\/defaultwebpage\.cgi/i.test(lower)) {
     return {
       code: "directory_listing",
       label: "Site quebrado (Index of /)",
-      diag: "quebrado mostrando diretórios internos sem página inicial",
+      diag: "quebrado mostrando diretórios internos ou página padrão do servidor",
     };
   }
-  if (/este dom[ií]nio est[aá] registrado|domain is parked|compre este dom[ií]nio|registro\.br.*estacionado/.test(lower)) {
+  if (
+    /este dom[ií]nio est[aá] registrado|domain is parked|compre este dom[ií]nio|registro\.br.*estacionado|hugedomains|sedoparking|afternic\.com|dan\.com\/buy-domain|bodis\.com/i.test(
+      lower,
+    )
+  ) {
     return {
       code: "parked_domain",
       label: "Domínio estacionado",
-      diag: "caindo em página genérica de domínio estacionado sem site",
+      diag: "caindo em página genérica de domínio estacionado ou à venda sem site",
     };
   }
-  if (/p[aá]gina em constru[çc][aã]o|site em manuten[çc][aã]o|coming soon/.test(lower) && html.length < 18000) {
+  if (/<(?:title|h1)[^>]*>[^<]*(?:slot gacor|togel online|judi online|situs toto|maxwin)/i.test(html)) {
     return {
-      code: "under_construction",
-      label: "Site em construção",
-      diag: "travado em página de 'Site em construção / manutenção'",
+      code: "hacked_spam_domain",
+      label: "Domínio comprometido/invadido",
+      diag: "redirecionando ou comprometido por spam externo em vez do site da empresa",
     };
   }
   return null;
+}
+
+function detectPlaceholderHtmlPattern(
+  html: string,
+  visibleLen: number,
+): { code: string; label: string; diag: string } | null {
+  const lower = html.toLowerCase();
+  const titleAndH1 = (html.match(/<(?:title|h1|h2)[^>]*>[\s\S]{0,200}<\/(?:title|h1|h2)>/gi) || []).join(" ").toLowerCase();
+
+  if (
+    visibleLen < 700 &&
+    (/p[aá]gina em constru[çc][aã]o|site em constru[çc][aã]o|estamos em manuten[çc][aã]o|site em manuten[çc][aã]o|novo site em breve|voltamos em breve|under construction|coming soon/.test(
+      titleAndH1,
+    ) ||
+      (/p[aá]gina em constru[çc][aã]o|site em manuten[çc][aã]o|coming soon/.test(lower) && html.length < 18000))
+  ) {
+    return {
+      code: "under_construction",
+      label: "Site em construção",
+      diag: "travado em página de 'Site em construção / manutenção' sem captar clientes",
+    };
+  }
+
+  if (
+    /just another wordpress site|s[oó] mais um site wordpress|meu primeiro site|welcome to nginx|apache2 (?:ubuntu|debian) default page|iis windows server|seu site est[aá] pronto|site publicado com sucesso|bem-vindo [àa] sua nova hospedagem/i.test(
+      lower,
+    ) &&
+    visibleLen < 1200
+  ) {
+    return {
+      code: "cms_placeholder",
+      label: "Site modelo sem edição",
+      diag: "publicado com modelo padrão de hospedagem/WordPress sem conteúdo comercial",
+    };
+  }
+
+  const loremMatches = lower.match(/lorem ipsum dolor sit amet/g);
+  if (loremMatches && loremMatches.length >= 2) {
+    return {
+      code: "template_lorem_ipsum",
+      label: "Template inacabado",
+      diag: "com textos genéricos de modelo ('Lorem ipsum') visíveis ao cliente",
+    };
+  }
+
+  return null;
+}
+
+const INSTAGRAM_IGNORE_SEGMENTS = new Set([
+  "p",
+  "reel",
+  "reels",
+  "stories",
+  "explore",
+  "accounts",
+  "share",
+  "tv",
+  "about",
+  "legal",
+  "developer",
+  "direct",
+  "oauth",
+]);
+
+export function extractInstagramFromHtml(html: string): string | undefined {
+  if (!html) return undefined;
+  const re = /https?:\/\/(?:www\.)?instagram\.com\/([A-Za-z0-9._]{2,30})(?:[/?#"'\s<]|$)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const seg = (m[1] || "").trim().replace(/\.$/, "");
+    if (!seg || INSTAGRAM_IGNORE_SEGMENTS.has(seg.toLowerCase())) continue;
+    return `https://www.instagram.com/${seg}/`;
+  }
+  return undefined;
+}
+
+function stripNonVisibleHtml(html: string): string {
+  return String(html || "")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function evaluateWebsiteQuality(input: {
+  html: string;
+  currentUrl: string;
+  extractedWhatsApps: string[];
+  hasPaidTrafficTag: boolean;
+  managementTools: string[];
+  abandonedCopyrightYear?: number;
+}): {
+  qualityScore: number;
+  weaknesses: string[];
+  strengths: string[];
+  hasHeadTag: boolean;
+  hasViewport: boolean;
+  hasSsl: boolean;
+  hasClearCta: boolean;
+  isSpaShell: boolean;
+  visibleLen: number;
+} {
+  const { html, currentUrl, extractedWhatsApps, hasPaidTrafficTag, managementTools, abandonedCopyrightYear } = input;
+  const visibleText = stripNonVisibleHtml(html);
+  const visibleLen = visibleText.length;
+  const hasHeadTag = /<head[\s>]/i.test(html);
+  const hasViewport = /<meta\b[^>]*name\s*=\s*["']viewport["'][^>]*>/i.test(html);
+  const hasSsl = currentUrl.startsWith("https://");
+  const isSpaShell =
+    /<div[^>]+id\s*=\s*["'](?:root|app|__next|__nuxt|svelte)["'][^>]*>/i.test(html) &&
+    /<script\b[^>]*src\s*=/i.test(html);
+
+  const hasWhatsAppSignal =
+    extractedWhatsApps.length > 0 ||
+    /joinchat|whatshelp|leadster|tawk\.to|jivochat|tidio|zendesk|intercom|wpp-button|btn-whatsapp|floating-wpp|whatsapp/i.test(
+      html,
+    );
+  const hasTelOrForm =
+    /href\s*=\s*["']tel:/i.test(html) ||
+    /<form\b/i.test(html) ||
+    managementTools.length > 0;
+  const hasCtaKeywords =
+    /\b(?:agend(?:e|ar|amento)|or[çc]amento|fale conosco|falar com|atendimento|marcar consulta|solicitar|whatsapp|entre em contato)\b/i.test(
+      visibleText,
+    );
+  const hasClearCta = hasWhatsAppSignal || hasTelOrForm || hasCtaKeywords;
+
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const rawTitle = titleMatch ? titleMatch[1].replace(/\s+/g, " ").trim() : "";
+  const isGenericTitle =
+    !rawTitle ||
+    rawTitle.length < 4 ||
+    /^(?:home|index|document|untitled|page|website|welcome|just another wordpress site)$/i.test(rawTitle);
+
+  const hasMetaDesc =
+    /<meta\b[^>]*(?:name\s*=\s*["']description["']|property\s*=\s*["']og:description["'])[^>]*content\s*=\s*["'][^"']{15,}["']/i.test(
+      html,
+    );
+  const hasH1 = /<h1\b[^>]*>[\s\S]*?\S[\s\S]*?<\/h1>/i.test(html);
+  const hasSchemaOrg = /application\/ld\+json/i.test(html);
+  const hasLegacyFrames = /<frameset\b/i.test(html);
+  const hasAnalyticsOrTracking =
+    hasPaidTrafficTag ||
+    /googletagmanager\.com|google-analytics\.com|clarity\.ms|hotjar\.com/i.test(html);
+
+  let score = 35;
+  const weaknesses: string[] = [];
+  const strengths: string[] = [];
+
+  if (hasSsl) {
+    score += 15;
+    strengths.push("HTTPS ativo");
+  } else {
+    score -= 20;
+    weaknesses.push("sem cadeado HTTPS");
+  }
+
+  if (hasViewport) {
+    score += 15;
+    strengths.push("adaptado para celular");
+  } else if (hasHeadTag) {
+    score -= 25;
+    weaknesses.push("desconfigurado no celular (sem viewport mobile)");
+  }
+
+  if (hasLegacyFrames) {
+    score -= 20;
+    weaknesses.push("tecnologia antiga em frames");
+  }
+
+  if (hasWhatsAppSignal) {
+    score += 20;
+    strengths.push("botão/canal de WhatsApp");
+  }
+  if (hasTelOrForm) {
+    score += 10;
+    strengths.push("formulário/telefone clicável");
+  }
+  if (hasCtaKeywords) {
+    score += 8;
+  }
+
+  if (hasHeadTag && !isSpaShell && !hasWhatsAppSignal && !hasTelOrForm) {
+    score -= 8;
+    weaknesses.push("sem botão de WhatsApp ou formulário de contato");
+  }
+
+  if (!isGenericTitle) {
+    score += 8;
+  } else if (hasHeadTag && !isSpaShell) {
+    score -= 5;
+    weaknesses.push("título SEO genérico ou ausente");
+  }
+
+  if (hasMetaDesc) {
+    score += 7;
+    strengths.push("meta descrição configurada");
+  }
+  if (hasH1) score += 5;
+  if (hasSchemaOrg) score += 5;
+
+  if (isSpaShell) {
+    score += 10;
+  } else if (visibleLen >= 400) {
+    score += 10;
+  } else if (visibleLen >= 120) {
+    score += 5;
+  } else if (hasHeadTag && visibleLen < 60) {
+    score -= 25;
+    weaknesses.push("quase sem conteúdo visível");
+  }
+
+  if (hasAnalyticsOrTracking) {
+    score += 7;
+    strengths.push("monitoramento/pixel ativo");
+  }
+
+  if (abandonedCopyrightYear) {
+    score -= 12;
+    weaknesses.push(`rodapé parado em © ${abandonedCopyrightYear}`);
+  }
+
+  return {
+    qualityScore: Math.max(0, Math.min(100, score)),
+    weaknesses,
+    strengths,
+    hasHeadTag,
+    hasViewport,
+    hasSsl,
+    hasClearCta,
+    isSpaShell,
+    visibleLen,
+  };
 }
 
 /**
@@ -984,8 +1225,8 @@ export function extractPersonNameFromLeadSignals(input: {
 }
 
 /**
- * Audita a saúde técnica de um site em < 4s lendo no máximo 64KB para não pesar a VPS.
- * Retorna também links WhatsApp (`wa.me`) e CNPJs encontrados no HTML.
+ * Audita a saúde técnica e a maturidade de conversão de um site em < 4,5s lendo até 256KB
+ * sem custo externo. Extrai também links WhatsApp (`wa.me`), Instagram e CNPJs do HTML.
  */
 export async function auditLeadWebsite(
   rawUrl: string | null | undefined,
@@ -999,6 +1240,7 @@ export async function auditLeadWebsite(
       diagnosticoComercial: "sem site cadastrado no Google Maps",
       extractedWhatsApps: [],
       extractedCnpjs: [],
+      siteQualityScore: 0,
     };
   }
 
@@ -1010,10 +1252,12 @@ export async function auditLeadWebsite(
       diagnosticoComercial: "sem site válido cadastrado no Google Maps",
       extractedWhatsApps: [],
       extractedCnpjs: [],
+      siteQualityScore: 0,
     };
   }
 
-  if (matchesHostList(host, SOCIAL_ONLY_HOSTS)) {
+  const preClass = classifyNonOwnWebsiteUrl(raw);
+  if (preClass === "social_link_only") {
     return {
       status: "no_site",
       issueCode: "social_link_only",
@@ -1021,12 +1265,26 @@ export async function auditLeadWebsite(
       diagnosticoComercial: "usando apenas link de rede social em vez de site profissional",
       extractedWhatsApps: extractWhatsAppPhonesFromHtml(raw),
       extractedCnpjs: [],
+      extractedInstagram: extractInstagramFromHtml(raw),
+      siteQualityScore: 10,
+    };
+  }
+  if (preClass === "third_party_platform") {
+    return {
+      status: "no_site",
+      issueCode: "third_party_platform",
+      statusLabel: "Só plataforma de terceiros",
+      diagnosticoComercial: "usando apenas cardápio/agenda de terceiros sem site profissional próprio",
+      extractedWhatsApps: extractWhatsAppPhonesFromHtml(raw),
+      extractedCnpjs: [],
+      siteQualityScore: 15,
     };
   }
 
   const isImprovisedHost = matchesHostList(host, IMPROVISED_HOSTS);
   let currentUrl = normalizeHttpUrl(raw);
   const startMs = Date.now();
+  let lastHopMs = 0;
   let lastRes: Response | null = null;
   let networkError: unknown = null;
 
@@ -1040,9 +1298,11 @@ export async function auditLeadWebsite(
           : "",
         extractedWhatsApps: [],
         extractedCnpjs: [],
+        siteQualityScore: isImprovisedHost ? 30 : 50,
       };
     }
 
+    const hopStart = Date.now();
     try {
       const res = await fetchImpl(currentUrl, {
         method: "GET",
@@ -1054,6 +1314,7 @@ export async function auditLeadWebsite(
           "Accept-Language": "pt-BR,pt;q=0.9",
         },
       });
+      lastHopMs = Date.now() - hopStart;
 
       if (res.status >= 300 && res.status < 400) {
         const location = res.headers.get("location");
@@ -1063,12 +1324,18 @@ export async function auditLeadWebsite(
           break;
         }
         currentUrl = new URL(location, currentUrl).toString();
+        const redirectedNonSite = classifyNonOwnWebsiteUrl(currentUrl);
+        if (redirectedNonSite === "social_link_only" || redirectedNonSite === "third_party_platform") {
+          lastRes = res;
+          break;
+        }
         continue;
       }
 
       lastRes = res;
       break;
     } catch (err) {
+      lastHopMs = Date.now() - hopStart;
       networkError = err;
       // Fallback HTTP caso o link tenha vindo HTTPS mas falhou TLS ou vice-versa
       if (hop === 0 && currentUrl.startsWith("https://")) {
@@ -1094,6 +1361,8 @@ export async function auditLeadWebsite(
               responseTimeMs: Date.now() - startMs,
               extractedWhatsApps: [],
               extractedCnpjs: [],
+              siteQualityScore: tlsDiag.code.startsWith("ssl") ? 10 : 35,
+              hasSsl: false,
             };
           }
           await resHttp.body?.cancel?.().catch(() => {});
@@ -1118,23 +1387,49 @@ export async function auditLeadWebsite(
       responseTimeMs: elapsed,
       extractedWhatsApps: [],
       extractedCnpjs: [],
+      siteQualityScore: 0,
     };
   }
 
-  if (isCloudflareChallenge(lastRes)) {
+  const finalHost = getHostname(currentUrl);
+  const redirectedToNonWebsite = classifyNonOwnWebsiteUrl(currentUrl);
+  if (redirectedToNonWebsite === "social_link_only" || redirectedToNonWebsite === "third_party_platform") {
     await lastRes.body?.cancel?.().catch(() => {});
     return {
-      status: isImprovisedHost ? "weak_site" : "active_site",
-      issueCode: isImprovisedHost ? "improvised_host" : "waf_protected",
-      statusLabel: isImprovisedHost ? "Site improvisado/gratuito" : "Site ativo",
-      diagnosticoComercial: isImprovisedHost
+      status: "weak_site",
+      issueCode: "redirects_to_social",
+      statusLabel: "Domínio redireciona p/ rede social",
+      diagnosticoComercial: "com domínio próprio apenas redirecionando para rede social/plataforma sem site próprio",
+      httpStatus: lastRes.status,
+      finalUrl: currentUrl,
+      responseTimeMs: elapsed,
+      extractedWhatsApps: extractWhatsAppPhonesFromHtml(currentUrl),
+      extractedCnpjs: [],
+      extractedInstagram: extractInstagramFromHtml(currentUrl),
+      siteQualityScore: 28,
+      siteWeaknesses: ["domínio apenas redireciona para rede social/terceiro"],
+      hasSsl: currentUrl.startsWith("https://"),
+    };
+  }
+
+  const effectiveImprovisedHost = isImprovisedHost || (!!finalHost && matchesHostList(finalHost, IMPROVISED_HOSTS));
+
+  if (isWafOrBotChallenge(lastRes)) {
+    await lastRes.body?.cancel?.().catch(() => {});
+    return {
+      status: effectiveImprovisedHost ? "weak_site" : "active_site",
+      issueCode: effectiveImprovisedHost ? "improvised_host" : "waf_protected",
+      statusLabel: effectiveImprovisedHost ? "Site improvisado/gratuito" : "Site ativo",
+      diagnosticoComercial: effectiveImprovisedHost
         ? "usando página improvisada gratuita em vez de um site profissional próprio"
-        : "site ativo (protegido por Cloudflare)",
+        : "site ativo (protegido por barreira anti-bot/Cloudflare)",
       httpStatus: lastRes.status,
       finalUrl: currentUrl,
       responseTimeMs: elapsed,
       extractedWhatsApps: [],
       extractedCnpjs: [],
+      siteQualityScore: effectiveImprovisedHost ? 35 : 65,
+      hasSsl: currentUrl.startsWith("https://"),
     };
   }
 
@@ -1146,15 +1441,16 @@ export async function auditLeadWebsite(
   const extractedWhatsApps = extractWhatsAppPhonesFromHtml(html);
   const extractedCnpjs = extractCnpjsFromText(html);
   const extractedEmails = extractEmailsFromHtml(html);
+  let extractedInstagram = extractInstagramFromHtml(html);
   const trafficTags = detectPaidTrafficTags(html);
   let managementTools = detectManagementTools(html);
   let abandonedCopyrightYear = detectAbandonedCopyrightYear(html);
-  const discoveredRealWebsite = isImprovisedHost
+  const discoveredRealWebsite = effectiveImprovisedHost
     ? extractExternalBusinessUrlFromBioHtml(html, currentUrl)
     : undefined;
 
   // 1-hop em subpágina interna (/contato, /sobre, /quem-somos) quando o rodapé da home não trouxe CNPJ
-  if (lastRes.ok && !isImprovisedHost && extractedCnpjs.length === 0 && html) {
+  if (lastRes.ok && !effectiveImprovisedHost && extractedCnpjs.length === 0 && html) {
     const subpageUrl = findInternalContactSubpageUrl(html, currentUrl);
     if (subpageUrl && !isPrivateOrLocalUrl(subpageUrl)) {
       try {
@@ -1180,6 +1476,9 @@ export async function auditLeadWebsite(
           for (const em of extractEmailsFromHtml(subHtml)) {
             if (!extractedEmails.includes(em)) extractedEmails.push(em);
           }
+          if (!extractedInstagram) {
+            extractedInstagram = extractInstagramFromHtml(subHtml);
+          }
           for (const t of detectPaidTrafficTags(subHtml)) {
             if (!trafficTags.includes(t)) trafficTags.push(t);
           }
@@ -1200,26 +1499,55 @@ export async function auditLeadWebsite(
   }
 
   const hasPaidTrafficTag = trafficTags.length > 0;
+  const quality = evaluateWebsiteQuality({
+    html,
+    currentUrl,
+    extractedWhatsApps,
+    hasPaidTrafficTag,
+    managementTools,
+    abandonedCopyrightYear,
+  });
+
   const auditExtras = {
     ...(extractedEmails.length > 0 ? { extractedEmails } : {}),
+    ...(extractedInstagram ? { extractedInstagram } : {}),
     ...(hasPaidTrafficTag ? { hasPaidTrafficTag, trafficTags } : {}),
     ...(discoveredRealWebsite ? { discoveredRealWebsite } : {}),
     ...(managementTools.length > 0 ? { managementTools } : {}),
     ...(abandonedCopyrightYear ? { abandonedCopyrightYear } : {}),
+    siteQualityScore: quality.qualityScore,
+    ...(quality.weaknesses.length > 0 ? { siteWeaknesses: quality.weaknesses } : {}),
+    ...(quality.strengths.length > 0 ? { siteStrengths: quality.strengths } : {}),
+    hasMobileViewport: quality.hasViewport,
+    hasSsl: quality.hasSsl,
+    hasClearCta: quality.hasClearCta,
   };
 
-  if ([404, 410, 500, 502, 503, 504].includes(lastRes.status)) {
+  if (
+    lastRes.status === 401 ||
+    lastRes.status === 403 ||
+    lastRes.status === 404 ||
+    lastRes.status === 410 ||
+    lastRes.status === 451 ||
+    lastRes.status >= 500
+  ) {
+    const isCfOriginDown = lastRes.status >= 520 && lastRes.status <= 530;
     return {
       status: "broken_site",
       issueCode: `http_${lastRes.status}`,
-      statusLabel: `Site com erro HTTP ${lastRes.status}`,
-      diagnosticoComercial: `retornando página de erro (HTTP ${lastRes.status}) para os visitantes`,
+      statusLabel: isCfOriginDown
+        ? `Servidor fora do ar (Erro ${lastRes.status})`
+        : `Site com erro HTTP ${lastRes.status}`,
+      diagnosticoComercial: isCfOriginDown
+        ? `com servidor de origem offline (erro Cloudflare ${lastRes.status})`
+        : `retornando página de erro (HTTP ${lastRes.status}) para os visitantes`,
       httpStatus: lastRes.status,
       finalUrl: currentUrl,
       responseTimeMs: elapsed,
       extractedWhatsApps,
       extractedCnpjs,
       ...auditExtras,
+      siteQualityScore: 0,
     };
   }
 
@@ -1236,10 +1564,11 @@ export async function auditLeadWebsite(
       extractedWhatsApps,
       extractedCnpjs,
       ...auditExtras,
+      siteQualityScore: 5,
     };
   }
 
-  if (isImprovisedHost) {
+  if (effectiveImprovisedHost) {
     return {
       status: "weak_site",
       issueCode: "improvised_host",
@@ -1269,12 +1598,80 @@ export async function auditLeadWebsite(
     };
   }
 
-  if (elapsed > 3200) {
+  const placeholderPattern = detectPlaceholderHtmlPattern(html, quality.visibleLen);
+  if (placeholderPattern) {
+    return {
+      status: "weak_site",
+      issueCode: placeholderPattern.code,
+      statusLabel: placeholderPattern.label,
+      diagnosticoComercial: placeholderPattern.diag,
+      httpStatus: lastRes.status,
+      finalUrl: currentUrl,
+      responseTimeMs: elapsed,
+      extractedWhatsApps,
+      extractedCnpjs,
+      ...auditExtras,
+      siteQualityScore: Math.min(quality.qualityScore, 22),
+    };
+  }
+
+  if (lastHopMs > 4200 || elapsed > 6000) {
     return {
       status: "weak_site",
       issueCode: "slow_site",
       statusLabel: "Site muito lento",
-      diagnosticoComercial: `muito lento para abrir (${(elapsed / 1000).toFixed(1)}s no carregamento)`,
+      diagnosticoComercial: `muito lento para abrir (${(Math.max(lastHopMs, elapsed) / 1000).toFixed(1)}s na resposta)`,
+      httpStatus: lastRes.status,
+      finalUrl: currentUrl,
+      responseTimeMs: elapsed,
+      extractedWhatsApps,
+      extractedCnpjs,
+      ...auditExtras,
+    };
+  }
+
+  if (quality.hasHeadTag && !quality.isSpaShell && quality.visibleLen < 60 && extractedWhatsApps.length === 0) {
+    return {
+      status: "weak_site",
+      issueCode: "empty_or_thin_page",
+      statusLabel: "Site vazio/incompleto",
+      diagnosticoComercial: "abrindo quase em branco, sem conteúdo comercial nem canais de contato",
+      httpStatus: lastRes.status,
+      finalUrl: currentUrl,
+      responseTimeMs: elapsed,
+      extractedWhatsApps,
+      extractedCnpjs,
+      ...auditExtras,
+    };
+  }
+
+  if (quality.hasHeadTag && !quality.hasViewport) {
+    return {
+      status: "weak_site",
+      issueCode: "not_mobile_friendly",
+      statusLabel: "Site sem versão mobile",
+      diagnosticoComercial:
+        extractedWhatsApps.length === 0
+          ? "desconfigurado no celular (sem adaptação mobile) e sem botão direto de WhatsApp"
+          : "desconfigurado no celular por não ter adaptação mobile responsiva",
+      httpStatus: lastRes.status,
+      finalUrl: currentUrl,
+      responseTimeMs: elapsed,
+      extractedWhatsApps,
+      extractedCnpjs,
+      ...auditExtras,
+    };
+  }
+
+  if (quality.hasHeadTag && !quality.isSpaShell && quality.qualityScore < 45) {
+    const reasonSummary = quality.weaknesses.slice(0, 2).join(" e ");
+    return {
+      status: "weak_site",
+      issueCode: "low_conversion_site",
+      statusLabel: "Site defasado / baixa conversão",
+      diagnosticoComercial: reasonSummary
+        ? `com site defasado (${reasonSummary})`
+        : "com site antigo e baixa estrutura para gerar contatos",
       httpStatus: lastRes.status,
       finalUrl: currentUrl,
       responseTimeMs: elapsed,
@@ -1286,8 +1683,13 @@ export async function auditLeadWebsite(
 
   return {
     status: "active_site",
-    statusLabel: "Site ativo",
-    diagnosticoComercial: "site ativo e funcionando",
+    statusLabel: quality.qualityScore >= 78 ? "Site estruturado" : "Site ativo",
+    diagnosticoComercial:
+      quality.qualityScore >= 78
+        ? "site ativo, responsivo e bem estruturado para conversão"
+        : quality.weaknesses.length > 0
+          ? `site ativo, mas ${quality.weaknesses[0]}`
+          : "site ativo e funcionando",
     httpStatus: lastRes.status,
     finalUrl: currentUrl,
     responseTimeMs: elapsed,
@@ -2175,50 +2577,126 @@ export function computeLeadQualificationScore(input: {
   claimed?: boolean;
   hasPartnerWhatsApp?: boolean;
   ownerActiveOnMaps?: boolean;
+  hasReceptionist?: boolean;
+  objective?: QualificationObjective;
 }): { score: number; reasons: string[] } {
+  const objective: QualificationObjective = input.objective || "site_sales";
   let score = 30;
   const reasons: string[] = [];
 
-  if (input.siteAudit.status === "broken_site") {
-    score += 28;
-    reasons.push(`Site com falha (${input.siteAudit.statusLabel})`);
-  } else if (input.siteAudit.status === "weak_site") {
-    score += 18;
-    reasons.push(`Site fraco (${input.siteAudit.statusLabel})`);
-  } else if (input.siteAudit.status === "no_site") {
-    score += 12;
-    reasons.push("Sem site profissional");
+  const siteQuality = input.siteAudit.siteQualityScore;
+
+  if (objective === "ai_automation") {
+    if (input.siteAudit.status === "active_site") {
+      const highQuality = siteQuality !== undefined && siteQuality >= 75;
+      score += highQuality ? 22 : 18;
+      reasons.push(highQuality ? "Presença digital estruturada p/ IA" : "Site ativo para atendimento IA");
+    } else if (input.siteAudit.status === "weak_site") {
+      score += 13;
+      reasons.push(`Canal digital com gargalo (${input.siteAudit.statusLabel})`);
+    } else if (input.siteAudit.status === "broken_site") {
+      score += 8;
+      reasons.push(`Site com falha (${input.siteAudit.statusLabel})`);
+    } else {
+      score += 6;
+      reasons.push("Operação via Maps/WhatsApp sem site");
+    }
+
+    if (input.siteAudit.hasPaidTrafficTag) {
+      score += 12;
+      reasons.push("Investe em tráfego pago (alta demanda p/ IA)");
+    }
+
+    if ((input.siteAudit.managementTools?.length ?? 0) > 0) {
+      score += 8;
+      reasons.push(`Usa sistemas (${input.siteAudit.managementTools!.slice(0, 2).join(", ")})`);
+    }
+
+    if (input.hasReceptionist) {
+      score += 6;
+      reasons.push("Recepção/triagem identificada");
+    }
+  } else if (objective === "general") {
+    if (input.siteAudit.status === "active_site") {
+      score += 14;
+      reasons.push("Site ativo");
+    } else if (input.siteAudit.status === "weak_site" || input.siteAudit.status === "broken_site") {
+      score += 14;
+      reasons.push(input.siteAudit.statusLabel);
+    } else {
+      score += 10;
+      reasons.push("Sem site próprio");
+    }
+
+    if (input.siteAudit.hasPaidTrafficTag) {
+      score += 8;
+      reasons.push("Investe em anúncios online");
+    }
+
+    if ((input.siteAudit.managementTools?.length ?? 0) > 0) {
+      score += 6;
+      reasons.push(`Usa sistemas (${input.siteAudit.managementTools!.slice(0, 2).join(", ")})`);
+    }
   } else {
-    score += 8;
-    reasons.push("Site ativo estruturado");
-  }
+    // Objetivo "site_sales" (preserva baseline broken_site = 58 e com Ads = 65)
+    if (input.siteAudit.status === "broken_site") {
+      score += 28;
+      reasons.push(`Site com falha (${input.siteAudit.statusLabel})`);
+    } else if (input.siteAudit.status === "weak_site") {
+      score += 18;
+      reasons.push(`Site fraco (${input.siteAudit.statusLabel})`);
+    } else if (input.siteAudit.status === "no_site") {
+      score += 14;
+      reasons.push(
+        input.siteAudit.issueCode === "third_party_platform"
+          ? "Depende de plataforma de terceiros (sem site próprio)"
+          : "Sem site profissional",
+      );
+    } else {
+      const highQuality = siteQuality !== undefined && siteQuality >= 80;
+      score += highQuality ? 4 : 8;
+      reasons.push(highQuality ? "Site já bem estruturado" : "Site ativo com margem de melhoria");
+    }
 
-  if (
-    input.siteAudit.hasPaidTrafficTag &&
-    (input.siteAudit.status === "broken_site" || input.siteAudit.status === "weak_site")
-  ) {
-    score += 7;
-    reasons.push("Anuncia online com site precário");
-  }
+    if (
+      input.siteAudit.hasPaidTrafficTag &&
+      (input.siteAudit.status === "broken_site" || input.siteAudit.status === "weak_site")
+    ) {
+      score += 7;
+      reasons.push("Anuncia online com site precário");
+    }
 
-  if ((input.siteAudit.managementTools?.length ?? 0) > 0) {
-    score += 6;
-    reasons.push(`Usa sistemas (${input.siteAudit.managementTools!.slice(0, 2).join(", ")})`);
-  }
+    if ((input.siteAudit.managementTools?.length ?? 0) > 0) {
+      score += 6;
+      reasons.push(`Usa sistemas (${input.siteAudit.managementTools!.slice(0, 2).join(", ")})`);
+    }
 
-  if (input.siteAudit.abandonedCopyrightYear) {
-    score += 4;
-    reasons.push(`Copyright desatualizado (${input.siteAudit.abandonedCopyrightYear})`);
+    if (input.siteAudit.abandonedCopyrightYear) {
+      score += 4;
+      reasons.push(`Copyright desatualizado (${input.siteAudit.abandonedCopyrightYear})`);
+    }
   }
 
   const reviews = parseInt(String(input.reviewCount || "0").replace(/\D/g, ""), 10) || 0;
   const rating = parseFloat(String(input.averageRating || "0").replace(",", ".")) || 0;
 
-  if (reviews >= 50) {
-    score += 12;
-    reasons.push(`${reviews} avaliações no Google`);
-  } else if (reviews >= 15) {
-    score += 6;
+  if (objective === "ai_automation") {
+    if (reviews >= 100) {
+      score += 18;
+      reasons.push(`${reviews} avaliações no Google (alto volume)`);
+    } else if (reviews >= 40) {
+      score += 13;
+      reasons.push(`${reviews} avaliações no Google`);
+    } else if (reviews >= 15) {
+      score += 8;
+    }
+  } else {
+    if (reviews >= 50) {
+      score += 12;
+      reasons.push(`${reviews} avaliações no Google`);
+    } else if (reviews >= 15) {
+      score += 6;
+    }
   }
   if (rating >= 4.4) {
     score += 6;
@@ -2280,13 +2758,37 @@ export async function enrichCapturedLead(input: EnrichLeadInput): Promise<Enrich
   const mapsPhoneModern = mapsPhoneDigits ? toModern13DigitBrMobile(mapsPhoneDigits) : "";
   const mapsWaCandidates = extractWhatsAppPhonesFromHtml(input.mapsWhatsAppUrl || "");
 
-  let siteAudit: SiteAuditResult = input.precomputedSiteAudit || {
-    status: input.website ? "active_site" : "no_site",
-    statusLabel: input.website ? "Site informado" : "Sem site",
-    diagnosticoComercial: input.website ? "" : "sem site cadastrado no Google Maps",
-    extractedWhatsApps: [],
-    extractedCnpjs: [],
-  };
+  const preSiteClass = classifyNonOwnWebsiteUrl(input.website);
+  let siteAudit: SiteAuditResult = input.precomputedSiteAudit || (
+    preSiteClass === "social_link_only"
+      ? {
+          status: "no_site",
+          issueCode: "social_link_only",
+          statusLabel: "Só rede social/WhatsApp",
+          diagnosticoComercial: "usando apenas link de rede social em vez de site profissional",
+          extractedWhatsApps: extractWhatsAppPhonesFromHtml(input.website || ""),
+          extractedCnpjs: [],
+          extractedInstagram: extractInstagramFromHtml(input.website || ""),
+          siteQualityScore: 10,
+        }
+      : preSiteClass === "third_party_platform"
+        ? {
+            status: "no_site",
+            issueCode: "third_party_platform",
+            statusLabel: "Só plataforma de terceiros",
+            diagnosticoComercial: "usando apenas cardápio/agenda de terceiros sem site profissional próprio",
+            extractedWhatsApps: extractWhatsAppPhonesFromHtml(input.website || ""),
+            extractedCnpjs: [],
+            siteQualityScore: 15,
+          }
+        : {
+            status: input.website ? "active_site" : "no_site",
+            statusLabel: input.website ? "Site informado" : "Sem site",
+            diagnosticoComercial: input.website ? "" : "sem site cadastrado no Google Maps",
+            extractedWhatsApps: [],
+            extractedCnpjs: [],
+          }
+  );
 
   let rdapInfo: RdapCacheEntry = { cnpj: null, frozen: false };
 
@@ -2326,6 +2828,9 @@ export async function enrichCapturedLead(input: EnrichLeadInput): Promise<Enrich
         extractedWhatsApps: mergedWhatsApps,
         extractedCnpjs: mergedCnpjs,
         ...(mergedEmails.length > 0 ? { extractedEmails: mergedEmails } : {}),
+        ...(realAudit.extractedInstagram || siteAudit.extractedInstagram
+          ? { extractedInstagram: realAudit.extractedInstagram || siteAudit.extractedInstagram }
+          : {}),
         ...(mergedTags.length > 0 ? { hasPaidTrafficTag: true, trafficTags: mergedTags } : {}),
         ...(mergedTools.length > 0 ? { managementTools: mergedTools } : {}),
         ...(realAudit.abandonedCopyrightYear || siteAudit.abandonedCopyrightYear
@@ -2622,6 +3127,7 @@ export async function enrichCapturedLead(input: EnrichLeadInput): Promise<Enrich
         ? `Fura-secretária pedindo encaminhamento para ${primeiroNomeSocio}`
         : undefined;
 
+  const qualificationObjective: QualificationObjective = input.options.qualificationObjective || "site_sales";
   const { score, reasons } = computeLeadQualificationScore({
     siteAudit,
     cnpjResult,
@@ -2630,6 +3136,8 @@ export async function enrichCapturedLead(input: EnrichLeadInput): Promise<Enrich
     claimed: input.claimed,
     hasPartnerWhatsApp: !!partnerWhatsAppFound,
     ownerActiveOnMaps,
+    hasReceptionist,
+    objective: qualificationObjective,
   });
 
   const enrichment: LeadEnrichmentData = {
@@ -2638,6 +3146,9 @@ export async function enrichCapturedLead(input: EnrichLeadInput): Promise<Enrich
     siteIssueCode: siteAudit.issueCode,
     siteDiagnostico: siteAudit.diagnosticoComercial || undefined,
     siteHttpStatus: siteAudit.httpStatus,
+    ...(siteAudit.siteQualityScore !== undefined ? { siteQualityScore: siteAudit.siteQualityScore } : {}),
+    ...(siteAudit.siteWeaknesses?.length ? { siteWeaknesses: siteAudit.siteWeaknesses } : {}),
+    qualificationObjective,
     cnpj: cnpjResult?.cnpj,
     razaoSocial: cnpjResult?.razaoSocial || undefined,
     situacaoCadastral: cnpjResult?.situacaoCadastral,

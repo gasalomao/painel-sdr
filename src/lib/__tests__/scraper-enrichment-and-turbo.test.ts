@@ -599,6 +599,7 @@ describe("UI toggles — ativação e desativação individual em Captador Maps 
     fireEvent.click(screen.getByRole("switch", { name: "Modo Turbo VPS (alta velocidade e economia de RAM)" }));
     fireEvent.click(screen.getByRole("switch", { name: "Descartar empresas fechadas ou CNPJ baixado/inapto" }));
     fireEvent.click(screen.getByRole("switch", { name: "Auditar saúde do site (detectar fora do ar, SSL vencido, erro 500 ou fraco)" }));
+    // Escolher modo dependente de auditoria deve reativar auditSiteHealth automaticamente
     fireEvent.click(screen.getByRole("radio", { name: "Só Site Quebrado/Fraco" }));
     fireEvent.click(screen.getByRole("switch", { name: "Enriquecer CNPJ e Sócio-Administrador gratuitamente (Receita + RDAP)" }));
     fireEvent.click(screen.getByRole("switch", { name: "Priorizar WhatsApp oculto do site ou celular direto do sócio" }));
@@ -615,7 +616,7 @@ describe("UI toggles — ativação e desativação individual em Captador Maps 
       expect(starts[0]).toMatchObject({
         turboMode: false,
         filterClosedBusinesses: false,
-        auditSiteHealth: false,
+        auditSiteHealth: true,
         siteFilterMode: "only_broken_or_weak",
         enrichCnpj: false,
         prioritizePartnerPhone: false,

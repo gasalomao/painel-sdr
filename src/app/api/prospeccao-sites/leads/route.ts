@@ -68,10 +68,10 @@ export async function GET(req: NextRequest) {
       .from("leads_extraidos")
       .select(select, { count: "exact" })
       .eq("client_id", ctx.clientId) as any;
-    if (hasWebsite === "only_empty") qq = qq.or("website.is.null,website.eq.");
+    if (hasWebsite === "only_empty") qq = qq.or("website.is.null,website.eq.,business_details->enrichment->>siteHealth.eq.no_site");
     else if (hasWebsite === "only_with") qq = qq.not("website", "is", null).neq("website", "");
     else if (hasWebsite === "broken_or_weak") qq = qq.or("business_details->enrichment->>siteHealth.eq.broken_site,business_details->enrichment->>siteHealth.eq.weak_site");
-    else if (hasWebsite === "broken_or_empty") qq = qq.or("website.is.null,website.eq.,business_details->enrichment->>siteHealth.eq.broken_site,business_details->enrichment->>siteHealth.eq.weak_site");
+    else if (hasWebsite === "broken_or_empty") qq = qq.or("website.is.null,website.eq.,business_details->enrichment->>siteHealth.eq.no_site,business_details->enrichment->>siteHealth.eq.broken_site,business_details->enrichment->>siteHealth.eq.weak_site");
     if (channelFilter === "owner_direct") qq = qq.in("business_details->enrichment->>whatsappChannelType", ["socio_direto", "provavel_socio"]);
     else if (channelFilter === "reception") qq = qq.eq("business_details->enrichment->>whatsappChannelType", "recepcao_comercial");
     else if (channelFilter === "paid_traffic") qq = qq.eq("business_details->enrichment->>hasPaidTrafficTag", "true");

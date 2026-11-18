@@ -166,6 +166,12 @@ export async function POST(req: NextRequest) {
         ...(body.huntPartnerDirectPhone !== undefined ? { huntPartnerDirectPhone: body.huntPartnerDirectPhone } : {}),
         ...(body.expandNeighborhoods !== undefined ? { expandNeighborhoods: body.expandNeighborhoods } : {}),
         ...(minCapitalSocial > 0 ? { minCapitalSocial } : {}),
+        ...(typeof body._source === "string" ? { _source: body._source } : {}),
+        ...(body.qualificationObjective === "site_sales" ||
+        body.qualificationObjective === "ai_automation" ||
+        body.qualificationObjective === "general"
+          ? { qualificationObjective: body.qualificationObjective }
+          : {}),
         minReviews,
         maxReviews,
         minRating,

@@ -1,5 +1,28 @@
 import { parseGoogleReviewCount } from "./scraper-review-count";
-import type { SiteFilterMode, SiteHealthStatus } from "./scraper-lead-enrichment";
+import type { SiteFilterMode, SiteHealthStatus } from "./scraper-filter-sync";
+
+export {
+  SOCIAL_ONLY_HOSTS,
+  THIRD_PARTY_PLATFORM_HOSTS,
+  IMPROVISED_HOSTS,
+  SCRAPER_PRESET_OPTIONS,
+  extractUrlHostname,
+  matchesDomainList,
+  classifyNonOwnWebsiteUrl,
+  isNonWebsiteUrl,
+  applyScraperFilterChange,
+  normalizeScraperSettingsForBackend,
+  resolveQualificationObjective,
+  type SiteHealthStatus,
+  type SiteFilterMode,
+  type QualificationObjective,
+  type ScraperPresetId,
+  type ScraperSurface,
+  type ScraperFilterSyncState,
+  type ScraperFilterChangeAction,
+  type ScraperFilterSyncResult,
+  type ScraperPresetOption,
+} from "./scraper-filter-sync";
 
 export const SITE_FILTER_MODES = [
   "any",
@@ -49,7 +72,8 @@ export function matchesSiteFilterMode(
         ? { pass: false, reason: "Sem site" }
         : { pass: false, reason: "Site já ativo e saudável" };
     case "only_active_site":
-      if (status === "active_site" || status === "weak_site") return { pass: true, reason: "" };
+      if (status === "active_site") return { pass: true, reason: "" };
+      if (status === "weak_site") return { pass: false, reason: "Site fraco ou improvisado" };
       return status === "no_site"
         ? { pass: false, reason: "Sem site" }
         : { pass: false, reason: "Site fora do ar/quebrado" };

@@ -27,6 +27,7 @@ import { summarizeReviewsForLead } from "@/lib/reviews-ai";
 import * as channel from "@/lib/channel";
 import { isAutoPoolInstance } from "@/lib/campaign-pool";
 import { computePriority } from "@/lib/prospeccao-priority";
+import { normalizeScraperSettingsForBackend, resolveQualificationObjective } from "@/lib/scraper-lead-filters";
 
 type AutomationRow = any;
 
@@ -236,12 +237,32 @@ async function startScrapingPhase(a: AutomationRow): Promise<void> {
     };
   });
   if (!row) return;
-  const filters = row.scrape_filters;
+  const filters = normalizeScraperSettingsForBackend(row.scrape_filters as Record<string, unknown>);
   // Não permite um start ultrapassado (por pausa/retomada concorrente) abrir o navegador.
   const current = await updateAutomationCapture(clientId, a.id, latest =>
     latest.status === "running" && latest.phase === "scraping" && latest.scrape_filters._captureAttemptId === attempt ? {} : null);
   if (!current) return;
   try {
+    const reviewsAiCfg = filters.reviews_ai as { enabled?: boolean } | undefined;
+    const consumidorResumo = [
+      row.dispatch_template,
+      row.dispatch_ai_prompt,
+      row.followup_ai_prompt,
+      ...(Array.isArray(row.followup_steps) ? row.followup_steps.map((s: any) => s?.template || "") : []),
+    ].filter(Boolean).join("\n");
+    const willConsumeReviewsAi =
+      Boolean(reviewsAiCfg?.enabled) &&
+      (/resumo_avaliacoes/.test(consumidorResumo) || Boolean(row.dispatch_personalize) || Boolean(row.followup_ai_enabled));
+    const effectiveCaptureAllReviews =
+      (filters.captureAllReviews === true || (Boolean(reviewsAiCfg?.enabled) && filters.captureAllReviews !== false)) &&
+      (!reviewsAiCfg?.enabled || willConsumeReviewsAi);
+    const qualificationObjective = resolveQualificationObjective({
+      source: typeof filters._source === "string" ? filters._source : undefined,
+      siteFilterMode: typeof filters.siteFilterMode === "string" ? filters.siteFilterMode : undefined,
+      filterWithWebsite: filters.filterWithWebsite === true,
+      isAutomation: true,
+    });
+
     const r = startScraperRun({
       niches, regions, mode: "batch",
       filterEmpty: filters.filterEmpty !== false,
@@ -267,7 +288,9 @@ async function startScrapingPhase(a: AutomationRow): Promise<void> {
       ...(filters.huntPartnerDirectPhone !== undefined ? { huntPartnerDirectPhone: filters.huntPartnerDirectPhone === true } : {}),
       ...(filters.expandNeighborhoods !== undefined ? { expandNeighborhoods: filters.expandNeighborhoods === true } : {}),
       ...(typeof filters.minCapitalSocial === "number" && filters.minCapitalSocial > 0 ? { minCapitalSocial: filters.minCapitalSocial } : {}),
-      captureAllReviews: filters.captureAllReviews === true,
+      ...(typeof filters._source === "string" ? { _source: filters._source } : {}),
+      qualificationObjective,
+      captureAllReviews: effectiveCaptureAllReviews,
       webhookEnabled: false,
       maxLeads: captureGoal(row) - validCaptureIds(filters).length,
       automation_id: a.id, client_id: clientId, captureAttemptId: attempt,
@@ -397,9 +420,9 @@ async function startDispatchPhase(
       a.followup_ai_prompt,
       ...(Array.isArray(a.followup_steps) ? a.followup_steps.map((s: any) => s?.template || "") : []),
     ].filter(Boolean).join("\n");
-    if (!/resumo_avaliacoes/.test(consumidorResumo)) {
+    if (!/resumo_avaliacoes/.test(consumidorResumo) && !a.dispatch_personalize && !a.followup_ai_enabled) {
       await log(a.id, "scrape", "info",
-        `⏭️ Resumo de avaliações pulado — nenhum template/prompt usa {{resumo_avaliacoes}}.`);
+        `⏭️ Resumo de avaliações pulado — nenhum template/IA consome {{resumo_avaliacoes}}.`);
     } else {
     await log(a.id, "scrape", "info",
       `🧠 Resumindo avaliações do Google com IA (${reviewsAiCfg.model}) pra ${leads.length} lead(s)...`
@@ -525,13 +548,25 @@ async function startDispatchPhase(
         await log(a.id, "scrape", "info", `─────────────────────────────────`);
 
         // Em paralelo com chunks de 5 — equilíbrio velocidade × quota.
+        const intelObjective = resolveQualificationObjective({
+          source: typeof filters._source === "string" ? filters._source : undefined,
+          siteFilterMode: typeof filters.siteFilterMode === "string" ? filters.siteFilterMode : undefined,
+          filterWithWebsite: filters.filterWithWebsite === true,
+          isAutomation: true,
+        });
         let analyzed = 0, cachedHits = 0, errors = 0;
         const CHUNK = 5;
         const tStart = Date.now();
         for (let i = 0; i < leads.length; i += CHUNK) {
           const batch = leads.slice(i, i + CHUNK);
           const res = await Promise.allSettled(
-            batch.map(l => analyzeLead({ leadId: l.id, apiKey, model: intelModel })),
+            batch.map(l => analyzeLead({
+              leadId: l.id,
+              apiKey,
+              model: intelModel,
+              clientId,
+              objective: isSiteProspecting ? "site_sales" : intelObjective,
+            })),
           );
           // Log POR LEAD com sumário visível na UI.
           for (let k = 0; k < res.length; k++) {

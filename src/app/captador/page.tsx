@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback, useMemo, type CSSProperties } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Header } from "@/components/layout/header";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -19,41 +19,29 @@ import {
   MapPin, Rocket, Square, Filter, Loader2, CheckCircle2, XCircle, Terminal, Bot, ChevronRight,
   Download, Trash2, Send, ToggleLeft, Eye, Star, Clock, Link2, MapPinned,
   Building2, Search, Phone, ExternalLink, Copy, Check, Sparkles, AlertCircle,
-  SlidersHorizontal, ChevronDown, Globe, MessageCircle, Zap, ShieldCheck, UserCheck,
+  SlidersHorizontal, ChevronDown, Globe, MessageCircle, Zap, ShieldCheck, UserCheck, Info,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import styles from "./captador.module.css";
 import { ModelOptions } from "@/components/ai-module-shared";
 import type { GroupableModel } from "@/lib/model-grouping";
 import { parseMinReviews } from "@/lib/scraper-review-count";
 import {
+  applyScraperFilterChange,
+  isNonWebsiteUrl,
   parseGoogleYear,
   parseMaxReviews,
   parseMinCapitalSocial,
   parseRatingBound,
+  SCRAPER_PRESET_OPTIONS,
   validateGoogleYearRange,
   validateRatingRange,
   validateReviewCountRange,
+  type ScraperFilterChangeAction,
+  type ScraperFilterSyncState,
+  type ScraperPresetId,
 } from "@/lib/scraper-lead-filters";
 import type { LeadEnrichmentData, SiteFilterMode } from "@/lib/scraper-lead-enrichment";
-
-// ponytail: cores locais enquanto o tema global expuser canais HSL; remover após normalizar os tokens globais.
-const CAPTADOR_COLORS = {
-  "--color-background": "hsl(240 10% 3.9%)",
-  "--color-foreground": "hsl(0 0% 98%)",
-  "--color-card": "hsl(240 10% 3.9%)",
-  "--color-card-foreground": "hsl(0 0% 98%)",
-  "--color-popover": "hsl(240 10% 3.9%)",
-  "--color-popover-foreground": "hsl(0 0% 98%)",
-  "--color-primary": "hsl(0 0% 98%)",
-  "--color-primary-foreground": "hsl(240 5.9% 10%)",
-  "--color-secondary": "hsl(240 3.7% 15.9%)",
-  "--color-secondary-foreground": "hsl(0 0% 98%)",
-  "--color-muted": "hsl(240 3.7% 15.9%)",
-  "--color-muted-foreground": "hsl(240 5% 64.9%)",
-  "--color-border": "hsl(240 3.7% 15.9%)",
-  "--color-input": "hsl(240 3.7% 15.9%)",
-  "--color-ring": "hsl(240 4.9% 83.9%)",
-} as CSSProperties;
 
 interface ReviewDetalhe {
   autor?: string;
@@ -261,6 +249,7 @@ export default function CaptadorPage() {
   const [googleYearFrom, setGoogleYearFrom] = useState("0");
   const [googleYearTo, setGoogleYearTo] = useState("0");
   const [extraFiltersError, setExtraFiltersError] = useState("");
+  const [captadorSyncNote, setCaptadorSyncNote] = useState<string | null>(null);
   const [limitEnabled, setLimitEnabled] = useState(true);
   const [maxLeads, setMaxLeads] = useState("50");
   const [maxLeadsError, setMaxLeadsError] = useState(false);
@@ -320,7 +309,7 @@ export default function CaptadorPage() {
     fetch("/api/scraper", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "get_leads" }) })
       .then((r) => r.json())
       .then((d) => { if (d.leads) setLeads(d.leads); })
-      .catch(() => {});
+      .catch(() => { });
     return () => { eventSourceRef.current?.close(); };
   }, [connectSSE]);
 
@@ -409,6 +398,7 @@ export default function CaptadorPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "start",
+          _source: "captador",
           niches: nicheList,
           regions: regionList,
           webhookUrl,
@@ -446,10 +436,10 @@ export default function CaptadorPage() {
       });
       const data = await res.json();
       if (data.error) addLog(data.error, "error");
-      else { 
-        setIsRunning(true); 
+      else {
+        setIsRunning(true);
         setIsPaused(false);
-        setActiveTab("leads"); 
+        setActiveTab("leads");
       }
     } catch (err) {
       addLog(`Erro: ${(err as Error).message}`, "error");
@@ -682,7 +672,7 @@ export default function CaptadorPage() {
   const searchCombinations = nicheCount * regionCount;
 
   const leadsWithPhone = useMemo(() => leads.filter(l => Boolean(l.phones && l.phones.replace(/\D/g, "").length >= 8)).length, [leads]);
-  const leadsWithWebsite = useMemo(() => leads.filter(l => Boolean(l.website && l.website.trim().length > 3)).length, [leads]);
+  const leadsWithWebsite = useMemo(() => leads.filter(l => !isNonWebsiteUrl(l.website) && getLeadEnrichment(l)?.siteHealth !== "no_site").length, [leads]);
   const averageRatingNum = useMemo(() => {
     const list = leads.map(l => parseFloat(l.averageRating.replace(",", "."))).filter(n => !isNaN(n) && n > 0);
     if (!list.length) return null;
@@ -708,27 +698,81 @@ export default function CaptadorPage() {
     });
   }, [leads, searchQuery]);
 
+  function renderPresetIcon(presetId: ScraperPresetId) {
+    if (presetId === "vender_sites") return <Globe className="w-4 h-4" />;
+    if (presetId === "vender_ia") return <Bot className="w-4 h-4" />;
+    if (presetId === "direto_socio") return <Phone className="w-4 h-4" />;
+    return <Zap className="w-4 h-4" />;
+  }
+
+  function applyCaptadorFilterSync(action: ScraperFilterChangeAction) {
+    const current: ScraperFilterSyncState = {
+      filterEmpty,
+      filterDuplicates,
+      filterLandlines,
+      filterWithWebsite,
+      filterWithInstagram,
+      captureAllReviews,
+      reviewsAiEnabled,
+      turboMode,
+      filterClosedBusinesses,
+      auditSiteHealth,
+      siteFilterMode,
+      enrichCnpj,
+      prioritizePartnerPhone,
+      validateWhatsApp,
+      excludeMei,
+      excludeFranchises,
+      huntPartnerDirectPhone,
+      expandNeighborhoods,
+      prioritizeByScore: false,
+      minCapitalSocial,
+    };
+    const { state: next, autoNote } = applyScraperFilterChange(current, action, "captador");
+    setFilterEmpty(next.filterEmpty);
+    setFilterDuplicates(next.filterDuplicates);
+    setFilterLandlines(next.filterLandlines);
+    setFilterWithWebsite(next.filterWithWebsite);
+    setFilterWithInstagram(next.filterWithInstagram);
+    setCaptureAllReviews(next.captureAllReviews);
+    setReviewsAiEnabled(next.reviewsAiEnabled);
+    setTurboMode(next.turboMode);
+    setFilterClosedBusinesses(next.filterClosedBusinesses);
+    setAuditSiteHealth(next.auditSiteHealth);
+    setSiteFilterMode(next.siteFilterMode);
+    setEnrichCnpj(next.enrichCnpj);
+    setPrioritizePartnerPhone(next.prioritizePartnerPhone);
+    setValidateWhatsApp(next.validateWhatsApp);
+    setExcludeMei(next.excludeMei);
+    setExcludeFranchises(next.excludeFranchises);
+    setHuntPartnerDirectPhone(next.huntPartnerDirectPhone);
+    setMinCapitalSocial(next.minCapitalSocial);
+    setCaptadorSyncNote(autoNote);
+    if (action.type === "minCapitalSocial" || action.type === "preset") {
+      setExtraFiltersError("");
+    }
+  }
+
   return (
-    <div style={CAPTADOR_COLORS} className="captador-surface flex flex-col h-[100dvh] overflow-hidden bg-background text-foreground">
-      <style>{".captador-surface, .captador-surface * { border-color: revert-layer; }"}</style>
+    <div className={cn(styles.workspace, "flex flex-col h-[100dvh] overflow-hidden bg-[#101411] text-[#edf2ee]")}>
       <Header />
 
       <div className="flex-1 p-3 sm:p-6 space-y-4 overflow-y-auto w-full max-w-7xl mx-auto mobile-safe-bottom">
 
         {/* Painel de Controle Superior / Cockpit */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 p-4 rounded-xl border border-border/60 bg-card/60 backdrop-blur-sm shadow-xs">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 p-4 rounded-xl border border-[#303a32] bg-[#181d19]">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center text-primary shrink-0">
+            <div className="w-10 h-10 rounded-lg bg-[#1b2c22] border border-[#355844] flex items-center justify-center text-[#6ee7b7] shrink-0">
               <MapPin className="w-5 h-5" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-base sm:text-lg font-bold tracking-tight">Captador Maps</h1>
-                <Badge variant="outline" className="text-[10px] uppercase font-mono tracking-wider text-muted-foreground border-border/80">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h1 className="text-base sm:text-lg font-semibold tracking-tight text-[#edf2ee]">Captador Maps</h1>
+                <Badge variant="outline" className="text-xs font-mono text-[#a5b1a8] border-[#303a32] bg-[#141a16]">
                   Google Maps Scraper
                 </Badge>
               </div>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-xs text-[#a5b1a8]">
                 Extração precisa de estabelecimentos, contatos telefônicos e reputação comercial.
               </p>
             </div>
@@ -736,11 +780,11 @@ export default function CaptadorPage() {
 
           <div className="flex min-w-0 items-center flex-wrap gap-2">
             {/* Tab Switcher - preserva nomes exatos esperados pelos testes */}
-            <div className="flex flex-wrap items-center rounded-lg border border-border/70 bg-secondary/30 p-1">
+            <div className="flex flex-wrap items-center rounded-lg border border-[#303a32] bg-[#141a16] p-1 gap-1">
               <Button
                 variant={activeTab === "config" ? "default" : "ghost"}
                 size="sm"
-                className="gap-2 text-xs h-7 px-3 rounded-md transition-all font-medium"
+                className="gap-2 text-xs h-8 px-3 rounded-md transition-colors font-medium"
                 onClick={() => setActiveTab("config")}
               >
                 <MapPin className="w-3.5 h-3.5" /> Configuração
@@ -748,21 +792,21 @@ export default function CaptadorPage() {
               <Button
                 variant={activeTab === "leads" ? "default" : "ghost"}
                 size="sm"
-                className="gap-2 text-xs h-7 px-3 rounded-md transition-all font-medium"
+                className="gap-2 text-xs h-8 px-3 rounded-md transition-colors font-medium"
                 onClick={() => setActiveTab("leads")}
               >
-                <Terminal className="w-3.5 h-3.5" /> Leads & Console
-                {leads.length > 0 && <Badge variant="secondary" className="ml-1 text-[10px] px-1.5 py-0">{leads.length}</Badge>}
+                <Terminal className="w-3.5 h-3.5" /> Leads &amp; Console
+                {leads.length > 0 && <Badge variant="secondary" className="ml-1 text-xs px-1.5 py-0">{leads.length}</Badge>}
               </Button>
             </div>
 
             {/* Badge de status ativo / pausado */}
             {isRunning && (
               <Badge className={cn(
-                "animate-pulse text-[10px] px-2.5 py-1 font-medium border flex items-center gap-1.5",
+                "text-xs px-2.5 py-1 font-medium border flex items-center gap-1.5",
                 isPaused
-                  ? "bg-amber-500/20 text-amber-400 border-amber-500/30"
-                  : "bg-green-500/20 text-green-400 border-green-500/30"
+                  ? "bg-[#2c2516] text-[#fde68a] border-[#614d23]"
+                  : "bg-[#243d30] text-[#a5f3cf] border-[#4e7c62]"
               )}>
                 {isPaused ? <Square className="w-3 h-3 mr-1" /> : <Loader2 className="w-3 h-3 mr-1 animate-spin" />}
                 {isPaused ? "Pausado" : "Extraindo..."}
@@ -774,157 +818,196 @@ export default function CaptadorPage() {
         {/* Métricas Rápidas em Linha */}
         {leads.length > 0 && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div className="p-3 rounded-lg border border-border/50 bg-card/40 flex items-center justify-between">
+            <div className="p-3 rounded-lg border border-[#2b362e] bg-[#141a16] flex items-center justify-between">
               <div>
-                <span className="text-[10px] uppercase font-semibold text-muted-foreground block">Total Extraído</span>
-                <span className="text-lg font-bold tracking-tight text-foreground">{leads.length}</span>
+                <span className="text-xs font-medium text-[#a5b1a8] block">Total Extraído</span>
+                <span className="text-lg font-semibold tracking-tight text-[#edf2ee]">{leads.length}</span>
               </div>
-              <Building2 className="w-5 h-5 text-primary/40" />
+              <Building2 className="w-5 h-5 text-[#6ee7b7]/50" />
             </div>
-            <div className="p-3 rounded-lg border border-border/50 bg-card/40 flex items-center justify-between">
+            <div className="p-3 rounded-lg border border-[#2b362e] bg-[#141a16] flex items-center justify-between">
               <div>
-                <span className="text-[10px] uppercase font-semibold text-muted-foreground block">Com Telefone</span>
-                <span className="text-lg font-bold tracking-tight text-emerald-400">{leadsWithPhone}</span>
+                <span className="text-xs font-medium text-[#a5b1a8] block">Com Telefone</span>
+                <span className="text-lg font-semibold tracking-tight text-[#a5f3cf]">{leadsWithPhone}</span>
               </div>
-              <Phone className="w-5 h-5 text-emerald-400/40" />
+              <Phone className="w-5 h-5 text-[#6ee7b7]/50" />
             </div>
-            <div className="p-3 rounded-lg border border-border/50 bg-card/40 flex items-center justify-between">
+            <div className="p-3 rounded-lg border border-[#2b362e] bg-[#141a16] flex items-center justify-between">
               <div>
-                <span className="text-[10px] uppercase font-semibold text-muted-foreground block">Com Website</span>
-                <span className="text-lg font-bold tracking-tight text-foreground">{leadsWithWebsite}</span>
+                <span className="text-xs font-medium text-[#a5b1a8] block">Com Website</span>
+                <span className="text-lg font-semibold tracking-tight text-[#edf2ee]">{leadsWithWebsite}</span>
               </div>
-              <Globe className="w-5 h-5 text-primary/40" />
+              <Globe className="w-5 h-5 text-[#6ee7b7]/50" />
             </div>
-            <div className="p-3 rounded-lg border border-border/50 bg-card/40 flex items-center justify-between">
+            <div className="p-3 rounded-lg border border-[#2b362e] bg-[#141a16] flex items-center justify-between">
               <div>
-                <span className="text-[10px] uppercase font-semibold text-muted-foreground block">Nota Média</span>
-                <span className="text-lg font-bold tracking-tight text-amber-400 flex items-center gap-1">
+                <span className="text-xs font-medium text-[#a5b1a8] block">Nota Média</span>
+                <span className="text-lg font-semibold tracking-tight text-[#edf2ee] flex items-center gap-1">
                   {averageRatingNum ? `${averageRatingNum} ★` : "—"}
                 </span>
               </div>
-              <Star className="w-5 h-5 text-amber-400/40 fill-amber-400/20" />
+              <Star className="w-5 h-5 text-[#eab308]/60 fill-[#eab308]/20" />
             </div>
           </div>
         )}
 
         {/* ABA 1: CONFIGURAÇÃO */}
         {activeTab === "config" && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
 
             {/* Coluna Esquerda: Formulário e Filtros */}
             <div className="lg:col-span-7 space-y-4">
-              <Card className="border-border/60 bg-card/80 shadow-xs">
-                <CardHeader className="pb-3 border-b border-border/40">
-                  <div className="flex items-center justify-between">
+              <Card>
+                <CardHeader className="pb-3 border-b border-[#2b362e]">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
                     <div className="flex items-center gap-2">
-                      <SlidersHorizontal className="w-4 h-4 text-primary" />
-                      <CardTitle className="text-sm font-semibold">Parâmetros de Pesquisa</CardTitle>
+                      <SlidersHorizontal className="w-4 h-4 text-[#6ee7b7]" />
+                      <CardTitle className="text-sm font-semibold text-[#edf2ee]">Parâmetros de Pesquisa</CardTitle>
                     </div>
                     {searchCombinations > 0 && (
-                      <Badge variant="outline" className="text-[10px] text-muted-foreground border-border/70">
+                      <Badge variant="outline" className="text-xs text-[#c5f0d8] border-[#355844] bg-[#18281f]">
                         {searchCombinations} {searchCombinations === 1 ? "busca programada" : "buscas programadas"}
                       </Badge>
                     )}
                   </div>
-                  <CardDescription className="text-xs text-muted-foreground">
-                    O robô visitará o Google Maps combinando cada nicho com cada cidade informada.
+                  <CardDescription className="text-xs text-[#a5b1a8]">
+                    O extrator combina cada nicho com cada região abaixo para buscar no Google Maps e aplicar seus critérios de qualificação.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4 pt-4">
-                  {/* Nichos & Regiões */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <label htmlFor="captador-niches" className="text-xs font-semibold text-muted-foreground uppercase tracking-wider block">
-                          Nichos (um por linha)
-                        </label>
-                        {nicheCount > 0 && (
-                          <span className="text-[10px] text-muted-foreground">{nicheCount} {nicheCount === 1 ? "nicho" : "nichos"}</span>
-                        )}
-                      </div>
-                      <Textarea
-                        id="captador-niches"
-                        disabled={isRunning}
-                        placeholder={"Contabilidade\nAdvocacia\nPsicologia\nClínica Odontológica"}
-                        value={niches}
-                        onChange={(e) => setNiches(e.target.value)}
-                        className="h-32 bg-secondary/40 border-border/60 text-sm resize-none focus-visible:ring-primary/40 font-mono text-xs"
-                      />
-                      {/* Chips rápidos de nicho */}
-                      <div className="space-y-1">
-                        <span className="text-[10px] text-muted-foreground flex items-center gap-1">
-                          <Sparkles className="w-2.5 h-2.5 text-primary" /> Sugestões rápidas:
-                        </span>
-                        <div className="flex flex-wrap gap-1">
-                          {PRESET_NICHES.slice(0, 4).map((p) => (
-                            <button
-                              key={p}
-                              type="button"
-                              disabled={isRunning}
-                              onClick={() => addPresetNiche(p)}
-                              className="text-[10px] px-2 py-0.5 rounded-md bg-secondary/50 hover:bg-secondary border border-border/50 text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50 cursor-pointer"
-                            >
-                              + {p}
-                            </button>
-                          ))}
-                        </div>
+                  {/* Bloco 1: Nichos & Regiões */}
+                  <div className={styles.subGroup}>
+                    <div className={styles.groupHeader}>
+                      <div>
+                        <h3 className={styles.groupTitle}>Onde e o que buscar</h3>
+                        <p className={styles.groupDesc}>Informe um item por linha ou clique nos atalhos para preencher rápido.</p>
                       </div>
                     </div>
-
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <label htmlFor="captador-regions" className="text-xs font-semibold text-muted-foreground uppercase tracking-wider block">
-                          Regiões (uma por linha)
-                        </label>
-                        {regionCount > 0 && (
-                          <span className="text-[10px] text-muted-foreground">{regionCount} {regionCount === 1 ? "região" : "regiões"}</span>
-                        )}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <label htmlFor="captador-niches" className="text-xs font-medium text-[#dce7df] block">
+                            Nichos (um por linha)
+                          </label>
+                          {nicheCount > 0 && (
+                            <span className="text-xs text-[#9ce9bc]">{nicheCount} {nicheCount === 1 ? "nicho" : "nichos"}</span>
+                          )}
+                        </div>
+                        <Textarea
+                          id="captador-niches"
+                          disabled={isRunning}
+                          placeholder={"Contabilidade\nAdvocacia\nPsicologia\nClínica Odontológica"}
+                          value={niches}
+                          onChange={(e) => setNiches(e.target.value)}
+                          className="h-32 text-xs font-mono resize-none"
+                        />
+                        <div className="space-y-1.5">
+                          <span className="text-xs text-[#a5b1a8] flex items-center gap-1.5">
+                            <Sparkles className="w-3 h-3 text-[#6ee7b7]" /> Sugestões rápidas:
+                          </span>
+                          <div className="flex flex-wrap gap-1.5">
+                            {PRESET_NICHES.slice(0, 4).map((p) => (
+                              <button
+                                key={p}
+                                type="button"
+                                disabled={isRunning}
+                                onClick={() => addPresetNiche(p)}
+                                className="text-xs px-2.5 py-1 rounded-md bg-[#111712] hover:bg-[#1d2921] border border-[#303a32] hover:border-[#4a7c61] text-[#c4d4c9] hover:text-[#edf2ee] transition-colors disabled:opacity-50 cursor-pointer"
+                              >
+                                + {p}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
                       </div>
-                      <Textarea
-                        id="captador-regions"
-                        disabled={isRunning}
-                        placeholder={"São Paulo, SP\nVitória, ES\nBelo Horizonte, MG"}
-                        value={regions}
-                        onChange={(e) => setRegions(e.target.value)}
-                        className="h-32 bg-secondary/40 border-border/60 text-sm resize-none focus-visible:ring-primary/40 font-mono text-xs"
-                      />
-                      {/* Chips rápidos de região */}
-                      <div className="space-y-1">
-                        <span className="text-[10px] text-muted-foreground flex items-center gap-1">
-                          <MapPin className="w-2.5 h-2.5 text-primary" /> Cidades frequentes:
-                        </span>
-                        <div className="flex flex-wrap gap-1">
-                          {PRESET_REGIONS.slice(0, 4).map((r) => (
-                            <button
-                              key={r}
-                              type="button"
-                              disabled={isRunning}
-                              onClick={() => addPresetRegion(r)}
-                              className="text-[10px] px-2 py-0.5 rounded-md bg-secondary/50 hover:bg-secondary border border-border/50 text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50 cursor-pointer"
-                            >
-                              + {r}
-                            </button>
-                          ))}
+
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <label htmlFor="captador-regions" className="text-xs font-medium text-[#dce7df] block">
+                            Regiões (uma por linha)
+                          </label>
+                          {regionCount > 0 && (
+                            <span className="text-xs text-[#9ce9bc]">{regionCount} {regionCount === 1 ? "região" : "regiões"}</span>
+                          )}
+                        </div>
+                        <Textarea
+                          id="captador-regions"
+                          disabled={isRunning}
+                          placeholder={"São Paulo, SP\nVitória, ES\nBelo Horizonte, MG"}
+                          value={regions}
+                          onChange={(e) => setRegions(e.target.value)}
+                          className="h-32 text-xs font-mono resize-none"
+                        />
+                        <div className="space-y-1.5">
+                          <span className="text-xs text-[#a5b1a8] flex items-center gap-1.5">
+                            <MapPin className="w-3 h-3 text-[#6ee7b7]" /> Cidades frequentes:
+                          </span>
+                          <div className="flex flex-wrap gap-1.5">
+                            {PRESET_REGIONS.slice(0, 4).map((r) => (
+                              <button
+                                key={r}
+                                type="button"
+                                disabled={isRunning}
+                                onClick={() => addPresetRegion(r)}
+                                className="text-xs px-2.5 py-1 rounded-md bg-[#111712] hover:bg-[#1d2921] border border-[#303a32] hover:border-[#4a7c61] text-[#c4d4c9] hover:text-[#edf2ee] transition-colors disabled:opacity-50 cursor-pointer"
+                              >
+                                + {r}
+                              </button>
+                            ))}
+                          </div>
                         </div>
                       </div>
                     </div>
                   </div>
 
-                  <Separator className="bg-border/40" />
+                  {/* Bloco 2: Perfis rápidos */}
+                  <div className={styles.subGroup}>
+                    <div className={styles.groupHeader}>
+                      <div>
+                        <h3 className={styles.groupTitle}>Perfis rápidos</h3>
+                        <p className={styles.groupDesc}>Aplique uma configuração pronta conforme seu objetivo de venda.</p>
+                      </div>
+                    </div>
+                    <div className={styles.presetGrid}>
+                      {SCRAPER_PRESET_OPTIONS.map((preset) => (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          disabled={isRunning}
+                          onClick={() => applyCaptadorFilterSync({ type: "preset", preset: preset.id })}
+                          title={preset.shortDesc}
+                          className={styles.presetCard}
+                        >
+                          {renderPresetIcon(preset.id)}
+                          <div className="min-w-0">
+                            <span className={styles.presetCardTitle}>{preset.label}</span>
+                            <span className={styles.presetCardDesc}>{preset.shortDesc}</span>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                    {captadorSyncNote && (
+                      <div role="status" className={styles.syncBanner}>
+                        <div className={styles.syncBannerText}>
+                          <Info className="w-4 h-4" />
+                          <span>{captadorSyncNote}</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
 
-                  {/* Filtros e Regras Automáticas */}
-                  <div className="space-y-3">
-                    <div className="flex items-center gap-1.5">
-                      <Filter className="w-3.5 h-3.5 text-primary" />
-                      <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                        Filtros Automáticos & Qualificação
-                      </h3>
+                  {/* Bloco 3: Reputação e tempo no Google Maps */}
+                  <div className={styles.subGroup}>
+                    <div className={styles.groupHeader}>
+                      <div>
+                        <h3 className={styles.groupTitle}>Reputação e tempo no Google Maps</h3>
+                        <p className={styles.groupDesc}>Defina tamanho, idade da empresa no Maps e faixa de nota aceita.</p>
+                      </div>
                     </div>
 
-                    {/* Mínimo de Reviews */}
-                    <div className="p-3 rounded-lg border border-border/50 bg-secondary/20 space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <label htmlFor="captador-min-reviews" className="text-xs font-medium text-foreground">
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-3">
+                        <label htmlFor="captador-min-reviews" className={styles.optionTitle}>
                           Mínimo de avaliações no Google
                         </label>
                         <Input
@@ -938,49 +1021,44 @@ export default function CaptadorPage() {
                           onChange={e => { setMinReviews(e.target.value); setMinReviewsError(false); }}
                           aria-invalid={minReviewsError}
                           aria-describedby={`captador-min-reviews-help${minReviewsError ? " captador-min-reviews-error" : ""}`}
-                          className="w-24 h-8 text-right font-mono text-xs bg-background"
+                          className="w-28 h-8 text-right font-mono text-xs"
                         />
                       </div>
-                      <p id="captador-min-reviews-help" className="text-[11px] text-muted-foreground">
+                      <p id="captador-min-reviews-help" className={styles.optionDesc}>
                         Quantidade de pessoas que deram estrelas, com ou sem comentário. Não filtra pela nota. 0 = sem mínimo.
                       </p>
                       {minReviewsError && (
-                        <p id="captador-min-reviews-error" role="alert" className="text-xs text-destructive flex items-center gap-1 pt-1">
-                          <AlertCircle className="w-3 h-3" /> Informe um inteiro entre 0 e 2147483647.
+                        <p id="captador-min-reviews-error" role="alert" className="text-xs text-[#fca5a5] flex items-center gap-1 pt-1">
+                          <AlertCircle className="w-3.5 h-3.5" /> Informe um inteiro entre 0 e 2147483647.
                         </p>
                       )}
                     </div>
 
-                    {/* Tempo no Google (Desde o ano até data atual / ano final) + Avaliações máx & Nota */}
-                    <div className="p-3 rounded-lg border border-border/50 bg-secondary/20 space-y-3">
+                    <div className="space-y-2.5 pt-2 border-t border-[#263028]">
                       <div className="flex items-center justify-between gap-2 flex-wrap">
-                        <span className="text-xs font-medium text-foreground flex items-center gap-1.5">
-                          <Clock className="w-3.5 h-3.5 text-primary" />
+                        <span className="text-xs font-medium text-[#dce7df] flex items-center gap-1.5">
+                          <Clock className="w-3.5 h-3.5 text-[#6ee7b7]" />
                           Está no Google desde (filtro por ano)
                         </span>
-                        <div className="flex flex-wrap gap-1">
+                        <div className={styles.segmentedPills}>
                           {[
                             { label: "Qualquer ano", from: "0", to: "0" },
                             { label: "Desde 2019 até hoje", from: "2019", to: String(new Date().getFullYear()) },
                             { label: "Desde 2020 até hoje", from: "2020", to: String(new Date().getFullYear()) },
                             { label: "Desde 2022 até hoje", from: "2022", to: String(new Date().getFullYear()) },
                             { label: "Até 2019", from: "1900", to: "2019" },
-                          ].map(preset => (
+                          ].map((preset) => (
                             <button
                               key={preset.label}
                               type="button"
                               disabled={isRunning}
+                              data-active={googleYearFrom === preset.from && googleYearTo === preset.to ? "true" : undefined}
                               onClick={() => {
                                 setGoogleYearFrom(preset.from);
                                 setGoogleYearTo(preset.to);
                                 setExtraFiltersError("");
                               }}
-                              className={cn(
-                                "text-[10px] px-2 py-0.5 rounded-md border transition-colors disabled:opacity-50 cursor-pointer",
-                                googleYearFrom === preset.from && googleYearTo === preset.to
-                                  ? "bg-primary/20 border-primary/50 text-foreground font-medium"
-                                  : "bg-secondary/50 hover:bg-secondary border-border/50 text-muted-foreground hover:text-foreground",
-                              )}
+                              className={styles.pillChoice}
                             >
                               {preset.label}
                             </button>
@@ -990,7 +1068,7 @@ export default function CaptadorPage() {
 
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <div className="flex items-center justify-between gap-2">
-                          <label htmlFor="captador-google-year-from" className="text-xs text-muted-foreground">
+                          <label htmlFor="captador-google-year-from" className="text-xs text-[#a5b1a8]">
                             No Google desde (ano)
                           </label>
                           <Input
@@ -1003,11 +1081,11 @@ export default function CaptadorPage() {
                             placeholder="Ex: 2019 (0 = todos)"
                             value={googleYearFrom}
                             onChange={e => { setGoogleYearFrom(e.target.value); setExtraFiltersError(""); }}
-                            className="w-24 h-8 text-right font-mono text-xs bg-background"
+                            className="w-28 h-8 text-right font-mono text-xs"
                           />
                         </div>
                         <div className="flex items-center justify-between gap-2">
-                          <label htmlFor="captador-google-year-to" className="text-xs text-muted-foreground">
+                          <label htmlFor="captador-google-year-to" className="text-xs text-[#a5b1a8]">
                             Até o ano (0 = atual)
                           </label>
                           <Input
@@ -1020,19 +1098,17 @@ export default function CaptadorPage() {
                             placeholder={`Ex: ${new Date().getFullYear()}`}
                             value={googleYearTo}
                             onChange={e => { setGoogleYearTo(e.target.value); setExtraFiltersError(""); }}
-                            className="w-24 h-8 text-right font-mono text-xs bg-background"
+                            className="w-28 h-8 text-right font-mono text-xs"
                           />
                         </div>
                       </div>
-                      <p className="text-[11px] text-muted-foreground">
+                      <p className={styles.optionDesc}>
                         Filtra empresas pelo ano em que estão no Google Maps (ex.: desde 2019 até {new Date().getFullYear()}). Use 0 para sem limite.
                       </p>
 
-                      <Separator className="bg-border/30" />
-
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-[#263028]">
                         <div className="space-y-1">
-                          <label htmlFor="captador-max-reviews" className="text-[11px] text-muted-foreground block">
+                          <label htmlFor="captador-max-reviews" className="text-xs text-[#a5b1a8] block">
                             Máximo de avaliações
                           </label>
                           <Input
@@ -1044,11 +1120,11 @@ export default function CaptadorPage() {
                             max={2147483647}
                             value={maxReviews}
                             onChange={e => { setMaxReviews(e.target.value); setExtraFiltersError(""); }}
-                            className="h-8 text-right font-mono text-xs bg-background"
+                            className="h-8 text-right font-mono text-xs"
                           />
                         </div>
                         <div className="space-y-1">
-                          <label htmlFor="captador-min-rating" className="text-[11px] text-muted-foreground block">
+                          <label htmlFor="captador-min-rating" className="text-xs text-[#a5b1a8] block">
                             Nota mínima (0 a 5)
                           </label>
                           <Input
@@ -1060,11 +1136,11 @@ export default function CaptadorPage() {
                             step={0.1}
                             value={minRating}
                             onChange={e => { setMinRating(e.target.value); setExtraFiltersError(""); }}
-                            className="h-8 text-right font-mono text-xs bg-background"
+                            className="h-8 text-right font-mono text-xs"
                           />
                         </div>
                         <div className="space-y-1">
-                          <label htmlFor="captador-max-rating" className="text-[11px] text-muted-foreground block">
+                          <label htmlFor="captador-max-rating" className="text-xs text-[#a5b1a8] block">
                             Nota máxima (0 a 5)
                           </label>
                           <Input
@@ -1076,311 +1152,239 @@ export default function CaptadorPage() {
                             step={0.1}
                             value={maxRating}
                             onChange={e => { setMaxRating(e.target.value); setExtraFiltersError(""); }}
-                            className="h-8 text-right font-mono text-xs bg-background"
+                            className="h-8 text-right font-mono text-xs"
                           />
                         </div>
                       </div>
                       {extraFiltersError && (
-                        <p role="alert" className="text-xs text-destructive flex items-center gap-1 pt-1">
-                          <AlertCircle className="w-3 h-3" /> {extraFiltersError}
+                        <p role="alert" className="text-xs text-[#fca5a5] flex items-center gap-1 pt-1">
+                          <AlertCircle className="w-3.5 h-3.5" /> {extraFiltersError}
                         </p>
                       )}
                     </div>
+                  </div>
 
-                    {/* Somente com Instagram */}
-                    <div className="p-2.5 rounded-lg border border-border/50 bg-secondary/15 hover:bg-secondary/30 transition-colors">
-                      <label className="flex items-center justify-between gap-2 cursor-pointer">
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs font-medium">Somente com Instagram</span>
+                  {/* Bloco 4: Presença digital e saúde do site */}
+                  <div className={styles.subGroup}>
+                    <div className={styles.groupHeader}>
+                      <div>
+                        <h3 className={styles.groupTitle}>Presença digital e saúde do site</h3>
+                        <p className={styles.groupDesc}>Filtre empresas por situação do site ou presença no Instagram.</p>
+                      </div>
+                    </div>
+
+                    <div className={styles.optionList}>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="captador-audit-site" className={styles.optionTitle}>
+                            <Globe className="w-3.5 h-3.5 text-[#9ce9bc]" />
+                            Auditar saúde do site (detectar fora do ar, SSL vencido, erro 500 ou fraco)
+                          </label>
+                          <p className={styles.optionDesc}>
+                            Lê o HTML inicial do site com proteção contra falso positivo de firewall/Cloudflare e gera diagnóstico técnico comercial.
+                          </p>
+                        </div>
+                        <Switch
+                          id="captador-audit-site"
+                          aria-label="Auditar saúde do site (detectar fora do ar, SSL vencido, erro 500 ou fraco)"
+                          disabled={isRunning}
+                          checked={auditSiteHealth}
+                          onCheckedChange={v => applyCaptadorFilterSync({ type: "auditSiteHealth", value: v })}
+                          size="sm"
+                        />
+                      </div>
+
+                      <div className="py-2 space-y-2 border-t border-[#263028]">
+                        <span className="text-xs font-medium text-[#dce7df] block">Filtro por saúde do site</span>
+                        <div className={styles.segmentedPills} role="radiogroup" aria-label="Filtro por saúde do site">
+                          {SITE_FILTER_MODE_OPTIONS.map((opt) => {
+                            const active = siteFilterMode === opt.value;
+                            return (
+                              <button
+                                key={opt.value}
+                                type="button"
+                                role="radio"
+                                aria-checked={active}
+                                disabled={isRunning}
+                                onClick={() => applyCaptadorFilterSync({ type: "siteFilterMode", value: opt.value })}
+                                className={styles.pillChoice}
+                              >
+                                {opt.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="captador-only-no-site" className={styles.optionTitle}>
+                            Capturar somente leads sem site
+                          </label>
+                          <p className={styles.optionDesc}>
+                            Perfeito para oferta direta de criação de site. Ajusta o filtro de saúde automaticamente.
+                          </p>
                         </div>
                         <input
+                          id="captador-only-no-site"
+                          type="checkbox"
+                          disabled={isRunning}
+                          checked={filterWithWebsite}
+                          onChange={e => applyCaptadorFilterSync({ type: "filterWithWebsite", value: e.target.checked })}
+                          className={styles.toggleInput}
+                        />
+                      </div>
+
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="captador-with-instagram" className={styles.optionTitle}>
+                            Somente com Instagram
+                          </label>
+                          <p id="captador-instagram-help" className={styles.optionDesc}>
+                            Exige perfil informado no Google Maps; não busca no site.
+                          </p>
+                        </div>
+                        <input
+                          id="captador-with-instagram"
                           type="checkbox"
                           disabled={isRunning}
                           checked={filterWithInstagram}
                           onChange={e => setFilterWithInstagram(e.target.checked)}
                           aria-describedby="captador-instagram-help"
-                          className="w-4 h-4 rounded accent-primary cursor-pointer"
+                          className={styles.toggleInput}
                         />
-                      </label>
-                      <p id="captador-instagram-help" className="text-[11px] text-muted-foreground mt-1 pl-0.5">
-                        Exige perfil informado no Google Maps; não busca no site.
-                      </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Bloco 5: Contato, CNPJ e sócio decisor */}
+                  <div className={styles.subGroup}>
+                    <div className={styles.groupHeader}>
+                      <div>
+                        <h3 className={styles.groupTitle}>Contato, CNPJ e sócio decisor</h3>
+                        <p className={styles.groupDesc}>Higienização telefônica, validação na Evolution e dados da Receita Federal (custo zero).</p>
+                      </div>
                     </div>
 
-                    {/* Avaliações completas e análise com IA - details obrigatório com matching de texto exato para testes */}
-                    <details className="rounded-lg border border-border/60 bg-secondary/20 p-3 space-y-3 group">
-                      <summary className="flex items-center gap-2 text-xs font-medium cursor-pointer list-none select-none">
-                        <Bot className="w-4 h-4 text-primary shrink-0" />
-                        <span>Avaliações completas e análise com IA</span>
-                        <ChevronRight className="w-4 h-4 ml-auto text-muted-foreground transition-transform group-open:rotate-90" />
-                      </summary>
-
-                      <div className="pt-2 space-y-3 border-t border-border/40 mt-2">
-                        <div className="flex items-center justify-between gap-2">
-                          <div>
-                            <label htmlFor="capture-all-reviews" className="text-xs font-medium cursor-pointer">
-                              Capturar todas as avaliações
-                            </label>
-                            <p className="text-[11px] text-muted-foreground">
-                              Salva os comentários disponíveis no Google Maps. Esta opção pode aumentar o tempo de captura.
-                            </p>
-                          </div>
-                          <Switch
-                            id="capture-all-reviews"
-                            aria-label="Capturar todas as avaliações"
-                            disabled={isRunning}
-                            checked={captureAllReviews}
-                            onCheckedChange={setCaptureAllReviews}
-                            size="sm"
-                          />
-                        </div>
-
-                        <Separator className="bg-border/30" />
-
-                        <div className="flex items-center justify-between gap-2">
-                          <div>
-                            <label htmlFor="captador-reviews-ai" className="text-xs font-medium cursor-pointer">
-                              Resumir avaliações com IA
-                            </label>
-                            <p className="text-[11px] text-muted-foreground">
-                              Ativa a captura de comentários e gera um resumo por lead após salvar. Disponível no CRM como resumo de avaliações.
-                            </p>
-                          </div>
-                          <Switch
-                            id="captador-reviews-ai"
-                            aria-label="Resumir avaliações com IA"
-                            disabled={isRunning}
-                            checked={reviewsAiEnabled}
-                            onCheckedChange={enabled => { setReviewsAiEnabled(enabled); if (enabled) setCaptureAllReviews(true); }}
-                            size="sm"
-                          />
-                        </div>
-
-                        {reviewsAiEnabled && (
-                          <div className="space-y-3 pt-2 p-3 rounded-md bg-background/60 border border-border/50">
-                            <div className="space-y-1">
-                              <label htmlFor="captador-reviews-model" className="text-xs font-medium">
-                                Modelo de IA para avaliações
-                              </label>
-                              <select
-                                id="captador-reviews-model"
-                                aria-label="Modelo de IA para avaliações"
-                                value={reviewsAiModel}
-                                onChange={e => setReviewsAiModel(e.target.value)}
-                                disabled={isRunning || loadingAiModels}
-                                className="w-full min-w-0 rounded-md border border-border bg-secondary/50 px-3 py-1.5 text-xs focus:ring-1 focus:ring-primary"
-                              >
-                                {reviewsAiModel && !aiModels.some((m) => m.id === reviewsAiModel) && (
-                                  <option value={reviewsAiModel} className="bg-neutral-900">{reviewsAiModel} (salvo)</option>
-                                )}
-                                {!aiModels.length && <option value="" className="bg-neutral-900">{loadingAiModels ? "Carregando…" : "Sem modelos disponíveis"}</option>}
-                                <ModelOptions models={aiModels} />
-                              </select>
-                              {aiModelsError && <p role="alert" className="text-xs text-destructive">{aiModelsError}</p>}
-                            </div>
-
-                            <div className="space-y-1">
-                              <label htmlFor="captador-reviews-prompt" className="text-xs font-medium">
-                                Instruções para resumir avaliações
-                              </label>
-                              <Textarea
-                                id="captador-reviews-prompt"
-                                disabled={isRunning}
-                                value={reviewsAiPrompt}
-                                onChange={e => setReviewsAiPrompt(e.target.value)}
-                                rows={3}
-                                placeholder="Vazio usa o padrão: elogios, reclamações, gancho e nota geral."
-                                className="text-xs bg-secondary/30 resize-none font-mono"
-                              />
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </details>
-
-                    {/* Demais filtros em lista estilizada */}
-                    <div className="space-y-1.5 pt-1">
+                    <div className={styles.optionList}>
                       {[
-                        { label: "Remover leads sem telefone", value: filterEmpty, set: setFilterEmpty, desc: "Descarta empresas sem número cadastrado no Maps" },
-                        { label: "Remover telefones duplicados", value: filterDuplicates, set: setFilterDuplicates, desc: "Garante que o mesmo número não entre duas vezes" },
-                        { label: "Remover telefones fixos", value: filterLandlines, set: setFilterLandlines, desc: "Prioriza celulares com WhatsApp habilitado (mantém fixo se tiver WhatsApp Business validado)" },
+                        { id: "captador-filter-empty", label: "Remover leads sem telefone", value: filterEmpty, set: setFilterEmpty, desc: "Descarta empresas sem número cadastrado no Maps." },
+                        { id: "captador-filter-dups", label: "Remover telefones duplicados", value: filterDuplicates, set: setFilterDuplicates, desc: "Garante que o mesmo número não entre duas vezes." },
+                        { id: "captador-filter-landlines", label: "Remover telefones fixos", value: filterLandlines, set: setFilterLandlines, desc: "Prioriza celulares com WhatsApp habilitado (mantém fixo se tiver WhatsApp Business validado)." },
                       ].map((f) => (
-                        <div key={f.label} className="p-2.5 rounded-lg border border-border/40 hover:bg-secondary/30 transition-colors">
-                          <label className="flex items-center justify-between gap-3 cursor-pointer">
-                            <span className="text-xs font-medium text-foreground select-none">{f.label}</span>
-                            <input
-                              type="checkbox"
-                              disabled={isRunning}
-                              checked={f.value}
-                              onChange={e => f.set(e.target.checked)}
-                              className="w-4 h-4 rounded accent-primary cursor-pointer shrink-0"
-                            />
-                          </label>
-                          <p className="text-[11px] text-muted-foreground mt-0.5">{f.desc}</p>
+                        <div key={f.id} className={styles.optionRow}>
+                          <div className={styles.optionCopy}>
+                            <label htmlFor={f.id} className={styles.optionTitle}>{f.label}</label>
+                            <p className={styles.optionDesc}>{f.desc}</p>
+                          </div>
+                          <input
+                            id={f.id}
+                            type="checkbox"
+                            disabled={isRunning}
+                            checked={f.value}
+                            onChange={e => f.set(e.target.checked)}
+                            className={styles.toggleInput}
+                          />
                         </div>
                       ))}
 
-                      <div className="p-2.5 rounded-lg border border-border/40 hover:bg-secondary/30 transition-colors">
-                        <label className="flex items-center justify-between gap-3 cursor-pointer">
-                          <span className="text-xs font-medium text-foreground select-none">Capturar somente leads sem site</span>
-                          <input
-                            type="checkbox"
-                            disabled={isRunning}
-                            checked={filterWithWebsite}
-                            onChange={e => {
-                              const checked = e.target.checked;
-                              setFilterWithWebsite(checked);
-                              setSiteFilterMode(prev => checked ? "no_site" : (prev === "no_site" ? "any" : prev));
-                            }}
-                            className="w-4 h-4 rounded accent-primary cursor-pointer shrink-0"
-                          />
-                        </label>
-                        <p className="text-[11px] text-muted-foreground mt-0.5">Perfeito para prospecção de criação de sites</p>
-                      </div>
-                    </div>
-
-                    {/* Modo Turbo VPS, Saúde do Site & Decisor (Custo Zero) */}
-                    <div className="p-3.5 rounded-lg border border-primary/25 bg-primary/[0.04] space-y-3">
-                      <div className="flex items-center gap-2">
-                        <Zap className="w-4 h-4 text-primary shrink-0" />
-                        <div>
-                          <h4 className="text-xs font-semibold text-foreground">
-                            Modo Turbo VPS, Saúde do Site &amp; Decisor (Custo Zero)
-                          </h4>
-                          <p className="text-[11px] text-muted-foreground">
-                            Ligue ou desligue cada recurso livremente — zero gasto com API paga e baixo consumo de RAM na VPS.
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="captador-validate-wa" className={styles.optionTitle}>
+                            Validar WhatsApp ativo na Evolution (recupera fixos com WhatsApp Business)
+                          </label>
+                          <p className={styles.optionDesc}>
+                            Confirma gratuitamente no chip conectado se o telefone comercial ou do sócio recebe WhatsApp de verdade.
                           </p>
                         </div>
+                        <Switch
+                          id="captador-validate-wa"
+                          aria-label="Validar WhatsApp ativo na Evolution (recupera fixos com WhatsApp Business)"
+                          disabled={isRunning}
+                          checked={validateWhatsApp}
+                          onCheckedChange={v => applyCaptadorFilterSync({ type: "validateWhatsApp", value: v })}
+                          size="sm"
+                        />
                       </div>
 
-                      <div className="space-y-2.5 pt-1 border-t border-border/40">
-                        <div className="flex items-center justify-between gap-2">
-                          <div>
-                            <label htmlFor="captador-turbo-mode" className="text-xs font-medium cursor-pointer">
-                              Modo Turbo VPS (alta velocidade e economia de RAM)
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="captador-filter-closed" className={styles.optionTitle}>
+                            <ShieldCheck className="w-3.5 h-3.5 text-[#9ce9bc]" />
+                            Descartar empresas fechadas ou CNPJ baixado/inapto
+                          </label>
+                          <p className={styles.optionDesc}>
+                            Evita desperdiçar disparos com empresas encerradas no Google Maps ou inativas na Receita Federal.
+                          </p>
+                        </div>
+                        <Switch
+                          id="captador-filter-closed"
+                          aria-label="Descartar empresas fechadas ou CNPJ baixado/inapto"
+                          disabled={isRunning}
+                          checked={filterClosedBusinesses}
+                          onCheckedChange={setFilterClosedBusinesses}
+                          size="sm"
+                        />
+                      </div>
+
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="captador-exclude-franchises" className={styles.optionTitle}>
+                            Ignorar grandes redes e franquias
+                          </label>
+                          <p className={styles.optionDesc}>
+                            Descarta grandes redes e S/A para focar em negócios com decisor local acessível.
+                          </p>
+                        </div>
+                        <Switch
+                          id="captador-exclude-franchises"
+                          aria-label="Ignorar grandes redes e franquias"
+                          disabled={isRunning}
+                          checked={excludeFranchises}
+                          onCheckedChange={setExcludeFranchises}
+                          size="sm"
+                        />
+                      </div>
+
+                      <div className="pt-2.5 border-t border-[#263028] space-y-2.5">
+                        <div className="flex items-start justify-between gap-4">
+                          <div className={styles.optionCopy}>
+                            <label htmlFor="captador-enrich-cnpj" className={styles.optionTitle}>
+                              <UserCheck className="w-3.5 h-3.5 text-[#9ce9bc]" />
+                              Enriquecer CNPJ e Sócio-Administrador gratuitamente (Receita + RDAP)
                             </label>
-                            <p className="text-[11px] text-muted-foreground">
-                              Reutiliza 1 aba de detalhes (reciclada a cada 25 empresas), bloqueia mídia/tiles pesados e evita aberturas duplicadas com cache do CRM em memória.
+                            <p className={styles.optionDesc}>
+                              Descobre CNPJ via site/RDAP Registro.br e consulta Receita Federal grátis para obter Sócio, Porte e Capital Social.
                             </p>
                           </div>
                           <Switch
-                            id="captador-turbo-mode"
-                            aria-label="Modo Turbo VPS (alta velocidade e economia de RAM)"
+                            id="captador-enrich-cnpj"
+                            aria-label="Enriquecer CNPJ e Sócio-Administrador gratuitamente (Receita + RDAP)"
                             disabled={isRunning}
-                            checked={turboMode}
-                            onCheckedChange={setTurboMode}
+                            checked={enrichCnpj}
+                            onCheckedChange={v => applyCaptadorFilterSync({ type: "enrichCnpj", value: v })}
                             size="sm"
                           />
                         </div>
 
-                        <div className="flex items-center justify-between gap-2">
-                          <div>
-                            <label htmlFor="captador-filter-closed" className="text-xs font-medium cursor-pointer flex items-center gap-1.5">
-                              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                              Descartar empresas fechadas ou CNPJ baixado/inapto
-                            </label>
-                            <p className="text-[11px] text-muted-foreground">
-                              Evita desperdiçar disparos com empresas encerradas no Google Maps ou inativas na Receita Federal.
-                            </p>
-                          </div>
-                          <Switch
-                            id="captador-filter-closed"
-                            aria-label="Descartar empresas fechadas ou CNPJ baixado/inapto"
-                            disabled={isRunning}
-                            checked={filterClosedBusinesses}
-                            onCheckedChange={setFilterClosedBusinesses}
-                            size="sm"
-                          />
-                        </div>
-
-                        <div className="space-y-2">
-                          <div className="flex items-center justify-between gap-2">
-                            <div>
-                              <label htmlFor="captador-audit-site" className="text-xs font-medium cursor-pointer flex items-center gap-1.5">
-                                <Globe className="w-3.5 h-3.5 text-amber-400" />
-                                Auditar saúde do site (detectar fora do ar, SSL vencido, erro 500 ou fraco)
-                              </label>
-                              <p className="text-[11px] text-muted-foreground">
-                                Lê apenas os primeiros 64KB com proteção contra falso positivo do Cloudflare e gera argumento técnico de venda.
-                              </p>
-                            </div>
-                            <Switch
-                              id="captador-audit-site"
-                              aria-label="Auditar saúde do site (detectar fora do ar, SSL vencido, erro 500 ou fraco)"
-                              disabled={isRunning}
-                              checked={auditSiteHealth}
-                              onCheckedChange={setAuditSiteHealth}
-                              size="sm"
-                            />
-                          </div>
-
-                          <div className="space-y-1 pl-0.5">
-                            <span className="text-[11px] text-muted-foreground block">Filtro por saúde do site:</span>
-                            <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Filtro por saúde do site">
-                              {SITE_FILTER_MODE_OPTIONS.map((opt) => {
-                                const active = siteFilterMode === opt.value;
-                                return (
-                                  <button
-                                    key={opt.value}
-                                    type="button"
-                                    role="radio"
-                                    aria-checked={active}
-                                    disabled={isRunning}
-                                    onClick={() => {
-                                      setSiteFilterMode(opt.value);
-                                      setFilterWithWebsite(opt.value === "no_site");
-                                    }}
-                                    className={cn(
-                                      "text-[11px] px-2.5 py-1 rounded-md border transition-colors cursor-pointer disabled:opacity-50",
-                                      active
-                                        ? "bg-primary/20 border-primary/60 text-foreground font-medium"
-                                        : "bg-secondary/40 hover:bg-secondary border-border/50 text-muted-foreground hover:text-foreground",
-                                    )}
-                                  >
-                                    {opt.label}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="space-y-2">
-                          <div className="flex items-center justify-between gap-2">
-                            <div>
-                              <label htmlFor="captador-enrich-cnpj" className="text-xs font-medium cursor-pointer flex items-center gap-1.5">
-                                <UserCheck className="w-3.5 h-3.5 text-cyan-400" />
-                                Enriquecer CNPJ e Sócio-Administrador gratuitamente (Receita + RDAP)
-                              </label>
-                              <p className="text-[11px] text-muted-foreground">
-                                Descobre CNPJ via site/RDAP Registro.br/busca e consulta Receita Federal grátis (BrasilAPI → OpenCNPJ → MinhaReceita) para obter Sócio, Porte e Capital Social.
-                              </p>
-                            </div>
-                            <Switch
-                              id="captador-enrich-cnpj"
-                              aria-label="Enriquecer CNPJ e Sócio-Administrador gratuitamente (Receita + RDAP)"
-                              disabled={isRunning}
-                              checked={enrichCnpj}
-                              onCheckedChange={setEnrichCnpj}
-                              size="sm"
-                            />
-                          </div>
-
-                          {enrichCnpj && (
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 p-2.5 rounded-md bg-background/50 border border-border/40">
-                              <label htmlFor="captador-exclude-mei" className="flex items-center justify-between gap-2 cursor-pointer">
-                                <span className="text-[11px] font-medium text-foreground">Ignorar MEI (focar ME, EPP e Ltda)</span>
+                        {enrichCnpj && (
+                          <div className={styles.nestedPanel}>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
+                              <div className="flex items-center justify-between gap-2">
+                                <label htmlFor="captador-exclude-mei" className={styles.optionTitle}>
+                                  Ignorar MEI (focar ME, EPP e Ltda)
+                                </label>
                                 <input
                                   id="captador-exclude-mei"
                                   type="checkbox"
                                   disabled={isRunning}
                                   checked={excludeMei}
-                                  onChange={e => setExcludeMei(e.target.checked)}
-                                  className="w-4 h-4 rounded accent-primary cursor-pointer"
+                                  onChange={e => applyCaptadorFilterSync({ type: "excludeMei", value: e.target.checked })}
+                                  className={styles.toggleInput}
                                 />
-                              </label>
+                              </div>
                               <div className="flex items-center justify-between gap-2">
-                                <label htmlFor="captador-min-capital" className="text-[11px] text-muted-foreground">
+                                <label htmlFor="captador-min-capital" className="text-xs text-[#a5b1a8]">
                                   Capital social mínimo (R$)
                                 </label>
                                 <Input
@@ -1390,233 +1394,314 @@ export default function CaptadorPage() {
                                   min={0}
                                   step={1000}
                                   value={minCapitalSocial}
-                                  onChange={e => { setMinCapitalSocial(e.target.value); setExtraFiltersError(""); }}
-                                  className="w-28 h-7 text-right font-mono text-xs bg-background"
+                                  onChange={e => applyCaptadorFilterSync({ type: "minCapitalSocial", value: e.target.value })}
+                                  className="w-28 h-8 text-right font-mono text-xs"
                                 />
                               </div>
                             </div>
-                          )}
-                        </div>
-
-                        <div className="flex items-center justify-between gap-2">
-                          <div>
-                            <label htmlFor="captador-partner-phone" className="text-xs font-medium cursor-pointer">
-                              Priorizar WhatsApp oculto do site ou celular direto do sócio
-                            </label>
-                            <p className="text-[11px] text-muted-foreground">
-                              Captura links wa.me ocultos no rodapé e celulares diretos na Receita (descartando telefones de contabilidade).
-                            </p>
                           </div>
-                          <Switch
-                            id="captador-partner-phone"
-                            aria-label="Priorizar WhatsApp oculto do site ou celular direto do sócio"
-                            disabled={isRunning}
-                            checked={prioritizePartnerPhone}
-                            onCheckedChange={setPrioritizePartnerPhone}
-                            size="sm"
-                          />
-                        </div>
-
-                        <div className="flex items-center justify-between gap-2">
-                          <div>
-                            <label htmlFor="captador-validate-wa" className="text-xs font-medium cursor-pointer">
-                              Validar WhatsApp ativo na Evolution (recupera fixos com WhatsApp Business)
-                            </label>
-                            <p className="text-[11px] text-muted-foreground">
-                              Confirma gratuitamente no chip conectado se o telefone comercial ou do sócio recebe WhatsApp de verdade.
-                            </p>
-                          </div>
-                          <Switch
-                            id="captador-validate-wa"
-                            aria-label="Validar WhatsApp ativo na Evolution (recupera fixos com WhatsApp Business)"
-                            disabled={isRunning}
-                            checked={validateWhatsApp}
-                            onCheckedChange={setValidateWhatsApp}
-                            size="sm"
-                          />
-                        </div>
-
-                        <div className="flex items-center justify-between gap-2">
-                          <div>
-                            <label htmlFor="captador-hunt-partner" className="text-xs font-medium cursor-pointer">
-                              Modo Direto no Dono (9º dígito Anatel + WhatsApp pessoal)
-                            </label>
-                            <p className="text-[11px] text-muted-foreground">
-                              Testa o 9º dígito nos celulares antigos da Receita, busca o sócio na web e separa WhatsApp Pessoal vs Recepção.
-                            </p>
-                          </div>
-                          <Switch
-                            id="captador-hunt-partner"
-                            aria-label="Modo Direto no Dono"
-                            disabled={isRunning}
-                            checked={huntPartnerDirectPhone}
-                            onCheckedChange={setHuntPartnerDirectPhone}
-                            size="sm"
-                          />
-                        </div>
-
-                        <div className="flex items-center justify-between gap-2">
-                          <div>
-                            <label htmlFor="captador-exclude-franchises" className="text-xs font-medium cursor-pointer">
-                              Ignorar grandes redes e franquias
-                            </label>
-                            <p className="text-[11px] text-muted-foreground">
-                              Descarta Smart Fit, OdontoCompany, Drogasil, carimbo S/A e grandes redes para focar em decisores locais.
-                            </p>
-                          </div>
-                          <Switch
-                            id="captador-exclude-franchises"
-                            aria-label="Ignorar grandes redes e franquias"
-                            disabled={isRunning}
-                            checked={excludeFranchises}
-                            onCheckedChange={setExcludeFranchises}
-                            size="sm"
-                          />
-                        </div>
-
-                        <div className="flex items-center justify-between gap-2">
-                          <div>
-                            <label htmlFor="captador-expand-neighborhoods" className="text-xs font-medium cursor-pointer">
-                              Busca profunda por bairros (furar teto de 120 leads)
-                            </label>
-                            <p className="text-[11px] text-muted-foreground">
-                              Subdivide grandes cidades pelos principais bairros comerciais quando a busca atinge o teto por consulta.
-                            </p>
-                          </div>
-                          <Switch
-                            id="captador-expand-neighborhoods"
-                            aria-label="Busca profunda por bairros"
-                            disabled={isRunning}
-                            checked={expandNeighborhoods}
-                            onCheckedChange={setExpandNeighborhoods}
-                            size="sm"
-                          />
-                        </div>
+                        )}
                       </div>
-                    </div>
-                  </div>
 
-                  <Separator className="bg-border/40" />
-
-                  {/* Limite de leads e Meta */}
-                  <div className="p-3 rounded-lg border border-border/50 bg-secondary/20 space-y-2">
-                    <div className="flex items-center justify-between gap-3 flex-wrap">
-                      <div className="flex items-center gap-2">
-                        <label htmlFor="captador-limit-enabled" className="text-xs font-semibold cursor-pointer">
-                          Limite de leads
-                        </label>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="captador-partner-phone" className={styles.optionTitle}>
+                            Priorizar WhatsApp oculto do site ou celular direto do sócio
+                          </label>
+                          <p className={styles.optionDesc}>
+                            Captura links wa.me ocultos no rodapé e celulares diretos na Receita (descartando telefones de contabilidade).
+                          </p>
+                        </div>
                         <Switch
-                          id="captador-limit-enabled"
-                          aria-label="Limite de leads"
+                          id="captador-partner-phone"
+                          aria-label="Priorizar WhatsApp oculto do site ou celular direto do sócio"
                           disabled={isRunning}
-                          checked={limitEnabled}
-                          onCheckedChange={enabled => { setLimitEnabled(enabled); setMaxLeadsError(false); }}
+                          checked={prioritizePartnerPhone}
+                          onCheckedChange={v => applyCaptadorFilterSync({ type: "prioritizePartnerPhone", value: v })}
                           size="sm"
                         />
                       </div>
-                      {limitEnabled && (
-                        <div className="flex items-center gap-2">
-                          <span className="text-[11px] text-muted-foreground">Meta:</span>
-                          <Input
-                            aria-label="Quantidade máxima de leads"
-                            disabled={isRunning}
-                            type="number"
-                            min={1}
-                            step={1}
-                            max={5000}
-                            value={maxLeads}
-                            onChange={e => { setMaxLeads(e.target.value); setMaxLeadsError(false); }}
-                            className="w-24 h-8 text-right font-mono text-xs bg-background"
-                            aria-invalid={maxLeadsError}
-                            aria-describedby={`captador-limit-help${maxLeadsError ? " captador-limit-error" : ""}`}
-                          />
+
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="captador-hunt-partner" className={styles.optionTitle}>
+                            Modo Direto no Dono (9º dígito Anatel + WhatsApp pessoal)
+                          </label>
+                          <p className={styles.optionDesc}>
+                            Testa o 9º dígito nos celulares antigos da Receita, busca o sócio na web e separa WhatsApp Pessoal vs Recepção.
+                          </p>
                         </div>
-                      )}
+                        <Switch
+                          id="captador-hunt-partner"
+                          aria-label="Modo Direto no Dono"
+                          disabled={isRunning}
+                          checked={huntPartnerDirectPhone}
+                          onCheckedChange={v => applyCaptadorFilterSync({ type: "huntPartnerDirectPhone", value: v })}
+                          size="sm"
+                        />
+                      </div>
                     </div>
-                    <p id="captador-limit-help" className="text-[11px] text-muted-foreground leading-relaxed">
-                      {limitEnabled
-                        ? "Continua buscando até atingir a meta de leads aprovados e salvos, com novas tentativas e expansão para cidades próximas. Você pode pausar ou parar."
-                        : "Sem limite definido: encerra ao esgotar as buscas informadas."}
-                    </p>
-                    {maxLeadsError && (
-                      <p id="captador-limit-error" role="alert" className="text-xs text-destructive flex items-center gap-1 pt-1">
-                        <AlertCircle className="w-3 h-3" /> Informe um inteiro entre 1 e 5000.
-                      </p>
-                    )}
                   </div>
 
-                  {/* Integrações Opcionais (Webhook / n8n) */}
-                  <div className="border border-border/40 rounded-lg p-2.5 bg-secondary/10">
-                    <button
-                      type="button"
-                      onClick={() => setShowWebhookConfig(v => !v)}
-                      className="w-full flex items-center justify-between text-xs text-muted-foreground hover:text-foreground font-medium cursor-pointer"
-                    >
-                      <span className="flex items-center gap-1.5">
-                        <Send className="w-3.5 h-3.5" /> Integração de Envio (n8n / Webhook)
-                      </span>
-                      <ChevronDown className={cn("w-3.5 h-3.5 transition-transform", showWebhookConfig && "rotate-180")} />
-                    </button>
+                  {/* Bloco 6: Velocidade, avaliações IA, meta e integrações */}
+                  <div className={styles.subGroupMuted}>
+                    <div className={styles.groupHeader}>
+                      <div>
+                        <h3 className={styles.groupTitle}>Desempenho, avaliações com IA e meta</h3>
+                        <p className={styles.groupDesc}>Controle de consumo na VPS, resumo opcional de comentários, meta e webhook.</p>
+                      </div>
+                    </div>
 
-                    {showWebhookConfig && (
-                      <div className="mt-3 pt-3 border-t border-border/30 space-y-3">
-                        <div className="flex items-center justify-between">
-                          <label htmlFor="webhook-active-toggle" className="text-xs text-foreground cursor-pointer">
-                            Ativar envio automático para Webhook
+                    <div className={styles.optionList}>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="captador-turbo-mode" className={styles.optionTitle}>
+                            <Zap className="w-3.5 h-3.5 text-[#9ce9bc]" />
+                            Modo Turbo VPS (alta velocidade e economia de RAM)
                           </label>
+                          <p className={styles.optionDesc}>
+                            Reutiliza 1 aba de detalhes, bloqueia mídia/tiles pesados e evita aberturas duplicadas com cache do CRM em memória.
+                          </p>
+                        </div>
+                        <Switch
+                          id="captador-turbo-mode"
+                          aria-label="Modo Turbo VPS (alta velocidade e economia de RAM)"
+                          disabled={isRunning}
+                          checked={turboMode}
+                          onCheckedChange={v => applyCaptadorFilterSync({ type: "turboMode", value: v })}
+                          size="sm"
+                        />
+                      </div>
+
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="captador-expand-neighborhoods" className={styles.optionTitle}>
+                            Busca profunda por bairros (furar teto de 120 leads)
+                          </label>
+                          <p className={styles.optionDesc}>
+                            Subdivide grandes cidades pelos principais bairros comerciais quando a busca atinge o teto por consulta.
+                          </p>
+                        </div>
+                        <Switch
+                          id="captador-expand-neighborhoods"
+                          aria-label="Busca profunda por bairros"
+                          disabled={isRunning}
+                          checked={expandNeighborhoods}
+                          onCheckedChange={setExpandNeighborhoods}
+                          size="sm"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Avaliações completas e análise com IA - details obrigatório com matching de texto exato para testes */}
+                    <details className="rounded-lg border border-[#303a32] bg-[#111712] p-3 space-y-3 group">
+                      <summary className="flex items-center gap-2 text-xs font-medium text-[#edf2ee] cursor-pointer list-none select-none">
+                        <Bot className="w-4 h-4 text-[#6ee7b7] shrink-0" />
+                        <span>Avaliações completas e análise com IA</span>
+                        <ChevronRight className="w-4 h-4 ml-auto text-[#a5b1a8] transition-transform group-open:rotate-90" />
+                      </summary>
+
+                      <div className="pt-3 space-y-3 border-t border-[#263028] mt-2">
+                        <div className="flex items-start justify-between gap-4">
+                          <div className={styles.optionCopy}>
+                            <label htmlFor="capture-all-reviews" className={styles.optionTitle}>
+                              Capturar todas as avaliações
+                            </label>
+                            <p className={styles.optionDesc}>
+                              Salva os comentários disponíveis no Google Maps. Esta opção pode aumentar o tempo de captura.
+                            </p>
+                          </div>
                           <Switch
-                            id="webhook-active-toggle"
+                            id="capture-all-reviews"
+                            aria-label="Capturar todas as avaliações"
                             disabled={isRunning}
-                            checked={webhookEnabled}
-                            onCheckedChange={setWebhookEnabled}
+                            checked={captureAllReviews}
+                            onCheckedChange={v => applyCaptadorFilterSync({ type: "captureAllReviews", value: v })}
                             size="sm"
                           />
                         </div>
-                        <div className="space-y-1">
-                          <label htmlFor="captador-webhook-url" className="text-[11px] text-muted-foreground">URL do Webhook</label>
-                          <Input
-                            id="captador-webhook-url"
+
+                        <div className="flex items-start justify-between gap-4 pt-3 border-t border-[#263028]">
+                          <div className={styles.optionCopy}>
+                            <label htmlFor="captador-reviews-ai" className={styles.optionTitle}>
+                              Resumir avaliações com IA
+                            </label>
+                            <p className={styles.optionDesc}>
+                              Ativa a captura de comentários e gera um resumo por lead após salvar. Disponível no CRM como resumo de avaliações.
+                            </p>
+                          </div>
+                          <Switch
+                            id="captador-reviews-ai"
+                            aria-label="Resumir avaliações com IA"
                             disabled={isRunning}
-                            value={webhookUrl}
-                            onChange={e => setWebhookUrl(e.target.value)}
-                            placeholder="https://seu-n8n.com/webhook/leads"
-                            className="text-xs h-8 font-mono bg-background"
+                            checked={reviewsAiEnabled}
+                            onCheckedChange={enabled => applyCaptadorFilterSync({ type: "reviewsAiEnabled", value: enabled })}
+                            size="sm"
                           />
                         </div>
-                        <div className="flex items-center gap-4 text-xs">
-                          <span className="text-[11px] text-muted-foreground">Modo:</span>
-                          <label className="flex items-center gap-1.5 cursor-pointer">
-                            <input
-                              type="radio"
-                              name="sendMode"
-                              checked={sendMode === "realtime"}
-                              onChange={() => setSendMode("realtime")}
-                              disabled={isRunning}
-                              className="accent-primary"
-                            />
-                            Tempo Real
-                          </label>
-                          <label className="flex items-center gap-1.5 cursor-pointer">
-                            <input
-                              type="radio"
-                              name="sendMode"
-                              checked={sendMode === "batch"}
-                              onChange={() => setSendMode("batch")}
-                              disabled={isRunning}
-                              className="accent-primary"
-                            />
-                            Em Lote (manual)
-                          </label>
-                        </div>
+
+                        {reviewsAiEnabled && (
+                          <div className="space-y-3 p-3 rounded-md bg-[#141a16] border border-[#303a32]">
+                            <div className="space-y-1">
+                              <label htmlFor="captador-reviews-model" className="text-xs font-medium text-[#dce7df] block">
+                                Modelo de IA para avaliações
+                              </label>
+                              <select
+                                id="captador-reviews-model"
+                                aria-label="Modelo de IA para avaliações"
+                                value={reviewsAiModel}
+                                onChange={e => setReviewsAiModel(e.target.value)}
+                                disabled={isRunning || loadingAiModels}
+                                className="w-full min-w-0 rounded-md border border-[#38443b] bg-[#111712] px-3 py-1.5 text-xs text-[#edf2ee]"
+                              >
+                                {reviewsAiModel && !aiModels.some((m) => m.id === reviewsAiModel) && (
+                                  <option value={reviewsAiModel} className="bg-[#181d19]">{reviewsAiModel} (salvo)</option>
+                                )}
+                                {!aiModels.length && <option value="" className="bg-[#181d19]">{loadingAiModels ? "Carregando…" : "Sem modelos disponíveis"}</option>}
+                                <ModelOptions models={aiModels} />
+                              </select>
+                              {aiModelsError && <p role="alert" className="text-xs text-[#fca5a5]">{aiModelsError}</p>}
+                            </div>
+
+                            <div className="space-y-1">
+                              <label htmlFor="captador-reviews-prompt" className="text-xs font-medium text-[#dce7df] block">
+                                Instruções para resumir avaliações
+                              </label>
+                              <Textarea
+                                id="captador-reviews-prompt"
+                                disabled={isRunning}
+                                value={reviewsAiPrompt}
+                                onChange={e => setReviewsAiPrompt(e.target.value)}
+                                rows={3}
+                                placeholder="Vazio usa o padrão: elogios, reclamações, gancho e nota geral."
+                                className="text-xs resize-none font-mono"
+                              />
+                            </div>
+                          </div>
+                        )}
                       </div>
-                    )}
+                    </details>
+
+                    {/* Limite de leads e Meta */}
+                    <div className="p-3 rounded-lg border border-[#303a32] bg-[#111712] space-y-2">
+                      <div className="flex items-center justify-between gap-3 flex-wrap">
+                        <div className="flex items-center gap-2.5">
+                          <label htmlFor="captador-limit-enabled" className={styles.optionTitle}>
+                            Limite de leads
+                          </label>
+                          <Switch
+                            id="captador-limit-enabled"
+                            aria-label="Limite de leads"
+                            disabled={isRunning}
+                            checked={limitEnabled}
+                            onCheckedChange={enabled => { setLimitEnabled(enabled); setMaxLeadsError(false); }}
+                            size="sm"
+                          />
+                        </div>
+                        {limitEnabled && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-[#a5b1a8]">Meta:</span>
+                            <Input
+                              aria-label="Quantidade máxima de leads"
+                              disabled={isRunning}
+                              type="number"
+                              min={1}
+                              step={1}
+                              max={5000}
+                              value={maxLeads}
+                              onChange={e => { setMaxLeads(e.target.value); setMaxLeadsError(false); }}
+                              className="w-24 h-8 text-right font-mono text-xs"
+                              aria-invalid={maxLeadsError}
+                              aria-describedby={`captador-limit-help${maxLeadsError ? " captador-limit-error" : ""}`}
+                            />
+                          </div>
+                        )}
+                      </div>
+                      <p id="captador-limit-help" className={styles.optionDesc}>
+                        {limitEnabled
+                          ? "Continua buscando até atingir a meta de leads aprovados e salvos, com novas tentativas e expansão para cidades próximas. Você pode pausar ou parar."
+                          : "Sem limite definido: encerra ao esgotar as buscas informadas."}
+                      </p>
+                      {maxLeadsError && (
+                        <p id="captador-limit-error" role="alert" className="text-xs text-[#fca5a5] flex items-center gap-1 pt-1">
+                          <AlertCircle className="w-3.5 h-3.5" /> Informe um inteiro entre 1 e 5000.
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Integrações Opcionais (Webhook / n8n) */}
+                    <div className="border border-[#303a32] rounded-lg p-3 bg-[#111712]">
+                      <button
+                        type="button"
+                        onClick={() => setShowWebhookConfig(v => !v)}
+                        className="w-full flex items-center justify-between text-xs text-[#c4d4c9] hover:text-[#edf2ee] font-medium cursor-pointer"
+                      >
+                        <span className="flex items-center gap-2">
+                          <Send className="w-3.5 h-3.5 text-[#9ce9bc]" /> Integração de Envio (n8n / Webhook)
+                        </span>
+                        <ChevronDown className={cn("w-4 h-4 transition-transform", showWebhookConfig && "rotate-180")} />
+                      </button>
+
+                      {showWebhookConfig && (
+                        <div className="mt-3 pt-3 border-t border-[#263028] space-y-3">
+                          <div className="flex items-center justify-between">
+                            <label htmlFor="webhook-active-toggle" className={styles.optionTitle}>
+                              Ativar envio automático para Webhook
+                            </label>
+                            <Switch
+                              id="webhook-active-toggle"
+                              disabled={isRunning}
+                              checked={webhookEnabled}
+                              onCheckedChange={setWebhookEnabled}
+                              size="sm"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label htmlFor="captador-webhook-url" className="text-xs text-[#a5b1a8] block">URL do Webhook</label>
+                            <Input
+                              id="captador-webhook-url"
+                              disabled={isRunning}
+                              value={webhookUrl}
+                              onChange={e => setWebhookUrl(e.target.value)}
+                              placeholder="https://seu-n8n.com/webhook/leads"
+                              className="text-xs h-8 font-mono"
+                            />
+                          </div>
+                          <div className="flex items-center gap-4 text-xs">
+                            <span className="text-xs text-[#a5b1a8]">Modo:</span>
+                            <label className="flex items-center gap-1.5 cursor-pointer text-[#edf2ee]">
+                              <input
+                                type="radio"
+                                name="sendMode"
+                                checked={sendMode === "realtime"}
+                                onChange={() => setSendMode("realtime")}
+                                disabled={isRunning}
+                                className="accent-[#6ee7b7]"
+                              />
+                              Tempo Real
+                            </label>
+                            <label className="flex items-center gap-1.5 cursor-pointer text-[#edf2ee]">
+                              <input
+                                type="radio"
+                                name="sendMode"
+                                checked={sendMode === "batch"}
+                                onChange={() => setSendMode("batch")}
+                                disabled={isRunning}
+                                className="accent-[#6ee7b7]"
+                              />
+                              Em Lote (manual)
+                            </label>
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   {/* Botões de Ação Principais */}
-                  <div className="pt-2">
+                  <div className="pt-1">
                     {!isRunning ? (
                       <Button
-                        className="w-full gap-2 text-sm font-semibold h-11 bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm cursor-pointer"
+                        className="w-full gap-2 text-sm font-semibold h-11 cursor-pointer"
                         onClick={handleStart}
                       >
                         <Rocket className="w-4 h-4" /> Iniciar Captação
@@ -1625,14 +1710,14 @@ export default function CaptadorPage() {
                       <div className="flex items-center gap-2">
                         {isPaused ? (
                           <Button
-                            className="flex-1 gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-medium h-11 cursor-pointer"
+                            className="flex-1 gap-2 bg-[#243d30] hover:bg-[#2a4738] text-[#a5f3cf] border border-[#4e7c62] font-medium h-11 cursor-pointer"
                             onClick={handleResume}
                           >
                             <Rocket className="w-4 h-4" /> Retomar
                           </Button>
                         ) : (
                           <Button
-                            className="flex-1 gap-2 bg-amber-600 hover:bg-amber-700 text-white font-medium h-11 cursor-pointer"
+                            className="flex-1 gap-2 bg-[#2c2516] hover:bg-[#382f1c] text-[#fde68a] border border-[#614d23] font-medium h-11 cursor-pointer"
                             onClick={handlePause}
                           >
                             <Square className="w-4 h-4" /> Pausar
@@ -1653,63 +1738,58 @@ export default function CaptadorPage() {
             </div>
 
             {/* Coluna Direita: Console de Operação em Tempo Real */}
-            <div className="lg:col-span-5 flex flex-col">
-              <Card className="border-border/60 bg-card/80 shadow-xs flex-1 flex flex-col overflow-hidden">
-                <CardHeader className="pb-3 border-b border-border/40">
+            <div className="lg:col-span-5 flex flex-col lg:sticky lg:top-4 self-start">
+              <Card className="flex-1 flex flex-col overflow-hidden">
+                <CardHeader className="pb-3 border-b border-[#2b362e]">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      <div className="flex gap-1.5 mr-1">
-                        <span className="w-2.5 h-2.5 rounded-full bg-red-500/80" />
-                        <span className="w-2.5 h-2.5 rounded-full bg-amber-500/80" />
-                        <span className="w-2.5 h-2.5 rounded-full bg-emerald-500/80" />
-                      </div>
-                      <Terminal className="w-4 h-4 text-primary" />
-                      <CardTitle className="text-sm font-semibold">Console de Logs</CardTitle>
+                      <Terminal className="w-4 h-4 text-[#6ee7b7]" />
+                      <CardTitle className="text-sm font-semibold text-[#edf2ee]">Console de Logs</CardTitle>
                     </div>
                     <div className="flex items-center gap-2">
-                      <Badge variant="secondary" className="text-[10px] font-mono font-normal">
+                      <Badge variant="secondary" className="text-xs font-mono font-normal bg-[#141a16] border border-[#303a32] text-[#c4d4c9]">
                         {logs.length} logs
                       </Badge>
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="text-xs text-muted-foreground hover:text-foreground h-7 px-2"
+                        className="text-xs text-[#a5b1a8] hover:text-[#edf2ee] h-7 px-2"
                         onClick={() => setLogs([])}
                       >
                         Limpar
                       </Button>
                     </div>
                   </div>
-                  <CardDescription className="text-xs text-muted-foreground flex items-center justify-between">
+                  <CardDescription className="text-xs text-[#a5b1a8] flex items-center justify-between">
                     <span>Acompanhamento das chamadas e extrações ao vivo.</span>
-                    <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground">
+                    <span className="text-xs text-[#9cab9f]">
                       Eventos em tempo real
                     </span>
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="flex-1 p-0 flex flex-col">
-                  <div className="bg-[oklch(0.08_0.01_260)] rounded-b-lg flex-1 min-h-[440px] max-h-[560px] overflow-y-auto p-4 font-mono text-xs leading-6 select-text border-t border-white/[0.04]">
+                  <div className="bg-[#111813] rounded-b-lg flex-1 min-h-[440px] max-h-[620px] overflow-y-auto p-4 font-mono text-xs leading-6 select-text border-t border-[#28332b]">
                     {logs.length === 0 ? (
-                      <div className="flex flex-col items-center justify-center h-full text-muted-foreground gap-2 py-16">
-                        <Terminal className="w-8 h-8 stroke-1 opacity-50" />
-                        <p className="text-xs">Aguardando execução...</p>
-                        <span className="text-[10px] text-muted-foreground text-center max-w-[200px]">
+                      <div className="flex flex-col items-center justify-center h-full text-[#a5b1a8] gap-2 py-16">
+                        <Terminal className="w-8 h-8 stroke-1 opacity-60 text-[#6ee7b7]" />
+                        <p className="text-xs font-medium text-[#edf2ee]">Aguardando execução...</p>
+                        <span className="text-xs text-[#9cab9f] text-center max-w-[240px]">
                           Configure os nichos e clique em &quot;Iniciar Captação&quot; para iniciar o scraper.
                         </span>
                       </div>
                     ) : (
                       logs.map((log, i) => (
-                        <div key={i} className="flex items-start gap-2 py-0.5 hover:bg-white/[0.02] rounded px-1 -mx-1">
-                          <span className="text-muted-foreground/50 shrink-0 text-[10px]">[{log.time}]</span>
-                          {log.type === "success" && <CheckCircle2 className="w-3.5 h-3.5 mt-1 text-emerald-400 shrink-0" />}
-                          {log.type === "error" && <XCircle className="w-3.5 h-3.5 mt-1 text-red-400 shrink-0" />}
-                          {log.type === "warning" && <AlertCircle className="w-3.5 h-3.5 mt-1 text-amber-400 shrink-0" />}
+                        <div key={i} className="flex items-start gap-2 py-0.5 hover:bg-[#18211b] rounded px-1 -mx-1">
+                          <span className="text-[#7f8e83] shrink-0 text-xs">[{log.time}]</span>
+                          {log.type === "success" && <CheckCircle2 className="w-3.5 h-3.5 mt-1 text-[#6ee7b7] shrink-0" />}
+                          {log.type === "error" && <XCircle className="w-3.5 h-3.5 mt-1 text-[#f87171] shrink-0" />}
+                          {log.type === "warning" && <AlertCircle className="w-3.5 h-3.5 mt-1 text-[#fbbf24] shrink-0" />}
                           <span className={cn(
                             "break-words text-xs",
-                            log.type === "success" && "text-emerald-300 font-medium",
-                            log.type === "error" && "text-red-400",
-                            log.type === "warning" && "text-amber-300",
-                            log.type === "info" && "text-muted-foreground/90",
+                            log.type === "success" && "text-[#c5f0d8] font-medium",
+                            log.type === "error" && "text-[#fca5a5]",
+                            log.type === "warning" && "text-[#fde68a]",
+                            log.type === "info" && "text-[#b5c4b9]",
                           )}>
                             {log.message}
                           </span>
@@ -1727,14 +1807,14 @@ export default function CaptadorPage() {
         {/* ABA 2: LEADS & RESULTADOS */}
         {activeTab === "leads" && (
           <div className="space-y-4">
-            <Card className="border-border/60 bg-card/80 shadow-xs">
-              <CardHeader className="pb-3 border-b border-border/40">
+            <Card>
+              <CardHeader className="pb-3 border-b border-[#2b362e]">
                 <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
                   <div className="flex items-center gap-2">
-                    <ToggleLeft className="w-4 h-4 text-primary" />
-                    <CardTitle className="text-sm font-semibold">Clientes Extraídos</CardTitle>
+                    <ToggleLeft className="w-4 h-4 text-[#6ee7b7]" />
+                    <CardTitle className="text-sm font-semibold text-[#edf2ee]">Clientes Extraídos</CardTitle>
                     {/* Badge com formato exato 'X clientes' esperado pelos testes */}
-                    <Badge variant="secondary" className="text-[10px] font-mono">
+                    <Badge variant="secondary" className="text-xs font-mono bg-[#141a16] border border-[#303a32] text-[#c5f0d8]">
                       {leads.length} clientes
                     </Badge>
                   </div>
@@ -1748,11 +1828,11 @@ export default function CaptadorPage() {
                     )}
 
                     {/* Botões de Filtros Locais - preserva nomes e tags esperados */}
-                    <div className="flex items-center rounded-lg border border-border/60 bg-secondary/30 p-0.5">
+                    <div className="flex items-center rounded-lg border border-[#303a32] bg-[#141a16] p-0.5">
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="gap-1 text-[10px] uppercase font-bold text-amber-500 hover:text-amber-400 h-7 px-2.5"
+                        className="gap-1 text-xs font-medium text-[#c4d4c9] hover:text-[#edf2ee] h-7 px-2.5"
                         onClick={filterLocalDuplicates}
                         title="Remove números duplicados da lista atual"
                       >
@@ -1761,7 +1841,7 @@ export default function CaptadorPage() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="gap-1 text-[10px] uppercase font-bold text-amber-500 hover:text-amber-400 h-7 px-2.5"
+                        className="gap-1 text-xs font-medium text-[#c4d4c9] hover:text-[#edf2ee] h-7 px-2.5"
                         onClick={filterLocalLandlines}
                         title="Remove números fixos da lista atual"
                       >
@@ -1770,7 +1850,7 @@ export default function CaptadorPage() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="gap-1 text-[10px] uppercase font-bold text-amber-500 hover:text-amber-400 h-7 px-2.5"
+                        className="gap-1 text-xs font-medium text-[#c4d4c9] hover:text-[#edf2ee] h-7 px-2.5"
                         onClick={filterLocalEmpty}
                         title="Remove leads sem telefone da lista atual"
                       >
@@ -1778,7 +1858,7 @@ export default function CaptadorPage() {
                       </Button>
                     </div>
 
-                    <div className="w-px h-5 bg-border/60 mx-0.5 hidden sm:block" />
+                    <div className="w-px h-5 bg-[#303a32] mx-0.5 hidden sm:block" />
 
                     <Button
                       variant="outline"
@@ -1793,7 +1873,7 @@ export default function CaptadorPage() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="gap-1.5 text-xs h-8 text-red-400 hover:text-red-300 hover:bg-red-500/10 cursor-pointer"
+                      className="gap-1.5 text-xs h-8 text-[#fca5a5] hover:text-[#fecaca] hover:bg-[#2d1a1a] cursor-pointer"
                       onClick={handleClear}
                       disabled={isRunning || isPaused || leads.length === 0}
                     >
@@ -1816,17 +1896,17 @@ export default function CaptadorPage() {
                 {leads.length > 0 && (
                   <div className="pt-3 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                     <div className="relative flex-1">
-                      <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                      <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-[#a5b1a8]" />
                       <Input
                         aria-label="Buscar leads"
                         placeholder="Filtrar por nome, telefone, categoria ou cidade..."
                         value={searchQuery}
                         onChange={e => setSearchQuery(e.target.value)}
-                        className="h-8 pl-8 text-xs bg-background/80"
+                        className="h-8 pl-8 text-xs"
                       />
                     </div>
                     {searchQuery && (
-                      <span className="text-[11px] text-muted-foreground self-center">
+                      <span className="text-xs text-[#a5b1a8] self-center">
                         Exibindo {filteredLeads.length} de {leads.length}
                       </span>
                     )}
@@ -1839,26 +1919,26 @@ export default function CaptadorPage() {
                 <div className="hidden sm:block overflow-x-auto max-h-[540px] overflow-y-auto">
                   <Table>
                     <TableHeader>
-                      <TableRow className="border-border/60 hover:bg-transparent bg-secondary/20">
-                        <TableHead className="text-[10px] uppercase font-bold sticky top-0 bg-card z-10 w-[220px]">Nome do Negócio</TableHead>
-                        <TableHead className="text-[10px] uppercase font-bold sticky top-0 bg-card z-10">Telefone</TableHead>
-                        <TableHead className="text-[10px] uppercase font-bold sticky top-0 bg-card z-10">Categoria</TableHead>
-                        <TableHead className="text-[10px] uppercase font-bold sticky top-0 bg-card z-10 w-[240px]">Endereço</TableHead>
-                        <TableHead className="text-[10px] uppercase font-bold sticky top-0 bg-card z-10 text-center">Avaliação</TableHead>
-                        <TableHead className="text-[10px] uppercase font-bold sticky top-0 bg-card z-10 text-center">Reviews</TableHead>
-                        <TableHead className="text-[10px] uppercase font-bold sticky top-0 bg-card z-10 text-center">Detalhes</TableHead>
-                        <TableHead className="text-[10px] uppercase font-bold sticky top-0 bg-card z-10">Website</TableHead>
-                        <TableHead className="text-[10px] uppercase font-bold sticky top-0 bg-card z-10">Extraído Em</TableHead>
+                      <TableRow className="border-[#2b362e] hover:bg-transparent bg-[#141a16]">
+                        <TableHead className="text-xs font-semibold sticky top-0 bg-[#181d19] z-10 w-[240px] text-[#c4d4c9]">Nome do Negócio</TableHead>
+                        <TableHead className="text-xs font-semibold sticky top-0 bg-[#181d19] z-10 text-[#c4d4c9]">Telefone</TableHead>
+                        <TableHead className="text-xs font-semibold sticky top-0 bg-[#181d19] z-10 text-[#c4d4c9]">Categoria</TableHead>
+                        <TableHead className="text-xs font-semibold sticky top-0 bg-[#181d19] z-10 w-[240px] text-[#c4d4c9]">Endereço</TableHead>
+                        <TableHead className="text-xs font-semibold sticky top-0 bg-[#181d19] z-10 text-center text-[#c4d4c9]">Avaliação</TableHead>
+                        <TableHead className="text-xs font-semibold sticky top-0 bg-[#181d19] z-10 text-center text-[#c4d4c9]">Reviews</TableHead>
+                        <TableHead className="text-xs font-semibold sticky top-0 bg-[#181d19] z-10 text-center text-[#c4d4c9]">Detalhes</TableHead>
+                        <TableHead className="text-xs font-semibold sticky top-0 bg-[#181d19] z-10 text-[#c4d4c9]">Website</TableHead>
+                        <TableHead className="text-xs font-semibold sticky top-0 bg-[#181d19] z-10 text-[#c4d4c9]">Extraído Em</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {leads.length === 0 ? (
                         <TableRow>
-                          <TableCell colSpan={9} className="text-center py-16 text-muted-foreground text-sm">
+                          <TableCell colSpan={9} className="text-center py-16 text-[#a5b1a8] text-sm">
                             <div className="flex flex-col items-center justify-center gap-2">
-                              <Building2 className="w-8 h-8 stroke-1 opacity-40 text-muted-foreground" />
-                              <p className="font-medium">{isRunning ? "Aguardando leads..." : "Nenhum lead extraído"}</p>
-                              <p className="text-xs text-muted-foreground/60 max-w-sm">
+                              <Building2 className="w-8 h-8 stroke-1 opacity-50 text-[#9cab9f]" />
+                              <p className="font-medium text-[#edf2ee]">{isRunning ? "Aguardando leads..." : "Nenhum lead extraído"}</p>
+                              <p className="text-xs text-[#9cab9f] max-w-sm">
                                 {isRunning
                                   ? "O robô está navegando no Google Maps. Os resultados aparecerão aqui assim que forem encontrados."
                                   : "Vá para a aba 'Configuração' e inicie a busca para extrair leads."}
@@ -1868,7 +1948,7 @@ export default function CaptadorPage() {
                         </TableRow>
                       ) : filteredLeads.length === 0 ? (
                         <TableRow>
-                          <TableCell colSpan={9} className="text-center py-12 text-muted-foreground text-xs">
+                          <TableCell colSpan={9} className="text-center py-12 text-[#a5b1a8] text-xs">
                             Nenhum lead encontrado para o termo &quot;{searchQuery}&quot;.
                           </TableCell>
                         </TableRow>
@@ -1879,50 +1959,50 @@ export default function CaptadorPage() {
                           const waUrl = getWhatsAppUrl(lead.phones);
                           const siteHealthClass =
                             enrich?.siteHealth === "broken_site"
-                              ? "text-red-400 border-red-500/40 bg-red-500/10"
+                              ? "text-[#fca5a5] border-[#663030] bg-[#2d1a1a]"
                               : enrich?.siteHealth === "weak_site"
-                                ? "text-amber-300 border-amber-500/40 bg-amber-500/10"
+                                ? "text-[#fde68a] border-[#614d23] bg-[#2c2516]"
                                 : enrich?.siteHealth === "active_site"
-                                  ? "text-emerald-300 border-emerald-500/30 bg-emerald-500/10"
-                                  : "text-muted-foreground border-border/50 bg-secondary/40";
+                                  ? "text-[#c5f0d8] border-[#355844] bg-[#18281f]"
+                                  : "text-[#b5c4b9] border-[#303a32] bg-[#141a16]";
                           return (
-                            <TableRow key={i} className="border-border/30 text-xs hover:bg-secondary/20 transition-colors">
-                              <TableCell className="font-medium max-w-[240px]">
-                                <div className="truncate font-semibold text-foreground" title={lead.name}>
+                            <TableRow key={i} className="border-[#263028] text-xs hover:bg-[#141a16] transition-colors">
+                              <TableCell className="font-medium max-w-[260px]">
+                                <div className="truncate font-semibold text-[#edf2ee]" title={lead.name}>
                                   {lead.name}
                                 </div>
                                 {lead.priceRange && (
-                                  <span className="text-[10px] text-muted-foreground/70">{lead.priceRange}</span>
+                                  <span className="text-xs text-[#9cab9f]">{lead.priceRange}</span>
                                 )}
                                 {enrich && (
-                                  <div className="flex flex-wrap items-center gap-1 mt-1">
-                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-cyan-500/30 text-cyan-300 bg-cyan-500/10">
+                                  <div className="flex flex-wrap items-center gap-1 mt-1.5">
+                                    <Badge variant="outline" className="text-xs px-2 py-0 border-[#355844] text-[#c5f0d8] bg-[#18281f]">
                                       Score {enrich.qualificationScore}
                                     </Badge>
                                     {(enrich.primeiroNomeSocio || enrich.socioDecisor || lead.ownerName) && (
-                                      <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-emerald-500/30 text-emerald-300 bg-emerald-500/10">
+                                      <Badge variant="outline" className="text-xs px-2 py-0 border-[#355844] text-[#c5f0d8] bg-[#18281f]">
                                         Sócio: {enrich.primeiroNomeSocio || enrich.socioDecisor || lead.ownerName}
                                       </Badge>
                                     )}
                                     {(enrich.porte || enrich.anosEmpresa) && (
-                                      <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-border/60 text-muted-foreground">
+                                      <Badge variant="outline" className="text-xs px-2 py-0 border-[#334338] text-[#dce7df] bg-[#1b241e]">
                                         {[enrich.porte, enrich.anosEmpresa ? `${enrich.anosEmpresa}a` : ""].filter(Boolean).join(" · ")}
                                       </Badge>
                                     )}
                                     {(enrich.whatsappChannelType === "socio_direto" || enrich.whatsappChannelType === "provavel_socio") && (
-                                      <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-emerald-400/40 text-emerald-200 bg-emerald-500/15">
+                                      <Badge variant="outline" className="text-xs px-2 py-0 border-[#355844] text-[#c5f0d8] bg-[#18281f]">
                                         Direto Sócio
                                       </Badge>
                                     )}
                                     {enrich.whatsappChannelType === "recepcao_comercial" && (
-                                      <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-amber-400/40 text-amber-200 bg-amber-500/10">
+                                      <Badge variant="outline" className="text-xs px-2 py-0 border-[#614d23] text-[#fde68a] bg-[#2c2516]">
                                         Recepção
                                       </Badge>
                                     )}
                                     {enrich.hasPaidTrafficTag && (
                                       <Badge
                                         variant="outline"
-                                        className="text-[9px] px-1.5 py-0 border-fuchsia-400/40 text-fuchsia-200 bg-fuchsia-500/10"
+                                        className="text-xs px-2 py-0 border-[#334338] text-[#dce7df] bg-[#1b241e]"
                                         title={enrich.trafficTags?.join(", ") || "Investe em tráfego pago"}
                                       >
                                         Ads
@@ -1931,7 +2011,7 @@ export default function CaptadorPage() {
                                     {enrich.managementTools && enrich.managementTools.length > 0 && (
                                       <Badge
                                         variant="outline"
-                                        className="text-[9px] px-1.5 py-0 border-sky-400/40 text-sky-200 bg-sky-500/10"
+                                        className="text-xs px-2 py-0 border-[#334338] text-[#dce7df] bg-[#1b241e]"
                                         title={enrich.managementTools.join(", ")}
                                       >
                                         Sistemas: {enrich.managementTools.slice(0, 2).join(", ")}
@@ -1940,7 +2020,7 @@ export default function CaptadorPage() {
                                     {enrich.abandonedCopyrightYear && (
                                       <Badge
                                         variant="outline"
-                                        className="text-[9px] px-1.5 py-0 border-orange-400/40 text-orange-200 bg-orange-500/10"
+                                        className="text-xs px-2 py-0 border-[#334338] text-[#dce7df] bg-[#1b241e]"
                                         title={`Rodapé com copyright antigo (${enrich.abandonedCopyrightYear})`}
                                       >
                                         © {enrich.abandonedCopyrightYear}
@@ -1952,7 +2032,7 @@ export default function CaptadorPage() {
                               <TableCell className="whitespace-nowrap">
                                 {lead.phones ? (
                                   <div>
-                                    <div className="flex items-center gap-1.5 font-mono text-emerald-400">
+                                    <div className="flex items-center gap-1.5 font-mono text-[#a5f3cf]">
                                       <span>{formatPhoneNumber(lead.phones)}</span>
                                       <CopyButton text={lead.phones} title="Copiar telefone" />
                                       {waUrl && (
@@ -1960,46 +2040,46 @@ export default function CaptadorPage() {
                                           href={waUrl}
                                           target="_blank"
                                           rel="noopener noreferrer"
-                                          className="text-muted-foreground hover:text-emerald-400 transition-colors p-1"
+                                          className="text-[#a5b1a8] hover:text-[#6ee7b7] transition-colors p-1"
                                           title="Abrir no WhatsApp"
                                         >
-                                          <MessageCircle className="w-3 h-3" />
+                                          <MessageCircle className="w-3.5 h-3.5" />
                                         </a>
                                       )}
                                     </div>
                                     {enrich?.whatsappVerified && (
-                                      <span className="block text-[9px] text-emerald-400/80 mt-0.5">WhatsApp validado</span>
+                                      <span className="block text-xs text-[#9ce9bc] mt-0.5">WhatsApp validado</span>
                                     )}
                                   </div>
                                 ) : (
-                                  <span className="text-muted-foreground/40">—</span>
+                                  <span className="text-[#7f8e83]">—</span>
                                 )}
                               </TableCell>
-                              <TableCell className="max-w-[150px] truncate text-muted-foreground" title={lead.categories?.toString()}>
+                              <TableCell className="max-w-[150px] truncate text-[#a5b1a8]" title={lead.categories?.toString()}>
                                 {lead.categories || "—"}
                               </TableCell>
-                              <TableCell className="max-w-[240px] truncate text-muted-foreground" title={lead.fullAddress}>
+                              <TableCell className="max-w-[240px] truncate text-[#a5b1a8]" title={lead.fullAddress}>
                                 {lead.fullAddress || "—"}
                               </TableCell>
                               <TableCell className="text-center whitespace-nowrap">
                                 {lead.averageRating ? (
-                                  <span className="inline-flex items-center gap-1 font-semibold text-amber-400">
-                                    <Star className="w-3 h-3 fill-amber-400" />
+                                  <span className="inline-flex items-center gap-1 font-semibold text-[#eab308]">
+                                    <Star className="w-3 h-3 fill-[#eab308]" />
                                     {lead.averageRating}
                                   </span>
                                 ) : (
-                                  <span className="text-muted-foreground/40">—</span>
+                                  <span className="text-[#7f8e83]">—</span>
                                 )}
                               </TableCell>
                               <TableCell className="text-center">
-                                <span className="text-foreground">{lead.reviewCount || "0"}</span>
+                                <span className="text-[#edf2ee]">{lead.reviewCount || "0"}</span>
                                 {lead.reviewsDetalhes && lead.reviewsDetalhes.length > 0 && (
-                                  <span className="block text-[9px] text-muted-foreground mt-0.5">
+                                  <span className="block text-xs text-[#a5b1a8] mt-0.5">
                                     {lead.reviewsDetalhes.length} detalhadas
                                   </span>
                                 )}
                                 {lead.yearEstablished && (
-                                  <span className="block text-[9px] text-emerald-400/90 font-medium mt-0.5">
+                                  <span className="block text-xs text-[#9ce9bc] font-medium mt-0.5">
                                     Desde {lead.yearEstablished}
                                   </span>
                                 )}
@@ -2008,12 +2088,12 @@ export default function CaptadorPage() {
                                 <Button
                                   variant={temExtras ? "secondary" : "ghost"}
                                   size="sm"
-                                  className={cn("gap-1 text-[10px] h-6 px-2 font-medium cursor-pointer", !temExtras && "text-muted-foreground/40")}
+                                  className={cn("gap-1 text-xs h-7 px-2.5 font-medium cursor-pointer", !temExtras && "text-[#7f8e83]")}
                                   onClick={() => setSelectedLead(lead)}
                                   disabled={!temExtras}
                                   title={temExtras ? "Ver reviews, fotos, horários e detalhes completos" : "Sem detalhes extras capturados"}
                                 >
-                                  <Eye className="w-3 h-3" />
+                                  <Eye className="w-3.5 h-3.5" />
                                   {temExtras ? "Ver" : "—"}
                                 </Button>
                               </TableCell>
@@ -2024,28 +2104,28 @@ export default function CaptadorPage() {
                                       href={lead.website}
                                       target="_blank"
                                       rel="noopener noreferrer"
-                                      className="text-primary hover:underline inline-flex items-center gap-1 font-medium truncate max-w-full"
+                                      className="text-[#6ee7b7] hover:underline inline-flex items-center gap-1 font-medium truncate max-w-full"
                                     >
                                       <span className="truncate">{safeHostname(lead.website)}</span>
-                                      <ExternalLink className="w-2.5 h-2.5 shrink-0 opacity-60" />
+                                      <ExternalLink className="w-3 h-3 shrink-0 opacity-70" />
                                     </a>
                                     {enrich?.siteStatusLabel && (
-                                      <Badge variant="outline" className={cn("block w-fit text-[9px] px-1.5 py-0", siteHealthClass)} title={enrich.siteDiagnostico}>
+                                      <Badge variant="outline" className={cn("block w-fit text-xs px-2 py-0", siteHealthClass)} title={enrich.siteDiagnostico}>
                                         {enrich.siteStatusLabel}
                                       </Badge>
                                     )}
                                   </div>
                                 ) : (
                                   enrich?.siteStatusLabel ? (
-                                    <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0", siteHealthClass)}>
+                                    <Badge variant="outline" className={cn("text-xs px-2 py-0", siteHealthClass)}>
                                       {enrich.siteStatusLabel}
                                     </Badge>
                                   ) : (
-                                    <span className="text-muted-foreground/40">—</span>
+                                    <span className="text-[#7f8e83]">—</span>
                                   )
                                 )}
                               </TableCell>
-                              <TableCell className="text-muted-foreground whitespace-nowrap text-[11px]">
+                              <TableCell className="text-[#a5b1a8] whitespace-nowrap text-xs">
                                 {lead.extractedAt}
                               </TableCell>
                             </TableRow>
@@ -2057,13 +2137,13 @@ export default function CaptadorPage() {
                 </div>
 
                 {/* Lista Mobile (Cards Responsivos) */}
-                <div className="sm:hidden divide-y divide-border/40 max-h-[500px] overflow-y-auto p-3 space-y-3">
+                <div className="sm:hidden divide-y divide-[#263028] max-h-[500px] overflow-y-auto p-3 space-y-3">
                   {leads.length === 0 ? (
-                    <div className="text-center py-12 text-muted-foreground text-sm">
+                    <div className="text-center py-12 text-[#a5b1a8] text-sm">
                       {isRunning ? "Aguardando leads..." : "Nenhum lead extraído"}
                     </div>
                   ) : filteredLeads.length === 0 ? (
-                    <div className="text-center py-12 text-muted-foreground text-xs">
+                    <div className="text-center py-12 text-[#a5b1a8] text-xs">
                       Nenhum lead encontrado para o termo &quot;{searchQuery}&quot;.
                     </div>
                   ) : (
@@ -2073,38 +2153,38 @@ export default function CaptadorPage() {
                       return (
                         <div key={i} className="py-2.5 flex flex-col gap-2 text-xs">
                           <div className="flex justify-between items-start gap-2">
-                            <span className="font-bold text-sm text-foreground">{lead.name}</span>
-                            <span className="text-emerald-400 font-mono whitespace-nowrap text-xs font-semibold">
+                            <span className="font-semibold text-sm text-[#edf2ee]">{lead.name}</span>
+                            <span className="text-[#a5f3cf] font-mono whitespace-nowrap text-xs font-semibold">
                               {lead.phones ? formatPhoneNumber(lead.phones) : "—"}
                             </span>
                           </div>
                           {enrich && (
-                            <div className="flex flex-wrap gap-1">
-                              <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-cyan-500/30 text-cyan-300">
+                            <div className="flex flex-wrap gap-1.5">
+                              <Badge variant="outline" className="text-xs px-2 py-0 border-[#355844] text-[#c5f0d8] bg-[#18281f]">
                                 Score {enrich.qualificationScore}
                               </Badge>
-                              <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-border/60">
+                              <Badge variant="outline" className="text-xs px-2 py-0 border-[#334338] text-[#dce7df] bg-[#1b241e]">
                                 {enrich.siteStatusLabel}
                               </Badge>
                               {(enrich.primeiroNomeSocio || enrich.socioDecisor || lead.ownerName) && (
-                                <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-emerald-500/30 text-emerald-300">
+                                <Badge variant="outline" className="text-xs px-2 py-0 border-[#355844] text-[#c5f0d8] bg-[#18281f]">
                                   Sócio: {enrich.primeiroNomeSocio || enrich.socioDecisor || lead.ownerName}
                                 </Badge>
                               )}
                               {(enrich.whatsappChannelType === "socio_direto" || enrich.whatsappChannelType === "provavel_socio") && (
-                                <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-emerald-400/40 text-emerald-200 bg-emerald-500/15">
+                                <Badge variant="outline" className="text-xs px-2 py-0 border-[#355844] text-[#c5f0d8] bg-[#18281f]">
                                   Direto Sócio
                                 </Badge>
                               )}
                               {enrich.whatsappChannelType === "recepcao_comercial" && (
-                                <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-amber-400/40 text-amber-200 bg-amber-500/10">
+                                <Badge variant="outline" className="text-xs px-2 py-0 border-[#614d23] text-[#fde68a] bg-[#2c2516]">
                                   Recepção
                                 </Badge>
                               )}
                               {enrich.hasPaidTrafficTag && (
                                 <Badge
                                   variant="outline"
-                                  className="text-[9px] px-1.5 py-0 border-fuchsia-400/40 text-fuchsia-200 bg-fuchsia-500/10"
+                                  className="text-xs px-2 py-0 border-[#334338] text-[#dce7df] bg-[#1b241e]"
                                   title={enrich.trafficTags?.join(", ") || "Investe em tráfego pago"}
                                 >
                                   Ads
@@ -2113,7 +2193,7 @@ export default function CaptadorPage() {
                               {enrich.managementTools && enrich.managementTools.length > 0 && (
                                 <Badge
                                   variant="outline"
-                                  className="text-[9px] px-1.5 py-0 border-sky-400/40 text-sky-200 bg-sky-500/10"
+                                  className="text-xs px-2 py-0 border-[#334338] text-[#dce7df] bg-[#1b241e]"
                                   title={enrich.managementTools.join(", ")}
                                 >
                                   Sistemas: {enrich.managementTools.slice(0, 2).join(", ")}
@@ -2122,25 +2202,25 @@ export default function CaptadorPage() {
                               {enrich.abandonedCopyrightYear && (
                                 <Badge
                                   variant="outline"
-                                  className="text-[9px] px-1.5 py-0 border-orange-400/40 text-orange-200 bg-orange-500/10"
+                                  className="text-xs px-2 py-0 border-[#334338] text-[#dce7df] bg-[#1b241e]"
                                 >
                                   © {enrich.abandonedCopyrightYear}
                                 </Badge>
                               )}
                             </div>
                           )}
-                          <div className="grid grid-cols-2 gap-1 text-muted-foreground">
-                            <div className="col-span-2"><strong className="text-foreground/80">Cat:</strong> {lead.categories || "—"}</div>
-                            <div><strong className="text-foreground/80">Rating:</strong> {lead.averageRating ? `${lead.averageRating} ⭐` : "—"}</div>
-                            <div><strong className="text-foreground/80">Reviews:</strong> {lead.reviewCount || "0"}</div>
-                            <div className="col-span-2"><strong className="text-foreground/80">End:</strong> {lead.fullAddress || "—"}</div>
-                            {lead.cep && <div className="col-span-2"><strong className="text-foreground/80">CEP:</strong> {lead.cep}</div>}
-                            {lead.priceRange && <div><strong className="text-foreground/80">Preço:</strong> {lead.priceRange}</div>}
-                            {lead.openNow && <div className="col-span-2"><strong className="text-foreground/80">Status:</strong> {lead.openNow}</div>}
+                          <div className="grid grid-cols-2 gap-1 text-[#a5b1a8]">
+                            <div className="col-span-2"><strong className="text-[#dce7df]">Cat:</strong> {lead.categories || "—"}</div>
+                            <div><strong className="text-[#dce7df]">Rating:</strong> {lead.averageRating ? `${lead.averageRating} ★` : "—"}</div>
+                            <div><strong className="text-[#dce7df]">Reviews:</strong> {lead.reviewCount || "0"}</div>
+                            <div className="col-span-2"><strong className="text-[#dce7df]">End:</strong> {lead.fullAddress || "—"}</div>
+                            {lead.cep && <div className="col-span-2"><strong className="text-[#dce7df]">CEP:</strong> {lead.cep}</div>}
+                            {lead.priceRange && <div><strong className="text-[#dce7df]">Preço:</strong> {lead.priceRange}</div>}
+                            {lead.openNow && <div className="col-span-2"><strong className="text-[#dce7df]">Status:</strong> {lead.openNow}</div>}
                             {lead.website && (
                               <div className="col-span-2 truncate">
-                                <strong className="text-foreground/80">Web:</strong>{" "}
-                                <a href={lead.website} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                                <strong className="text-[#dce7df]">Web:</strong>{" "}
+                                <a href={lead.website} target="_blank" rel="noopener noreferrer" className="text-[#6ee7b7] hover:underline">
                                   {lead.website}
                                 </a>
                               </div>
@@ -2151,13 +2231,13 @@ export default function CaptadorPage() {
                               <Button
                                 variant="outline"
                                 size="sm"
-                                className="gap-1 text-[10px] h-7 px-2.5"
+                                className="gap-1 text-xs h-7 px-2.5"
                                 onClick={() => setSelectedLead(lead)}
                               >
-                                <Eye className="w-3 h-3" /> Ver Detalhes ({(lead.reviewsDetalhes?.length || 0)} reviews, {(lead.photos?.length || 0)} fotos)
+                                <Eye className="w-3.5 h-3.5" /> Ver Detalhes ({(lead.reviewsDetalhes?.length || 0)} reviews, {(lead.photos?.length || 0)} fotos)
                               </Button>
                             ) : <span />}
-                            <span className="text-[10px] text-muted-foreground/60">{lead.extractedAt}</span>
+                            <span className="text-xs text-[#9cab9f]">{lead.extractedAt}</span>
                           </div>
                         </div>
                       );
@@ -2169,26 +2249,26 @@ export default function CaptadorPage() {
 
             {/* Console Embutido na Aba Leads (quando o usuário deseja monitorar sem alternar abas) */}
             {showConsoleInLeads && (
-              <Card className="border-border/60 bg-card/80 shadow-xs">
-                <CardHeader className="py-2.5 px-4 border-b border-border/40 flex flex-row items-center justify-between">
+              <Card>
+                <CardHeader className="py-2.5 px-4 border-b border-[#2b362e] flex flex-row items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <Terminal className="w-3.5 h-3.5 text-primary" />
-                    <span className="text-xs font-semibold">Monitor de Execução em Tempo Real</span>
+                    <Terminal className="w-3.5 h-3.5 text-[#6ee7b7]" />
+                    <span className="text-xs font-semibold text-[#edf2ee]">Monitor de Execução em Tempo Real</span>
                   </div>
-                  <Button variant="ghost" size="sm" className="text-xs h-6 px-2 text-muted-foreground" onClick={() => setShowConsoleInLeads(false)}>
+                  <Button variant="ghost" size="sm" className="text-xs h-7 px-2 text-[#a5b1a8] hover:text-[#edf2ee]" onClick={() => setShowConsoleInLeads(false)}>
                     Fechar
                   </Button>
                 </CardHeader>
                 <CardContent className="p-0">
-                  <div className="bg-[oklch(0.08_0.01_260)] h-48 overflow-y-auto p-3 font-mono text-[11px] leading-relaxed">
+                  <div className="bg-[#111813] h-48 overflow-y-auto p-3 font-mono text-xs leading-relaxed">
                     {logs.map((log, i) => (
                       <div key={i} className="flex items-start gap-1.5 py-0.5">
-                        <span className="text-muted-foreground/50 shrink-0">[{log.time}]</span>
+                        <span className="text-[#7f8e83] shrink-0">[{log.time}]</span>
                         <span className={cn(
-                          log.type === "success" && "text-emerald-300",
-                          log.type === "error" && "text-red-400",
-                          log.type === "warning" && "text-amber-300",
-                          log.type === "info" && "text-muted-foreground/90",
+                          log.type === "success" && "text-[#c5f0d8]",
+                          log.type === "error" && "text-[#fca5a5]",
+                          log.type === "warning" && "text-[#fde68a]",
+                          log.type === "info" && "text-[#b5c4b9]",
                         )}>
                           {log.message}
                         </span>
@@ -2205,7 +2285,7 @@ export default function CaptadorPage() {
 
       {/* ---- Modal: Detalhes Completos do Lead ---- */}
       <Dialog open={!!selectedLead} onOpenChange={(open) => !open && setSelectedLead(null)}>
-        <DialogContent style={CAPTADOR_COLORS} className="captador-surface max-w-[calc(100%-2rem)] sm:max-w-[min(56rem,calc(100%-2rem))] max-h-[92vh] overflow-y-auto bg-card border-border/70 p-4 sm:p-6 shadow-xl">
+        <DialogContent className={cn(styles.workspace, "max-w-[calc(100%-2rem)] sm:max-w-[min(56rem,calc(100%-2rem))] max-h-[92vh] overflow-y-auto bg-[#181d19] border-[#303a32] p-4 sm:p-6 shadow-none")}>
           {selectedLead && <LeadDetailContent lead={selectedLead} />}
         </DialogContent>
       </Dialog>
@@ -2383,40 +2463,40 @@ function LeadDetailContent({ lead }: { lead: Lead }) {
           </div>
 
           {enrich && (
-            <div className="p-3.5 rounded-lg border border-cyan-500/30 bg-cyan-500/[0.04] space-y-3">
+            <div className={styles.subGroup}>
               <div className="flex items-center justify-between gap-2 flex-wrap">
-                <span className="text-[10px] uppercase font-semibold text-cyan-300 flex items-center gap-1.5">
-                  <ShieldCheck className="w-3.5 h-3.5" /> Diagnóstico Técnico do Site &amp; Quadro Societário (Receita Federal)
+                <span className="text-xs font-semibold text-[#c5f0d8] flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4 text-[#6ee7b7]" /> Diagnóstico Técnico do Site &amp; Quadro Societário (Receita Federal)
                 </span>
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <Badge variant="outline" className="text-[10px] border-cyan-500/40 text-cyan-200 bg-cyan-500/10">
+                  <Badge variant="outline" className="text-xs border-[#355844] text-[#c5f0d8] bg-[#18281f]">
                     Score {enrich.qualificationScore}/100
                   </Badge>
-                  <Badge variant="outline" className="text-[10px] border-border/60">
+                  <Badge variant="outline" className="text-xs border-[#334338] text-[#dce7df] bg-[#1b241e]">
                     {enrich.siteStatusLabel}
                   </Badge>
                   {(enrich.whatsappChannelType === "socio_direto" || enrich.whatsappChannelType === "provavel_socio") && (
-                    <Badge variant="outline" className="text-[10px] border-emerald-400/40 text-emerald-200 bg-emerald-500/15">
+                    <Badge variant="outline" className="text-xs border-[#355844] text-[#c5f0d8] bg-[#18281f]">
                       Direto Sócio
                     </Badge>
                   )}
                   {enrich.whatsappChannelType === "recepcao_comercial" && (
-                    <Badge variant="outline" className="text-[10px] border-amber-400/40 text-amber-200 bg-amber-500/10">
+                    <Badge variant="outline" className="text-xs border-[#614d23] text-[#fde68a] bg-[#2c2516]">
                       Recepção
                     </Badge>
                   )}
                   {enrich.hasPaidTrafficTag && (
-                    <Badge variant="outline" className="text-[10px] border-fuchsia-400/40 text-fuchsia-200 bg-fuchsia-500/10">
+                    <Badge variant="outline" className="text-xs border-[#334338] text-[#dce7df] bg-[#1b241e]">
                       {enrich.trafficTags?.length ? `Ads: ${enrich.trafficTags.join(", ")}` : "Tráfego Pago"}
                     </Badge>
                   )}
                   {enrich.managementTools && enrich.managementTools.length > 0 && (
-                    <Badge variant="outline" className="text-[10px] border-sky-400/40 text-sky-200 bg-sky-500/10">
+                    <Badge variant="outline" className="text-xs border-[#334338] text-[#dce7df] bg-[#1b241e]">
                       Sistemas: {enrich.managementTools.join(", ")}
                     </Badge>
                   )}
                   {enrich.abandonedCopyrightYear && (
-                    <Badge variant="outline" className="text-[10px] border-orange-400/40 text-orange-200 bg-orange-500/10">
+                    <Badge variant="outline" className="text-xs border-[#334338] text-[#dce7df] bg-[#1b241e]">
                       Copyright {enrich.abandonedCopyrightYear}
                     </Badge>
                   )}

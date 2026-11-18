@@ -17,7 +17,8 @@ import {
   Send, Play, Pause, Square, Loader2, Search, Globe, BarChart3,
   CheckCircle2, XCircle, Star, Ban, RefreshCw,
   Rocket, Terminal, Filter, TrendingUp, Building2, Link2, Link2Off, Trash2, MapPin, ExternalLink,
-  Clock, MessageSquare, ChevronRight, Bot, Smartphone, Zap, Repeat, Plus, Scissors, Sparkles,
+  Clock, MessageSquare, ChevronRight, Bot, Smartphone, Zap, Repeat, Plus, Sparkles, Info,
+  ShieldCheck, Workflow,
 } from "lucide-react";
 import { renderTemplate, type TemplateContext } from "@/lib/template-vars";
 import { AUTO_POOL_INSTANCE, formatInstanceLabel } from "@/lib/campaign-pool";
@@ -27,13 +28,19 @@ import { useClientSession } from "@/lib/use-session";
 import { cn } from "@/lib/utils";
 import { parseMinReviews } from "@/lib/scraper-review-count";
 import {
+  applyScraperFilterChange,
+  isNonWebsiteUrl,
   parseGoogleYear,
   parseMaxReviews,
   parseMinCapitalSocial,
   parseRatingBound,
+  SCRAPER_PRESET_OPTIONS,
   validateGoogleYearRange,
   validateRatingRange,
   validateReviewCountRange,
+  type ScraperFilterChangeAction,
+  type ScraperFilterSyncState,
+  type ScraperPresetId,
 } from "@/lib/scraper-lead-filters";
 import type { LeadEnrichmentData, SiteFilterMode } from "@/lib/scraper-lead-enrichment";
 import { AutomationLogs } from "../automacao/AutomationLogs";
@@ -179,24 +186,24 @@ function CountdownCard({ cd }: { cd: { secs: number; nextAt: number } | undefine
   const remaining = nextAt === undefined ? null : remainingState;
   if (remaining === null || remaining <= 0) {
     return (
-      <div className="flex items-center gap-2 p-2 rounded-lg bg-green-500/5 border border-green-500/20">
-        <Loader2 className="w-3.5 h-3.5 text-green-400 animate-spin shrink-0" />
-        <span className="text-[11px] text-green-300 font-bold">Processando agora.</span>
+      <div className={styles.countdownIdle}>
+        <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+        <span>Processando agora.</span>
       </div>
     );
   }
   return (
-    <div className="flex items-center gap-2 p-2.5 rounded-lg bg-blue-500/10 border border-blue-500/30">
-      <Clock className="w-4 h-4 text-blue-400 animate-pulse shrink-0" />
+    <div className={styles.countdownBox}>
+      <Clock className="w-4 h-4 text-[#9ce9bc] shrink-0" />
       <div className="flex-1 min-w-0">
-        <span className="text-[10px] font-black uppercase tracking-wider text-blue-400">Próximo disparo em</span>
-        <div className="text-lg font-black text-blue-300 font-mono leading-none mt-0.5">
+        <span className="text-xs font-medium text-[#a5b1a8]">Próximo disparo em</span>
+        <div className="text-base font-semibold text-[#edf2ee] font-mono leading-none mt-1">
           {String(Math.floor(remaining / 60)).padStart(2, "0")}:{String(remaining % 60).padStart(2, "0")}
         </div>
       </div>
-      <div className="w-16 h-1 bg-blue-500/20 rounded-full overflow-hidden">
+      <div className="w-16 h-1.5 bg-[#26332b] rounded-full overflow-hidden">
         <div
-          className="h-full bg-blue-400 transition-all duration-1000"
+          className="h-full bg-[#6ee7b7] transition-all duration-1000"
           style={{ width: `${cd && cd.secs > 0 ? Math.max(0, (remaining / cd.secs) * 100) : 0}%` }}
         />
       </div>
@@ -250,6 +257,8 @@ export default function ProspeccaoSitesPage() {
   const [googleYearFrom, setGoogleYearFrom] = useState("0");
   const [googleYearTo, setGoogleYearTo] = useState("0");
   const [extraFiltersError, setExtraFiltersError] = useState("");
+  const [captureSyncNote, setCaptureSyncNote] = useState<string | null>(null);
+  const [disparoSyncNote, setDisparoSyncNote] = useState<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -333,6 +342,7 @@ export default function ProspeccaoSitesPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "start",
+          _source: "prospeccao-sites",
           niches: nicheList,
           regions: regionList,
           filterEmpty,
@@ -461,7 +471,7 @@ export default function ProspeccaoSitesPage() {
       const isDisparado = l.primeiro_contato_source === "disparo" || disparoJids.has(l.remoteJid);
       if (disparoFilter === "pending" && isDisparado) return false;
       if (disparoFilter === "sent" && !isDisparado) return false;
-      const hasW = !!(l.website && l.website.trim());
+      const hasW = !isNonWebsiteUrl(l.website) && l.enrichment?.siteHealth !== "no_site";
       const sh = l.enrichment?.siteHealth;
       if (hasWebsite === "only_empty" && hasW) return false;
       if (hasWebsite === "only_with" && !hasW) return false;
@@ -694,8 +704,9 @@ export default function ProspeccaoSitesPage() {
   const [autoFilterWithInstagram, setAutoFilterWithInstagram] = useState(false);
   const [autoTurboMode, setAutoTurboMode] = useState(true);
   const [autoFilterClosedBusinesses, setAutoFilterClosedBusinesses] = useState(true);
-  const [autoAuditSiteHealth, setAutoAuditSiteHealth] = useState(true);
+  const [autoAuditSiteHealth, setAutoAuditSiteHealth] = useState(false);
   const [autoSiteFilterMode, setAutoSiteFilterMode] = useState<SiteFilterMode>("no_site");
+  const [autoSyncNote, setAutoSyncNote] = useState<string | null>(null);
   const [autoEnrichCnpj, setAutoEnrichCnpj] = useState(true);
   const [autoPrioritizePartnerPhone, setAutoPrioritizePartnerPhone] = useState(true);
   const [autoValidateWhatsApp, setAutoValidateWhatsApp] = useState(true);
@@ -1215,7 +1226,7 @@ export default function ProspeccaoSitesPage() {
 
   // Estatísticas helper
   const stats = useMemo(() => {
-    const withW = rankedLeads.filter((l) => l.website && l.website.trim()).length;
+    const withW = rankedLeads.filter((l) => !isNonWebsiteUrl(l.website) && l.enrichment?.siteHealth !== "no_site").length;
     const withoutW = rankedLeads.length - withW;
     const rated = rankedLeads.map((l) => parseFloat(l.rating || "0")).filter((r) => !isNaN(r) && r > 0);
     const avgRating = rated.length
@@ -1224,6 +1235,145 @@ export default function ProspeccaoSitesPage() {
     const totalReviews = rankedLeads.reduce((s, l) => s + (parseInt(l.reviews || "0", 10) || 0), 0);
     return { withW, withoutW, avgRating, totalReviews };
   }, [rankedLeads]);
+
+  function renderPresetIcon(presetId: ScraperPresetId) {
+    if (presetId === "vender_sites") return <Globe className="w-4 h-4" />;
+    if (presetId === "vender_ia") return <Bot className="w-4 h-4" />;
+    if (presetId === "direto_socio") return <Smartphone className="w-4 h-4" />;
+    return <Zap className="w-4 h-4" />;
+  }
+
+  function applyCaptureFilterSync(action: ScraperFilterChangeAction) {
+    const current: ScraperFilterSyncState = {
+      filterEmpty,
+      filterDuplicates,
+      filterLandlines,
+      filterWithWebsite,
+      filterWithInstagram,
+      captureAllReviews,
+      reviewsAiEnabled,
+      turboMode,
+      filterClosedBusinesses,
+      auditSiteHealth,
+      siteFilterMode,
+      enrichCnpj,
+      prioritizePartnerPhone,
+      validateWhatsApp,
+      excludeMei,
+      excludeFranchises,
+      huntPartnerDirectPhone,
+      expandNeighborhoods,
+      prioritizeByScore: false,
+      minCapitalSocial,
+    };
+    const { state: next, autoNote } = applyScraperFilterChange(current, action, "prospeccao-sites");
+    setFilterEmpty(next.filterEmpty);
+    setFilterDuplicates(next.filterDuplicates);
+    setFilterLandlines(next.filterLandlines);
+    setFilterWithWebsite(next.filterWithWebsite);
+    setFilterWithInstagram(next.filterWithInstagram);
+    setCaptureAllReviews(next.captureAllReviews);
+    setReviewsAiEnabled(next.reviewsAiEnabled);
+    setTurboMode(next.turboMode);
+    setFilterClosedBusinesses(next.filterClosedBusinesses);
+    setAuditSiteHealth(next.auditSiteHealth);
+    setSiteFilterMode(next.siteFilterMode);
+    setEnrichCnpj(next.enrichCnpj);
+    setPrioritizePartnerPhone(next.prioritizePartnerPhone);
+    setValidateWhatsApp(next.validateWhatsApp);
+    setExcludeMei(next.excludeMei);
+    setExcludeFranchises(next.excludeFranchises);
+    setHuntPartnerDirectPhone(next.huntPartnerDirectPhone);
+    setMinCapitalSocial(next.minCapitalSocial);
+    setCaptureSyncNote(autoNote);
+    if (action.type === "minCapitalSocial" || action.type === "preset") {
+      setExtraFiltersError("");
+    }
+  }
+
+  function applyDisparoFilterSync(action: { type: "personalizeWithAi" | "antibanMixer"; value: boolean }) {
+    const current: ScraperFilterSyncState = {
+      filterEmpty,
+      filterDuplicates,
+      filterLandlines,
+      filterWithWebsite,
+      filterWithInstagram,
+      captureAllReviews,
+      reviewsAiEnabled,
+      turboMode,
+      filterClosedBusinesses,
+      auditSiteHealth,
+      siteFilterMode,
+      enrichCnpj,
+      prioritizePartnerPhone,
+      validateWhatsApp,
+      excludeMei,
+      excludeFranchises,
+      huntPartnerDirectPhone,
+      expandNeighborhoods,
+      prioritizeByScore: false,
+      minCapitalSocial,
+      personalizeWithAi,
+      antibanMixer,
+    };
+    const { state: next, autoNote } = applyScraperFilterChange(current, action, "prospeccao-sites");
+    setPersonalizeWithAi(Boolean(next.personalizeWithAi));
+    setAntibanMixer(next.antibanMixer !== false);
+    setDisparoSyncNote(autoNote);
+  }
+
+  function applyAutoFilterSync(action: ScraperFilterChangeAction) {
+    const current: ScraperFilterSyncState = {
+      filterEmpty: autoFilterEmpty,
+      filterDuplicates: autoFilterDuplicates,
+      filterLandlines: autoFilterLandlines,
+      filterWithWebsite: autoFilterWithWebsite,
+      filterWithInstagram: autoFilterWithInstagram,
+      captureAllReviews: autoCaptureAllReviews,
+      reviewsAiEnabled: autoReviewsAi,
+      turboMode: autoTurboMode,
+      filterClosedBusinesses: autoFilterClosedBusinesses,
+      auditSiteHealth: autoAuditSiteHealth,
+      siteFilterMode: autoSiteFilterMode,
+      enrichCnpj: autoEnrichCnpj,
+      prioritizePartnerPhone: autoPrioritizePartnerPhone,
+      validateWhatsApp: autoValidateWhatsApp,
+      excludeMei: autoExcludeMei,
+      excludeFranchises: autoExcludeFranchises,
+      huntPartnerDirectPhone: autoHuntPartnerDirectPhone,
+      expandNeighborhoods: autoExpandNeighborhoods,
+      prioritizeByScore: autoPrioritizeByScore,
+      minCapitalSocial: autoMinCapitalSocial,
+      personalizeWithAi: autoPersonalize,
+      antibanMixer: autoAntibanMixer,
+    };
+    const { state: next, autoNote } = applyScraperFilterChange(current, action, "prospeccao-sites");
+    setAutoFilterEmpty(next.filterEmpty);
+    setAutoFilterDuplicates(next.filterDuplicates);
+    setAutoFilterLandlines(next.filterLandlines);
+    setAutoFilterWithWebsite(next.filterWithWebsite);
+    setAutoFilterWithInstagram(next.filterWithInstagram);
+    setAutoCaptureAllReviews(next.captureAllReviews);
+    setAutoReviewsAi(next.reviewsAiEnabled);
+    setAutoTurboMode(next.turboMode);
+    setAutoFilterClosedBusinesses(next.filterClosedBusinesses);
+    setAutoAuditSiteHealth(next.auditSiteHealth);
+    setAutoSiteFilterMode(next.siteFilterMode);
+    setAutoEnrichCnpj(next.enrichCnpj);
+    setAutoPrioritizePartnerPhone(next.prioritizePartnerPhone);
+    setAutoValidateWhatsApp(next.validateWhatsApp);
+    setAutoExcludeMei(next.excludeMei);
+    setAutoExcludeFranchises(next.excludeFranchises);
+    setAutoHuntPartnerDirectPhone(next.huntPartnerDirectPhone);
+    setAutoPrioritizeByScore(next.prioritizeByScore);
+    setAutoMinCapitalSocial(next.minCapitalSocial);
+    setAutoPersonalize(Boolean(next.personalizeWithAi));
+    setAutoAntibanMixer(next.antibanMixer !== false);
+    setAutoSyncNote(autoNote);
+    if (action.type === "minCapitalSocial" || action.type === "preset") {
+      setAutoExtraFiltersError("");
+    }
+  }
 
   return (
     <div className={cn(styles.workspace, "h-full flex flex-col overflow-hidden")}>
@@ -1290,31 +1440,61 @@ export default function ProspeccaoSitesPage() {
                 </div>
 
                 <div className={styles.filterSection}>
-                  <div className="flex items-center justify-between gap-3 flex-wrap">
-                    <div className="flex items-center gap-1.5">
-                      <Filter className="w-3 h-3 text-white/60" />
-                      <label className="text-xs font-semibold text-white/60 uppercase tracking-wider">Filtros Automáticos</label>
+                  <div className={styles.subGroup}>
+                    <div className={styles.groupHeader}>
+                      <Sparkles className="w-4 h-4" />
+                      <div>
+                        <h4 className={styles.groupTitle}>Perfis rápidos de captura</h4>
+                        <p className={styles.groupDesc}>Escolha um perfil pronto para ajustar site, CNPJ e WhatsApp automaticamente.</p>
+                      </div>
                     </div>
+                    <div className={styles.presetGrid}>
+                      {SCRAPER_PRESET_OPTIONS.map((preset) => (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          aria-label={preset.label}
+                          onClick={() => applyCaptureFilterSync({ type: "preset", preset: preset.id })}
+                          className={styles.presetCard}
+                        >
+                          {renderPresetIcon(preset.id)}
+                          <span className={styles.presetCardText}>
+                            <span className={styles.presetCardTitle}>{preset.label}</span>
+                            <span className={styles.presetCardDesc}>{preset.shortDesc}</span>
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                    {captureSyncNote && (
+                      <div role="status" className={styles.syncBanner}>
+                        <span className={styles.syncBannerText}>
+                          <Info className="w-4 h-4" />
+                          <span>{captureSyncNote}</span>
+                        </span>
+                      </div>
+                    )}
                   </div>
 
-                  <div className="space-y-1">
-                    <label htmlFor="ps-min-reviews" className="text-xs text-white/60">Mínimo de avaliações no Google</label>
-                    <Input id="ps-min-reviews" type="number" min={0} step={1} max={2147483647}
-                      value={minReviews} onChange={(e) => { setMinReviews(e.target.value); setMinReviewsError(false); }}
-                      aria-invalid={minReviewsError}
-                      aria-describedby={`ps-min-reviews-help${minReviewsError ? " ps-min-reviews-error" : ""}`} />
-                    <p id="ps-min-reviews-help" className="text-[11px] text-white/50">{MIN_REVIEWS_HELP}</p>
-                    {minReviewsError && <p id="ps-min-reviews-error" role="alert" className="text-xs text-red-400">{MIN_REVIEWS_ERROR}</p>}
-                  </div>
-
-                  {/* Tempo no Google (Desde o ano até data atual) & Qualificação */}
-                  <div className="rounded-lg border border-white/10 bg-black/20 p-3 space-y-2.5">
-                    <div className="flex items-center justify-between gap-2 flex-wrap">
-                      <span className="text-xs font-semibold text-white/80 flex items-center gap-1.5">
-                        <Clock className="w-3.5 h-3.5 text-primary" />
-                        Está no Google desde (filtro por ano)
-                      </span>
-                      <div className="flex flex-wrap gap-1">
+                  <div className={styles.subGroup}>
+                    <div className={styles.groupHeader}>
+                      <Clock className="w-4 h-4" />
+                      <div>
+                        <h4 className={styles.groupTitle}>Reputação e tempo no Google Maps</h4>
+                        <p className={styles.groupDesc}>Defina quantidade mínima/máxima de avaliações, nota média e ano no Google. Use 0 para desativar.</p>
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <label htmlFor="ps-min-reviews">Mínimo de avaliações no Google</label>
+                      <Input id="ps-min-reviews" type="number" min={0} step={1} max={2147483647}
+                        value={minReviews} onChange={(e) => { setMinReviews(e.target.value); setMinReviewsError(false); }}
+                        aria-invalid={minReviewsError}
+                        aria-describedby={`ps-min-reviews-help${minReviewsError ? " ps-min-reviews-error" : ""}`} />
+                      <p id="ps-min-reviews-help" className={styles.optionDesc}>{MIN_REVIEWS_HELP}</p>
+                      {minReviewsError && <p id="ps-min-reviews-error" role="alert" className="text-xs text-[#fda4af]">{MIN_REVIEWS_ERROR}</p>}
+                    </div>
+                    <div className="space-y-2 pt-1">
+                      <span className={styles.optionTitle}>Está no Google desde (atalho por ano)</span>
+                      <div className={styles.segmentedPills}>
                         {[
                           { label: "Qualquer ano", from: "0", to: "0" },
                           { label: "Desde 2019 até hoje", from: "2019", to: String(new Date().getFullYear()) },
@@ -1325,27 +1505,22 @@ export default function ProspeccaoSitesPage() {
                           <button
                             key={preset.label}
                             type="button"
+                            data-active={googleYearFrom === preset.from && googleYearTo === preset.to ? "true" : undefined}
                             onClick={() => {
                               setGoogleYearFrom(preset.from);
                               setGoogleYearTo(preset.to);
                               setExtraFiltersError("");
                             }}
-                            className={cn(
-                              "text-[10px] px-2 py-0.5 rounded border transition-colors cursor-pointer",
-                              googleYearFrom === preset.from && googleYearTo === preset.to
-                                ? "bg-primary/20 border-primary/50 text-white font-medium"
-                                : "bg-black/40 border-white/10 text-white/60 hover:text-white",
-                            )}
+                            className={styles.pillChoice}
                           >
                             {preset.label}
                           </button>
                         ))}
                       </div>
                     </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
                       <div>
-                        <label htmlFor="ps-google-year-from" className="text-xs text-white/60">No Google desde (ano)</label>
+                        <label htmlFor="ps-google-year-from">No Google desde (ano)</label>
                         <Input
                           id="ps-google-year-from"
                           type="number"
@@ -1358,7 +1533,7 @@ export default function ProspeccaoSitesPage() {
                         />
                       </div>
                       <div>
-                        <label htmlFor="ps-google-year-to" className="text-xs text-white/60">Até o ano (0 = atual)</label>
+                        <label htmlFor="ps-google-year-to">Até o ano (0 = atual)</label>
                         <Input
                           id="ps-google-year-to"
                           type="number"
@@ -1371,7 +1546,7 @@ export default function ProspeccaoSitesPage() {
                         />
                       </div>
                       <div>
-                        <label htmlFor="ps-max-reviews" className="text-xs text-white/60">Máximo de avaliações</label>
+                        <label htmlFor="ps-max-reviews">Máximo de avaliações</label>
                         <Input
                           id="ps-max-reviews"
                           type="number"
@@ -1383,7 +1558,7 @@ export default function ProspeccaoSitesPage() {
                         />
                       </div>
                       <div>
-                        <label htmlFor="ps-min-rating" className="text-xs text-white/60">Nota mínima (0 a 5)</label>
+                        <label htmlFor="ps-min-rating">Nota mínima (0 a 5)</label>
                         <Input
                           id="ps-min-rating"
                           type="number"
@@ -1395,7 +1570,7 @@ export default function ProspeccaoSitesPage() {
                         />
                       </div>
                       <div>
-                        <label htmlFor="ps-max-rating" className="text-xs text-white/60">Nota máxima (0 a 5)</label>
+                        <label htmlFor="ps-max-rating">Nota máxima (0 a 5)</label>
                         <Input
                           id="ps-max-rating"
                           type="number"
@@ -1407,206 +1582,221 @@ export default function ProspeccaoSitesPage() {
                         />
                       </div>
                     </div>
-                    <p className="text-[11px] text-white/50">
-                      Filtra empresas pelo ano em que estão no Google Maps (ex.: desde 2019 até {new Date().getFullYear()}), limite de avaliações e nota. Use 0 para desativar.
-                    </p>
-                    {extraFiltersError && <p role="alert" className="text-xs text-red-400">{extraFiltersError}</p>}
+                    {extraFiltersError && <p role="alert" className="text-xs text-[#fda4af]">{extraFiltersError}</p>}
                   </div>
 
-                  <div className="space-y-1">
-                    <label htmlFor="ps-filter-with-instagram" className="flex items-center justify-between gap-2 p-2 rounded-lg hover:bg-white/5 cursor-pointer">
-                      <span className="text-sm text-white/90 select-none flex-1">Somente com Instagram</span>
-                      <input id="ps-filter-with-instagram" type="checkbox" checked={filterWithInstagram}
-                        onChange={(e) => setFilterWithInstagram(e.target.checked)}
-                        aria-describedby="ps-filter-with-instagram-help"
-                        className="w-4 h-4 accent-primary cursor-pointer" />
-                    </label>
-                    <p id="ps-filter-with-instagram-help" className="text-[11px] text-white/50">{INSTAGRAM_FILTER_HELP}</p>
+                  <div className={styles.subGroup}>
+                    <div className={styles.groupHeader}>
+                      <Globe className="w-4 h-4" />
+                      <div>
+                        <h4 className={styles.groupTitle}>Presença digital e saúde do site</h4>
+                        <p className={styles.groupDesc}>Separa automaticamente sites reais de links do Instagram/iFood/Linktree e detecta falhas técnicas ou falta de versão celular.</p>
+                      </div>
+                    </div>
+                    <div className={styles.optionList}>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="ps-audit-site" className={styles.optionTitle}>Auditar saúde do site (quebrado, SSL vencido, erro 500 ou fraco)</label>
+                          <p id="ps-audit-site-help" className={styles.optionDesc}>Protegido contra falso positivo Cloudflare; gera nota técnica e diagnóstico comercial.</p>
+                        </div>
+                        <Switch id="ps-audit-site" aria-describedby="ps-audit-site-help" checked={auditSiteHealth} onCheckedChange={(v) => applyCaptureFilterSync({ type: "auditSiteHealth", value: v })} />
+                      </div>
+                      <div className="py-2 space-y-2 border-t border-[#263028]">
+                        <div>
+                          <span className={styles.optionTitle}>Filtro por saúde do site:</span>
+                          <p className={styles.optionDesc}>Escolher um critério de qualidade ativa a auditoria do site automaticamente.</p>
+                        </div>
+                        <div className={styles.segmentedPills} role="radiogroup" aria-label="Filtro por saúde do site na captura">
+                          {SITE_FILTER_MODE_OPTIONS.map((opt) => {
+                            const active = siteFilterMode === opt.value;
+                            return (
+                              <button
+                                key={opt.value}
+                                type="button"
+                                role="radio"
+                                aria-checked={active}
+                                onClick={() => applyCaptureFilterSync({ type: "siteFilterMode", value: opt.value })}
+                                className={styles.pillChoice}
+                              >
+                                {opt.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="ps-only-no-site" className={styles.optionTitle}>Capturar somente leads sem site</label>
+                          <p id="ps-only-no-site-help" className={styles.optionDesc}>Exige campo Website vazio no Maps e desliga auditoria HTTP.</p>
+                        </div>
+                        <input
+                          id="ps-only-no-site"
+                          type="checkbox"
+                          aria-describedby="ps-only-no-site-help"
+                          checked={filterWithWebsite}
+                          onChange={(e) => applyCaptureFilterSync({ type: "filterWithWebsite", value: e.target.checked })}
+                          className={styles.toggleInput}
+                        />
+                      </div>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="ps-filter-with-instagram" className={styles.optionTitle}>Somente com Instagram</label>
+                          <p id="ps-filter-with-instagram-help" className={styles.optionDesc}>{INSTAGRAM_FILTER_HELP}</p>
+                        </div>
+                        <input id="ps-filter-with-instagram" type="checkbox" checked={filterWithInstagram}
+                          onChange={(e) => setFilterWithInstagram(e.target.checked)}
+                          aria-describedby="ps-filter-with-instagram-help"
+                          className={styles.toggleInput} />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className={styles.subGroup}>
+                    <div className={styles.groupHeader}>
+                      <ShieldCheck className="w-4 h-4" />
+                      <div>
+                        <h4 className={styles.groupTitle}>Contato, CNPJ e sócio decisor</h4>
+                        <p className={styles.groupDesc}>Higienize telefones, valide WhatsApp na Evolution e consulte dados gratuitos da Receita Federal.</p>
+                      </div>
+                    </div>
+                    <div className={styles.optionList}>
+                      {[
+                        { id: "ps-filter-empty", label: "Remover leads sem telefone", desc: "Descarta empresas sem número de contato.", value: filterEmpty, set: setFilterEmpty },
+                        { id: "ps-filter-dups", label: "Remover telefones duplicados", desc: "Evita duplicidade de números na base.", value: filterDuplicates, set: setFilterDuplicates },
+                        { id: "ps-filter-landlines", label: "Remover telefones fixos", desc: "Ignora fixos comuns (mantém fixos com WhatsApp Business ativo se a validação estiver ligada).", value: filterLandlines, set: setFilterLandlines },
+                      ].map((f) => (
+                        <div key={f.label} className={styles.optionRow}>
+                          <div className={styles.optionCopy}>
+                            <label htmlFor={f.id} className={styles.optionTitle}>{f.label}</label>
+                            <p id={`${f.id}-help`} className={styles.optionDesc}>{f.desc}</p>
+                          </div>
+                          <input id={f.id} type="checkbox" aria-describedby={`${f.id}-help`} checked={f.value} onChange={(e) => f.set(e.target.checked)} className={styles.toggleInput} />
+                        </div>
+                      ))}
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="ps-validate-wa" className={styles.optionTitle}>Validar WhatsApp ativo na Evolution (recupera fixos Business)</label>
+                          <p id="ps-validate-wa-help" className={styles.optionDesc}>Confirma no chip conectado se o telefone realmente recebe WhatsApp.</p>
+                        </div>
+                        <Switch id="ps-validate-wa" aria-describedby="ps-validate-wa-help" checked={validateWhatsApp} onCheckedChange={(v) => applyCaptureFilterSync({ type: "validateWhatsApp", value: v })} />
+                      </div>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="ps-filter-closed" className={styles.optionTitle}>Descartar empresas fechadas ou CNPJ baixado/inapto</label>
+                          <p id="ps-filter-closed-help" className={styles.optionDesc}>Rejeita empresas encerradas no Maps ou inativas na Receita Federal.</p>
+                        </div>
+                        <Switch id="ps-filter-closed" aria-describedby="ps-filter-closed-help" checked={filterClosedBusinesses} onCheckedChange={setFilterClosedBusinesses} />
+                      </div>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="ps-exclude-franchises" className={styles.optionTitle}>Ignorar grandes redes e franquias</label>
+                          <p id="ps-exclude-franchises-help" className={styles.optionDesc}>Descarta redes conhecidas e S/A para focar decisores locais.</p>
+                        </div>
+                        <Switch id="ps-exclude-franchises" aria-label="Ignorar grandes redes e franquias" aria-describedby="ps-exclude-franchises-help" checked={excludeFranchises} onCheckedChange={setExcludeFranchises} />
+                      </div>
+                      <div className="py-2.5 border-t border-[#263028]">
+                        <div className="flex items-start justify-between gap-4">
+                          <div className={styles.optionCopy}>
+                            <label htmlFor="ps-enrich-cnpj" className={styles.optionTitle}>Enriquecer CNPJ e Sócio Decisor grátis (Receita + RDAP)</label>
+                            <p id="ps-enrich-cnpj-help" className={styles.optionDesc}>Consulta gratuita em cascata (BrasilAPI → OpenCNPJ → MinhaReceita).</p>
+                          </div>
+                          <Switch id="ps-enrich-cnpj" aria-describedby="ps-enrich-cnpj-help" checked={enrichCnpj} onCheckedChange={(v) => applyCaptureFilterSync({ type: "enrichCnpj", value: v })} />
+                        </div>
+                        {enrichCnpj && (
+                          <div className={styles.nestedPanel}>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
+                              <div className="flex items-center justify-between gap-3">
+                                <label htmlFor="ps-exclude-mei" className={styles.optionTitle}>Ignorar MEI (focar ME, EPP e Ltda)</label>
+                                <input id="ps-exclude-mei" type="checkbox" checked={excludeMei} onChange={(e) => applyCaptureFilterSync({ type: "excludeMei", value: e.target.checked })} className={styles.toggleInput} />
+                              </div>
+                              <div className="flex items-center justify-between gap-3">
+                                <label htmlFor="ps-min-capital" className={styles.optionTitle}>Capital mínimo (R$)</label>
+                                <Input id="ps-min-capital" type="number" min={0} step={1000} value={minCapitalSocial} onChange={(e) => { applyCaptureFilterSync({ type: "minCapitalSocial", value: e.target.value }); }} className="w-28" />
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="ps-partner-phone" className={styles.optionTitle}>Priorizar WhatsApp oculto do site / celular do sócio</label>
+                          <p id="ps-partner-phone-help" className={styles.optionDesc}>Usa links WhatsApp do site ou telefone direto do administrador quando disponível.</p>
+                        </div>
+                        <Switch id="ps-partner-phone" aria-describedby="ps-partner-phone-help" checked={prioritizePartnerPhone} onCheckedChange={(v) => applyCaptureFilterSync({ type: "prioritizePartnerPhone", value: v })} />
+                      </div>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="ps-hunt-partner" className={styles.optionTitle}>Modo Direto no Dono</label>
+                          <p id="ps-hunt-partner-help" className={styles.optionDesc}>9º dígito Anatel + WhatsApp Pessoal do sócio vs Recepção.</p>
+                        </div>
+                        <Switch id="ps-hunt-partner" aria-label="Modo Direto no Dono" aria-describedby="ps-hunt-partner-help" checked={huntPartnerDirectPhone} onCheckedChange={(v) => applyCaptureFilterSync({ type: "huntPartnerDirectPhone", value: v })} />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className={styles.subGroup}>
+                    <div className={styles.groupHeader}>
+                      <Zap className="w-4 h-4" />
+                      <div>
+                        <h4 className={styles.groupTitle}>Velocidade e alcance da busca</h4>
+                        <p className={styles.groupDesc}>Controle economia de memória na VPS e subdivisão por bairros em cidades grandes.</p>
+                      </div>
+                    </div>
+                    <div className={styles.optionList}>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="ps-turbo-mode" className={styles.optionTitle}>Modo Turbo VPS (alta velocidade e economia de RAM)</label>
+                          <p id="ps-turbo-mode-help" className={styles.optionDesc}>Reutiliza aba, bloqueia mídia pesada e pula duplicados via cache em RAM.</p>
+                        </div>
+                        <Switch id="ps-turbo-mode" aria-describedby="ps-turbo-mode-help" checked={turboMode} onCheckedChange={(v) => applyCaptureFilterSync({ type: "turboMode", value: v })} />
+                      </div>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="ps-expand-neighborhoods" className={styles.optionTitle}>Busca profunda por bairros</label>
+                          <p id="ps-expand-neighborhoods-help" className={styles.optionDesc}>Subdivide cidades em bairros para furar o teto de 120 leads.</p>
+                        </div>
+                        <Switch id="ps-expand-neighborhoods" aria-label="Busca profunda por bairros" aria-describedby="ps-expand-neighborhoods-help" checked={expandNeighborhoods} onCheckedChange={setExpandNeighborhoods} />
+                      </div>
+                    </div>
                   </div>
 
                   <details className={styles.advancedOptions}>
                     <summary><Bot className="size-4" /> Avaliações completas e análise com IA <ChevronRight className="size-4" /></summary>
                     <div className="flex items-center justify-between gap-3">
                       <label htmlFor="ps-capture-all-reviews">Capturar todas as avaliações</label>
-                      <Switch id="ps-capture-all-reviews" checked={captureAllReviews} onCheckedChange={setCaptureAllReviews} />
+                      <Switch id="ps-capture-all-reviews" checked={captureAllReviews} onCheckedChange={(v) => applyCaptureFilterSync({ type: "captureAllReviews", value: v })} />
                     </div>
                     <p>Salva os comentários disponíveis no Google Maps. Esta opção pode aumentar o tempo de captura.</p>
-                  {/* Resumo de avaliações com IA (reviews-ai) */}
-                  <div className={styles.optionSection}>
-                    <div className="flex items-center justify-between gap-2">
-                      <label htmlFor="ps-reviews-ai" className="text-xs font-semibold text-white/70 cursor-pointer">Resumir avaliações com IA</label>
-                      <Switch id="ps-reviews-ai" checked={reviewsAiEnabled} onCheckedChange={(v) => { setReviewsAiEnabled(v); if (v) setCaptureAllReviews(true); }} />
+                    <div className={styles.optionSection}>
+                      <div className="flex items-center justify-between gap-2">
+                        <label htmlFor="ps-reviews-ai" className={styles.optionTitle}>Resumir avaliações com IA</label>
+                        <Switch id="ps-reviews-ai" checked={reviewsAiEnabled} onCheckedChange={(v) => applyCaptureFilterSync({ type: "reviewsAiEnabled", value: v })} />
+                      </div>
+                      <p className={styles.optionDesc}>
+                        Ativa a captura de comentários e gera um resumo por lead. Use <code>{"{{resumo_avaliacoes}}"}</code> para incluir o resultado na mensagem.
+                      </p>
+                      {reviewsAiEnabled && (
+                        <div className={styles.nestedPanel}>
+                          <div>
+                            <label>Modelo de IA</label>
+                            <select aria-label="Modelo de IA para avaliações" value={reviewsAiModel} onChange={(e) => setReviewsAiModel(e.target.value)} className="w-full mt-1 px-3 py-2 rounded-lg text-sm">
+                              {loadingAiModels && <option value="">Carregando…</option>}
+                              {!loadingAiModels && aiModels.length === 0 && <option value="">(sem modelos — admin precisa configurar API key)</option>}
+                              <ModelOptions models={aiModels as any} />
+                            </select>
+                          </div>
+                          <div>
+                            <label>Prompt (vazio = padrão: ELOGIOS / RECLAMAÇÕES / GANCHO / NOTA GERAL)</label>
+                            <Textarea aria-label="Instruções para resumir avaliações" value={reviewsAiPrompt} onChange={(e) => setReviewsAiPrompt(e.target.value)} rows={3}
+                              placeholder="Ex: Resuma em tom de vendas, focando dores que um site profissional resolveria…" />
+                          </div>
+                          <Button onClick={runReviewsAi} disabled={reviewsAiRunning} size="sm" className="w-full">
+                            {reviewsAiRunning ? "Analisando…" : `Analisar avaliações (${selected.size > 0 ? selected.size : leads.length} lead${selected.size > 0 ? " selecionado" : ""})`}
+                          </Button>
+                        </div>
+                      )}
                     </div>
-                    <p className="text-[11px] text-white/50">
-                      Ativa a captura de comentários e gera um resumo por lead. Use <code>{"{{resumo_avaliacoes}}"}</code> para incluir o resultado na mensagem.
-                    </p>
-                    {reviewsAiEnabled && (
-                      <>
-                        <div>
-                          <label className="text-xs text-white/60">Modelo de IA</label>
-                          <select aria-label="Modelo de IA para avaliações" value={reviewsAiModel} onChange={(e) => setReviewsAiModel(e.target.value)} className="w-full mt-1 px-3 py-2 rounded-lg bg-black/40 border border-white/10 text-sm">
-                            {loadingAiModels && <option value="">Carregando…</option>}
-                            {!loadingAiModels && aiModels.length === 0 && <option value="">(sem modelos — admin precisa configurar API key)</option>}
-                            <ModelOptions models={aiModels as any} />
-                          </select>
-                        </div>
-                        <div>
-                          <label className="text-xs text-white/60">Prompt (vazio = padrão: ELOGIOS / RECLAMAÇÕES / GANCHO / NOTA GERAL)</label>
-                          <Textarea aria-label="Instruções para resumir avaliações" value={reviewsAiPrompt} onChange={(e) => setReviewsAiPrompt(e.target.value)} rows={3}
-                            placeholder="Ex: Resuma em tom de vendas, focando dores que um site profissional resolveria…"
-                            className="bg-black/40 border-white/10 font-mono text-xs" />
-                        </div>
-                        <Button onClick={runReviewsAi} disabled={reviewsAiRunning} size="sm" className="w-full">
-                          {reviewsAiRunning ? "Analisando…" : `Analisar avaliações (${selected.size > 0 ? selected.size : leads.length} lead${selected.size > 0 ? " selecionado" : ""})`}
-                        </Button>
-                      </>
-                    )}
-                  </div>
                   </details>
-
-                  {[
-                    { label: "Remover leads sem telefone", value: filterEmpty, set: setFilterEmpty },
-                    { label: "Remover telefones duplicados", value: filterDuplicates, set: setFilterDuplicates },
-                    { label: "Remover telefones fixos", value: filterLandlines, set: setFilterLandlines },
-                  ].map((f) => (
-                    <label key={f.label} className={styles.checkboxRow}>
-                      <span>{f.label}</span>
-                      <input type="checkbox" checked={f.value} onChange={(e) => f.set(e.target.checked)} />
-                    </label>
-                  ))}
-
-                  <label className={styles.checkboxRow}>
-                    <span>Capturar somente leads sem site</span>
-                    <input
-                      type="checkbox"
-                      checked={filterWithWebsite}
-                      onChange={(e) => {
-                        const checked = e.target.checked;
-                        setFilterWithWebsite(checked);
-                        setSiteFilterMode(prev => checked ? "no_site" : (prev === "no_site" ? "any" : prev));
-                      }}
-                    />
-                  </label>
-
-                  {/* Modo Turbo VPS, Saúde do Site & Decisor (Custo Zero) */}
-                  <div className="rounded-lg border border-cyan-500/25 bg-cyan-500/[0.04] p-3 space-y-2.5">
-                    <div className="flex items-center gap-1.5 text-xs font-semibold text-cyan-200">
-                      <Zap className="w-3.5 h-3.5 text-cyan-400" />
-                      Modo Turbo VPS, Saúde do Site &amp; Decisor (Custo Zero)
-                    </div>
-
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <div>
-                          <label htmlFor="ps-turbo-mode" className="text-xs text-white/90 cursor-pointer block">Modo Turbo VPS (alta velocidade e economia de RAM)</label>
-                          <span className="text-[10px] text-white/45">Reutiliza aba, bloqueia mídia pesada e pula duplicados via cache em RAM.</span>
-                        </div>
-                        <Switch id="ps-turbo-mode" checked={turboMode} onCheckedChange={setTurboMode} />
-                      </div>
-
-                      <div className="flex items-center justify-between gap-2">
-                        <div>
-                          <label htmlFor="ps-filter-closed" className="text-xs text-white/90 cursor-pointer block">Descartar empresas fechadas ou CNPJ baixado/inapto</label>
-                          <span className="text-[10px] text-white/45">Rejeita empresas encerradas no Maps ou inativas na Receita Federal.</span>
-                        </div>
-                        <Switch id="ps-filter-closed" checked={filterClosedBusinesses} onCheckedChange={setFilterClosedBusinesses} />
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between gap-2">
-                          <div>
-                            <label htmlFor="ps-audit-site" className="text-xs text-white/90 cursor-pointer block">Auditar saúde do site (quebrado, SSL vencido, erro 500 ou fraco)</label>
-                            <span className="text-[10px] text-white/45">Protegido contra falso positivo Cloudflare; gera diagnóstico comercial.</span>
-                          </div>
-                          <Switch id="ps-audit-site" checked={auditSiteHealth} onCheckedChange={setAuditSiteHealth} />
-                        </div>
-                        <div className="space-y-1">
-                          <span className="text-[11px] text-white/60 block">Filtro por saúde do site:</span>
-                          <div className="flex flex-wrap gap-1" role="radiogroup" aria-label="Filtro por saúde do site na captura">
-                            {SITE_FILTER_MODE_OPTIONS.map((opt) => {
-                              const active = siteFilterMode === opt.value;
-                              return (
-                                <button
-                                  key={opt.value}
-                                  type="button"
-                                  role="radio"
-                                  aria-checked={active}
-                                  onClick={() => {
-                                    setSiteFilterMode(opt.value);
-                                    setFilterWithWebsite(opt.value === "no_site");
-                                  }}
-                                  className={cn(
-                                    "text-[10px] px-2 py-1 rounded border transition-colors cursor-pointer",
-                                    active
-                                      ? "bg-primary/20 border-primary/50 text-white font-medium"
-                                      : "bg-black/40 border-white/10 text-white/60 hover:text-white",
-                                  )}
-                                >
-                                  {opt.label}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between gap-2">
-                          <div>
-                            <label htmlFor="ps-enrich-cnpj" className="text-xs text-white/90 cursor-pointer block">Enriquecer CNPJ e Sócio Decisor grátis (Receita + RDAP)</label>
-                            <span className="text-[10px] text-white/45">Consulta gratuita em cascata (BrasilAPI → OpenCNPJ → MinhaReceita).</span>
-                          </div>
-                          <Switch id="ps-enrich-cnpj" checked={enrichCnpj} onCheckedChange={setEnrichCnpj} />
-                        </div>
-                        {enrichCnpj && (
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 p-2 rounded bg-black/30 border border-white/10">
-                            <label htmlFor="ps-exclude-mei" className="flex items-center justify-between gap-2 text-xs text-white/80 cursor-pointer">
-                              <span>Ignorar MEI (focar ME, EPP e Ltda)</span>
-                              <input id="ps-exclude-mei" type="checkbox" checked={excludeMei} onChange={(e) => setExcludeMei(e.target.checked)} className="w-4 h-4 accent-primary cursor-pointer" />
-                            </label>
-                            <div className="flex items-center justify-between gap-2">
-                              <label htmlFor="ps-min-capital" className="text-xs text-white/60">Capital mínimo (R$)</label>
-                              <Input id="ps-min-capital" type="number" min={0} step={1000} value={minCapitalSocial} onChange={(e) => { setMinCapitalSocial(e.target.value); setExtraFiltersError(""); }} className="w-28 h-8 text-xs" />
-                            </div>
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="flex items-center justify-between gap-2">
-                        <label htmlFor="ps-partner-phone" className="text-xs text-white/90 cursor-pointer">Priorizar WhatsApp oculto do site / celular do sócio</label>
-                        <Switch id="ps-partner-phone" checked={prioritizePartnerPhone} onCheckedChange={setPrioritizePartnerPhone} />
-                      </div>
-
-                      <div className="flex items-center justify-between gap-2">
-                        <label htmlFor="ps-validate-wa" className="text-xs text-white/90 cursor-pointer">Validar WhatsApp ativo na Evolution (recupera fixos Business)</label>
-                        <Switch id="ps-validate-wa" checked={validateWhatsApp} onCheckedChange={setValidateWhatsApp} />
-                      </div>
-
-                      <div className="flex items-center justify-between gap-2">
-                        <div>
-                          <label htmlFor="ps-hunt-partner" className="text-xs text-white/90 cursor-pointer block">Modo Direto no Dono</label>
-                          <span className="text-[10px] text-white/45">9º dígito Anatel + WhatsApp Pessoal do sócio vs Recepção</span>
-                        </div>
-                        <Switch id="ps-hunt-partner" aria-label="Modo Direto no Dono" checked={huntPartnerDirectPhone} onCheckedChange={setHuntPartnerDirectPhone} />
-                      </div>
-
-                      <div className="flex items-center justify-between gap-2">
-                        <div>
-                          <label htmlFor="ps-exclude-franchises" className="text-xs text-white/90 cursor-pointer block">Ignorar grandes redes e franquias</label>
-                          <span className="text-[10px] text-white/45">Descarta redes conhecidas e S/A para focar decisores locais</span>
-                        </div>
-                        <Switch id="ps-exclude-franchises" aria-label="Ignorar grandes redes e franquias" checked={excludeFranchises} onCheckedChange={setExcludeFranchises} />
-                      </div>
-
-                      <div className="flex items-center justify-between gap-2">
-                        <div>
-                          <label htmlFor="ps-expand-neighborhoods" className="text-xs text-white/90 cursor-pointer block">Busca profunda por bairros</label>
-                          <span className="text-[10px] text-white/45">Subdivide cidades em bairros para furar o teto de 120 leads</span>
-                        </div>
-                        <Switch id="ps-expand-neighborhoods" aria-label="Busca profunda por bairros" checked={expandNeighborhoods} onCheckedChange={setExpandNeighborhoods} />
-                      </div>
-                    </div>
-                  </div>
                 </div>
 
                 <div className={styles.captureLimit}>
@@ -1653,23 +1843,23 @@ export default function ProspeccaoSitesPage() {
 
             {/* Resultado do resumo de avaliações com IA */}
             {reviewsAiResults && (
-              <Card className="border-cyan-500/20 bg-white/[0.02]">
-                <CardContent className="p-3 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <div className="text-xs font-bold uppercase tracking-wider text-cyan-300/80">
-                      Resumo de avaliações (IA) · {reviewsAiResults.filter((r) => r.ok).length}/{reviewsAiResults.length} ok
+              <Card>
+                <CardContent className="p-4 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-xs font-semibold text-[#c5f0d8]">
+                      Resumo de avaliações (IA) · {reviewsAiResults.filter((r) => r.ok).length}/{reviewsAiResults.length} concluídos
                     </div>
-                    <button type="button" onClick={() => setReviewsAiResults(null)} className="text-white/40 hover:text-white text-xs">fechar ✕</button>
+                    <button type="button" onClick={() => setReviewsAiResults(null)} className="text-[#9cab9f] hover:text-[#edf2ee] text-xs cursor-pointer">fechar ✕</button>
                   </div>
                   {reviewsAiResults.map((r) => (
-                    <div key={r.lead_id} className={`rounded-lg border p-2 text-xs ${r.ok ? "border-white/10 bg-black/30" : "border-red-500/30 bg-red-500/5"}`}>
+                    <div key={r.lead_id} className={cn("rounded-lg border p-3 text-xs", r.ok ? "border-[#303a32] bg-[#141a16]" : "border-[#663030] bg-[#2d1a1a]")}>
                       <div className="flex items-center gap-2 mb-1">
-                        <span className="font-bold text-white/80">{r.nome_negocio || `Lead #${r.lead_id}`}</span>
-                        {r.cached && <span className="px-1.5 py-0.5 rounded bg-white/10 text-white/50 text-[9px]">CACHE</span>}
+                        <span className="font-semibold text-[#edf2ee]">{r.nome_negocio || `Lead #${r.lead_id}`}</span>
+                        {r.cached && <span className="px-2 py-0.5 rounded bg-[#1b241e] border border-[#334338] text-[#a5b1a8] text-xs">Cache</span>}
                       </div>
                       {r.ok
-                        ? <pre className="whitespace-pre-wrap font-sans text-white/70 leading-relaxed">{r.resumo}</pre>
-                        : <span className="text-red-300/80">Erro: {r.error}</span>}
+                        ? <pre className="whitespace-pre-wrap font-sans text-[#dce7df] leading-relaxed">{r.resumo}</pre>
+                        : <span className="text-[#fca5a5]">Erro: {r.error}</span>}
                     </div>
                   ))}
                 </CardContent>
@@ -1678,10 +1868,10 @@ export default function ProspeccaoSitesPage() {
 
             {/* Log panel */}
             {logs.length > 0 && (
-              <Card className="border-white/10 bg-black/40">
-                <CardContent className="p-3">
-                  <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-white/50 mb-2">
-                    <Terminal className="w-3.5 h-3.5" /> Log
+              <Card>
+                <CardContent className="p-4">
+                  <div className="flex items-center gap-2 text-xs font-semibold text-[#c4d4c9] mb-2">
+                    <Terminal className="w-3.5 h-3.5 text-[#6ee7b7]" /> Histórico de execução
                   </div>
                   <div className="space-y-1 text-xs font-mono max-h-64 overflow-y-auto custom-scrollbar">
                     {logs.map((l, i) => (
@@ -1866,44 +2056,44 @@ export default function ProspeccaoSitesPage() {
                                 </a>
                               </div>
                               {(l.enrichment || l.owner_name) && (
-                                <div className="flex flex-wrap gap-1 mt-1 font-normal">
+                                <div className="flex flex-wrap gap-1.5 mt-1 font-normal">
                                   {l.enrichment?.qualificationScore != null && (
-                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-cyan-300 border-cyan-500/30 bg-cyan-500/10">
+                                    <Badge variant="outline" className="text-xs px-2 py-0 text-[#c5f0d8] border-[#355844] bg-[#18281f]">
                                       Score {l.enrichment.qualificationScore}
                                     </Badge>
                                   )}
                                   {(l.enrichment?.primeiroNomeSocio || l.enrichment?.socioDecisor || l.owner_name) && (
-                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-emerald-300 border-emerald-500/30 bg-emerald-500/10">
+                                    <Badge variant="outline" className="text-xs px-2 py-0 text-[#c5f0d8] border-[#355844] bg-[#18281f]">
                                       Sócio: {l.enrichment?.primeiroNomeSocio || l.enrichment?.socioDecisor || l.owner_name}
                                     </Badge>
                                   )}
                                   {l.enrichment?.porte && (
-                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-white/70 border-white/15">
+                                    <Badge variant="outline" className="text-xs px-2 py-0 text-[#dce7df] border-[#334338] bg-[#1b241e]">
                                       {l.enrichment.porte}
                                     </Badge>
                                   )}
                                   {(l.enrichment?.whatsappChannelType === "socio_direto" || l.enrichment?.whatsappChannelType === "provavel_socio") && (
-                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-emerald-200 border-emerald-400/40 bg-emerald-500/15">
+                                    <Badge variant="outline" className="text-xs px-2 py-0 text-[#c5f0d8] border-[#355844] bg-[#18281f]">
                                       Direto Sócio
                                     </Badge>
                                   )}
                                   {l.enrichment?.whatsappChannelType === "recepcao_comercial" && (
-                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-amber-200 border-amber-400/40 bg-amber-500/10">
+                                    <Badge variant="outline" className="text-xs px-2 py-0 text-[#fde68a] border-[#614d23] bg-[#2c2516]">
                                       Recepção
                                     </Badge>
                                   )}
                                   {l.enrichment?.hasPaidTrafficTag && (
-                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-fuchsia-200 border-fuchsia-400/40 bg-fuchsia-500/10" title={l.enrichment.trafficTags?.join(", ") || "Investe em tráfego pago"}>
+                                    <Badge variant="outline" className="text-xs px-2 py-0 text-[#dce7df] border-[#334338] bg-[#1b241e]" title={l.enrichment.trafficTags?.join(", ") || "Investe em tráfego pago"}>
                                       Ads
                                     </Badge>
                                   )}
                                   {l.enrichment?.managementTools && l.enrichment.managementTools.length > 0 && (
-                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-sky-200 border-sky-400/40 bg-sky-500/10" title={l.enrichment.managementTools.join(", ")}>
+                                    <Badge variant="outline" className="text-xs px-2 py-0 text-[#dce7df] border-[#334338] bg-[#1b241e]" title={l.enrichment.managementTools.join(", ")}>
                                       Sistemas: {l.enrichment.managementTools.slice(0, 2).join(", ")}
                                     </Badge>
                                   )}
                                   {l.enrichment?.abandonedCopyrightYear && (
-                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-orange-200 border-orange-400/40 bg-orange-500/10" title={`Rodapé desatualizado (${l.enrichment.abandonedCopyrightYear})`}>
+                                    <Badge variant="outline" className="text-xs px-2 py-0 text-[#dce7df] border-[#334338] bg-[#1b241e]" title={`Rodapé desatualizado (${l.enrichment.abandonedCopyrightYear})`}>
                                       © {l.enrichment.abandonedCopyrightYear}
                                     </Badge>
                                   )}
@@ -1911,64 +2101,64 @@ export default function ProspeccaoSitesPage() {
                               )}
                             </td>
                             <td className="p-2">{l.ramo_negocio || "—"}</td>
-                            <td className="p-2 font-mono text-green-300">{l.telefone || l.remoteJid.split("@")[0]}</td>
+                            <td className="p-2 font-mono text-[#a5f3cf]">{l.telefone || l.remoteJid.split("@")[0]}</td>
                             <td className="p-2">
                               {l.rating && (
                                 <span className="inline-flex items-center gap-1">
-                                  <Star className="w-3 h-3 text-amber-400 fill-amber-400" />{l.rating}
+                                  <Star className="w-3 h-3 text-[#eab308] fill-[#eab308]" />{l.rating}
                                 </span>
                               )}
                             </td>
                             <td className="p-2 font-bold">
                               <span className="inline-flex items-center gap-1">
-                                <TrendingUp className="w-3 h-3 text-blue-400" />{parseInt(l.reviews || "0", 10).toLocaleString("pt-BR")}
+                                <TrendingUp className="w-3 h-3 text-[#9ce9bc]" />{parseInt(l.reviews || "0", 10).toLocaleString("pt-BR")}
                               </span>
                               {l.year_established && (
-                                <span className="block text-[10px] font-medium text-emerald-400/90 mt-0.5">
+                                <span className="block text-xs font-medium text-[#9ce9bc] mt-0.5">
                                   Desde {l.year_established}
                                 </span>
                               )}
                             </td>
                             <td className="p-2">
                               {l.enrichment?.siteHealth === "broken_site" ? (
-                                <Badge variant="outline" className="text-red-300 border-red-500/40 bg-red-500/10" title={l.enrichment.siteDiagnostico || "Site fora do ar ou quebrado"}>
+                                <Badge variant="outline" className="text-[#fca5a5] border-[#663030] bg-[#2d1a1a]" title={l.enrichment.siteDiagnostico || "Site fora do ar ou quebrado"}>
                                   Quebrado
                                 </Badge>
                               ) : l.enrichment?.siteHealth === "weak_site" ? (
-                                <Badge variant="outline" className="text-amber-300 border-amber-500/40 bg-amber-500/10" title={l.enrichment.siteDiagnostico || "Site fraco / sem SSL"}>
+                                <Badge variant="outline" className="text-[#fde68a] border-[#614d23] bg-[#2c2516]" title={l.enrichment.siteDiagnostico || "Site fraco / sem SSL"}>
                                   Fraco
                                 </Badge>
                               ) : hasW ? (
-                                <Badge variant="outline" className="text-green-400 border-green-500/30">
+                                <Badge variant="outline" className="text-[#dce7df] border-[#334338] bg-[#1b241e]">
                                   <Link2 className="w-3 h-3 mr-1" />tem
                                 </Badge>
                               ) : (
-                                <Badge variant="outline" className="text-red-400 border-red-500/30">
+                                <Badge variant="outline" className="text-[#fca5a5] border-[#663030] bg-[#2d1a1a]">
                                   <Link2Off className="w-3 h-3 mr-1" />sem
                                 </Badge>
                               )}
                             </td>
                             <td className="p-2">
                               {(l.primeiro_contato_source === "disparo" || disparoJids.has(l.remoteJid)) ? (
-                                <Badge variant="outline" className="text-cyan-400 border-cyan-500/30 bg-cyan-500/5" title={l.primeiro_contato_at ? `Disparado em ${new Date(l.primeiro_contato_at).toLocaleDateString("pt-BR")}` : "Já recebeu disparo"}>
+                                <Badge variant="outline" className="text-[#dce7df] border-[#334338] bg-[#1b241e]" title={l.primeiro_contato_at ? `Disparado em ${new Date(l.primeiro_contato_at).toLocaleDateString("pt-BR")}` : "Já recebeu disparo"}>
                                   <Send className="w-3 h-3 mr-1" />Enviado
                                 </Badge>
                               ) : (
-                                <Badge variant="outline" className="text-emerald-400/60 border-emerald-500/20">
+                                <Badge variant="outline" className="text-[#dce7df] border-[#334338] bg-[#1b241e]">
                                   <Clock className="w-3 h-3 mr-1" />Pendente
                                 </Badge>
                               )}
                             </td>
                             <td className="p-2">
                               {l.previa_status === "REUNIAO_AGENDADA" ? (
-                                <Badge variant="outline" className="text-purple-300 border-purple-500/40 bg-purple-500/10 gap-1" title={l.reuniao_horario_confirmado ? `Reunião: ${l.reuniao_horario_confirmado}` : "Reunião agendada"}>
-                                  <CheckCircle2 className="w-3 h-3 text-purple-400" />
+                                <Badge variant="outline" className="text-[#c5f0d8] border-[#355844] bg-[#18281f] gap-1" title={l.reuniao_horario_confirmado ? `Reunião: ${l.reuniao_horario_confirmado}` : "Reunião agendada"}>
+                                  <CheckCircle2 className="w-3 h-3 text-[#6ee7b7]" />
                                   Reunião Marcada
                                 </Badge>
                               ) : l.previa_status === "PREVIA_PRONTA" && l.link_previa ? (
                                 <a href={l.link_previa} target="_blank" rel="noopener noreferrer" title={`Nota QA: ${l.previa_qa_score || 85}/100`}>
-                                  <Badge variant="outline" className="text-emerald-300 border-emerald-500/40 bg-emerald-500/10 hover:bg-emerald-500/20 gap-1 transition-colors">
-                                    <Globe className="w-3 h-3 text-emerald-400" />
+                                  <Badge variant="outline" className="text-[#c5f0d8] border-[#355844] bg-[#18281f] hover:bg-[#243d30] gap-1 transition-colors">
+                                    <Globe className="w-3 h-3 text-[#6ee7b7]" />
                                     Ver Site {l.previa_qa_score ? `(${l.previa_qa_score})` : ""}
                                     <ExternalLink className="w-2.5 h-2.5 opacity-70" />
                                   </Badge>
@@ -2066,50 +2256,76 @@ export default function ProspeccaoSitesPage() {
               </CardContent></Card>
             ) : (
               <>
-                <Card className="border-white/10 bg-white/[0.02]"><CardContent className="p-3 space-y-2">
-                  <div className="text-xs font-bold uppercase tracking-wider text-white/50">Template</div>
-                  <div className="space-y-1.5">
-                    <p className="text-[9px] uppercase font-bold text-white/40">Variáveis disponíveis (clica pra inserir):</p>
-                    <div className="flex flex-wrap gap-1.5">
-                      {[
-                        { key: "saudacao",          label: "Saudação",      hint: "Bom dia / Boa tarde / Boa noite" },
-                        { key: "nome",              label: "Nome",          hint: "Push name do WhatsApp (fallback empresa)" },
-                        { key: "nome_empresa",      label: "Empresa",       hint: "leads_extraidos.nome_negocio" },
-                        { key: "primeiro_nome",     label: "1ª palavra",    hint: "Primeira palavra do nome empresa" },
-                        { key: "ramo",              label: "Ramo",          hint: "leads_extraidos.ramo_negocio" },
-                        { key: "categoria",         label: "Categoria",     hint: "Categoria Google Maps" },
-                        { key: "endereco",          label: "Endereço",      hint: "Endereço completo" },
-                        { key: "website",           label: "Website",       hint: "Site do lead" },
-                        { key: "avaliacao",         label: "Avaliação",     hint: "Nota Google (1-5)" },
-                        { key: "reviews",           label: "Reviews",       hint: "Qtd. de reviews" },
-                        { key: "resumo_avaliacoes", label: "Resumo aval.",  hint: "Resumo IA das avaliações do Google (reviews-ai)" },
-                        { key: "telefone",          label: "Telefone",      hint: "Número limpo" },
-                        { key: "vendedor",          label: "Vendedor",      hint: "Nome do vendedor preenchido abaixo" },
-                        { key: "primeiro_nome_socio", label: "1º Nome Sócio", hint: "Primeiro nome do sócio-administrador" },
-                        { key: "nome_socio",        label: "Sócio Decisor", hint: "Nome completo do sócio-administrador (Receita)" },
-                        { key: "diagnostico_site",  label: "Diagnóstico Site", hint: "Diagnóstico técnico do site" },
-                        { key: "porte_receita",     label: "Porte Receita", hint: "MEI / ME / EPP / Ltda" },
-                        { key: "anos_empresa",      label: "Anos CNPJ",     hint: "Idade da empresa em anos" },
-                        { key: "abertura_inteligente", label: "Abertura Inteligente", hint: "Abordagem adaptada para Sócio Direto vs Recepção" },
-                        { key: "empresa_curta",     label: "Empresa Curta", hint: "Nome limpo sem LTDA/EPP/cidade" },
-                        { key: "servico_principal", label: "Serviço Principal", hint: "Especialidade principal sem ruído" },
-                        { key: "canal_whatsapp",    label: "Canal WhatsApp", hint: "WhatsApp direto do sócio ou Recepção" },
-                      ].map(v => (
-                        <button
-                          key={v.key} type="button" title={v.hint}
-                          onClick={() => setTemplate((template || "") + `{{${v.key}}}`)}
-                          className="px-2 py-1 rounded-md bg-cyan-500/10 border border-cyan-500/30 hover:bg-cyan-500/20 text-[10px] cursor-pointer flex items-center gap-1"
-                        >
-                          <span className="font-bold text-cyan-100">{v.label}</span>
-                          <code className="text-[9px] font-mono text-cyan-300/70">{`{{${v.key}}}`}</code>
-                        </button>
-                      ))}
+                <Card><CardContent className="p-4 space-y-4">
+                  <div className={styles.groupHeader}>
+                    <div>
+                      <h4 className={styles.groupTitle}>Mensagem-base da campanha</h4>
+                      <p className={styles.groupDesc}>Clique em qualquer variável abaixo para inserir no texto automaticamente.</p>
                     </div>
                   </div>
-                  <Textarea aria-label="Mensagem-base da campanha" value={template} onChange={(e) => setTemplate(e.target.value)} rows={5} className="text-sm font-mono bg-black/40 border-white/10" />
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-white/50">Vendedor:</span>
-                    <Input aria-label="Nome do vendedor" value={vendedor} onChange={(e) => setVendedor(e.target.value)} className="w-48" />
+                  <div className={styles.varCategoryBox}>
+                    {[
+                      {
+                        cat: "Empresa e contato",
+                        vars: [
+                          { key: "saudacao", label: "Saudação", hint: "Bom dia / Boa tarde / Boa noite" },
+                          { key: "nome", label: "Nome", hint: "Push name do WhatsApp (fallback empresa)" },
+                          { key: "nome_empresa", label: "Empresa", hint: "leads_extraidos.nome_negocio" },
+                          { key: "empresa_curta", label: "Empresa Curta", hint: "Nome limpo sem LTDA/EPP/cidade" },
+                          { key: "primeiro_nome", label: "1ª palavra", hint: "Primeira palavra do nome empresa" },
+                          { key: "ramo", label: "Ramo", hint: "leads_extraidos.ramo_negocio" },
+                          { key: "categoria", label: "Categoria", hint: "Categoria Google Maps" },
+                          { key: "servico_principal", label: "Serviço Principal", hint: "Especialidade principal sem ruído" },
+                          { key: "endereco", label: "Endereço", hint: "Endereço completo" },
+                          { key: "telefone", label: "Telefone", hint: "Número limpo" },
+                          { key: "vendedor", label: "Vendedor", hint: "Nome do vendedor preenchido abaixo" },
+                        ],
+                      },
+                      {
+                        cat: "Site e reputação no Google",
+                        vars: [
+                          { key: "website", label: "Website", hint: "Site do lead" },
+                          { key: "avaliacao", label: "Avaliação", hint: "Nota Google (1-5)" },
+                          { key: "reviews", label: "Reviews", hint: "Qtd. de reviews" },
+                          { key: "resumo_avaliacoes", label: "Resumo aval.", hint: "Resumo IA das avaliações do Google (reviews-ai)" },
+                          { key: "diagnostico_site", label: "Diagnóstico Site", hint: "Diagnóstico técnico do site" },
+                        ],
+                      },
+                      {
+                        cat: "Dados do CNPJ e sócio decisor",
+                        vars: [
+                          { key: "primeiro_nome_socio", label: "1º Nome Sócio", hint: "Primeiro nome do sócio-administrador" },
+                          { key: "nome_socio", label: "Sócio Decisor", hint: "Nome completo do sócio-administrador (Receita)" },
+                          { key: "porte_receita", label: "Porte Receita", hint: "MEI / ME / EPP / Ltda" },
+                          { key: "anos_empresa", label: "Anos CNPJ", hint: "Idade da empresa em anos" },
+                          { key: "abertura_inteligente", label: "Abertura Inteligente", hint: "Abordagem adaptada para Sócio Direto vs Recepção" },
+                          { key: "canal_whatsapp", label: "Canal WhatsApp", hint: "WhatsApp direto do sócio ou Recepção" },
+                        ],
+                      },
+                    ].map((group) => (
+                      <div key={group.cat} className={styles.varCategoryRow}>
+                        <span className={styles.varCategoryTitle}>{group.cat}</span>
+                        <div className="flex flex-wrap gap-1.5">
+                          {group.vars.map((v) => (
+                            <button
+                              key={v.key}
+                              type="button"
+                              title={v.hint}
+                              onClick={() => setTemplate((template || "") + `{{${v.key}}}`)}
+                              className={styles.varChip}
+                            >
+                              <span className="font-medium text-[#edf2ee]">{v.label}</span>
+                              <code>{`{{${v.key}}}`}</code>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <Textarea aria-label="Mensagem-base da campanha" value={template} onChange={(e) => setTemplate(e.target.value)} rows={5} className="text-sm font-mono" />
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <span className="text-xs text-[#a5b1a8]">Vendedor:</span>
+                    <Input aria-label="Nome do vendedor" value={vendedor} onChange={(e) => setVendedor(e.target.value)} className="w-52" />
                   </div>
                 </CardContent></Card>
 
@@ -2234,60 +2450,73 @@ export default function ProspeccaoSitesPage() {
                     <Input aria-label="Hora final dos envios" type="number" value={endHour} onChange={(e) => setEndHour(Number(e.target.value))} min={0} max={23} /></div>
                 </div>
 
-                <div className={styles.optionSection}>
-                  <div className="flex items-center justify-between gap-3">
+                <div className={styles.subGroup}>
+                  <div className={styles.groupHeader}>
+                    <Bot className="w-4 h-4" />
                     <div>
-                      <div className="text-xs font-bold uppercase tracking-wider text-white/50">Reescrever cada mensagem com IA</div>
-                      <div className="text-xs text-white/40">Personaliza e varia o texto por lead pra reduzir banimento (igual Automação).</div>
+                      <h4 className={styles.groupTitle}>Personalização e proteção anti-banimento</h4>
+                      <p className={styles.groupDesc}>Defina se cada lead receberá variação com IA, mensagens picotadas ou proteção comercial.</p>
                     </div>
-                    <Switch aria-label="Reescrever cada mensagem com IA" checked={personalizeWithAi} onCheckedChange={setPersonalizeWithAi} />
                   </div>
-                  {personalizeWithAi && (
-                    <>
-                      <div>
-                        <label className="text-xs text-white/60">Modelo de IA</label>
-                        <select aria-label="Modelo de IA para mensagens" value={aiModel} onChange={(e) => setAiModel(e.target.value)} className="w-full mt-1 px-3 py-2 rounded-lg bg-black/40 border border-white/10 text-sm">
-                          {loadingAiModels && <option value="">Carregando…</option>}
-                          {!loadingAiModels && aiModels.length === 0 && <option value="">(sem modelos — admin precisa configurar API key)</option>}
-                          <ModelOptions models={aiModels as any} />
-                        </select>
+                  <div className={styles.optionList}>
+                    <div className="py-2">
+                      <div className="flex items-start justify-between gap-4">
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="ps-disparo-ai" className={styles.optionTitle}>Reescrever cada mensagem com IA</label>
+                          <p className={styles.optionDesc}>Personaliza e varia o texto por lead para reduzir banimento (igual à Automação).</p>
+                        </div>
+                        <Switch id="ps-disparo-ai" aria-label="Reescrever cada mensagem com IA" checked={personalizeWithAi} onCheckedChange={(v) => applyDisparoFilterSync({ type: "personalizeWithAi", value: v })} />
                       </div>
-                      <div>
-                        <label className="text-xs text-white/60">Prompt de reescrita</label>
-                        <Textarea aria-label="Instruções para reescrever mensagens" value={aiPrompt} onChange={(e) => setAiPrompt(e.target.value)} rows={4} placeholder="Ex: Reescreva a mensagem a seguir de forma natural, variação conversacional, mantenha os dados do lead mas evite linguagem padrão. Não use emojis." />
+                      {personalizeWithAi && (
+                        <div className={styles.nestedPanel}>
+                          <div>
+                            <label>Modelo de IA</label>
+                            <select aria-label="Modelo de IA para mensagens" value={aiModel} onChange={(e) => setAiModel(e.target.value)} className="w-full mt-1 px-3 py-2 rounded-lg text-sm">
+                              {loadingAiModels && <option value="">Carregando…</option>}
+                              {!loadingAiModels && aiModels.length === 0 && <option value="">(sem modelos — admin precisa configurar API key)</option>}
+                              <ModelOptions models={aiModels as any} />
+                            </select>
+                          </div>
+                          <div>
+                            <label>Prompt de reescrita</label>
+                            <Textarea aria-label="Instruções para reescrever mensagens" value={aiPrompt} onChange={(e) => setAiPrompt(e.target.value)} rows={4} placeholder="Ex: Reescreva a mensagem a seguir de forma natural, variação conversacional, mantenha os dados do lead mas evite linguagem padrão. Não use emojis." />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className={styles.optionRow}>
+                      <div className={styles.optionCopy}>
+                        <label htmlFor="ps-disparo-humanize" className={styles.optionTitle}>Humanizar Mensagens (Picotar)</label>
+                        <p className={styles.optionDesc}>Divide a mensagem em partes menores e simula tempo de digitação entre elas.</p>
                       </div>
-                    </>
+                      <Switch id="ps-disparo-humanize" aria-label="Humanizar mensagens" checked={humanizeMessages} onCheckedChange={setHumanizeMessages} />
+                    </div>
+
+                    <div className={styles.optionRow}>
+                      <div className={styles.optionCopy}>
+                        <label htmlFor="ps-disparo-mixer" className={styles.optionTitle}>Misturador Anti-Ban (Variação de Abordagem)</label>
+                        <p className={styles.optionDesc}>Alterna variações naturais de saudação e limpa sufixos do Maps no nome da empresa.</p>
+                      </div>
+                      <Switch id="ps-disparo-mixer" aria-label="Misturador Anti-Ban" checked={antibanMixer} onCheckedChange={(v) => applyDisparoFilterSync({ type: "antibanMixer", value: v })} />
+                    </div>
+
+                    <div className={styles.optionRow}>
+                      <div className={styles.optionCopy}>
+                        <label htmlFor="ps-disparo-weekend" className={styles.optionTitle}>Modo Comercial B2B (Proteção Fim de Semana)</label>
+                        <p className={styles.optionDesc}>Pausa disparos frios aos domingos e reduz o ritmo pela metade aos sábados.</p>
+                      </div>
+                      <Switch id="ps-disparo-weekend" aria-label="Modo Comercial B2B" checked={weekendGuard} onCheckedChange={setWeekendGuard} />
+                    </div>
+                  </div>
+                  {disparoSyncNote && (
+                    <div role="status" className={styles.syncBanner}>
+                      <span className={styles.syncBannerText}>
+                        <Info className="w-4 h-4" />
+                        <span>{disparoSyncNote}</span>
+                      </span>
+                    </div>
                   )}
-                </div>
-
-                <div className={styles.optionSection}>
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-xs font-bold uppercase tracking-wider text-white/50">Humanizar Mensagens (Picotar)</div>
-                      <div className="text-xs text-white/40">Divide a mensagem em várias partes e simula tempo de digitação entre elas (igual ao Agente de IA).</div>
-                    </div>
-                    <Switch aria-label="Humanizar mensagens" checked={humanizeMessages} onCheckedChange={setHumanizeMessages} />
-                  </div>
-                </div>
-
-                <div className={styles.optionSection}>
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-xs font-bold uppercase tracking-wider text-white/50">Misturador Anti-Ban (Variação de Abordagem)</div>
-                      <div className="text-xs text-white/40">Alterna automaticamente a estrutura da saudação e limpa sufixos do Google Maps no nome da empresa, mantendo o mesmo sentido sem repetir o mesmo texto.</div>
-                    </div>
-                    <Switch aria-label="Misturador Anti-Ban" checked={antibanMixer} onCheckedChange={setAntibanMixer} />
-                  </div>
-                </div>
-
-                <div className={styles.optionSection}>
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-xs font-bold uppercase tracking-wider text-white/50">Modo Comercial B2B (Proteção Fim de Semana)</div>
-                      <div className="text-xs text-white/40">Pausa disparos frios aos domingos e reduz o ritmo pela metade aos sábados para evitar denúncias de empresas fora do expediente.</div>
-                    </div>
-                    <Switch aria-label="Modo Comercial B2B" checked={weekendGuard} onCheckedChange={setWeekendGuard} />
-                  </div>
                 </div>
                 <div className="text-xs text-white/50">
                   <Globe className="w-3.5 h-3.5 inline mr-1" /> {selected.size} leads selecionados
@@ -2338,23 +2567,24 @@ export default function ProspeccaoSitesPage() {
                             jitter {c.min_interval_seconds}-{c.max_interval_seconds}s
                           </div>
                         </div>
-                        <Badge variant="outline" className={
-                          c.status === "running" ? "text-green-400 border-green-500/30" :
-                          c.status === "paused" ? "text-amber-400 border-amber-500/30" :
-                          c.status === "done" ? "text-blue-400 border-blue-500/30" :
-                          "text-white/50"
-                        }>{({ draft: "Rascunho", running: "Em execução", paused: "Pausada", done: "Concluída", cancelled: "Cancelada", stopped: "Interrompida", error: "Erro" } as Record<string, string>)[c.status] || c.status}</Badge>
+                        <Badge variant="outline" className={cn(
+                          "text-xs font-medium",
+                          c.status === "running" ? "bg-[#243d30] text-[#a5f3cf] border-[#4e7c62]" :
+                          c.status === "paused" ? "bg-[#2c2516] text-[#fde68a] border-[#614d23]" :
+                          c.status === "done" ? "bg-[#18281f] text-[#c5f0d8] border-[#355844]" :
+                          "bg-[#141a16] text-[#b5c4b9] border-[#303a32]"
+                        )}>{({ draft: "Rascunho", running: "Em execução", paused: "Pausada", done: "Concluída", cancelled: "Cancelada", stopped: "Interrompida", error: "Erro" } as Record<string, string>)[c.status] || c.status}</Badge>
                       </div>
 
-                      <div className="grid grid-cols-4 gap-2 text-xs">
-                        <div className="bg-black/30 p-2 rounded"><div className="text-white/40">Alvos</div><div className="text-white font-bold">{c.total_targets}</div></div>
-                        <div className="bg-black/30 p-2 rounded"><div className="text-green-400/60">Enviados</div><div className="text-green-400 font-bold">{c.sent_count}</div></div>
-                        <div className="bg-black/30 p-2 rounded"><div className="text-red-400/60">Falhas</div><div className="text-red-400 font-bold">{c.failed_count}</div></div>
-                        <div className="bg-black/30 p-2 rounded"><div className="text-amber-400/60">Pulados</div><div className="text-amber-400 font-bold">{c.skipped_count || 0}</div></div>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                        <div className="bg-[#141a16] border border-[#2b362e] p-2.5 rounded-lg"><div className="text-[#a5b1a8]">Alvos</div><div className="text-[#edf2ee] font-semibold mt-0.5">{c.total_targets}</div></div>
+                        <div className="bg-[#141a16] border border-[#2b362e] p-2.5 rounded-lg"><div className="text-[#9ce9bc]">Enviados</div><div className="text-[#a5f3cf] font-semibold mt-0.5">{c.sent_count}</div></div>
+                        <div className="bg-[#141a16] border border-[#2b362e] p-2.5 rounded-lg"><div className="text-[#fca5a5]">Falhas</div><div className="text-[#fecaca] font-semibold mt-0.5">{c.failed_count}</div></div>
+                        <div className="bg-[#141a16] border border-[#2b362e] p-2.5 rounded-lg"><div className="text-[#fde68a]">Pulados</div><div className="text-[#fef3c7] font-semibold mt-0.5">{c.skipped_count || 0}</div></div>
                       </div>
 
-                      <div className="w-full h-1.5 bg-black/40 rounded-full overflow-hidden">
-                        <div className="h-full bg-primary transition-all" style={{ width: `${pct}%` }} />
+                      <div className="w-full h-1.5 bg-[#141a16] rounded-full overflow-hidden">
+                        <div className="h-full bg-[#6ee7b7] transition-all" style={{ width: `${pct}%` }} />
                       </div>
 
                       {/* Countdown timer + live log */}
@@ -2363,18 +2593,18 @@ export default function ProspeccaoSitesPage() {
                           <CountdownCard cd={countdowns[c.id]} />
 
                           {latestLogByCampaign[c.id] && (
-                            <div className="flex items-start gap-2 p-2.5 rounded-lg bg-emerald-500/5 border border-emerald-500/20">
-                              <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse mt-1.5 shrink-0" />
+                            <div className="flex items-start gap-2.5 p-3 rounded-lg bg-[#18281f] border border-[#355844]">
+                              <span className="inline-block w-2 h-2 rounded-full bg-[#6ee7b7] mt-1.5 shrink-0" />
                               <div className="min-w-0 flex-1">
-                                <p className="text-[9px] font-black uppercase tracking-widest text-emerald-400">
+                                <p className="text-xs font-medium text-[#9ce9bc]">
                                   Agora · {new Date(latestLogByCampaign[c.id].created_at).toLocaleTimeString()}
                                 </p>
                                 <p className={cn(
-                                  "text-[11px] break-words mt-0.5 whitespace-pre-wrap",
-                                  latestLogByCampaign[c.id].level === "error" ? "text-red-300"
-                                  : latestLogByCampaign[c.id].level === "warning" ? "text-yellow-300"
-                                  : latestLogByCampaign[c.id].level === "success" ? "text-emerald-200"
-                                  : "text-white/80"
+                                  "text-xs break-words mt-0.5 whitespace-pre-wrap",
+                                  latestLogByCampaign[c.id].level === "error" ? "text-[#fca5a5]"
+                                  : latestLogByCampaign[c.id].level === "warning" ? "text-[#fde68a]"
+                                  : latestLogByCampaign[c.id].level === "success" ? "text-[#c5f0d8]"
+                                  : "text-[#dce7df]"
                                 )}>{latestLogByCampaign[c.id].message}</p>
                               </div>
                             </div>
@@ -2383,10 +2613,10 @@ export default function ProspeccaoSitesPage() {
                       )}
 
                       {c.last_error && (
-                        <div className="flex items-start gap-2 p-2.5 rounded-lg bg-red-500/10 border border-red-500/30">
-                          <XCircle className="w-3.5 h-3.5 text-red-400 shrink-0 mt-0.5" />
+                        <div className="flex items-start gap-2.5 p-3 rounded-lg bg-[#2d1a1a] border border-[#663030]">
+                          <XCircle className="w-3.5 h-3.5 text-[#f87171] shrink-0 mt-0.5" />
                           <div className="min-w-0">
-                            <p className="text-[9px] font-black uppercase tracking-widest text-red-400">
+                            <p className="text-xs font-medium text-[#fca5a5]">
                               Último erro{c.last_error_at ? ` · ${new Date(c.last_error_at).toLocaleString("pt-BR")}` : ""}
                             </p>
                             <p className="text-[11px] text-red-200/90 break-words mt-0.5">{c.last_error}</p>
@@ -2459,30 +2689,30 @@ export default function ProspeccaoSitesPage() {
                         variant="ghost"
                         size="sm"
                         onClick={() => setActiveTargetsCampaignId(activeTargetsCampaignId === c.id ? null : c.id)}
-                        className="w-full justify-between h-8 bg-white/5 border border-white/5 hover:bg-white/10 text-[10px] uppercase font-black"
+                        className="w-full justify-between h-8 bg-[#141a16] border border-[#303a32] hover:bg-[#1e2720] text-xs font-medium text-[#dce7df]"
                       >
                         <span className="flex items-center gap-2">
-                          <MessageSquare className="w-3 h-3 text-cyan-300" />
+                          <MessageSquare className="w-3.5 h-3.5 text-[#9ce9bc]" />
                           {activeTargetsCampaignId === c.id ? "Ocultar mensagens" : `Ver mensagens enviadas (${c.sent_count || 0}/${c.total_targets || 0})`}
                         </span>
-                        <ChevronRight className={cn("w-3 h-3 transition-transform", activeTargetsCampaignId === c.id && "rotate-90")} />
+                        <ChevronRight className={cn("w-3.5 h-3.5 transition-transform", activeTargetsCampaignId === c.id && "rotate-90")} />
                       </Button>
 
                       {activeTargetsCampaignId === c.id && (
-                        <div className="mt-2 rounded-xl bg-black/40 border border-white/5 p-3 flex flex-col max-h-[420px]">
-                          <div className="flex items-center justify-between mb-2 border-b border-white/5 pb-2 gap-2 flex-wrap">
+                        <div className="mt-2 rounded-xl bg-[#111712] border border-[#303a32] p-3 flex flex-col max-h-[420px]">
+                          <div className="flex items-center justify-between mb-2 border-b border-[#263028] pb-2 gap-2 flex-wrap">
                             <div className="flex items-center gap-2">
-                              <span className="text-[9px] uppercase font-black text-white/40">Histórico de envios</span>
-                              {loadingTargets && <Loader2 className="w-3 h-3 animate-spin text-white/40" />}
+                              <span className="text-xs font-semibold text-[#c4d4c9]">Histórico de envios</span>
+                              {loadingTargets && <Loader2 className="w-3.5 h-3.5 animate-spin text-[#a5b1a8]" />}
                             </div>
-                            <div className="flex items-center gap-1 text-[9px] flex-wrap">
+                            <div className="flex items-center gap-1.5 text-xs flex-wrap">
                               {(["all", "sent", "failed", "pending"] as const).map(f => (
                                 <button
                                   key={f}
                                   onClick={() => setTargetsFilter(f)}
                                   className={cn(
-                                    "px-2 py-0.5 rounded-md font-black uppercase tracking-widest transition",
-                                    targetsFilter === f ? "bg-cyan-500/20 text-cyan-200 border border-cyan-500/30" : "text-white/40 hover:text-white"
+                                    "px-2.5 py-1 rounded-md font-medium transition cursor-pointer",
+                                    targetsFilter === f ? "bg-[#243d30] text-[#a5f3cf] border border-[#4e7c62]" : "text-[#a5b1a8] hover:text-[#edf2ee]"
                                   )}
                                 >
                                   {f === "all" ? `Todos (${targets.length})`
@@ -2491,28 +2721,30 @@ export default function ProspeccaoSitesPage() {
                                     : `Pendentes (${targets.filter(t => t.status === "pending").length})`}
                                 </button>
                               ))}
-                              <Button variant="ghost" size="sm" onClick={() => loadTargets(c.id)} className="h-5 px-1.5 text-[8px] bg-white/5 hover:bg-white/10 ml-1" title="Atualizar">↻</Button>
+                              <Button variant="ghost" size="sm" onClick={() => loadTargets(c.id)} className="h-7 px-2 text-xs bg-[#141a16] border border-[#303a32] hover:bg-[#1e2720] ml-1" title="Atualizar">
+                                <RefreshCw className="w-3.5 h-3.5" />
+                              </Button>
                             </div>
                           </div>
                           <div className="flex-1 overflow-y-auto custom-scrollbar pr-1 space-y-2">
                             {targets.length === 0 ? (
-                              <p className="text-white/40 italic text-center py-10 text-[11px]">Nenhum envio ainda.</p>
+                              <p className="text-[#a5b1a8] italic text-center py-10 text-xs">Nenhum envio ainda.</p>
                             ) : (
                               targets
                                 .filter(t => targetsFilter === "all" || t.status === targetsFilter)
                                 .map(t => {
                                   const phone = (t.remote_jid || "").replace("@s.whatsapp.net", "");
                                   const statusColor =
-                                    t.status === "sent" ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/10" :
-                                    t.status === "failed" ? "text-red-400 border-red-500/30 bg-red-500/10" :
-                                    t.status === "skipped" ? "text-yellow-400 border-yellow-500/30 bg-yellow-500/10" :
-                                    "text-white/40 border-white/10 bg-white/5";
+                                    t.status === "sent" ? "text-[#a5f3cf] border-[#4e7c62] bg-[#243d30]" :
+                                    t.status === "failed" ? "text-[#fca5a5] border-[#663030] bg-[#2d1a1a]" :
+                                    t.status === "skipped" ? "text-[#fde68a] border-[#614d23] bg-[#2c2516]" :
+                                    "text-[#b5c4b9] border-[#303a32] bg-[#141a16]";
                                   return (
-                                    <div key={t.id} className="rounded-lg bg-white/[0.02] border border-white/5 p-2.5 space-y-1.5">
+                                    <div key={t.id} className="rounded-lg bg-[#141a16] border border-[#2b362e] p-2.5 space-y-1.5">
                                       <div className="flex items-center justify-between gap-2 flex-wrap">
                                         <div className="min-w-0 flex-1">
-                                          <p className="text-[11px] font-bold text-white truncate">{t.nome_negocio || "(sem nome)"}</p>
-                                          <p className="text-[9px] text-white/40 font-mono">{phone}{t.ramo_negocio ? ` · ${t.ramo_negocio}` : ""}</p>
+                                          <p className="text-xs font-semibold text-[#edf2ee] truncate">{t.nome_negocio || "(sem nome)"}</p>
+                                          <p className="text-xs text-[#9cab9f] font-mono">{phone}{t.ramo_negocio ? ` · ${t.ramo_negocio}` : ""}</p>
                                         </div>
                                         <div className="flex items-center gap-2 shrink-0">
                                           {t.sent_at && <span className="text-[9px] text-white/40 font-mono">{new Date(t.sent_at).toLocaleString("pt-BR")}</span>}
@@ -2555,82 +2787,136 @@ export default function ProspeccaoSitesPage() {
 
         {/* TAB AUTOMAÇÃO */}
         {tab === "automacao" && (
-          <div className={cn(styles.automationLayout, "space-y-3")}>
-            <Card className="border-white/10 bg-white/[0.02]">
-              <CardContent className="p-4 space-y-3">
+          <div className={cn(styles.automationLayout, "space-y-4")}>
+            <Card>
+              <CardContent className="space-y-4">
                 <div className={styles.sectionHeading}>
                   <h3><Zap className="size-4" /> Nova automação</h3>
-                  <p>Defina o público, a mensagem e os retornos. Depois de criar, use Iniciar na lista de automações.</p>
+                  <p>Configure o público, a mensagem e os retornos em 4 blocos organizados. Depois de criar, clique em Iniciar na lista abaixo.</p>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label htmlFor="ps-automation-name" className="text-xs text-white/60">Nome da automação</label>
-                    <Input id="ps-automation-name" value={autoName} onChange={(e) => setAutoName(e.target.value)} placeholder="Ex: Pizzarias SP - Outubro" />
-                  </div>
-                  <div>
-                    <label className="text-xs text-white/60">Instância WhatsApp</label>
-                    <Select value={autoInstance} onValueChange={(v) => setAutoInstance(v || "")}>
-                      <SelectTrigger aria-label="Instância WhatsApp" className="w-full"><SelectValue placeholder="Selecionar…" /></SelectTrigger>
-                      <SelectContent>
-                        {instances.map((inst) => (
-                          <SelectItem key={inst.instance_name} value={inst.instance_name}>
-                            {inst.instance_name}{inst.status ? ` (${inst.status})` : ""}
-                          </SelectItem>
-                        ))}
-                        {instances.length >= 1 && (
-                          <SelectItem key={AUTO_POOL_INSTANCE} value={AUTO_POOL_INSTANCE}>
-                            ⚡ Pool Automático (alternar entre chips saudáveis)
-                          </SelectItem>
-                        )}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
+                <nav aria-label="Atalhos do formulário da automação" className={styles.quickJumpBar}>
+                  <a href="#ps-auto-id" className={styles.quickJumpLink}><Workflow className="w-3.5 h-3.5" /> 1. Identificação</a>
+                  <a href="#ps-auto-publico" className={styles.quickJumpLink}><MapPin className="w-3.5 h-3.5" /> 2. Público e filtros</a>
+                  <a href="#ps-auto-msg" className={styles.quickJumpLink}><MessageSquare className="w-3.5 h-3.5" /> 3. Mensagem e IA</a>
+                  <a href="#ps-auto-followup" className={styles.quickJumpLink}><Repeat className="w-3.5 h-3.5" /> 4. Follow-up e horário</a>
+                </nav>
 
-                <div className={styles.fieldGrid}>
-                  <div>
-                    <label htmlFor="auto-niches">Nichos (1 por linha)</label>
-                    <Textarea id="auto-niches" value={autoNiches} onChange={(e) => setAutoNiches(e.target.value)} rows={2} placeholder={"pizzaria\ndentista"} />
-                  </div>
-                  <div>
-                    <label htmlFor="auto-regions">Regiões (1 por linha)</label>
-                    <Textarea id="auto-regions" value={autoRegions} onChange={(e) => setAutoRegions(e.target.value)} rows={2} placeholder={"São Paulo SP\nCentro, Belo Horizonte MG"} />
-                  </div>
-                </div>
-
-                {/* Filtros Automáticos da Automação */}
-                <div className={styles.filterSection}>
-                  <div className="flex items-center justify-between gap-3 flex-wrap">
-                    <div className="flex items-center gap-1.5">
-                      <Filter className="w-3 h-3 text-white/60" />
-                      <label className="text-xs font-semibold text-white/60 uppercase tracking-wider">Filtros Automáticos da Captura</label>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <label htmlFor="auto-capture-all-reviews" className="text-xs text-white/60 cursor-pointer">Capturar todas as avaliações</label>
-                      <Switch id="auto-capture-all-reviews" checked={autoCaptureAllReviews || autoReviewsAi} onCheckedChange={setAutoCaptureAllReviews} />
+                {/* Bloco 1: Identificação */}
+                <section id="ps-auto-id" className={styles.chapterCard} aria-label="Identificação e conexão WhatsApp">
+                  <div className={styles.groupHeader}>
+                    <Workflow className="w-4 h-4" />
+                    <div>
+                      <h4 className={styles.groupTitle}>Identificação e conexão WhatsApp</h4>
+                      <p className={styles.groupDesc}>Defina o nome da automação, o chip de envio e quantos leads elegíveis deseja captar.</p>
                     </div>
                   </div>
-                  <p className="text-[11px] text-white/50">Configurações de filtragem que serão aplicadas durante a fase de captação de leads desta automação.</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label htmlFor="ps-automation-name">Nome da automação</label>
+                      <Input id="ps-automation-name" value={autoName} onChange={(e) => setAutoName(e.target.value)} placeholder="Ex: Pizzarias SP - Outubro" />
+                    </div>
+                    <div>
+                      <label>Instância WhatsApp</label>
+                      <Select value={autoInstance} onValueChange={(v) => setAutoInstance(v || "")}>
+                        <SelectTrigger aria-label="Instância WhatsApp" className="w-full"><SelectValue placeholder="Selecionar…" /></SelectTrigger>
+                        <SelectContent>
+                          {instances.map((inst) => (
+                            <SelectItem key={inst.instance_name} value={inst.instance_name}>
+                              {inst.instance_name}{inst.status ? ` (${inst.status})` : ""}
+                            </SelectItem>
+                          ))}
+                          {instances.length >= 1 && (
+                            <SelectItem key={AUTO_POOL_INSTANCE} value={AUTO_POOL_INSTANCE}>
+                              ⚡ Pool Automático (alternar entre chips saudáveis)
+                            </SelectItem>
+                          )}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div>
+                      <label htmlFor="ps-auto-max-leads">Máx. leads a captar</label>
+                      <Input id="ps-auto-max-leads" aria-label="Máximo de leads a captar" type="number" value={autoMaxLeads} onChange={(e) => setAutoMaxLeads(Number(e.target.value))} min={1} />
+                    </div>
+                  </div>
+                </section>
 
-                  <div className="space-y-1">
-                    <label htmlFor="auto-min-reviews" className="text-xs text-white/60">Mínimo de avaliações no Google</label>
-                    <Input id="auto-min-reviews" type="number" min={0} step={1} max={2147483647}
-                      value={autoMinReviews} onChange={(e) => { setAutoMinReviews(e.target.value); setAutoMinReviewsError(false); }}
-                      aria-invalid={autoMinReviewsError}
-                      aria-describedby={`auto-min-reviews-help${autoMinReviewsError ? " auto-min-reviews-error" : ""}`} />
-                    <p id="auto-min-reviews-help" className="text-[11px] text-white/50">{MIN_REVIEWS_HELP}</p>
-                    {autoMinReviewsError && <p id="auto-min-reviews-error" role="alert" className="text-xs text-red-400">{MIN_REVIEWS_ERROR}</p>}
+                {/* Bloco 2: Público e Filtros */}
+                <section id="ps-auto-publico" className={styles.chapterCard} aria-label="Público e filtros da captura">
+                  <div className={styles.groupHeader}>
+                    <MapPin className="w-4 h-4" />
+                    <div>
+                      <h4 className={styles.groupTitle}>Público e filtros de captura no Google Maps</h4>
+                      <p className={styles.groupDesc}>Informe nichos e regiões, ou escolha um perfil rápido para configurar todos os filtros automaticamente.</p>
+                    </div>
                   </div>
 
-                  {/* Tempo no Google (Desde o ano até data atual) & Qualificação da Automação */}
-                  <div className="rounded-lg border border-white/10 bg-black/20 p-3 space-y-2.5">
-                    <div className="flex items-center justify-between gap-2 flex-wrap">
-                      <span className="text-xs font-semibold text-white/80 flex items-center gap-1.5">
-                        <Clock className="w-3.5 h-3.5 text-primary" />
-                        Está no Google desde (filtro por ano)
-                      </span>
-                      <div className="flex flex-wrap gap-1">
+                  <div className={styles.fieldGrid}>
+                    <div>
+                      <label htmlFor="auto-niches">Nichos (1 por linha)</label>
+                      <Textarea id="auto-niches" value={autoNiches} onChange={(e) => setAutoNiches(e.target.value)} rows={2} placeholder={"pizzaria\ndentista"} />
+                    </div>
+                    <div>
+                      <label htmlFor="auto-regions">Regiões (1 por linha)</label>
+                      <Textarea id="auto-regions" value={autoRegions} onChange={(e) => setAutoRegions(e.target.value)} rows={2} placeholder={"São Paulo SP\nCentro, Belo Horizonte MG"} />
+                    </div>
+                  </div>
+
+                  <div className={styles.subGroupMuted}>
+                    <div className={styles.groupHeader}>
+                      <Sparkles className="w-4 h-4" />
+                      <div>
+                        <h5 className={styles.groupTitle}>Perfis rápidos</h5>
+                        <p className={styles.groupDesc}>Um clique ajusta saúde do site, CNPJ, validação WhatsApp e velocidade sem conflitos.</p>
+                      </div>
+                    </div>
+                    <div className={styles.presetGrid}>
+                      {SCRAPER_PRESET_OPTIONS.map((preset) => (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          aria-label={preset.label}
+                          onClick={() => applyAutoFilterSync({ type: "preset", preset: preset.id })}
+                          className={styles.presetCard}
+                        >
+                          {renderPresetIcon(preset.id)}
+                          <span className={styles.presetCardText}>
+                            <span className={styles.presetCardTitle}>{preset.label}</span>
+                            <span className={styles.presetCardDesc}>{preset.shortDesc}</span>
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                    {autoSyncNote && (
+                      <div role="status" className={styles.syncBanner}>
+                        <span className={styles.syncBannerText}>
+                          <Info className="w-4 h-4" />
+                          <span>{autoSyncNote}</span>
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className={styles.subGroupMuted}>
+                    <div className={styles.groupHeader}>
+                      <Clock className="w-4 h-4" />
+                      <div>
+                        <h5 className={styles.groupTitle}>Reputação e tempo no Google Maps</h5>
+                        <p className={styles.groupDesc}>Filtre empresas por avaliações, nota média e ano de presença no Google (0 desativa).</p>
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <label htmlFor="auto-min-reviews">Mínimo de avaliações no Google</label>
+                      <Input id="auto-min-reviews" type="number" min={0} step={1} max={2147483647}
+                        value={autoMinReviews} onChange={(e) => { setAutoMinReviews(e.target.value); setAutoMinReviewsError(false); }}
+                        aria-invalid={autoMinReviewsError}
+                        aria-describedby={`auto-min-reviews-help${autoMinReviewsError ? " auto-min-reviews-error" : ""}`} />
+                      <p id="auto-min-reviews-help" className={styles.optionDesc}>{MIN_REVIEWS_HELP}</p>
+                      {autoMinReviewsError && <p id="auto-min-reviews-error" role="alert" className="text-xs text-[#fda4af]">{MIN_REVIEWS_ERROR}</p>}
+                    </div>
+                    <div className="space-y-2 pt-1">
+                      <span className={styles.optionTitle}>Está no Google desde (atalho por ano)</span>
+                      <div className={styles.segmentedPills}>
                         {[
                           { label: "Qualquer ano", from: "0", to: "0" },
                           { label: "Desde 2019 até hoje", from: "2019", to: String(new Date().getFullYear()) },
@@ -2641,27 +2927,22 @@ export default function ProspeccaoSitesPage() {
                           <button
                             key={preset.label}
                             type="button"
+                            data-active={autoGoogleYearFrom === preset.from && autoGoogleYearTo === preset.to ? "true" : undefined}
                             onClick={() => {
                               setAutoGoogleYearFrom(preset.from);
                               setAutoGoogleYearTo(preset.to);
                               setAutoExtraFiltersError("");
                             }}
-                            className={cn(
-                              "text-[10px] px-2 py-0.5 rounded border transition-colors cursor-pointer",
-                              autoGoogleYearFrom === preset.from && autoGoogleYearTo === preset.to
-                                ? "bg-primary/20 border-primary/50 text-white font-medium"
-                                : "bg-black/40 border-white/10 text-white/60 hover:text-white",
-                            )}
+                            className={styles.pillChoice}
                           >
                             {preset.label}
                           </button>
                         ))}
                       </div>
                     </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
                       <div>
-                        <label htmlFor="auto-google-year-from" className="text-xs text-white/60">No Google desde (ano)</label>
+                        <label htmlFor="auto-google-year-from">No Google desde (ano)</label>
                         <Input
                           id="auto-google-year-from"
                           type="number"
@@ -2674,7 +2955,7 @@ export default function ProspeccaoSitesPage() {
                         />
                       </div>
                       <div>
-                        <label htmlFor="auto-google-year-to" className="text-xs text-white/60">Até o ano (0 = atual)</label>
+                        <label htmlFor="auto-google-year-to">Até o ano (0 = atual)</label>
                         <Input
                           id="auto-google-year-to"
                           type="number"
@@ -2687,7 +2968,7 @@ export default function ProspeccaoSitesPage() {
                         />
                       </div>
                       <div>
-                        <label htmlFor="auto-max-reviews" className="text-xs text-white/60">Máximo de avaliações</label>
+                        <label htmlFor="auto-max-reviews">Máximo de avaliações</label>
                         <Input
                           id="auto-max-reviews"
                           type="number"
@@ -2699,7 +2980,7 @@ export default function ProspeccaoSitesPage() {
                         />
                       </div>
                       <div>
-                        <label htmlFor="auto-min-rating" className="text-xs text-white/60">Nota mínima (0 a 5)</label>
+                        <label htmlFor="auto-min-rating">Nota mínima (0 a 5)</label>
                         <Input
                           id="auto-min-rating"
                           type="number"
@@ -2711,7 +2992,7 @@ export default function ProspeccaoSitesPage() {
                         />
                       </div>
                       <div>
-                        <label htmlFor="auto-max-rating" className="text-xs text-white/60">Nota máxima (0 a 5)</label>
+                        <label htmlFor="auto-max-rating">Nota máxima (0 a 5)</label>
                         <Input
                           id="auto-max-rating"
                           type="number"
@@ -2723,540 +3004,553 @@ export default function ProspeccaoSitesPage() {
                         />
                       </div>
                     </div>
-                    <p className="text-[11px] text-white/50">
-                      Filtra empresas na captura da automação pelo ano em que estão no Google Maps (ex.: desde 2019 até {new Date().getFullYear()}), limite máximo de avaliações e nota. Use 0 para desativar.
-                    </p>
-                    {autoExtraFiltersError && <p role="alert" className="text-xs text-red-400">{autoExtraFiltersError}</p>}
+                    {autoExtraFiltersError && <p role="alert" className="text-xs text-[#fda4af]">{autoExtraFiltersError}</p>}
                   </div>
 
-                  <div className="space-y-1">
-                    <label htmlFor="auto-filter-with-instagram" className="flex items-center justify-between gap-2 p-2 rounded-lg hover:bg-white/5 cursor-pointer">
-                      <span className="text-sm text-white/90 select-none flex-1">Somente com Instagram</span>
-                      <input id="auto-filter-with-instagram" type="checkbox" checked={autoFilterWithInstagram}
-                        onChange={(e) => setAutoFilterWithInstagram(e.target.checked)}
-                        aria-describedby="auto-filter-with-instagram-help"
-                        className="w-4 h-4 accent-primary cursor-pointer" />
-                    </label>
-                    <p id="auto-filter-with-instagram-help" className="text-[11px] text-white/50">{INSTAGRAM_FILTER_HELP}</p>
-                  </div>
-
-                  {[
-                    { label: "Remover leads sem telefone", value: autoFilterEmpty, set: setAutoFilterEmpty },
-                    { label: "Remover telefones duplicados", value: autoFilterDuplicates, set: setAutoFilterDuplicates },
-                    { label: "Remover telefones fixos", value: autoFilterLandlines, set: setAutoFilterLandlines },
-                  ].map((f) => (
-                    <label key={f.label} className={styles.checkboxRow}>
-                      <span>{f.label}</span>
-                      <input type="checkbox" checked={f.value} onChange={(e) => f.set(e.target.checked)} />
-                    </label>
-                  ))}
-
-                  <label className={styles.checkboxRow}>
-                    <span>Capturar somente leads sem site</span>
-                    <input
-                      type="checkbox"
-                      checked={autoFilterWithWebsite}
-                      onChange={(e) => {
-                        const checked = e.target.checked;
-                        setAutoFilterWithWebsite(checked);
-                        setAutoSiteFilterMode(prev => checked ? "no_site" : (prev === "no_site" ? "any" : prev));
-                      }}
-                    />
-                  </label>
-
-                  {/* Modo Turbo VPS, Saúde do Site & Decisor (Custo Zero) */}
-                  <div className="rounded-lg border border-cyan-500/25 bg-cyan-500/[0.04] p-3 space-y-2.5">
-                    <div className="flex items-center gap-1.5 text-xs font-semibold text-cyan-200">
-                      <Zap className="w-3.5 h-3.5 text-cyan-400" />
-                      Modo Turbo VPS, Saúde do Site &amp; Decisor (Custo Zero)
+                  <div className={styles.subGroupMuted}>
+                    <div className={styles.groupHeader}>
+                      <Globe className="w-4 h-4" />
+                      <div>
+                        <h5 className={styles.groupTitle}>Presença digital e saúde do site</h5>
+                        <p className={styles.groupDesc}>Avalie se a empresa possui site próprio saudável, site com falhas ou apenas redes sociais/plataformas terceiras.</p>
+                      </div>
                     </div>
-
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between gap-2">
+                    <div className={styles.optionList}>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="auto-audit-site" className={styles.optionTitle}>Auditar saúde do site (quebrado, SSL vencido, erro 500 ou fraco)</label>
+                          <p id="auto-audit-site-help" className={styles.optionDesc}>Protegido contra falso positivo Cloudflare; alimenta o diagnóstico técnico no template/IA.</p>
+                        </div>
+                        <Switch id="auto-audit-site" aria-describedby="auto-audit-site-help" checked={autoAuditSiteHealth} onCheckedChange={(v) => applyAutoFilterSync({ type: "auditSiteHealth", value: v })} />
+                      </div>
+                      <div className="py-2 space-y-2 border-t border-[#263028]">
                         <div>
-                          <label htmlFor="auto-turbo-mode" className="text-xs text-white/90 cursor-pointer block">Modo Turbo VPS (alta velocidade e economia de RAM)</label>
-                          <span className="text-[10px] text-white/45">Reutiliza aba, bloqueia mídia pesada e pula duplicados via cache em RAM.</span>
+                          <span className={styles.optionTitle}>Filtro por saúde do site na automação:</span>
+                          <p className={styles.optionDesc}>Opções que exigem diagnóstico ativam a auditoria automaticamente.</p>
                         </div>
-                        <Switch id="auto-turbo-mode" checked={autoTurboMode} onCheckedChange={setAutoTurboMode} />
-                      </div>
-
-                      <div className="flex items-center justify-between gap-2">
-                        <div>
-                          <label htmlFor="auto-filter-closed" className="text-xs text-white/90 cursor-pointer block">Descartar empresas fechadas ou CNPJ baixado/inapto</label>
-                          <span className="text-[10px] text-white/45">Evita disparos para empresas encerradas no Maps ou inativas na Receita Federal.</span>
-                        </div>
-                        <Switch id="auto-filter-closed" checked={autoFilterClosedBusinesses} onCheckedChange={setAutoFilterClosedBusinesses} />
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between gap-2">
-                          <div>
-                            <label htmlFor="auto-audit-site" className="text-xs text-white/90 cursor-pointer block">Auditar saúde do site (quebrado, SSL vencido, erro 500 ou fraco)</label>
-                            <span className="text-[10px] text-white/45">Protegido contra falso positivo Cloudflare; gera diagnóstico para o template/IA.</span>
-                          </div>
-                          <Switch id="auto-audit-site" checked={autoAuditSiteHealth} onCheckedChange={setAutoAuditSiteHealth} />
-                        </div>
-                        <div className="space-y-1">
-                          <span className="text-[11px] text-white/60 block">Filtro por saúde do site na automação:</span>
-                          <div className="flex flex-wrap gap-1" role="radiogroup" aria-label="Filtro por saúde do site na automação">
-                            {SITE_FILTER_MODE_OPTIONS.map((opt) => {
-                              const active = autoSiteFilterMode === opt.value;
-                              return (
-                                <button
-                                  key={opt.value}
-                                  type="button"
-                                  role="radio"
-                                  aria-checked={active}
-                                  onClick={() => {
-                                    setAutoSiteFilterMode(opt.value);
-                                    setAutoFilterWithWebsite(opt.value === "no_site");
-                                  }}
-                                  className={cn(
-                                    "text-[10px] px-2 py-1 rounded border transition-colors cursor-pointer",
-                                    active
-                                      ? "bg-primary/20 border-primary/50 text-white font-medium"
-                                      : "bg-black/40 border-white/10 text-white/60 hover:text-white",
-                                  )}
-                                >
-                                  {opt.label}
-                                </button>
-                              );
-                            })}
-                          </div>
+                        <div className={styles.segmentedPills} role="radiogroup" aria-label="Filtro por saúde do site na automação">
+                          {SITE_FILTER_MODE_OPTIONS.map((opt) => {
+                            const active = autoSiteFilterMode === opt.value;
+                            return (
+                              <button
+                                key={opt.value}
+                                type="button"
+                                role="radio"
+                                aria-checked={active}
+                                onClick={() => applyAutoFilterSync({ type: "siteFilterMode", value: opt.value })}
+                                className={styles.pillChoice}
+                              >
+                                {opt.label}
+                              </button>
+                            );
+                          })}
                         </div>
                       </div>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="auto-only-no-site" className={styles.optionTitle}>Capturar somente leads sem site</label>
+                          <p id="auto-only-no-site-help" className={styles.optionDesc}>Mantém apenas empresas sem link de site cadastrado no Google Maps.</p>
+                        </div>
+                        <input
+                          id="auto-only-no-site"
+                          type="checkbox"
+                          aria-describedby="auto-only-no-site-help"
+                          checked={autoFilterWithWebsite}
+                          onChange={(e) => applyAutoFilterSync({ type: "filterWithWebsite", value: e.target.checked })}
+                          className={styles.toggleInput}
+                        />
+                      </div>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="auto-filter-with-instagram" className={styles.optionTitle}>Somente com Instagram</label>
+                          <p id="auto-filter-with-instagram-help" className={styles.optionDesc}>{INSTAGRAM_FILTER_HELP}</p>
+                        </div>
+                        <input id="auto-filter-with-instagram" type="checkbox" checked={autoFilterWithInstagram}
+                          onChange={(e) => setAutoFilterWithInstagram(e.target.checked)}
+                          aria-describedby="auto-filter-with-instagram-help"
+                          className={styles.toggleInput} />
+                      </div>
+                    </div>
+                  </div>
 
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between gap-2">
-                          <div>
-                            <label htmlFor="auto-enrich-cnpj" className="text-xs text-white/90 cursor-pointer block">Enriquecer CNPJ e Sócio Decisor grátis (Receita + RDAP)</label>
-                            <span className="text-[10px] text-white/45">Preenche nome do sócio, CNPJ, porte e idade da empresa antes dos disparos.</span>
+                  <div className={styles.subGroupMuted}>
+                    <div className={styles.groupHeader}>
+                      <ShieldCheck className="w-4 h-4" />
+                      <div>
+                        <h5 className={styles.groupTitle}>Contato, CNPJ e sócio decisor</h5>
+                        <p className={styles.groupDesc}>Filtre telefones válidos, empresas ativas na Receita e encontre o WhatsApp direto do dono.</p>
+                      </div>
+                    </div>
+                    <div className={styles.optionList}>
+                      {[
+                        { id: "auto-filter-empty", label: "Remover leads sem telefone", desc: "Descarta empresas sem nenhum número.", value: autoFilterEmpty, set: setAutoFilterEmpty },
+                        { id: "auto-filter-dups", label: "Remover telefones duplicados", desc: "Evita abordar o mesmo telefone mais de uma vez.", value: autoFilterDuplicates, set: setAutoFilterDuplicates },
+                        { id: "auto-filter-landlines", label: "Remover telefones fixos", desc: "Remove fixos sem WhatsApp Business ativo.", value: autoFilterLandlines, set: setAutoFilterLandlines },
+                      ].map((f) => (
+                        <div key={f.label} className={styles.optionRow}>
+                          <div className={styles.optionCopy}>
+                            <label htmlFor={f.id} className={styles.optionTitle}>{f.label}</label>
+                            <p id={`${f.id}-help`} className={styles.optionDesc}>{f.desc}</p>
                           </div>
-                          <Switch id="auto-enrich-cnpj" checked={autoEnrichCnpj} onCheckedChange={setAutoEnrichCnpj} />
+                          <input id={f.id} type="checkbox" aria-describedby={`${f.id}-help`} checked={f.value} onChange={(e) => f.set(e.target.checked)} className={styles.toggleInput} />
+                        </div>
+                      ))}
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="auto-validate-wa" className={styles.optionTitle}>Validar WhatsApp ativo na Evolution (recupera fixos Business)</label>
+                          <p id="auto-validate-wa-help" className={styles.optionDesc}>Confirma no chip conectado antes de salvar o lead para disparo.</p>
+                        </div>
+                        <Switch id="auto-validate-wa" aria-describedby="auto-validate-wa-help" checked={autoValidateWhatsApp} onCheckedChange={(v) => applyAutoFilterSync({ type: "validateWhatsApp", value: v })} />
+                      </div>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="auto-filter-closed" className={styles.optionTitle}>Descartar empresas fechadas ou CNPJ baixado/inapto</label>
+                          <p id="auto-filter-closed-help" className={styles.optionDesc}>Evita disparos para empresas encerradas no Maps ou inativas na Receita Federal.</p>
+                        </div>
+                        <Switch id="auto-filter-closed" aria-describedby="auto-filter-closed-help" checked={autoFilterClosedBusinesses} onCheckedChange={setAutoFilterClosedBusinesses} />
+                      </div>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="auto-exclude-franchises" className={styles.optionTitle}>Ignorar grandes redes e franquias</label>
+                          <p id="auto-exclude-franchises-help" className={styles.optionDesc}>Descarta redes conhecidas e S/A para focar decisores locais.</p>
+                        </div>
+                        <Switch id="auto-exclude-franchises" aria-label="Ignorar grandes redes e franquias na automação" aria-describedby="auto-exclude-franchises-help" checked={autoExcludeFranchises} onCheckedChange={setAutoExcludeFranchises} />
+                      </div>
+                      <div className="py-2.5 border-t border-[#263028]">
+                        <div className="flex items-start justify-between gap-4">
+                          <div className={styles.optionCopy}>
+                            <label htmlFor="auto-enrich-cnpj" className={styles.optionTitle}>Enriquecer CNPJ e Sócio Decisor grátis (Receita + RDAP)</label>
+                            <p id="auto-enrich-cnpj-help" className={styles.optionDesc}>Preenche nome do sócio, CNPJ, porte e idade da empresa antes dos disparos.</p>
+                          </div>
+                          <Switch id="auto-enrich-cnpj" aria-describedby="auto-enrich-cnpj-help" checked={autoEnrichCnpj} onCheckedChange={(v) => applyAutoFilterSync({ type: "enrichCnpj", value: v })} />
                         </div>
                         {autoEnrichCnpj && (
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 p-2 rounded bg-black/30 border border-white/10">
-                            <label htmlFor="auto-exclude-mei" className="flex items-center justify-between gap-2 text-xs text-white/80 cursor-pointer">
-                              <span>Ignorar MEI (focar ME, EPP e Ltda)</span>
-                              <input id="auto-exclude-mei" type="checkbox" checked={autoExcludeMei} onChange={(e) => setAutoExcludeMei(e.target.checked)} className="w-4 h-4 accent-primary cursor-pointer" />
-                            </label>
-                            <div className="flex items-center justify-between gap-2">
-                              <label htmlFor="auto-min-capital" className="text-xs text-white/60">Capital mínimo (R$)</label>
-                              <Input id="auto-min-capital" type="number" min={0} step={1000} value={autoMinCapitalSocial} onChange={(e) => { setAutoMinCapitalSocial(e.target.value); setAutoExtraFiltersError(""); }} className="w-28 h-8 text-xs" />
+                          <div className={styles.nestedPanel}>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
+                              <div className="flex items-center justify-between gap-3">
+                                <label htmlFor="auto-exclude-mei" className={styles.optionTitle}>Ignorar MEI (focar ME, EPP e Ltda)</label>
+                                <input id="auto-exclude-mei" type="checkbox" checked={autoExcludeMei} onChange={(e) => applyAutoFilterSync({ type: "excludeMei", value: e.target.checked })} className={styles.toggleInput} />
+                              </div>
+                              <div className="flex items-center justify-between gap-3">
+                                <label htmlFor="auto-min-capital" className={styles.optionTitle}>Capital mínimo (R$)</label>
+                                <Input id="auto-min-capital" type="number" min={0} step={1000} value={autoMinCapitalSocial} onChange={(e) => applyAutoFilterSync({ type: "minCapitalSocial", value: e.target.value })} className="w-28" />
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="auto-partner-phone" className={styles.optionTitle}>Priorizar WhatsApp oculto do site / celular do sócio</label>
+                          <p id="auto-partner-phone-help" className={styles.optionDesc}>Dá preferência para números extraídos do site oficial ou sócio.</p>
+                        </div>
+                        <Switch id="auto-partner-phone" aria-describedby="auto-partner-phone-help" checked={autoPrioritizePartnerPhone} onCheckedChange={(v) => applyAutoFilterSync({ type: "prioritizePartnerPhone", value: v })} />
+                      </div>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="auto-hunt-partner" className={styles.optionTitle}>Modo Direto no Dono</label>
+                          <p id="auto-hunt-partner-help" className={styles.optionDesc}>9º dígito Anatel + WhatsApp Pessoal do sócio vs Recepção.</p>
+                        </div>
+                        <Switch id="auto-hunt-partner" aria-label="Modo Direto no Dono na automação" aria-describedby="auto-hunt-partner-help" checked={autoHuntPartnerDirectPhone} onCheckedChange={(v) => applyAutoFilterSync({ type: "huntPartnerDirectPhone", value: v })} />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className={styles.subGroupMuted}>
+                    <div className={styles.groupHeader}>
+                      <Zap className="w-4 h-4" />
+                      <div>
+                        <h5 className={styles.groupTitle}>Velocidade, fila inteligente e avaliações com IA</h5>
+                        <p className={styles.groupDesc}>Defina ordem de disparo por Score ICP, economia de RAM e resumo de avaliações.</p>
+                      </div>
+                    </div>
+                    <div className={styles.optionList}>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="auto-turbo-mode" className={styles.optionTitle}>Modo Turbo VPS (alta velocidade e economia de RAM)</label>
+                          <p id="auto-turbo-mode-help" className={styles.optionDesc}>Reutiliza aba, bloqueia mídia pesada e pula duplicados via cache em RAM.</p>
+                        </div>
+                        <Switch id="auto-turbo-mode" aria-describedby="auto-turbo-mode-help" checked={autoTurboMode} onCheckedChange={(v) => applyAutoFilterSync({ type: "turboMode", value: v })} />
+                      </div>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="auto-expand-neighborhoods" className={styles.optionTitle}>Busca profunda por bairros</label>
+                          <p id="auto-expand-neighborhoods-help" className={styles.optionDesc}>Subdivide cidades em bairros para furar o teto de 120 leads.</p>
+                        </div>
+                        <Switch id="auto-expand-neighborhoods" aria-label="Busca profunda por bairros na automação" aria-describedby="auto-expand-neighborhoods-help" checked={autoExpandNeighborhoods} onCheckedChange={setAutoExpandNeighborhoods} />
+                      </div>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="auto-prioritize-score" className={styles.optionTitle}>Priorizar fila por Score ICP</label>
+                          <p id="auto-prioritize-score-help" className={styles.optionDesc}>Envia primeiro para leads com maior Score ICP e contato direto do sócio.</p>
+                        </div>
+                        <Switch id="auto-prioritize-score" aria-label="Priorizar fila por Score ICP na automação" aria-describedby="auto-prioritize-score-help" checked={autoPrioritizeByScore} onCheckedChange={(v) => applyAutoFilterSync({ type: "prioritizeByScore", value: v })} />
+                      </div>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="auto-capture-all-reviews" className={styles.optionTitle}>Capturar todas as avaliações</label>
+                          <p id="auto-capture-all-reviews-help" className={styles.optionDesc}>Salva todos os comentários disponíveis no Maps (aumenta o tempo de captura e pausa o Modo Turbo).</p>
+                        </div>
+                        <Switch id="auto-capture-all-reviews" aria-describedby="auto-capture-all-reviews-help" checked={autoCaptureAllReviews} onCheckedChange={(v) => applyAutoFilterSync({ type: "captureAllReviews", value: v })} />
+                      </div>
+                      <div className="py-2.5 border-t border-[#263028]">
+                        <div className="flex items-start justify-between gap-4">
+                          <div className={styles.optionCopy}>
+                            <label htmlFor="ps-auto-reviews-ai" className={styles.optionTitle}>Resumir avaliações do Google com IA</label>
+                            <p id="ps-auto-reviews-ai-help" className={styles.optionDesc}>
+                              Gera elogios, reclamações e gancho comercial em <code>{"{{resumo_avaliacoes}}"}</code> antes do disparo. Ativa &quot;Capturar todas as avaliações&quot; automaticamente.
+                            </p>
+                          </div>
+                          <Switch id="ps-auto-reviews-ai" aria-describedby="ps-auto-reviews-ai-help" checked={autoReviewsAi} onCheckedChange={(v) => applyAutoFilterSync({ type: "reviewsAiEnabled", value: v })} />
+                        </div>
+                        {autoReviewsAi && (
+                          <div className={styles.nestedPanel}>
+                            <div>
+                              <label>Modelo de IA</label>
+                              <select
+                                aria-label="Modelo de IA para avaliações da automação"
+                                value={autoReviewsAiModel || ""}
+                                onChange={(e) => setAutoReviewsAiModel(e.target.value)}
+                                className="w-full mt-0.5 rounded-md px-2 text-xs"
+                              >
+                                {aiModels.length === 0 ? (
+                                  <option value="">{loadingAiModels ? "carregando…" : "(sem modelos — configure API key)"}</option>
+                                ) : (
+                                  <ModelOptions models={aiModels as any} />
+                                )}
+                              </select>
+                            </div>
+                            <div>
+                              <label>Prompt (vazio = padrão)</label>
+                              <Textarea aria-label="Instruções de IA para avaliações da automação" rows={2}
+                                value={autoReviewsAiPrompt}
+                                onChange={(e) => setAutoReviewsAiPrompt(e.target.value)}
+                                placeholder="Ex: Resuma as avaliações focando em dores que um site profissional resolveria…" />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                {/* Bloco 3: Mensagem inicial, ritmo e variação */}
+                <section id="ps-auto-msg" className={styles.chapterCard} aria-label="Mensagem inicial e ritmo de envio">
+                  <div className={styles.groupHeader}>
+                    <MessageSquare className="w-4 h-4" />
+                    <div>
+                      <h4 className={styles.groupTitle}>Mensagem inicial, ritmo e anti-banimento</h4>
+                      <p className={styles.groupDesc}>Monte a mensagem com variáveis dinâmicas, ajuste o ritmo humano e escolha como variar o texto.</p>
+                    </div>
+                  </div>
+
+                  <div className={styles.varCategoryBox}>
+                    {[
+                      {
+                        title: "Empresa e contato",
+                        vars: [
+                          { key: "saudacao", label: "Saudação", hint: "Bom dia / Boa tarde / Boa noite" },
+                          { key: "nome", label: "Nome", hint: "Push name do WhatsApp (fallback empresa)" },
+                          { key: "nome_empresa", label: "Empresa", hint: "leads_extraidos.nome_negocio" },
+                          { key: "empresa_curta", label: "Empresa Curta", hint: "Nome limpo sem LTDA/EPP/cidade" },
+                          { key: "primeiro_nome", label: "1ª palavra", hint: "Primeira palavra do nome empresa" },
+                          { key: "ramo", label: "Ramo", hint: "leads_extraidos.ramo_negocio" },
+                          { key: "categoria", label: "Categoria", hint: "Categoria Google Maps" },
+                          { key: "servico_principal", label: "Serviço Principal", hint: "Especialidade principal sem ruído" },
+                          { key: "endereco", label: "Endereço", hint: "Endereço completo" },
+                          { key: "website", label: "Website", hint: "Site do lead" },
+                          { key: "telefone", label: "Telefone", hint: "Número limpo" },
+                        ],
+                      },
+                      {
+                        title: "Sócio decisor, CNPJ e diagnóstico",
+                        vars: [
+                          { key: "primeiro_nome_socio", label: "1º Nome Sócio", hint: "Primeiro nome do sócio-administrador" },
+                          { key: "nome_socio", label: "Sócio Decisor", hint: "Nome completo do sócio-administrador (Receita)" },
+                          { key: "canal_whatsapp", label: "Canal WhatsApp", hint: "WhatsApp direto do sócio ou Recepção" },
+                          { key: "abertura_inteligente", label: "Abertura Inteligente", hint: "Abordagem adaptada para Sócio Direto vs Recepção" },
+                          { key: "diagnostico_site", label: "Diagnóstico Site", hint: "Diagnóstico técnico do site" },
+                          { key: "porte_receita", label: "Porte Receita", hint: "MEI / ME / EPP / Ltda" },
+                          { key: "anos_empresa", label: "Anos CNPJ", hint: "Idade da empresa em anos" },
+                        ],
+                      },
+                      {
+                        title: "Avaliações e data",
+                        vars: [
+                          { key: "avaliacao", label: "Avaliação", hint: "Nota Google (1-5)" },
+                          { key: "reviews", label: "Reviews", hint: "Qtd. de reviews" },
+                          { key: "resumo_avaliacoes", label: "Resumo aval.", hint: "Resumo IA das avaliações do Google (reviews-ai)" },
+                          { key: "data", label: "Data", hint: "DD/MM/AAAA" },
+                          { key: "hora", label: "Hora", hint: "HH:MM" },
+                        ],
+                      },
+                    ].map(cat => (
+                      <div key={cat.title} className={styles.varCategoryRow}>
+                        <span className={styles.varCategoryTitle}>{cat.title}</span>
+                        <div className="flex flex-wrap gap-1.5">
+                          {cat.vars.map(v => (
+                            <button
+                              key={v.key} type="button" title={v.hint}
+                              onClick={() => setAutoTemplate((autoTemplate || "") + `{{${v.key}}}`)}
+                              className={styles.varChip}
+                            >
+                              <span>{v.label}</span>
+                              <code>{`{{${v.key}}}`}</code>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div>
+                    <label htmlFor="ps-auto-template">Mensagem-base (template de disparo)</label>
+                    <Textarea id="ps-auto-template" aria-label="Mensagem-base da automação" value={autoTemplate} onChange={(e) => setAutoTemplate(e.target.value)} rows={3}
+                      placeholder="Ex: {{saudacao}} {{nome_empresa}}! Vi vocês no Maps…" />
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label htmlFor="ps-auto-min-sec">Intervalo mín. entre disparos (s)</label>
+                      <Input id="ps-auto-min-sec" aria-label="Intervalo mínimo entre disparos em segundos" type="number" value={autoMinSec} onChange={(e) => setAutoMinSec(Number(e.target.value))} min={5} />
+                    </div>
+                    <div>
+                      <label htmlFor="ps-auto-max-sec">Intervalo máx. entre disparos (s)</label>
+                      <Input id="ps-auto-max-sec" aria-label="Intervalo máximo entre disparos em segundos" type="number" value={autoMaxSec} onChange={(e) => setAutoMaxSec(Number(e.target.value))} min={autoMinSec} />
+                    </div>
+                  </div>
+
+                  <div className={styles.subGroupMuted}>
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className={styles.optionTitle}>Delay e Presença &quot;Digitando...&quot; (Evolution API)</span>
+                      <span className={styles.noteBadge}>
+                        {autoTypingDelayMode === "fixed" ? `Fixo: ${autoTypingDelaySeconds}s digitando` : `Aleatório: ${autoTypingDelayMinSeconds}s a ${autoTypingDelayMaxSeconds}s`}
+                      </span>
+                    </div>
+                    <p className={styles.optionDesc}>
+                      Simula digitação real antes de entregar cada mensagem para prevenir bloqueios por envios mecânicos.
+                    </p>
+                    <div className={styles.segmentedPills}>
+                      <button
+                        type="button"
+                        data-active={autoTypingDelayMode === "fixed" ? "true" : undefined}
+                        onClick={() => setAutoTypingDelayMode("fixed")}
+                        className={styles.pillChoice}
+                      >
+                        Modo Fixo
+                      </button>
+                      <button
+                        type="button"
+                        data-active={autoTypingDelayMode === "random" ? "true" : undefined}
+                        onClick={() => setAutoTypingDelayMode("random")}
+                        className={styles.pillChoice}
+                      >
+                        Modo Aleatório (Faixa Min–Máx)
+                      </button>
+                    </div>
+                    {autoTypingDelayMode === "fixed" ? (
+                      <div className="space-y-1.5 pt-1 max-w-md">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className={styles.optionDesc}>Tempo digitando por mensagem:</span>
+                          <span className={styles.noteBadge}>{autoTypingDelaySeconds}s</span>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <input
+                            type="range"
+                            min={1}
+                            max={60}
+                            value={autoTypingDelaySeconds}
+                            onChange={(e) => setAutoTypingDelaySeconds(Number(e.target.value))}
+                          />
+                          <Input
+                            type="number"
+                            min={1}
+                            max={120}
+                            value={autoTypingDelaySeconds}
+                            onChange={(e) => setAutoTypingDelaySeconds(Math.max(1, Math.min(Number(e.target.value), 120)))}
+                            className="w-20 text-center"
+                          />
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1 max-w-lg">
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between text-xs">
+                            <span className={styles.optionDesc}>Mínimo digitando:</span>
+                            <span className={styles.noteBadge}>{autoTypingDelayMinSeconds}s</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="range"
+                              min={1}
+                              max={60}
+                              value={autoTypingDelayMinSeconds}
+                              onChange={(e) => {
+                                const val = Number(e.target.value);
+                                setAutoTypingDelayMinSeconds(val);
+                                if (val > autoTypingDelayMaxSeconds) setAutoTypingDelayMaxSeconds(val);
+                              }}
+                            />
+                            <Input
+                              type="number"
+                              min={1}
+                              max={120}
+                              value={autoTypingDelayMinSeconds}
+                              onChange={(e) => {
+                                const val = Math.max(1, Math.min(Number(e.target.value), 120));
+                                setAutoTypingDelayMinSeconds(val);
+                                if (val > autoTypingDelayMaxSeconds) setAutoTypingDelayMaxSeconds(val);
+                              }}
+                              className="w-20 text-center"
+                            />
+                          </div>
+                        </div>
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between text-xs">
+                            <span className={styles.optionDesc}>Máximo digitando:</span>
+                            <span className={styles.noteBadge}>{autoTypingDelayMaxSeconds}s</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="range"
+                              min={1}
+                              max={60}
+                              value={autoTypingDelayMaxSeconds}
+                              onChange={(e) => {
+                                const val = Number(e.target.value);
+                                setAutoTypingDelayMaxSeconds(val);
+                                if (val < autoTypingDelayMinSeconds) setAutoTypingDelayMinSeconds(val);
+                              }}
+                            />
+                            <Input
+                              type="number"
+                              min={1}
+                              max={120}
+                              value={autoTypingDelayMaxSeconds}
+                              onChange={(e) => {
+                                const val = Math.max(1, Math.min(Number(e.target.value), 120));
+                                setAutoTypingDelayMaxSeconds(val);
+                                if (val < autoTypingDelayMinSeconds) setAutoTypingDelayMinSeconds(val);
+                              }}
+                              className="w-20 text-center"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className={styles.subGroupMuted}>
+                    <div className={styles.optionList}>
+                      <div className="py-2">
+                        <div className="flex items-start justify-between gap-4">
+                          <div className={styles.optionCopy}>
+                            <label htmlFor="ps-auto-personalize" className={styles.optionTitle}>Reescrever cada disparo com IA</label>
+                            <p className={styles.optionDesc}>Cada lead recebe um texto único a partir do template e dos dados captados, reduzindo risco de banimento.</p>
+                          </div>
+                          <Switch id="ps-auto-personalize" checked={autoPersonalize} onCheckedChange={(v) => applyAutoFilterSync({ type: "personalizeWithAi", value: v })} />
+                        </div>
+                        {autoPersonalize && (
+                          <div className={styles.nestedPanel}>
+                            <div>
+                              <label>Modelo de IA</label>
+                              <select
+                                aria-label="Modelo de IA da automação"
+                                value={autoAiModel || ""}
+                                onChange={(e) => setAutoAiModel(e.target.value)}
+                                className="w-full mt-0.5 rounded-md px-2 text-xs"
+                              >
+                                {aiModels.length === 0 ? (
+                                  <option value="">{loadingAiModels ? "carregando…" : "(sem modelos — configure API key em Configurações)"}</option>
+                                ) : (
+                                  <ModelOptions models={aiModels as any} />
+                                )}
+                              </select>
+                            </div>
+                            <div>
+                              <label>Prompt para a IA (como reescrever)</label>
+                              <Textarea aria-label="Instruções de IA para disparos" rows={3}
+                                value={autoAiPrompt}
+                                onChange={(e) => setAutoAiPrompt(e.target.value)}
+                                placeholder="Ex: Reescreva a mensagem-base de forma natural e única para cada cliente, mantendo o tom amigável e profissional. Não use emojis exagerados. Adapte ao ramo do negócio se for relevante. Mensagem deve ter no máximo 3 frases." />
+                              <p className={styles.optionDesc}>
+                                A IA recebe: prompt + mensagem-base + dados do lead (nome, ramo). Devolve a mensagem final enviada.
+                              </p>
                             </div>
                           </div>
                         )}
                       </div>
 
-                      <div className="flex items-center justify-between gap-2">
-                        <label htmlFor="auto-partner-phone" className="text-xs text-white/90 cursor-pointer">Priorizar WhatsApp oculto do site / celular do sócio</label>
-                        <Switch id="auto-partner-phone" checked={autoPrioritizePartnerPhone} onCheckedChange={setAutoPrioritizePartnerPhone} />
-                      </div>
-
-                      <div className="flex items-center justify-between gap-2">
-                        <label htmlFor="auto-validate-wa" className="text-xs text-white/90 cursor-pointer">Validar WhatsApp ativo na Evolution (recupera fixos Business)</label>
-                        <Switch id="auto-validate-wa" checked={autoValidateWhatsApp} onCheckedChange={setAutoValidateWhatsApp} />
-                      </div>
-
-                      <div className="flex items-center justify-between gap-2">
-                        <div>
-                          <label htmlFor="auto-hunt-partner" className="text-xs text-white/90 cursor-pointer block">Modo Direto no Dono</label>
-                          <span className="text-[10px] text-white/45">9º dígito Anatel + WhatsApp Pessoal do sócio vs Recepção</span>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="ps-auto-humanize" className={styles.optionTitle}>Humanizar disparo (picotar mensagem)</label>
+                          <p className={styles.optionDesc}>Divide a mensagem em blocos curtos com pausa de digitação entre eles (2–5s).</p>
                         </div>
-                        <Switch id="auto-hunt-partner" aria-label="Modo Direto no Dono na automação" checked={autoHuntPartnerDirectPhone} onCheckedChange={setAutoHuntPartnerDirectPhone} />
+                        <Switch id="ps-auto-humanize" checked={autoHumanize} onCheckedChange={setAutoHumanize} />
                       </div>
 
-                      <div className="flex items-center justify-between gap-2">
-                        <div>
-                          <label htmlFor="auto-exclude-franchises" className="text-xs text-white/90 cursor-pointer block">Ignorar grandes redes e franquias</label>
-                          <span className="text-[10px] text-white/45">Descarta redes conhecidas e S/A para focar decisores locais</span>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="ps-auto-mixer" className={styles.optionTitle}>Misturador Anti-Ban (Variação de Abordagem)</label>
+                          <p className={styles.optionDesc}>Alterna variações naturais de saudação sem IA paga. Desativa automaticamente se a reescrita IA estiver ligada.</p>
                         </div>
-                        <Switch id="auto-exclude-franchises" aria-label="Ignorar grandes redes e franquias na automação" checked={autoExcludeFranchises} onCheckedChange={setAutoExcludeFranchises} />
+                        <Switch id="ps-auto-mixer" aria-label="Misturador Anti-Ban na automação" checked={autoAntibanMixer} onCheckedChange={(v) => applyAutoFilterSync({ type: "antibanMixer", value: v })} />
                       </div>
 
-                      <div className="flex items-center justify-between gap-2">
-                        <div>
-                          <label htmlFor="auto-expand-neighborhoods" className="text-xs text-white/90 cursor-pointer block">Busca profunda por bairros</label>
-                          <span className="text-[10px] text-white/45">Subdivide cidades em bairros para furar o teto de 120 leads</span>
+                      <div className={styles.optionRow}>
+                        <div className={styles.optionCopy}>
+                          <label htmlFor="ps-auto-weekend" className={styles.optionTitle}>Modo Comercial B2B (Proteção Fim de Semana)</label>
+                          <p className={styles.optionDesc}>Pausa disparos frios aos domingos e reduz o teto por hora pela metade aos sábados.</p>
                         </div>
-                        <Switch id="auto-expand-neighborhoods" aria-label="Busca profunda por bairros na automação" checked={autoExpandNeighborhoods} onCheckedChange={setAutoExpandNeighborhoods} />
-                      </div>
-
-                      <div className="flex items-center justify-between gap-2">
-                        <div>
-                          <label htmlFor="auto-prioritize-score" className="text-xs text-white/90 cursor-pointer block">Priorizar fila por Score ICP</label>
-                          <span className="text-[10px] text-white/45">Envia primeiro para leads com maior Score ICP e sócio direto</span>
-                        </div>
-                        <Switch id="auto-prioritize-score" aria-label="Priorizar fila por Score ICP na automação" checked={autoPrioritizeByScore} onCheckedChange={setAutoPrioritizeByScore} />
+                        <Switch id="ps-auto-weekend" aria-label="Modo Comercial B2B na automação" checked={autoWeekendGuard} onCheckedChange={setAutoWeekendGuard} />
                       </div>
                     </div>
                   </div>
-                </div>
+                </section>
 
-                {/* Template de disparo + variáveis */}
-                <div className="space-y-1.5">
-                  <p className="text-[9px] uppercase font-bold text-white/40">Variáveis disponíveis (clica pra inserir):</p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {[
-                      { key: "saudacao",      label: "Saudação",     hint: "Bom dia / Boa tarde / Boa noite" },
-                      { key: "nome",          label: "Nome",         hint: "Push name do WhatsApp (fallback empresa)" },
-                      { key: "nome_empresa",  label: "Empresa",      hint: "leads_extraidos.nome_negocio" },
-                      { key: "primeiro_nome", label: "1ª palavra",   hint: "Primeira palavra do nome empresa" },
-                      { key: "ramo",          label: "Ramo",         hint: "leads_extraidos.ramo_negocio" },
-                      { key: "categoria",     label: "Categoria",    hint: "Categoria Google Maps" },
-                      { key: "endereco",      label: "Endereço",     hint: "Endereço completo" },
-                      { key: "website",       label: "Website",      hint: "Site do lead" },
-                      { key: "avaliacao",     label: "Avaliação",    hint: "Nota Google (1-5)" },
-                      { key: "reviews",       label: "Reviews",      hint: "Qtd. de reviews" },
-                      { key: "resumo_avaliacoes", label: "Resumo aval.", hint: "Resumo IA das avaliações do Google (reviews-ai)" },
-                      { key: "telefone",      label: "Telefone",     hint: "Número limpo" },
-                      { key: "data",          label: "Data",         hint: "DD/MM/AAAA" },
-                      { key: "hora",          label: "Hora",         hint: "HH:MM" },
-                      { key: "primeiro_nome_socio", label: "1º Nome Sócio", hint: "Primeiro nome do sócio-administrador" },
-                      { key: "nome_socio",    label: "Sócio Decisor", hint: "Nome completo do sócio-administrador (Receita)" },
-                      { key: "diagnostico_site", label: "Diagnóstico Site", hint: "Diagnóstico técnico do site" },
-                      { key: "porte_receita", label: "Porte Receita", hint: "MEI / ME / EPP / Ltda" },
-                      { key: "anos_empresa",  label: "Anos CNPJ",    hint: "Idade da empresa em anos" },
-                      { key: "abertura_inteligente", label: "Abertura Inteligente", hint: "Abordagem adaptada para Sócio Direto vs Recepção" },
-                      { key: "empresa_curta", label: "Empresa Curta", hint: "Nome limpo sem LTDA/EPP/cidade" },
-                      { key: "servico_principal", label: "Serviço Principal", hint: "Especialidade principal sem ruído" },
-                      { key: "canal_whatsapp", label: "Canal WhatsApp", hint: "WhatsApp direto do sócio ou Recepção" },
-                    ].map(v => (
-                      <button
-                        key={v.key} type="button" title={v.hint}
-                        onClick={() => setAutoTemplate((autoTemplate || "") + `{{${v.key}}}`)}
-                        className="px-2 py-1 rounded-md bg-cyan-500/10 border border-cyan-500/30 hover:bg-cyan-500/20 text-[10px] cursor-pointer flex items-center gap-1"
-                      >
-                        <span className="font-bold text-cyan-100">{v.label}</span>
-                        <code className="text-[9px] font-mono text-cyan-300/70">{`{{${v.key}}}`}</code>
-                      </button>
-                    ))}
-                  </div>
-                  <label className="text-xs text-white/60">Mensagem-base (template de disparo)</label>
-                  <Textarea aria-label="Mensagem-base da automação" value={autoTemplate} onChange={(e) => setAutoTemplate(e.target.value)} rows={3}
-                    placeholder="Ex: {{saudacao}} {{nome_empresa}}! Vi vocês no Maps…"
-                    className="bg-black/40 border-white/10 font-mono text-xs" />
-                </div>
-
-                {/* Intervalos de disparo */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div>
-                    <label className="text-xs text-white/60">Máx. leads a captar</label>
-                    <Input aria-label="Máximo de leads a captar" type="number" value={autoMaxLeads} onChange={(e) => setAutoMaxLeads(Number(e.target.value))} min={1} />
-                  </div>
-                  <div>
-                    <label className="text-xs text-white/60">Intervalo mín. entre disparos (s)</label>
-                    <Input aria-label="Intervalo mínimo entre disparos em segundos" type="number" value={autoMinSec} onChange={(e) => setAutoMinSec(Number(e.target.value))} min={5} />
-                  </div>
-                  <div>
-                    <label className="text-xs text-white/60">Intervalo máx. entre disparos (s)</label>
-                    <Input aria-label="Intervalo máximo entre disparos em segundos" type="number" value={autoMaxSec} onChange={(e) => setAutoMaxSec(Number(e.target.value))} min={autoMinSec} />
-                  </div>
-                </div>
-
-                {/* Delay & Digitando (Evolution API) — Anti-banimento */}
-                <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-3 space-y-2.5">
-                  <div className="flex items-center justify-between gap-2 flex-wrap">
-                    <span className="text-xs font-semibold text-cyan-200 flex items-center gap-1.5">
-                      <Clock className="w-3.5 h-3.5 text-cyan-400" />
-                      Delay & Presença &quot;Digitando...&quot; (Evolution API)
-                    </span>
-                    <span className="text-[10px] font-mono text-cyan-300 bg-cyan-500/10 border border-cyan-500/20 px-2 py-0.5 rounded-full">
-                      {autoTypingDelayMode === "fixed" ? `Fixo: ${autoTypingDelaySeconds}s digitando` : `Aleatório: ${autoTypingDelayMinSeconds}s a ${autoTypingDelayMaxSeconds}s`}
-                    </span>
-                  </div>
-                  <p className="text-[10px] text-white/60 leading-relaxed">
-                    A Evolution API manterá a presença <strong className="text-cyan-300">&quot;digitando...&quot;</strong> ativa no WhatsApp do lead durante esse tempo antes de entregar a mensagem. Simula presença humana autêntica e previne bloqueios no WhatsApp.
-                  </p>
-
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setAutoTypingDelayMode("fixed")}
-                      className={cn(
-                        "text-xs px-2.5 py-1 rounded-md border font-medium transition cursor-pointer",
-                        autoTypingDelayMode === "fixed"
-                          ? "bg-cyan-500/20 border-cyan-500/50 text-cyan-200 font-semibold shadow-xs"
-                          : "bg-black/40 border-white/10 text-white/60 hover:text-white"
-                      )}
-                    >
-                      Modo Fixo
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setAutoTypingDelayMode("random")}
-                      className={cn(
-                        "text-xs px-2.5 py-1 rounded-md border font-medium transition cursor-pointer",
-                        autoTypingDelayMode === "random"
-                          ? "bg-cyan-500/20 border-cyan-500/50 text-cyan-200 font-semibold shadow-xs"
-                          : "bg-black/40 border-white/10 text-white/60 hover:text-white"
-                      )}
-                    >
-                      Modo Aleatório (Faixa Min–Máx)
-                    </button>
-                  </div>
-
-                  {autoTypingDelayMode === "fixed" ? (
-                    <div className="space-y-1.5 pt-1 max-w-md">
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="text-white/60">Tempo digitando por mensagem:</span>
-                        <span className="font-mono text-cyan-300 font-bold">{autoTypingDelaySeconds}s</span>
-                      </div>
-                      <div className="flex items-center gap-3">
-                        <input
-                          type="range"
-                          min={1}
-                          max={60}
-                          value={autoTypingDelaySeconds}
-                          onChange={(e) => setAutoTypingDelaySeconds(Number(e.target.value))}
-                          className="w-full accent-cyan-400 cursor-pointer"
-                        />
-                        <Input
-                          type="number"
-                          min={1}
-                          max={120}
-                          value={autoTypingDelaySeconds}
-                          onChange={(e) => setAutoTypingDelaySeconds(Math.max(1, Math.min(Number(e.target.value), 120)))}
-                          className="bg-black/40 border-white/10 h-8 w-16 text-xs text-center"
-                        />
+                {/* Bloco 4: Follow-up e Horário */}
+                <section id="ps-auto-followup" className={styles.chapterCard} aria-label="Follow-up automático e horário permitido">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className={styles.groupHeader}>
+                      <Repeat className="w-4 h-4" />
+                      <div>
+                        <h4 className={styles.groupTitle}>Follow-up automático e horário comercial</h4>
+                        <p className={styles.groupDesc}>Configure retornos programados para quem não respondeu e a janela diária permitida para envios.</p>
                       </div>
                     </div>
+                    <Switch checked={autoFollowup} onCheckedChange={setAutoFollowup} aria-label="Ativar follow-up automático na automação" />
+                  </div>
+
+                  {!autoFollowup ? (
+                    <p className={styles.optionDesc}>
+                      Follow-up desativado: a automação encerra logo após o disparo inicial sem enviar retornos.
+                    </p>
                   ) : (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1 max-w-lg">
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="text-white/60">Mínimo digitando:</span>
-                          <span className="font-mono text-cyan-300 font-bold">{autoTypingDelayMinSeconds}s</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="range"
-                            min={1}
-                            max={60}
-                            value={autoTypingDelayMinSeconds}
-                            onChange={(e) => {
-                              const val = Number(e.target.value);
-                              setAutoTypingDelayMinSeconds(val);
-                              if (val > autoTypingDelayMaxSeconds) setAutoTypingDelayMaxSeconds(val);
-                            }}
-                            className="w-full accent-cyan-400 cursor-pointer"
-                          />
-                          <Input
-                            type="number"
-                            min={1}
-                            max={120}
-                            value={autoTypingDelayMinSeconds}
-                            onChange={(e) => {
-                              const val = Math.max(1, Math.min(Number(e.target.value), 120));
-                              setAutoTypingDelayMinSeconds(val);
-                              if (val > autoTypingDelayMaxSeconds) setAutoTypingDelayMaxSeconds(val);
-                            }}
-                            className="bg-black/40 border-white/10 h-8 w-16 text-xs text-center"
-                          />
-                        </div>
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="text-white/60">Máximo digitando:</span>
-                          <span className="font-mono text-cyan-300 font-bold">{autoTypingDelayMaxSeconds}s</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="range"
-                            min={1}
-                            max={60}
-                            value={autoTypingDelayMaxSeconds}
-                            onChange={(e) => {
-                              const val = Number(e.target.value);
-                              setAutoTypingDelayMaxSeconds(val);
-                              if (val < autoTypingDelayMinSeconds) setAutoTypingDelayMinSeconds(val);
-                            }}
-                            className="w-full accent-cyan-400 cursor-pointer"
-                          />
-                          <Input
-                            type="number"
-                            min={1}
-                            max={120}
-                            value={autoTypingDelayMaxSeconds}
-                            onChange={(e) => {
-                              const val = Math.max(1, Math.min(Number(e.target.value), 120));
-                              setAutoTypingDelayMaxSeconds(val);
-                              if (val < autoTypingDelayMinSeconds) setAutoTypingDelayMinSeconds(val);
-                            }}
-                            className="bg-black/40 border-white/10 h-8 w-16 text-xs text-center"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* IA personaliza disparo */}
-                <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-3 space-y-2">
-                  <label className="flex items-center gap-2 text-xs cursor-pointer">
-                    <Switch checked={autoPersonalize} onCheckedChange={setAutoPersonalize} />
-                    <Bot className="w-3.5 h-3.5 text-cyan-300" />
-                    <span className="font-bold text-cyan-200">Reescrever cada disparo com IA</span>
-                  </label>
-                  <p className="text-[10px] text-white/40 leading-relaxed">
-                    Cada lead recebe um <strong>texto único</strong> gerado pela IA a partir do template + dados do lead. Reduz risco de banimento por padrão repetitivo no WhatsApp.
-                  </p>
-                  {autoPersonalize && (
-                    <div className="space-y-2 pl-3 border-l-2 border-cyan-500/30">
-                      <div>
-                        <label className="text-[10px] uppercase font-bold text-white/40">Modelo de IA</label>
-                        <select
-                          aria-label="Modelo de IA da automação"
-                          value={autoAiModel || ""}
-                          onChange={(e) => setAutoAiModel(e.target.value)}
-                          className="w-full mt-0.5 bg-black/40 border border-white/10 rounded-md px-2 h-8 text-xs"
-                        >
-                          {aiModels.length === 0 ? (
-                            <option value="">{loadingAiModels ? "carregando…" : "(sem modelos — configure API key em Configurações)"}</option>
-                          ) : (
-                            <ModelOptions models={aiModels as any} />
-                          )}
-                        </select>
-                      </div>
-                      <div>
-                        <label className="text-[10px] uppercase font-bold text-white/40">Prompt para a IA (como reescrever)</label>
-                        <Textarea aria-label="Instruções de IA para disparos" rows={3}
-                          value={autoAiPrompt}
-                          onChange={(e) => setAutoAiPrompt(e.target.value)}
-                          placeholder="Ex: Reescreva a mensagem-base de forma natural e única para cada cliente, mantendo o tom amigável e profissional. Não use emojis exagerados. Adapte ao ramo do negócio se for relevante. Mensagem deve ter no máximo 3 frases."
-                          className="bg-black/40 border-white/10 font-mono text-xs" />
-                        <p className="text-[9px] text-white/30 mt-1">
-                          A IA recebe: prompt + mensagem-base + dados do lead (nome, ramo). Devolve a mensagem final que será enviada.
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Humanizar disparo (picotar mensagem) */}
-                <div className={cn(
-                  "rounded-lg border p-3 space-y-2 transition-colors",
-                  autoHumanize ? "border-emerald-400/40 bg-emerald-500/5" : "border-white/10 bg-white/[0.02]"
-                )}>
-                  <label className="flex items-center gap-2 text-xs cursor-pointer">
-                    <Switch checked={autoHumanize} onCheckedChange={setAutoHumanize} />
-                    <Scissors className="w-3.5 h-3.5 text-emerald-300" />
-                    <span className="font-bold text-emerald-200">Humanizar disparo (picotar mensagem)</span>
-                  </label>
-                  <p className="text-[10px] text-white/40 leading-relaxed">
-                    Cada disparo chega <strong>dividido em várias mensagens curtas</strong> com pausa de digitação entre elas (2-5s), igual ao Agente de IA — muito mais humano e menos risco de banimento.
-                  </p>
-                </div>
-
-                {/* Misturador Anti-Ban (padrão sóbrio do sistema) */}
-                <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3 space-y-1.5">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-xs font-semibold text-white/80">Misturador Anti-Ban (Variação de Abordagem)</div>
-                      <div className="text-[11px] text-white/40 leading-relaxed mt-0.5">
-                        Alterna automaticamente a estrutura de <code className="bg-black/40 px-1 rounded">{"{{saudacao}}! Tudo bem? {{nome_empresa}}?"}</code> entre variações naturais e limpa o nome da empresa para evitar padrão repetitivo no WhatsApp.
-                      </div>
-                    </div>
-                    <Switch aria-label="Misturador Anti-Ban na automação" checked={autoAntibanMixer} onCheckedChange={setAutoAntibanMixer} />
-                  </div>
-                </div>
-
-                <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3 space-y-1.5">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-xs font-semibold text-white/80">Modo Comercial B2B (Proteção Fim de Semana)</div>
-                      <div className="text-[11px] text-white/40 leading-relaxed mt-0.5">
-                        Pausa disparos frios aos domingos e reduz o teto por hora pela metade aos sábados para empresas que não respondem no fim de semana.
-                      </div>
-                    </div>
-                    <Switch aria-label="Modo Comercial B2B na automação" checked={autoWeekendGuard} onCheckedChange={setAutoWeekendGuard} />
-                  </div>
-                </div>
-
-                {/* Resumo de avaliações com IA (antes do disparo) — reviews-ai */}
-                <div className={cn(
-                  "rounded-lg border p-3 space-y-2 transition-colors",
-                  autoReviewsAi ? "border-cyan-400/40 bg-cyan-500/5" : "border-white/10 bg-white/[0.02]"
-                )}>
-                  <label className="flex items-center gap-2 text-xs cursor-pointer">
-                    <Switch checked={autoReviewsAi} onCheckedChange={setAutoReviewsAi} />
-                    <Bot className="w-3.5 h-3.5 text-cyan-300" />
-                    <span className="font-bold text-cyan-200">Resumir avaliações do Google com IA</span>
-                  </label>
-                  <p className="text-[10px] text-white/40 leading-relaxed">
-                    Antes do disparo, roda a IA em todas as avaliações capturadas de cada lead e gera um resumo (elogios, reclamações e gancho). Disponível como <code className="bg-black/40 px-1 rounded">{"{{resumo_avaliacoes}}"}</code> no template. Ativa &quot;Capturar todas as avaliações&quot; automaticamente.
-                  </p>
-                  {autoReviewsAi && (
-                    <div className="space-y-2 pl-3 border-l-2 border-cyan-500/30">
-                      <div>
-                        <label className="text-[10px] uppercase font-bold text-white/40">Modelo de IA</label>
-                        <select
-                          aria-label="Modelo de IA para avaliações da automação"
-                          value={autoReviewsAiModel || ""}
-                          onChange={(e) => setAutoReviewsAiModel(e.target.value)}
-                          className="w-full mt-0.5 bg-black/40 border border-white/10 rounded-md px-2 h-8 text-xs"
-                        >
-                          {aiModels.length === 0 ? (
-                            <option value="">{loadingAiModels ? "carregando…" : "(sem modelos — configure API key)"}</option>
-                          ) : (
-                            <ModelOptions models={aiModels as any} />
-                          )}
-                        </select>
-                      </div>
-                      <div>
-                        <label className="text-[10px] uppercase font-bold text-white/40">Prompt (vazio = padrão)</label>
-                        <Textarea aria-label="Instruções de IA para avaliações da automação" rows={2}
-                          value={autoReviewsAiPrompt}
-                          onChange={(e) => setAutoReviewsAiPrompt(e.target.value)}
-                          placeholder="Ex: Resuma as avaliações focando em dores que um site profissional resolveria…"
-                          className="bg-black/40 border-white/10 font-mono text-xs" />
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Follow-up automático */}
-                <div className={cn(
-                  "rounded-xl border p-4 space-y-3 transition-colors",
-                  autoFollowup
-                    ? "border-purple-500/20 bg-purple-500/5"
-                    : "border-zinc-500/20 bg-zinc-500/5 opacity-60"
-                )}>
-                  <div className="flex items-center justify-between gap-3 flex-wrap">
-                    <p className="text-xs font-bold uppercase tracking-wider text-purple-300 flex items-center gap-2">
-                      <Repeat className="w-3.5 h-3.5" /> Follow-up automático
-                    </p>
-                    <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
-                      <span className={cn("font-bold", autoFollowup ? "text-purple-200" : "text-white/40")}>
-                        {autoFollowup ? "ATIVADO" : "DESATIVADO"}
-                      </span>
-                      <Switch checked={autoFollowup} onCheckedChange={setAutoFollowup} />
-                    </label>
-                  </div>
-                  {!autoFollowup && (
-                    <p className="text-[10px] text-white/40 italic">
-                      Automação vai terminar logo após o disparo inicial. Leads nesta lista não receberão follow-up.
-                    </p>
-                  )}
-                  {autoFollowup && (
-                    <>
-                      <div className="space-y-2">
-                        {autoSteps.map((step, idx) => (
-                          <div key={idx} className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-start p-2 rounded-xl bg-black/20 border border-white/5 sm:border-none sm:bg-transparent sm:p-0">
-                            <div className="flex flex-col gap-1 shrink-0 w-full sm:w-24">
-                              <span className="text-[9px] uppercase font-bold text-white/40">Após (dias)</span>
+                    <div className="space-y-3">
+                      {autoSteps.map((step, idx) => (
+                        <div key={idx} className={styles.followupCard}>
+                          <div className={styles.followupCardHead}>
+                            <span className={styles.followupBadge}>{idx + 1}º retorno</span>
+                            <Button onClick={() => setAutoSteps(autoSteps.filter((_, i) => i !== idx))}
+                              aria-label={`Remover retorno ${idx + 1}`}
+                              variant="ghost" size="icon" className="h-8 w-8 text-[#fda4af]">
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </Button>
+                          </div>
+                          <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-start">
+                            <div className="flex flex-col gap-1 shrink-0 w-full sm:w-28">
+                              <label>Após (dias)</label>
                               <NumberInput aria-label={`Dias até o retorno ${idx + 1}`} min={1} fallback={1} value={step.day_offset}
                                 onChange={n => {
                                   const next = [...autoSteps];
                                   next[idx] = { ...next[idx], day_offset: n };
                                   setAutoSteps(next);
                                 }}
-                                className="bg-black/40 border-white/10 h-8 text-xs" />
+                                className="w-full" />
                             </div>
-                            <div className="flex-1 space-y-1">
-                              <div className="flex items-center justify-between">
-                                <span className="text-[9px] uppercase font-bold text-white/40">Mensagem do follow-up</span>
+                            <div className="flex-1 min-w-0 space-y-1.5">
+                              <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <label>Mensagem do follow-up</label>
                                 <div className="flex flex-wrap gap-1">
                                   {[
                                     { key: "saudacao", label: "Saudação" },
@@ -3271,7 +3565,7 @@ export default function ProspeccaoSitesPage() {
                                         next[idx] = { ...next[idx], template: (next[idx].template || "") + `{{${v.key}}}` };
                                         setAutoSteps(next);
                                       }}
-                                      className="px-1.5 py-0.5 rounded bg-purple-500/10 border border-purple-500/30 hover:bg-purple-500/20 text-[9px] text-purple-200 cursor-pointer"
+                                      className={styles.pillChoice}
                                     >
                                       +{v.label}
                                     </button>
@@ -3284,53 +3578,45 @@ export default function ProspeccaoSitesPage() {
                                   next[idx] = { ...next[idx], template: e.target.value };
                                   setAutoSteps(next);
                                 }}
-                                placeholder="Ex: Olá {{nome_empresa}}! Vi os elogios em {{resumo_avaliacoes}} e..."
-                                className="bg-black/40 border-white/10 font-mono text-xs" />
+                                placeholder="Ex: Olá {{nome_empresa}}! Vi os elogios em {{resumo_avaliacoes}} e..." />
                             </div>
-                            <Button onClick={() => setAutoSteps(autoSteps.filter((_, i) => i !== idx))}
-                              aria-label={`Remover retorno ${idx + 1}`}
-                              variant="ghost" size="icon" className="h-8 w-8 text-red-400 self-end sm:mt-4">
-                              <Trash2 className="w-3 h-3" />
-                            </Button>
                           </div>
-                        ))}
-                        <Button onClick={() => setAutoSteps([...autoSteps, { day_offset: 3, template: "" }])}
-                          variant="outline" className="text-[10px] uppercase font-bold gap-2 h-8">
-                          <Plus className="w-3 h-3" /> Adicionar retorno
-                        </Button>
-                      </div>
+                        </div>
+                      ))}
 
-                      {/* Intervalos follow-up */}
-                      <div className="grid grid-cols-2 gap-3">
+                      <Button onClick={() => setAutoSteps([...autoSteps, { day_offset: 3, template: "" }])}
+                        variant="outline" className="gap-2">
+                        <Plus className="w-3.5 h-3.5" /> Adicionar retorno
+                      </Button>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
                         <div>
-                          <label className="text-xs text-white/60">Intervalo mín. entre follow-ups (s)</label>
+                          <label>Intervalo mín. entre follow-ups (s)</label>
                           <Input aria-label="Intervalo mínimo entre retornos em segundos" type="number" value={autoFuMinSec} onChange={(e) => setAutoFuMinSec(Number(e.target.value))} min={5} />
                         </div>
                         <div>
-                          <label className="text-xs text-white/60">Intervalo máx. entre follow-ups (s)</label>
+                          <label>Intervalo máx. entre follow-ups (s)</label>
                           <Input aria-label="Intervalo máximo entre retornos em segundos" type="number" value={autoFuMaxSec} onChange={(e) => setAutoFuMaxSec(Number(e.target.value))} min={autoFuMinSec} />
                         </div>
                       </div>
 
-                      {/* IA reescrever follow-up */}
-                      <div className="border-t border-white/5 pt-3 space-y-2">
-                        <label className="flex items-center gap-2 text-xs cursor-pointer">
-                          <Switch checked={autoFollowupAi} onCheckedChange={setAutoFollowupAi} />
-                          <Bot className="w-3.5 h-3.5 text-purple-300" />
-                          <span className="font-bold text-purple-200">Reescrever cada follow-up com IA</span>
-                        </label>
-                        <p className="text-[10px] text-white/40 leading-relaxed">
-                          Cada follow-up vira único, considerando o <strong>histórico da conversa</strong> daquele lead. Útil pra puxar gancho do que o cliente já disse e fugir de padrão repetitivo.
-                        </p>
+                      <div className={styles.subGroupMuted}>
+                        <div className="flex items-start justify-between gap-4">
+                          <div className={styles.optionCopy}>
+                            <label htmlFor="ps-auto-followup-ai" className={styles.optionTitle}>Reescrever cada follow-up com IA</label>
+                            <p className={styles.optionDesc}>Considera o histórico da conversa de cada lead para puxar um gancho natural sem parecer automático.</p>
+                          </div>
+                          <Switch id="ps-auto-followup-ai" checked={autoFollowupAi} onCheckedChange={setAutoFollowupAi} />
+                        </div>
                         {autoFollowupAi && (
-                          <div className="space-y-2 pl-3 border-l-2 border-purple-500/30">
+                          <div className={styles.nestedPanel}>
                             <div>
-                              <label className="text-[10px] uppercase font-bold text-white/40">Modelo de IA</label>
+                              <label>Modelo de IA</label>
                               <select
                                 aria-label="Modelo de IA para retornos"
                                 value={autoFollowupAiModel || ""}
                                 onChange={(e) => setAutoFollowupAiModel(e.target.value)}
-                                className="w-full mt-0.5 bg-black/40 border border-white/10 rounded-md px-2 h-8 text-xs"
+                                className="w-full mt-0.5 rounded-md px-2 text-xs"
                               >
                                 {aiModels.length === 0 ? (
                                   <option value="">{loadingAiModels ? "carregando…" : "(sem modelos — configure API key em Configurações)"}</option>
@@ -3340,31 +3626,29 @@ export default function ProspeccaoSitesPage() {
                               </select>
                             </div>
                             <div>
-                              <label className="text-[10px] uppercase font-bold text-white/40">Prompt para a IA</label>
+                              <label>Prompt para a IA</label>
                               <Textarea aria-label="Instruções de IA para retornos" rows={3}
                                 value={autoFollowupAiPrompt}
                                 onChange={(e) => setAutoFollowupAiPrompt(e.target.value)}
-                                placeholder="Ex: Você é um SDR cordial fazendo follow-up sem ser insistente. Use o histórico pra puxar gancho do que o cliente já mencionou. Tom natural, máximo 3 frases."
-                                className="bg-black/40 border-white/10 font-mono text-xs" />
+                                placeholder="Ex: Você é um SDR cordial fazendo follow-up sem ser insistente. Use o histórico pra puxar gancho do que o cliente já mencionou. Tom natural, máximo 3 frases." />
                             </div>
                           </div>
                         )}
                       </div>
-                    </>
+                    </div>
                   )}
-                </div>
 
-                {/* Horário permitido */}
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-xs text-white/60">Enviar a partir das (h)</label>
-                    <Input aria-label="Hora inicial da automação" type="number" value={autoStartHour} onChange={(e) => setAutoStartHour(Number(e.target.value))} min={0} max={23} />
+                  <div className="pt-2 border-t border-[#263028] grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label htmlFor="ps-auto-start-hour">Enviar a partir das (h)</label>
+                      <Input id="ps-auto-start-hour" aria-label="Hora inicial da automação" type="number" value={autoStartHour} onChange={(e) => setAutoStartHour(Number(e.target.value))} min={0} max={23} />
+                    </div>
+                    <div>
+                      <label htmlFor="ps-auto-end-hour">Enviar até as (h)</label>
+                      <Input id="ps-auto-end-hour" aria-label="Hora final da automação" type="number" value={autoEndHour} onChange={(e) => setAutoEndHour(Number(e.target.value))} min={1} max={24} />
+                    </div>
                   </div>
-                  <div>
-                    <label className="text-xs text-white/60">Enviar até as (h)</label>
-                    <Input aria-label="Hora final da automação" type="number" value={autoEndHour} onChange={(e) => setAutoEndHour(Number(e.target.value))} min={1} max={24} />
-                  </div>
-                </div>
+                </section>
 
                 <Button onClick={createAutomation} disabled={creatingAuto} className="w-full">
                   {creatingAuto ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Zap className="w-4 h-4 mr-1" />}
@@ -3374,17 +3658,22 @@ export default function ProspeccaoSitesPage() {
             </Card>
 
             {/* Lista de automações */}
-            <div className="flex justify-between items-center">
-              <div className="text-xs font-bold uppercase tracking-wider text-white/50">Automações ativas</div>
+            <div className="flex justify-between items-center pt-2">
+              <div className={styles.groupHeader}>
+                <div>
+                  <h4 className={styles.groupTitle}>Automações ativas</h4>
+                  <p className={styles.groupDesc}>Acompanhe o andamento da captação, disparos e retornos.</p>
+                </div>
+              </div>
               <Button variant="ghost" size="sm" onClick={loadAutomations}><RefreshCw className="w-3.5 h-3.5 mr-1" /> Atualizar</Button>
             </div>
 
             {automations.length === 0 ? (
-              <Card className="border-white/10 bg-white/[0.02]"><CardContent className="p-8 text-center text-white/40 text-sm">
+              <Card><CardContent className="p-8 text-center text-[#a5b1a8] text-sm">
                 Nenhuma automação criada ainda.
               </CardContent></Card>
             ) : (
-              <div className="space-y-2">
+              <div className="space-y-3">
                 {automations.map((a) => {
                   const phaseLabels: Record<string, string> = {
                     idle: "Aguardando", scraping: "Captando", campaigning: "Disparando", dispatching: "Disparando",
@@ -3394,38 +3683,38 @@ export default function ProspeccaoSitesPage() {
                     draft: "Rascunho", running: "Em execução", paused: "Pausada", error: "Erro", done: "Concluída",
                   };
                   const statusColor =
-                    a.status === "running" ? "text-green-400 bg-green-500/10 border-green-500/30" :
-                    a.status === "paused" ? "text-yellow-400 bg-yellow-500/10 border-yellow-500/30" :
-                    a.status === "error" ? "text-red-400 bg-red-500/10 border-red-500/30" :
-                    a.status === "done" ? "text-blue-400 bg-blue-500/10 border-blue-500/30" :
-                    "text-white/50 bg-white/5 border-white/10";
+                    a.status === "running" ? "text-[#a5f3cf] bg-[#243d30] border-[#4e7c62]" :
+                    a.status === "paused" ? "text-[#fde68a] bg-[#2c2516] border-[#614d23]" :
+                    a.status === "error" ? "text-[#fca5a5] bg-[#2d1a1a] border-[#663030]" :
+                    a.status === "done" ? "text-[#c5f0d8] bg-[#18281f] border-[#355844]" :
+                    "text-[#b5c4b9] bg-[#141a16] border-[#303a32]";
                   return (
-                    <Card key={a.id} className="border-white/10 bg-white/[0.02]">
-                      <CardContent className="p-3 space-y-2">
-                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <Card key={a.id}>
+                      <CardContent className="p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-3 flex-wrap">
                           <div className="min-w-0 flex-1 basis-full sm:basis-0">
-                            <p className="text-sm font-bold text-white truncate">{a.name}</p>
-                            <p className="text-[10px] text-white/40">
+                            <p className="text-sm font-semibold text-[#edf2ee] truncate">{a.name}</p>
+                            <p className="text-xs text-[#9cab9f] mt-0.5">
                               {(a.niches || []).join(", ") || "—"} · {(a.regions || []).join(", ") || "—"} · {formatInstanceLabel(a.instance_name)}
                             </p>
                           </div>
-                          <div className="flex items-center gap-2 shrink-0">
-                            <span className={cn("text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-md border", statusColor)}>
+                          <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                            <span className={cn("text-xs font-medium px-2.5 py-0.5 rounded-md border", statusColor)}>
                               {statusLabels[a.status] || a.status} · {phaseLabels[a.phase] || a.phase}
                             </span>
-                            <Badge className="bg-white/10 text-white/60">{a.scraped_count ?? 0}/{a.scrape_max_leads} leads</Badge>
+                            <Badge className="bg-[#141a16] border border-[#303a32] text-[#c4d4c9] text-xs font-medium">{a.scraped_count ?? 0}/{a.scrape_max_leads} leads</Badge>
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-1.5 flex-wrap">
+                        <div className="flex items-center gap-2 flex-wrap">
                           {(a.status === "draft" || a.status === "paused" || a.status === "error" || a.status === "done") && (
-                            <Button size="sm" onClick={() => autoAction(a.id, "start")} disabled={pendingAutoActions.has(a.id)} className="h-7 text-[10px]">
-                              <Play className="w-3 h-3 mr-1" /> {a.status === "paused" || a.status === "error" || (a.status === "done" && (a.scraped_count ?? 0) < a.scrape_max_leads) ? "Retomar" : "Iniciar"}
+                            <Button size="sm" onClick={() => autoAction(a.id, "start")} disabled={pendingAutoActions.has(a.id)} className="h-8 text-xs">
+                              <Play className="w-3.5 h-3.5 mr-1" /> {a.status === "paused" || a.status === "error" || (a.status === "done" && (a.scraped_count ?? 0) < a.scrape_max_leads) ? "Retomar" : "Iniciar"}
                             </Button>
                           )}
                           {a.status === "running" && (
-                            <Button size="sm" variant="outline" onClick={() => autoAction(a.id, "pause")} disabled={pendingAutoActions.has(a.id)} className="h-7 text-[10px]">
-                              <Pause className="w-3 h-3 mr-1" /> Pausar
+                            <Button size="sm" variant="outline" onClick={() => autoAction(a.id, "pause")} disabled={pendingAutoActions.has(a.id)} className="h-8 text-xs">
+                              <Pause className="w-3.5 h-3.5 mr-1" /> Pausar
                             </Button>
                           )}
                           <Button
@@ -3436,22 +3725,25 @@ export default function ProspeccaoSitesPage() {
                               else { setExpandedAuto(a.id); loadAutoLogs(a.id); }
                             }}
                             className={cn(
-                              "h-7 text-[10px]",
+                              "h-8 text-xs",
                               expandedAuto === a.id
-                                ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/30"
-                                : "bg-white/5 hover:bg-white/10"
+                                ? "bg-[#243d30] text-[#a5f3cf] border border-[#4e7c62] hover:bg-[#2a4738]"
+                                : "border border-[#303a32] bg-[#141a16] text-[#c4d4c9] hover:bg-[#1e2720] hover:text-[#edf2ee]"
                             )}
                           >
-                            <Terminal className="w-3 h-3 mr-1" />
+                            <Terminal className="w-3.5 h-3.5 mr-1" />
                             {expandedAuto === a.id ? "Terminal ao vivo (ativo)" : "Ver terminal"}
                           </Button>
-                          <Button size="sm" variant="ghost" onClick={() => autoAction(a.id, "delete")} disabled={pendingAutoActions.has(a.id)} aria-label={`Deletar automação ${a.name}`} className="h-7 text-[10px] text-red-400 hover:bg-red-500/10">
-                            <Trash2 className="w-3 h-3" />
+                          <Button size="sm" variant="ghost" onClick={() => autoAction(a.id, "delete")} disabled={pendingAutoActions.has(a.id)} aria-label={`Deletar automação ${a.name}`} className="h-8 text-xs text-[#fca5a5] hover:bg-[#2d1a1a]">
+                            <Trash2 className="w-3.5 h-3.5" />
                           </Button>
                         </div>
 
                         {a.last_error && (
-                          <p className="text-[10px] text-red-300 bg-red-500/5 border border-red-500/20 rounded-md px-2 py-1">⚠ {a.last_error}</p>
+                          <p className="flex items-start gap-2 text-xs text-[#fecaca] bg-[#2d1a1a] border border-[#663030] rounded-md px-3 py-2">
+                            <XCircle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-[#f87171]" />
+                            <span>{a.last_error}</span>
+                          </p>
                         )}
 
                         {expandedAuto === a.id && (
