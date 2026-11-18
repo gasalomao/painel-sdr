@@ -29,9 +29,14 @@
 const COOLDOWN = new Map<string, number>();
 /** Endpoint "morto": credencial inválida (401/403). Pula até restart. */
 const DEAD = new Set<string>();
+/** Última vez que cada endpoint foi marcado (evita sondar cooldown recém-criado). */
+const MARKED_AT = new Map<string, number>();
 
 /** Cooldown padrão pós-429 (recuo). Sobrescrevível p/ testes/flexibilidade. */
 const DEFAULT_429_COOLDOWN_MS = 5 * 60 * 1000; // 5 min
+
+/** Idade mínima de um cooldown antes de permitir uma sonda real. */
+const MIN_PROBE_AGE_MS = 3_000;
 
 /**
  * Marca um endpoint em cooldown TEMPORÁRIO (usar após 429/quota). Recuo
@@ -40,6 +45,7 @@ const DEFAULT_429_COOLDOWN_MS = 5 * 60 * 1000; // 5 min
 export function markEndpointCooldown(id: string, ms: number = DEFAULT_429_COOLDOWN_MS): void {
   if (!id) return;
   const now = Date.now();
+  MARKED_AT.set(id, now);
   const current = COOLDOWN.get(id);
   // Recuo: se ainda está em cooldown, estende (até 60min).
   if (current && current > now) {
@@ -53,6 +59,29 @@ export function markEndpointCooldown(id: string, ms: number = DEFAULT_429_COOLDO
 /** Marca um endpoint como MORTO (401/403 — credencial inválida). Pula até restart. */
 export function markEndpointDead(id: string): void {
   if (id) DEAD.add(id);
+}
+
+/**
+ * Libera um endpoint imediatamente (cooldown E marca de morto).
+ * Usado quando uma chamada real dá certo: prova viva de que a credencial e o
+ * modelo funcionam, então o estado negativo em memória estava desatualizado.
+ */
+export function clearEndpointCooldown(id: string): void {
+  if (!id) return;
+  COOLDOWN.delete(id);
+  DEAD.delete(id);
+  MARKED_AT.delete(id);
+}
+
+/**
+ * A sonda só vale a pena se o cooldown tem alguma idade: logo após um 429 real,
+ * repetir a chamada é justamente o que o cooldown existe para evitar.
+ */
+export function canProbeEndpoint(id: string, minAgeMs: number = MIN_PROBE_AGE_MS): boolean {
+  if (!id) return false;
+  const markedAt = MARKED_AT.get(id);
+  if (!markedAt) return true;
+  return Date.now() - markedAt >= minAgeMs;
 }
 
 /** Verdadeiro se o endpoint NÃO deve ser tentado agora (cooldown OU morto). */
@@ -93,6 +122,7 @@ function getGlobalResetHooks(): Set<() => void> {
 export function resetGatewayCooldown(): void {
   COOLDOWN.clear();
   DEAD.clear();
+  MARKED_AT.clear();
   for (const hook of getGlobalResetHooks()) {
     try {
       hook();

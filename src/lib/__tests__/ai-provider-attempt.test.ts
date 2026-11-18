@@ -3,7 +3,7 @@ import { addAiUsage, gatewayChatWithFailover, openRouterChatWithFailover, openRo
 
 const state = vi.hoisted(() => ({ alts: vi.fn(), unavailable: vi.fn() }));
 vi.mock("@/lib/gateway-model-discovery", () => ({ listEndpointsForModel: (...args: unknown[]) => state.alts(...args) }));
-vi.mock("@/lib/gateway-cooldown", () => ({ markEndpointCooldown: vi.fn(), markEndpointDead: vi.fn(), isEndpointUnavailable: (...args: unknown[]) => state.unavailable(...args) }));
+vi.mock("@/lib/gateway-cooldown", () => ({ markEndpointCooldown: vi.fn(), markEndpointDead: vi.fn(), isEndpointUnavailable: (...args: unknown[]) => state.unavailable(...args), isEndpointDead: () => false, clearEndpointCooldown: vi.fn(), canProbeEndpoint: () => true }));
 beforeEach(() => {
   vi.resetAllMocks();
   state.alts.mockResolvedValue([{ id: "second", baseUrl: "https://second.invalid/v1", apiKey: null }]);

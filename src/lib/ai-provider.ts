@@ -650,7 +650,7 @@ export async function nvidiaChatWithFailover(
   opts: ControlledNvidiaOptions = {}
 ): Promise<any> {
   opts.signal?.throwIfAborted();
-  const { markEndpointCooldown, markEndpointDead, isEndpointUnavailable } = await import("@/lib/gateway-cooldown");
+  const { markEndpointCooldown, markEndpointDead, isEndpointUnavailable, isEndpointDead, clearEndpointCooldown, canProbeEndpoint } = await import("@/lib/gateway-cooldown");
 
   type NvCandidate = { id: string; label: string; apiKey: string };
   const rawList: NvCandidate[] = [];
@@ -709,12 +709,35 @@ export async function nvidiaChatWithFailover(
   let attempts = 0;
   const maxAttempts = opts.maxAttempts === undefined ? Infinity : Math.max(1, Math.min(3, Math.trunc(opts.maxAttempts) || 1));
 
+  // Mesmo motivo do OpenRouter: cooldown é estado em memória e pode estar
+  // desatualizado. Se TODAS as contas estão em cooldown, sonda uma (não morta)
+  // para renovar o estado e devolver o erro real em vez de mensagem genérica.
+  const unavailableForModel = (c: { id: string }) => {
+    const coolId = model ? `${c.id}::${model}` : c.id;
+    return isEndpointUnavailable(c.id) || isEndpointUnavailable(coolId);
+  };
+  const budgetAllowsProbe = !opts.attemptBudget || opts.attemptBudget.remaining > 0;
+  let probeKeyId: string | null = null;
+  if (budgetAllowsProbe && candidates.length > 0 && candidates.every(unavailableForModel)) {
+    const alive = candidates.find((c) => {
+      const coolId = model ? `${c.id}::${model}` : c.id;
+      return !isEndpointDead(c.id) && canProbeEndpoint(coolId) && canProbeEndpoint(c.id);
+    });
+    if (alive) probeKeyId = alive.id;
+  }
+
   for (const c of candidates) {
     opts.signal?.throwIfAborted();
     if (attempts >= maxAttempts || (opts.attemptBudget && opts.attemptBudget.remaining <= 0)) break;
     const coolId = model ? `${c.id}::${model}` : c.id;
     const coolLabel = model ? `${c.label}::${model}` : c.label;
-    if (isEndpointUnavailable(c.id) || isEndpointUnavailable(coolId)) continue;
+    const unavailable = isEndpointUnavailable(c.id) || isEndpointUnavailable(coolId);
+    const isProbe = unavailable && probeKeyId === c.id;
+    if (unavailable && !isProbe) continue;
+    if (isProbe) {
+      probeKeyId = null;
+      console.warn(`[ai-provider:nvidia] Todas as contas em cooldown para "${model}". Probe único em ${coolLabel} para validar/renovar o estado.`);
+    }
     const callStartedAt = Date.now();
     try {
       attempts++;
@@ -757,6 +780,9 @@ export async function nvidiaChatWithFailover(
 
       const usable = opts.allowEmptyContent ? json : requireUsableOpenAIResponse(json, "nvidia", model);
       recordModelSuccess("nvidia", model, Date.now() - callStartedAt);
+      // Chamada real bem-sucedida = estado negativo em memória estava errado.
+      clearEndpointCooldown(c.id);
+      clearEndpointCooldown(coolId);
       return withAccumulatedUsage(usable, accumulatedUsage, "nvidia", model);
     } catch (err) {
       if (opts.signal?.aborted) throw attachAiUsage(opts.signal.reason ?? err, accumulatedUsage);
@@ -764,7 +790,7 @@ export async function nvidiaChatWithFailover(
       if (err instanceof AiEmptyResponseError) {
         accumulatedUsage = addAiUsage(accumulatedUsage, err.usage);
         recordModelFailure("nvidia", model, { isEmpty: true });
-        markEndpointCooldown(coolId);
+        if (!isProbe) markEndpointCooldown(coolId);
         console.warn(`[ai-provider:nvidia] Conta ${coolLabel} retornou resposta vazia. Rotacionando para próxima conta NVIDIA.`);
         continue;
       }
@@ -789,7 +815,7 @@ export async function nvidiaChatWithFailover(
           /credit|quota|insufficient|rate.?limit/i.test(err.message)
         ) {
           recordModelFailure("nvidia", model, { status: err.status, message: err.message });
-          markEndpointCooldown(coolId);
+          if (!isProbe) markEndpointCooldown(coolId);
           console.warn(`[ai-provider:nvidia] Conta ${coolLabel} em cooldown (${err.message.slice(0, 80)}). Rotacionando para próxima conta NVIDIA.`);
           continue;
         }
@@ -822,7 +848,7 @@ export async function openRouterChatWithFailover(
   opts: ControlledOpenRouterOptions = {}
 ): Promise<OpenRouterResponse> {
   opts.signal?.throwIfAborted();
-  const { markEndpointCooldown, markEndpointDead, isEndpointUnavailable } = await import("@/lib/gateway-cooldown");
+  const { markEndpointCooldown, markEndpointDead, isEndpointUnavailable, isEndpointDead, clearEndpointCooldown, canProbeEndpoint } = await import("@/lib/gateway-cooldown");
 
   // Coleta lista inicial de chaves fornecidas explicitamente
   const rawList: string[] = [];
@@ -876,12 +902,38 @@ export async function openRouterChatWithFailover(
   const isModelFreeSlug = model.toLowerCase().endsWith(":free");
   let attempts = 0;
   const maxAttempts = opts.maxAttempts === undefined ? Infinity : Math.max(1, Math.min(3, Math.trunc(opts.maxAttempts) || 1));
+  // Todas as chaves em cooldown não significa que todas falharam: o cooldown é
+  // palpite em memória e pode estar desatualizado (429 de rajada, restart de
+  // outra instância, etc.). Sem probe, o caller recebia "todas as chaves
+  // falharam" sem NENHUMA chamada HTTP. Forçamos UMA tentativa real na primeira
+  // chave para renovar o estado e devolver o erro verdadeiro se ainda falhar.
+  const unavailableForModel = (c: { id: string }) => {
+    const coolId = model ? `${c.id}::${model}` : c.id;
+    return isEndpointUnavailable(c.id) || isEndpointUnavailable(coolId);
+  };
+  const budgetAllowsProbe = !opts.attemptBudget || opts.attemptBudget.remaining > 0;
+  let probeKeyId: string | null = null;
+  if (budgetAllowsProbe && candidates.length > 0 && candidates.every(unavailableForModel)) {
+    // Só sonda chave que não foi marcada MORTA (401/403): credencial inválida
+    // não se resolve com uma nova tentativa.
+    const alive = candidates.find((c) => {
+      const coolId = model ? `${c.id}::${model}` : c.id;
+      return !isEndpointDead(c.id) && canProbeEndpoint(coolId) && canProbeEndpoint(c.id);
+    });
+    if (alive) probeKeyId = alive.id;
+  }
   for (const c of candidates) {
     opts.signal?.throwIfAborted();
     if (attempts >= maxAttempts || (opts.attemptBudget && opts.attemptBudget.remaining <= 0)) break;
     const coolId = model ? `${c.id}::${model}` : c.id;
     const coolLabel = model ? `${c.label}::${model}` : c.label;
-    if (isEndpointUnavailable(c.id) || isEndpointUnavailable(coolId)) continue;
+    const unavailable = isEndpointUnavailable(c.id) || isEndpointUnavailable(coolId);
+    const isProbe = unavailable && probeKeyId === c.id;
+    if (unavailable && !isProbe) continue;
+    if (isProbe) {
+      probeKeyId = null;
+      console.warn(`[ai-provider:openrouter] Todas as chaves em cooldown para "${model}". Probe único em ${coolLabel} para validar/renovar o estado.`);
+    }
     const callStartedAt = Date.now();
     try {
       attempts++;
@@ -914,6 +966,9 @@ export async function openRouterChatWithFailover(
 
       const usable = allowEmpty ? json : requireUsableOpenAIResponse(json, "openrouter", model);
       recordModelSuccess("openrouter", model, Date.now() - callStartedAt);
+      // Chamada real bem-sucedida = estado negativo em memória estava errado.
+      clearEndpointCooldown(c.id);
+      clearEndpointCooldown(coolId);
       return withAccumulatedUsage(usable, accumulatedUsage, "openrouter", model);
     } catch (err) {
       if (opts.signal?.aborted) throw attachAiUsage(opts.signal.reason ?? err, accumulatedUsage);
@@ -921,7 +976,7 @@ export async function openRouterChatWithFailover(
       if (err instanceof AiEmptyResponseError) {
         accumulatedUsage = addAiUsage(accumulatedUsage, err.usage);
         recordModelFailure("openrouter", model, { isEmpty: true });
-        markEndpointCooldown(coolId);
+        if (!isProbe) markEndpointCooldown(coolId);
         console.warn(`[ai-provider:openrouter] ${coolLabel} retornou resposta vazia. Rotacionando para próxima chave.`);
         continue;
       }
@@ -949,7 +1004,7 @@ export async function openRouterChatWithFailover(
           isFailoverableStatus(err.status, err.message)
         ) {
           recordModelFailure("openrouter", model, { status: err.status, message: err.message });
-          markEndpointCooldown(coolId);
+          if (!isProbe) markEndpointCooldown(coolId);
           console.warn(`[ai-provider:openrouter] ${coolLabel} falhou (${err.message.slice(0, 80)}). Rotacionando para próxima chave/modelo.`);
           continue;
         }

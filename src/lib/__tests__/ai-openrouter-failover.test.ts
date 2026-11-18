@@ -64,6 +64,7 @@ beforeEach(() => {
 
 afterEach(() => {
   global.fetch = realFetch;
+  vi.useRealTimers();
 });
 
 describe("OpenRouter Multi-Key Failover (9Router-style)", () => {
@@ -217,5 +218,69 @@ describe("OpenRouter Multi-Key Failover (9Router-style)", () => {
     expect(res.text).toBe("PRIORITY_OK");
     expect(st.openrouterCalls).toHaveLength(1);
     expect(st.openrouterCalls[0].key).toBe("sk-or-v1-custom-first");
+  });
+
+  it("sonda uma chave viva quando todas estão em cooldown e recupera sozinho", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    st.openrouterHandler = () => ({ status: 429, content: "", msg: "Rate limit: free-tier quota exhausted" });
+
+    // Chamada 1: as duas chaves dão 429 e entram em cooldown.
+    await expect(
+      generateText({
+        modelRef: "openrouter:openai/gpt-4o-mini",
+        prompt: "Chamada 1",
+        openrouterKeys: ["sk-or-v1-key1", "sk-or-v1-key2"],
+        noGatewayFallback: true,
+      })
+    ).rejects.toThrow("Rate limit");
+    expect(st.openrouterCalls).toHaveLength(2);
+
+    // Cooldown recém-criado não é sondado na mesma hora (evita martelar 429).
+    vi.setSystemTime(Date.now() + 10_000);
+    st.openrouterCalls = [];
+    st.openrouterHandler = () => ({ status: 200, content: "RECOVERED", msg: "" });
+
+    // Chamada 2: TODAS em cooldown. Antes devolvia erro genérico sem chamar a
+    // API; agora sonda uma chave real e volta a funcionar.
+    const res = await generateText({
+      modelRef: "openrouter:openai/gpt-4o-mini",
+      prompt: "Chamada 2",
+      openrouterKeys: ["sk-or-v1-key1", "sk-or-v1-key2"],
+      noGatewayFallback: true,
+    });
+
+    expect(res.text).toBe("RECOVERED");
+    expect(st.openrouterCalls).toHaveLength(1);
+    expect(st.openrouterCalls[0].key).toBe("sk-or-v1-key1");
+    vi.useRealTimers();
+  });
+
+  it("devolve o erro real (não a mensagem genérica) quando o probe também falha", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    st.openrouterHandler = () => ({ status: 429, content: "", msg: "Rate limit: quota exhausted" });
+
+    await expect(
+      generateText({
+        modelRef: "openrouter:openai/gpt-4o-mini",
+        prompt: "Chamada 1",
+        openrouterKeys: ["sk-or-v1-key1", "sk-or-v1-key2"],
+        noGatewayFallback: true,
+      })
+    ).rejects.toThrow("Rate limit");
+
+    vi.setSystemTime(Date.now() + 10_000);
+    st.openrouterCalls = [];
+    await expect(
+      generateText({
+        modelRef: "openrouter:openai/gpt-4o-mini",
+        prompt: "Chamada 2",
+        openrouterKeys: ["sk-or-v1-key1", "sk-or-v1-key2"],
+        noGatewayFallback: true,
+      })
+    ).rejects.toThrow("Rate limit");
+
+    expect(st.openrouterCalls).toHaveLength(1);
+    expect(st.openrouterCalls[0].key).toBe("sk-or-v1-key1");
+    vi.useRealTimers();
   });
 });

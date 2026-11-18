@@ -250,10 +250,10 @@ export async function POST(req: NextRequest) {
       console.warn(`[AGENT] Instância "${instanceName}" não pertence ao cliente da sessão — bloqueado.`);
       return NextResponse.json({ success: false, error: "Instância não vinculada a este cliente." }, { status: 403 });
     }
-    // Shape compatível com a leitura antiga de ai_organizer_config (só estas
-    // 2 chaves são usadas no pipeline).
+    // Shape compatível com a leitura antiga de ai_organizer_config (chaves
+    // consumidas pelo pipeline: Gemini, OpenRouter e NVIDIA).
     const orgConfig = orgRes
-      ? { api_key: orgRes.gemini, openrouter_api_key: orgRes.openrouter }
+      ? { api_key: orgRes.gemini, openrouter_api_key: orgRes.openrouter, nvidia_api_key: orgRes.nvidia }
       : null;
     let leadRow: any = null;
     let contactRow: any = null;
