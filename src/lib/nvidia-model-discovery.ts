@@ -27,15 +27,54 @@ export type NvidiaModel = {
 
 type Cache = { models: NvidiaModel[]; at: number };
 let CACHE: Cache | null = null;
+let IN_FLIGHT_REFRESH: Promise<NvidiaModel[] | null> | null = null;
 const TTL_MS = 10 * 60 * 1000;
+const STALE_REFRESH_MS = 8 * 60 * 1000;
+
+async function hashNvidiaKeyId(key: string): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
+  return `nvidia:${Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("")}`;
+}
 
 async function getKey(): Promise<string | null> {
   try {
     const keys = await getAiKeys();
-    return keys.nvidia && String(keys.nvidia).trim() ? String(keys.nvidia).trim() : null;
+    const candidates: string[] = [];
+    if (Array.isArray(keys.nvidiaAccounts)) {
+      for (const acc of keys.nvidiaAccounts) {
+        const k = acc?.apiKey ? String(acc.apiKey).trim() : "";
+        if (k && !candidates.includes(k)) candidates.push(k);
+      }
+    }
+    if (keys.nvidia && String(keys.nvidia).trim()) {
+      const primary = String(keys.nvidia).trim();
+      if (!candidates.includes(primary)) candidates.unshift(primary);
+    }
+    let checkDead: ((id: string) => boolean) | null = null;
+    try {
+      const mod = await import("@/lib/gateway-cooldown");
+      if ("isEndpointDead" in mod && typeof mod.isEndpointDead === "function") {
+        checkDead = mod.isEndpointDead;
+      }
+    } catch {
+      checkDead = null;
+    }
+    for (const candidate of candidates) {
+      const id = await hashNvidiaKeyId(candidate).catch(() => "");
+      if (!id || !checkDead || !checkDead(id)) return candidate;
+    }
+    return candidates[0] || null;
   } catch {
     return null;
   }
+}
+
+export function getCachedNvidiaModels(): NvidiaModel[] {
+  return CACHE?.models ? [...CACHE.models] : [];
+}
+
+export function seedNvidiaModelsCache(models: NvidiaModel[]): void {
+  CACHE = { models: [...models], at: Date.now() };
 }
 
 /**
@@ -148,89 +187,113 @@ async function fetchNgcCatalogMap(): Promise<Map<string, CatalogResource>> {
   return map;
 }
 
+async function fetchNvidiaModelsCatalog(timeoutMs = 12000): Promise<NvidiaModel[] | null> {
+  const apiKey = await getKey();
+  if (!apiKey) return null;
+
+  const [modelsRes, catalogMap] = await Promise.all([
+    fetch("https://integrate.api.nvidia.com/v1/models", {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      signal: AbortSignal.timeout(timeoutMs),
+    }).catch(() => null),
+    fetchNgcCatalogMap(),
+  ]);
+
+  const json = modelsRes && modelsRes.ok ? await modelsRes.json().catch(() => ({})) : null;
+  const list: unknown[] = Array.isArray(json?.data) ? json.data : [];
+
+  if (!list.length) {
+    return CACHE?.models?.length ? CACHE.models : FALLBACK_NVIDIA_MODELS;
+  }
+
+  // Filtra modelos não-chat (embeddings, rerank, reward, whisper, etc.)
+  const models: NvidiaModel[] = list
+    .filter((raw: unknown) => {
+      const m = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+      const id = String(m.id || "").toLowerCase();
+      if (!id) return false;
+      if (/embed|rerank|ranking|reward|guard|clip|whisper|stt|tts|bge-|voicechat/i.test(id)) {
+        return false;
+      }
+      return true;
+    })
+    .map((raw: unknown) => {
+      const m = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+      const id = String(m.id || "");
+      const ownedBy = typeof m.owned_by === "string" ? m.owned_by : undefined;
+      const norm = normalizeNvidiaModelKey(id);
+      const cat = catalogMap.get(norm);
+      const isFreeEndpoint = cat ? cat.isFree : false;
+      const available = cat ? cat.available : true;
+      const usageCount = cat ? cat.usageCount : undefined;
+      const name = formatDisplayName(id, cat?.displayName);
+      const supportsTools = !/reward|math|code-only|r1\b/i.test(id);
+
+      return {
+        id,
+        name,
+        description: isFreeEndpoint
+          ? `NVIDIA NIM · Free Endpoint (${ownedBy || "system"})`
+          : `NVIDIA NIM (${ownedBy || "system"})`,
+        supportsTools,
+        ownedBy,
+        isFreeEndpoint,
+        available,
+        usageCount,
+        contextLength: /405b|70b|nemotron/i.test(id) ? 128000 : 32768,
+      };
+    })
+    // Exclui modelos explicitamente marcados como indisponíveis no catálogo NGC
+    .filter((m) => m.available !== false);
+
+  // Ordena: Free Endpoints primeiro, depois por popularidade/invocações
+  models.sort((a, b) => {
+    if (a.isFreeEndpoint && !b.isFreeEndpoint) return -1;
+    if (!a.isFreeEndpoint && b.isFreeEndpoint) return 1;
+    const uA = a.usageCount || 0;
+    const uB = b.usageCount || 0;
+    if (uA !== uB) return uB - uA;
+    return a.name.localeCompare(b.name, "pt-BR");
+  });
+
+  const finalModels = models.length > 0 ? models : FALLBACK_NVIDIA_MODELS;
+  CACHE = { models: finalModels, at: Date.now() };
+  return finalModels;
+}
+
 /**
  * Lista modelos NVIDIA NIM que suportam chat e geração de texto em tempo real.
  * Cruza a API com o catálogo NGC para marcar Free Endpoint e disponibilidade.
  * Retorna [] se nenhuma API key NVIDIA estiver configurada.
  */
-export async function listAvailableNvidiaModels(force = false): Promise<NvidiaModel[]> {
-  if (!force && CACHE && Date.now() - CACHE.at < TTL_MS) return CACHE.models;
-
-  const apiKey = await getKey();
-  if (!apiKey) return [];
+export async function listAvailableNvidiaModels(force = false, timeoutMs = 12000): Promise<NvidiaModel[]> {
+  const age = CACHE ? Date.now() - CACHE.at : Infinity;
+  if (!force && CACHE && age < TTL_MS) {
+    if (age >= STALE_REFRESH_MS && !IN_FLIGHT_REFRESH) {
+      IN_FLIGHT_REFRESH = fetchNvidiaModelsCatalog(timeoutMs)
+        .then((m) => m || CACHE?.models || [])
+        .catch(() => CACHE?.models || [])
+        .finally(() => {
+          IN_FLIGHT_REFRESH = null;
+        });
+    }
+    return CACHE.models;
+  }
 
   try {
-    // Busca /v1/models (autenticado) e catálogo NGC (público) em paralelo
-    const [modelsRes, catalogMap] = await Promise.all([
-      fetch("https://integrate.api.nvidia.com/v1/models", {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
-        signal: AbortSignal.timeout(12000),
-      }).catch(() => null),
-      fetchNgcCatalogMap(),
-    ]);
-
-    const json = modelsRes && modelsRes.ok ? await modelsRes.json().catch(() => ({})) : null;
-    const list: any[] = Array.isArray(json?.data) ? json.data : [];
-
-    if (!list.length) {
-      return CACHE?.models?.length ? CACHE.models : FALLBACK_NVIDIA_MODELS;
+    if (!IN_FLIGHT_REFRESH || force) {
+      IN_FLIGHT_REFRESH = fetchNvidiaModelsCatalog(timeoutMs).finally(() => {
+        IN_FLIGHT_REFRESH = null;
+      });
     }
-
-    // Filtra modelos não-chat (embeddings, rerank, reward, whisper, etc.)
-    const models: NvidiaModel[] = list
-      .filter((m: any) => {
-        const id = String(m?.id || "").toLowerCase();
-        if (!id) return false;
-        if (/embed|rerank|ranking|reward|guard|clip|whisper|stt|tts|bge-|voicechat/i.test(id)) {
-          return false;
-        }
-        return true;
-      })
-      .map((m: any) => {
-        const id = String(m.id);
-        const norm = normalizeNvidiaModelKey(id);
-        const cat = catalogMap.get(norm);
-        const isFreeEndpoint = cat ? cat.isFree : false;
-        const available = cat ? cat.available : true;
-        const usageCount = cat ? cat.usageCount : undefined;
-        const name = formatDisplayName(id, cat?.displayName);
-        const supportsTools = !/reward|math|code-only|r1\b/i.test(id);
-
-        return {
-          id,
-          name,
-          description: isFreeEndpoint
-            ? `NVIDIA NIM · Free Endpoint (${m.owned_by || "system"})`
-            : `NVIDIA NIM (${m.owned_by || "system"})`,
-          supportsTools,
-          ownedBy: m.owned_by,
-          isFreeEndpoint,
-          available,
-          usageCount,
-          contextLength: /405b|70b|nemotron/i.test(id) ? 128000 : 32768,
-        };
-      })
-      // Exclui modelos explicitamente marcados como indisponíveis no catálogo NGC
-      .filter((m) => m.available !== false);
-
-    // Ordena: Free Endpoints primeiro, depois por popularidade/invocações
-    models.sort((a, b) => {
-      if (a.isFreeEndpoint && !b.isFreeEndpoint) return -1;
-      if (!a.isFreeEndpoint && b.isFreeEndpoint) return 1;
-      const uA = a.usageCount || 0;
-      const uB = b.usageCount || 0;
-      if (uA !== uB) return uB - uA;
-      return a.name.localeCompare(b.name, "pt-BR");
-    });
-
-    const finalModels = models.length > 0 ? models : FALLBACK_NVIDIA_MODELS;
-    CACHE = { models: finalModels, at: Date.now() };
-    return finalModels;
+    const fresh = await IN_FLIGHT_REFRESH;
+    if (!fresh) return [];
+    return fresh;
   } catch (err) {
-    console.warn("[nvidia-discovery] Falha ao listar modelos:", (err as any)?.message);
+    console.warn("[nvidia-discovery] Falha ao listar modelos:", (err as Error)?.message);
     return CACHE?.models?.length ? CACHE.models : FALLBACK_NVIDIA_MODELS;
   }
 }

@@ -1461,6 +1461,9 @@ export async function analyzeLead(opts: {
   const keys = await getAiKeys();
   const geminiApiKey = opts.apiKey || keys.gemini;
   const openrouterApiKey = keys.openrouter;
+  const openrouterKeys = keys.openrouterKeys;
+  const nvidiaApiKey = keys.nvidia;
+  const nvidiaAccounts = keys.nvidiaAccounts;
   const provider = providerOf(model);
   const providerLabel = providerDisplayName(provider);
   // thinking nativo só no Gemini 2.5/3 (dynamic = -1). OpenRouter ignora.
@@ -1513,6 +1516,9 @@ export async function analyzeLead(opts: {
       thinkingBudget,
       geminiApiKey,
       openrouterApiKey,
+      openrouterKeys,
+      nvidiaApiKey,
+      nvidiaAccounts,
     });
     reflexao = thinkOut.text;
     liLog(tag, `🧠 PASS 1 ok → ${reflexao.length} chars de reflexão (${Date.now() - tThink}ms)`);
@@ -1522,7 +1528,7 @@ export async function analyzeLead(opts: {
         sourceLabel: `Lead Intel THINK: ${lead.nome_negocio || lead.remoteJid}`,
         sourceId: String(lead.id),
         model: thinkOut.modelUsed,
-        provider: providerLabel,
+        provider: providerDisplayName(thinkOut.provider) || providerLabel,
         promptTokens: thinkOut.usage.promptTokens,
         completionTokens: thinkOut.usage.completionTokens,
         totalTokens: thinkOut.usage.totalTokens,
@@ -1549,6 +1555,9 @@ export async function analyzeLead(opts: {
     thinkingBudget,
     geminiApiKey,
     openrouterApiKey,
+    openrouterKeys,
+    nvidiaApiKey,
+    nvidiaAccounts,
   });
   const raw = jsonOut.text;
   liLog(tag, `📋 PASS 2 ok → ${raw.length} chars de JSON (${Date.now() - tJson}ms)`);
@@ -1560,7 +1569,7 @@ export async function analyzeLead(opts: {
       sourceLabel: `Lead Intel: ${lead.nome_negocio || lead.remoteJid}`,
       sourceId: String(lead.id),
       model: jsonOut.modelUsed,
-      provider: providerLabel,
+      provider: providerDisplayName(jsonOut.provider) || providerLabel,
       promptTokens: jsonOut.usage.promptTokens,
       completionTokens: jsonOut.usage.completionTokens,
       totalTokens: jsonOut.usage.totalTokens,

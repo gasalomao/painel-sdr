@@ -5,6 +5,11 @@ import { listAvailableOpenRouterModels } from "@/lib/openrouter-model-discovery"
 import { listAvailableGatewayModels } from "@/lib/gateway-model-discovery";
 import { listAvailableNvidiaModels } from "@/lib/nvidia-model-discovery";
 import { formatModelRef } from "@/lib/ai-provider";
+import {
+  AUTO_FREE_FAST_MODEL_REF,
+  AUTO_FREE_MODEL_REF,
+  scoreFreeModelCandidate,
+} from "@/lib/ai-smart-free-router";
 
 // Lê com service role pra contornar RLS (mesmo motivo que ai-organize).
 const adminClient = supabaseAdmin;
@@ -127,16 +132,60 @@ export async function GET(req: NextRequest) {
     const [gemini, openrouter, gateway, nvidia] = await Promise.all([
       geminiKey ? listGemini(geminiKey) : Promise.resolve([] as UnifiedModel[]),
       openrouterKey
-        ? listAvailableOpenRouterModels().then((list) =>
-            list.map((m): UnifiedModel => ({
+        ? listAvailableOpenRouterModels().then((list) => {
+            const sorted = [...list].sort((a, b) => {
+              const aFree = Boolean(a.isFree);
+              const bFree = Boolean(b.isFree);
+              if (aFree && bFree) {
+                const sA = scoreFreeModelCandidate(
+                  {
+                    provider: "openrouter",
+                    rawId: a.id,
+                    name: a.name,
+                    description: a.description,
+                    contextLength: a.contextLength,
+                    maxCompletionTokens: a.maxCompletionTokens,
+                    created: a.created,
+                    supportsTools: a.supportsTools,
+                    supportsStructuredOutputs: a.supportsStructuredOutputs,
+                    supportsReasoning: a.supportsReasoning,
+                    inputModalities: a.inputModalities,
+                    outputModalities: a.outputModalities,
+                  },
+                  { profile: "agent", requireTools: true },
+                );
+                const sB = scoreFreeModelCandidate(
+                  {
+                    provider: "openrouter",
+                    rawId: b.id,
+                    name: b.name,
+                    description: b.description,
+                    contextLength: b.contextLength,
+                    maxCompletionTokens: b.maxCompletionTokens,
+                    created: b.created,
+                    supportsTools: b.supportsTools,
+                    supportsStructuredOutputs: b.supportsStructuredOutputs,
+                    supportsReasoning: b.supportsReasoning,
+                    inputModalities: b.inputModalities,
+                    outputModalities: b.outputModalities,
+                  },
+                  { profile: "agent", requireTools: true },
+                );
+                if (sB !== sA) return sB - sA;
+              }
+              if (aFree !== bFree) return aFree ? -1 : 1;
+              return a.name.localeCompare(b.name, "pt-BR");
+            });
+            return sorted.map((m): UnifiedModel => ({
               id: formatModelRef("openrouter", m.id),
               rawId: m.id,
               name: m.name,
               description: m.description,
               provider: "openrouter",
               supportsTools: m.supportsTools,
-            }))
-          )
+              isFreeEndpoint: m.isFree,
+            }));
+          })
         : Promise.resolve([] as UnifiedModel[]),
       gatewayConfigured
         ? listAvailableGatewayModels().then((list) => {
@@ -170,14 +219,40 @@ export async function GET(req: NextRequest) {
         : Promise.resolve([] as UnifiedModel[]),
     ]);
 
-    const comboModels: UnifiedModel[] = configuredCombos.map((c) => ({
-      id: formatModelRef("combo", c.id),
-      rawId: c.id,
-      name: c.name,
-      description: c.description || `${c.models.length} modelos em cascata resiliente`,
-      provider: "combo",
-      supportsTools: true,
-    }));
+    const autoFreeModels: UnifiedModel[] = [
+      {
+        id: AUTO_FREE_MODEL_REF,
+        rawId: AUTO_FREE_MODEL_REF,
+        name: "🧠 Automático Inteligente (Melhor Free em Tempo Real)",
+        description:
+          "Avalia sozinho o catálogo ao vivo (OpenRouter + NVIDIA + Gateway) e escolhe o modelo gratuito mais inteligente e saudável",
+        provider: "combo",
+        supportsTools: true,
+        isFreeEndpoint: true,
+      },
+      {
+        id: AUTO_FREE_FAST_MODEL_REF,
+        rawId: AUTO_FREE_FAST_MODEL_REF,
+        name: "⚡ Automático Ultra-Rápido (Avaliadores & Resumos Free)",
+        description:
+          "Escolhe em tempo real o modelo gratuito instruct mais rápido e econômico, sem gasto oculto com thinking",
+        provider: "combo",
+        supportsTools: true,
+        isFreeEndpoint: true,
+      },
+    ];
+
+    const comboModels: UnifiedModel[] = [
+      ...autoFreeModels,
+      ...configuredCombos.map((c) => ({
+        id: formatModelRef("combo", c.id),
+        rawId: c.id,
+        name: c.name,
+        description: c.description || `${c.models.length} modelos em cascata resiliente`,
+        provider: "combo" as const,
+        supportsTools: true,
+      })),
+    ];
 
     // NVIDIA NIM tem prioridade máxima nos seletores, seguido por combo, gateway, openrouter e gemini.
     const models = [...nvidia, ...comboModels, ...gateway, ...openrouter, ...gemini];

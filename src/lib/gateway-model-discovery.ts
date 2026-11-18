@@ -247,6 +247,16 @@ export async function resolveGatewayEndpointForModel(modelId: string): Promise<G
   return endpoints[0];
 }
 
+/** Leitura síncrona (zero rede) do cache atual de modelos do Gateway. */
+export function getCachedGatewayModels(): GatewayModel[] {
+  return CACHE?.models ? [...CACHE.models] : [];
+}
+
+/** Permite popular o cache do Gateway em testes determinísticos. */
+export function seedGatewayModelsCache(models: GatewayModel[]): void {
+  CACHE = { models: [...models], at: Date.now() };
+}
+
 /** Invalida o cache — usar quando o admin trocar/adicionar/remover conexões. */
 export function invalidateGatewayModelsCache() {
   CACHE = null;

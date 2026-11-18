@@ -19,8 +19,15 @@
  */
 
 import { supabaseAdmin } from "@/lib/supabase_admin";
-import { generateText } from "@/lib/ai-provider";
+import { generateText, parseModelRef } from "@/lib/ai-provider";
 import { getAiKeys } from "@/lib/ai-keys";
+import {
+  isAutoFreeModelRef,
+  isModelUnavailable,
+  isProviderUnreachable,
+  isReasoningHeavyModel,
+  pickBestFreeModelRef,
+} from "@/lib/ai-smart-free-router";
 import { createHmac } from "crypto";
 
 // Cache em memória (process): remoteJid → { hash, summary }.
@@ -64,12 +71,14 @@ export async function cheapModelForSummary(opts?: SummarizeHistoryOptions): Prom
 } | null> {
   const keys = await getAiKeys().catch(() => null);
   const geminiKey = opts?.geminiApiKey || keys?.gemini || null;
-  const openrouterKey = opts?.openrouterApiKey || keys?.openrouter || null;
-  const nvidiaKey = opts?.nvidiaApiKey || keys?.nvidia || null;
+  const openrouterKey =
+    opts?.openrouterApiKey || keys?.openrouter || keys?.openrouterKeys?.[0] || null;
+  const nvidiaKey =
+    opts?.nvidiaApiKey || keys?.nvidia || keys?.nvidiaAccounts?.[0]?.apiKey || null;
+  const hasGateway = Boolean(keys?.gatewayEndpoints && keys.gatewayEndpoints.length > 0);
 
-  // Se o agente usa Gateway/OpenCode ou modelo :free explícito, prioriza ele para não cair em provedor pago/off-line.
   const pref = (opts?.preferredModelRef || "").trim();
-  if (pref && (pref.startsWith("gateway:") || pref.endsWith(":free"))) {
+  if (pref && (pref.startsWith("gateway:") || isAutoFreeModelRef(pref))) {
     return {
       modelRef: pref,
       geminiApiKey: geminiKey,
@@ -78,9 +87,69 @@ export async function cheapModelForSummary(opts?: SummarizeHistoryOptions): Prom
     };
   }
 
-  if (geminiKey) {
-    return { modelRef: "gemini-2.5-flash", geminiApiKey: geminiKey, openrouterApiKey: openrouterKey, nvidiaApiKey: nvidiaKey };
+  if (pref && pref.endsWith(":free")) {
+    const parsedPref = parseModelRef(pref);
+    const prefUnavailable = isModelUnavailable(parsedPref.provider, parsedPref.model);
+    const prefHeavy = isReasoningHeavyModel(parsedPref.model);
+    if (!prefUnavailable && !prefHeavy) {
+      return {
+        modelRef: pref,
+        geminiApiKey: geminiKey,
+        openrouterApiKey: openrouterKey,
+        nvidiaApiKey: nvidiaKey,
+      };
+    }
+    // Se o modelo :free titular é pesado de reasoning ou está em cooldown, tenta achar um :free instruct veloz
+    const fastFree = await pickBestFreeModelRef({
+      profile: "fast",
+      hasOpenRouter: Boolean(openrouterKey),
+      hasNvidia: Boolean(nvidiaKey),
+      hasGateway,
+    }).catch(() => null);
+    if (fastFree) {
+      return {
+        modelRef: fastFree,
+        geminiApiKey: geminiKey,
+        openrouterApiKey: openrouterKey,
+        nvidiaApiKey: nvidiaKey,
+      };
+    }
+    if (!prefUnavailable) {
+      return {
+        modelRef: pref,
+        geminiApiKey: geminiKey,
+        openrouterApiKey: openrouterKey,
+        nvidiaApiKey: nvidiaKey,
+      };
+    }
   }
+
+  if (geminiKey && !isProviderUnreachable("gemini")) {
+    return {
+      modelRef: "gemini-2.5-flash",
+      geminiApiKey: geminiKey,
+      openrouterApiKey: openrouterKey,
+      nvidiaApiKey: nvidiaKey,
+    };
+  }
+
+  if (openrouterKey || nvidiaKey) {
+    const fastFree = await pickBestFreeModelRef({
+      profile: "fast",
+      hasOpenRouter: Boolean(openrouterKey),
+      hasNvidia: Boolean(nvidiaKey),
+      hasGateway,
+    }).catch(() => null);
+    if (fastFree) {
+      return {
+        modelRef: fastFree,
+        geminiApiKey: geminiKey,
+        openrouterApiKey: openrouterKey,
+        nvidiaApiKey: nvidiaKey,
+      };
+    }
+  }
+
   if (openrouterKey) {
     return {
       modelRef: "openrouter:meta-llama/llama-3.1-8b-instruct",
@@ -102,7 +171,7 @@ export async function cheapModelForSummary(opts?: SummarizeHistoryOptions): Prom
       nvidiaApiKey: nvidiaKey,
     };
   }
-  if (keys?.gatewayEndpoints && keys.gatewayEndpoints.length > 0) {
+  if (hasGateway) {
     try {
       const { listAvailableGatewayModels } = await import("@/lib/gateway-model-discovery");
       const gwModels = await listAvailableGatewayModels();
@@ -208,6 +277,7 @@ export async function summarizeMiddleMessages(
       prompt,
       // Econômico: resumo não precisa raciocínio profundo. Economiza token.
       reasoningMode: 0,
+      taskProfile: "fast",
       geminiApiKey: model.geminiApiKey,
       openrouterApiKey: model.openrouterApiKey,
       nvidiaApiKey: model.nvidiaApiKey,

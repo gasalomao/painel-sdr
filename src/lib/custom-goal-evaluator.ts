@@ -158,6 +158,9 @@ export async function evaluateCustomGoal(opts: {
     opts.modelRef && opts.modelRef.trim().length > 0
       ? opts.modelRef.trim()
       : process.env.DEFAULT_FAST_MODEL || "";
+  let resolvedGeminiKey = opts.geminiApiKey;
+  let resolvedOpenRouterKey = opts.openrouterApiKey;
+  let resolvedNvidiaKey = opts.nvidiaApiKey;
   if (!targetModel) {
     try {
       const { cheapModelForSummary } = await import("@/lib/history-summary");
@@ -167,6 +170,9 @@ export async function evaluateCustomGoal(opts: {
         nvidiaApiKey: opts.nvidiaApiKey,
       });
       targetModel = cheap?.modelRef || "gemini-2.0-flash";
+      resolvedGeminiKey = resolvedGeminiKey ?? cheap?.geminiApiKey;
+      resolvedOpenRouterKey = resolvedOpenRouterKey ?? cheap?.openrouterApiKey;
+      resolvedNvidiaKey = resolvedNvidiaKey ?? cheap?.nvidiaApiKey;
     } catch {
       targetModel = "gemini-2.0-flash";
     }
@@ -181,9 +187,10 @@ export async function evaluateCustomGoal(opts: {
       temperature: 0,
       maxOutputTokens: 5,
       reasoningMode: 0,
-      geminiApiKey: opts.geminiApiKey,
-      openrouterApiKey: opts.openrouterApiKey,
-      nvidiaApiKey: opts.nvidiaApiKey,
+      taskProfile: "fast",
+      geminiApiKey: resolvedGeminiKey,
+      openrouterApiKey: resolvedOpenRouterKey,
+      nvidiaApiKey: resolvedNvidiaKey,
     });
 
     const achieved = parseBinaryGoalResponse(aiRes.text);

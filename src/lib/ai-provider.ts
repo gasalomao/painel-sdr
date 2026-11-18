@@ -34,6 +34,22 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { pickBestFlashModel } from "@/lib/gemini-model-discovery";
 import { isDeadModelError } from "@/lib/gemini-call";
 import { COMBO_PREFIX, resolveComboSteps } from "@/lib/ai-combos";
+import {
+  AUTO_FREE_PREFIX,
+  areAllOpenRouterKeysFreeOnly,
+  isAutoFreeModelRef,
+  isCreditExhaustedOnKeyError,
+  isModelLevelFatalError,
+  isModelQuarantined,
+  isProviderUnreachable,
+  markKeyFreeOnly,
+  markProviderUnreachable,
+  profileFromAutoModelRef,
+  rankFreeModelsFromCatalogs,
+  recordModelFailure,
+  recordModelSuccess,
+  type AiTaskProfile,
+} from "@/lib/ai-smart-free-router";
 
 /**
  * Timeout por chamada de IA — sem isso um gateway/proxy pendurado bloqueia a
@@ -271,6 +287,9 @@ export function buildSystemMessage(
 export function parseModelRef(ref: string | null | undefined): ModelRef {
   const s = (ref || "").trim();
   if (!s) return { provider: "gemini", model: "" };
+  if (s.toLowerCase().startsWith(AUTO_FREE_PREFIX)) {
+    return { provider: "combo", model: s.toLowerCase() };
+  }
   if (s.startsWith(COMBO_PREFIX)) {
     return { provider: "combo", model: s.slice(COMBO_PREFIX.length).trim() };
   }
@@ -294,7 +313,10 @@ export function parseModelRef(ref: string | null | undefined): ModelRef {
 /** Monta a string de modelo pra salvar no banco a partir de provider + id cru. */
 export function formatModelRef(provider: AiProvider, model: string): string {
   const m = (model || "").trim();
-  if (provider === "combo") return `${COMBO_PREFIX}${m}`;
+  if (provider === "combo") {
+    if (m.toLowerCase().startsWith(AUTO_FREE_PREFIX)) return m.toLowerCase();
+    return `${COMBO_PREFIX}${m}`;
+  }
   if (provider === "nvidia") return `${NVIDIA_PREFIX}${m}`;
   if (provider === "openrouter") return `${OPENROUTER_PREFIX}${m}`;
   if (provider === "gateway") return `${GATEWAY_PREFIX}${m}`;
@@ -681,6 +703,9 @@ export async function nvidiaChatWithFailover(
   let lastErr: unknown = null;
   let accumulatedUsage = emptyUsage();
   const model = String(body?.model || "");
+  if (model && isModelQuarantined("nvidia", model) && opts.maxAttempts !== 1) {
+    throw new ProviderHttpError(404, `Modelo nvidia:${model} indisponível temporariamente (em quarentena).`);
+  }
   let attempts = 0;
   const maxAttempts = opts.maxAttempts === undefined ? Infinity : Math.max(1, Math.min(3, Math.trunc(opts.maxAttempts) || 1));
 
@@ -690,10 +715,11 @@ export async function nvidiaChatWithFailover(
     const coolId = model ? `${c.id}::${model}` : c.id;
     const coolLabel = model ? `${c.label}::${model}` : c.label;
     if (isEndpointUnavailable(c.id) || isEndpointUnavailable(coolId)) continue;
+    const callStartedAt = Date.now();
     try {
       attempts++;
       if (opts.attemptBudget) opts.attemptBudget.remaining--;
-      const json = await openAICompatibleChat(
+      let json = await openAICompatibleChat(
         NVIDIA_BASE,
         body,
         {
@@ -704,17 +730,40 @@ export async function nvidiaChatWithFailover(
         coolId,
         opts.signal
       );
-      return withAccumulatedUsage(
-        opts.allowEmptyContent ? json : requireUsableOpenAIResponse(json, "nvidia", model),
-        accumulatedUsage,
-        "nvidia",
-        model
-      );
+
+      // Resgate contra truncamento de thinking em chamadas ultra-curtas (ex.: max_tokens=5 em avaliadores)
+      const msg0 = json?.choices?.[0]?.message || {};
+      const emptyOut = !String(msg0.content || "").trim() && !(Array.isArray(msg0.tool_calls) && msg0.tool_calls.length > 0);
+      const reasoningTruncated =
+        emptyOut &&
+        !opts.allowEmptyContent &&
+        Number(body?.max_tokens) > 0 &&
+        Number(body?.max_tokens) < 384 &&
+        (Number(json?.usage?.completion_tokens_details?.reasoning_tokens) > 0 || json?.choices?.[0]?.finish_reason === "length") &&
+        attempts < maxAttempts;
+      if (reasoningTruncated) {
+        accumulatedUsage = addAiUsage(accumulatedUsage, openRouterUsage(json, "nvidia", model));
+        attempts++;
+        if (opts.attemptBudget) opts.attemptBudget.remaining--;
+        json = await openAICompatibleChat(
+          NVIDIA_BASE,
+          { ...body, max_tokens: 384, reasoning: { effort: "minimal" } },
+          { Authorization: `Bearer ${c.apiKey}`, "Content-Type": "application/json" },
+          "NVIDIA NIM",
+          coolId,
+          opts.signal,
+        );
+      }
+
+      const usable = opts.allowEmptyContent ? json : requireUsableOpenAIResponse(json, "nvidia", model);
+      recordModelSuccess("nvidia", model, Date.now() - callStartedAt);
+      return withAccumulatedUsage(usable, accumulatedUsage, "nvidia", model);
     } catch (err) {
       if (opts.signal?.aborted) throw attachAiUsage(opts.signal.reason ?? err, accumulatedUsage);
       lastErr = err;
       if (err instanceof AiEmptyResponseError) {
         accumulatedUsage = addAiUsage(accumulatedUsage, err.usage);
+        recordModelFailure("nvidia", model, { isEmpty: true });
         markEndpointCooldown(coolId);
         console.warn(`[ai-provider:nvidia] Conta ${coolLabel} retornou resposta vazia. Rotacionando para próxima conta NVIDIA.`);
         continue;
@@ -727,18 +776,26 @@ export async function nvidiaChatWithFailover(
           console.warn(`[ai-provider:nvidia] Conta ${c.label} marcada MORTA (HTTP ${err.status}). Rotacionando para próxima conta NVIDIA.`);
           continue;
         }
+        if (isModelLevelFatalError(err.status, err.message) && !/support tool use/i.test(err.message)) {
+          recordModelFailure("nvidia", model, { status: err.status, message: err.message });
+          markEndpointCooldown(coolId);
+          console.warn(`[ai-provider:nvidia] Modelo "${model}" indisponível no provedor (${err.message.slice(0, 80)}). Pulando contas restantes e subindo escada.`);
+          break;
+        }
         if (
           err.status === 429 ||
           err.status === 402 ||
           isFailoverableStatus(err.status, err.message) ||
           /credit|quota|insufficient|rate.?limit/i.test(err.message)
         ) {
+          recordModelFailure("nvidia", model, { status: err.status, message: err.message });
           markEndpointCooldown(coolId);
           console.warn(`[ai-provider:nvidia] Conta ${coolLabel} em cooldown (${err.message.slice(0, 80)}). Rotacionando para próxima conta NVIDIA.`);
           continue;
         }
         throw accumulatedUsage.attempts?.length ? setAiUsage(err, accumulatedUsage) : err;
       }
+      recordModelFailure("nvidia", model, { isTimeout: true, message: (err as Error)?.message });
       console.warn(`[ai-provider:nvidia] Conta ${c.label} falhou (rede/timeout). Rotacionando:`, (err as any)?.message);
       continue;
     }
@@ -758,7 +815,7 @@ export async function nvidiaChatWithFailover(
  * Tenta as chaves disponíveis sequencialmente (pulando as em cooldown/mortas).
  * 429/quota/402 → marca cooldown temporário da chave e tenta a PRÓXIMA chave.
  * 401/403 → marca chave como MORTA (inválida) e tenta a PRÓXIMA chave.
- * 400 (Bad Request) → relança (erro de payload/modelo, trocar chave não resolve).
+ * Erro global do modelo (404 / unavailable for free / no endpoints) → quarentena do modelo e avança escada imediatamente.
  */
 export async function openRouterChatWithFailover(
   body: Record<string, unknown>,
@@ -813,6 +870,10 @@ export async function openRouterChatWithFailover(
   // POR MODELO. Sem o modelo no ID, um único :free estourado colocava a
   // chave inteira em cooldown e derrubava TODOS os outros modelos.
   const model = String(body?.model || "");
+  if (model && isModelQuarantined("openrouter", model) && opts.maxAttempts !== 1) {
+    throw new ProviderHttpError(404, `Modelo openrouter:${model} indisponível temporariamente (em quarentena).`);
+  }
+  const isModelFreeSlug = model.toLowerCase().endsWith(":free");
   let attempts = 0;
   const maxAttempts = opts.maxAttempts === undefined ? Infinity : Math.max(1, Math.min(3, Math.trunc(opts.maxAttempts) || 1));
   for (const c of candidates) {
@@ -821,18 +882,45 @@ export async function openRouterChatWithFailover(
     const coolId = model ? `${c.id}::${model}` : c.id;
     const coolLabel = model ? `${c.label}::${model}` : c.label;
     if (isEndpointUnavailable(c.id) || isEndpointUnavailable(coolId)) continue;
+    const callStartedAt = Date.now();
     try {
       attempts++;
       if (opts.attemptBudget) opts.attemptBudget.remaining--;
-      const json = await openRouterChat(c.key, body, coolId, opts.signal);
+      let json = await openRouterChat(c.key, body, coolId, opts.signal);
       const hasImages = opts.allowImages && Array.isArray(json?.choices?.[0]?.message?.images) && json.choices[0].message.images.length > 0;
       const allowEmpty = Boolean(opts.allowEmptyContent) || hasImages;
-      return withAccumulatedUsage(allowEmpty ? json : requireUsableOpenAIResponse(json, "openrouter", model), accumulatedUsage, "openrouter", model);
+
+      // Resgate contra truncamento de thinking em chamadas curtas (ex.: max_tokens=5 no avaliador binário)
+      const msg0 = json?.choices?.[0]?.message || {};
+      const emptyOut = !String(msg0.content || "").trim() && !(Array.isArray(msg0.tool_calls) && msg0.tool_calls.length > 0);
+      const reasoningTruncated =
+        emptyOut &&
+        !allowEmpty &&
+        Number(body?.max_tokens) > 0 &&
+        Number(body?.max_tokens) < 384 &&
+        (Number(json?.usage?.completion_tokens_details?.reasoning_tokens) > 0 || json?.choices?.[0]?.finish_reason === "length") &&
+        attempts < maxAttempts;
+      if (reasoningTruncated) {
+        accumulatedUsage = addAiUsage(accumulatedUsage, openRouterUsage(json, "openrouter", model));
+        attempts++;
+        if (opts.attemptBudget) opts.attemptBudget.remaining--;
+        json = await openRouterChat(
+          c.key,
+          { ...body, max_tokens: 384, reasoning: { effort: "minimal" } },
+          coolId,
+          opts.signal,
+        );
+      }
+
+      const usable = allowEmpty ? json : requireUsableOpenAIResponse(json, "openrouter", model);
+      recordModelSuccess("openrouter", model, Date.now() - callStartedAt);
+      return withAccumulatedUsage(usable, accumulatedUsage, "openrouter", model);
     } catch (err) {
       if (opts.signal?.aborted) throw attachAiUsage(opts.signal.reason ?? err, accumulatedUsage);
       lastErr = err;
       if (err instanceof AiEmptyResponseError) {
         accumulatedUsage = addAiUsage(accumulatedUsage, err.usage);
+        recordModelFailure("openrouter", model, { isEmpty: true });
         markEndpointCooldown(coolId);
         console.warn(`[ai-provider:openrouter] ${coolLabel} retornou resposta vazia. Rotacionando para próxima chave.`);
         continue;
@@ -840,23 +928,34 @@ export async function openRouterChatWithFailover(
       const failedUsage = aiUsageFromError(err) ?? openRouterResponseUsage(null);
       accumulatedUsage = addAiUsage(accumulatedUsage, withUsageAttempt(failedUsage, "openrouter", model));
       if (err instanceof ProviderHttpError) {
-        if (err.status === 401 || err.status === 403) {
+        if (!isModelFreeSlug && isCreditExhaustedOnKeyError(err.status, err.message)) {
+          markKeyFreeOnly(c.key);
+        }
+        // 403 específico do modelo :free ("only available on agentic harnesses") não mata a API key inteira!
+        if ((err.status === 401 || err.status === 403) && !isModelLevelFatalError(err.status, err.message)) {
           markEndpointDead(c.id);
           console.warn(`[ai-provider:openrouter] Chave ${c.label} marcada MORTA (HTTP ${err.status}). Rotacionando para próxima chave OpenRouter.`);
           continue;
         }
+        if (isModelLevelFatalError(err.status, err.message) && !/support tool use/i.test(err.message)) {
+          recordModelFailure("openrouter", model, { status: err.status, message: err.message });
+          markEndpointCooldown(coolId);
+          console.warn(`[ai-provider:openrouter] Modelo "${model}" indisponível no provedor (${err.message.slice(0, 80)}). Pulando chaves restantes e avançando escada.`);
+          break;
+        }
         if (
           err.status === 429 ||
           err.status === 402 ||
-          isFailoverableStatus(err.status, err.message) ||
-          (/unavailable for free|not a valid model id/i.test(err.message) && !/support tool use/i.test(err.message))
+          isFailoverableStatus(err.status, err.message)
         ) {
+          recordModelFailure("openrouter", model, { status: err.status, message: err.message });
           markEndpointCooldown(coolId);
           console.warn(`[ai-provider:openrouter] ${coolLabel} falhou (${err.message.slice(0, 80)}). Rotacionando para próxima chave/modelo.`);
           continue;
         }
         throw accumulatedUsage.attempts?.length ? setAiUsage(err, accumulatedUsage) : err;
       }
+      recordModelFailure("openrouter", model, { isTimeout: true, message: (err as Error)?.message });
       console.warn(`[ai-provider:openrouter] Chave ${c.label} falhou (rede/timeout). Rotacionando:`, (err as any)?.message);
       continue;
     }
@@ -1154,8 +1253,14 @@ export interface GenerateTextOpts {
   noGatewayFallback?: boolean;
   /** Força saída em JSON (Gemini: responseMimeType; OpenRouter: response_format). */
   jsonMode?: boolean;
-  /** Só Gemini: schema estruturado pra saída JSON garantida (responseSchema). */
+  /** Schema estruturado pra saída JSON garantida (Gemini nativo + tradução automática p/ outros provedores). */
   geminiResponseSchema?: any;
+  /** Perfil semântico da tarefa ("agent" | "general" | "fast") para ranquear o melhor modelo :free compatível. */
+  taskProfile?: AiTaskProfile;
+  /** Sinal opcional de cancelamento/timeout por tentativa. */
+  signal?: AbortSignal;
+  /** Força descoberta ao vivo de catálogo mesmo em ambiente Vitest. */
+  allowLiveDiscovery?: boolean;
 }
 
 export interface GenerateTextResult {
@@ -1167,54 +1272,104 @@ export interface GenerateTextResult {
   didFallback: boolean;
 }
 
+function isGeminiNetworkUnreachableError(err: unknown): boolean {
+  const msg = String((err as Error)?.message || err || "");
+  return /Error fetching from https:\/\/generativelanguage\.googleapis\.com|fetch failed|ENOTFOUND|ETIMEDOUT|ECONNREFUSED|ECONNRESET/i.test(
+    msg,
+  );
+}
+
+function isJsonFormatUnsupportedError(err: unknown): boolean {
+  if (!(err instanceof ProviderHttpError)) return false;
+  if (err.status !== 400 && err.status !== 422) return false;
+  return /response_format|json_object|json_schema|structured.?output|json mode/i.test(err.message || "");
+}
+
+function prepareJsonAwarePrompts(opts: {
+  system?: string;
+  prompt: string;
+  jsonMode?: boolean;
+  geminiResponseSchema?: unknown;
+}): { system?: string; prompt: string; useJsonResponseFormat: boolean } {
+  const hasSchema = Boolean(opts.geminiResponseSchema && typeof opts.geminiResponseSchema === "object");
+  const useJsonResponseFormat = Boolean(opts.jsonMode || hasSchema);
+  if (!hasSchema) {
+    return { system: opts.system, prompt: opts.prompt, useJsonResponseFormat };
+  }
+  let schemaSnippet = "";
+  try {
+    schemaSnippet = JSON.stringify(opts.geminiResponseSchema).slice(0, 1800);
+  } catch {
+    schemaSnippet = "";
+  }
+  const schemaInstruction = schemaSnippet
+    ? `\n\nResponda EXCLUSIVAMENTE com um JSON válido obedecendo estritamente a esta estrutura/schema (sem blocos markdown): ${schemaSnippet}`
+    : `\n\nResponda EXCLUSIVAMENTE com um JSON válido puro (sem blocos markdown).`;
+  return {
+    system: opts.system ? `${opts.system}${schemaInstruction}` : schemaInstruction.trim(),
+    prompt: opts.prompt,
+    useJsonResponseFormat,
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────────
-// ESCADA DE FALLBACK CROSS-PROVIDER ("nunca quebra")
-// A rotação de CONTAS já existe dentro de cada provider (chaves OpenRouter,
-// contas do gateway, cascata de combos). O que faltava era a travessia:
-// Gemini com quota estourada não caía pra OpenRouter; generateText no
-// OpenRouter não caía pro Gemini. A escada cobre isso num lugar só —
-// generateText e startAiChat ganham de graça.
+// ESCADA DE FALLBACK CROSS-PROVIDER ("nunca quebra" + Free-First em Tempo Real)
 // ─────────────────────────────────────────────────────────────────────
 
 /**
- * Esse erro justifica tentar OUTRO provider? Erros de CONTA (quota/429/auth/
- * rede) sim — outra conta resolve. Erros de REQUEST (400 bad request puro,
- * 404 modelo morto) não — qualquer provider daria o mesmo erro (e modelo
- * morto já tem retry interno próprio).
+ * Esse erro justifica tentar OUTRO modelo/provider?
+ * Erros de CONTA (quota/429/auth/rede) OU morte global do modelo (404 /
+ * unavailable for free / no endpoints found) sim — outro modelo/provedor resolve.
+ * Erros de REQUEST malformado do cliente (400 bad request puro) não.
  */
 function isAccountLevelError(err: unknown): boolean {
   if (err instanceof AiEmptyResponseError) return true;
   if (err instanceof ProviderHttpError) {
     if (isFailoverableStatus(err.status, err.message)) return true;
+    if (isModelLevelFatalError(err.status, err.message)) return true;
     const msg = String(err.message || "");
-    if (/unavailable for free|not a valid model id|no endpoints found|cooldown|falharam/i.test(msg)) return true;
+    if (/unavailable for free|not a valid model id|no endpoints found|cooldown|falharam|quarentena/i.test(msg)) return true;
     return false;
   }
   const msg = String((err as any)?.message || err);
-  return /quota|exhaust|429|rate.?limit|timeout|deadline|network|ENOTFOUND|ECONNRESET|fetch failed|api key|unauthor|forbidden|unavailable|overloaded|unavailable for free|not a valid model id|no endpoints found|cooldown|falharam/i.test(msg);
+  return /quota|exhaust|429|rate.?limit|timeout|deadline|network|ENOTFOUND|ECONNRESET|fetch failed|api key|unauthor|forbidden|unavailable|overloaded|unavailable for free|not a valid model id|no endpoints found|cooldown|falharam|quarentena|nenhum modelo gratuito/i.test(msg);
 }
 
 /** Chaves mínimas que a escada precisa pra montar os rungs. */
 interface LadderKeys {
   gemini?: string | null;
   nvidia?: string | null;
+  nvidiaAccounts?: import("@/lib/ai-keys").NvidiaAccount[] | null;
   openrouter?: string | null;
   openrouterKeys?: string[] | null;
+  gatewayBaseUrl?: string | null;
+  gatewayEndpoints?: Array<{ id: string; label: string; baseUrl: string; apiKey?: string | null }> | null;
   agentFallbackModel?: string | null;
   gatewayFallbackModel?: string | null;
 }
 
+interface BuildLadderOptions {
+  profile?: AiTaskProfile;
+  requireTools?: boolean;
+  requireJson?: boolean;
+  allowLiveDiscovery?: boolean;
+}
+
 /**
- * Monta a escada de fallback cross-provider, dedup POR PROVIDER (a rotação
- * interna já cobre "outra conta do mesmo provider"):
- *   1. modelRef pedido
- *   2. agentFallbackModel — RESERVA ESCOLHIDA NO AGENTE (se configurada)
- *   3. gatewayFallbackModel — RESERVA ESCOLHIDA PELO USUÁRIO em Configurações
- *   4. melhor flash ATUAL descoberto na hora (pickBestFlashModel)
- *   5. nvidia:nvidia/nemotron-3.5-lightning-30b-a3b (se chave NVIDIA configurada)
- *   6. openrouter:openai/gpt-4o-mini (última rede de segurança)
+ * Monta a escada inteligente de fallback Free-First em tempo real:
+ *   1. modelRef titular escolhido pelo usuário (SEMPRE respeitado primeiro)
+ *   2. agentFallbackModel — reserva explícita do agente (se configurada)
+ *   3. gatewayFallbackModel — reserva global de Configurações (se configurada)
+ *   4. Fila Inteligente Free-First em Tempo Real (OpenRouter :free + NVIDIA Free Endpoints + Gateway conectado),
+ *      pontuada por inteligência/capacidade + saúde/latência ao vivo e intercalada entre provedores
+ *   5. Gemini Flash dinâmico atual (`pickBestFlashModel`) se chave Gemini ativa e acessível
+ *   6. Rede de segurança estática (NVIDIA Free default / `gpt-4o-mini` somente se houver chave com crédito)
  */
-async function buildLadder(requestedRef: string, keys: LadderKeys | null): Promise<string[]> {
+async function buildLadder(
+  requestedRef: string,
+  keys: LadderKeys | null,
+  ladderOpts?: BuildLadderOptions,
+): Promise<string[]> {
   const ladder = [requestedRef];
   const modelKey = (ref: string) => {
     const parsed = parseModelRef(ref);
@@ -1226,39 +1381,90 @@ async function buildLadder(requestedRef: string, keys: LadderKeys | null): Promi
   const push = (ref: string | null | undefined, allowSameProvider = false) => {
     const r = (ref || "").trim();
     if (!r || seenModels.has(modelKey(r))) return;
-    const p = providerOf(r);
+    const parsed = parseModelRef(r);
+    if (isModelQuarantined(parsed.provider, parsed.model)) return;
+    const p = parsed.provider;
     if (!allowSameProvider && seenProviders.has(p)) return;
     seenModels.add(modelKey(r));
     seenProviders.add(p);
     ladder.push(r);
   };
 
-  // 1. Reserva específica do agente (máxima prioridade) e reserva global da conta
-  push(keys?.agentFallbackModel, true);
-  push(keys?.gatewayFallbackModel, true);
+  const hasOpenRouter = Boolean(keys?.openrouter || (keys?.openrouterKeys?.length || 0) > 0);
+  const hasNvidia = Boolean(keys?.nvidia || (keys?.nvidiaAccounts?.length || 0) > 0);
+  const hasGateway = Boolean((keys?.gatewayEndpoints?.length || 0) > 0 || keys?.gatewayBaseUrl);
 
-  // 2. Provedor Gemini (melhor flash do momento)
-  if (keys?.gemini) {
+  // 1. Reservas manuais explícitas do agente e da conta (exceto se forem "auto:free", que expandem no passo 2)
+  if (keys?.agentFallbackModel && !isAutoFreeModelRef(keys.agentFallbackModel)) {
+    push(keys.agentFallbackModel, true);
+  }
+  if (keys?.gatewayFallbackModel && !isAutoFreeModelRef(keys.gatewayFallbackModel)) {
+    push(keys.gatewayFallbackModel, true);
+  }
+
+  // 2. Fila Inteligente Free-First em Tempo Real (novos modelos :free avaliados automaticamente)
+  if (hasOpenRouter || hasNvidia || hasGateway) {
+    try {
+      const explicitAuto =
+        isAutoFreeModelRef(keys?.agentFallbackModel) || isAutoFreeModelRef(keys?.gatewayFallbackModel);
+      const effectiveProfile = isAutoFreeModelRef(keys?.agentFallbackModel)
+        ? profileFromAutoModelRef(keys?.agentFallbackModel, ladderOpts?.profile || "general")
+        : ladderOpts?.profile || "general";
+      const dynamicFree = await rankFreeModelsFromCatalogs({
+        profile: effectiveProfile,
+        requireTools: ladderOpts?.requireTools,
+        requireJson: ladderOpts?.requireJson,
+        excludeRefs: ladder,
+        maxResults: 5,
+        hasOpenRouter,
+        hasNvidia,
+        hasGateway,
+        allowLiveFetch: ladderOpts?.allowLiveDiscovery ?? explicitAuto ? true : undefined,
+      });
+      for (const candidate of dynamicFree) {
+        push(candidate.modelRef, true);
+      }
+    } catch {
+      /* descoberta de catálogo falhou — segue para degraus estáticos de segurança */
+    }
+  }
+
+  // 3. Provedor Gemini (melhor flash do momento, se chave configurada e rede acessível)
+  if (keys?.gemini && !isProviderUnreachable("gemini")) {
     let best = "gemini-2.5-flash";
     try { best = (await pickBestFlashModel()) || best; } catch { /* offline */ }
     push(best);
   }
 
-  // 3. Provedor NVIDIA NIM (se configurado — prioriza o modelo Free Endpoint em alta)
-  if (keys?.nvidia) {
+  // 4. Rede de segurança NVIDIA Free Endpoint (caso catálogo dinâmico estivesse frio)
+  if (hasNvidia && !ladder.some((r) => r !== requestedRef && providerOf(r) === "nvidia")) {
     push("nvidia:nvidia/nemotron-3.5-lightning-30b-a3b", true);
   }
 
-  // 4. Última rede de segurança: modelo OpenRouter barato e de alta disponibilidade (gpt-4o-mini)
-  if (keys?.openrouter || (keys?.openrouterKeys?.length || 0) > 0) {
-    push("openrouter:openai/gpt-4o-mini", true);
+  // 5. Última rede de segurança OpenRouter (somente se não sabemos que todas as chaves são 100% sem crédito)
+  if (hasOpenRouter) {
+    const allOrKeys = [
+      ...(Array.isArray(keys?.openrouterKeys) ? keys!.openrouterKeys! : []),
+      ...(keys?.openrouter ? [keys.openrouter] : []),
+    ];
+    if (!areAllOpenRouterKeysFreeOnly(allOrKeys)) {
+      push("openrouter:openai/gpt-4o-mini", true);
+    }
   }
 
   return ladder;
 }
 
 /** Lê as chaves pra montar a escada — preserva chaves passadas mesmo se o banco falhar. */
-async function ladderKeys(opts: { geminiApiKey?: string | null; nvidiaApiKey?: string | null; openrouterApiKey?: string | null; openrouterKeys?: string[] | null; fallbackModelRef?: string | null }): Promise<LadderKeys> {
+async function ladderKeys(opts: {
+  geminiApiKey?: string | null;
+  nvidiaApiKey?: string | null;
+  nvidiaAccounts?: import("@/lib/ai-keys").NvidiaAccount[] | null;
+  openrouterApiKey?: string | null;
+  openrouterKeys?: string[] | null;
+  gatewayBaseUrl?: string | null;
+  fallbackModelRef?: string | null;
+}): Promise<LadderKeys> {
   let keys: Awaited<ReturnType<typeof import("@/lib/ai-keys")["getAiKeys"]>> | null = null;
   try {
     const { getAiKeys } = await import("@/lib/ai-keys");
@@ -1269,8 +1475,11 @@ async function ladderKeys(opts: { geminiApiKey?: string | null; nvidiaApiKey?: s
   return {
     gemini: opts.geminiApiKey || keys?.gemini || null,
     nvidia: opts.nvidiaApiKey || keys?.nvidia || null,
+    nvidiaAccounts: opts.nvidiaAccounts || keys?.nvidiaAccounts || null,
     openrouter: opts.openrouterApiKey || keys?.openrouter || null,
     openrouterKeys: opts.openrouterKeys || keys?.openrouterKeys || null,
+    gatewayBaseUrl: opts.gatewayBaseUrl || keys?.gatewayBaseUrl || null,
+    gatewayEndpoints: keys?.gatewayEndpoints || null,
     agentFallbackModel: opts.fallbackModelRef || null,
     gatewayFallbackModel: keys?.gatewayFallbackModel || null,
   };
@@ -1286,14 +1495,79 @@ function normalizeGenerateTextOpts(raw: GenerateTextOpts): GenerateTextOpts & { 
   };
 }
 
+async function resolveDynamicOrStaticComboSteps(
+  model: string,
+  opts: {
+    taskProfile?: AiTaskProfile;
+    requireTools?: boolean;
+    requireJson?: boolean;
+    openrouterApiKey?: string | null;
+    openrouterKeys?: string[] | null;
+    nvidiaApiKey?: string | null;
+    nvidiaAccounts?: import("@/lib/ai-keys").NvidiaAccount[] | null;
+    gatewayBaseUrl?: string | null;
+  },
+): Promise<string[]> {
+  const { getAiKeys } = await import("@/lib/ai-keys");
+  const keys = await getAiKeys().catch(() => null);
+
+  if (isAutoFreeModelRef(model)) {
+    const profile = profileFromAutoModelRef(
+      model,
+      opts.taskProfile || (opts.requireTools ? "agent" : "general"),
+    );
+    const hasOpenRouter = Boolean(
+      opts.openrouterApiKey ||
+        (opts.openrouterKeys?.length || 0) > 0 ||
+        keys?.openrouter ||
+        (keys?.openrouterKeys?.length || 0) > 0,
+    );
+    const hasNvidia = Boolean(
+      opts.nvidiaApiKey ||
+        (opts.nvidiaAccounts?.length || 0) > 0 ||
+        keys?.nvidia ||
+        (keys?.nvidiaAccounts?.length || 0) > 0,
+    );
+    const hasGateway = Boolean(
+      opts.gatewayBaseUrl || keys?.gatewayBaseUrl || (keys?.gatewayEndpoints?.length || 0) > 0,
+    );
+    const ranked = await rankFreeModelsFromCatalogs({
+      profile,
+      requireTools: opts.requireTools,
+      requireJson: opts.requireJson,
+      maxResults: 5,
+      hasOpenRouter,
+      hasNvidia,
+      hasGateway,
+      allowLiveFetch: true,
+    });
+    if (!ranked.length) {
+      throw new ProviderHttpError(
+        503,
+        "Nenhum modelo gratuito disponível no catálogo em tempo real no momento.",
+      );
+    }
+    return ranked.map((c) => c.modelRef);
+  }
+
+  return resolveComboSteps(model, keys?.aiCombos || []);
+}
+
 async function generateTextSingle(rawOpts: GenerateTextOpts): Promise<GenerateTextResult> {
   const opts = normalizeGenerateTextOpts(rawOpts);
   const { provider, model } = parseModelRef(opts.modelRef);
 
   if (provider === "combo") {
-    const { getAiKeys } = await import("@/lib/ai-keys");
-    const keys = await getAiKeys();
-    const steps = resolveComboSteps(model, keys?.aiCombos);
+    const steps = await resolveDynamicOrStaticComboSteps(model, {
+      taskProfile: opts.taskProfile,
+      requireTools: false,
+      requireJson: Boolean(opts.jsonMode || opts.geminiResponseSchema),
+      openrouterApiKey: opts.openrouterApiKey,
+      openrouterKeys: opts.openrouterKeys,
+      nvidiaApiKey: opts.nvidiaApiKey,
+      nvidiaAccounts: opts.nvidiaAccounts,
+      gatewayBaseUrl: opts.gatewayBaseUrl,
+    });
     if (!steps.length) {
       throw new Error(`Combo de IA "${model}" não possui modelos ativos configurados.`);
     }
@@ -1330,18 +1604,49 @@ async function generateTextSingle(rawOpts: GenerateTextOpts): Promise<GenerateTe
   }
 
   if (provider === "openrouter") {
+    const prepared = prepareJsonAwarePrompts({
+      system: opts.system,
+      prompt: opts.prompt,
+      jsonMode: opts.jsonMode,
+      geminiResponseSchema: opts.geminiResponseSchema,
+    });
     const messages: any[] = [];
-    if (opts.system) messages.push(buildSystemMessage(opts.system, provider, model));
-    messages.push({ role: "user", content: opts.prompt });
+    if (prepared.system) messages.push(buildSystemMessage(prepared.system, provider, model));
+    messages.push({ role: "user", content: prepared.prompt });
     const body: Record<string, any> = { model, messages };
     if (opts.temperature != null && Number.isFinite(opts.temperature)) body.temperature = opts.temperature;
     body.max_tokens = opts.maxOutputTokens != null ? opts.maxOutputTokens : 4096;
-    if (opts.jsonMode) body.response_format = { type: "json_object" };
+    if (prepared.useJsonResponseFormat) body.response_format = { type: "json_object" };
     applyReasoning(body, resolveReasoningMode(opts.reasoningMode, opts.thinkingBudget), provider, model);
-    const json = await openRouterChatWithFailover(body, {
-      openrouterApiKey: opts.openrouterApiKey,
-      openrouterKeys: opts.openrouterKeys,
-    });
+
+    let json: OpenRouterResponse;
+    try {
+      json = await openRouterChatWithFailover(body, {
+        openrouterApiKey: opts.openrouterApiKey,
+        openrouterKeys: opts.openrouterKeys,
+        signal: opts.signal,
+      });
+    } catch (err) {
+      // Degradação automática se o modelo :free recusar response_format json_object com HTTP 400
+      if (prepared.useJsonResponseFormat && isJsonFormatUnsupportedError(err)) {
+        const fallbackBody = { ...body };
+        delete fallbackBody.response_format;
+        fallbackBody.messages = [
+          ...messages.slice(0, -1),
+          {
+            role: "user",
+            content: `${prepared.prompt}\n\nIMPORTANTE: Responda EXCLUSIVAMENTE com um JSON válido puro, sem markdown (\`\`\`) e sem texto adicional.`,
+          },
+        ];
+        json = await openRouterChatWithFailover(fallbackBody, {
+          openrouterApiKey: opts.openrouterApiKey,
+          openrouterKeys: opts.openrouterKeys,
+          signal: opts.signal,
+        });
+      } else {
+        throw err;
+      }
+    }
     const text = String(json?.choices?.[0]?.message?.content || "").trim();
     return { text, usage: openRouterUsage(json, provider, model), provider, modelUsed: model, model, didFallback: false };
   }
@@ -1351,32 +1656,97 @@ async function generateTextSingle(rawOpts: GenerateTextOpts): Promise<GenerateTe
     if (!creds.baseUrl) {
       throw new ProviderHttpError(0, "Gateway de assinatura indisponível: defina a URL do proxy em Configurações.");
     }
+    const prepared = prepareJsonAwarePrompts({
+      system: opts.system,
+      prompt: opts.prompt,
+      jsonMode: opts.jsonMode,
+      geminiResponseSchema: opts.geminiResponseSchema,
+    });
     const messages: any[] = [];
-    if (opts.system) messages.push(buildSystemMessage(opts.system, provider, model));
-    messages.push({ role: "user", content: opts.prompt });
+    if (prepared.system) messages.push(buildSystemMessage(prepared.system, provider, model));
+    messages.push({ role: "user", content: prepared.prompt });
     const body: Record<string, any> = { model, messages };
     if (opts.temperature != null && Number.isFinite(opts.temperature)) body.temperature = opts.temperature;
     if (opts.maxOutputTokens != null) body.max_tokens = opts.maxOutputTokens;
-    if (opts.jsonMode) body.response_format = { type: "json_object" };
+    if (prepared.useJsonResponseFormat) body.response_format = { type: "json_object" };
     applyReasoning(body, resolveReasoningMode(opts.reasoningMode, opts.thinkingBudget), provider, model);
-    const json = await gatewayChatWithFailover(model, body, { baseUrl: creds.baseUrl, apiKey: creds.apiKey, endpointId: creds.endpointId });
+
+    let json: any;
+    try {
+      json = await gatewayChatWithFailover(
+        model,
+        body,
+        { baseUrl: creds.baseUrl, apiKey: creds.apiKey, endpointId: creds.endpointId },
+        { signal: opts.signal },
+      );
+    } catch (err) {
+      if (prepared.useJsonResponseFormat && isJsonFormatUnsupportedError(err)) {
+        const fallbackBody = { ...body };
+        delete fallbackBody.response_format;
+        fallbackBody.messages = [
+          ...messages.slice(0, -1),
+          {
+            role: "user",
+            content: `${prepared.prompt}\n\nIMPORTANTE: Responda EXCLUSIVAMENTE com um JSON válido puro, sem markdown (\`\`\`) e sem texto adicional.`,
+          },
+        ];
+        json = await gatewayChatWithFailover(
+          model,
+          fallbackBody,
+          { baseUrl: creds.baseUrl, apiKey: creds.apiKey, endpointId: creds.endpointId },
+          { signal: opts.signal },
+        );
+      } else {
+        throw err;
+      }
+    }
     const text = String(json?.choices?.[0]?.message?.content || "").trim();
     return { text, usage: openRouterUsage(json, provider, model), provider, modelUsed: model, model, didFallback: false };
   }
 
   if (provider === "nvidia") {
+    const prepared = prepareJsonAwarePrompts({
+      system: opts.system,
+      prompt: opts.prompt,
+      jsonMode: opts.jsonMode,
+      geminiResponseSchema: opts.geminiResponseSchema,
+    });
     const messages: any[] = [];
-    if (opts.system) messages.push(buildSystemMessage(opts.system, provider, model));
-    messages.push({ role: "user", content: opts.prompt });
+    if (prepared.system) messages.push(buildSystemMessage(prepared.system, provider, model));
+    messages.push({ role: "user", content: prepared.prompt });
     const body: Record<string, any> = { model, messages };
     if (opts.temperature != null && Number.isFinite(opts.temperature)) body.temperature = opts.temperature;
     body.max_tokens = opts.maxOutputTokens != null ? opts.maxOutputTokens : 4096;
-    if (opts.jsonMode) body.response_format = { type: "json_object" };
+    if (prepared.useJsonResponseFormat) body.response_format = { type: "json_object" };
     applyReasoning(body, resolveReasoningMode(opts.reasoningMode, opts.thinkingBudget), provider, model);
-    const json = await nvidiaChatWithFailover(body, {
-      nvidiaApiKey: opts.nvidiaApiKey,
-      nvidiaAccounts: opts.nvidiaAccounts,
-    });
+
+    let json: any;
+    try {
+      json = await nvidiaChatWithFailover(body, {
+        nvidiaApiKey: opts.nvidiaApiKey,
+        nvidiaAccounts: opts.nvidiaAccounts,
+        signal: opts.signal,
+      });
+    } catch (err) {
+      if (prepared.useJsonResponseFormat && isJsonFormatUnsupportedError(err)) {
+        const fallbackBody = { ...body };
+        delete fallbackBody.response_format;
+        fallbackBody.messages = [
+          ...messages.slice(0, -1),
+          {
+            role: "user",
+            content: `${prepared.prompt}\n\nIMPORTANTE: Responda EXCLUSIVAMENTE com um JSON válido puro, sem markdown (\`\`\`) e sem texto adicional.`,
+          },
+        ];
+        json = await nvidiaChatWithFailover(fallbackBody, {
+          nvidiaApiKey: opts.nvidiaApiKey,
+          nvidiaAccounts: opts.nvidiaAccounts,
+          signal: opts.signal,
+        });
+      } else {
+        throw err;
+      }
+    }
     const text = String(json?.choices?.[0]?.message?.content || "").trim();
     return { text, usage: openRouterUsage(json, provider, model), provider, modelUsed: model, model, didFallback: false };
   }
@@ -1412,10 +1782,12 @@ async function generateTextSingle(rawOpts: GenerateTextOpts): Promise<GenerateTe
   };
 
   try {
+    const t0 = Date.now();
     const res = await run(model);
     const text = res.response.text().trim();
     const usage = geminiUsage(res, model);
     if (!text) throw new AiEmptyResponseError("gemini", model, usage);
+    recordModelSuccess("gemini", model, Date.now() - t0);
     return {
       text,
       usage,
@@ -1425,14 +1797,20 @@ async function generateTextSingle(rawOpts: GenerateTextOpts): Promise<GenerateTe
       didFallback: false,
     };
   } catch (err) {
+    if (isGeminiNetworkUnreachableError(err)) {
+      markProviderUnreachable("gemini");
+      throw err;
+    }
     if (!isDeadModelError(err)) throw err;
     const fallback = await pickBestFlashModel();
     if (!fallback || fallback === model) throw err;
     console.warn(`[ai-provider] Gemini "${model}" morto. Retentando com "${fallback}".`);
+    const t1 = Date.now();
     const res = await run(fallback);
     const text = res.response.text().trim();
     const usage = geminiUsage(res, fallback);
     if (!text) throw new AiEmptyResponseError("gemini", fallback, usage);
+    recordModelSuccess("gemini", fallback, Date.now() - t1);
     return {
       text,
       usage,
@@ -1445,11 +1823,9 @@ async function generateTextSingle(rawOpts: GenerateTextOpts): Promise<GenerateTe
 }
 
 /**
- * generateText PÚBLICO — escada cross-provider em volta do single:
- * falha de CONTA no provider pedido (quota/429/auth/rede) tenta os rungs
- * de OUTROS providers configurados. Só lança de verdade quando NENHUMA
- * conta/provider consegue atender — exatamente o contrato do disparo:
- * "IA reescrevendo" não pode cair no template cru por 1 chave morta.
+ * generateText PÚBLICO — escada Free-First cross-provider em volta do single:
+ * falha de CONTA/MODELO no provider pedido tenta primeiro os melhores modelos
+ * gratuitos vivos descobertos em tempo real, depois demais provedores configurados.
  */
 export async function generateText(rawOpts: GenerateTextOpts): Promise<GenerateTextResult> {
   const opts = normalizeGenerateTextOpts(rawOpts);
@@ -1460,18 +1836,33 @@ export async function generateText(rawOpts: GenerateTextOpts): Promise<GenerateT
     let lastErr: unknown = err;
     let accumulatedUsage = aiUsageFromError(err) || emptyUsage();
     if (!isAccountLevelError(err)) throw err;
+    const effectiveProfile: AiTaskProfile =
+      opts.taskProfile ||
+      (opts.maxOutputTokens != null && opts.maxOutputTokens <= 150 ? "fast" : "general");
     const keys = await ladderKeys(opts);
-    const ladder = await buildLadder(opts.modelRef, keys);
+    const ladder = await buildLadder(opts.modelRef, keys, {
+      profile: effectiveProfile,
+      requireTools: false,
+      requireJson: Boolean(opts.jsonMode || opts.geminiResponseSchema),
+      allowLiveDiscovery: opts.allowLiveDiscovery,
+    });
+    const rungTimeoutMs = effectiveProfile === "fast" ? 9_000 : 16_000;
     for (const rung of ladder.slice(1)) {
+      const rungSignal = opts.signal
+        ? AbortSignal.any([opts.signal, AbortSignal.timeout(rungTimeoutMs)])
+        : AbortSignal.timeout(rungTimeoutMs);
       try {
-        console.warn(`[ai-provider] "${opts.modelRef}" falhou (${String((err as any)?.message || err).slice(0, 120)}). Fallback cross-provider → "${rung}".`);
+        console.warn(`[ai-provider] "${opts.modelRef}" falhou (${String((err as any)?.message || err).slice(0, 120)}). Fallback inteligente → "${rung}".`);
         const res = await generateTextSingle({
           ...opts,
           modelRef: rung,
           noGatewayFallback: true,
-          geminiApiKey: keys?.gemini || null,
-          openrouterApiKey: keys?.openrouter || null,
-          openrouterKeys: keys?.openrouterKeys || null,
+          signal: rungSignal,
+          geminiApiKey: opts.geminiApiKey || keys?.gemini || null,
+          nvidiaApiKey: opts.nvidiaApiKey || keys?.nvidia || null,
+          nvidiaAccounts: opts.nvidiaAccounts || keys?.nvidiaAccounts || null,
+          openrouterApiKey: opts.openrouterApiKey || keys?.openrouter || null,
+          openrouterKeys: opts.openrouterKeys || keys?.openrouterKeys || null,
         });
         return { ...res, usage: addAiUsage(accumulatedUsage, res.usage), didFallback: true };
       } catch (rungErr) {
@@ -1569,17 +1960,30 @@ export interface StartAiChatOpts {
   fallbackModelRef?: string | null;
   /** Igual ao generateText: suprime o fallback global (usado pelos passos de combo). */
   noGatewayFallback?: boolean;
+  /** Perfil semântico da tarefa ("agent" | "general" | "fast"). */
+  taskProfile?: AiTaskProfile;
+  /** Sinal opcional de cancelamento/timeout por tentativa. */
+  signal?: AbortSignal;
+  /** Força descoberta ao vivo de catálogo mesmo em ambiente Vitest. */
+  allowLiveDiscovery?: boolean;
 }
 
 /**
- * startAiChat PÚBLICO — escada cross-provider em volta do single. Sessões
- * falham no 1º turno (não na criação), então a migração acontece ali:
- * se o turno inicial morrer com erro de CONTA, monta sessão no próximo
- * rung de outro provider e refaz o turno. Migra UMA vez — depois do 1º
- * turno bem-sucedido nunca troca (não perde contexto no meio da conversa).
- * Só lança quando NENHUMA conta/provider consegue atender.
+ * startAiChat PÚBLICO — escada Free-First cross-provider em volta do single.
+ * Sessões falham no 1º turno (não na criação), então a migração acontece ali:
+ * se o turno inicial morrer com erro de CONTA ou MODELO indisponível, monta
+ * sessão no próximo melhor rung gratuito/configurado e refaz o turno.
+ * Em `sendToolResults`, se o modelo cair após rodar ferramentas, migra levando
+ * os resultados já obtidos sem repetir as chamadas das ferramentas.
  */
 export async function startAiChat(opts: StartAiChatOpts): Promise<AiChatSession> {
+  const hasTools = Array.isArray(opts.tools) && opts.tools.length > 0;
+  const ladderConfig: BuildLadderOptions = {
+    profile: opts.taskProfile || (hasTools ? "agent" : "general"),
+    requireTools: hasTools,
+    requireJson: false,
+    allowLiveDiscovery: opts.allowLiveDiscovery,
+  };
   let inner: AiChatSession;
   let initialRungIndex = 0;
   let resolvedKeys: LadderKeys | null = null;
@@ -1589,7 +1993,7 @@ export async function startAiChat(opts: StartAiChatOpts): Promise<AiChatSession>
   } catch (err) {
     if (opts.noGatewayFallback || !isAccountLevelError(err)) throw err;
     resolvedKeys = await ladderKeys(opts);
-    resolvedLadder = await buildLadder(opts.modelRef, resolvedKeys);
+    resolvedLadder = await buildLadder(opts.modelRef, resolvedKeys, ladderConfig);
     let lastErr: unknown = err;
     let initialized: AiChatSession | null = null;
     for (let index = 1; index < resolvedLadder.length; index++) {
@@ -1601,6 +2005,7 @@ export async function startAiChat(opts: StartAiChatOpts): Promise<AiChatSession>
           noGatewayFallback: true,
           geminiApiKey: opts.geminiApiKey || resolvedKeys?.gemini || null,
           nvidiaApiKey: opts.nvidiaApiKey || resolvedKeys?.nvidia || null,
+          nvidiaAccounts: opts.nvidiaAccounts || resolvedKeys?.nvidiaAccounts || null,
           openrouterApiKey: opts.openrouterApiKey || resolvedKeys?.openrouter || null,
           openrouterKeys: opts.openrouterKeys || resolvedKeys?.openrouterKeys || null,
         });
@@ -1618,6 +2023,7 @@ export async function startAiChat(opts: StartAiChatOpts): Promise<AiChatSession>
   let migrated: AiChatSession | null = null;
   let successfulTurns = 0;
   let lastUserText = "";
+  const rungTimeoutMs = 16_000;
 
   return {
     get provider() { return migrated ? migrated.provider : inner.provider; },
@@ -1636,16 +2042,21 @@ export async function startAiChat(opts: StartAiChatOpts): Promise<AiChatSession>
         if (initialUsage) accumulatedUsage = addAiUsage(accumulatedUsage, initialUsage);
         if (successfulTurns > 0 || !isAccountLevelError(err)) throw err;
         const keys = resolvedKeys || await ladderKeys(opts);
-        const ladder = resolvedLadder || await buildLadder(opts.modelRef, keys);
+        const ladder = resolvedLadder || await buildLadder(opts.modelRef, keys, ladderConfig);
         for (const rung of ladder.slice(initialRungIndex + 1)) {
+          const rungSignal = opts.signal
+            ? AbortSignal.any([opts.signal, AbortSignal.timeout(rungTimeoutMs)])
+            : AbortSignal.timeout(rungTimeoutMs);
           try {
-            console.warn(`[ai-provider] Sessão "${opts.modelRef}" falhou no 1º turno (${String((err as any)?.message || err).slice(0, 120)}). Migrando pro fallback cross-provider "${rung}".`);
+            console.warn(`[ai-provider] Sessão "${opts.modelRef}" falhou no 1º turno (${String((err as any)?.message || err).slice(0, 120)}). Migrando pro fallback inteligente "${rung}".`);
             const s = await startAiChatSingle({
               ...opts,
               modelRef: rung,
               noGatewayFallback: true,
+              signal: rungSignal,
               geminiApiKey: opts.geminiApiKey || keys?.gemini || null,
               nvidiaApiKey: opts.nvidiaApiKey || keys?.nvidia || null,
+              nvidiaAccounts: opts.nvidiaAccounts || keys?.nvidiaAccounts || null,
               openrouterApiKey: opts.openrouterApiKey || keys?.openrouter || null,
               openrouterKeys: opts.openrouterKeys || keys?.openrouterKeys || null,
             });
@@ -1677,21 +2088,26 @@ export async function startAiChat(opts: StartAiChatOpts): Promise<AiChatSession>
         if (initialUsage) accumulatedUsage = addAiUsage(accumulatedUsage, initialUsage);
         let lastErr: unknown = err;
         const keys = resolvedKeys || await ladderKeys(opts);
-        const ladder = resolvedLadder || await buildLadder(opts.modelRef, keys);
+        const ladder = resolvedLadder || await buildLadder(opts.modelRef, keys, ladderConfig);
         const toolContextBlock = results
           .map((tr) => `[Resultado da ferramenta "${tr.name}"]:\n${typeof tr.response === "string" ? tr.response : JSON.stringify(tr.response)}`)
           .join("\n\n");
         const replayMessage = `${lastUserText}\n\n=== RESULTADOS DAS FERRAMENTAS JÁ EXECUTADAS NESTE TURNO (USE ESTES DADOS PARA RESPONDER AO CLIENTE SEM REPETIR A MESMA CHAMADA) ===\n${toolContextBlock}`;
 
         for (const rung of ladder.slice(initialRungIndex + 1)) {
+          const rungSignal = opts.signal
+            ? AbortSignal.any([opts.signal, AbortSignal.timeout(rungTimeoutMs)])
+            : AbortSignal.timeout(rungTimeoutMs);
           try {
             console.warn(`[ai-provider] sendToolResults falhou em "${target.modelUsed()}" (${String((err as any)?.message || err).slice(0, 100)}). Migrando c/ resultados p/ "${rung}".`);
             const s = await startAiChatSingle({
               ...opts,
               modelRef: rung,
               noGatewayFallback: true,
+              signal: rungSignal,
               geminiApiKey: opts.geminiApiKey || keys?.gemini || null,
               nvidiaApiKey: opts.nvidiaApiKey || keys?.nvidia || null,
+              nvidiaAccounts: opts.nvidiaAccounts || keys?.nvidiaAccounts || null,
               openrouterApiKey: opts.openrouterApiKey || keys?.openrouter || null,
               openrouterKeys: opts.openrouterKeys || keys?.openrouterKeys || null,
             });
@@ -1714,9 +2130,17 @@ async function startAiChatSingle(opts: StartAiChatOpts): Promise<AiChatSession> 
   const { provider, model } = parseModelRef(opts.modelRef);
 
   if (provider === "combo") {
-    const { getAiKeys } = await import("@/lib/ai-keys");
-    const keys = await getAiKeys();
-    const steps = resolveComboSteps(model, keys?.aiCombos);
+    const hasTools = Array.isArray(opts.tools) && opts.tools.length > 0;
+    const steps = await resolveDynamicOrStaticComboSteps(model, {
+      taskProfile: opts.taskProfile || (hasTools ? "agent" : "general"),
+      requireTools: hasTools,
+      requireJson: false,
+      openrouterApiKey: opts.openrouterApiKey,
+      openrouterKeys: opts.openrouterKeys,
+      nvidiaApiKey: opts.nvidiaApiKey,
+      nvidiaAccounts: opts.nvidiaAccounts,
+      gatewayBaseUrl: opts.gatewayBaseUrl,
+    });
     if (!steps.length) {
       throw new Error(`Combo de IA "${model}" não possui modelos ativos configurados.`);
     }
@@ -1828,6 +2252,7 @@ async function startAiChatSingle(opts: StartAiChatOpts): Promise<AiChatSession> 
         openRouterChatWithFailover(body, {
           openrouterApiKey: opts.openrouterApiKey,
           openrouterKeys: opts.openrouterKeys,
+          signal: opts.signal,
         }),
     });
   }
@@ -1839,7 +2264,13 @@ async function startAiChatSingle(opts: StartAiChatOpts): Promise<AiChatSession> 
     }
     return startOpenAICompatibleChat(opts, model, {
       provider: "gateway",
-      post: (body) => gatewayChatWithFailover(model, body, { baseUrl: creds.baseUrl, apiKey: creds.apiKey, endpointId: creds.endpointId }),
+      post: (body) =>
+        gatewayChatWithFailover(
+          model,
+          body,
+          { baseUrl: creds.baseUrl, apiKey: creds.apiKey, endpointId: creds.endpointId },
+          { signal: opts.signal },
+        ),
     });
   }
 
@@ -1850,6 +2281,7 @@ async function startAiChatSingle(opts: StartAiChatOpts): Promise<AiChatSession> 
         nvidiaChatWithFailover(body, {
           nvidiaApiKey: opts.nvidiaApiKey,
           nvidiaAccounts: opts.nvidiaAccounts,
+          signal: opts.signal,
         }),
     });
   }
@@ -1930,21 +2362,31 @@ function startGeminiChat(opts: StartAiChatOpts, requestedModel: string): AiChatS
     modelUsed: () => usedModel,
     async sendUser(text: string) {
       // 1ª tentativa com retry curto para 429/503 transitório + fallback de modelo morto (404).
+      const t0 = Date.now();
       try {
-        return await withShortTransientRetry(async () => {
+        const res = await withShortTransientRetry(async () => {
           chat = buildChat(usedModel);
           const r = await withAiTimeout(chat.sendMessage([{ text }]), `Gemini ${usedModel}`);
           return parse(r);
         });
+        recordModelSuccess("gemini", usedModel, Date.now() - t0);
+        return res;
       } catch (err) {
+        if (isGeminiNetworkUnreachableError(err)) {
+          markProviderUnreachable("gemini");
+          throw err;
+        }
         if (!isDeadModelError(err)) throw err;
         const fb = await pickBestFlashModel();
         if (!fb || fb === usedModel) throw err;
         console.warn(`[ai-provider] Gemini "${usedModel}" morto. Trocando p/ "${fb}".`);
         usedModel = fb;
         chat = buildChat(usedModel);
+        const t1 = Date.now();
         const r = await withAiTimeout(chat.sendMessage([{ text }]), `Gemini ${fb}`);
-        return parse(r);
+        const parsed = parse(r);
+        recordModelSuccess("gemini", fb, Date.now() - t1);
+        return parsed;
       }
     },
     async sendToolResults(results: AiToolResult[]) {

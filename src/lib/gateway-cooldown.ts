@@ -79,8 +79,25 @@ export function isEndpointDead(id: string): boolean {
   return !!id && DEAD.has(id);
 }
 
+const RESET_HOOKS_SYM = Symbol.for("painel_sdr.ai_cooldown_reset_hooks");
+
+function getGlobalResetHooks(): Set<() => void> {
+  const g = globalThis as Record<symbol, unknown>;
+  if (!(g[RESET_HOOKS_SYM] instanceof Set)) {
+    g[RESET_HOOKS_SYM] = new Set<() => void>();
+  }
+  return g[RESET_HOOKS_SYM] as Set<() => void>;
+}
+
 /** Limpa todo o estado (testes / reset manual). */
 export function resetGatewayCooldown(): void {
   COOLDOWN.clear();
   DEAD.clear();
+  for (const hook of getGlobalResetHooks()) {
+    try {
+      hook();
+    } catch {
+      /* no-op */
+    }
+  }
 }
