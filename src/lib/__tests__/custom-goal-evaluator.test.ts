@@ -119,6 +119,64 @@ describe("Custom Goal Evaluator (Objetivo Personalizado)", () => {
       expect(callArg.prompt).toContain("OBJETIVO: obter o e-mail do cliente");
       expect(callArg.prompt).toContain("C: Meu e-mail é contato@empresa.com.br");
     });
+
+    it("preserva objetivo longo (> 600 chars) sem cortar regras de NUNCA pausar no final", async () => {
+      generateTextMock.mockResolvedValueOnce({
+        text: "NAO",
+        usage: { promptTokens: 180, completionTokens: 1, totalTokens: 181 },
+        provider: "gemini",
+        modelUsed: "gemini-2.0-flash",
+        didFallback: false,
+      });
+
+      const longGoal =
+        "Pausar somente quando o cliente confirmar interesse na prévia e autorizar o envio.\n" +
+        "Contexto adicional sobre qualificação e atendimento consultivo em várias etapas. ".repeat(8) +
+        "\nNUNCA pausar quando estiver apenas aguardando atendimento humano ou resposta do setor.";
+
+      expect(longGoal.length).toBeGreaterThan(600);
+
+      const res = await evaluateCustomGoal({
+        goalText: longGoal,
+        messages: [
+          { role: "user", content: "Vou ver com meu sócio." },
+          { role: "agent", content: "Claro, me avisa assim que conversarem." },
+        ],
+        modelRef: "gemini-2.0-flash",
+      });
+
+      expect(res.achieved).toBe(false);
+      expect(res.method).toBe("ai");
+      expect(generateTextMock).toHaveBeenCalledTimes(1);
+      const sentPrompt = generateTextMock.mock.calls[0][0].prompt as string;
+      expect(sentPrompt).toContain("NUNCA pausar quando estiver apenas aguardando atendimento humano ou resposta do setor.");
+    });
+
+    it("faz curto-circuito com 0 tokens quando a última fala da IA é espera pura em fila/URA", async () => {
+      const res = await evaluateCustomGoal({
+        goalText: "Pausar após confirmação de agendamento",
+        messages: [
+          { role: "user", content: "Aguarde um momento que vou transferir para o responsável." },
+          { role: "agent", content: "Combinado, fico no aguardo por aqui!" },
+        ],
+      });
+
+      expect(res).toEqual({ achieved: false, method: "skipped", tokensUsed: 0 });
+      expect(generateTextMock).not.toHaveBeenCalled();
+    });
+
+    it("faz curto-circuito com 0 tokens quando o objetivo proíbe pausar em perguntas e a IA terminou com ?", async () => {
+      const res = await evaluateCustomGoal({
+        goalText: "Pausar após envio da proposta.\nNUNCA pausar se você ainda fez alguma pergunta ao cliente.",
+        messages: [
+          { role: "user", content: "Pode me explicar melhor como funciona?" },
+          { role: "agent", content: "Claro! Você prefere que eu envie a apresentação por aqui ou por e-mail?" },
+        ],
+      });
+
+      expect(res).toEqual({ achieved: false, method: "skipped", tokensUsed: 0 });
+      expect(generateTextMock).not.toHaveBeenCalled();
+    });
   });
 });
 

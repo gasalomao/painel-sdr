@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { getTenantSaasLimits } from "@/lib/saas-limits";
 import { invalidateAgentConfigCache } from "@/lib/agent-config-cache";
 
 export const dynamic = "force-dynamic";
@@ -277,6 +278,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     let updatePayload: JsonObject;
 
     if (section === "identity") {
+      const limits = await getTenantSaasLimits(auth.clientId, auth.isAdmin);
       const incomingOpts = ((body.options as JsonObject | undefined) || {}) as JsonObject;
       const mergedOpts: JsonObject = preserveSecretOptions(existingOpts, {
         ...existingOpts,
@@ -293,59 +295,75 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
         custom_goal_pause_mode:
           incomingOpts.custom_goal_pause_mode === "indefinite" ? "indefinite" : "timed",
         custom_goal_pause_minutes: Math.max(1, Number(incomingOpts.custom_goal_pause_minutes) || 30),
-        web_search_enabled: Boolean(incomingOpts.web_search_enabled),
-        reasoning_mode:
-          incomingOpts.reasoning_mode === 0 ||
-          incomingOpts.reasoning_mode === 1 ||
-          incomingOpts.reasoning_mode === 2 ||
-          incomingOpts.reasoning_mode === 3
-            ? incomingOpts.reasoning_mode
-            : 0,
-        thinking_budget:
-          incomingOpts.thinking_budget === 0 ||
-          incomingOpts.thinking_budget === 1 ||
-          incomingOpts.thinking_budget === 2 ||
-          incomingOpts.thinking_budget === 3
-            ? incomingOpts.thinking_budget
-            : 0,
-        custom_tools: Array.isArray(incomingOpts.custom_tools)
-          ? incomingOpts.custom_tools.filter((t): t is { name: string; description: string; webhook_url: string } => {
-              if (!t || typeof t !== "object") return false;
-              const obj = t as Record<string, unknown>;
-              return typeof obj.name === "string" && obj.name.trim().length > 0 && typeof obj.webhook_url === "string" && obj.webhook_url.trim().length > 0;
-            })
-          : [],
-        site_preview_auto_detect: Boolean(incomingOpts.site_preview_auto_detect),
-        sdr_enrichment_dossier_enabled:
-          incomingOpts.sdr_enrichment_dossier_enabled !== undefined
-            ? Boolean(incomingOpts.sdr_enrichment_dossier_enabled)
-            : Boolean(existingOpts.sdr_enrichment_dossier_enabled),
-        sdr_enrichment_dossier_mode:
-          incomingOpts.sdr_enrichment_dossier_mode === "strategic" ||
-          incomingOpts.sdr_enrichment_dossier_mode === "full" ||
-          incomingOpts.sdr_enrichment_dossier_mode === "off"
-            ? incomingOpts.sdr_enrichment_dossier_mode
-            : existingOpts.sdr_enrichment_dossier_mode === "strategic" ||
-                existingOpts.sdr_enrichment_dossier_mode === "full" ||
-                existingOpts.sdr_enrichment_dossier_mode === "off"
-              ? existingOpts.sdr_enrichment_dossier_mode
-              : undefined,
-        site_preview_confirm_before_link:
-          incomingOpts.site_preview_confirm_before_link !== undefined
-            ? Boolean(incomingOpts.site_preview_confirm_before_link)
-            : true,
-        site_preview_eval_prompt:
-          typeof incomingOpts.site_preview_eval_prompt === "string"
-            ? incomingOpts.site_preview_eval_prompt
-            : existingOpts.site_preview_eval_prompt,
-        site_preview_ping_message:
-          typeof incomingOpts.site_preview_ping_message === "string"
-            ? incomingOpts.site_preview_ping_message
-            : existingOpts.site_preview_ping_message,
-        site_preview_eval_model:
-          typeof incomingOpts.site_preview_eval_model === "string"
-            ? incomingOpts.site_preview_eval_model
-            : existingOpts.site_preview_eval_model,
+        web_search_enabled: auth.isAdmin
+          ? Boolean(incomingOpts.web_search_enabled)
+          : Boolean(existingOpts.web_search_enabled),
+        reasoning_mode: auth.isAdmin
+          ? (incomingOpts.reasoning_mode === 0 ||
+              incomingOpts.reasoning_mode === 1 ||
+              incomingOpts.reasoning_mode === 2 ||
+              incomingOpts.reasoning_mode === 3
+                ? incomingOpts.reasoning_mode
+                : 0)
+          : (existingOpts.reasoning_mode === 0 || existingOpts.reasoning_mode === 1
+              ? existingOpts.reasoning_mode
+              : 0),
+        thinking_budget: auth.isAdmin
+          ? (incomingOpts.thinking_budget === 0 ||
+              incomingOpts.thinking_budget === 1 ||
+              incomingOpts.thinking_budget === 2 ||
+              incomingOpts.thinking_budget === 3
+                ? incomingOpts.thinking_budget
+                : 0)
+          : (typeof existingOpts.thinking_budget === "number" ? Math.min(1, existingOpts.thinking_budget) : 0),
+        custom_tools: auth.isAdmin
+          ? (Array.isArray(incomingOpts.custom_tools)
+              ? incomingOpts.custom_tools.filter((t): t is { name: string; description: string; webhook_url: string } => {
+                  if (!t || typeof t !== "object") return false;
+                  const obj = t as Record<string, unknown>;
+                  return typeof obj.name === "string" && obj.name.trim().length > 0 && typeof obj.webhook_url === "string" && obj.webhook_url.trim().length > 0;
+                })
+              : [])
+          : (Array.isArray(existingOpts.custom_tools) ? existingOpts.custom_tools : []),
+        site_preview_auto_detect: auth.isAdmin
+          ? Boolean(incomingOpts.site_preview_auto_detect)
+          : Boolean(existingOpts.site_preview_auto_detect),
+        sdr_enrichment_dossier_enabled: auth.isAdmin
+          ? (incomingOpts.sdr_enrichment_dossier_enabled !== undefined
+              ? Boolean(incomingOpts.sdr_enrichment_dossier_enabled)
+              : Boolean(existingOpts.sdr_enrichment_dossier_enabled))
+          : Boolean(existingOpts.sdr_enrichment_dossier_enabled),
+        sdr_enrichment_dossier_mode: auth.isAdmin
+          ? (incomingOpts.sdr_enrichment_dossier_mode === "strategic" ||
+              incomingOpts.sdr_enrichment_dossier_mode === "full" ||
+              incomingOpts.sdr_enrichment_dossier_mode === "off"
+                ? incomingOpts.sdr_enrichment_dossier_mode
+                : existingOpts.sdr_enrichment_dossier_mode === "strategic" ||
+                    existingOpts.sdr_enrichment_dossier_mode === "full" ||
+                    existingOpts.sdr_enrichment_dossier_mode === "off"
+                  ? existingOpts.sdr_enrichment_dossier_mode
+                  : undefined)
+          : existingOpts.sdr_enrichment_dossier_mode,
+        site_preview_confirm_before_link: auth.isAdmin
+          ? (incomingOpts.site_preview_confirm_before_link !== undefined
+              ? Boolean(incomingOpts.site_preview_confirm_before_link)
+              : true)
+          : (existingOpts.site_preview_confirm_before_link ?? true),
+        site_preview_eval_prompt: auth.isAdmin
+          ? (typeof incomingOpts.site_preview_eval_prompt === "string"
+              ? incomingOpts.site_preview_eval_prompt
+              : existingOpts.site_preview_eval_prompt)
+          : existingOpts.site_preview_eval_prompt,
+        site_preview_ping_message: auth.isAdmin
+          ? (typeof incomingOpts.site_preview_ping_message === "string"
+              ? incomingOpts.site_preview_ping_message
+              : existingOpts.site_preview_ping_message)
+          : existingOpts.site_preview_ping_message,
+        site_preview_eval_model: auth.isAdmin
+          ? (typeof incomingOpts.site_preview_eval_model === "string"
+              ? incomingOpts.site_preview_eval_model
+              : existingOpts.site_preview_eval_model)
+          : existingOpts.site_preview_eval_model,
         // Segurança: apenas admin pode configurar modelo reserva (mesmo controle de custo de target_model).
         fallback_model: auth.isAdmin
           ? (typeof incomingOpts.fallback_model === "string"
@@ -355,10 +373,21 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
       });
 
       const rawMaxOut = incomingOpts.max_output_tokens;
-      if (rawMaxOut !== undefined && rawMaxOut !== null && rawMaxOut !== "" && Number(rawMaxOut) > 0) {
-        mergedOpts.max_output_tokens = Math.min(8192, Math.max(50, Math.floor(Number(rawMaxOut))));
+      if (auth.isAdmin) {
+        if (rawMaxOut !== undefined && rawMaxOut !== null && rawMaxOut !== "" && Number(rawMaxOut) > 0) {
+          mergedOpts.max_output_tokens = Math.min(8192, Math.max(50, Math.floor(Number(rawMaxOut))));
+        } else {
+          delete mergedOpts.max_output_tokens;
+        }
       } else {
-        delete mergedOpts.max_output_tokens;
+        const cap = limits.max_output_tokens ?? 1024;
+        if (rawMaxOut !== undefined && rawMaxOut !== null && rawMaxOut !== "" && Number(rawMaxOut) > 0) {
+          mergedOpts.max_output_tokens = Math.min(cap, Math.max(50, Math.floor(Number(rawMaxOut))));
+        } else if (typeof existingOpts.max_output_tokens === "number" && existingOpts.max_output_tokens > 0) {
+          mergedOpts.max_output_tokens = Math.min(cap, existingOpts.max_output_tokens);
+        } else {
+          mergedOpts.max_output_tokens = cap;
+        }
       }
 
       const rawTemp = incomingOpts.temperature;
@@ -381,8 +410,20 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
         lead_intelligence_enabled: Boolean(body.lead_intelligence_enabled),
       };
     } else if (section === "prompt") {
+      const promptText = String(body.main_prompt ?? "");
+      if (!auth.isAdmin) {
+        const limits = await getTenantSaasLimits(auth.clientId, false);
+        if (promptText.length > limits.max_prompt_chars) {
+          return NextResponse.json(
+            {
+              error: `O prompt excede o limite do seu plano (${promptText.length}/${limits.max_prompt_chars} caracteres).`,
+            },
+            { status: 400 }
+          );
+        }
+      }
       updatePayload = {
-        main_prompt: String(body.main_prompt ?? ""),
+        main_prompt: promptText,
       };
     } else if (section === "schedules") {
       updatePayload = {
@@ -520,6 +561,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const action = String(body.action || "");
 
     if (action === "create_agent") {
+      if (!auth.isAdmin) {
+        const limits = await getTenantSaasLimits(auth.clientId, false);
+        if (limits.max_agents !== null) {
+          const { count } = await supabaseAdmin
+            .from("agent_settings")
+            .select("id", { count: "exact", head: true })
+            .eq("client_id", auth.clientId);
+          if ((count ?? 0) >= limits.max_agents) {
+            return NextResponse.json(
+              {
+                error: `Seu plano permite no máximo ${limits.max_agents} agente(s). Fale com o administrador para ampliar o limite.`,
+              },
+              { status: 403 }
+            );
+          }
+        }
+      }
       const name = String(body.name || "").trim();
       if (!name) {
         return NextResponse.json({ error: "Nome do agente é obrigatório" }, { status: 400 });

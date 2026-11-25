@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { requireFeatureAccess } from "@/lib/saas-limits";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 import { validateCampaignInstanceAccess } from "@/lib/campaign-instance-access";
 
@@ -13,6 +14,8 @@ export const dynamic = "force-dynamic";
 async function ownsFollowup(req: NextRequest, id: string) {
   const tenant = await requireClientId(req);
   if (!tenant.ok) return { ok: false as const, res: tenant.response };
+  const denied = requireFeatureAccess(tenant, "followup");
+  if (denied) return { ok: false as const, res: denied };
   const { data } = await supabase
     .from("followup_campaigns")
     .select("client_id, min_interval_seconds, max_interval_seconds")
@@ -112,6 +115,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if ("min_interval_seconds" in update || "max_interval_seconds" in update) {
       const nextMin = "min_interval_seconds" in update ? Number(update.min_interval_seconds) : (own.minInterval ?? 40);
       const nextMax = "max_interval_seconds" in update ? Number(update.max_interval_seconds) : (own.maxInterval ?? 90);
+      if (!own.isAdmin && Number.isFinite(nextMin) && nextMin < 15) {
+        return NextResponse.json({ success: false, error: "Intervalo mínimo entre envios: 15 s." }, { status: 400 });
+      }
       if (!Number.isFinite(nextMin) || !Number.isFinite(nextMax) || nextMin < 5 || nextMax < 5) {
         return NextResponse.json({ success: false, error: "Intervalo mínimo entre envios: 5 s." }, { status: 400 });
       }

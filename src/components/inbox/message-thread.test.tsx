@@ -150,5 +150,29 @@ describe("MessageThread envio manual", () => {
     await waitFor(() => expect(onNewMessage).toHaveBeenCalledTimes(1));
     expect(mocks.fetch.mock.calls.some(([u]) => String(u) === "/api/agent/control")).toBe(false);
   });
+
+  it("exibe o motivo da pausa (pause_reason) no banner quando a IA está pausada", () => {
+    render(
+      <MessageThread
+        conversation={{
+          ...conversation,
+          bot_status: "bot_paused",
+          paused_by: "system",
+          pause_reason: "Objetivo alcançado: agendar reunião",
+        }}
+        contact={conversation.contact ?? null}
+        messages={[]}
+        onMessagesLoaded={vi.fn()}
+        onNewMessage={vi.fn()}
+        onUpdateMessage={vi.fn()}
+        onStatusChange={vi.fn()}
+        clientId="tenant-a"
+        realtimeConnected
+      />
+    );
+
+    expect(screen.getByText(/Objetivo alcançado: agendar reunião/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Reativar IA/i })).toBeTruthy();
+  });
 });
 

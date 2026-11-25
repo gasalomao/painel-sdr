@@ -42,3 +42,68 @@ export function __pendingLocks(): number {
 export function hasActiveSessionLock(sessionId: string): boolean {
   return locks.has(sessionId);
 }
+
+const HANDLED_MESSAGE_TTL_MS = 10 * 60_000;
+const HANDLED_MESSAGE_MAX_ENTRIES = 5_000;
+const handledSessionMessages = new Map<string, number>();
+
+function pruneHandledMessages(now = Date.now()): void {
+  for (const [key, expiresAt] of handledSessionMessages.entries()) {
+    if (expiresAt <= now) {
+      handledSessionMessages.delete(key);
+    }
+  }
+  if (handledSessionMessages.size > HANDLED_MESSAGE_MAX_ENTRIES) {
+    const excess = handledSessionMessages.size - HANDLED_MESSAGE_MAX_ENTRIES;
+    let deleted = 0;
+    for (const key of handledSessionMessages.keys()) {
+      handledSessionMessages.delete(key);
+      deleted++;
+      if (deleted >= excess) break;
+    }
+  }
+}
+
+function buildHandledKey(lockKey: string, messageId: string): string {
+  return `${lockKey}::${messageId}`;
+}
+
+/**
+ * Registra message_ids já atendidos por um turno para evitar que um segundo
+ * turno concorrente responda novamente à mesma mensagem consolidada.
+ */
+export function markSessionMessagesHandled(
+  lockKey: string,
+  messageIds: ReadonlyArray<string | null | undefined>,
+  nowMs = Date.now(),
+): void {
+  if (!lockKey || !Array.isArray(messageIds) || messageIds.length === 0) return;
+  pruneHandledMessages(nowMs);
+  const expiresAt = nowMs + HANDLED_MESSAGE_TTL_MS;
+  for (const rawId of messageIds) {
+    const id = typeof rawId === "string" ? rawId.trim() : "";
+    if (!id) continue;
+    handledSessionMessages.set(buildHandledKey(lockKey, id), expiresAt);
+  }
+}
+
+export function isSessionMessageHandled(
+  lockKey: string,
+  messageId: string | null | undefined,
+  nowMs = Date.now(),
+): boolean {
+  const id = typeof messageId === "string" ? messageId.trim() : "";
+  if (!lockKey || !id) return false;
+  const key = buildHandledKey(lockKey, id);
+  const expiresAt = handledSessionMessages.get(key);
+  if (!expiresAt) return false;
+  if (expiresAt <= nowMs) {
+    handledSessionMessages.delete(key);
+    return false;
+  }
+  return true;
+}
+
+export function resetHandledMessagesForTests(): void {
+  handledSessionMessages.clear();
+}

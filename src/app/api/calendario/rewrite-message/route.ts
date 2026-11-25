@@ -16,6 +16,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { checkTenantAiQuota, checkTenantRateLimit, requireFeatureAccess } from "@/lib/saas-limits";
 import { resolveModel } from "@/lib/ai-default-model";
 import { logTokenUsage } from "@/lib/token-usage";
 import { generateText, providerOf, providerDisplayName } from "@/lib/ai-provider";
@@ -27,6 +28,24 @@ export const maxDuration = 60;
 export async function POST(req: NextRequest) {
   const auth = await requireClientId(req);
   if (!auth.ok) return auth.response;
+  const denied = requireFeatureAccess(auth, "calendario");
+  if (denied) return denied;
+  if (!auth.isAdmin) {
+    const rl = checkTenantRateLimit(`cal_rewrite:${auth.clientId}`, 15, 60_000);
+    if (!rl.allowed) {
+      return NextResponse.json(
+        { ok: false, error: `Limite de reescritas atingido. Aguarde ${rl.retryAfterSec ?? 1}s.` },
+        { status: 429 },
+      );
+    }
+    const quota = await checkTenantAiQuota(auth.clientId, false);
+    if (!quota.allowed) {
+      return NextResponse.json(
+        { ok: false, error: quota.reason || "Limite mensal de IA do plano atingido." },
+        { status: 429 },
+      );
+    }
+  }
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
 
   const body = await req.json().catch(() => ({}));

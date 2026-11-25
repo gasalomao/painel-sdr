@@ -48,6 +48,7 @@ export interface SiteAuditResult {
   issueCode?: string;
   statusLabel: string;
   diagnosticoComercial: string;
+  auditUncertain?: boolean;
   httpStatus?: number;
   finalUrl?: string;
   responseTimeMs?: number;
@@ -119,6 +120,7 @@ export interface LeadEnrichmentData {
   siteStatusLabel: string;
   siteIssueCode?: string;
   siteDiagnostico?: string;
+  auditUncertain?: boolean;
   siteHttpStatus?: number;
   cnpj?: string;
   razaoSocial?: string;
@@ -217,7 +219,7 @@ export interface EnrichLeadOutput {
 const MAX_CACHE_ENTRIES = 500;
 const MAX_PHONE_ROOT_ENTRIES = 1000;
 const MAX_SITE_HTML_BYTES = 256 * 1024;
-const SITE_AUDIT_TIMEOUT_MS = 4500;
+const SITE_AUDIT_TIMEOUT_MS = 8500;
 const RDAP_TIMEOUT_MS = 3500;
 const CNPJ_TIMEOUT_MS = 4000;
 const MAX_REDIRECTS = 4;
@@ -590,14 +592,22 @@ function describeNetworkError(err: unknown): { code: string; label: string; diag
 }
 
 function isWafOrBotChallenge(res: Response): boolean {
-  if (res.status !== 403 && res.status !== 429 && res.status !== 503) {
+  if (res.status !== 401 && res.status !== 403 && res.status !== 429 && res.status !== 503) {
     return false;
   }
   const cfRay = res.headers.get("cf-ray");
   const cfMitigated = (res.headers.get("cf-mitigated") || "").toLowerCase();
   const server = (res.headers.get("server") || "").toLowerCase();
   const poweredBy = (res.headers.get("x-powered-by") || "").toLowerCase();
+  const wafHeaders = [
+    res.headers.get("x-sucuri-id"),
+    res.headers.get("x-waf"),
+    res.headers.get("x-amz-cf-id"),
+    res.headers.get("x-litespeed-cache"),
+    res.headers.get("x-imunify360"),
+  ].some(Boolean);
   return (
+    wafHeaders ||
     !!cfRay ||
     cfMitigated.includes("challenge") ||
     server.includes("cloudflare") ||
@@ -605,7 +615,17 @@ function isWafOrBotChallenge(res: Response): boolean {
     server.includes("cloudfront") ||
     server.includes("akamai") ||
     server.includes("imperva") ||
-    poweredBy.includes("sucuri")
+    server.includes("incapsula") ||
+    server.includes("litespeed") ||
+    server.includes("imunify360") ||
+    server.includes("wordfence") ||
+    server.includes("mod_security") ||
+    server.includes("awselb") ||
+    server.includes("awswaf") ||
+    server.includes("fastly") ||
+    server.includes("ddos-guard") ||
+    poweredBy.includes("sucuri") ||
+    poweredBy.includes("imunify360")
   );
 }
 
@@ -772,8 +792,12 @@ function evaluateWebsiteQuality(input: {
   const hasViewport = /<meta\b[^>]*name\s*=\s*["']viewport["'][^>]*>/i.test(html);
   const hasSsl = currentUrl.startsWith("https://");
   const isSpaShell =
-    /<div[^>]+id\s*=\s*["'](?:root|app|__next|__nuxt|svelte)["'][^>]*>/i.test(html) &&
-    /<script\b[^>]*src\s*=/i.test(html);
+    (/<div[^>]+id\s*=\s*["'](?:root|app|__next|__nuxt|svelte)["'][^>]*>/i.test(html) &&
+      /<script\b[^>]*src\s*=/i.test(html)) ||
+    /<script\b[^>]*type\s*=\s*["']module["'][^>]*>/i.test(html) ||
+    /wixstatic\.com|wix-warmup-data|data-wf-site|website-files\.com|framerusercontent\.com|static1\.squarespace\.com|squarespace\.com\/universal|cdn\.shopify\.com|shopify\.theme|tiendanube|nuvemshop|bubbleapps\.io|elementor-page|wp-content\/plugins\/elementor/i.test(
+      html,
+    );
 
   const hasWhatsAppSignal =
     extractedWhatsApps.length > 0 ||
@@ -1337,6 +1361,60 @@ export async function auditLeadWebsite(
     } catch (err) {
       lastHopMs = Date.now() - hopStart;
       networkError = err;
+      const errDiag = describeNetworkError(err);
+      const rawMsg = err instanceof Error ? err.message : String(err || "");
+      const isTransientRetryable =
+        hop === 0 &&
+        (errDiag.code === "timeout" || /ECONNRESET|UND_ERR_CONNECT_TIMEOUT/i.test(rawMsg));
+
+      if (isTransientRetryable) {
+        let retryUrl = currentUrl;
+        try {
+          const parsedRetry = new URL(currentUrl);
+          if (parsedRetry.hostname && !parsedRetry.hostname.startsWith("www.") && parsedRetry.hostname.split(".").length <= 3) {
+            parsedRetry.hostname = `www.${parsedRetry.hostname}`;
+            const wwwCandidate = parsedRetry.toString();
+            if (!isPrivateOrLocalUrl(wwwCandidate)) retryUrl = wwwCandidate;
+          }
+        } catch {}
+
+        try {
+          const retryStart = Date.now();
+          const retryRes = await fetchImpl(retryUrl, {
+            method: "GET",
+            redirect: "manual",
+            signal: AbortSignal.timeout(SITE_AUDIT_TIMEOUT_MS),
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+              "Accept-Language": "pt-BR,pt;q=0.9",
+            },
+          });
+          lastHopMs = Date.now() - retryStart;
+          currentUrl = retryUrl;
+          networkError = null;
+          if (retryRes.status >= 300 && retryRes.status < 400) {
+            const location = retryRes.headers.get("location");
+            retryRes.body?.cancel?.().catch(() => {});
+            if (!location || hop === MAX_REDIRECTS) {
+              lastRes = retryRes;
+              break;
+            }
+            currentUrl = new URL(location, currentUrl).toString();
+            const redirectedNonSite = classifyNonOwnWebsiteUrl(currentUrl);
+            if (redirectedNonSite === "social_link_only" || redirectedNonSite === "third_party_platform") {
+              lastRes = retryRes;
+              break;
+            }
+            continue;
+          }
+          lastRes = retryRes;
+          break;
+        } catch (retryErr) {
+          networkError = retryErr;
+        }
+      }
+
       // Fallback HTTP caso o link tenha vindo HTTPS mas falhou TLS ou vice-versa
       if (hop === 0 && currentUrl.startsWith("https://")) {
         const httpFallback = `http://${currentUrl.slice("https://".length)}`;
@@ -1378,6 +1456,23 @@ export async function auditLeadWebsite(
 
   if (!lastRes) {
     const info = describeNetworkError(networkError);
+    if (info.code === "timeout") {
+      return {
+        status: isImprovisedHost ? "weak_site" : "active_site",
+        issueCode: isImprovisedHost ? "improvised_host" : "audit_timeout_unverified",
+        statusLabel: isImprovisedHost ? "Site improvisado/gratuito" : "Site não verificado (lento/protegido)",
+        diagnosticoComercial: isImprovisedHost
+          ? "usando página improvisada gratuita em vez de um site profissional próprio"
+          : "",
+        auditUncertain: !isImprovisedHost,
+        finalUrl: currentUrl,
+        responseTimeMs: elapsed,
+        extractedWhatsApps: [],
+        extractedCnpjs: [],
+        siteQualityScore: isImprovisedHost ? 30 : 55,
+        hasSsl: currentUrl.startsWith("https://"),
+      };
+    }
     return {
       status: "broken_site",
       issueCode: info.code,
@@ -1419,10 +1514,11 @@ export async function auditLeadWebsite(
     return {
       status: effectiveImprovisedHost ? "weak_site" : "active_site",
       issueCode: effectiveImprovisedHost ? "improvised_host" : "waf_protected",
-      statusLabel: effectiveImprovisedHost ? "Site improvisado/gratuito" : "Site ativo",
+      statusLabel: effectiveImprovisedHost ? "Site improvisado/gratuito" : "Site ativo (protegido)",
       diagnosticoComercial: effectiveImprovisedHost
         ? "usando página improvisada gratuita em vez de um site profissional próprio"
-        : "site ativo (protegido por barreira anti-bot/Cloudflare)",
+        : "",
+      auditUncertain: !effectiveImprovisedHost,
       httpStatus: lastRes.status,
       finalUrl: currentUrl,
       responseTimeMs: elapsed,
@@ -1523,9 +1619,44 @@ export async function auditLeadWebsite(
     hasClearCta: quality.hasClearCta,
   };
 
+  const brokenPattern = detectBrokenHtmlPattern(html);
+  if (brokenPattern) {
+    return {
+      status: "broken_site",
+      issueCode: brokenPattern.code,
+      statusLabel: brokenPattern.label,
+      diagnosticoComercial: brokenPattern.diag,
+      httpStatus: lastRes.status,
+      finalUrl: currentUrl,
+      responseTimeMs: elapsed,
+      extractedWhatsApps,
+      extractedCnpjs,
+      ...auditExtras,
+      siteQualityScore: 5,
+    };
+  }
+
+  // HTTP 401/403/429 sem padrão explícito de erro/suspensão no HTML costuma ser WAF ou bloqueio anti-crawler.
+  if (lastRes.status === 401 || lastRes.status === 403 || lastRes.status === 429) {
+    return {
+      status: effectiveImprovisedHost ? "weak_site" : "active_site",
+      issueCode: effectiveImprovisedHost ? "improvised_host" : "waf_protected",
+      statusLabel: effectiveImprovisedHost ? "Site improvisado/gratuito" : "Site ativo (protegido)",
+      diagnosticoComercial: effectiveImprovisedHost
+        ? "usando página improvisada gratuita em vez de um site profissional próprio"
+        : "",
+      auditUncertain: !effectiveImprovisedHost,
+      httpStatus: lastRes.status,
+      finalUrl: currentUrl,
+      responseTimeMs: elapsed,
+      extractedWhatsApps,
+      extractedCnpjs,
+      ...auditExtras,
+      siteQualityScore: effectiveImprovisedHost ? 35 : 65,
+    };
+  }
+
   if (
-    lastRes.status === 401 ||
-    lastRes.status === 403 ||
     lastRes.status === 404 ||
     lastRes.status === 410 ||
     lastRes.status === 451 ||
@@ -1548,23 +1679,6 @@ export async function auditLeadWebsite(
       extractedCnpjs,
       ...auditExtras,
       siteQualityScore: 0,
-    };
-  }
-
-  const brokenPattern = detectBrokenHtmlPattern(html);
-  if (brokenPattern) {
-    return {
-      status: "broken_site",
-      issueCode: brokenPattern.code,
-      statusLabel: brokenPattern.label,
-      diagnosticoComercial: brokenPattern.diag,
-      httpStatus: lastRes.status,
-      finalUrl: currentUrl,
-      responseTimeMs: elapsed,
-      extractedWhatsApps,
-      extractedCnpjs,
-      ...auditExtras,
-      siteQualityScore: 5,
     };
   }
 
@@ -1615,7 +1729,7 @@ export async function auditLeadWebsite(
     };
   }
 
-  if (lastHopMs > 4200 || elapsed > 6000) {
+  if (lastHopMs > 7500 || elapsed > 10000) {
     return {
       status: "weak_site",
       issueCode: "slow_site",
@@ -1663,7 +1777,7 @@ export async function auditLeadWebsite(
     };
   }
 
-  if (quality.hasHeadTag && !quality.isSpaShell && quality.qualityScore < 45) {
+  if (quality.hasHeadTag && !quality.isSpaShell && quality.weaknesses.length >= 2 && quality.qualityScore < 40) {
     const reasonSummary = quality.weaknesses.slice(0, 2).join(" e ");
     return {
       status: "weak_site",
@@ -3145,6 +3259,7 @@ export async function enrichCapturedLead(input: EnrichLeadInput): Promise<Enrich
     siteStatusLabel: siteAudit.statusLabel,
     siteIssueCode: siteAudit.issueCode,
     siteDiagnostico: siteAudit.diagnosticoComercial || undefined,
+    ...(siteAudit.auditUncertain ? { auditUncertain: true } : {}),
     siteHttpStatus: siteAudit.httpStatus,
     ...(siteAudit.siteQualityScore !== undefined ? { siteQualityScore: siteAudit.siteQualityScore } : {}),
     ...(siteAudit.siteWeaknesses?.length ? { siteWeaknesses: siteAudit.siteWeaknesses } : {}),

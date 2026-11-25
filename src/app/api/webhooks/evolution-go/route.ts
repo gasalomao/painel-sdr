@@ -33,6 +33,7 @@ import {
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
 import { isAiSend, isManualSend, isPendingAutomatedSend, isPendingAutomatedMedia } from "@/lib/manual-send-registry";
 import { safeSecretEqual, shouldLogOnce } from "@/lib/webhook-security";
+import { checkTenantAiQuota, isClientActiveCached, isClientAdminCached } from "@/lib/saas-limits";
 import { shouldSkipGroupActions, resolveTranscriptionConfig } from "@/lib/bot-status";
 import { evolution } from "@/lib/evolution";
 import { handleIncomingOptOutIfDetected } from "@/lib/opt-out";
@@ -277,7 +278,17 @@ export async function POST(req: NextRequest) {
     // Provider da transcrição (UI only — badge no chat; nunca vai pro agente).
     let transcribeProvider: string | null = null;
 
-    if (sender !== "ai" && msgType === "audio" && !base64Media && messageId) {
+    // SaaS cost & status guard: evita transcrição/visão/IA em contas desativadas ou com cota excedida.
+    const clientActive = await isClientActiveCached(clientId);
+    const adminTenant = clientActive ? await isClientAdminCached(clientId) : false;
+    const aiQuotaResult = !clientActive
+      ? { allowed: false, reason: "Conta desativada" }
+      : adminTenant
+        ? { allowed: true }
+        : await checkTenantAiQuota(clientId, false);
+    const aiQuotaAllowed = aiQuotaResult.allowed;
+
+    if (sender !== "ai" && msgType === "audio" && !base64Media && messageId && clientActive && aiQuotaAllowed) {
       try {
         const got = await evolution.getBase64FromMedia(messageId, instanceName, remoteJid, fromMe);
         base64Media = got?.base64 || got?.data?.base64 || got?.message?.base64 || null;
@@ -302,7 +313,7 @@ export async function POST(req: NextRequest) {
         );
 
         // Transcrição/descrição baseada no tipo (áudio transcreve inclusive para envio do operador/fromMe).
-        if (msgType === "audio" && !groupDisabled && transcriptionMethod !== "disabled") {
+        if (msgType === "audio" && !groupDisabled && transcriptionMethod !== "disabled" && clientActive && aiQuotaAllowed) {
           const det = await transcribeAudioDetailed(
             base64Media,
             sanitizeMimetype(mimetype || "", "audio/ogg"),
@@ -314,13 +325,12 @@ export async function POST(req: NextRequest) {
             ? `🎤 ${det.text}`
             : (fromMe ? "[🎤 Áudio enviado]" : "[🎤 O cliente enviou um áudio que não consegui transcrever]");
           if (det) transcribeProvider = det.provider;
-        } else if (msgType === "audio" && groupDisabled) {
-          console.log(`[evo-go-webhook] Áudio em grupo ${remoteJid} — transcrição ignorada (grupos desativados)`);
+        } else if (msgType === "audio" && (groupDisabled || !clientActive || !aiQuotaAllowed)) {
           enrichedContent = fromMe ? "[🎤 Áudio enviado]" : "[🎤 Áudio recebido]";
-        } else if (!fromMe && !groupDisabled && msgType === "image") {
+        } else if (!fromMe && !groupDisabled && msgType === "image" && clientActive && aiQuotaAllowed) {
           const desc = await describeImage(base64Media, sanitizeMimetype(mimetype || "", "image/jpeg"), clientId);
           enrichedContent = desc ? `📷 ${desc}` : null;
-        } else if (!fromMe && !groupDisabled && msgType === "document") {
+        } else if (!fromMe && !groupDisabled && msgType === "document" && clientActive && aiQuotaAllowed) {
           const desc = await describeDocument(base64Media, sanitizeMimetype(mimetype || "", "application/pdf"), fileName, clientId);
           enrichedContent = desc ? `📄 ${fileName ? `[${fileName}] ` : ""}${desc}` : null;
         }
@@ -484,6 +494,31 @@ export async function POST(req: NextRequest) {
 
     // ===== Disparar agente IA (mensagens do cliente com texto/mídia; reações ou opt-out NÃO disparam IA) =====
     if (!fromMe && !optedOutInTurn && msgType !== "reaction" && (text || msgType === "audio" || msgType === "image" || msgType === "document") && session?.id && !groupDisabled) {
+      if (!clientActive) {
+        if (shouldLogOnce("inactive_go", clientId)) {
+          supabase.from("webhook_logs").insert({
+            instance_name: instanceName,
+            client_id: clientId,
+            event: "AGENT_SKIP_INACTIVE_TENANT",
+            payload: { remote_jid: maskJid(remoteJid), reason: "Conta desativada", source: "evolution_go" },
+            created_at: new Date().toISOString(),
+          }).then(() => {}, () => {});
+        }
+      } else if (!aiQuotaAllowed) {
+        if (shouldLogOnce("quota_go", clientId)) {
+          supabase.from("webhook_logs").insert({
+            instance_name: instanceName,
+            client_id: clientId,
+            event: "AGENT_QUOTA_EXCEEDED",
+            payload: {
+              remote_jid: maskJid(remoteJid),
+              reason: aiQuotaResult.reason || "Limite mensal de IA do plano atingido.",
+              source: "evolution_go",
+            },
+            created_at: new Date().toISOString(),
+          }).then(() => {}, () => {});
+        }
+      } else {
       // FIX crítico: usar getEffectiveStatus de verdade — antes lia
       // `_effective_active` (nunca setado aqui) e bot_status cru, então o
       // snooze expirava e a IA ficava MUDA para sempre, e a pausa por
@@ -553,6 +588,7 @@ export async function POST(req: NextRequest) {
         import("@/lib/organizer-realtime")
           .then((m) => m.scheduleRealtimeLeadEvaluation(clientId, remoteJid))
           .catch(() => {});
+      }
       }
     }
 

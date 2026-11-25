@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { renderTemplate } from "@/lib/template-vars";
 import { requireClientId } from "@/lib/tenant";
+import { checkTenantAiQuota, checkTenantRateLimit, requireFeatureAccess } from "@/lib/saas-limits";
 import {
   getConversationHistory,
   personalizeFollowupWithAI,
@@ -27,6 +28,24 @@ export async function POST(
   try {
     const auth = await requireClientId(req);
     if (!auth.ok) return auth.response;
+    const denied = requireFeatureAccess(auth, "followup");
+    if (denied) return denied;
+    if (!auth.isAdmin) {
+      const rl = checkTenantRateLimit(`followup_preview:${auth.clientId}`, 15, 60_000);
+      if (!rl.allowed) {
+        return NextResponse.json(
+          { success: false, error: `Muitas prévias em sequência. Aguarde ${rl.retryAfterSec ?? 1}s.` },
+          { status: 429 },
+        );
+      }
+      const quota = await checkTenantAiQuota(auth.clientId, false);
+      if (!quota.allowed) {
+        return NextResponse.json(
+          { success: false, error: quota.reason || "Limite mensal de IA do plano atingido." },
+          { status: 429 },
+        );
+      }
+    }
     const { id } = await params;
     const body = await req.json().catch(() => ({}));
     const { target_id, remote_jid, step_index, force_ai } = body || {};

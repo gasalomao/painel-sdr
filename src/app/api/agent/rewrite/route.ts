@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { webSearch, formatResultsForAI } from "@/lib/web-search";
 import { logTokenUsage } from "@/lib/token-usage";
 import { requireClientId } from "@/lib/tenant";
+import { checkTenantAiQuota, checkTenantRateLimit } from "@/lib/saas-limits";
 import { getAiKeys } from "@/lib/ai-keys";
 import { startAiChat, providerOf, providerDisplayName } from "@/lib/ai-provider";
 
@@ -9,9 +10,26 @@ export async function POST(req: NextRequest) {
   // AUTH: precisa de sessão. Sem auth qualquer um queimava a Gemini API key.
   const ctx = await requireClientId(req);
   if (!ctx.ok) return ctx.response;
+  if (!ctx.isAdmin) {
+    const rl = checkTenantRateLimit(`agent_rewrite:${ctx.clientId}`, 20, 60_000);
+    if (!rl.allowed) {
+      return NextResponse.json(
+        { success: false, error: `Limite de reescritas atingido. Aguarde ${rl.retryAfterSec ?? 1}s.` },
+        { status: 429 },
+      );
+    }
+    const quota = await checkTenantAiQuota(ctx.clientId, false);
+    if (!quota.allowed) {
+      return NextResponse.json(
+        { success: false, error: quota.reason || "Limite mensal de IA do plano atingido." },
+        { status: 429 },
+      );
+    }
+  }
 
   try {
-    const { baseMessage, model, customPrompt, nomeEmpresa, ramo, useWebSearch } = await req.json();
+    const { baseMessage, model, customPrompt, nomeEmpresa, ramo, useWebSearch: rawUseWebSearch } = await req.json();
+    const useWebSearch = ctx.isAdmin ? Boolean(rawUseWebSearch) : false;
 
     if (!baseMessage) {
       return NextResponse.json({ success: false, error: "baseMessage é obrigatório" }, { status: 400 });

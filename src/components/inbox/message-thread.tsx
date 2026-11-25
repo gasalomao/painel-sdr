@@ -704,6 +704,8 @@ export function MessageThread({
         conversationId={conversation.id}
         botStatus={conversation.bot_status || (conversation.status === "pending" ? "bot_active" : "bot_paused")}
         resumeAt={conversation.resume_at || null}
+        pausedBy={conversation.paused_by || null}
+        pauseReason={conversation.pause_reason || null}
         instanceName={getSendInstanceName()}
         onChange={(patch) => {
           onStatusChange(

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { startAutomation } from "@/lib/automation-worker";
 import { requireClientId } from "@/lib/tenant";
+import { requireFeatureAccess } from "@/lib/saas-limits";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 
 export const dynamic = "force-dynamic";
@@ -9,6 +10,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   try {
     const auth = await requireClientId(req);
     if (!auth.ok) return auth.response;
+    const denied = requireFeatureAccess(auth, ["automacao", "prospeccao_sites"]);
+    if (denied) return denied;
     const { id } = await ctx.params;
     if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
     const { data: owned, error } = await supabaseAdmin

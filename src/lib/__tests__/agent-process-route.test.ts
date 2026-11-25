@@ -77,6 +77,7 @@ vi.mock("@/lib/channel", () => ({
 
 import { POST } from "../../app/api/agent/process/route";
 import { AiEmptyResponseError } from "../ai-provider";
+import { resetSaasLimitsStateForTests } from "../saas-limits";
 
 const CLIENT_A = "00000000-0000-0000-0000-00000000a001";
 const CLIENT_B = "00000000-0000-0000-0000-00000000b002";
@@ -118,6 +119,7 @@ function webhookEvents() {
 }
 
 beforeEach(() => {
+  resetSaasLimitsStateForTests();
   state.rows = {
     channel_connections: { agent_id: 7, client_id: CLIENT_A },
     agent_settings: agentConfig(),

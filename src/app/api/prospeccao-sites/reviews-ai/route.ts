@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { requireFeatureAccess } from "@/lib/saas-limits";
+import { resolveModelForClient } from "@/lib/ai-default-model";
 import { summarizeReviewsForLead } from "@/lib/reviews-ai";
 
 export const dynamic = "force-dynamic";
@@ -19,12 +21,15 @@ export async function POST(req: NextRequest) {
   try {
     const ctx = await requireClientId(req);
     if (!ctx.ok) return ctx.response;
+    const denied = requireFeatureAccess(ctx, "prospeccao_sites");
+    if (denied) return denied;
 
     const body = await req.json();
     const leadIds: number[] = Array.isArray(body?.lead_ids)
       ? body.lead_ids.map((x: any) => Number(x)).filter((n: number) => Number.isInteger(n) && n > 0).slice(0, 50)
       : [];
-    const model = String(body?.model || "").trim();
+    const requestedModel = String(body?.model || "").trim();
+    const model = ctx.isAdmin ? requestedModel : await resolveModelForClient(ctx.clientId);
     if (!leadIds.length) return NextResponse.json({ success: false, error: "lead_ids é obrigatório (máx 50)" }, { status: 400 });
     if (!model) return NextResponse.json({ success: false, error: "model é obrigatório" }, { status: 400 });
 
@@ -54,6 +59,8 @@ export async function GET(req: NextRequest) {
   try {
     const ctx = await requireClientId(req);
     if (!ctx.ok) return ctx.response;
+    const denied = requireFeatureAccess(ctx, "prospeccao_sites");
+    if (denied) return denied;
 
     const leadId = Number(req.nextUrl.searchParams.get("lead_id") || 0);
     const logs = req.nextUrl.searchParams.get("logs") === "1";
@@ -61,14 +68,29 @@ export async function GET(req: NextRequest) {
 
     // Resumo cacheado do lead (coluna) — com fallback pra reviews_ai_logs
     if (leadId && !logs) {
+      if (!ctx.isAdmin) {
+        const { data: leadOwned } = await supabase
+          .from("leads_extraidos")
+          .select("id")
+          .eq("id", leadId)
+          .eq("client_id", ctx.clientId)
+          .maybeSingle();
+        if (!leadOwned) {
+          return NextResponse.json({ success: false, error: "Lead não encontrado" }, { status: 404 });
+        }
+      }
       const { getCachedReviewsSummary } = await import("@/lib/reviews-ai");
       const resumo = await getCachedReviewsSummary({ leadId });
-      const { data: leadLogs, error } = await supabase
+      let leadLogsQ = supabase
         .from("reviews_ai_logs")
         .select("*")
         .eq("lead_id", leadId)
         .order("created_at", { ascending: false })
         .limit(20);
+      if (!ctx.isAdmin) {
+        leadLogsQ = leadLogsQ.eq("client_id", ctx.clientId);
+      }
+      const { data: leadLogs, error } = await leadLogsQ;
       return NextResponse.json({
         success: true,
         resumo,

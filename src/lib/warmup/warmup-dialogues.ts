@@ -789,18 +789,221 @@ export const FALLBACK_SCRIPTS: DialogueScript[] = [
       },
     ],
   },
+  {
+    id: "dia_a_dia_cafe_4",
+    theme: "dia_a_dia",
+    turns: [
+      {
+        speaker: "A",
+        text: "{saudacao} {mano|parceiro|meu amigo}, passando só pra desejar um bom expediente aí!",
+        variants: [
+          "{saudacao} {mano|cara}! Passando só pra dar um alô rápido",
+          "{saudacao} {meu querido|parceiro}, tudo {tranquilo|na paz} aí hoje?",
+          "E aí {mano|amigo}, {saudacao}! Como começou o dia por aí?",
+        ],
+        reaction: "☕",
+      },
+      {
+        speaker: "B",
+        text: "{saudacao}! Por aqui tá {corrido|suave}, acabei de passar um café aqui",
+        variants: [
+          "{saudacao}! Acabei de fazer um café forte aqui pra engrenar",
+          "Tudo {blz|em ordem} por aqui graças a Deus, e vc?",
+          "Na correria boa de sempre kkk já no segundo café do dia",
+        ],
+        reaction: "👍",
+      },
+      {
+        speaker: "A",
+        text: "Cafézinho é lei né kkk hoje o dia promete ser longo",
+        variants: [
+          "Cafézinho salva demais kkk hoje tenho mil coisas pra resolver",
+          "Boa! Aqui tbm não vivo sem café logo {cedo|agora}",
+          "Massa demais, bora que o dia só tá começando!",
+        ],
+        reaction: "😄",
+      },
+      {
+        speaker: "B",
+        text: "Com certeza! Qualquer coisa que precisar dá um grito aqui",
+        variants: [
+          "Tamo junto! Qualquer coisa é só chamar aqui",
+          "Bora pra cima! Mais tarde a gente vai se falando",
+          "Combinado demais, bom trabalho aí {mano|parceiro}!",
+        ],
+        reaction: "🙏",
+      },
+    ],
+  },
+  {
+    id: "trabalho_agenda_3",
+    theme: "trabalho",
+    turns: [
+      {
+        speaker: "A",
+        text: "{saudacao}, consegui organizar a agenda da semana certinho aqui",
+        variants: [
+          "{saudacao}! Fechei agora o planejamento da semana aqui",
+          "E aí {mano|parceiro}, deu certo aquele alinhamento de ontem?",
+          "{saudacao}! Hoje tirei a manhã pra responder uns clientes pendentes",
+        ],
+        reaction: "📈",
+      },
+      {
+        speaker: "B",
+        text: "Show de bola! Aqui tbm consegui dar uma enxugada nas pendências",
+        variants: [
+          "Que massa! Por aqui tbm zerei quase tudo que tava acumulado",
+          "Deu certo sim! Organização muda o jogo demais",
+          "Top demais, quando organiza logo no começo rende o dobro",
+        ],
+        reaction: "👏",
+      },
+      {
+        speaker: "A",
+        text: "Total! Se eu precisar de uma segunda opinião te mando um áudio depois",
+        variants: [
+          "Demais! Mais tarde troco uma ideia contigo sobre uns ajustes",
+          "Isso aí! Assim que fechar os números aqui te dou um toque",
+          "Fechado então, bom foco aí nos atendimentos!",
+        ],
+        reaction: "🤝",
+      },
+      {
+        speaker: "B",
+        text: "Manda sim! Bom trabalho por aí e até mais",
+        variants: [
+          "Pode mandar sim, tô por aqui hoje!",
+          "Valeu demais, excelente dia pra você aí!",
+          "Fechadíssimo! Até mais tarde 👋",
+        ],
+        reaction: "🚀",
+      },
+    ],
+  },
+  {
+    id: "tecnologia_celular_3",
+    theme: "tecnologia",
+    turns: [
+      {
+        speaker: "A",
+        text: "{saudacao}! Viu se saiu atualização nova pro Android essa semana?",
+        variants: [
+          "{saudacao} {mano|cara}, teu celular atualizou o sistema ontem tbm?",
+          "E aí, tá usando aquele aplicativo novo de notas ainda?",
+          "{saudacao}! Troquei a película aqui e parece celular novo kkk",
+        ],
+        reaction: "📱",
+      },
+      {
+        speaker: "B",
+        text: "Atualizou sim! Achei que a bateria segurou bem melhor agora",
+        variants: [
+          "Vi sim, atualizei ontem à noite e ficou bem fluido!",
+          "Tô usando sim, facilita muito na hora de anotar tudo rápido",
+          "Nossa, dá outra cara mesmo kkk bom demais cuidar dos aparelhos",
+        ],
+        reaction: "✨",
+      },
+      {
+        speaker: "A",
+        text: "Boa saber, vou deixar baixando aqui no Wi-Fi pra não gastar os dados",
+        variants: [
+          "Top! Depois me passa o nome certinho pra eu testar aqui tbm",
+          "Verdade, bem melhor fazer no Wi-Fi mesmo pra não dar erro",
+          "Pois é, pequeno detalhe mas faz diferença no dia a dia",
+        ],
+        reaction: "👍",
+      },
+      {
+        speaker: "B",
+        text: "Faz isso mesmo! Qualquer bug que notar te aviso aqui kkk",
+        variants: [
+          "Beleza, te mando o link certinho já já!",
+          "Combinado, depois me conta o que achou!",
+          "Fechou mano, abraço! 🤝",
+        ],
+        reaction: "🔥",
+      },
+    ],
+  },
 ];
+
+function getBrazilClockParts(now: Date = new Date()): { hour: number; weekday: string } {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Sao_Paulo",
+      hour: "numeric",
+      weekday: "short",
+      hour12: false,
+    }).formatToParts(now);
+    const hourVal = Number(parts.find((p) => p.type === "hour")?.value ?? 12);
+    const weekday = parts.find((p) => p.type === "weekday")?.value || "Wed";
+    return { hour: hourVal === 24 ? 0 : hourVal, weekday };
+  } catch {
+    return { hour: now.getHours(), weekday: "Wed" };
+  }
+}
+
+export function resolveWarmupSpintax(template: string, now: Date = new Date()): string {
+  const { hour } = getBrazilClockParts(now);
+  const greetings =
+    hour >= 5 && hour < 12
+      ? ["Bom dia", "Bom diaa", "Fala, bom dia"]
+      : hour >= 12 && hour < 18
+        ? ["Boa tarde", "Boa tardee", "E aí, boa tarde"]
+        : ["Boa noite", "Boa noitee", "Fala, boa noite"];
+
+  const chosenGreeting = greetings[Math.floor(Math.random() * greetings.length)];
+  let out = template
+    .replace(/\{saudacao\}/gi, chosenGreeting)
+    .replace(/\{cumprimento\}/gi, chosenGreeting);
+
+  // Expande blocos {opção A|opção B|opção C} sem recursão infinita
+  for (let pass = 0; pass < 3; pass++) {
+    const next = out.replace(/\{([^{}|]+\|[^{}]+)\}/g, (_match, group: string) => {
+      const options = group.split("|").map((s) => s.trim()).filter(Boolean);
+      if (options.length === 0) return "";
+      return options[Math.floor(Math.random() * options.length)];
+    });
+    if (next === out) break;
+    out = next;
+  }
+
+  return out.replace(/\s{2,}/g, " ").trim();
+}
+
+function stableHashInt(input: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
 
 export function getRandomReaction(): string {
   return NATURAL_REACTIONS[Math.floor(Math.random() * NATURAL_REACTIONS.length)];
 }
 
-export function getRandomStatusQuote(): string {
-  return STATUS_STORIES_QUOTES[Math.floor(Math.random() * STATUS_STORIES_QUOTES.length)];
+export function getRandomStatusQuote(now: Date = new Date()): string {
+  const { weekday, hour } = getBrazilClockParts(now);
+  const filtered = STATUS_STORIES_QUOTES.filter((q) => {
+    const lower = q.toLowerCase();
+    if (lower.includes("sextou") && weekday !== "Fri") return false;
+    if (lower.includes("sábado") && weekday !== "Sat") return false;
+    if (lower.includes("domingo") && weekday !== "Sun") return false;
+    if (lower.includes("começando o dia") && hour >= 13) return false;
+    if ((lower.includes("fim de tarde") || lower.includes("finalizado")) && hour < 15) return false;
+    return true;
+  });
+  const pool = filtered.length > 0 ? filtered : STATUS_STORIES_QUOTES;
+  return pool[Math.floor(Math.random() * pool.length)];
 }
 
-export function getRandomCasualVoiceNote(): string {
-  return CASUAL_VOICE_NOTES[Math.floor(Math.random() * CASUAL_VOICE_NOTES.length)];
+export function getRandomCasualVoiceNote(now: Date = new Date()): string {
+  const raw = CASUAL_VOICE_NOTES[Math.floor(Math.random() * CASUAL_VOICE_NOTES.length)];
+  return resolveWarmupSpintax(raw, now);
 }
 
 /**
@@ -829,15 +1032,18 @@ export function pickFallbackDialogue(theme?: string): DialogueScript {
 }
 
 /**
- * Seleciona uma fala natural do banco de diálogos evitando repetir frases já
- * presentes no histórico da conversa atual e aplicando variações humanas sutis.
+ * Seleciona uma fala natural do banco de diálogos travando no mesmo roteiro (`conversationId`)
+ * para manter coerência entre perguntas e respostas do início ao fim da thread,
+ * evitando repetições recentes e aplicando Spintax contextual por horário de Brasília.
  */
 export function pickVariedFallbackTurnText(opts: {
   theme?: string;
   stepIndex: number;
   usedTexts?: string[];
+  conversationId?: string;
+  now?: Date;
 }): string {
-  const { theme, stepIndex, usedTexts = [] } = opts;
+  const { theme, stepIndex, usedTexts = [], conversationId, now = new Date() } = opts;
   const usedSet = new Set(usedTexts.map((t) => t.trim().toLowerCase()));
 
   const themeScripts =
@@ -846,15 +1052,36 @@ export function pickVariedFallbackTurnText(opts: {
       : FALLBACK_SCRIPTS;
   const scriptsPool = themeScripts.length > 0 ? themeScripts : FALLBACK_SCRIPTS;
 
-  // Coleta todas as variantes candidatas para este turno em todos os scripts do tema
+  // 1. Quando conversationId é informado, mantém toda a conversa dentro do MESMO roteiro para coerência
+  if (conversationId && scriptsPool.length > 0) {
+    const lockedIdx = stableHashInt(conversationId) % scriptsPool.length;
+    const lockedScript = scriptsPool[lockedIdx];
+    const lockedTurn =
+      lockedScript.turns[Math.min(stepIndex, lockedScript.turns.length - 1)] || lockedScript.turns[0];
+    if (lockedTurn) {
+      const rawPool =
+        lockedTurn.variants && lockedTurn.variants.length > 0
+          ? lockedTurn.variants
+          : [lockedTurn.text];
+      const resolvedPool = rawPool.map((v) => resolveWarmupSpintax(v, now));
+      const unusedLocked = resolvedPool.filter((v) => v && !usedSet.has(v.toLowerCase()));
+      if (unusedLocked.length > 0) {
+        return unusedLocked[Math.floor(Math.random() * unusedLocked.length)];
+      }
+      // Se já usou variantes deste passo, evita repetição exata com candidatos do mesmo tema
+    }
+  }
+
+  // 2. Fallback: coleta variantes inéditas para o turno em outros roteiros do tema
   const candidates: string[] = [];
   for (const script of scriptsPool) {
     const turn = script.turns[Math.min(stepIndex, script.turns.length - 1)] || script.turns[0];
     if (!turn) continue;
     const pool = turn.variants && turn.variants.length > 0 ? turn.variants : [turn.text];
     for (const v of pool) {
-      if (v && !usedSet.has(v.trim().toLowerCase())) {
-        candidates.push(v);
+      const resolved = resolveWarmupSpintax(v, now);
+      if (resolved && !usedSet.has(resolved.toLowerCase())) {
+        candidates.push(resolved);
       }
     }
   }
@@ -868,7 +1095,7 @@ export function pickVariedFallbackTurnText(opts: {
       fallbackScript.turns[Math.min(stepIndex, fallbackScript.turns.length - 1)] ||
       fallbackScript.turns[0];
     const pool = turn?.variants && turn.variants.length > 0 ? turn.variants : [turn?.text || "Opa, tudo bem por aí?"];
-    chosen = pool[Math.floor(Math.random() * pool.length)];
+    chosen = resolveWarmupSpintax(pool[Math.floor(Math.random() * pool.length)], now);
   }
 
   return chosen;

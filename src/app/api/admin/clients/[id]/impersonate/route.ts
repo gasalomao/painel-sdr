@@ -10,6 +10,7 @@ import {
   revokeSession,
 } from "@/lib/auth";
 import { randomUUID } from "crypto";
+import { logAdminAudit } from "@/lib/saas-limits";
 
 export const dynamic = "force-dynamic";
 
@@ -58,6 +59,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     token: newToken,
     userAgent: req.headers.get("user-agent") || undefined,
     ip: req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || undefined,
+  });
+
+  await logAdminAudit({
+    actorId: claims.actorId,
+    targetClientId: target.id,
+    action: "client_impersonated",
+    details: { email: target.email },
   });
 
   const res = NextResponse.json({ ok: true, clientId: target.id, name: target.name });

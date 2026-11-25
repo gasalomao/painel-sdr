@@ -97,6 +97,9 @@ export async function logTokenUsage(input: TokenUsageInput): Promise<void> {
       } else {
         console.error("[TokenUsage] Falha ao gravar:", error.message, "| code=", (error as any).code);
       }
+    } else if (input.clientId) {
+      const { recordTenantUsageDelta } = await import("@/lib/saas-limits");
+      recordTenantUsageDelta(input.clientId, totalTokens, cost);
     }
   } catch (err: any) {
     console.error("[TokenUsage] erro inesperado:", err?.message);

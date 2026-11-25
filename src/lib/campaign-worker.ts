@@ -22,6 +22,7 @@ import { logTokenUsage } from "@/lib/token-usage";
 import { registerAiSend, registerPendingAutomatedSend } from "@/lib/manual-send-registry";
 import { splitMessage } from "@/lib/agent-format";
 import { isInstanceOwnedByClient } from "@/lib/tenant";
+import { checkTenantAiQuota, isClientActiveCached, isClientAdminCached } from "@/lib/saas-limits";
 import {
   evaluateWeekendB2BGuard,
   isAutoPoolInstance,
@@ -599,6 +600,32 @@ async function resolveCampaignClientId(campaignId: string): Promise<string | nul
   } catch {
     return null;
   }
+}
+
+const CAMPAIGN_WARNING_COOLDOWN_MS = 30 * 60 * 1000;
+const _lastCampaignWarningMap = new Map<string, { at: number; message: string }>();
+
+export function resetCampaignWarningThrottleForTests(): void {
+  _lastCampaignWarningMap.clear();
+}
+
+/**
+ * Evita flood de `CAMPAIGN_WARNING` idênticos em `webhook_logs` / `campaign_logs`:
+ * suprime mensagens idênticas da mesma campanha/motivo dentro de 30 min.
+ */
+export function shouldEmitCampaignWarning(
+  campaignId: string | number,
+  reasonKey: string,
+  message: string,
+  nowMs = Date.now(),
+): boolean {
+  const key = `${campaignId}:${reasonKey}`;
+  const prev = _lastCampaignWarningMap.get(key);
+  if (prev && prev.message === message && nowMs - prev.at < CAMPAIGN_WARNING_COOLDOWN_MS) {
+    return false;
+  }
+  _lastCampaignWarningMap.set(key, { at: nowMs, message });
+  return true;
 }
 
 async function addCampaignLog(campaignId: string, message: string, level: "info" | "success" | "warning" | "error" = "info") {
@@ -1406,6 +1433,14 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     }).eq("id", campaignId);
     return "stopped";
   }
+  if (!(await isClientActiveCached(clientId))) {
+    const msg = "Conta desativada — campanha pausada automaticamente.";
+    await addCampaignLog(campaignId, msg, "warning");
+    await supabase.from("campaigns").update({
+      status: "paused", last_error: msg, last_error_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    }).eq("id", campaignId).eq("client_id", clientId);
+    return "stopped";
+  }
   if (!isAutoPoolInstance(c.instance_name) && !(await isInstanceOwnedByClient(c.instance_name, clientId))) {
     const msg = `Instância "${c.instance_name}" não pertence ao cliente da campanha — disparo pausado.`;
     await addCampaignLog(campaignId, msg, "error");
@@ -1420,8 +1455,10 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
 
   if (!isWithinAllowedHour(c as any)) {
     const msg = `⏰ Fora do horário permitido — agora são ${nowHourBRT()}h, a janela é ${c.allowed_start_hour}h-${c.allowed_end_hour}h. O disparo retoma sozinho quando a janela abrir.`;
-    console.log(`[CAMPAIGN ${c.name}] ${msg}`);
-    await addCampaignLog(campaignId, msg, "warning");
+    if (shouldEmitCampaignWarning(campaignId, "out_of_hours", msg)) {
+      console.log(`[CAMPAIGN ${c.name}] ${msg}`);
+      await addCampaignLog(campaignId, msg, "warning");
+    }
     return "out_of_hours";
   }
 
@@ -1449,8 +1486,10 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
   const weekendGuard = evaluateWeekendB2BGuard(weekendGuardEnabled);
   if (!weekendGuard.allowed) {
     const msg = "📅 Modo Comercial B2B ativo — disparos frios pausados aos domingos para preservar reputação; retoma na segunda-feira.";
-    console.log(`[CAMPAIGN ${c.name}] ${msg}`);
-    await addCampaignLog(campaignId, msg, "warning");
+    if (shouldEmitCampaignWarning(campaignId, "weekend_b2b", msg)) {
+      console.log(`[CAMPAIGN ${c.name}] ${msg}`);
+      await addCampaignLog(campaignId, msg, "warning");
+    }
     return "out_of_hours";
   }
 
@@ -1819,32 +1858,44 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
   // Se "Personalizar com IA" estiver ativo (e não há pré-gerada), passa pelo
   // Gemini ANTES de enviar
   else if (c.personalize_with_ai) {
-    aiInputText = text;
-    try {
-      await addCampaignLog(campaignId, `Personalizando mensagem com IA para ${target.nome_negocio}...`, "info");
-      const aiText = await personalizeWithAI({
-        baseMessage: text,
-        model: c.ai_model || "gemini-1.5-flash",
-        customPrompt: c.ai_prompt ? renderTemplate(c.ai_prompt, renderCtx) : null,
-        nomeEmpresa: effectiveCompanyName || "",
-        ramo: target.ramo_negocio || "",
-        useWebSearch: !!c.use_web_search,
-        campaignId: c.id,
-        campaignName: c.name,
-        remoteJid: target.remote_jid,
-        clientId,
-      });
-      if (aiText && aiText.trim()) {
-        text = aiText.trim();
-        await addCampaignLog(campaignId, `IA gerou: "${text.slice(0, 140)}${text.length > 140 ? "…" : ""}"`, "success");
-      } else {
-        await addCampaignLog(campaignId, `IA retornou resposta vazia — usando template original.`, "warning");
+    const adminTenant = await isClientAdminCached(clientId);
+    const quota: { allowed: boolean; reason?: string } = adminTenant
+      ? { allowed: true }
+      : await checkTenantAiQuota(clientId, false);
+    if (!quota.allowed) {
+      await addCampaignLog(
+        campaignId,
+        `Cota mensal de IA atingida (${quota.reason || "plano"}) — usando template direto sem personalização IA.`,
+        "warning",
+      );
+    } else {
+      aiInputText = text;
+      try {
+        await addCampaignLog(campaignId, `Personalizando mensagem com IA para ${target.nome_negocio}...`, "info");
+        const aiText = await personalizeWithAI({
+          baseMessage: text,
+          model: c.ai_model || "gemini-1.5-flash",
+          customPrompt: c.ai_prompt ? renderTemplate(c.ai_prompt, renderCtx) : null,
+          nomeEmpresa: effectiveCompanyName || "",
+          ramo: target.ramo_negocio || "",
+          useWebSearch: !!c.use_web_search,
+          campaignId: c.id,
+          campaignName: c.name,
+          remoteJid: target.remote_jid,
+          clientId,
+        });
+        if (aiText && aiText.trim()) {
+          text = aiText.trim();
+          await addCampaignLog(campaignId, `IA gerou: "${text.slice(0, 140)}${text.length > 140 ? "…" : ""}"`, "success");
+        } else {
+          await addCampaignLog(campaignId, `IA retornou resposta vazia — usando template original.`, "warning");
+        }
+      } catch (e: any) {
+        const errMsg = `Falha ao personalizar com IA, usando template direto: ${e.message}`;
+        console.warn(`[CAMPAIGN ${c.name}] ${errMsg}`);
+        await addCampaignLog(campaignId, errMsg, "warning");
+        // Continua com `text` original (renderTemplate)
       }
-    } catch (e: any) {
-      const errMsg = `Falha ao personalizar com IA, usando template direto: ${e.message}`;
-      console.warn(`[CAMPAIGN ${c.name}] ${errMsg}`);
-      await addCampaignLog(campaignId, errMsg, "warning");
-      // Continua com `text` original (renderTemplate)
     }
   }
 

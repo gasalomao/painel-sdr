@@ -16,6 +16,7 @@ import {
   detachSseClient,
 } from "@/lib/scraper-engine";
 import { isSessionLiveStrict, SESSION_COOKIE, verifySession } from "@/lib/auth";
+import { isFeatureEnabledForSession } from "@/lib/saas-policy";
 import { cookies } from "next/headers";
 import { parseMinReviews } from "@/lib/scraper-review-count";
 import {
@@ -38,6 +39,9 @@ export async function GET() {
   const session = token ? await verifySession(token) : null;
   if (!session?.clientId || !session.sessionId || !token || !(await isSessionLiveStrict(session.sessionId, token))) {
     return new Response("Não autenticado", { status: 401 });
+  }
+  if (!isFeatureEnabledForSession("captador", session)) {
+    return new Response("Módulo Captador Maps não liberado para esta conta.", { status: 403 });
   }
   let streamController: ReadableStreamDefaultController | null = null;
   let closeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -71,6 +75,9 @@ export async function POST(req: NextRequest) {
   const session = token ? await verifySession(token) : null;
   if (!session?.clientId || !session.sessionId || !token || !(await isSessionLiveStrict(session.sessionId, token))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  if (!isFeatureEnabledForSession("captador", session)) {
+    return NextResponse.json({ error: "Módulo Captador Maps não liberado no seu plano." }, { status: 403 });
   }
 
   const body = await req.json();

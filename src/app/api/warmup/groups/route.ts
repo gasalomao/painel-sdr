@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireClientId } from "@/lib/tenant";
+import { requireFeatureAccess } from "@/lib/saas-limits";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { evolution } from "@/lib/evolution";
 import {
   importWarmupGroups,
+  isWarmupGroupDead,
   syncGroupMembershipForChips,
 } from "@/lib/warmup/warmup-groups";
 import type { WarmupGroupMember } from "@/lib/warmup/warmup-types";
@@ -17,6 +19,8 @@ export const dynamic = "force-dynamic";
 export async function GET(req: NextRequest) {
   const auth = await requireClientId(req);
   if (!auth.ok) return auth.response;
+  const denied = requireFeatureAccess(auth, "aquecer_chips");
+  if (denied) return denied;
   const clientId = auth.clientId;
 
   try {
@@ -44,6 +48,7 @@ export async function GET(req: NextRequest) {
 
     const enriched = (groups || []).map((g) => ({
       ...g,
+      is_dead: isWarmupGroupDead(g),
       members: membersByGroup.get(g.id) || [],
     }));
 
@@ -63,6 +68,8 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const auth = await requireClientId(req);
   if (!auth.ok) return auth.response;
+  const denied = requireFeatureAccess(auth, "aquecer_chips");
+  if (denied) return denied;
   const clientId = auth.clientId;
 
   try {
@@ -116,6 +123,8 @@ export async function POST(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
   const auth = await requireClientId(req);
   if (!auth.ok) return auth.response;
+  const denied = requireFeatureAccess(auth, "aquecer_chips");
+  if (denied) return denied;
   const clientId = auth.clientId;
 
   try {

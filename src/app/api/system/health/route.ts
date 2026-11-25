@@ -35,7 +35,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       success: false,
       overall: "error" as HealthStatus,
       checkedAt: new Date().toISOString(),
-      checks: [
+      checks: auth.isAdmin ? [
         {
           id: "workers_db",
           title: "Banco e Workers",
@@ -43,7 +43,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           summary: "Cliente administrativo do Supabase não configurado.",
           actionHint: "Defina SUPABASE_SERVICE_ROLE_KEY nas variáveis de ambiente.",
         },
-      ],
+      ] : [],
     }, { status: 500 });
   }
 
@@ -140,8 +140,19 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         id: "ai",
         title: "Provedores de IA",
         status: "error",
-        summary: "Nenhuma API Key de IA configurada no servidor.",
-        actionHint: "Adicione ao menos uma chave (Gemini, OpenRouter ou NVIDIA) abaixo para a IA responder.",
+        summary: auth.isAdmin
+          ? "Nenhuma API Key de IA configurada no servidor."
+          : "Serviço de inteligência artificial temporariamente indisponível.",
+        actionHint: auth.isAdmin
+          ? "Adicione ao menos uma chave (Gemini, OpenRouter ou NVIDIA) abaixo para a IA responder."
+          : "Entre em contato com o suporte administrativo.",
+      });
+    } else if (!auth.isAdmin) {
+      checks.push({
+        id: "ai",
+        title: "Inteligência Artificial",
+        status: "ok",
+        summary: "Serviço de IA ativo e operacional.",
       });
     } else if (activeProviders.length === 1) {
       checks.push({
@@ -274,36 +285,44 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const redisEnabled = Boolean(process.env.REDIS_URL?.trim());
 
     if (missingParts.length > 0) {
-      checks.push({
-        id: "workers_db",
-        title: "Banco e Workers",
-        status: "warn",
-        summary: `Pendência no banco detectada: ${missingParts.join("; ")}.`,
-        actionHint: "Execute o SQL de atualização do setup ou aplique as migrations pendentes no Supabase.",
-      });
+      if (auth.isAdmin) {
+        checks.push({
+          id: "workers_db",
+          title: "Banco e Workers",
+          status: "warn",
+          summary: `Pendência no banco detectada: ${missingParts.join("; ")}.`,
+          actionHint: "Execute o SQL de atualização do setup ou aplique as migrations pendentes no Supabase.",
+        });
+      }
     } else if (!workerEnabled) {
-      checks.push({
-        id: "workers_db",
-        title: "Banco e Workers",
-        status: "warn",
-        summary: `Banco atualizado, mas o worker automático de follow-up está desligado (${redisEnabled ? "Redis ativo" : "modo sem Redis"}).`,
-        actionHint: "Defina AGENT_FOLLOWUP_WORKER_ENABLED=true no deploy se utilizar follow-up automático de IA.",
-      });
+      if (auth.isAdmin) {
+        checks.push({
+          id: "workers_db",
+          title: "Banco e Workers",
+          status: "warn",
+          summary: `Banco atualizado, mas o worker automático de follow-up está desligado (${redisEnabled ? "Redis ativo" : "modo sem Redis"}).`,
+          actionHint: "Defina AGENT_FOLLOWUP_WORKER_ENABLED=true no deploy se utilizar follow-up automático de IA.",
+        });
+      }
     } else {
       checks.push({
         id: "workers_db",
         title: "Banco e Workers",
         status: "ok",
-        summary: `Banco em dia, worker de follow-up ativo e ${redisEnabled ? "Redis conectado" : "operando sem Redis"}.`,
+        summary: auth.isAdmin
+          ? `Banco em dia, worker de follow-up ativo e ${redisEnabled ? "Redis conectado" : "operando sem Redis"}.`
+          : "Serviços de atendimento e automação operacionais.",
       });
     }
   } catch {
-    checks.push({
-      id: "workers_db",
-      title: "Banco e Workers",
-      status: "warn",
-      summary: "Não foi possível verificar as RPCs/tabelas de background.",
-    });
+    if (auth.isAdmin) {
+      checks.push({
+        id: "workers_db",
+        title: "Banco e Workers",
+        status: "warn",
+        summary: "Não foi possível verificar as RPCs/tabelas de background.",
+      });
+    }
   }
 
   const overall: HealthStatus = checks.some((c) => c.status === "error")

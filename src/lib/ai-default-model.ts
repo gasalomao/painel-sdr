@@ -143,9 +143,10 @@ export async function resolveModel(
     } catch (dbErr) {
       console.error("[resolveModel] Erro ao buscar dados do cliente no Supabase:", dbErr);
     }
+    return getDefaultModel();
   }
 
-  // Fallback se não informado clientId ou falhar DB
+  // Fallback se não informado clientId
   if (optsModel && optsModel.trim()) return mapModelAsync(optsModel.trim());
   return getDefaultModel();
 }

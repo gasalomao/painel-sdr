@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { requireFeatureAccess } from "@/lib/saas-limits";
 import { validateCampaignInstanceAccess, validateClientAgentAccess } from "@/lib/campaign-instance-access";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 import { parseMinReviews } from "@/lib/scraper-review-count";
@@ -25,6 +26,8 @@ export async function GET(req: NextRequest) {
   try {
     const ctx = await requireClientId(req);
     if (!ctx.ok) return ctx.response;
+    const denied = requireFeatureAccess(ctx, ["automacao", "prospeccao_sites"]);
+    if (denied) return denied;
 
     const source = req.nextUrl.searchParams.get("source");
     let q = supabase.from("automations").select("*").order("created_at", { ascending: false });
@@ -57,6 +60,8 @@ export async function POST(req: NextRequest) {
   try {
     const ctx = await requireClientId(req);
     if (!ctx.ok) return ctx.response;
+    const denied = requireFeatureAccess(ctx, ["automacao", "prospeccao_sites"]);
+    if (denied) return denied;
 
     const input: unknown = await req.json();
     if (!input || typeof input !== "object" || Array.isArray(input)) {

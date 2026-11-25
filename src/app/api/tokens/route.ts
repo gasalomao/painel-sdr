@@ -2,8 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { ensurePricing, lookupPriceSync, computeCost, getCacheState, ensureFxRate, getFxState } from "@/lib/pricing";
 import { requireClientId } from "@/lib/tenant";
+import { requireFeatureAccess } from "@/lib/saas-limits";
 
 export const dynamic = "force-dynamic";
+
+const TOKENS_CACHE_TTL_MS = 60_000;
+const TOKENS_CACHE_MAX = 200;
+const tokensSummaryCache = new Map<string, { payload: Record<string, unknown>; at: number }>();
 
 const adminClient = supabaseAdmin;
 
@@ -30,13 +35,23 @@ export async function GET(req: NextRequest) {
     // vê TUDO (sem filtro client_id) pra dashboard global do sistema.
     const ctx = await requireClientId(req);
     if (!ctx.ok) return ctx.response;
-
-    await Promise.all([ensurePricing(), ensureFxRate()]);
+    const denied = requireFeatureAccess(ctx, "tokens");
+    if (denied) return denied;
 
     const fromIso = req.nextUrl.searchParams.get("from");
     const toIso   = req.nextUrl.searchParams.get("to");
-    const fxState = await getFxState();
     const brlOverride = req.nextUrl.searchParams.get("brl");
+
+    const cacheKey = `${ctx.isAdmin ? "admin" : ctx.clientId}|${fromIso || ""}|${toIso || ""}|${brlOverride || ""}`;
+    const cached = tokensSummaryCache.get(cacheKey);
+    const now = Date.now();
+    if (cached && now - cached.at < TOKENS_CACHE_TTL_MS) {
+      return NextResponse.json(cached.payload);
+    }
+
+    await Promise.all([ensurePricing(), ensureFxRate()]);
+
+    const fxState = await getFxState();
     const brlRate = brlOverride ? Number(brlOverride) : fxState.rate;
 
     if (!adminClient) {
@@ -177,7 +192,7 @@ export async function GET(req: NextRequest) {
 
     const pricingState = await getCacheState();
 
-    return NextResponse.json({
+    const responsePayload = {
       success: true,
       totals: {
         prompt: totalPrompt,
@@ -209,7 +224,15 @@ export async function GET(req: NextRequest) {
         created_at: r.created_at,
       })),
       pricingState,
-    });
+    };
+
+    if (tokensSummaryCache.size >= TOKENS_CACHE_MAX && !tokensSummaryCache.has(cacheKey)) {
+      const oldest = tokensSummaryCache.keys().next().value;
+      if (oldest !== undefined) tokensSummaryCache.delete(oldest);
+    }
+    tokensSummaryCache.set(cacheKey, { payload: responsePayload, at: now });
+
+    return NextResponse.json(responsePayload);
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err?.message || String(err) }, { status: 500 });
   }

@@ -29,6 +29,7 @@ vi.mock("@/lib/supabase_admin", () => ({
 }));
 
 import { POST } from "@/app/api/upload-media/route";
+import { resetSaasLimitsStateForTests } from "@/lib/saas-limits";
 
 function makeUploadRequest(fileName: string, mimeType: string, content = "conteudo") {
   const form = new FormData();
@@ -43,6 +44,7 @@ function makeUploadRequest(fileName: string, mimeType: string, content = "conteu
 describe("POST /api/upload-media (allowlist MIME/extensão e prefixo por tenant)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetSaasLimitsStateForTests();
     mocks.requireClientId.mockResolvedValue({
       ok: true,
       clientId: "tenant-123",
@@ -144,5 +146,22 @@ describe("POST /api/upload-media (allowlist MIME/extensão e prefixo por tenant)
     const [uploadedPath] = mocks.storageUpload.mock.calls[0] as unknown as [string];
     expect(uploadedPath).not.toContain("..");
     expect(uploadedPath).toMatch(/^tenant____outro\/kb_.*\.jpg$/);
+  });
+
+  it("bloqueia com HTTP 413 quando arquivo excede limite do plano SaaS", async () => {
+    const req = new NextRequest("http://localhost/api/upload-media", { method: "POST" });
+    const bigForm = new FormData();
+    const fakeBigFile = {
+      name: "video-pesado.mp4",
+      type: "video/mp4",
+      size: 35 * 1024 * 1024,
+      arrayBuffer: async () => new ArrayBuffer(8),
+    } as unknown as File;
+    vi.spyOn(bigForm, "get").mockReturnValue(fakeBigFile);
+    vi.spyOn(req, "formData").mockResolvedValue(bigForm);
+
+    const res = await POST(req);
+    expect(res.status).toBe(413);
+    expect(mocks.storageUpload).not.toHaveBeenCalled();
   });
 });

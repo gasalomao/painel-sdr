@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { enrollLeads } from "@/lib/followup-worker";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { requireFeatureAccess } from "@/lib/saas-limits";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +10,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   // AUTH + OWNERSHIP: cliente A não pode enrolar leads/campanha do cliente B.
   const ctx = await requireClientId(req);
   if (!ctx.ok) return ctx.response;
+  const denied = requireFeatureAccess(ctx, "followup");
+  if (denied) return denied;
 
   try {
     const { id } = await params;

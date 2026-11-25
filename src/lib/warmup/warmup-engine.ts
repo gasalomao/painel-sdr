@@ -3,8 +3,19 @@ import { evolution } from "@/lib/evolution";
 import { generateText } from "@/lib/ai-provider";
 import { getAiKeys } from "@/lib/ai-keys";
 import { registerWarmupSend } from "@/lib/manual-send-registry";
+import { checkTenantAiQuota } from "@/lib/saas-limits";
 import { getRandomWarmupVoiceBase64 } from "./warmup-audio";
 import { invalidateWarmupFirewallCache, persistResolvedChipPhone } from "./warmup-firewall";
+import {
+  createDynamicWarmupImage,
+  createDynamicWarmupSticker,
+  pickCasualWarmupPoll,
+} from "./warmup-media";
+import {
+  markPhoneDisconnected,
+  pruneMapToLimit,
+  savePhoneMemoryFromConfig,
+} from "./warmup-phone-memory";
 import {
   calculateInterConversationCooldownSec,
   calculateReactionDelayMs,
@@ -36,6 +47,7 @@ const MAX_RECENT_TEXTS_PER_SENDER = 30;
 export function recordRecentWarmupText(senderKey: string, text: string): void {
   const clean = text.trim();
   if (!clean) return;
+  pruneMapToLimit(_recentTextsBySender, 2000);
   const list = _recentTextsBySender.get(senderKey) || [];
   list.push(clean);
   if (list.length > MAX_RECENT_TEXTS_PER_SENDER) {
@@ -237,6 +249,47 @@ export function getHourlySendCap(cfg: WarmupConfig, effectiveDailyTarget: number
 }
 
 /**
+ * Indica se a data cai no sábado ou domingo (horário oficial de Brasília).
+ */
+export function isBrazilWeekend(date: Date = new Date()): boolean {
+  try {
+    const weekday = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Sao_Paulo",
+      weekday: "short",
+    }).format(date);
+    return weekday === "Sat" || weekday === "Sun";
+  } catch {
+    const day = date.getDay();
+    return day === 0 || day === 6;
+  }
+}
+
+/**
+ * Curva circadiana de ritmo horário:
+ * - Picos naturais de atividade humana pela manhã (09-11h) e tarde (14-17h)
+ * - Queda natural no almoço (12-13h), início/fim de expediente e desaceleração (~45%) no fim de semana.
+ */
+export function getCircadianHourlyCap(
+  cfg: WarmupConfig,
+  effectiveDailyTarget: number,
+  date: Date = new Date()
+): number {
+  const baseCap = getHourlySendCap(cfg, effectiveDailyTarget);
+  const hour = getBrazilHour(date);
+  const weekendFactor = isBrazilWeekend(date) ? 0.55 : 1;
+
+  let hourWeight = 1;
+  if (hour >= 9 && hour <= 11) hourWeight = 1.15;
+  else if (hour >= 12 && hour <= 13) hourWeight = 0.55;
+  else if (hour >= 14 && hour <= 17) hourWeight = 1.15;
+  else if (hour >= 18 && hour <= 19) hourWeight = 0.75;
+  else if (hour >= 20 || hour < 6) hourWeight = 0.45;
+  else hourWeight = 0.7; // 06h-08h
+
+  return Math.max(1, Math.round(baseCap * weekendFactor * hourWeight));
+}
+
+/**
  * Resolve o telefone do WhatsApp associado à instância via channel_connections ou Evolution.
  */
 export async function resolveInstancePhone(
@@ -311,8 +364,11 @@ export async function generateWarmupMessage(opts: {
   aiModel?: string;
   customPrompt?: string | null;
   senderInstance?: string;
+  clientId?: string;
+  conversationId?: string;
+  now?: Date;
 }): Promise<{ text: string; provider: string; modelUsed: string }> {
-  const { theme, speakerRole, history, aiModel, customPrompt, senderInstance } = opts;
+  const { theme, speakerRole, history, aiModel, customPrompt, senderInstance, clientId, conversationId, now = new Date() } = opts;
 
   const historyTexts = history.map((h) => h.text).filter(Boolean);
   const recentSenderTexts = senderInstance ? getRecentWarmupTexts(senderInstance) : [];
@@ -323,6 +379,8 @@ export async function generateWarmupMessage(opts: {
       theme,
       stepIndex: history.length,
       usedTexts,
+      conversationId,
+      now,
     });
     if (senderInstance) recordRecentWarmupText(senderInstance, text);
     return {
@@ -333,7 +391,51 @@ export async function generateWarmupMessage(opts: {
   }
 
   try {
+    // Respeita a cota mensal de IA do tenant antes de chamar qualquer provedor LLM
+    if (clientId) {
+      const quota = await checkTenantAiQuota(clientId, false).catch(() => ({ allowed: true }));
+      if (quota && quota.allowed === false) {
+        const text = pickVariedFallbackTurnText({
+          theme,
+          stepIndex: history.length,
+          usedTexts,
+          conversationId,
+          now,
+        });
+        if (senderInstance) recordRecentWarmupText(senderInstance, text);
+        return {
+          text,
+          provider: "native_fallback",
+          modelUsed: "dialogue_bank_pt_br",
+        };
+      }
+    }
+
     const keys = await getAiKeys();
+    const hasAnyKey = Boolean(
+      keys.gemini ||
+      keys.openrouter ||
+      (Array.isArray(keys.openrouterKeys) && keys.openrouterKeys.length > 0) ||
+      keys.nvidia ||
+      (keys.gatewayBaseUrl && keys.gatewayApiKey)
+    );
+
+    if (!hasAnyKey) {
+      const text = pickVariedFallbackTurnText({
+        theme,
+        stepIndex: history.length,
+        usedTexts,
+        conversationId,
+        now,
+      });
+      if (senderInstance) recordRecentWarmupText(senderInstance, text);
+      return {
+        text,
+        provider: "native_fallback",
+        modelUsed: "dialogue_bank_pt_br",
+      };
+    }
+
     const recentHistoryText = history
       .slice(-5)
       .map((h) => `${h.sender}: ${h.text}`)
@@ -341,6 +443,7 @@ export async function generateWarmupMessage(opts: {
 
     const themeObj = WARMUP_THEMES.find((t) => t.id === theme) || WARMUP_THEMES[0];
     const avoidSample = usedTexts.slice(-8).join(" | ");
+    const resolvedModelRef = aiModel === "auto:free" ? "auto:free-fast" : aiModel;
 
     const systemPrompt = `Você é um usuário brasileiro casual conversando no WhatsApp com um amigo próximo sobre ${themeObj.label}.
 REGRAS OBRIGATÓRIAS:
@@ -356,7 +459,7 @@ REGRAS OBRIGATÓRIAS:
         : `Últimas mensagens trocadas:\n${recentHistoryText}\n\nResponda casualmente como o interlocutor (${speakerRole}):`;
 
     const res = await generateText({
-      modelRef: aiModel,
+      modelRef: resolvedModelRef,
       system: systemPrompt,
       prompt: userPrompt,
       temperature: 0.9,
@@ -374,7 +477,7 @@ REGRAS OBRIGATÓRIAS:
       return {
         text: cleanText,
         provider: res.provider,
-        modelUsed: res.modelUsed || aiModel,
+        modelUsed: res.modelUsed || resolvedModelRef,
       };
     }
   } catch (err: any) {
@@ -385,6 +488,8 @@ REGRAS OBRIGATÓRIAS:
     theme,
     stepIndex: history.length,
     usedTexts,
+    conversationId,
+    now,
   });
   if (senderInstance) recordRecentWarmupText(senderInstance, text);
   return {
@@ -438,19 +543,40 @@ export async function logWarmupAction(log: WarmupLog): Promise<void> {
   } catch {}
 }
 
+export function isTransientInfraError(message: string): boolean {
+  return /(?:ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|UND_ERR_CONNECT_TIMEOUT|fetch failed|signal is aborted|timed out after|status\s+50[234]|gateway timeout)/i.test(
+    String(message || "")
+  );
+}
+
+export function isSevereDisconnectReason(reason: unknown): boolean {
+  const reasonStr = reason != null ? String(reason).trim() : "";
+  if (!reasonStr) return false;
+  return /(?:^|\D)(401|403|405|428)(?:\D|$)|logged.?out|ban|blocked|restricted|removed|refused/i.test(
+    reasonStr
+  );
+}
+
 /**
  * Disjuntor de Emergência (Circuit Breaker): Reduz score e coloca em quarentena se houver erros.
  */
 export async function handleInstanceFailure(
   clientId: string,
   cfg: WarmupConfig,
-  errorMessage: string
+  errorMessage: string,
+  opts?: { immediateQuarantine?: boolean; isTransientInfra?: boolean }
 ): Promise<void> {
   const now = new Date();
-  const errorsToday = (cfg.error_count_today || 0) + 1;
-  const newHealth = Math.max(0, (cfg.health_score ?? 100) - 20);
+  const isTransientInfra = Boolean(opts?.isTransientInfra);
+  const immediateQuarantine = Boolean(opts?.immediateQuarantine);
+  const errorsToday = isTransientInfra
+    ? cfg.error_count_today || 0
+    : (cfg.error_count_today || 0) + 1;
+  const healthPenalty = isTransientInfra ? 5 : immediateQuarantine ? 65 : 20;
+  const newHealth = Math.max(0, (cfg.health_score ?? 100) - healthPenalty);
 
-  const shouldQuarantine = errorsToday >= 3 || newHealth <= 40;
+  const shouldQuarantine =
+    immediateQuarantine || (!isTransientInfra && (errorsToday >= 3 || newHealth <= 40)) || newHealth <= 30;
   const quarantineUntil = shouldQuarantine
     ? new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString()
     : null;
@@ -461,7 +587,11 @@ export async function handleInstanceFailure(
       error_count_today: errorsToday,
       health_score: newHealth,
       is_quarantined: shouldQuarantine,
-      quarantine_reason: shouldQuarantine ? `Múltiplas falhas detectadas: ${errorMessage}` : null,
+      quarantine_reason: shouldQuarantine
+        ? immediateQuarantine
+          ? `Quarentena imediata por bloqueio/sessão crítica: ${errorMessage}`
+          : `Múltiplas falhas detectadas: ${errorMessage}`
+        : null,
       quarantine_until: quarantineUntil,
       updated_at: now.toISOString(),
     })
@@ -474,14 +604,111 @@ export async function handleInstanceFailure(
     receiver_instance: "circuit_breaker",
     message_text: shouldQuarantine
       ? `🛑 DISJUNTOR ATIVADO: Chip ${cfg.instance_name} colocado em Quarentena 24h para evitar banimento.`
-      : `⚠️ Alerta de falha no Chip ${cfg.instance_name} (${errorsToday}/3 falhas). Saúde: ${newHealth}%.`,
+      : isTransientInfra
+        ? `⚠️ Instabilidade transitória da Evolution API no Chip ${cfg.instance_name} (sem quebrar sequência de dias). Saúde: ${newHealth}%.`
+        : `⚠️ Alerta de falha no Chip ${cfg.instance_name} (${errorsToday}/3 falhas). Saúde: ${newHealth}%.`,
     action_type: "circuit_breaker",
-    details: { error: errorMessage, health_score: newHealth, is_quarantined: shouldQuarantine },
+    details: {
+      error: errorMessage,
+      health_score: newHealth,
+      is_quarantined: shouldQuarantine,
+      transient_infra: isTransientInfra,
+      immediate_quarantine: immediateQuarantine,
+    },
   });
 }
 
 const _lastDisconnectReportAt = new Map<string, number>();
 const DISCONNECT_REPORT_COOLDOWN_MS = 5 * 60 * 1000;
+const _lastDisconnectAlertAt = new Map<string, number>();
+const DISCONNECT_ALERT_COOLDOWN_MS = 30 * 60 * 1000;
+
+export function resetDisconnectAlertCooldownForTests(): void {
+  _lastDisconnectAlertAt.clear();
+  _lastDisconnectReportAt.clear();
+}
+
+async function notifySevereDisconnectAlert(params: {
+  clientId: string;
+  instanceName: string;
+  reasonStr: string;
+  pausedCampaigns: number;
+  nowMs: number;
+}): Promise<void> {
+  const { clientId, instanceName, reasonStr, pausedCampaigns, nowMs } = params;
+  const cooldownKey = `${clientId}:${instanceName}`;
+  const lastAlertAt = _lastDisconnectAlertAt.get(cooldownKey) || 0;
+  if (nowMs - lastAlertAt < DISCONNECT_ALERT_COOLDOWN_MS) {
+    return;
+  }
+  _lastDisconnectAlertAt.set(cooldownKey, nowMs);
+
+  try {
+    await supabaseAdmin.from("webhook_logs").insert({
+      instance_name: instanceName,
+      client_id: clientId,
+      event: "INSTANCE_DISCONNECTED_ALERT",
+      payload: {
+        instance_name: instanceName,
+        reason: reasonStr,
+        paused_campaigns: pausedCampaigns,
+      },
+      created_at: new Date(nowMs).toISOString(),
+    });
+  } catch {}
+
+  try {
+    const { data: peers } = await supabaseAdmin
+      .from("channel_connections")
+      .select("instance_name, status")
+      .eq("client_id", clientId);
+
+    const peerRow = (Array.isArray(peers) ? peers : []).find((row) => {
+      const name = String(row?.instance_name || "").trim();
+      const status = String(row?.status || "").trim().toLowerCase();
+      return name && name !== instanceName && (status === "open" || status === "connected");
+    });
+    const peerInstance = peerRow?.instance_name ? String(peerRow.instance_name).trim() : "";
+    if (!peerInstance) return;
+
+    let ownerPhone = "";
+    try {
+      const { data: agents } = await supabaseAdmin
+        .from("agent_settings")
+        .select("scheduler_config")
+        .eq("client_id", clientId);
+      for (const ag of Array.isArray(agents) ? agents : []) {
+        const sched = (ag as { scheduler_config?: { owner_phone?: string } | null })?.scheduler_config;
+        const candidate = String(sched?.owner_phone || "").replace(/\D/g, "");
+        if (candidate.length >= 10) {
+          ownerPhone = candidate;
+          break;
+        }
+      }
+    } catch {}
+
+    if (!ownerPhone) {
+      ownerPhone = String(process.env.ADMIN_WHATSAPP_PHONE || process.env.OWNER_PHONE || "").replace(/\D/g, "");
+    }
+    if (ownerPhone.length < 10) return;
+
+    const ownerJid = `${ownerPhone}@s.whatsapp.net`;
+    const alertText =
+      `🚨 *ALERTA DE CHIP DESCONECTADO*\n\n` +
+      `📱 Instância: *${instanceName}*\n` +
+      `⚠️ Motivo: ${reasonStr}\n` +
+      `⏸️ Campanhas pausadas automaticamente: ${pausedCampaigns}\n` +
+      `🔄 Reconecte o QR Code no painel para retomar o atendimento.`;
+
+    try {
+      const { registerPendingAutomatedSend } = await import("@/lib/manual-send-registry");
+      registerPendingAutomatedSend(peerInstance, ownerJid, alertText);
+    } catch {}
+
+    const { sendMessage } = await import("@/lib/channel");
+    await sendMessage(ownerJid, alertText, peerInstance);
+  } catch {}
+}
 
 /**
  * Responde a quedas/desconexões recebidas via webhook `connection.update`:
@@ -499,8 +726,10 @@ export async function handleWebhookConnectionClosed(params: {
   if (!clientId || !instanceName) return { severe: false, pausedCampaigns: 0 };
 
   const reasonStr = statusReason != null && String(statusReason).trim() ? String(statusReason).trim() : "desconexão";
-  const severe = /(?:^|\D)(401|403|405)(?:\D|$)|logged.?out|ban|blocked|restricted|removed/i.test(reasonStr);
+  const severe = isSevereDisconnectReason(reasonStr);
   const lastAt = _lastDisconnectReportAt.get(instanceName) || 0;
+
+  markPhoneDisconnected(clientId, instanceName, reasonStr, nowMs);
 
   if (severe || nowMs - lastAt >= DISCONNECT_REPORT_COOLDOWN_MS) {
     _lastDisconnectReportAt.set(instanceName, nowMs);
@@ -516,7 +745,8 @@ export async function handleWebhookConnectionClosed(params: {
         await handleInstanceFailure(
           clientId,
           wCfg as WarmupConfig,
-          `[Webhook] Conexão fechada (${reasonStr})`
+          `[Webhook] Conexão fechada (${reasonStr})`,
+          { immediateQuarantine: severe }
         );
       }
     } catch {}
@@ -539,6 +769,14 @@ export async function handleWebhookConnectionClosed(params: {
         .select("id");
       pausedCampaigns = Array.isArray(paused) ? paused.length : 0;
     } catch {}
+
+    await notifySevereDisconnectAlert({
+      clientId,
+      instanceName,
+      reasonStr,
+      pausedCampaigns,
+      nowMs,
+    });
   }
 
   return { severe, pausedCampaigns };
@@ -705,10 +943,26 @@ export function evaluateDailyAutoProgress(
     ? (cfg.consecutive_successful_days || 0) + 1
     : Math.max(0, (cfg.consecutive_successful_days || 0) - 1);
 
-  // Dias ativos = dias civis desde a criação do chip (fonte real), com fallback
-  // para o contador incremental quando created_at não estiver disponível.
+  // Dias ativos: só avança quando houve tráfego real no dia anterior e limita saltos após hiatos offline (>=48h)
   const elapsedFromCreated = calculateElapsedDaysFromCreatedAt(cfg.created_at, nowIso);
-  const newDaysActive = elapsedFromCreated ?? (cfg.days_active || 1) + 1;
+  const hadWarmupActivity = (cfg.sent_today || 0) > 0 || (cfg.received_today || 0) > 0;
+  const lastActMs = cfg.last_activity_at ? new Date(cfg.last_activity_at).getTime() : NaN;
+  const nowMs = new Date(nowIso).getTime();
+  const hasOfflineGap =
+    Number.isFinite(lastActMs) && Number.isFinite(nowMs) && nowMs - lastActMs >= 48 * 60 * 60 * 1000;
+
+  let newDaysActive: number;
+  if (!hadWarmupActivity) {
+    // Dia offline/ocioso: nunca promove dias ativos à força
+    newDaysActive =
+      elapsedFromCreated !== null ? Math.min(elapsedFromCreated, cfg.days_active || 1) : (cfg.days_active || 1);
+  } else if (hasOfflineGap) {
+    // Voltou após >=48h parado: avança apenas +1 dia real de uso por ciclo, nunca saltando dias offline
+    const incremental = (cfg.days_active || 1) + 1;
+    newDaysActive = elapsedFromCreated !== null ? Math.min(elapsedFromCreated, incremental) : incremental;
+  } else {
+    newDaysActive = elapsedFromCreated ?? (cfg.days_active || 1) + 1;
+  }
 
   let newStage: WarmupStage = curStage;
   let stagePromoted = false;
@@ -765,6 +1019,73 @@ export function evaluateDailyAutoProgress(
         : cfg.daily_target || stageInfo.dailyTarget,
     stageInfo,
   };
+}
+
+/**
+ * Rotina isolada de publicação no WhatsApp Status (Stories):
+ * Executa fora do turno de mensagem para evitar timeout encadeado na Evolution API
+ * e só grava `last_status_post_at` + log se o provedor confirmar o envio.
+ */
+export async function runIsolatedStatusPost(opts: {
+  clientId: string;
+  senderConfig: WarmupConfig;
+  peerPhones?: string[];
+  force?: boolean;
+}): Promise<{ posted: boolean; quote?: string }> {
+  const { clientId, senderConfig, peerPhones = [], force = false } = opts;
+  if (!force && senderConfig.enable_status_posts === false) {
+    return { posted: false };
+  }
+  if (
+    !force &&
+    senderConfig.is_quarantined &&
+    (!senderConfig.quarantine_until || new Date(senderConfig.quarantine_until) > new Date())
+  ) {
+    return { posted: false };
+  }
+
+  const statusIntervalMs = (24 + Math.floor(Math.random() * 12)) * 60 * 60 * 1000;
+  const isDue =
+    force ||
+    !senderConfig.last_status_post_at ||
+    Date.now() - new Date(senderConfig.last_status_post_at).getTime() > statusIntervalMs;
+
+  if (!isDue) return { posted: false };
+
+  try {
+    const quote = getRandomStatusQuote();
+    const statusRes = (await evolution.sendStatus(
+      quote,
+      "text",
+      senderConfig.instance_name,
+      peerPhones
+    )) as { key?: { id?: string }; id?: string; data?: { key?: { id?: string } } } | null;
+    if (!statusRes) {
+      return { posted: false };
+    }
+    const statusId = statusRes?.key?.id || statusRes?.id || statusRes?.data?.key?.id;
+    if (statusId) registerWarmupSend(statusId);
+
+    const postedAt = new Date().toISOString();
+    await supabaseAdmin
+      .from("whatsapp_warmup_configs")
+      .update({ last_status_post_at: postedAt })
+      .eq("instance_name", senderConfig.instance_name)
+      .eq("client_id", clientId);
+
+    await logWarmupAction({
+      client_id: clientId,
+      sender_instance: senderConfig.instance_name,
+      receiver_instance: "status@broadcast",
+      message_text: `Publicou Story no WhatsApp Status: "${quote}"`,
+      action_type: "status",
+      details: { isolated: !force, message_id: statusId || null },
+    });
+
+    return { posted: true, quote };
+  } catch {
+    return { posted: false };
+  }
 }
 
 /**
@@ -875,48 +1196,56 @@ export async function executeWarmupTurn(opts: {
     } catch {}
   }
 
-  // 5. POSTAGEM DE STATUS (WhatsApp Stories) - A cada 24–36h ou se requisitado no teste manual
-  const statusIntervalMs = (24 + Math.floor(Math.random() * 12)) * 60 * 60 * 1000;
-  const shouldPostStatus =
-    (forceStatusPost || !isManualTrigger) &&
-    senderConfig.enable_status_posts !== false &&
-    (Boolean(forceStatusPost) ||
-      !senderConfig.last_status_post_at ||
-      Date.now() - new Date(senderConfig.last_status_post_at).getTime() > statusIntervalMs);
-
-  if (shouldPostStatus) {
-    try {
-      const quote = getRandomStatusQuote();
-      await evolution.sendStatus(
-        quote,
-        "text",
-        senderConfig.instance_name,
-        receiverPhone ? [receiverPhone] : []
-      );
-      await supabaseAdmin
-        .from("whatsapp_warmup_configs")
-        .update({ last_status_post_at: new Date().toISOString() })
-        .eq("instance_name", senderConfig.instance_name)
-        .eq("client_id", clientId);
-
-      await logWarmupAction({
-        client_id: clientId,
-        sender_instance: senderConfig.instance_name,
-        receiver_instance: "status@broadcast",
-        message_text: `Publicou Story no WhatsApp Status: "${quote}"`,
-        action_type: "status",
-      });
-    } catch {}
+  // 5. POSTAGEM DE STATUS (WhatsApp Stories) — Desacoplada do turno automático
+  // Apenas dispara inline no teste manual explícito (`forceStatusPost`). No automático,
+  // roda isoladamente no worker para não competir no mesmo socket e causar timeouts.
+  if (forceStatusPost && senderConfig.enable_status_posts !== false) {
+    await runIsolatedStatusPost({
+      clientId,
+      senderConfig,
+      peerPhones: receiverPhone ? [receiverPhone] : [],
+      force: true,
+    });
   }
 
-  // 6. Geração da Mensagem (Texto ou Áudio)
-  const isAudioTurn =
-    senderConfig.enable_audio !== false && senderConfig.stage >= 2 && Math.random() < 0.16;
+  // 6. Seleção orgânica de modalidade e geração da mensagem (Áudio, Figurinha, Imagem, Enquete ou Texto)
+  const isTestEnv = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
+  const hasSendMedia = typeof (evolution as { sendMedia?: unknown }).sendMedia === "function";
+  const hasSendSticker = typeof (evolution as { sendSticker?: unknown }).sendSticker === "function";
+  const hasSendPoll = typeof (evolution as { sendPoll?: unknown }).sendPoll === "function";
+
+  const mediaRoll = Math.random();
+  const isAudioTurn = senderConfig.enable_audio !== false && senderConfig.stage >= 2 && hasSendMedia && mediaRoll < 0.16;
+  const isStickerTurn = !isAudioTurn && !isManualTrigger && senderConfig.stage >= 2 && hasSendSticker && mediaRoll >= 0.16 && mediaRoll < 0.26;
+  const isImageTurn = !isAudioTurn && !isStickerTurn && !isManualTrigger && senderConfig.stage >= 2 && hasSendMedia && mediaRoll >= 0.26 && mediaRoll < 0.33;
+  const isPollTurn = !isAudioTurn && !isStickerTurn && !isImageTurn && !isManualTrigger && senderConfig.stage >= 3 && hasSendPoll && mediaRoll >= 0.33 && mediaRoll < 0.35;
+
+  let turnActionType: WarmupLog["action_type"] = "text";
   let messageText = "";
   let genResult = { provider: "native", modelUsed: "dialogue_bank" };
+  let stickerB64: string | null = null;
+  let imagePayload: { base64: string; mimetype: string; caption: string; sha256: string } | null = null;
+  let pollPayload: { name: string; values: string[]; selectableCount: number } | null = null;
 
   if (isAudioTurn) {
+    turnActionType = "audio";
     messageText = getRandomCasualVoiceNote();
+  } else if (isStickerTurn) {
+    turnActionType = "sticker";
+    const stk = createDynamicWarmupSticker(`${senderConfig.instance_name}:${conversation.id}`);
+    stickerB64 = stk.base64;
+    messageText = "[Figurinha enviada]";
+    genResult = { provider: "native_media", modelUsed: `webp_vp8l_${stk.sha256.slice(0, 8)}` };
+  } else if (isImageTurn) {
+    turnActionType = "image";
+    imagePayload = createDynamicWarmupImage(`${senderConfig.instance_name}:${conversation.id}`);
+    messageText = imagePayload.caption || "[Foto casual enviada]";
+    genResult = { provider: "native_media", modelUsed: `png_${imagePayload.sha256.slice(0, 8)}` };
+  } else if (isPollTurn) {
+    turnActionType = "poll";
+    pollPayload = pickCasualWarmupPoll(`${senderConfig.instance_name}:${conversation.id}`);
+    messageText = `📊 Enquete: ${pollPayload.name}`;
+    genResult = { provider: "native_poll", modelUsed: "casual_poll_pt_br" };
   } else {
     const speakerRole = conversation.turn_count % 2 === 0 ? "A" : "B";
     const generated = await generateWarmupMessage({
@@ -926,13 +1255,15 @@ export async function executeWarmupTurn(opts: {
       aiModel: senderConfig.ai_model,
       customPrompt: senderConfig.custom_prompt,
       senderInstance: senderConfig.instance_name,
+      clientId,
+      conversationId: conversation.id,
     });
     messageText = generated.text;
     genResult = { provider: generated.provider, modelUsed: generated.modelUsed };
   }
 
-  // 7. Simulação de Digitação Humana ou Gravação de Áudio
-  if (senderConfig.enable_typing) {
+  // 7. Simulação de Digitação Humana (com hesitação natural ocasional) ou Gravação de Áudio
+  if (senderConfig.enable_typing && !isStickerTurn && !isPollTurn) {
     const presenceType = isAudioTurn ? "recording" : "composing";
     const typingMs = calculateTypingDuration(
       messageText.length,
@@ -957,9 +1288,46 @@ export async function executeWarmupTurn(opts: {
 
     const effectiveWait = isManualTrigger ? Math.min(typingMs, 3500) : typingMs;
     await new Promise((r) => setTimeout(r, effectiveWait));
+
+    // Hesitação humana (~15% em texto automático): para brevemente e retoma antes de enviar
+    if (!isAudioTurn && !isImageTurn && !isManualTrigger && Math.random() < 0.15) {
+      try {
+        await evolution.sendPresence(targetJid, "paused", senderConfig.instance_name);
+        await new Promise((r) => setTimeout(r, isTestEnv ? 10 : 750 + Math.floor(Math.random() * 650)));
+        await evolution.sendPresence(targetJid, "composing", senderConfig.instance_name);
+        await new Promise((r) => setTimeout(r, isTestEnv ? 10 : 900 + Math.floor(Math.random() * 800)));
+      } catch {}
+    }
   }
 
-  // 8. Envio Efetivo (Áudio Opus PTT com encoding: true para variar hash binário, ou Texto)
+  // Determina se haverá citação (`quoted`) ou divisão natural de frase em 2 partes
+  let quotedOpt: { key: { id: string; fromMe: boolean; remoteJid: string } } | undefined;
+  if (turnActionType === "text" && !isManualTrigger && Math.random() < 0.25) {
+    const lastPartnerWithId = [...(conversation.history || [])]
+      .reverse()
+      .find((h) => h.sender !== senderConfig.instance_name && h.message_id);
+    if (lastPartnerWithId?.message_id) {
+      quotedOpt = {
+        key: { id: lastPartnerWithId.message_id, fromMe: false, remoteJid: targetJid },
+      };
+    }
+  }
+
+  const splitParts = (() => {
+    if (turnActionType !== "text" || isManualTrigger || quotedOpt || messageText.length < 36 || Math.random() >= 0.15) {
+      return null;
+    }
+    const sepMatch = messageText.match(/^(.{12,60}?)([?!.,])\s+(.{10,})$/) ||
+      messageText.match(/^(.{12,60}?)\s+(?:mas|então|porque)\s+(.{10,})$/i);
+    if (!sepMatch) return null;
+    if (sepMatch.length === 4) {
+      const p1 = `${sepMatch[1].trim()}${sepMatch[2] === "," ? "" : sepMatch[2]}`.trim();
+      return [p1, sepMatch[3].trim()] as const;
+    }
+    return [sepMatch[1].trim(), sepMatch[2].trim()] as const;
+  })();
+
+  // 8. Envio Efetivo (Áudio, Figurinha, Foto única, Enquete ou Texto com quoted/split orgânico)
   let sendResult: any = null;
   try {
     if (isAudioTurn) {
@@ -971,12 +1339,49 @@ export async function executeWarmupTurn(opts: {
         senderConfig.instance_name,
         { delay: 1200 + Math.floor(Math.random() * 900), encoding: true }
       );
+    } else if (isStickerTurn && stickerB64) {
+      sendResult = await evolution.sendSticker(targetJid, stickerB64, senderConfig.instance_name, {
+        delay: 700 + Math.floor(Math.random() * 600),
+      });
+    } else if (isImageTurn && imagePayload) {
+      sendResult = await evolution.sendMedia(
+        targetJid,
+        imagePayload.caption,
+        { type: "image", base64: imagePayload.base64, mimetype: imagePayload.mimetype },
+        senderConfig.instance_name,
+        { delay: 1100 + Math.floor(Math.random() * 900) }
+      );
+    } else if (isPollTurn && pollPayload) {
+      sendResult = await evolution.sendPoll(
+        targetJid,
+        pollPayload.name,
+        pollPayload.values,
+        pollPayload.selectableCount,
+        senderConfig.instance_name
+      );
+    } else if (splitParts) {
+      const part1Res: any = await evolution.sendTextMessage(targetJid, splitParts[0], senderConfig.instance_name);
+      registerWarmupSend(part1Res?.key?.id || part1Res?.id || part1Res?.data?.key?.id);
+      if (senderConfig.enable_typing) {
+        try {
+          await evolution.sendPresence(targetJid, "composing", senderConfig.instance_name);
+        } catch {}
+        await new Promise((r) => setTimeout(r, isTestEnv ? 10 : 800 + Math.floor(Math.random() * 900)));
+      }
+      sendResult = await evolution.sendTextMessage(targetJid, splitParts[1], senderConfig.instance_name);
+    } else if (quotedOpt) {
+      sendResult = await evolution.sendTextMessage(targetJid, messageText, senderConfig.instance_name, {
+        quoted: quotedOpt,
+      });
     } else {
       sendResult = await evolution.sendTextMessage(targetJid, messageText, senderConfig.instance_name);
     }
   } catch (err: any) {
-    const errorMsg = `Erro ao enviar no WhatsApp: ${err.message}`;
-    await handleInstanceFailure(clientId, senderConfig, errorMsg);
+    const rawErrMsg = err?.message || String(err);
+    const errorMsg = `Erro ao enviar no WhatsApp: ${rawErrMsg}`;
+    await handleInstanceFailure(clientId, senderConfig, errorMsg, {
+      isTransientInfra: isTransientInfraError(rawErrMsg),
+    });
     return { success: false, messageText, error: errorMsg };
   }
 
@@ -994,13 +1399,21 @@ export async function executeWarmupTurn(opts: {
     receiver_instance: receiverConfig.instance_name,
     sender_phone: senderPhone,
     receiver_phone: receiverPhone,
-    message_text: isAudioTurn ? `🎤 Áudio PTT gravado na hora: "${messageText}"` : messageText,
-    action_type: isAudioTurn ? "audio" : "text",
+    message_text: isAudioTurn
+      ? `🎤 Áudio PTT gravado na hora: "${messageText}"`
+      : isStickerTurn
+        ? "🎭 Enviou figurinha WebP exclusiva para manter naturalidade"
+        : isImageTurn
+          ? `🖼️ Enviou imagem exclusiva${imagePayload?.caption ? `: "${imagePayload.caption}"` : ""}`
+          : messageText,
+    action_type: turnActionType,
     details: {
       message_id: messageId,
       provider: genResult.provider,
       model_used: genResult.modelUsed,
       turn: conversation.turn_count + 1,
+      quoted: Boolean(quotedOpt),
+      split_parts: Boolean(splitParts),
     },
   });
 
@@ -1111,16 +1524,37 @@ export async function executeWarmupTurn(opts: {
     .eq("instance_name", receiverConfig.instance_name)
     .eq("client_id", clientId);
 
-  // 12. Atualização da conversa ativa (com cooldown longo ao encerrar sessão)
+  // Atualiza snapshot persistente no Passaporte do Número (sem impactar performance do turno)
+  if (senderPhone) {
+    savePhoneMemoryFromConfig(clientId, {
+      ...senderConfig,
+      phone_number: senderConfig.phone_number || senderPhone,
+      sent_today: newSent,
+      health_score: newHealth,
+      last_activity_at: nowIso,
+    }).catch(() => {});
+  }
+  if (receiverPhone) {
+    savePhoneMemoryFromConfig(clientId, {
+      ...receiverConfig,
+      phone_number: receiverConfig.phone_number || receiverPhone,
+      received_today: newReceived,
+      health_score: Math.min(100, (receiverConfig.health_score ?? 100) + 1),
+      last_activity_at: nowIso,
+    }).catch(() => {});
+  }
+
+  // 12. Atualização da conversa ativa (com cooldown longo ao encerrar sessão e jitter nos segundos)
   const updatedTurnCount = conversation.turn_count + 1;
   const isFinished = updatedTurnCount >= conversation.max_turns;
 
   const minSec = senderConfig.min_interval_seconds || 90;
   const maxSec = senderConfig.max_interval_seconds || 300;
   const turnIntervalSec = Math.floor(Math.random() * (maxSec - minSec + 1)) + minSec;
+  const secondJitter = isTestEnv ? 0 : Math.floor(Math.random() * 47);
   const nextIntervalSec = isFinished
-    ? calculateInterConversationCooldownSec(senderConfig.stage || 1)
-    : turnIntervalSec;
+    ? calculateInterConversationCooldownSec(senderConfig.stage || 1) + secondJitter
+    : turnIntervalSec + secondJitter;
   const nextTurnAt = new Date(Date.now() + nextIntervalSec * 1000).toISOString();
 
   const newTurn: WarmupConversationTurn = {
@@ -1128,7 +1562,7 @@ export async function executeWarmupTurn(opts: {
     text: messageText,
     sent_at: nowIso,
     message_id: messageId,
-    action_type: isAudioTurn ? "audio" : "text",
+    action_type: turnActionType,
   };
 
   const updatedHistory = [...(conversation.history || []), newTurn];

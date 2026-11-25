@@ -88,6 +88,38 @@ describe("dropTrailingCurrentMessage", () => {
     const out = dropTrailingCurrentMessage([msg("oi"), msg("ok"), msg("ok")], "oi\nok\nok", true);
     expect(out).toHaveLength(0);
   });
+
+  it("remove auto-resposta inicial mesmo quando Parte 2 do disparo entrou depois dela (allowTrailingOutbound)", () => {
+    const out = dropTrailingCurrentMessage(
+      [
+        msg("Oi, tudo bem? Montamos uma prévia para vocês.", "ai"),
+        msg("Seja bem-vindo! Em breve nossa equipe vai lhe atender.", "customer"),
+        msg("Aliás, posso te mandar o link aqui agora?", "ai"),
+      ],
+      "Seja bem-vindo! Em breve nossa equipe vai lhe atender.",
+      false,
+      { allowTrailingOutbound: true },
+    );
+    expect(out.map((m) => [m.sender_type, m.content])).toEqual([
+      ["ai", "Oi, tudo bem? Montamos uma prévia para vocês."],
+      ["ai", "Aliás, posso te mandar o link aqui agora?"],
+    ]);
+  });
+
+  it("remove copia exata pelo message_id mesmo fora do final", () => {
+    const out = dropTrailingCurrentMessage(
+      [
+        { sender_type: "ai", content: "Parte 1" },
+        { sender_type: "customer", content: "Atendimento automático", message_id: "wamid-auto-1" },
+        { sender_type: "ai", content: "Parte 2" },
+      ],
+      "Atendimento automático",
+      false,
+      { currentMessageId: "wamid-auto-1", allowTrailingOutbound: true },
+    );
+    expect(out).toHaveLength(2);
+    expect(out.every((m) => m.sender_type === "ai")).toBe(true);
+  });
 });
 
 describe("windowHistory", () => {

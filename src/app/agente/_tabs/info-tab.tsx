@@ -1185,37 +1185,42 @@ export function InfoTab(p: InfoTabProps) {
             )}
           </div>
 
-          {/* Web Search MCP */}
-          <ToggleRow
-            label="Pesquisar na internet (MCP)"
-            labelColor="text-cyan-400"
-            color="cyan"
-            checked={p.webSearchEnabled}
-            onChange={p.setWebSearchEnabled}
-            hint={<>Habilita a tool <code className="text-cyan-300">web_search</code> (DuckDuckGo, sem chave). Funciona em qualquer modelo. Use quando precisar de fato/dado atualizado.</>}
-          />
+          {/* Web Search MCP + Modo de Raciocínio (custo extra — somente admin) */}
+          {p.isAdmin && (
+            <>
+              <ToggleRow
+                label="Pesquisar na internet (MCP)"
+                labelColor="text-cyan-400"
+                color="cyan"
+                checked={p.webSearchEnabled}
+                onChange={p.setWebSearchEnabled}
+                hint={<>Habilita a tool <code className="text-cyan-300">web_search</code> (DuckDuckGo, sem chave). Funciona em qualquer modelo. Use quando precisar de fato/dado atualizado.</>}
+              />
 
-          {/* Modo de Raciocínio UNIVERSAL — funciona em todos os modelos */}
-          <div className="space-y-2">
-            <label className="text-[11px] font-semibold uppercase tracking-wider text-amber-400">Modo de Raciocínio (custo) — vale para todos os modelos</label>
-            <select
-              value={p.reasoningMode}
-              onChange={(e) => p.setReasoningMode(Number(e.target.value) as 0 | 1 | 2 | 3)}
-              className="w-full bg-white/5 border border-amber-400/20 text-white h-12 rounded-xl text-sm px-3 focus:outline-none focus:ring-1 focus:ring-amber-400/50"
-            >
-              <option value={0} className="bg-neutral-900 text-white">Econômico — sem raciocínio extra (recomendado p/ SDR)</option>
-              <option value={1} className="bg-neutral-900 text-white">Equilibrado — pouco raciocínio (tools/agendamento)</option>
-              <option value={2} className="bg-neutral-900 text-white">Intenso — raciocínio total (casos complexos, mais caro)</option>
-              <option value={3} className="bg-neutral-900 text-white">Think Máximo — força máxima inteligência + max tokens (mais caro, qualquer modelo)</option>
-            </select>
-            <p className="text-[11px] text-white/40 leading-relaxed">
-              Controla quanto a IA &quot;pensa&quot; antes de responder — <strong>em qualquer modelo</strong> (GPT, Claude, Gemini, DeepSeek). No modo <strong>Econômico</strong> responde direto (gasta menos token, ideal pra SDR). Suba pra <strong>Equilibrado</strong> se usar agendamento/tools, ou <strong>Intenso</strong> em casos complexos. <strong>Think Máximo</strong> força máxima inteligência (boost tokens + temperatura otimizada) em qualquer provedor. Modelos sem suporte ignoram silencioso.
-            </p>
-          </div>
+              {/* Modo de Raciocínio UNIVERSAL — funciona em todos os modelos */}
+              <div className="space-y-2">
+                <label className="text-[11px] font-semibold uppercase tracking-wider text-amber-400">Modo de Raciocínio (custo) — vale para todos os modelos</label>
+                <select
+                  value={p.reasoningMode}
+                  onChange={(e) => p.setReasoningMode(Number(e.target.value) as 0 | 1 | 2 | 3)}
+                  className="w-full bg-white/5 border border-amber-400/20 text-white h-12 rounded-xl text-sm px-3 focus:outline-none focus:ring-1 focus:ring-amber-400/50"
+                >
+                  <option value={0} className="bg-neutral-900 text-white">Econômico — sem raciocínio extra (recomendado p/ SDR)</option>
+                  <option value={1} className="bg-neutral-900 text-white">Equilibrado — pouco raciocínio (tools/agendamento)</option>
+                  <option value={2} className="bg-neutral-900 text-white">Intenso — raciocínio total (casos complexos, mais caro)</option>
+                  <option value={3} className="bg-neutral-900 text-white">Think Máximo — força máxima inteligência + max tokens (mais caro, qualquer modelo)</option>
+                </select>
+                <p className="text-[11px] text-white/40 leading-relaxed">
+                  Controla quanto a IA &quot;pensa&quot; antes de responder — <strong>em qualquer modelo</strong> (GPT, Claude, Gemini, DeepSeek). No modo <strong>Econômico</strong> responde direto (gasta menos token, ideal pra SDR). Suba pra <strong>Equilibrado</strong> se usar agendamento/tools, ou <strong>Intenso</strong> em casos complexos. <strong>Think Máximo</strong> força máxima inteligência (boost tokens + temperatura otimizada) em qualquer provedor. Modelos sem suporte ignoram silencioso.
+                </p>
+              </div>
+            </>
+          )}
 
           {/* Limite de Tokens de Saída & Temperatura (avançado) */}
-          {p.setMaxOutputTokens && p.setTemperature && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 rounded-xl border border-white/10 bg-black/25 p-3">
+          {(p.isAdmin ? p.setMaxOutputTokens && p.setTemperature : p.setTemperature) && (
+            <div className={cn("grid grid-cols-1 gap-3 rounded-xl border border-white/10 bg-black/25 p-3", p.isAdmin && "sm:grid-cols-2")}>
+              {p.isAdmin && p.setMaxOutputTokens && (
               <div className="space-y-1.5">
                 <label htmlFor="agent-max-output-tokens" className="text-[11px] font-semibold uppercase tracking-wider text-amber-300">
                   Limite de Tokens na Resposta
@@ -1234,6 +1239,7 @@ export function InfoTab(p: InfoTabProps) {
                   Opcional. Recomenda-se <strong>350–700</strong> para WhatsApp enxuto. Vazio = padrão do modelo.
                 </p>
               </div>
+              )}
 
               <div className="space-y-1.5">
                 <label htmlFor="agent-temperature" className="text-[11px] font-semibold uppercase tracking-wider text-amber-300">
@@ -1257,8 +1263,8 @@ export function InfoTab(p: InfoTabProps) {
             </div>
           )}
 
-          {/* Custom Tools (Webhooks N8N / Make por agente) */}
-          {p.setCustomTools && (
+          {/* Custom Tools (Webhooks N8N / Make por agente — somente admin) */}
+          {p.isAdmin && p.setCustomTools && (
             <div className="space-y-2.5 rounded-xl border border-white/10 bg-black/25 p-3">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
@@ -1347,7 +1353,8 @@ export function InfoTab(p: InfoTabProps) {
             hint={<>Antes de cada interação, a IA gera um <strong>briefing do cliente</strong> (dores, abordagem, decisor, alertas) e usa no contexto. Custa tokens extra — ative só nos agentes que precisam de análise profunda.</>}
           />
 
-          {/* Prévias de Sites IA — Pipeline Autônomo */}
+          {/* Prévias de Sites IA — Pipeline Autônomo (somente admin) */}
+          {p.isAdmin && (
           <div className="pt-3 border-t border-white/5 space-y-4">
             <div className="flex items-center gap-2">
               <Globe className="w-4 h-4 text-emerald-400" />
@@ -1484,6 +1491,7 @@ export function InfoTab(p: InfoTabProps) {
               </div>
             )}
           </div>
+          )}
         </div>
         </AdvancedSection>
       </SectionCard>

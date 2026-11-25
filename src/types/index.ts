@@ -72,6 +72,8 @@ export interface Conversation {
   instance_name?: string | null;
   bot_status?: string;
   resume_at?: string | null;
+  paused_by?: string | null;
+  pause_reason?: string | null;
   is_synthetic?: boolean;
   kanban_status?: string;
 }

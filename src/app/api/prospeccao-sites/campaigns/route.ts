@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { requireFeatureAccess } from "@/lib/saas-limits";
 import { validateCampaignInstanceAccess } from "@/lib/campaign-instance-access";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 import { computePriority, passesFilters, type ProspecOrderBy, type ProspecOrderDir } from "@/lib/prospeccao-priority";
@@ -11,6 +12,8 @@ export const dynamic = "force-dynamic";
 export async function GET(req: NextRequest) {
   const ctx = await requireClientId(req);
   if (!ctx.ok) return ctx.response;
+  const denied = requireFeatureAccess(ctx, "prospeccao_sites");
+  if (denied) return denied;
 
   const { data, error } = await supabase
     .from("campaigns")
@@ -27,6 +30,8 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const ctx = await requireClientId(req);
   if (!ctx.ok) return ctx.response;
+  const denied = requireFeatureAccess(ctx, "prospeccao_sites");
+  if (denied) return denied;
 
   try {
     const body = await req.json();
@@ -61,6 +66,12 @@ export async function POST(req: NextRequest) {
 
     if (!name || !instance_name || !message_template) {
       return NextResponse.json({ success: false, error: "Faltam campos: name, instance_name, message_template" }, { status: 400 });
+    }
+    if (!ctx.isAdmin && Number(min_interval_seconds) < 15) {
+      return NextResponse.json(
+        { success: false, error: "Intervalo mínimo permitido para disparo é de 15 segundos." },
+        { status: 400 }
+      );
     }
     if (Number(min_interval_seconds) < 1 || Number(max_interval_seconds) < 1) {
       return NextResponse.json({ success: false, error: "Intervalo mínimo: 1 segundo" }, { status: 400 });

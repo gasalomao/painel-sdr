@@ -10,6 +10,7 @@ import { maskJid, truncForLog } from "@/lib/pii";
 import { resolveAlternateWhatsappJid } from "@/lib/jid-utils";
 import { describeDocument, describeImage, refreshProfilePicIfStale, sanitizeLogPayload, uploadMediaBase64 } from "../shared-helpers";
 import { safeSecretEqual, shouldLogOnce } from "@/lib/webhook-security";
+import { checkTenantAiQuota, isClientActiveCached, isClientAdminCached } from "@/lib/saas-limits";
 import {
   processIncomingGroupMessage,
   processPassiveOrganicGroupMessage,
@@ -26,9 +27,12 @@ const INTERNAL_BASE = `http://localhost:${process.env.PORT || 3000}`;
 // HELPERS DE PARSING
 // ============================================================
 
-const STATUS_MAP: Record<number | string, string> = {
-  0: "error", 1: "delivered", 2: "read", 3: "played",
-  "ERROR": "error", "DELIVERED": "delivered", "READ": "read", "PLAYED": "played",
+export const STATUS_MAP: Record<number | string, string> = {
+  0: "error", 1: "delivered", 2: "read", 3: "played", 4: "read", 5: "played",
+  "ERROR": "error", "FAILED": "error",
+  "PENDING": "sent", "SERVER_ACK": "sent",
+  "DELIVERY_ACK": "delivered", "DELIVERED": "delivered",
+  "READ": "read", "PLAYED": "played",
 };
 
 /**
@@ -74,7 +78,7 @@ export function extractText(messageRaw: Record<string, any>): string {
     const it = tm.interactiveMessageTemplate;
     const bodyText = it?.body?.text || tm.hydratedTemplate?.hydratedContentText || tm.hydratedFourRowTemplate?.hydratedContentText || "";
     const headerTitle = it?.header?.title || tm.hydratedTemplate?.hydratedTitleText || "";
-    
+
     let buttonsStr = "";
     const buttons = it?.nativeFlowMessage?.buttons || tm.hydratedTemplate?.hydratedButtons || [];
     if (buttons.length > 0) {
@@ -97,7 +101,7 @@ export function extractText(messageRaw: Record<string, any>): string {
     const im = message.interactiveMessage;
     const bodyText = im.body?.text || "";
     const headerTitle = im.header?.title || "";
-    
+
     let buttonsStr = "";
     const buttons = im.nativeFlowMessage?.buttons || [];
     if (buttons.length > 0) {
@@ -120,7 +124,7 @@ export function extractText(messageRaw: Record<string, any>): string {
     const bm = message.buttonsMessage;
     const bodyText = bm.contentText || "";
     const headerText = bm.headerText || "";
-    
+
     let buttonsStr = "";
     const buttons = bm.buttons || [];
     if (buttons.length > 0) {
@@ -269,16 +273,16 @@ function sanitizeMimetype(mt: string | null | undefined, fallback: string): stri
 // Placeholder textual pra mídias (usado quando não há transcrição/descrição textual)
 function mediaPlaceholder(msgType: string): string {
   switch (msgType) {
-    case "image":    return "[📷 Imagem]";
-    case "audio":    return "[🎤 Áudio]";
-    case "video":    return "[🎥 Vídeo]";
+    case "image": return "[📷 Imagem]";
+    case "audio": return "[🎤 Áudio]";
+    case "video": return "[🎥 Vídeo]";
     case "document": return "[📄 Documento]";
-    case "sticker":  return "[Sticker]";
+    case "sticker": return "[Sticker]";
     case "location": return "[📍 Localização]";
-    case "contact":  return "[👤 Contato]";
-    case "poll":     return "[📊 Enquete]";
+    case "contact": return "[👤 Contato]";
+    case "poll": return "[📊 Enquete]";
     case "reaction": return "[↩ Reação]";
-    default:         return "[Mídia]";
+    default: return "[Mídia]";
   }
 }
 
@@ -536,7 +540,7 @@ export async function POST(req: NextRequest) {
           event: strict ? "WEBHOOK_SECRET_REJECTED" : "WEBHOOK_SECRET_MISMATCH",
           payload: { reason, strict },
           created_at: new Date().toISOString(),
-        }).then(() => {}, () => {});
+        }).then(() => { }, () => { });
         if (strict) {
           return NextResponse.json({ success: false, error: "Não autorizado" }, { status: 401 });
         }
@@ -641,7 +645,7 @@ export async function POST(req: NextRequest) {
           groupJid: remoteJid,
           messageId: finalId,
           fromMe,
-        }).catch(() => {});
+        }).catch(() => { });
 
         return NextResponse.json({
           success: true,
@@ -673,7 +677,7 @@ export async function POST(req: NextRequest) {
             .update({ last_activity_at: new Date().toISOString() })
             .eq("instance_name", instanceName)
             .eq("client_id", clientId)
-            .then(() => {}, () => {});
+            .then(() => { }, () => { });
 
           return NextResponse.json({
             success: true,
@@ -695,553 +699,589 @@ export async function POST(req: NextRequest) {
       (globalThis as any).__processedMessageIds.add(processingKey);
 
       try {
-      // === Find or Create Contact & Session ===
-      // Se falhar, NÃO aborta mais — a msg ainda vai pra chats_dashboard (que é o que
-      // a UI /chat lê). A tabela V2 messages depende de session, mas é secundária.
-      let contactId: string | null = null;
-      let session: any = null;
-      try {
-        // Em mensagens fromMe (saíram do nosso número), `pushName` é o nome
-        // do REMETENTE (nós) — não do contato. Passar isso renomearia o
-        // contato errado. Por isso só usamos pushName de mensagens recebidas.
-        contactId = await findOrCreateContact(remoteJid, fromMe ? undefined : pushName, clientId);
-        if (contactId) {
-          session = await findOrCreateSession(contactId, instanceName, remoteJid, clientId);
-        }
-        // Auto-cura do nome do lead no CRM: muitos leads entram sem nome de
-        // empresa (disparo por lista de números, lead que chamou no chat, etc) e
-        // ficam identificáveis só pelo telefone. Quando a pessoa interage e o
-        // WhatsApp informa o push_name, preenchemos o nome_negocio do lead SE
-        // estiver vazio/placeholder — sem sobrescrever nomes reais (scraper).
-        if (!fromMe && pushName) {
-          await healLeadNameFromPushName(remoteJid, pushName, clientId);
-          if (altWhatsappJid) await healLeadNameFromPushName(altWhatsappJid, pushName, clientId);
-        }
-        // Buscar foto de perfil (fire-and-forget — não bloqueia a mensagem).
-        if (!fromMe && instanceName) {
-          refreshProfilePicIfStale(altWhatsappJid || remoteJid, instanceName, clientId).catch(() => {});
-        }
-      } catch (sessErr: any) {
-        console.error(">>> [Webhook] ⚠ Falha ao criar contact/session (não-fatal):", sessErr?.message);
-        await supabase.from("webhook_logs").insert({
-          client_id: clientId,
-          instance_name: instanceName,
-          event: "WEBHOOK_SESSION_FAIL",
-          payload: { remote_jid: maskJid(remoteJid), error: sessErr?.message, fromMe },
-          created_at: new Date().toISOString(),
-        }).then(() => {}, () => {});
-      }
-
-      // Verifica se grupos estão desativados para este agente/cliente — se sim,
-      // skipa transcrição de áudio e disparo da IA (mensagem ainda é salva).
-      const groupDisabled = await shouldSkipGroupActions(remoteJid, session?.agent_id, clientId);
-
-      const { method: transcriptionMethod, models: orModels } = await resolveTranscriptionConfig(
-        session?.agent_id,
-        clientId
-      );
-
-      // Determinar sender. Pra mensagens fromMe (saíram do nosso número):
-      const isMediaMessage = ["image", "audio", "video", "document"].includes(msgType);
-      let sender: 'customer' | 'ai' | 'human' | 'system' = 'customer';
-      if (fromMe) {
-        if (
-          isAiSend(finalId) ||
-          isPendingAutomatedSend(instanceName, remoteJid, text) ||
-          (isMediaMessage && isPendingAutomatedMedia(instanceName, remoteJid))
-        ) {
-          sender = 'ai';
-        } else if (isManualSend(finalId)) {
-          sender = 'human';
-          console.log(">>> [Webhook] fromMe=true — envio MANUAL do painel:", finalId);
-        } else {
-          sender = 'human';
-          console.log(">>> [Webhook] fromMe=true — envio pelo CELULAR (número conectado):", finalId);
-        }
-      }
-
-      // === ANTI-DUPLICAÇÃO REFORÇADA ===
-      // Verifica em AMBAS tabelas (messages + chats_dashboard)
-      const [{ data: existingV2 }, { data: existingLegacy }] = await Promise.all([
-        supabase.from("messages").select("id").eq("message_id", finalId).eq("client_id", clientId).maybeSingle(),
-        supabase.from("chats_dashboard").select("id").eq("message_id", finalId).eq("client_id", clientId).maybeSingle(),
-      ]);
-
-      if (existingV2 || existingLegacy) {
-        console.log(">>> [Webhook] MESSAGE JÁ EXISTE (duplicata ignorada):", finalId);
-        return NextResponse.json({ success: true, message: "Já processada (duplicata)" });
-      }
-
-      console.log(`>>> [Webhook] Inserindo nova mensagem no banco: ${finalId}`);
-
-      // === Upload de mídia (Evolution v2) ===
-      // Caminhos possíveis onde o base64 pode vir:
-      //   - data.base64 (raiz, quando webhookBase64=true na Evolution)
-      //   - message.base64 (às vezes em webhooks customizados)
-      //   - message.{image|audio|video|document|sticker}Message.base64 (v2 padrão)
-      // Fallback: se NÃO veio inline, a Evolution tem endpoint pra buscar depois pelo id:
-      //   POST /chat/getBase64FromMediaMessage/{instance}
-      // O uploadMediaBase64 faz upload pro Storage "whatsapp_media" e devolve a URL pública.
-      // Usa a mensagem desempacotada — ephemeral/viewOnce escondiam a mídia
-      const unwrapped = unwrapMessage(message);
-      const mediaMsg =
-        unwrapped.imageMessage || unwrapped.audioMessage || unwrapped.pttMessage ||
-        unwrapped.videoMessage || unwrapped.ptvMessage ||
-        unwrapped.documentMessage || unwrapped.stickerMessage;
-      const hasMedia = !!mediaMsg || ['image', 'audio', 'video', 'document', 'sticker'].includes(msgType);
-
-      let base64Media: string | null =
-        data.base64 || message.base64 || unwrapped.base64 ||
-        mediaMsg?.base64 || null;
-
-      const effMimetype = mimetype || mediaMsg?.mimetype || (msgType === "audio" ? "audio/ogg" : msgType === "image" ? "image/jpeg" : "application/octet-stream");
-
-      // === TRANSCRIÇÃO INLINE (antes do insert) ===
-      // after() é no-op em standalone (confirmado no código linha ~1378).
-      // IIFE fire-and-forget morre quando o handler retorna.
-      // Única forma garantida: rodar a transcrição ANTES de salvar a mensagem.
-      // Evolution aceita até 30s — whisper small leva ~15s.
-      let enrichedContent: string | null = null;
-      // Provider da transcrição (UI only — badge no chat; nunca vai pro agente).
-      let transcribeProvider = "none";
-
-      if (hasMedia && msgType === "audio" && sender !== "ai" && !groupDisabled && transcriptionMethod !== "disabled") {
-        // Resolve base64 (inline ou via Evolution API — inclusive para áudios enviados pelo operador/fromMe)
-        if (!base64Media && finalId) {
-          console.log("[Media] Sem base64 inline — buscando via getBase64FromMedia...");
-          try {
-            const got = await evolution.getBase64FromMedia(finalId, instanceName, remoteJid, fromMe);
-            base64Media = got?.base64 || got?.data?.base64 || got?.message?.base64 || null;
-            if (!base64Media && fromMe) {
-              // Em áudios enviados pelo celular, a Evolution API às vezes precisa de alguns milissegundos pra indexar no store
-              await new Promise((r) => setTimeout(r, 800));
-              const retryGot = await evolution.getBase64FromMedia(finalId, instanceName, remoteJid, fromMe);
-              base64Media = retryGot?.base64 || retryGot?.data?.base64 || retryGot?.message?.base64 || null;
-            }
-            if (!base64Media && typeof got === "object") {
-              console.log("[Media] getBase64FromMedia resposta keys:", Object.keys(got));
-            }
-          } catch (fetchErr: any) {
-            console.warn("[Media] getBase64FromMedia falhou:", fetchErr?.message);
+        // === Find or Create Contact & Session ===
+        // Se falhar, NÃO aborta mais — a msg ainda vai pra chats_dashboard (que é o que
+        // a UI /chat lê). A tabela V2 messages depende de session, mas é secundária.
+        let contactId: string | null = null;
+        let session: any = null;
+        try {
+          // Em mensagens fromMe (saíram do nosso número), `pushName` é o nome
+          // do REMETENTE (nós) — não do contato. Passar isso renomearia o
+          // contato errado. Por isso só usamos pushName de mensagens recebidas.
+          contactId = await findOrCreateContact(remoteJid, fromMe ? undefined : pushName, clientId);
+          if (contactId) {
+            session = await findOrCreateSession(contactId, instanceName, remoteJid, clientId);
           }
+          // Auto-cura do nome do lead no CRM: muitos leads entram sem nome de
+          // empresa (disparo por lista de números, lead que chamou no chat, etc) e
+          // ficam identificáveis só pelo telefone. Quando a pessoa interage e o
+          // WhatsApp informa o push_name, preenchemos o nome_negocio do lead SE
+          // estiver vazio/placeholder — sem sobrescrever nomes reais (scraper).
+          if (!fromMe && pushName) {
+            await healLeadNameFromPushName(remoteJid, pushName, clientId);
+            if (altWhatsappJid) await healLeadNameFromPushName(altWhatsappJid, pushName, clientId);
+          }
+          // Buscar foto de perfil (fire-and-forget — não bloqueia a mensagem).
+          if (!fromMe && instanceName) {
+            refreshProfilePicIfStale(altWhatsappJid || remoteJid, instanceName, clientId).catch(() => { });
+          }
+        } catch (sessErr: any) {
+          console.error(">>> [Webhook] ⚠ Falha ao criar contact/session (não-fatal):", sessErr?.message);
+          await supabase.from("webhook_logs").insert({
+            client_id: clientId,
+            instance_name: instanceName,
+            event: "WEBHOOK_SESSION_FAIL",
+            payload: { remote_jid: maskJid(remoteJid), error: sessErr?.message, fromMe },
+            created_at: new Date().toISOString(),
+          }).then(() => { }, () => { });
         }
 
-        if (base64Media) {
-          console.log("[Media] base64 OK, length:", base64Media.length);
-          let transcript: string | null = null;
+        // Verifica se grupos estão desativados para este agente/cliente — se sim,
+        // skipa transcrição de áudio e disparo da IA (mensagem ainda é salva).
+        const groupDisabled = await shouldSkipGroupActions(remoteJid, session?.agent_id, clientId);
 
-          // Cadeia única: whisper → openrouter (grátis primeiro) → gemini
-          // (ordem definida em shared-helpers.transcribeAudioDetailed).
-          try {
-            const { transcribeAudioDetailed } = await import("@/app/api/webhooks/shared-helpers");
-            const det = await transcribeAudioDetailed(base64Media, effMimetype, finalId, transcriptionMethod, { models: orModels, clientId });
-            if (det) {
-              transcript = det.text;
-              transcribeProvider = det.provider;
-            }
-          } catch (tErr: any) {
-            console.warn("[Media] Pipeline de transcrição falhou:", tErr?.message);
-          }
+        const { method: transcriptionMethod, models: orModels } = await resolveTranscriptionConfig(
+          session?.agent_id,
+          clientId
+        );
 
-          if (transcript) {
-            enrichedContent = `🎤 ${transcript}`;
-            console.log(`[Media] Transcrição (${transcribeProvider}):`, transcript.slice(0, 80));
+        // Determinar sender. Pra mensagens fromMe (saíram do nosso número):
+        const isMediaMessage = ["image", "audio", "video", "document"].includes(msgType);
+        let sender: 'customer' | 'ai' | 'human' | 'system' = 'customer';
+        if (fromMe) {
+          if (
+            isAiSend(finalId) ||
+            isPendingAutomatedSend(instanceName, remoteJid, text) ||
+            (isMediaMessage && isPendingAutomatedMedia(instanceName, remoteJid))
+          ) {
+            sender = 'ai';
+          } else if (isManualSend(finalId)) {
+            sender = 'human';
+            console.log(">>> [Webhook] fromMe=true — envio MANUAL do painel:", finalId);
           } else {
+            sender = 'human';
+            console.log(">>> [Webhook] fromMe=true — envio pelo CELULAR (número conectado):", finalId);
+          }
+        }
+
+        // === ANTI-DUPLICAÇÃO REFORÇADA ===
+        // Verifica em AMBAS tabelas (messages + chats_dashboard)
+        const [{ data: existingV2 }, { data: existingLegacy }] = await Promise.all([
+          supabase.from("messages").select("id").eq("message_id", finalId).eq("client_id", clientId).maybeSingle(),
+          supabase.from("chats_dashboard").select("id").eq("message_id", finalId).eq("client_id", clientId).maybeSingle(),
+        ]);
+
+        if (existingV2 || existingLegacy) {
+          console.log(">>> [Webhook] MESSAGE JÁ EXISTE (duplicata ignorada):", finalId);
+          return NextResponse.json({ success: true, message: "Já processada (duplicata)" });
+        }
+
+        console.log(`>>> [Webhook] Inserindo nova mensagem no banco: ${finalId}`);
+
+        // === Upload de mídia (Evolution v2) ===
+        // Caminhos possíveis onde o base64 pode vir:
+        //   - data.base64 (raiz, quando webhookBase64=true na Evolution)
+        //   - message.base64 (às vezes em webhooks customizados)
+        //   - message.{image|audio|video|document|sticker}Message.base64 (v2 padrão)
+        // Fallback: se NÃO veio inline, a Evolution tem endpoint pra buscar depois pelo id:
+        //   POST /chat/getBase64FromMediaMessage/{instance}
+        // O uploadMediaBase64 faz upload pro Storage "whatsapp_media" e devolve a URL pública.
+        // Usa a mensagem desempacotada — ephemeral/viewOnce escondiam a mídia
+        const unwrapped = unwrapMessage(message);
+        const mediaMsg =
+          unwrapped.imageMessage || unwrapped.audioMessage || unwrapped.pttMessage ||
+          unwrapped.videoMessage || unwrapped.ptvMessage ||
+          unwrapped.documentMessage || unwrapped.stickerMessage;
+        const hasMedia = !!mediaMsg || ['image', 'audio', 'video', 'document', 'sticker'].includes(msgType);
+
+        let base64Media: string | null =
+          data.base64 || message.base64 || unwrapped.base64 ||
+          mediaMsg?.base64 || null;
+
+        const effMimetype = mimetype || mediaMsg?.mimetype || (msgType === "audio" ? "audio/ogg" : msgType === "image" ? "image/jpeg" : "application/octet-stream");
+
+        // SaaS cost & status guard: evita gasto com transcrição/visão/IA em contas desativadas ou acima da cota.
+        const clientActive = await isClientActiveCached(clientId);
+        const adminTenant = clientActive ? await isClientAdminCached(clientId) : false;
+        const aiQuotaResult = !clientActive
+          ? { allowed: false, reason: "Conta desativada" }
+          : adminTenant
+            ? { allowed: true }
+            : await checkTenantAiQuota(clientId, false);
+        const aiQuotaAllowed = aiQuotaResult.allowed;
+
+        // === TRANSCRIÇÃO INLINE (antes do insert) ===
+        // after() é no-op em standalone (confirmado no código linha ~1378).
+        // IIFE fire-and-forget morre quando o handler retorna.
+        // Única forma garantida: rodar a transcrição ANTES de salvar a mensagem.
+        // Evolution aceita até 30s — whisper small leva ~15s.
+        let enrichedContent: string | null = null;
+        // Provider da transcrição (UI only — badge no chat; nunca vai pro agente).
+        let transcribeProvider = "none";
+
+        if (hasMedia && msgType === "audio" && sender !== "ai" && !groupDisabled && transcriptionMethod !== "disabled" && clientActive && aiQuotaAllowed) {
+          // Resolve base64 (inline ou via Evolution API — inclusive para áudios enviados pelo operador/fromMe)
+          if (!base64Media && finalId) {
+            console.log("[Media] Sem base64 inline — buscando via getBase64FromMedia...");
+            try {
+              const got = await evolution.getBase64FromMedia(finalId, instanceName, remoteJid, fromMe);
+              base64Media = got?.base64 || got?.data?.base64 || got?.message?.base64 || null;
+              if (!base64Media && fromMe) {
+                // Em áudios enviados pelo celular, a Evolution API às vezes precisa de alguns milissegundos pra indexar no store
+                await new Promise((r) => setTimeout(r, 800));
+                const retryGot = await evolution.getBase64FromMedia(finalId, instanceName, remoteJid, fromMe);
+                base64Media = retryGot?.base64 || retryGot?.data?.base64 || retryGot?.message?.base64 || null;
+              }
+              if (!base64Media && typeof got === "object") {
+                console.log("[Media] getBase64FromMedia resposta keys:", Object.keys(got));
+              }
+            } catch (fetchErr: any) {
+              console.warn("[Media] getBase64FromMedia falhou:", fetchErr?.message);
+            }
+          }
+
+          if (base64Media) {
+            console.log("[Media] base64 OK, length:", base64Media.length);
+            let transcript: string | null = null;
+
+            // Cadeia única: whisper → openrouter (grátis primeiro) → gemini
+            // (ordem definida em shared-helpers.transcribeAudioDetailed).
+            try {
+              const { transcribeAudioDetailed } = await import("@/app/api/webhooks/shared-helpers");
+              const det = await transcribeAudioDetailed(base64Media, effMimetype, finalId, transcriptionMethod, { models: orModels, clientId });
+              if (det) {
+                transcript = det.text;
+                transcribeProvider = det.provider;
+              }
+            } catch (tErr: any) {
+              console.warn("[Media] Pipeline de transcrição falhou:", tErr?.message);
+            }
+
+            if (transcript) {
+              enrichedContent = `🎤 ${transcript}`;
+              console.log(`[Media] Transcrição (${transcribeProvider}):`, transcript.slice(0, 80));
+            } else {
+              enrichedContent = fromMe
+                ? "[🎤 Áudio enviado]"
+                : "[🎤 O cliente enviou um áudio que não consegui transcrever]";
+              console.warn("[Media] Transcrição falhou — nenhum provedor (whisper/openrouter/gemini) funcionou.");
+              // Log detalhado pra diagnóstico no banco
+              try {
+                let whisperDiag: any = "n/a";
+                try {
+                  const { isWhisperInstalled, getWhisperStatus } = await import("@/lib/whisper-manager");
+                  const fs = await import("fs");
+                  const path = await import("path");
+                  const dir = process.env.WHISPER_DIR || path.join(process.cwd(), ".whisper");
+                  const binPathFile = path.join(/*turbopackIgnore: true*/ dir, "bin-path.txt");
+                  const binPath = fs.existsSync(/*turbopackIgnore: true*/ binPathFile) ? fs.readFileSync(binPathFile, "utf8").trim() : "(missing)";
+                  const modelFile = path.join(/*turbopackIgnore: true*/ dir, process.env.WHISPER_MODEL || "ggml-base.bin");
+                  whisperDiag = {
+                    installed: isWhisperInstalled(),
+                    status: await getWhisperStatus(),
+                    binPath,
+                    binExists: fs.existsSync(/*turbopackIgnore: true*/ binPath),
+                    modelExpected: modelFile,
+                    modelExists: fs.existsSync(/*turbopackIgnore: true*/ modelFile),
+                    whisperDirExists: fs.existsSync(/*turbopackIgnore: true*/ dir),
+                    cwd: process.cwd(),
+                  };
+                } catch (de: any) { whisperDiag = "diag-error: " + de?.message; }
+
+                await supabase.from("webhook_logs").insert({
+                  client_id: clientId,
+                  instance_name: instanceName,
+                  event: "TRANSCRIPTION_FAIL",
+                  payload: {
+                    message_id: finalId,
+                    transcription_method: transcriptionMethod,
+                    base64_length: base64Media?.length || 0,
+                    mimetype: effMimetype,
+                    whisper_diag: whisperDiag,
+                  },
+                });
+              } catch { }
+            }
+          } else {
+            console.warn("[Media] Nenhum base64 — ative webhookBase64 na instância Evolution.");
             enrichedContent = fromMe
               ? "[🎤 Áudio enviado]"
-              : "[🎤 O cliente enviou um áudio que não consegui transcrever]";
-            console.warn("[Media] Transcrição falhou — nenhum provedor (whisper/openrouter/gemini) funcionou.");
-            // Log detalhado pra diagnóstico no banco
-            try {
-              let whisperDiag: any = "n/a";
-              try {
-                const { isWhisperInstalled, getWhisperStatus } = await import("@/lib/whisper-manager");
-                const fs = await import("fs");
-                const path = await import("path");
-                const dir = process.env.WHISPER_DIR || path.join(process.cwd(), ".whisper");
-                const binPathFile = path.join(/*turbopackIgnore: true*/ dir, "bin-path.txt");
-                const binPath = fs.existsSync(/*turbopackIgnore: true*/ binPathFile) ? fs.readFileSync(binPathFile, "utf8").trim() : "(missing)";
-                const modelFile = path.join(/*turbopackIgnore: true*/ dir, process.env.WHISPER_MODEL || "ggml-base.bin");
-                whisperDiag = {
-                  installed: isWhisperInstalled(),
-                  status: await getWhisperStatus(),
-                  binPath,
-                  binExists: fs.existsSync(/*turbopackIgnore: true*/ binPath),
-                  modelExpected: modelFile,
-                  modelExists: fs.existsSync(/*turbopackIgnore: true*/ modelFile),
-                  whisperDirExists: fs.existsSync(/*turbopackIgnore: true*/ dir),
-                  cwd: process.cwd(),
-                };
-              } catch (de: any) { whisperDiag = "diag-error: " + de?.message; }
-
-              await supabase.from("webhook_logs").insert({
-                client_id: clientId,
-                instance_name: instanceName,
-                event: "TRANSCRIPTION_FAIL",
-                payload: {
-                  message_id: finalId,
-                  transcription_method: transcriptionMethod,
-                  base64_length: base64Media?.length || 0,
-                  mimetype: effMimetype,
-                  whisper_diag: whisperDiag,
-                },
-              });
-            } catch {}
+              : "[🎤 Áudio recebido — base64 indisponível]";
           }
-        } else {
-          console.warn("[Media] Nenhum base64 — ative webhookBase64 na instância Evolution.");
-          enrichedContent = fromMe
-            ? "[🎤 Áudio enviado]"
-            : "[🎤 Áudio recebido — base64 indisponível]";
+        } else if (hasMedia && msgType === "audio" && groupDisabled) {
+          console.log(`[Media] Áudio em grupo ${remoteJid} — transcrição ignorada (grupos desativados)`);
+          enrichedContent = fromMe ? "[🎤 Áudio enviado]" : "[🎤 Áudio recebido]";
         }
-      } else if (hasMedia && msgType === "audio" && groupDisabled) {
-        console.log(`[Media] Áudio em grupo ${remoteJid} — transcrição ignorada (grupos desativados)`);
-        enrichedContent = fromMe ? "[🎤 Áudio enviado]" : "[🎤 Áudio recebido]";
-      }
 
-      // === UPLOAD + DESCRICAO DE IMAGEM/DOCUMENTO/VÍDEO (INLINE) ===
-      // FIX crítico: isto rodava dentro de after(), que é NO-OP em deploy
-      // standalone (comentário ~922 confirma) — imagem ficava "[📷 Imagem]"
-      // eterna sem preview nem descrição, IA respondia cega, e vídeo NUNCA
-      // tinha upload. Agora é inline, igual áudio/GO/Cloud.
-      let mediaUrlInline: string | null = null;
-      if (hasMedia && base64Media && !fromMe && (msgType === "image" || msgType === "document" || msgType === "video")) {
-        try {
-          mediaUrlInline = await uploadMediaBase64(base64Media, remoteJid, effMimetype, clientId);
-          if (!groupDisabled) {
-            if (msgType === "image") {
-              const desc = await describeImage(base64Media, effMimetype, clientId);
-              if (desc) enrichedContent = `📷 ${desc}`;
-            } else if (msgType === "document") {
-              const fileName = extractFileName(message);
-              const desc = await describeDocument(base64Media, effMimetype, fileName, clientId);
-              if (desc) enrichedContent = `📄 ${fileName ? `[${fileName}] ` : ""}${desc}`;
+        // === UPLOAD + DESCRICAO DE IMAGEM/DOCUMENTO/VÍDEO (INLINE) ===
+        // FIX crítico: isto rodava dentro de after(), que é NO-OP em deploy
+        // standalone (comentário ~922 confirma) — imagem ficava "[📷 Imagem]"
+        // eterna sem preview nem descrição, IA respondia cega, e vídeo NUNCA
+        // tinha upload. Agora é inline, igual áudio/GO/Cloud.
+        let mediaUrlInline: string | null = null;
+        if (hasMedia && base64Media && !fromMe && (msgType === "image" || msgType === "document" || msgType === "video")) {
+          try {
+            mediaUrlInline = await uploadMediaBase64(base64Media, remoteJid, effMimetype, clientId);
+            if (!groupDisabled && clientActive && aiQuotaAllowed) {
+              if (msgType === "image") {
+                const desc = await describeImage(base64Media, effMimetype, clientId);
+                if (desc) enrichedContent = `📷 ${desc}`;
+              } else if (msgType === "document") {
+                const fileName = extractFileName(message);
+                const desc = await describeDocument(base64Media, effMimetype, fileName, clientId);
+                if (desc) enrichedContent = `📄 ${fileName ? `[${fileName}] ` : ""}${desc}`;
+              }
             }
+            // vídeo: só upload (não há descrição de vídeo)
+          } catch (e: any) {
+            console.error("[Media] Pipeline imagem/doc/vídeo falhou:", e?.message);
           }
-          // vídeo: só upload (não há descrição de vídeo)
-        } catch (e: any) {
-          console.error("[Media] Pipeline imagem/doc/vídeo falhou:", e?.message);
         }
-      }
 
-      // === 1. SALVA PRIMEIRO NO chats_dashboard ===
-      // Se áudio foi transcrito, o conteúdo JÁ vem com a transcrição.
-      const initialContent =
-        enrichedContent ||
-        text ||
-        (hasMedia ? mediaPlaceholder(msgType) : null) ||
-        (msgType && msgType !== "text" ? mediaPlaceholder(msgType) : null);
+        // === 1. SALVA PRIMEIRO NO chats_dashboard ===
+        // Se áudio foi transcrito, o conteúdo JÁ vem com a transcrição.
+        const initialContent =
+          enrichedContent ||
+          text ||
+          (hasMedia ? mediaPlaceholder(msgType) : null) ||
+          (msgType && msgType !== "text" ? mediaPlaceholder(msgType) : null);
 
-      let mediaUrl: string | null = mediaUrlInline;
-      if (!mediaUrl && hasMedia && base64Media && msgType === "audio") {
-        try {
-          mediaUrl = await uploadMediaBase64(base64Media, remoteJid, effMimetype, clientId);
-        } catch {}
-      }
+        let mediaUrl: string | null = mediaUrlInline;
+        if (!mediaUrl && hasMedia && base64Media && msgType === "audio") {
+          try {
+            mediaUrl = await uploadMediaBase64(base64Media, remoteJid, effMimetype, clientId);
+          } catch { }
+        }
 
-      const { encodeTranscriptionMime } = await import("@/lib/transcription-label");
-      const finalMime = msgType === "audio" && transcribeProvider !== "none"
-        ? encodeTranscriptionMime(effMimetype, transcribeProvider)
-        : effMimetype;
+        const { encodeTranscriptionMime } = await import("@/lib/transcription-label");
+        const finalMime = msgType === "audio" && transcribeProvider !== "none"
+          ? encodeTranscriptionMime(effMimetype, transcribeProvider)
+          : effMimetype;
 
-      const basePayload: Record<string, any> = {
-        client_id: clientId,
-        instance_name: instanceName,
-        message_id: finalId,
-        remote_jid: remoteJid,
-        sender_type: sender === 'ai' ? 'ai' : sender,
-        content: initialContent,
-        status_envio: fromMe ? "sent" : "received",
-        ...(finalMime ? { mimetype: finalMime } : {}),
-        ...(msgType && msgType !== "text" ? { media_type: msgType } : {}),
-        created_at: new Date().toISOString(),
-      };
-
-      let { error: dashErr } = await supabase.from("chats_dashboard").insert(basePayload);
-
-      // Se falhou por coluna faltando (PGRST204), tenta ainda mais minimal
-      if (dashErr?.code === "PGRST204") {
-        console.warn(">>> [Webhook] chats_dashboard rejeitou coluna — tentando payload mínimo:", dashErr.message);
-        const minimal = {
+        const basePayload: Record<string, any> = {
           client_id: clientId,
-          remote_jid: remoteJid,
-          message_id: finalId,
-          sender_type: sender === 'ai' ? 'ai' : sender,
-          content: text,
           instance_name: instanceName,
+          message_id: finalId,
+          remote_jid: remoteJid,
+          sender_type: sender === 'ai' ? 'ai' : sender,
+          content: initialContent,
+          status_envio: fromMe ? "sent" : "received",
+          ...(finalMime ? { mimetype: finalMime } : {}),
+          ...(msgType && msgType !== "text" ? { media_type: msgType } : {}),
           created_at: new Date().toISOString(),
         };
-        const retry = await supabase.from("chats_dashboard").insert(minimal);
-        dashErr = retry.error as any;
-      }
 
-      if (dashErr) {
-        if ((dashErr as any).code === "23505") {
-          console.log(">>> [Webhook] chats_dashboard duplicata (msg já salva, abortando fluxo concorrente):", finalId);
-          // Se o webhook transcreveu o áudio (ex.: enviado pelo painel via /api/send-message),
-          // garante que o conteúdo transcrito e o mimetype com provider sejam persistidos.
-          if (enrichedContent && enrichedContent.startsWith("🎤")) {
-            const enrichUpd: Record<string, any> = { content: enrichedContent };
-            if (finalMime) enrichUpd.mimetype = finalMime;
-            if (mediaUrl) enrichUpd.media_url = mediaUrl;
-            supabase.from("chats_dashboard").update(enrichUpd).eq("message_id", finalId).eq("client_id", clientId).then(() => {}, () => {});
-            supabase.from("messages").update({ content: enrichedContent, ...(finalMime ? { mimetype: finalMime } : {}) }).eq("message_id", finalId).eq("client_id", clientId).then(() => {}, () => {});
-          }
-          // Mesmo sendo duplicata, atualiza last_message_at na session — antes
-          // esse return early pulava o update em mensagens fromMe vindas do
-          // painel (/api/send-message já inseriu a dash mas não bumpa sessions).
-          // Resultado: card da conversa não atualizava "última mensagem" nem
-          // ordem na lista até um re-fetch manual.
-          if (session?.id) {
-            const bumpPayload: any = { last_message_at: new Date().toISOString() };
-            if (!fromMe) bumpPayload.unread_count = (session as any).unread_count ? (session as any).unread_count + 1 : 1;
-            supabase.from("sessions").update(bumpPayload).eq("id", session.id).then(() => {}, () => {});
-          }
-          return NextResponse.json({ success: true, message: "Já processada (duplicata concorrente 23505)" });
-        } else {
-          console.error(">>> [Webhook] ❌ FALHA chats_dashboard:", dashErr.message, "| Details:", JSON.stringify(dashErr));
-          await supabase.from("webhook_logs").insert({
-            instance_name: instanceName,
+        let { error: dashErr } = await supabase.from("chats_dashboard").insert(basePayload);
+
+        // Se falhou por coluna faltando (PGRST204), tenta ainda mais minimal
+        if (dashErr?.code === "PGRST204") {
+          console.warn(">>> [Webhook] chats_dashboard rejeitou coluna — tentando payload mínimo:", dashErr.message);
+          const minimal = {
             client_id: clientId,
-            event: "WEBHOOK_DASH_INSERT_FAIL",
-            payload: { remote_jid: maskJid(remoteJid), sender, message_id: finalId, error: dashErr.message, code: (dashErr as any).code, details: dashErr },
+            remote_jid: remoteJid,
+            message_id: finalId,
+            sender_type: sender === 'ai' ? 'ai' : sender,
+            content: text,
+            instance_name: instanceName,
             created_at: new Date().toISOString(),
-          }).then(() => {}, () => {});
+          };
+          const retry = await supabase.from("chats_dashboard").insert(minimal);
+          dashErr = retry.error as any;
         }
-      } else {
-        console.log(">>> [Webhook] chats_dashboard OK:", finalId, "| sender_type:", sender === 'ai' ? 'ai' : sender);
 
-        // Best-effort: se a tabela tem as colunas de mídia, preenche via UPDATE separado.
-        // Se não tiver, falha silenciosa (não afeta a exibição no chat).
-        if (mediaUrl || msgType !== 'text' || quotedId) {
-          const extras: Record<string, any> = {};
-          if (mediaUrl) extras.media_url = mediaUrl;
-          if (finalMime) extras.mimetype = finalMime;
-          if (['image', 'audio', 'video', 'document'].includes(msgType)) extras.media_type = msgType;
-          if (msgType !== 'text') extras.message_type = msgType + 'Message';
-          if (quotedId) extras.quoted_id = quotedId;
-          if (quotedText) extras.quoted_text = quotedText;
-          supabase.from("chats_dashboard").update(extras).eq("message_id", finalId).eq("client_id", clientId).then(() => {}, () => {});
-        }
-      }
-
-      // === 2. SALVA no messages (V2) — só se tiver session. NÃO bloqueia. ===
-      if (session?.id) {
-        const { error: insertError } = await supabase.from("messages").insert({
-          client_id: clientId,
-          session_id: session.id,
-          message_id: finalId,
-          sender,
-          content: enrichedContent || text || null,
-          media_category: msgType as any,
-          media_url: mediaUrl,
-          mimetype: finalMime,
-          file_name: fileName,
-          file_size: fileSize,
-          quoted_msg_id: quotedId,
-          quoted_text: quotedText,
-          delivery_status: fromMe ? "sent" : "pending",
-          created_at: new Date().toISOString(),
-        });
-
-        if (insertError) {
-          if (insertError.code === "23505") {
-            console.log(">>> [Webhook] messages duplicata (msg já salva, abortando fluxo concorrente):", finalId);
-            return NextResponse.json({ success: true, message: "Já processada (duplicata concorrente messages 23505)" });
+        if (dashErr) {
+          if ((dashErr as any).code === "23505") {
+            console.log(">>> [Webhook] chats_dashboard duplicata (msg já salva, abortando fluxo concorrente):", finalId);
+            // Se o webhook transcreveu o áudio (ex.: enviado pelo painel via /api/send-message),
+            // garante que o conteúdo transcrito e o mimetype com provider sejam persistidos.
+            if (enrichedContent && enrichedContent.startsWith("🎤")) {
+              const enrichUpd: Record<string, any> = { content: enrichedContent };
+              if (finalMime) enrichUpd.mimetype = finalMime;
+              if (mediaUrl) enrichUpd.media_url = mediaUrl;
+              supabase.from("chats_dashboard").update(enrichUpd).eq("message_id", finalId).eq("client_id", clientId).then(() => { }, () => { });
+              supabase.from("messages").update({ content: enrichedContent, ...(finalMime ? { mimetype: finalMime } : {}) }).eq("message_id", finalId).eq("client_id", clientId).then(() => { }, () => { });
+            }
+            // Mesmo sendo duplicata, atualiza last_message_at na session — antes
+            // esse return early pulava o update em mensagens fromMe vindas do
+            // painel (/api/send-message já inseriu a dash mas não bumpa sessions).
+            // Resultado: card da conversa não atualizava "última mensagem" nem
+            // ordem na lista até um re-fetch manual.
+            if (session?.id) {
+              const bumpPayload: any = { last_message_at: new Date().toISOString() };
+              if (!fromMe) bumpPayload.unread_count = (session as any).unread_count ? (session as any).unread_count + 1 : 1;
+              supabase.from("sessions").update(bumpPayload).eq("id", session.id).then(() => { }, () => { });
+            }
+            return NextResponse.json({ success: true, message: "Já processada (duplicata concorrente 23505)" });
           } else {
-            console.error(">>> [Webhook] ⚠ messages insert falhou (não-fatal):", insertError.message);
+            console.error(">>> [Webhook] ❌ FALHA chats_dashboard:", dashErr.message, "| Details:", JSON.stringify(dashErr));
             await supabase.from("webhook_logs").insert({
               instance_name: instanceName,
               client_id: clientId,
-              event: "WEBHOOK_V2_INSERT_FAIL",
-              payload: { remote_jid: maskJid(remoteJid), sender, message_id: finalId, error: insertError.message, code: insertError.code },
+              event: "WEBHOOK_DASH_INSERT_FAIL",
+              payload: { remote_jid: maskJid(remoteJid), sender, message_id: finalId, error: dashErr.message, code: (dashErr as any).code, details: dashErr },
               created_at: new Date().toISOString(),
-            }).then(() => {}, () => {});
-          }
-        }
-      } else {
-        console.warn(">>> [Webhook] Sem session — V2 messages pulado (chats_dashboard já tem a msg).");
-      }
-
-      console.log(">>> MESSAGE SALVA:", finalId, "| sender:", sender);
-
-      // === 3. Atualizar session: last_message_at + unread_count ===
-      if (session?.id) {
-        const updatePayload: any = { last_message_at: new Date().toISOString() };
-        if (!fromMe) {
-          updatePayload.unread_count = (session as any).unread_count ? (session as any).unread_count + 1 : 1;
-        }
-        supabase.from("sessions").update(updatePayload).eq("id", session.id).then(() => {}, () => {});
-      }
-
-      // === Auto-pausa da IA quando um HUMANO assume a conversa ===
-      // Vale pro envio pelo painel E pelo CELULAR (número conectado). Evita
-      // IA + humano respondendo o cliente juntos. A mensagem do humano JÁ
-      // foi salva acima → a IA mantém o contexto e, ao voltar, sabe tudo o
-      // que foi conversado. Configurável (ligar/desligar, minutos, modo).
-      if (fromMe && sender === "human" && session?.id) {
-        try {
-          // Salvaguarda anti-eco: se há uma mensagem IDÊNTICA (ou mídia recente) da IA nos
-          // últimos 30s pra esse contato, isto é só o echo da própria IA
-          // (caso raro do id não bater no registro) — NÃO pausa a si mesma.
-          let isEchoOfAi = false;
-          const recentSinceIso = new Date(Date.now() - 30_000).toISOString();
-          if (text) {
-            const { data: recentAi } = await supabase
-              .from("chats_dashboard")
-              .select("id")
-              .eq("client_id", clientId)
-              .eq("remote_jid", remoteJid)
-              .eq("sender_type", "ai")
-              .eq("content", text)
-              .gte("created_at", recentSinceIso)
-              .limit(1);
-            isEchoOfAi = !!(recentAi && recentAi.length > 0);
-          } else if (hasMedia && ["image", "document"].includes(msgType)) {
-            const { data: recentAiMedia } = await supabase
-              .from("chats_dashboard")
-              .select("id")
-              .eq("client_id", clientId)
-              .eq("remote_jid", remoteJid)
-              .eq("sender_type", "ai")
-              .eq("media_type", msgType)
-              .gte("created_at", recentSinceIso)
-              .limit(1);
-            isEchoOfAi = !!(recentAiMedia && recentAiMedia.length > 0);
-          }
-          if (!isEchoOfAi) {
-            const { applyHumanAutoPause } = await import("@/lib/bot-status");
-            const pauseRes = await applyHumanAutoPause(session.id, clientId);
-            if (pauseRes.paused) {
-              console.log(
-                pauseRes.mode === "manual"
-                  ? `[AUTO-PAUSE] IA pausada manualmente (human) — humano respondeu ${maskJid(remoteJid)}`
-                  : `[AUTO-PAUSE] IA pausada ${pauseRes.minutes}min (snooze automático) — humano respondeu ${maskJid(remoteJid)}`
-              );
-            }
-            if (!groupDisabled && clientId && remoteJid) {
-              const { scheduleRealtimeLeadEvaluation } = await import("@/lib/organizer-realtime");
-              scheduleRealtimeLeadEvaluation(clientId, remoteJid);
-            }
-          }
-        } catch (e: any) {
-          console.warn("[AUTO-PAUSE] falhou:", e?.message);
-        }
-      }
-
-      // === Disparar IA (texto OU áudio transcrito; reações de emoji ficam salvas no chat mas NÃO disparam IA) ===
-      const agentText = text || enrichedContent;
-      let optedOutInTurn = false;
-      if (!fromMe && agentText && remoteJid) {
-        optedOutInTurn = await handleIncomingOptOutIfDetected({
-          clientId,
-          remoteJid: altWhatsappJid || remoteJid,
-          messageText: agentText,
-          sessionId: session?.id || null,
-        }).catch(() => false);
-        import("@/lib/campaign-worker")
-          .then((m) => m.clearZeroReplyBrakeForInstance?.(instanceName))
-          .catch(() => {});
-      }
-      if (!fromMe && msgType === "reaction" && session?.id) {
-        console.log(`[Webhook] Reação de emoji (${truncForLog(agentText, 24)}) salva no chat sem acionar IA:`, maskJid(remoteJid));
-        supabase.from("webhook_logs").insert({
-          instance_name: instanceName,
-          client_id: clientId,
-          event: "AGENT_SKIP_REACTION",
-          payload: { remote_jid: maskJid(remoteJid), text: truncForLog(agentText, 40) },
-          created_at: new Date().toISOString(),
-        }).then(() => {}, () => {});
-      } else if (!fromMe && optedOutInTurn) {
-        supabase.from("webhook_logs").insert({
-          instance_name: instanceName,
-          client_id: clientId,
-          event: "OPT_OUT_BLOCKED_AI",
-          payload: { remote_jid: maskJid(remoteJid), session_id: session?.id || null },
-          created_at: new Date().toISOString(),
-        }).then(() => {}, () => {});
-        if (clientId && remoteJid) {
-          import("@/lib/organizer-realtime")
-            .then((m) => m.scheduleRealtimeLeadEvaluation(clientId, remoteJid))
-            .catch(() => {});
-        }
-      } else if (!fromMe && msgType !== "reaction" && agentText && session?.id && !groupDisabled) {
-        const effectiveActive = (session as any)._effective_active ?? (session.bot_status === 'bot_active');
-        if (effectiveActive) {
-          console.log("🤖 DISPARANDO AGENTE DE IA PARA:", maskJid(remoteJid));
-          // Verifica precondições críticas ANTES do fetch:
-          //  1) Secret interno tem que existir senão /api/agent/process devolve 401 silencioso
-          const internalSecretValue = getInternalSecret();
-          if (!internalSecretValue) {
-            await supabase.from("webhook_logs").insert({
-              instance_name: instanceName,
-              client_id: clientId,
-              event: "AGENT_DISPATCH_NO_SECRET",
-              payload: { hint: "AUTH_SECRET ou SUPABASE_SERVICE_ROLE_KEY vazio no env do container; /api/agent/process vai rejeitar com 401", remote_jid: maskJid(remoteJid) },
-              created_at: new Date().toISOString(),
-            }).then(() => {}, () => {});
-          }
-          // FIX Next 16: NÃO usar fire-and-forget (cancelado quando handler retorna)
-          // NEM after() (no-op em alguns setups standalone). Importar o handler
-          // do agente DIRETAMENTE e invocar em-processo. Mais rápido, sem rede,
-          // sem auth interna, sem cancelamento. Webhook bloqueia ~3-7s mas
-          // Evolution aceita até 30s tranquilamente.
-          await supabase.from("webhook_logs").insert({
-            instance_name: instanceName,
-            client_id: clientId,
-            event: "AGENT_DISPATCH_SCHEDULED",
-            payload: { remote_jid: maskJid(remoteJid), via: "direct-call" },
-            created_at: new Date().toISOString(),
-          }).then(() => {}, () => {});
-          try {
-            const agentMod = await import("@/app/api/agent/process/route");
-            // Mantém o INTERNAL_SECRET_HEADER pra passar pelo gate do agent/process
-            const fakeReq = new Request(`${INTERNAL_BASE}/api/agent/process`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                [INTERNAL_SECRET_HEADER]: internalSecretValue,
-                ...(overrideAgentId ? { "x-test-agent-id": overrideAgentId } : {}),
-              },
-              body: JSON.stringify({
-                instanceName,
-                remoteJid,
-                ...(altWhatsappJid ? { alternateJid: altWhatsappJid } : {}),
-                text: agentText,
-                sessionId: session.id,
-              }),
-            });
-            // Invoca agent/process diretamente — serialização e buffer são gerenciados internamente
-            await agentMod.POST(fakeReq as any);
-            console.log("[Webhook] ✓ Agent dispatch concluído pra", maskJid(remoteJid));
-          } catch (e: any) {
-            console.error("[Webhook] Erro ao disparar IA:", e?.message);
-            await supabase.from("webhook_logs").insert({
-              instance_name: instanceName,
-              client_id: clientId,
-              event: "AGENT_DISPATCH_FETCH_FAIL",
-              payload: { error: String(e?.message || e), stack: String(e?.stack || "").slice(0, 500), via: "direct-call" },
-              created_at: new Date().toISOString(),
-            }).then(() => {}, () => {});
+            }).then(() => { }, () => { });
           }
         } else {
-          console.log("⏸️ IA pausada para:", maskJid(remoteJid), "| status:", session.bot_status, "(mensagem foi salva, IA terá contexto ao voltar)");
-          await supabase.from("webhook_logs").insert({
+          console.log(">>> [Webhook] chats_dashboard OK:", finalId, "| sender_type:", sender === 'ai' ? 'ai' : sender);
+
+          // Best-effort: se a tabela tem as colunas de mídia, preenche via UPDATE separado.
+          // Se não tiver, falha silenciosa (não afeta a exibição no chat).
+          if (mediaUrl || msgType !== 'text' || quotedId) {
+            const extras: Record<string, any> = {};
+            if (mediaUrl) extras.media_url = mediaUrl;
+            if (finalMime) extras.mimetype = finalMime;
+            if (['image', 'audio', 'video', 'document'].includes(msgType)) extras.media_type = msgType;
+            if (msgType !== 'text') extras.message_type = msgType + 'Message';
+            if (quotedId) extras.quoted_id = quotedId;
+            if (quotedText) extras.quoted_text = quotedText;
+            supabase.from("chats_dashboard").update(extras).eq("message_id", finalId).eq("client_id", clientId).then(() => { }, () => { });
+          }
+        }
+
+        // === 2. SALVA no messages (V2) — só se tiver session. NÃO bloqueia. ===
+        if (session?.id) {
+          const { error: insertError } = await supabase.from("messages").insert({
+            client_id: clientId,
+            session_id: session.id,
+            message_id: finalId,
+            sender,
+            content: enrichedContent || text || null,
+            media_category: msgType as any,
+            media_url: mediaUrl,
+            mimetype: finalMime,
+            file_name: fileName,
+            file_size: fileSize,
+            quoted_msg_id: quotedId,
+            quoted_text: quotedText,
+            delivery_status: fromMe ? "sent" : "pending",
+            created_at: new Date().toISOString(),
+          });
+
+          if (insertError) {
+            if (insertError.code === "23505") {
+              console.log(">>> [Webhook] messages duplicata (msg já salva, abortando fluxo concorrente):", finalId);
+              return NextResponse.json({ success: true, message: "Já processada (duplicata concorrente messages 23505)" });
+            } else {
+              console.error(">>> [Webhook] ⚠ messages insert falhou (não-fatal):", insertError.message);
+              await supabase.from("webhook_logs").insert({
+                instance_name: instanceName,
+                client_id: clientId,
+                event: "WEBHOOK_V2_INSERT_FAIL",
+                payload: { remote_jid: maskJid(remoteJid), sender, message_id: finalId, error: insertError.message, code: insertError.code },
+                created_at: new Date().toISOString(),
+              }).then(() => { }, () => { });
+            }
+          }
+        } else {
+          console.warn(">>> [Webhook] Sem session — V2 messages pulado (chats_dashboard já tem a msg).");
+        }
+
+        console.log(">>> MESSAGE SALVA:", finalId, "| sender:", sender);
+
+        // === 3. Atualizar session: last_message_at + unread_count ===
+        if (session?.id) {
+          const updatePayload: any = { last_message_at: new Date().toISOString() };
+          if (!fromMe) {
+            updatePayload.unread_count = (session as any).unread_count ? (session as any).unread_count + 1 : 1;
+          }
+          supabase.from("sessions").update(updatePayload).eq("id", session.id).then(() => { }, () => { });
+        }
+
+        // === Auto-pausa da IA quando um HUMANO assume a conversa ===
+        // Vale pro envio pelo painel E pelo CELULAR (número conectado). Evita
+        // IA + humano respondendo o cliente juntos. A mensagem do humano JÁ
+        // foi salva acima → a IA mantém o contexto e, ao voltar, sabe tudo o
+        // que foi conversado. Configurável (ligar/desligar, minutos, modo).
+        if (fromMe && sender === "human" && session?.id) {
+          try {
+            // Salvaguarda anti-eco: se há uma mensagem IDÊNTICA (ou mídia recente) da IA nos
+            // últimos 30s pra esse contato, isto é só o echo da própria IA
+            // (caso raro do id não bater no registro) — NÃO pausa a si mesma.
+            let isEchoOfAi = false;
+            const recentSinceIso = new Date(Date.now() - 30_000).toISOString();
+            if (text) {
+              const { data: recentAi } = await supabase
+                .from("chats_dashboard")
+                .select("id")
+                .eq("client_id", clientId)
+                .eq("remote_jid", remoteJid)
+                .eq("sender_type", "ai")
+                .eq("content", text)
+                .gte("created_at", recentSinceIso)
+                .limit(1);
+              isEchoOfAi = !!(recentAi && recentAi.length > 0);
+            } else if (hasMedia && ["image", "document"].includes(msgType)) {
+              const { data: recentAiMedia } = await supabase
+                .from("chats_dashboard")
+                .select("id")
+                .eq("client_id", clientId)
+                .eq("remote_jid", remoteJid)
+                .eq("sender_type", "ai")
+                .eq("media_type", msgType)
+                .gte("created_at", recentSinceIso)
+                .limit(1);
+              isEchoOfAi = !!(recentAiMedia && recentAiMedia.length > 0);
+            }
+            if (!isEchoOfAi) {
+              const { applyHumanAutoPause } = await import("@/lib/bot-status");
+              const pauseRes = await applyHumanAutoPause(session.id, clientId);
+              if (pauseRes.paused) {
+                console.log(
+                  pauseRes.mode === "manual"
+                    ? `[AUTO-PAUSE] IA pausada manualmente (human) — humano respondeu ${maskJid(remoteJid)}`
+                    : `[AUTO-PAUSE] IA pausada ${pauseRes.minutes}min (snooze automático) — humano respondeu ${maskJid(remoteJid)}`
+                );
+              }
+              if (!groupDisabled && clientId && remoteJid) {
+                const { scheduleRealtimeLeadEvaluation } = await import("@/lib/organizer-realtime");
+                scheduleRealtimeLeadEvaluation(clientId, remoteJid);
+              }
+            }
+          } catch (e: any) {
+            console.warn("[AUTO-PAUSE] falhou:", e?.message);
+          }
+        }
+
+        // === Disparar IA (texto OU áudio transcrito; reações de emoji ficam salvas no chat mas NÃO disparam IA) ===
+        const agentText = text || enrichedContent;
+        let optedOutInTurn = false;
+        if (!fromMe && agentText && remoteJid) {
+          optedOutInTurn = await handleIncomingOptOutIfDetected({
+            clientId,
+            remoteJid: altWhatsappJid || remoteJid,
+            messageText: agentText,
+            sessionId: session?.id || null,
+          }).catch(() => false);
+          import("@/lib/campaign-worker")
+            .then((m) => m.clearZeroReplyBrakeForInstance?.(instanceName))
+            .catch(() => { });
+        }
+        if (!fromMe && msgType === "reaction" && session?.id) {
+          console.log(`[Webhook] Reação de emoji (${truncForLog(agentText, 24)}) salva no chat sem acionar IA:`, maskJid(remoteJid));
+          supabase.from("webhook_logs").insert({
             instance_name: instanceName,
             client_id: clientId,
-            event: "AGENT_SKIP_PAUSED",
-            payload: { remote_jid: maskJid(remoteJid), bot_status: session.bot_status, message_saved: true },
-            created_at: new Date().toISOString()
-          });
+            event: "AGENT_SKIP_REACTION",
+            payload: { remote_jid: maskJid(remoteJid), text: truncForLog(agentText, 40) },
+            created_at: new Date().toISOString(),
+          }).then(() => { }, () => { });
+        } else if (!fromMe && optedOutInTurn) {
+          supabase.from("webhook_logs").insert({
+            instance_name: instanceName,
+            client_id: clientId,
+            event: "OPT_OUT_BLOCKED_AI",
+            payload: { remote_jid: maskJid(remoteJid), session_id: session?.id || null },
+            created_at: new Date().toISOString(),
+          }).then(() => { }, () => { });
           if (clientId && remoteJid) {
             import("@/lib/organizer-realtime")
               .then((m) => m.scheduleRealtimeLeadEvaluation(clientId, remoteJid))
-              .catch(() => {});
+              .catch(() => { });
+          }
+        } else if (!fromMe && msgType !== "reaction" && agentText && session?.id && !groupDisabled) {
+          if (!clientActive) {
+            if (shouldLogOnce("inactive", clientId)) {
+              supabase.from("webhook_logs").insert({
+                instance_name: instanceName,
+                client_id: clientId,
+                event: "AGENT_SKIP_INACTIVE_TENANT",
+                payload: { remote_jid: maskJid(remoteJid), reason: "Conta desativada" },
+                created_at: new Date().toISOString(),
+              }).then(() => { }, () => { });
+            }
+          } else if (!aiQuotaAllowed) {
+            if (shouldLogOnce("quota", clientId)) {
+              supabase.from("webhook_logs").insert({
+                instance_name: instanceName,
+                client_id: clientId,
+                event: "AGENT_QUOTA_EXCEEDED",
+                payload: {
+                  remote_jid: maskJid(remoteJid),
+                  reason: aiQuotaResult.reason || "Limite mensal de IA do plano atingido.",
+                },
+                created_at: new Date().toISOString(),
+              }).then(() => { }, () => { });
+            }
+          } else {
+            const effectiveActive = (session as any)._effective_active ?? (session.bot_status === 'bot_active');
+            if (effectiveActive) {
+              console.log("🤖 DISPARANDO AGENTE DE IA PARA:", maskJid(remoteJid));
+              // Verifica precondições críticas ANTES do fetch:
+              //  1) Secret interno tem que existir senão /api/agent/process devolve 401 silencioso
+              const internalSecretValue = getInternalSecret();
+              if (!internalSecretValue) {
+                await supabase.from("webhook_logs").insert({
+                  instance_name: instanceName,
+                  client_id: clientId,
+                  event: "AGENT_DISPATCH_NO_SECRET",
+                  payload: { hint: "AUTH_SECRET ou SUPABASE_SERVICE_ROLE_KEY vazio no env do container; /api/agent/process vai rejeitar com 401", remote_jid: maskJid(remoteJid) },
+                  created_at: new Date().toISOString(),
+                }).then(() => { }, () => { });
+              }
+              // FIX Next 16: NÃO usar fire-and-forget (cancelado quando handler retorna)
+              // NEM after() (no-op em alguns setups standalone). Importar o handler
+              // do agente DIRETAMENTE e invocar em-processo. Mais rápido, sem rede,
+              // sem auth interna, sem cancelamento. Webhook bloqueia ~3-7s mas
+              // Evolution aceita até 30s tranquilamente.
+              await supabase.from("webhook_logs").insert({
+                instance_name: instanceName,
+                client_id: clientId,
+                event: "AGENT_DISPATCH_SCHEDULED",
+                payload: { remote_jid: maskJid(remoteJid), via: "direct-call" },
+                created_at: new Date().toISOString(),
+              }).then(() => { }, () => { });
+              try {
+                const agentMod = await import("@/app/api/agent/process/route");
+                // Mantém o INTERNAL_SECRET_HEADER pra passar pelo gate do agent/process
+                const fakeReq = new Request(`${INTERNAL_BASE}/api/agent/process`, {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    [INTERNAL_SECRET_HEADER]: internalSecretValue,
+                    ...(overrideAgentId ? { "x-test-agent-id": overrideAgentId } : {}),
+                  },
+                  body: JSON.stringify({
+                    instanceName,
+                    remoteJid,
+                    ...(altWhatsappJid ? { alternateJid: altWhatsappJid } : {}),
+                    text: agentText,
+                    messageId: finalId || null,
+                    sessionId: session.id,
+                  }),
+                });
+                // Invoca agent/process diretamente — serialização e buffer são gerenciados internamente
+                await agentMod.POST(fakeReq as any);
+                console.log("[Webhook] ✓ Agent dispatch concluído pra", maskJid(remoteJid));
+              } catch (e: any) {
+                console.error("[Webhook] Erro ao disparar IA:", e?.message);
+                await supabase.from("webhook_logs").insert({
+                  instance_name: instanceName,
+                  client_id: clientId,
+                  event: "AGENT_DISPATCH_FETCH_FAIL",
+                  payload: { error: String(e?.message || e), stack: String(e?.stack || "").slice(0, 500), via: "direct-call" },
+                  created_at: new Date().toISOString(),
+                }).then(() => { }, () => { });
+              }
+            } else {
+              console.log("⏸️ IA pausada para:", maskJid(remoteJid), "| status:", session.bot_status, "(mensagem foi salva, IA terá contexto ao voltar)");
+              await supabase.from("webhook_logs").insert({
+                instance_name: instanceName,
+                client_id: clientId,
+                event: "AGENT_SKIP_PAUSED",
+                payload: { remote_jid: maskJid(remoteJid), bot_status: session.bot_status, message_saved: true },
+                created_at: new Date().toISOString()
+              });
+              if (clientId && remoteJid) {
+                import("@/lib/organizer-realtime")
+                  .then((m) => m.scheduleRealtimeLeadEvaluation(clientId, remoteJid))
+                  .catch(() => { });
+              }
+            }
           }
         }
-      }
 
-      return NextResponse.json({ success: true, event: "message_saved", message_id: finalId, sender });
+        return NextResponse.json({ success: true, event: "message_saved", message_id: finalId, sender });
       } finally {
         if (finalId) {
           (globalThis as any).__processedMessageIds.delete(processingKey);
@@ -1253,24 +1293,31 @@ export async function POST(req: NextRequest) {
     // EVENTO: messages.update (status de entrega)
     // ============================================================
     if (eventName === "messages.update" || eventName === "MESSAGES_UPDATE" || eventName === "message.status.update") {
-      const data = body.data || body;
-      const msgId = data.key?.id || data.id;
-      const statusRaw = data.status;
+      const rawData = body.data || body;
+      const items = Array.isArray(rawData) ? rawData : [rawData];
 
-      if (msgId && statusRaw !== null && statusRaw !== undefined) {
-        const statusText = STATUS_MAP[statusRaw] || "sent";
-        await supabase.from("messages").update({ delivery_status: statusText }).eq("message_id", msgId).eq("client_id", clientId);
-        await supabase.from("chats_dashboard").update({ status_envio: statusText }).eq("message_id", msgId).eq("client_id", clientId);
-        if (instanceName && (statusText === "error" || statusText === "delivered" || statusText === "read" || statusText === "played")) {
-          import("@/lib/warmup/warmup-engine")
-            .then((m) =>
-              m.recordWebhookDeliveryFeedback?.({
-                clientId,
-                instanceName,
-                statusText,
-              })
-            )
-            .catch(() => {});
+      for (const data of items) {
+        if (!data || typeof data !== "object") continue;
+        // Evolution v2.3.7 envia `keyId` no nível raiz do payload (além de `key.id` / `id`)
+        const msgId = data.keyId || data.key?.id || data.id;
+        const statusRaw = data.status ?? data.update?.status;
+
+        if (msgId && statusRaw !== null && statusRaw !== undefined) {
+          const normalizedRaw = typeof statusRaw === "string" ? statusRaw.trim().toUpperCase() : statusRaw;
+          const statusText = STATUS_MAP[normalizedRaw] || STATUS_MAP[statusRaw] || "sent";
+          await supabase.from("messages").update({ delivery_status: statusText }).eq("message_id", msgId).eq("client_id", clientId);
+          await supabase.from("chats_dashboard").update({ status_envio: statusText }).eq("message_id", msgId).eq("client_id", clientId);
+          if (instanceName && (statusText === "error" || statusText === "delivered" || statusText === "read" || statusText === "played")) {
+            import("@/lib/warmup/warmup-engine")
+              .then((m) =>
+                m.recordWebhookDeliveryFeedback?.({
+                  clientId,
+                  instanceName,
+                  statusText,
+                })
+              )
+              .catch(() => {});
+          }
         }
       }
       return NextResponse.json({ success: true, event: "status_updated" });
@@ -1282,12 +1329,12 @@ export async function POST(req: NextRequest) {
     if (eventName === "connection.update" || eventName === "CONNECTION_UPDATE") {
       const data = body.data || body;
       console.log(">>> CONNECTION UPDATE ->", JSON.stringify(data).slice(0, 200));
-      
-      const rawState = (data.state || data.status || "").toLowerCase();
+
+      const rawState = String(data.state || data.status || "").toLowerCase();
       let state = "disconnected";
       if (rawState === "open" || rawState === "connected") state = "open";
       if (rawState === "connecting" || rawState === "pairing") state = "connecting";
-      if (rawState === "close" || rawState === "disconnected") state = "close";
+      if (rawState === "close" || rawState === "disconnected" || rawState === "refused") state = "close";
 
       if (instanceName && state) {
         await supabase
@@ -1301,6 +1348,7 @@ export async function POST(req: NextRequest) {
             (data as any)?.statusReason ??
             (data as any)?.reason ??
             (data as any)?.error ??
+            (rawState === "refused" ? "refused" : null) ??
             (body as any)?.statusReason ??
             null;
           import("@/lib/warmup/warmup-engine")
@@ -1311,7 +1359,7 @@ export async function POST(req: NextRequest) {
                 statusReason,
               })
             )
-            .catch(() => {});
+            .catch(() => { });
         }
 
         // QR escaneado → instância CONECTOU. Vincula automaticamente um
@@ -1355,6 +1403,17 @@ export async function POST(req: NextRequest) {
                   supabase.from("sessions").update({ instance_name: instanceName }).eq("instance_name", phoneInstanceName).eq("client_id", connData.client_id),
                   supabase.from("messages").update({ instance_name: instanceName }).eq("instance_name", phoneInstanceName).eq("client_id", connData.client_id),
                 ]);
+
+                // Reconcilia passaporte de aquecimento por telefone (retoma estágio/dias mesmo se recriado com outro instance_name)
+                await import("@/lib/warmup/warmup-phone-memory")
+                  .then((m) =>
+                    m.reconcileWarmupIdentityByPhone({
+                      clientId: connData.client_id,
+                      instanceName,
+                      phone,
+                    })
+                  )
+                  .catch(() => {});
               }
             }
           } catch (err: any) {

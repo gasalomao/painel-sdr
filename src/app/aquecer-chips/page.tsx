@@ -44,6 +44,8 @@ import {
   Trash2,
   Zap,
   Target,
+  Download,
+  WifiOff,
   type LucideIcon,
 } from "lucide-react";
 import { ModelOptions } from "@/components/ai-module-shared";
@@ -77,6 +79,9 @@ interface InstanceItem {
   config: WarmupConfig;
   day0_warnings?: string[];
   day0_status?: "pending" | "warning" | "ok";
+  network_warnings?: string[];
+  flaps_24h?: number;
+  soft_recovery?: boolean;
   metrics?: ChipDeliveryMetrics | null;
   proxy: {
     enabled: boolean;
@@ -889,6 +894,15 @@ export default function AquecerChipsPage() {
                 {hasActiveChips ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
                 {bulkBusy ? "Aplicando..." : hasActiveChips ? "Pausar tudo" : "Ativar tudo"}
               </button>
+              <a
+                href="/api/warmup/vcf"
+                download="agenda-chips-colmeia.vcf"
+                className={styles.secondaryAction}
+                title="Baixa um arquivo .vcf com todos os números conectados para salvar na agenda do celular"
+              >
+                <Download className="w-3.5 h-3.5 text-emerald-400" />
+                Baixar Agenda (.vcf)
+              </a>
               <button
                 type="button"
                 onClick={() => setAdvancedOpen((v) => !v)}
@@ -1234,8 +1248,12 @@ export default function AquecerChipsPage() {
                           <option value="fallback" className="bg-[#181d19] text-emerald-400 font-semibold">
                             ★ [GRÁTIS] Diálogos Nativos pt-BR (Zero Consumo de Tokens)
                           </option>
+                          <option value="auto:free-fast" className="bg-[#181d19] text-sky-300 font-semibold">
+                            ⚡ [AUTO GRÁTIS] IA Gratuita Automática (OpenRouter/Gemini + Fallback Nativo)
+                          </option>
                           {globalSettings.ai_model &&
                             globalSettings.ai_model !== "fallback" &&
+                            globalSettings.ai_model !== "auto:free-fast" &&
                             !aiModels.some((m) => m.id === globalSettings.ai_model) && (
                               <option key={globalSettings.ai_model} value={globalSettings.ai_model} className="bg-[#181d19] text-white">
                                 {globalSettings.ai_model} (salvo)
@@ -1251,7 +1269,11 @@ export default function AquecerChipsPage() {
                         <p className={styles.fieldHint}>
                           {globalSettings.ai_model === "fallback" ? (
                             <>
-                              <strong className="text-emerald-400 font-medium">Modo Grátis ativado:</strong> usa o banco de diálogos humanos pt-BR nativo sem consumir tokens de APIs externas.
+                              <strong className="text-emerald-400 font-medium">Modo Grátis ativado:</strong> usa o banco de diálogos humanos pt-BR com roteiro contínuo e Spintax por horário sem consumir tokens.
+                            </>
+                          ) : globalSettings.ai_model === "auto:free-fast" ? (
+                            <>
+                              <strong className="text-sky-300 font-medium">Modo Auto-Free Inteligente:</strong> gera falas contextuais com modelos gratuitos respeitando sua cota, voltando aos diálogos nativos se precisar.
                             </>
                           ) : (
                             <>
@@ -1578,6 +1600,23 @@ export default function AquecerChipsPage() {
                                   <Award className="w-3 h-3" /> Pronto para vendas
                                 </Badge>
                               )}
+                              {item.soft_recovery && (
+                                <Badge variant="outline" className="text-[11px] border-sky-500/30 bg-sky-500/10 text-sky-300 font-medium">
+                                  Retomada suave 50%
+                                </Badge>
+                              )}
+                              {typeof item.flaps_24h === "number" && item.flaps_24h > 0 && (
+                                <Badge
+                                  variant="outline"
+                                  className={`text-[11px] font-medium ${
+                                    item.flaps_24h > 8
+                                      ? "border-red-500/40 bg-red-500/15 text-red-300"
+                                      : "border-white/15 bg-white/[0.04] text-neutral-300"
+                                  }`}
+                                >
+                                  {item.flaps_24h} queda(s)/24h
+                                </Badge>
+                              )}
                             </div>
                             <p className={styles.chipPhone}>
                               {item.phone_number ? `+${item.phone_number}` : "Número ainda não detectado"}
@@ -1609,6 +1648,21 @@ export default function AquecerChipsPage() {
                                 {cfg.quarantine_reason || "O sistema detectou erros seguidos e pausou este número por 24 horas."}
                                 {cfg.quarantine_until ? ` Volta automaticamente em ${new Date(cfg.quarantine_until).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}.` : ""}
                               </p>
+                            </div>
+                          )}
+
+                          {/* Risco de Rede / Proxy / Oscilação */}
+                          {!item.orphan && item.network_warnings && item.network_warnings.length > 0 && (
+                            <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-2.5 space-y-1">
+                              <p className="text-[11px] font-semibold text-red-300 flex items-center gap-1.5">
+                                <WifiOff className="w-3.5 h-3.5 shrink-0" />
+                                Alerta de Rede / Proxy
+                              </p>
+                              <ul className="space-y-0.5 pl-5 list-disc text-[11px] text-red-100/90">
+                                {item.network_warnings.map((warn, idx) => (
+                                  <li key={idx}>{warn}</li>
+                                ))}
+                              </ul>
                             </div>
                           )}
 
@@ -2033,19 +2087,26 @@ export default function AquecerChipsPage() {
                             {g.total_reactions_sent || 0}
                           </td>
                           <td>
-                            <Badge
-                              variant="outline"
-                              className={cn(
-                                "text-[10px] font-semibold",
-                                g.status === "active"
-                                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-                                  : g.status === "full"
-                                  ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
-                                  : "border-neutral-500/30 bg-neutral-500/10 text-neutral-300"
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <Badge
+                                variant="outline"
+                                className={cn(
+                                  "text-[10px] font-semibold",
+                                  g.status === "active"
+                                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                                    : g.status === "full"
+                                    ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
+                                    : "border-neutral-500/30 bg-neutral-500/10 text-neutral-300"
+                                )}
+                              >
+                                {g.status === "active" ? "Ativo" : g.status === "full" ? "Lotado" : g.status}
+                              </Badge>
+                              {(g as { is_dead?: boolean }).is_dead && (
+                                <Badge variant="outline" className="text-[10px] border-amber-500/30 bg-amber-500/10 text-amber-300">
+                                  Silencioso &gt;72h
+                                </Badge>
                               )}
-                            >
-                              {g.status === "active" ? "Ativo" : g.status === "full" ? "Lotado" : g.status}
-                            </Badge>
+                            </div>
                           </td>
                           <td className="text-right">
                             <button

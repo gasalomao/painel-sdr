@@ -5,6 +5,7 @@ import {
 } from "@/lib/crm-lead-profile";
 import { enrichCapturedLead } from "@/lib/scraper-lead-enrichment";
 import { requireClientId } from "@/lib/tenant";
+import { checkTenantRateLimit } from "@/lib/saas-limits";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 
 export const dynamic = "force-dynamic";
@@ -56,6 +57,16 @@ export async function POST(
     const { id } = await context.params;
     if (!id) {
       return NextResponse.json({ error: "ID do lead é obrigatório" }, { status: 400 });
+    }
+
+    if (!auth.isAdmin) {
+      const tenantRl = checkTenantRateLimit(`lead_enrich_tenant:${auth.clientId}`, 10, 60_000);
+      if (!tenantRl.allowed) {
+        return NextResponse.json(
+          { error: `Limite de auditorias por minuto atingido. Aguarde ${tenantRl.retryAfterSec ?? 1}s.` },
+          { status: 429 },
+        );
+      }
     }
 
     const rateKey = `${auth.clientId}:${id}`;

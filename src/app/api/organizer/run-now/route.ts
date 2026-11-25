@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { checkTenantAiQuota, checkTenantRateLimit, requireFeatureAccess } from "@/lib/saas-limits";
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
 import { getAiKeys } from "@/lib/ai-keys";
 import { providerDisplayName, providerOf } from "@/lib/ai-provider";
@@ -16,6 +17,25 @@ export const dynamic = "force-dynamic";
 export async function POST(req: NextRequest) {
   const ctx = await requireClientId(req);
   if (!ctx.ok) return ctx.response;
+  const denied = requireFeatureAccess(ctx, "organizador");
+  if (denied) return denied;
+
+  if (!ctx.isAdmin) {
+    const rl = checkTenantRateLimit(`organizer_run_now:${ctx.clientId}`, 2, 5 * 60_000);
+    if (!rl.allowed) {
+      return NextResponse.json(
+        { error: `Aguarde ${rl.retryAfterSec ?? 1}s antes de rodar o organizador novamente.` },
+        { status: 429 },
+      );
+    }
+    const quota = await checkTenantAiQuota(ctx.clientId, ctx.isAdmin);
+    if (!quota.allowed) {
+      return NextResponse.json(
+        { error: quota.reason || "Limite mensal de IA do plano atingido." },
+        { status: 429 },
+      );
+    }
+  }
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
 
   const { data: cfg } = await supabaseAdmin

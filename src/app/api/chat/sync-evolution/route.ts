@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { evolution } from "@/lib/evolution";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { requireClientId, clientIdFromInstance } from "@/lib/tenant";
+import { checkTenantRateLimit } from "@/lib/saas-limits";
 
 /**
  * Sync messages directly from Evolution API to Supabase
@@ -11,6 +12,15 @@ export async function POST(req: NextRequest) {
   try {
     const auth = await requireClientId(req);
     if (!auth.ok) return auth.response;
+    if (!auth.isAdmin) {
+      const rl = checkTenantRateLimit(`sync_evolution:${auth.clientId}`, 10, 60_000);
+      if (!rl.allowed) {
+        return NextResponse.json(
+          { error: `Muitas sincronizações em sequência. Aguarde ${rl.retryAfterSec ?? 1}s.` },
+          { status: 429 },
+        );
+      }
+    }
     if (!supabase) return NextResponse.json({ error: "DB indisponível" }, { status: 500 });
     const body = await req.json();
     const { remoteJid, count = 20, instanceName } = body;

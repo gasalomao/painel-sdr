@@ -49,7 +49,13 @@ function request(method: string, body: Record<string, unknown>): NextRequest {
 }
 
 beforeEach(() => {
-  mocks.auth.mockResolvedValue({ ok: true, clientId: "tenant-1", isAdmin: false, impersonating: false });
+  mocks.auth.mockResolvedValue({
+    ok: true,
+    clientId: "tenant-1",
+    isAdmin: false,
+    impersonating: false,
+    claims: { features: { aquecer_chips: true } },
+  });
   mocks.from.mockReset();
   mocks.fetchInstances.mockReset().mockResolvedValue({ instances: [] });
   mocks.ensure.mockReset().mockResolvedValue({
@@ -71,6 +77,18 @@ beforeEach(() => {
 });
 
 describe("GET /api/warmup", () => {
+  it("bloqueia com 403 quando módulo aquecer_chips não está liberado para o tenant", async () => {
+    mocks.auth.mockResolvedValueOnce({
+      ok: true,
+      clientId: "tenant-1",
+      isAdmin: false,
+      impersonating: false,
+      claims: { features: { aquecer_chips: false } },
+    });
+    const res = await GET(new NextRequest("http://localhost/api/warmup"));
+    expect(res.status).toBe(403);
+  });
+
   it("lista chips do tenant e marca instância órfã da Evolution", async () => {
     mocks.ensure.mockResolvedValue({
       created: [],

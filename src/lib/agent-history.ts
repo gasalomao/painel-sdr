@@ -9,8 +9,15 @@ export type HistoryMessage = {
   sender?: string | null;
   sender_type?: string | null;
   content?: string | null;
+  message_id?: string | null;
+  created_at?: string | null;
   _skip_marker?: boolean;
 };
+
+export interface DropTrailingOptions {
+  currentMessageId?: string | null;
+  allowTrailingOutbound?: boolean;
+}
 
 export type GeminiTurn = { role: "user" | "model"; parts: { text: string }[] };
 
@@ -55,13 +62,33 @@ export function historyRole(msg: HistoryMessage): "user" | "model" {
   return msg._skip_marker || sender !== "customer" ? "model" : "user";
 }
 
+function isOutboundSender(msg: HistoryMessage): boolean {
+  const sender = String(msg.sender_type || msg.sender || "").toLowerCase();
+  return sender === "ai" || sender === "human" || sender === "user_panel" || sender === "operator";
+}
+
+function matchesCustomerMessageContent(msg: HistoryMessage, current: string): boolean {
+  const sender = String(msg.sender_type || msg.sender || "").toLowerCase();
+  const lastContent = String(msg.content || "").trim();
+  return (
+    sender === "customer" &&
+    lastContent.length > 0 &&
+    (lastContent === current || (lastContent.length >= 2 && current.includes(lastContent)))
+  );
+}
+
 /**
  * A mensagem atual já foi persistida antes deste run. Remove do fim do
  * histórico a(s) cópia(s) dela.
  *
- * Regra: só remove quando o conteúdo bate. Em contexto de lote (várias
+ * Regra:
+ * 1) Se `opts.currentMessageId` bater com um item `customer`, remove essa cópia exata.
+ * 2) Só remove quando o conteúdo bate. Em contexto de lote (várias
  * mensagens consolidadas em `currentText`), as ocorrências finais também
  * batem e devem sair; fora de lote, remove no máximo uma.
+ * 3) Quando `opts.allowTrailingOutbound` é true (ex.: disparo em 2 partes onde a
+ * Parte 2 entrou logo após a auto-resposta inicial do cliente durante o buffer),
+ * preserva até 3 mensagens outbound finais e remove a cópia logo antes delas.
  *
  * @returns novo array; a entrada não é mutada.
  */
@@ -69,24 +96,140 @@ export function dropTrailingCurrentMessage(
   chrono: HistoryMessage[],
   currentText: string,
   isBatch = false,
+  opts?: DropTrailingOptions,
 ): HistoryMessage[] {
-  const out = [...chrono];
+  let out = [...chrono];
   const current = String(currentText || "").trim();
+  const currentMessageId = opts?.currentMessageId ? String(opts.currentMessageId).trim() : "";
+
+  let removedCount = 0;
+  if (currentMessageId) {
+    out = out.filter((msg) => {
+      const sender = String(msg.sender_type || msg.sender || "").toLowerCase();
+      if (sender === "customer" && msg.message_id && String(msg.message_id).trim() === currentMessageId) {
+        removedCount++;
+        return false;
+      }
+      return true;
+    });
+    if (!isBatch && removedCount > 0) {
+      return out;
+    }
+  }
+
   if (!current) return out;
 
+  let poppedAtEnd = false;
   while (out.length > 0) {
     const last = out[out.length - 1];
-    const sender = last.sender_type || last.sender;
-    const lastContent = String(last.content || "").trim();
-    const matches =
-      sender === "customer" &&
-      lastContent.length > 0 &&
-      (lastContent === current || (lastContent.length >= 2 && current.includes(lastContent)));
-    if (!matches) break;
+    if (!matchesCustomerMessageContent(last, current)) break;
     out.pop();
+    poppedAtEnd = true;
     if (!isBatch) break;
   }
+
+  if (!poppedAtEnd && removedCount === 0 && opts?.allowTrailingOutbound && out.length > 0) {
+    const preservedOutboundTail: HistoryMessage[] = [];
+    while (out.length > 0 && preservedOutboundTail.length < 3) {
+      const tailCandidate = out[out.length - 1];
+      if (!isOutboundSender(tailCandidate)) break;
+      preservedOutboundTail.unshift(out.pop()!);
+    }
+
+    if (preservedOutboundTail.length > 0) {
+      while (out.length > 0) {
+        const prevCustomer = out[out.length - 1];
+        if (!matchesCustomerMessageContent(prevCustomer, current)) break;
+        out.pop();
+        if (!isBatch) break;
+      }
+      out.push(...preservedOutboundTail);
+    }
+  }
+
   return out;
+}
+
+export interface UnansweredAfterAiResult {
+  answeredByNewerAi: boolean;
+  latestAiCreatedAt: string | null;
+  unansweredCustomerMessages: HistoryMessage[];
+}
+
+/**
+ * Resolve o "atropelamento de turnos": quando um Turno 2 acorda do buffer/lock,
+ * verifica se já houve resposta da IA *depois* da fronteira inicial do lote.
+ * Se sim, preserva apenas mensagens do cliente que ainda não foram respondidas.
+ */
+export function extractUnansweredCustomerMessagesAfterAi(
+  chrono: HistoryMessage[],
+  batchStartIso: string | null | undefined,
+  options?: {
+    currentMessageId?: string | null;
+    isMessageHandled?: (messageId: string | null | undefined) => boolean;
+  },
+): UnansweredAfterAiResult {
+  if (!Array.isArray(chrono) || chrono.length === 0 || !batchStartIso) {
+    return { answeredByNewerAi: false, latestAiCreatedAt: null, unansweredCustomerMessages: [] };
+  }
+
+  const batchStartMs = new Date(batchStartIso).getTime();
+  if (!Number.isFinite(batchStartMs)) {
+    return { answeredByNewerAi: false, latestAiCreatedAt: null, unansweredCustomerMessages: [] };
+  }
+
+  let latestAiIdx = -1;
+  let latestAiMs = -Infinity;
+  let latestAiCreatedAt: string | null = null;
+
+  for (let i = 0; i < chrono.length; i++) {
+    const msg = chrono[i];
+    const sender = String(msg.sender_type || msg.sender || "").toLowerCase();
+    if (sender !== "ai") continue;
+    const msgMs = msg.created_at ? new Date(msg.created_at).getTime() : NaN;
+    if (Number.isFinite(msgMs) && msgMs > batchStartMs && msgMs >= latestAiMs) {
+      latestAiMs = msgMs;
+      latestAiIdx = i;
+      latestAiCreatedAt = msg.created_at || null;
+    }
+  }
+
+  if (latestAiIdx === -1) {
+    return { answeredByNewerAi: false, latestAiCreatedAt: null, unansweredCustomerMessages: [] };
+  }
+
+  const isHandled = options?.isMessageHandled ?? (() => false);
+  const currentMessageId = options?.currentMessageId ? String(options.currentMessageId).trim() : "";
+  const seenIds = new Set<string>();
+  const unanswered: HistoryMessage[] = [];
+
+  for (let i = latestAiIdx + 1; i < chrono.length; i++) {
+    const msg = chrono[i];
+    const sender = String(msg.sender_type || msg.sender || "").toLowerCase();
+    if (sender !== "customer") continue;
+    if (isHandled(msg.message_id)) continue;
+    const idKey = msg.message_id ? String(msg.message_id).trim() : "";
+    if (idKey) seenIds.add(idKey);
+    unanswered.push(msg);
+  }
+
+  // Caso raro: a mensagem gatilho do Turno 2 chegou 1-2s ANTES da IA do Turno 1
+  // gravar sua resposta no banco, mas NÃO entrou no lote do Turno 1 (não marcada como handled).
+  if (currentMessageId && !seenIds.has(currentMessageId) && !isHandled(currentMessageId)) {
+    const triggerMsg = chrono.slice(0, latestAiIdx).find((msg) => {
+      const sender = String(msg.sender_type || msg.sender || "").toLowerCase();
+      return sender === "customer" && msg.message_id && String(msg.message_id).trim() === currentMessageId;
+    });
+    if (triggerMsg) {
+      unanswered.unshift(triggerMsg);
+    }
+  }
+
+  return {
+    answeredByNewerAi: true,
+    latestAiCreatedAt,
+    unansweredCustomerMessages: unanswered,
+  };
 }
 
 export type HistoryWindow = { messages: HistoryMessage[]; skipped: number };

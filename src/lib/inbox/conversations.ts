@@ -66,6 +66,8 @@ export function normalizeConversation(raw: any): Conversation {
     contact,
     bot_status: raw.bot_status || "bot_active",
     resume_at: raw.resume_at || null,
+    paused_by: raw.paused_by || null,
+    pause_reason: typeof raw.variables?._pause_reason === "string" ? raw.variables._pause_reason : null,
     last_instance: raw.instance_name || null,
     instance_name: raw.instance_name || null,
     // Estado extra do bot do painel-sdr (conector de IA)

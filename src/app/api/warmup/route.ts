@@ -1,12 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireClientId } from "@/lib/tenant";
+import { requireFeatureAccess } from "@/lib/saas-limits";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { evolution } from "@/lib/evolution";
 import { isChatRowInbound, isChatRowOutbound } from "@/lib/chat-direction";
 import {
+  analyzeChipClusterHealth,
   auditChipDay0Hygiene,
+  checkProxyIpIntel,
   extractDay0WarningsByInstance,
+  type ProxyIpIntel,
 } from "@/lib/warmup/warmup-groups";
+import {
+  mapWithConcurrency,
+  readPhoneMemoryMap,
+} from "@/lib/warmup/warmup-phone-memory";
 import {
   STAGE_DEFAULTS,
   type WarmupConfig,
@@ -182,6 +190,8 @@ function buildDisplayConfig(params: {
 export async function GET(req: NextRequest) {
   const auth = await requireClientId(req);
   if (!auth.ok) return auth.response;
+  const denied = requireFeatureAccess(auth, "aquecer_chips");
+  if (denied) return denied;
 
   const clientId = auth.clientId;
 
@@ -239,22 +249,39 @@ export async function GET(req: NextRequest) {
       { enabled: boolean; host: string | null; port: string | null; protocol: string }
     >();
     if (typeof (evolution as { findProxy?: unknown }).findProxy === "function") {
-      await Promise.all(
-        connections.map(async (c) => {
-          try {
-            const p: any = await evolution.findProxy(c.instance_name);
-            if (p && typeof p === "object") {
-              proxyByInstance.set(c.instance_name, {
-                enabled: Boolean(p.enabled),
-                host: p.host ? String(p.host) : null,
-                port: p.port ? String(p.port) : null,
-                protocol: p.protocol ? String(p.protocol) : "http",
-              });
-            }
-          } catch {}
-        })
-      );
+      await mapWithConcurrency(connections, 4, async (c) => {
+        try {
+          const p: any = await evolution.findProxy(c.instance_name);
+          if (p && typeof p === "object") {
+            proxyByInstance.set(c.instance_name, {
+              enabled: Boolean(p.enabled),
+              host: p.host ? String(p.host) : null,
+              port: p.port ? String(p.port) : null,
+              protocol: p.protocol ? String(p.protocol) : "http",
+            });
+          }
+        } catch {}
+      });
     }
+
+    // Resolve inteligência ASN/país dos proxies únicos (com cache 6h e limite de concorrência)
+    const uniqueProxyHosts = Array.from(
+      new Set(
+        Array.from(proxyByInstance.values())
+          .filter((p) => p.enabled && p.host)
+          .map((p) => p.host!.trim().toLowerCase())
+      )
+    );
+    const proxyIntelByHost = new Map<string, ProxyIpIntel | null>();
+    if (uniqueProxyHosts.length > 0) {
+      await mapWithConcurrency(uniqueProxyHosts, 3, async (host) => {
+        const intel = await checkProxyIpIntel(host);
+        proxyIntelByHost.set(host, intel);
+      });
+    }
+
+    const phoneMemoryMap = await readPhoneMemoryMap(clientId).catch(() => ({}));
+    const nowMs = Date.now();
 
     const logs = await getLogsFromDbOrSettings(clientId);
     const day0WarningsByInstance = extractDay0WarningsByInstance(logs);
@@ -294,6 +321,16 @@ export async function GET(req: NextRequest) {
           ? "warning"
           : "ok";
 
+      const netHealth = analyzeChipClusterHealth({
+        clientId,
+        instanceName: connection.instance_name,
+        config,
+        proxyByInstance,
+        proxyIntelByHost,
+        phoneMemoryMap,
+        nowMs,
+      });
+
       return {
         instance_name: connection.instance_name,
         connection_status: effectiveConnStatus,
@@ -302,6 +339,9 @@ export async function GET(req: NextRequest) {
         config,
         day0_warnings: day0Warnings,
         day0_status: day0Status,
+        network_warnings: netHealth.warnings,
+        flaps_24h: netHealth.flaps24h,
+        soft_recovery: netHealth.softRecovery,
         metrics: deliveryMetricsByInstance.get(connection.instance_name) || null,
         proxy: proxyByInstance.get(connection.instance_name) || {
           enabled: false,
@@ -329,6 +369,9 @@ export async function GET(req: NextRequest) {
         }),
         day0_warnings: [],
         day0_status: "pending",
+        network_warnings: [],
+        flaps_24h: 0,
+        soft_recovery: false,
         metrics: null,
         proxy: { enabled: false, host: null, port: null, protocol: "http" },
       });
@@ -401,6 +444,8 @@ async function saveSingleConfig(
 export async function POST(req: NextRequest) {
   const auth = await requireClientId(req);
   if (!auth.ok) return auth.response;
+  const denied = requireFeatureAccess(auth, "aquecer_chips");
+  if (denied) return denied;
 
   const clientId = auth.clientId;
 
@@ -465,6 +510,8 @@ export async function POST(req: NextRequest) {
 export async function PUT(req: NextRequest) {
   const auth = await requireClientId(req);
   if (!auth.ok) return auth.response;
+  const denied = requireFeatureAccess(auth, "aquecer_chips");
+  if (denied) return denied;
 
   try {
     const body = await req.json();
@@ -477,6 +524,8 @@ export async function PUT(req: NextRequest) {
 export async function PATCH(req: NextRequest) {
   const auth = await requireClientId(req);
   if (!auth.ok) return auth.response;
+  const denied = requireFeatureAccess(auth, "aquecer_chips");
+  if (denied) return denied;
 
   const clientId = auth.clientId;
 

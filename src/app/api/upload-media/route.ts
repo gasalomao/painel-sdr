@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { checkTenantRateLimit, getTenantSaasLimits } from "@/lib/saas-limits";
 import { resolveSafeUploadFormat } from "@/lib/media-upload-safety";
 
 export const dynamic = "force-dynamic";
@@ -46,7 +47,16 @@ export async function POST(req: NextRequest) {
       }, { status: 413 });
     }
 
-    await ensureBucket();
+    if (!session.isAdmin) {
+      const limits = await getTenantSaasLimits(session.clientId, false);
+      const planMaxBytes = limits.max_upload_mb * 1024 * 1024;
+      if (file.size > planMaxBytes) {
+        return NextResponse.json({
+          success: false,
+          error: `Arquivo excede o limite de ${limits.max_upload_mb}MB do seu plano.`,
+        }, { status: 413 });
+      }
+    }
 
     const safeFormat = resolveSafeUploadFormat(file.name, file.type);
     if (!safeFormat) {
@@ -55,6 +65,18 @@ export async function POST(req: NextRequest) {
         { status: 415 }
       );
     }
+
+    if (!session.isAdmin) {
+      const rl = checkTenantRateLimit(`upload_media:${session.clientId}`, 30, 5 * 60_000);
+      if (!rl.allowed) {
+        return NextResponse.json(
+          { success: false, error: `Muitos uploads em sequência. Aguarde ${rl.retryAfterSec ?? 1}s.` },
+          { status: 429 },
+        );
+      }
+    }
+
+    await ensureBucket();
 
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { requireFeatureAccess } from "@/lib/saas-limits";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 import { validateCampaignInstanceAccess } from "@/lib/campaign-instance-access";
 
@@ -9,6 +10,8 @@ export const dynamic = "force-dynamic";
 export async function GET(req: NextRequest) {
   const ctx = await requireClientId(req);
   if (!ctx.ok) return ctx.response;
+  const denied = requireFeatureAccess(ctx, "followup");
+  if (denied) return denied;
 
   let q = supabase.from("followup_campaigns").select("*").order("created_at", { ascending: false });
   if (!ctx.isAdmin) q = q.eq("client_id", ctx.clientId);
@@ -53,6 +56,8 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const ctx = await requireClientId(req);
   if (!ctx.ok) return ctx.response;
+  const denied = requireFeatureAccess(ctx, "followup");
+  if (denied) return denied;
 
   try {
     const body = await req.json();
@@ -106,6 +111,12 @@ export async function POST(req: NextRequest) {
           { status: 400 }
         );
       }
+    }
+    if (!ctx.isAdmin && Number(min_interval_seconds) < 15) {
+      return NextResponse.json(
+        { success: false, error: "Intervalo mínimo entre envios: 15 s." },
+        { status: 400 }
+      );
     }
     if (Number(min_interval_seconds) < 5 || Number(max_interval_seconds) < 5) {
       return NextResponse.json(

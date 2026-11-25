@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { verifySession, SESSION_COOKIE, timingSafeEqualEdge } from "@/lib/auth-edge";
+import { PATH_TO_FEATURE, isFeatureEnabledForSession } from "@/lib/saas-policy";
 
 // Mesma constante do lib/internal-auth.ts (não importamos diretamente porque
 // internal-auth depende de bindings node não disponíveis no edge runtime).
@@ -16,24 +17,6 @@ const INTERNAL_SECRET_HEADER = "x-internal-secret";
  *    feature marcada pelo admin (clients.features[key] !== false).
  *  - Admin (não-impersonando) passa em tudo, ignorando feature-gating.
  */
-
-// Mapeia path raiz → feature key em clients.features.
-// Path que NÃO está aqui é considerado "sem gate" (qualquer logado acessa).
-const PATH_TO_FEATURE: Record<string, string> = {
-  "/leads":        "leads",
-  "/chat":         "chat",
-  "/agente":       "agente",
-  "/automacao":    "automacao",
-  "/disparo":      "disparo",
-  "/follow-up":    "followup",
-  "/captador":     "captador",
-  "/whatsapp":     "whatsapp",
-  "/tokens":       "tokens",
-  "/organizador":  "organizador",
-  "/configuracoes": "configuracoes",
-  "/sites":        "sites",
-  "/aquecer-chips": "aquecer_chips",
-};
 
 function getFeatureForPath(pathname: string): string | null {
   // Match exato OU prefixo + "/"
@@ -131,10 +114,7 @@ export async function proxy(req: NextRequest) {
   // Cliente comum (ou admin impersonando): aplica feature gate.
   const feature = getFeatureForPath(pathname);
   if (feature) {
-    const features = claims.features || {};
-    // "sites" é premium opt-in: exige flag true (mesma regra fail-closed
-    // do requireSitesContext nas APIs).
-    const allowed = feature === "sites" ? features[feature] === true : features[feature] !== false;
+    const allowed = isFeatureEnabledForSession(feature, claims);
     if (!allowed) {
       const url = req.nextUrl.clone();
       url.pathname = "/";

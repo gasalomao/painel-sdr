@@ -119,6 +119,11 @@ export function buildSdrLeadDossierBlock(
   const anosEmpresa = asNumber(enr.anosEmpresa);
   const siteDiagnostico = asString(enr.siteDiagnostico, 160);
   const siteStatusLabel = asString(enr.siteStatusLabel, 100);
+  const siteIssueCode = asString(enr.siteIssueCode, 60);
+  const auditUncertain =
+    enr.auditUncertain === true ||
+    siteIssueCode === "waf_protected" ||
+    siteIssueCode === "audit_timeout_unverified";
   const discoveredRealWebsite = asString(enr.discoveredRealWebsite, 200);
   const abandonedCopyrightYear = asNumber(enr.abandonedCopyrightYear);
   const hasPaidTrafficTag = enr.hasPaidTrafficTag === true;
@@ -208,6 +213,8 @@ export function buildSdrLeadDossierBlock(
     );
   } else if (siteHealth === "no_site") {
     siteParts.push(`Sem site próprio (${siteDiagnostico || siteStatusLabel || "apenas Google/redes sociais"})`);
+  } else if (auditUncertain) {
+    siteParts.push(`Site ativo / não verificado (${siteStatusLabel || "protegido por WAF ou verificação incompleta"})`);
   } else {
     siteParts.push(`Site ativo (${siteStatusLabel || "funcionando"})`);
   }
@@ -278,6 +285,10 @@ export function buildSdrLeadDossierBlock(
   } else if (siteHealth === "no_site") {
     dossierLines.push(
       `- ÂNGULO OBRIGATÓRIO (SEM SITE): A empresa se destaca no Google${nomeEmpresa ? ` (${nomeEmpresa})` : ""}, mas ainda está sem um site profissional próprio vinculado para transformar quem pesquisa em novos atendimentos. Ofereça a prévia gratuita sob medida.`,
+    );
+  } else if (auditUncertain) {
+    dossierLines.push(
+      `- ÂNGULO CONSULTIVO (SITE PROTEGIDO/INCONCLUSIVO): A verificação automática não conseguiu auditar o conteúdo por bloqueio anti-robô (WAF) ou lentidão temporária. PROIBIDO dizer ou insinuar que o site está fora do ar, quebrado ou com erro. Foque apenas em conversão para WhatsApp e melhora de resultados caso faça sentido para a empresa.`,
     );
   } else {
     dossierLines.push(

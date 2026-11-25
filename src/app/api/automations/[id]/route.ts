@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { isDeepStrictEqual } from "node:util";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { requireFeatureAccess } from "@/lib/saas-limits";
 import { validateCampaignInstanceAccess } from "@/lib/campaign-instance-access";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 import { parseMinReviews } from "@/lib/scraper-review-count";
@@ -29,6 +30,8 @@ export const dynamic = "force-dynamic";
 export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const tenant = await requireClientId(req);
   if (!tenant.ok) return tenant.response;
+  const denied = requireFeatureAccess(tenant, ["automacao", "prospeccao_sites"]);
+  if (denied) return denied;
   const { id } = await ctx.params;
 
   let q = supabase.from("automations").select("*").eq("id", id);
@@ -74,6 +77,8 @@ const EDITABLE_FIELDS = [
 export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const tenant = await requireClientId(req);
   if (!tenant.ok) return tenant.response;
+  const denied = requireFeatureAccess(tenant, ["automacao", "prospeccao_sites"]);
+  if (denied) return denied;
   const { id } = await ctx.params;
   try {
     const input: unknown = await req.json();
@@ -244,6 +249,8 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
 export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const tenant = await requireClientId(req);
   if (!tenant.ok) return tenant.response;
+  const denied = requireFeatureAccess(tenant, ["automacao", "prospeccao_sites"]);
+  if (denied) return denied;
   const { id } = await ctx.params;
   try {
     // Pega referências pra também parar campanhas filhas — só se a automação

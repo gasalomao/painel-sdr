@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { requireFeatureAccess } from "@/lib/saas-limits";
 
 /**
  * GET /api/followup/stats?agent_id=X
@@ -12,6 +13,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
     const ctx = await requireClientId(req);
     if (!ctx.ok) return ctx.response;
+    const denied = requireFeatureAccess(ctx, "followup");
+    if (denied) return denied;
     const clientId = ctx.clientId;
     const agentId = req.nextUrl.searchParams.get("agent_id") || "";
     if (!/^[1-9]\d*$/.test(agentId) || !Number.isSafeInteger(Number(agentId))) {

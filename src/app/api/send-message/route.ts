@@ -4,6 +4,7 @@ import * as channel from "@/lib/channel";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { registerManualSend } from "@/lib/manual-send-registry";
 import { isInstanceOwnedByClient, requireClientId } from "@/lib/tenant";
+import { checkTenantRateLimit, isClientActiveCached } from "@/lib/saas-limits";
 
 function inferMimeForType(type: string, explicit?: string): string {
   if (explicit) return explicit;
@@ -24,6 +25,18 @@ export async function POST(req: NextRequest) {
   // só pelas instâncias do próprio tenant.
   const ctx = await requireClientId(req);
   if (!ctx.ok) return ctx.response;
+  if (!ctx.isAdmin) {
+    if (!(await isClientActiveCached(ctx.clientId))) {
+      return NextResponse.json({ error: "Conta desativada. Fale com o administrador." }, { status: 403 });
+    }
+    const rl = checkTenantRateLimit(`send_message:${ctx.clientId}`, 60, 60_000);
+    if (!rl.allowed) {
+      return NextResponse.json(
+        { error: `Limite de envios por minuto atingido. Aguarde ${rl.retryAfterSec ?? 1}s.` },
+        { status: 429 },
+      );
+    }
+  }
 
   try {
     const body = await req.json();

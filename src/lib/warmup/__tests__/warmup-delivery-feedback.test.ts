@@ -85,20 +85,33 @@ vi.mock("@/lib/evolution", () => ({
   },
 }));
 
+const sendMessageMock = vi.hoisted(() => vi.fn().mockResolvedValue({ ok: true }));
+vi.mock("@/lib/channel", () => ({
+  sendMessage: (...args: unknown[]) => sendMessageMock(...args),
+}));
+
 import {
+  handleWebhookConnectionClosed,
   recordWebhookDeliveryFeedback,
   resetDeliveryFeedbackForTests,
+  resetDisconnectAlertCooldownForTests,
 } from "../warmup-engine";
 import { auditChipDay0Hygiene } from "../warmup-groups";
 
 describe("Feedback Loop Webhook -> Disjuntor & Reauditoria Dia-0", () => {
   beforeEach(() => {
     resetDeliveryFeedbackForTests();
+    resetDisconnectAlertCooldownForTests();
     tables.whatsapp_warmup_configs.length = 0;
     tables.whatsapp_warmup_logs.length = 0;
     tables.app_settings.length = 0;
+    tables.webhook_logs = [];
+    tables.campaigns = [];
+    tables.channel_connections = [];
+    tables.agent_settings = [];
     mocks.fetchProfilePicture.mockReset();
     mocks.findProxy.mockReset();
+    sendMessageMock.mockReset().mockResolvedValue({ ok: true });
   });
 
   afterEach(() => {
@@ -205,6 +218,59 @@ describe("Feedback Loop Webhook -> Disjuntor & Reauditoria Dia-0", () => {
     expect(clean.ok).toBe(true);
     expect(clean.warnings).toEqual([]);
     expect(tables.whatsapp_warmup_logs[1].message_text).toContain("✓ Auditoria Dia-0 OK (chip-day0)");
+  });
+
+  it("handleWebhookConnectionClosed registra alerta de desconexão 401/403 e notifica dono via chip irmão do mesmo tenant com cooldown", async () => {
+    const clientId = "tenant-alert";
+    tables.whatsapp_warmup_configs.push({
+      client_id: clientId,
+      instance_name: "chip-caido",
+      enabled: true,
+      health_score: 100,
+      error_count_today: 0,
+      is_quarantined: false,
+    });
+    tables.campaigns.push({
+      id: 42,
+      client_id: clientId,
+      instance_name: "chip-caido",
+      status: "running",
+    });
+    tables.channel_connections.push(
+      { client_id: clientId, instance_name: "chip-caido", status: "close" },
+      { client_id: clientId, instance_name: "chip-saudavel", status: "open" },
+      { client_id: "outro-tenant", instance_name: "chip-externo", status: "open" },
+    );
+    tables.agent_settings.push({
+      client_id: clientId,
+      scheduler_config: { owner_phone: "5511999998888" },
+    });
+
+    const t0 = 1_700_000_000_000;
+    const res1 = await handleWebhookConnectionClosed({
+      clientId,
+      instanceName: "chip-caido",
+      statusReason: 401,
+      nowMs: t0,
+    });
+
+    expect(res1).toEqual({ severe: true, pausedCampaigns: 1 });
+    expect(tables.webhook_logs.some((l) => l.event === "INSTANCE_DISCONNECTED_ALERT" && l.client_id === clientId)).toBe(true);
+    expect(sendMessageMock).toHaveBeenCalledTimes(1);
+    expect(sendMessageMock).toHaveBeenCalledWith(
+      "5511999998888@s.whatsapp.net",
+      expect.stringContaining("chip-caido"),
+      "chip-saudavel",
+    );
+
+    // Segunda queda em < 30 min não spamma alerta novamente
+    await handleWebhookConnectionClosed({
+      clientId,
+      instanceName: "chip-caido",
+      statusReason: 403,
+      nowMs: t0 + 60_000,
+    });
+    expect(sendMessageMock).toHaveBeenCalledTimes(1);
   });
 });
 

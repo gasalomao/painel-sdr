@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 import { requireClientId } from "@/lib/tenant";
+import { requireFeatureAccess } from "@/lib/saas-limits";
 import { validateCampaignInstanceAccess, validateClientAgentAccess } from "@/lib/campaign-instance-access";
 import { computePriority } from "@/lib/prospeccao-priority";
 
@@ -13,6 +14,8 @@ export const dynamic = "force-dynamic";
 export async function GET(req: NextRequest) {
   const session = await requireClientId(req);
   if (!session.ok) return session.response;
+  const denied = requireFeatureAccess(session, "disparo");
+  if (denied) return denied;
 
   const { data, error } = await supabase
     .from("campaigns")
@@ -66,6 +69,8 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const session = await requireClientId(req);
   if (!session.ok) return session.response;
+  const denied = requireFeatureAccess(session, "disparo");
+  if (denied) return denied;
 
   try {
     const body = await req.json();
@@ -160,12 +165,21 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    if (!session.isAdmin && Number(min_interval_seconds) < 15) {
+      return NextResponse.json(
+        { success: false, error: "Intervalo mínimo permitido para disparo é de 15 segundos." },
+        { status: 400 }
+      );
+    }
+
     // Cria campanha
     const insertPayload: Record<string, any> = {
       client_id: session.clientId,
       name, instance_name, message_template, agent_id: agentAccess.agentId,
       min_interval_seconds, max_interval_seconds, allowed_start_hour, allowed_end_hour,
-      personalize_with_ai, use_web_search, humanize_messages,
+      personalize_with_ai,
+      use_web_search: session.isAdmin ? Boolean(use_web_search) : false,
+      humanize_messages,
       ai_prompt: ai_prompt || null,
       media_url: media_url || null,
       media_type: media_type || null,

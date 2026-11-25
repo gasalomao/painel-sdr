@@ -234,7 +234,17 @@ describe("V2.5 End-to-End API, Security (SSRF/Tenant) e Latência de Avaliadores
       clientId: "tenant-e2e",
       isAdmin: false,
       impersonating: false,
-      claims: { clientId: "tenant-e2e", isAdmin: false, impersonating: false, sessionId: "sess-e2e" },
+      claims: {
+        clientId: "tenant-e2e",
+        isAdmin: false,
+        impersonating: false,
+        sessionId: "sess-e2e",
+        features: {
+          automacao: true,
+          prospeccao_sites: true,
+          disparo: true,
+        },
+      } as typeof state.auth.claims,
     };
     state.internalSecret = false;
     state.simulatePriorityColumnMissingOnce = false;
@@ -308,6 +318,7 @@ describe("V2.5 End-to-End API, Security (SSRF/Tenant) e Latência de Avaliadores
   });
 
   it("PATCH /api/agent/settings salva e preserva sdr_enrichment_dossier_enabled mantendo google_tokens intacto", async () => {
+    state.auth.isAdmin = true;
     const reqEnable = new NextRequest("http://localhost/api/agent/settings", {
       method: "PATCH",
       headers: { "content-type": "application/json" },

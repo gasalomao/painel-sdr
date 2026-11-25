@@ -31,6 +31,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId, invalidateInstanceCache } from "@/lib/tenant";
 import { evolution } from "@/lib/evolution";
+import {
+  removePhoneMemory,
+  savePhoneMemoryFromConfig,
+} from "@/lib/warmup/warmup-phone-memory";
+import type { WarmupConfig } from "@/lib/warmup/warmup-types";
 
 export const dynamic = "force-dynamic";
 
@@ -130,19 +135,67 @@ export async function POST(req: NextRequest) {
     if (error) errors.push({ step: label, error: error.message });
   };
 
-  // PURGE MODE: mata também mensagens/sessões/logs.
-  // DEFAULT: preserva tudo isso. Quando o número for reconectado, o
-  // /chat agrupa por remote_jid + owner_phone e o histórico aparece junto.
+  // PURGE MODE: mata também mensagens/sessões/logs/memória de warmup.
+  // DEFAULT: preserva tudo isso. Quando o número for reconectado (mesmo com outro
+  // nome de instância), o /chat e o Aquecedor de Chips restauram histórico e fase.
+  const connPhone =
+    conn.provider_config?.owner_phone ||
+    conn.provider_config?.owner_jid?.replace(/\D/g, "") ||
+    null;
+
   if (purgeMessages) {
     await drop("chats_dashboard", "instance_name", "chats_dashboard");
     await drop("sessions", "instance_name", "sessions");
     await drop("webhook_logs", "instance_name", "webhook_logs");
+    await drop("whatsapp_warmup_configs", "instance_name", "whatsapp_warmup_configs");
+    await drop("whatsapp_warmup_group_members", "instance_name", "whatsapp_warmup_group_members");
+    if (tenantId && connPhone) {
+      await removePhoneMemory(tenantId, connPhone).catch(() => {});
+    }
   } else {
+    let resolvedPhone = connPhone;
+    if (tenantId) {
+      try {
+        const { data: warmupRow } = await supabaseAdmin
+          .from("whatsapp_warmup_configs")
+          .select("*")
+          .eq("client_id", tenantId)
+          .eq("instance_name", instanceName)
+          .maybeSingle();
+
+        const wCfg = warmupRow as WarmupConfig | null;
+        if (!resolvedPhone && wCfg?.phone_number) {
+          resolvedPhone = wCfg.phone_number;
+        }
+        if (wCfg) {
+          const nowIso = new Date().toISOString();
+          await savePhoneMemoryFromConfig(
+            tenantId,
+            {
+              ...wCfg,
+              phone_number: resolvedPhone || wCfg.phone_number || null,
+            },
+            { lastDisconnectedAt: nowIso }
+          );
+          await supabaseAdmin
+            .from("whatsapp_warmup_configs")
+            .update({
+              enabled: false,
+              phone_number: resolvedPhone || wCfg.phone_number || null,
+              updated_at: nowIso,
+            })
+            .eq("client_id", tenantId)
+            .eq("instance_name", instanceName);
+        }
+      } catch {
+        /* best-effort para não bloquear remoção da instância */
+      }
+    }
+
     // Modo preservação: mapeia o instance_name antigo para o owner_phone (se disponível)
     // para que a reconexão futura do mesmo número resgate o histórico automaticamente.
-    const phone = conn.provider_config?.owner_phone || conn.provider_config?.owner_jid?.replace(/\D/g, "");
-    if (phone) {
-      const phoneInstanceName = `phone:${phone}`;
+    if (resolvedPhone) {
+      const phoneInstanceName = `phone:${resolvedPhone}`;
       console.log(`[delete] Mapeando histórico da instância ${instanceName} para ${phoneInstanceName}`);
       const remap = async (table: string) => {
         let q = supabaseAdmin!

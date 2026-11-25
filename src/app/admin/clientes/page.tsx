@@ -3,6 +3,7 @@
 import { useEffect, useState, type FormEvent, type JSX } from "react";
 import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
+import { DEFAULT_SAAS_CLIENT_FEATURES, SAAS_PLAN_PRESETS, type SaasPlanId, type SaasTenantLimits, normalizeSaasLimits } from "@/lib/saas-policy";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -24,6 +25,8 @@ type Client = {
   is_active: boolean;
   default_ai_model: string | null;
   features: Record<string, boolean>;
+  limits?: SaasTenantLimits;
+  monthly_usage?: { tokens: number; usd: number };
   organizer_prompt?: string | null;
   organizer_enabled?: boolean;
   notes?: string | null;
@@ -35,21 +38,22 @@ type Client = {
 // Cada cliente tem o próprio JSONB features na row de public.clients — mudar
 // uma flag aqui afeta SÓ o cliente sendo editado, nunca os outros tenants.
 const FEATURE_LIST = [
-  { key: "dashboard",     label: "Dashboard" },
-  { key: "leads",         label: "Leads / CRM" },
-  { key: "chat",          label: "Chat" },
-  { key: "calendario",    label: "Calendário" },
-  { key: "agente",        label: "Agente IA" },
-  { key: "automacao",     label: "Automação" },
-  { key: "disparo",       label: "Disparo em Massa" },
-  { key: "followup",      label: "Follow-up" },
-  { key: "captador",      label: "Captador Maps" },
-  { key: "whatsapp",      label: "WhatsApp" },
+  { key: "dashboard", label: "Dashboard" },
+  { key: "leads", label: "Leads / CRM" },
+  { key: "chat", label: "Chat" },
+  { key: "calendario", label: "Calendário" },
+  { key: "agente", label: "Agente IA" },
+  { key: "automacao", label: "Automação" },
+  { key: "disparo", label: "Disparo em Massa" },
+  { key: "followup", label: "Follow-up" },
+  { key: "captador", label: "Captador Maps" },
+  { key: "whatsapp", label: "WhatsApp" },
   { key: "aquecer_chips", label: "Aquecer Chips" },
-  { key: "historico",     label: "Histórico IA" },
-  { key: "tokens",        label: "Tokens IA" },
-  { key: "organizador",   label: "Organizador IA" },
-  { key: "sites",         label: "Sites IA" },
+  { key: "prospeccao_sites", label: "Prospecção Sites IA" },
+  { key: "historico", label: "Histórico IA" },
+  { key: "tokens", label: "Tokens IA" },
+  { key: "organizador", label: "Organizador IA" },
+  { key: "sites", label: "Sites IA" },
   { key: "configuracoes", label: "Configurações" },
 ];
 
@@ -125,7 +129,9 @@ export default function AdminClientesPage(): JSX.Element {
       is_admin: false,
       is_active: true,
       default_ai_model: "", // vazio = ClientEditor preenche com models[0] vindo da API
-      features: DEFAULT_FEATURES as Record<string, boolean>,
+      features: { ...DEFAULT_SAAS_CLIENT_FEATURES },
+      limits: { ...SAAS_PLAN_PRESETS.starter },
+      organizer_enabled: false,
       organizer_prompt: "",
       notes: "",
       created_at: new Date().toISOString(),
@@ -262,12 +268,15 @@ export default function AdminClientesPage(): JSX.Element {
               <table className={styles.table}>
                 <caption className="sr-only">Contas de clientes, permissões, status e ações</caption>
                 <thead><tr>
-                  <th scope="col">Cliente</th><th scope="col">Tipo</th><th scope="col">Status</th><th scope="col">Modelo de IA</th><th scope="col">Módulos</th><th scope="col" className={styles.actionsHeading}>Ações</th>
+                  <th scope="col">Cliente</th><th scope="col">Tipo</th><th scope="col">Status</th><th scope="col">Plano / Consumo</th><th scope="col">Modelo de IA</th><th scope="col">Módulos</th><th scope="col" className={styles.actionsHeading}>Ações</th>
                 </tr></thead>
                 <tbody>
                   {filteredClients.map((c) => {
                     const activeFeatures = FEATURE_LIST.filter((feature) => c.features?.[feature.key]).length;
                     const isDefault = c.id === "00000000-0000-0000-0000-000000000001";
+                    const tokensMonth = c.monthly_usage?.tokens ?? 0;
+                    const tokensLimit = c.limits?.monthly_token_limit ?? null;
+                    const planName = c.is_admin ? "Admin" : (c.limits?.plan || "starter");
                     return (
                       <tr key={c.id}>
                         <th scope="row" className={styles.identityCell}>
@@ -278,6 +287,13 @@ export default function AdminClientesPage(): JSX.Element {
                         </th>
                         <td data-label="Tipo"><span className={cn(styles.badge, c.is_admin && styles.adminBadge)}>{c.is_admin && <Shield aria-hidden="true" />}{c.is_admin ? "Admin" : "Cliente"}</span></td>
                         <td data-label="Status"><span className={cn(styles.status, !c.is_active && styles.inactive)}><i aria-hidden="true" />{c.is_active ? "Ativo" : "Inativo"}</span></td>
+                        <td data-label="Plano / Consumo" className={styles.modelCell}>
+                          <span className={styles.model}>
+                            {c.is_admin
+                              ? "Ilimitado"
+                              : `${planName} · ${(tokensMonth / 1000).toFixed(0)}k${tokensLimit ? `/${Math.round(tokensLimit / 1000)}k` : ""}`}
+                          </span>
+                        </td>
                         <td data-label="Modelo de IA" className={styles.modelCell}><span className={styles.model}>{c.default_ai_model || "Padrão global"}</span></td>
                         <td data-label="Módulos"><div className={styles.modules}><span>{activeFeatures}<span> / {FEATURE_LIST.length}</span></span><meter min={0} max={FEATURE_LIST.length} value={activeFeatures} aria-label={`${activeFeatures} de ${FEATURE_LIST.length} módulos liberados`} /></div></td>
                         <td className={styles.actionsCell}>
@@ -434,8 +450,16 @@ function ClientEditor({
   const [isAdmin, setIsAdmin] = useState(client.is_admin);
   const [model, setModel] = useState(client.default_ai_model || "");
   const [features, setFeatures] = useState<Record<string, boolean>>(client.features || DEFAULT_FEATURES);
-  // Organizador IA: por padrão TRUE (admin pode desativar quando quiser)
-  const [organizerEnabled, setOrganizerEnabled] = useState<boolean>(client.organizer_enabled !== false);
+  const [limits, setLimits] = useState<SaasTenantLimits>(() =>
+    normalizeSaasLimits(
+      client.limits,
+      client.is_admin ? SAAS_PLAN_PRESETS.unlimited : SAAS_PLAN_PRESETS.starter
+    )
+  );
+  // Organizador IA: por padrão desligado para cliente SaaS novo e ligado quando configurado
+  const [organizerEnabled, setOrganizerEnabled] = useState<boolean>(
+    typeof client.organizer_enabled === "boolean" ? client.organizer_enabled : client.is_admin
+  );
   const [organizerPrompt, setOrganizerPrompt] = useState(client.organizer_prompt || "");
   const [notes, setNotes] = useState(client.notes || "");
   const [saving, setSaving] = useState(false);
@@ -494,6 +518,7 @@ function ClientEditor({
         is_admin: isAdmin,
         default_ai_model: model,
         features,
+        limits: isAdmin ? { ...SAAS_PLAN_PRESETS.unlimited, plan: "unlimited" } : limits,
         organizer_enabled: organizerEnabled,
         organizer_prompt: organizerPrompt || null,
         notes: notes || null,
@@ -580,10 +605,145 @@ function ClientEditor({
               <legend>Módulos liberados</legend>
               <div className={styles.fieldHeading}>
                 <span className={styles.hint}>{FEATURE_LIST.filter((f) => features[f.key]).length} de {FEATURE_LIST.length} selecionados</span>
-                <div className={styles.bulkActions}><button type="button" className={styles.inlineAction} onClick={() => setFeatures(DEFAULT_FEATURES)}>Selecionar todos</button><button type="button" className={styles.inlineAction} onClick={() => setFeatures(NO_FEATURES)}>Limpar seleção</button></div>
+                <div className={styles.bulkActions}>
+                  <button type="button" className={styles.inlineAction} onClick={() => setFeatures({ ...DEFAULT_SAAS_CLIENT_FEATURES })}>Padrão SaaS</button>
+                  <button type="button" className={styles.inlineAction} onClick={() => setFeatures(DEFAULT_FEATURES)}>Selecionar todos</button>
+                  <button type="button" className={styles.inlineAction} onClick={() => setFeatures(NO_FEATURES)}>Limpar seleção</button>
+                </div>
               </div>
               <div className={styles.featureGrid}>{FEATURE_LIST.map((f) => <label key={f.key} className={styles.feature}><input type="checkbox" checked={!!features[f.key]} onChange={() => toggleFeature(f.key)} /><span>{f.label}</span></label>)}</div>
             </fieldset>
+
+            {!isAdmin && (
+              <fieldset disabled={saving} className={styles.fieldset}>
+                <legend>Plano e Limites SaaS</legend>
+                <div className={styles.field}>
+                  <label htmlFor="client-plan">Plano</label>
+                  <select
+                    id="client-plan"
+                    value={limits.plan}
+                    onChange={(e) => {
+                      const nextPlan = e.target.value as SaasPlanId;
+                      if (nextPlan === "custom") {
+                        setLimits((prev) => ({ ...prev, plan: "custom" }));
+                      } else {
+                        setLimits({ ...SAAS_PLAN_PRESETS[nextPlan], plan: nextPlan });
+                      }
+                    }}
+                    className={styles.input}
+                  >
+                    <option value="starter" className="bg-neutral-900">Starter (2 agentes · 1 chip · 500k tokens/mês · $5)</option>
+                    <option value="pro" className="bg-neutral-900">Pro (5 agentes · 3 chips · 2M tokens/mês · $20)</option>
+                    <option value="enterprise" className="bg-neutral-900">Enterprise (15 agentes · 10 chips · 8M tokens/mês · $80)</option>
+                    <option value="custom" className="bg-neutral-900">Personalizado</option>
+                    <option value="unlimited" className="bg-neutral-900">Ilimitado (sem teto mensal)</option>
+                  </select>
+                </div>
+                <div className={styles.formGrid}>
+                  <div className={styles.field}>
+                    <label htmlFor="limit-tokens">Tokens IA / mês (0 = ilimitado)</label>
+                    <Input
+                      id="limit-tokens"
+                      type="number"
+                      min={0}
+                      value={limits.monthly_token_limit ?? 0}
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        setLimits((prev) => ({ ...prev, plan: "custom", monthly_token_limit: v > 0 ? v : null }));
+                      }}
+                      className={styles.input}
+                    />
+                  </div>
+                  <div className={styles.field}>
+                    <label htmlFor="limit-cost">Teto USD / mês (0 = ilimitado)</label>
+                    <Input
+                      id="limit-cost"
+                      type="number"
+                      min={0}
+                      step="0.5"
+                      value={limits.monthly_usd_limit ?? 0}
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        setLimits((prev) => ({ ...prev, plan: "custom", monthly_usd_limit: v > 0 ? v : null }));
+                      }}
+                      className={styles.input}
+                    />
+                  </div>
+                  <div className={styles.field}>
+                    <label htmlFor="limit-agents">Máx. agentes (0 = ilimitado)</label>
+                    <Input
+                      id="limit-agents"
+                      type="number"
+                      min={0}
+                      value={limits.max_agents ?? 0}
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        setLimits((prev) => ({ ...prev, plan: "custom", max_agents: v > 0 ? v : null }));
+                      }}
+                      className={styles.input}
+                    />
+                  </div>
+                  <div className={styles.field}>
+                    <label htmlFor="limit-instances">Máx. conexões WhatsApp (0 = ilimitado)</label>
+                    <Input
+                      id="limit-instances"
+                      type="number"
+                      min={0}
+                      value={limits.max_instances ?? 0}
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        setLimits((prev) => ({ ...prev, plan: "custom", max_instances: v > 0 ? v : null }));
+                      }}
+                      className={styles.input}
+                    />
+                  </div>
+                  <div className={styles.field}>
+                    <label htmlFor="limit-prompt">Máx. caracteres do prompt</label>
+                    <Input
+                      id="limit-prompt"
+                      type="number"
+                      min={1000}
+                      max={100000}
+                      value={limits.max_prompt_chars}
+                      onChange={(e) => {
+                        const v = Math.max(1000, Number(e.target.value) || 1000);
+                        setLimits((prev) => ({ ...prev, plan: "custom", max_prompt_chars: v }));
+                      }}
+                      className={styles.input}
+                    />
+                  </div>
+                  <div className={styles.field}>
+                    <label htmlFor="limit-kb-docs">Máx. documentos KB (0 = ilimitado)</label>
+                    <Input
+                      id="limit-kb-docs"
+                      type="number"
+                      min={0}
+                      value={limits.max_kb_docs ?? 0}
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        setLimits((prev) => ({ ...prev, plan: "custom", max_kb_docs: v > 0 ? v : null }));
+                      }}
+                      className={styles.input}
+                    />
+                  </div>
+                  <div className={styles.field}>
+                    <label htmlFor="limit-upload-mb">Máx. upload (MB)</label>
+                    <Input
+                      id="limit-upload-mb"
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={limits.max_upload_mb}
+                      onChange={(e) => {
+                        const v = Math.min(100, Math.max(1, Number(e.target.value) || 15));
+                        setLimits((prev) => ({ ...prev, plan: "custom", max_upload_mb: v }));
+                      }}
+                      className={styles.input}
+                    />
+                  </div>
+                </div>
+              </fieldset>
+            )}
 
             <div className={styles.field}><label htmlFor="client-notes">Notas internas</label><Textarea id="client-notes" value={notes} disabled={saving} onChange={(e) => setNotes(e.target.value)} placeholder="Anotações sobre este cliente" className={cn(styles.input, styles.notes)} /></div>
           </div>

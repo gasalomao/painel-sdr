@@ -388,9 +388,11 @@ export async function applyHumanAutoPause(
   if (!hp.enabled) return { paused: false };
   if (hp.mode === "manual") {
     await pauseSession(sessionId, "human");
+    await setSessionPauseReason(sessionId, "Atendente humano assumiu a conversa (pausa manual)");
     return { paused: true, mode: "manual" };
   }
   await snoozeSession(sessionId, hp.minutes, "human");
+  await setSessionPauseReason(sessionId, `Atendente humano respondeu (retoma em ${hp.minutes} min)`);
   return { paused: true, mode: "timed", minutes: hp.minutes };
 }
 
@@ -470,6 +472,45 @@ export async function snoozeSession(sessionId: string, durationMinutes: number, 
 }
 
 /**
+ * Registra (ou limpa) o motivo legível da pausa dentro de `sessions.variables._pause_reason`.
+ * Zero migration: best-effort, nunca lança erro.
+ */
+export async function setSessionPauseReason(
+  sessionId: string,
+  reason: string | null,
+): Promise<void> {
+  if (!sessionId) return;
+  try {
+    const { data: row } = await supabaseAdmin
+      .from("sessions")
+      .select("variables")
+      .eq("id", sessionId)
+      .maybeSingle();
+
+    const currentVars =
+      row?.variables && typeof row.variables === "object" && !Array.isArray(row.variables)
+        ? { ...(row.variables as Record<string, unknown>) }
+        : {};
+
+    const cleanReason = typeof reason === "string" ? reason.trim().slice(0, 300) : "";
+    if (cleanReason) {
+      currentVars._pause_reason = cleanReason;
+    } else if ("_pause_reason" in currentVars) {
+      delete currentVars._pause_reason;
+    } else {
+      return;
+    }
+
+    await supabaseAdmin
+      .from("sessions")
+      .update({ variables: currentVars })
+      .eq("id", sessionId);
+  } catch {
+    // Best-effort: nunca quebra fluxos principais ou mocks mínimos em testes
+  }
+}
+
+/**
  * Resume imediato.
  */
 export async function resumeSession(sessionId: string) {
@@ -477,5 +518,6 @@ export async function resumeSession(sessionId: string) {
     .from("sessions")
     .update({ bot_status: "bot_active", paused_by: null, paused_at: null, resume_at: null })
     .eq("id", sessionId);
+  await setSessionPauseReason(sessionId, null);
   return { bot_status: "bot_active" as BotStatus, resume_at: null };
 }

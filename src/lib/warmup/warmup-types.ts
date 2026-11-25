@@ -126,7 +126,7 @@ export interface WarmupLog {
   sender_phone?: string | null;
   receiver_phone?: string | null;
   message_text: string;
-  action_type: "text" | "reaction" | "audio" | "presence" | "vcard" | "status" | "circuit_breaker" | "system";
+  action_type: "text" | "reaction" | "audio" | "sticker" | "image" | "poll" | "presence" | "vcard" | "status" | "circuit_breaker" | "system";
   details?: Record<string, any> | null;
   created_at?: string;
 }

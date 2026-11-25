@@ -17,6 +17,14 @@ import {
   type WarmupPurpose,
   type WarmupStage,
 } from "./warmup-types";
+import {
+  applyPhoneMemoryToNewConfig,
+  findPhoneMemory,
+  mapWithConcurrency,
+  pruneMapToLimit,
+  reconcileWarmupIdentityByPhone,
+  savePhoneMemoryFromConfig,
+} from "./warmup-phone-memory";
 
 export type WarmupConfigSource = "table" | "settings";
 
@@ -255,7 +263,7 @@ export async function readTenantWarmupConfigs(clientId: string): Promise<{
 }
 
 const _lastConnectingProbeAt = new Map<string, number>();
-const CONNECTING_PROBE_THROTTLE_MS = 60 * 1000;
+const CONNECTING_PROBE_THROTTLE_MS = 90 * 1000;
 
 export async function readTenantConnections(clientId: string): Promise<TenantConnection[]> {
   try {
@@ -266,41 +274,69 @@ export async function readTenantConnections(clientId: string): Promise<TenantCon
 
     if (error || !Array.isArray(data)) return [];
 
+    const providerCfgByInstance = new Map<string, Record<string, unknown>>();
     const connections: TenantConnection[] = data.map((row) => {
       const providerConfig = (row.provider_config || {}) as Record<string, unknown>;
+      const instName = String(row.instance_name);
+      providerCfgByInstance.set(instName, providerConfig);
       const rawPhone = providerConfig.owner_phone ?? providerConfig.owner_jid ?? null;
       const cleanPhone = rawPhone
         ? String(rawPhone).replace(/@.*$/, "").replace(/\D/g, "")
         : "";
       return {
-        instance_name: String(row.instance_name),
+        instance_name: instName,
         status: String(row.status || ""),
         phone_number: cleanPhone.length >= 10 ? cleanPhone : null,
       };
     });
 
-    // Auto-cura para instâncias presas em status transitório ("connecting") no banco
-    // quando a Evolution API já restabeleceu a sessão ("open").
-    for (const conn of connections) {
-      if (conn.status.trim().toLowerCase() !== "connecting") continue;
+    // Auto-cura para instâncias presas em status transitório/fechado ("connecting",
+    // "close", "disconnected", "refused") no banco quando a Evolution API já restabeleceu "open".
+    const staleConnections = connections.filter((conn) => {
+      if (isConnectedStatus(conn.status)) return false;
       const lastProbe = _lastConnectingProbeAt.get(conn.instance_name) || 0;
-      if (Date.now() - lastProbe < CONNECTING_PROBE_THROTTLE_MS) continue;
-      _lastConnectingProbeAt.set(conn.instance_name, Date.now());
+      return Date.now() - lastProbe >= CONNECTING_PROBE_THROTTLE_MS;
+    });
 
-      try {
-        const { evolution } = await import("@/lib/evolution");
-        const live = await evolution.getStatus(conn.instance_name);
-        if (live?.state && isConnectedStatus(live.state)) {
-          conn.status = "open";
-          await supabaseAdmin
-            .from("channel_connections")
-            .update({ status: "open" })
-            .eq("client_id", clientId)
-            .eq("instance_name", conn.instance_name);
+    if (staleConnections.length > 0) {
+      pruneMapToLimit(_lastConnectingProbeAt, 3000);
+      await mapWithConcurrency(staleConnections, 4, async (conn) => {
+        _lastConnectingProbeAt.set(conn.instance_name, Date.now());
+        try {
+          const { evolution } = await import("@/lib/evolution");
+          if (typeof (evolution as { getStatus?: unknown })?.getStatus !== "function") return;
+          const live = await evolution.getStatus(conn.instance_name);
+          if (live?.state && isConnectedStatus(live.state)) {
+            conn.status = "open";
+            const liveOwner =
+              (live.data as { ownerJid?: string; owner?: string; instance?: { owner?: string; ownerJid?: string } } | null)?.ownerJid ||
+              (live.data as { owner?: string } | null)?.owner ||
+              (live.data as { instance?: { owner?: string; ownerJid?: string } } | null)?.instance?.owner ||
+              (live.data as { instance?: { owner?: string; ownerJid?: string } } | null)?.instance?.ownerJid ||
+              null;
+            const cleanLivePhone = liveOwner ? String(liveOwner).replace(/@.*$/, "").replace(/\D/g, "") : "";
+            if (cleanLivePhone.length >= 10 && !conn.phone_number) {
+              conn.phone_number = cleanLivePhone;
+            }
+            const curProviderCfg = providerCfgByInstance.get(conn.instance_name) || {};
+            const updatePayload: Record<string, unknown> = { status: "open" };
+            if (cleanLivePhone.length >= 10) {
+              updatePayload.provider_config = {
+                ...curProviderCfg,
+                owner_phone: cleanLivePhone,
+                ...(liveOwner ? { owner_jid: liveOwner } : {}),
+              };
+            }
+            await supabaseAdmin
+              .from("channel_connections")
+              .update(updatePayload)
+              .eq("client_id", clientId)
+              .eq("instance_name", conn.instance_name);
+          }
+        } catch {
+          /* mantém status atual se Evolution não responder */
         }
-      } catch {
-        /* mantém status atual se Evolution não responder */
-      }
+      });
     }
 
     return connections;
@@ -439,9 +475,21 @@ export async function saveWarmupConfig(
       );
 
     if (!error) {
+      const savedCfg = { client_id: clientId, instance_name: name, ...patch } as WarmupConfig;
+      try {
+        const { data: fullRow } = await supabaseAdmin
+          .from("whatsapp_warmup_configs")
+          .select("*")
+          .eq("client_id", clientId)
+          .eq("instance_name", name)
+          .maybeSingle();
+        if (fullRow && (fullRow as WarmupConfig).phone_number) {
+          await savePhoneMemoryFromConfig(clientId, fullRow as WarmupConfig);
+        }
+      } catch { /* best-effort */ }
       return {
         ok: true,
-        config: { client_id: clientId, instance_name: name, ...patch } as WarmupConfig,
+        config: savedCfg,
       };
     }
 
@@ -568,25 +616,55 @@ function buildNewWarmupConfig(
 export async function ensureWarmupConfigsForTenant(
   clientId: string,
   opts?: { connections?: TenantConnection[] }
-): Promise<{ created: string[]; enabledNew: string[]; source: WarmupConfigSource; connections: TenantConnection[] }> {
+): Promise<{
+  created: string[];
+  enabledNew: string[];
+  restored: Array<{ instanceName: string; previousInstance?: string | null; stage: WarmupStage; daysActive: number; softRecovery: boolean }>;
+  source: WarmupConfigSource;
+  connections: TenantConnection[];
+}> {
   const connections = opts?.connections ?? (await readTenantConnections(clientId));
   const { source, configs } = await readTenantWarmupConfigs(clientId);
 
   const created: string[] = [];
   const enabledNew: string[] = [];
+  const restored: Array<{
+    instanceName: string;
+    previousInstance?: string | null;
+    stage: WarmupStage;
+    daysActive: number;
+    softRecovery: boolean;
+  }> = [];
 
   if (source !== "table") {
-    return { created, enabledNew, source, connections };
+    return { created, enabledNew, restored, source, connections };
   }
 
   const global = await getGlobalWarmupSettings(clientId);
   const connected = connections.filter((c) => isConnectedStatus(c.status));
+  const nowIso = new Date().toISOString();
 
   for (const connection of connected) {
     const existing = configs[connection.instance_name];
 
     if (!existing) {
-      const row = buildNewWarmupConfig(clientId, connection, global);
+      let row = buildNewWarmupConfig(clientId, connection, global);
+      let restoredMeta: { previousInstance?: string | null; stage: WarmupStage; daysActive: number; softRecovery: boolean } | null = null;
+
+      if (connection.phone_number) {
+        const memory = await findPhoneMemory(clientId, connection.phone_number).catch(() => null);
+        if (memory) {
+          const applied = applyPhoneMemoryToNewConfig(row, memory, nowIso);
+          row = applied.config;
+          restoredMeta = {
+            previousInstance: memory.lastInstanceName,
+            stage: row.stage,
+            daysActive: row.days_active,
+            softRecovery: applied.softRecoveryActivated,
+          };
+        }
+      }
+
       try {
         const { error } = await supabaseAdmin
           .from("whatsapp_warmup_configs")
@@ -594,6 +672,17 @@ export async function ensureWarmupConfigsForTenant(
         if (!error) {
           created.push(connection.instance_name);
           if (row.enabled) enabledNew.push(connection.instance_name);
+          if (restoredMeta) {
+            restored.push({ instanceName: connection.instance_name, ...restoredMeta });
+          }
+          if (connection.phone_number) {
+            await reconcileWarmupIdentityByPhone({
+              clientId,
+              instanceName: connection.instance_name,
+              phone: connection.phone_number,
+              nowIso,
+            }).catch(() => {});
+          }
         }
       } catch {
         /* melhor deixar para o próximo tick do que derrubar o worker */
@@ -601,20 +690,45 @@ export async function ensureWarmupConfigsForTenant(
       continue;
     }
 
+    const effectivePhone = existing.phone_number || connection.phone_number;
     if (!existing.phone_number && connection.phone_number) {
       try {
         await supabaseAdmin
           .from("whatsapp_warmup_configs")
-          .update({ phone_number: connection.phone_number, updated_at: new Date().toISOString() })
+          .update({ phone_number: connection.phone_number, updated_at: nowIso })
           .eq("client_id", clientId)
           .eq("instance_name", connection.instance_name);
       } catch {
         /* opcional */
       }
     }
+
+    if (effectivePhone) {
+      const rec = await reconcileWarmupIdentityByPhone({
+        clientId,
+        instanceName: connection.instance_name,
+        phone: effectivePhone,
+        nowIso,
+      }).catch(() => ({
+        restored: false,
+        previousInstance: null as string | null,
+        stage: undefined as WarmupStage | undefined,
+        daysActive: undefined as number | undefined,
+        softRecovery: false,
+      }));
+      if (rec.restored && rec.stage && rec.daysActive) {
+        restored.push({
+          instanceName: connection.instance_name,
+          previousInstance: rec.previousInstance,
+          stage: rec.stage,
+          daysActive: rec.daysActive,
+          softRecovery: Boolean(rec.softRecovery),
+        });
+      }
+    }
   }
 
-  return { created, enabledNew, source, connections };
+  return { created, enabledNew, restored, source, connections };
 }
 
 /**

@@ -139,7 +139,7 @@ describe("Hardening de ai-organize/config, organizer/run-now, campaigns, automat
       clientId: "tenant-a",
       isAdmin: false,
       impersonating: false,
-      claims: {},
+      claims: { features: { organizador: true, disparo: true, automacao: true } },
     });
     state.isInstanceOwnedByClient.mockResolvedValue(true);
     state.enforceClientDefaultModel.mockResolvedValue(undefined);

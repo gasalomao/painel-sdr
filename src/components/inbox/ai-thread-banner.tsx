@@ -17,14 +17,30 @@ interface AiThreadBannerProps {
   conversationId: string; // remoteJid
   botStatus: "bot_active" | "bot_paused" | string;
   resumeAt: string | null;
+  pausedBy?: string | null;
+  pauseReason?: string | null;
   instanceName: string;
   onChange?: (patch: { bot_status: string; resume_at: string | null }) => void;
+}
+
+function formatPauseOrigin(pausedBy?: string | null): string | null {
+  if (!pausedBy) return null;
+  const norm = pausedBy.trim().toLowerCase();
+  if (norm === "human") return "Atendimento manual do operador";
+  if (norm === "system") return "Pausa automática do sistema";
+  if (norm === "agent_goal") return "Objetivo alcançado";
+  if (norm === "agent_ura_loop") return "Loop de URA detectado";
+  if (norm === "agent_closing") return "Encerramento detectado";
+  if (norm === "agent_quota") return "Cota mensal de IA atingida";
+  return null;
 }
 
 export function AiThreadBanner({
   conversationId,
   botStatus,
   resumeAt,
+  pausedBy,
+  pauseReason,
   instanceName,
   onChange,
 }: AiThreadBannerProps) {
@@ -256,16 +272,26 @@ export function AiThreadBanner({
         <div className={cn(styles.bannerDescription, "flex items-center gap-2 min-w-0 flex-1 truncate")}>
           {isPaused ? (
             countdown ? (
-              <div className="flex items-center gap-1.5 font-medium truncate">
-                <span className="truncate">Pausa humana ativa. Tempo restante para a IA reativar:</span>
+              <div className="flex items-center gap-1.5 font-medium truncate" title={pauseReason || undefined}>
+                <span className="truncate">
+                  {pauseReason
+                    ? `${pauseReason} — IA retoma em:`
+                    : formatPauseOrigin(pausedBy)
+                      ? `${formatPauseOrigin(pausedBy)}. Tempo restante para a IA reativar:`
+                      : "Pausa humana ativa. Tempo restante para a IA reativar:"}
+                </span>
                 <span className="inline-flex items-center gap-1 rounded-md bg-amber-600/20 border border-amber-600/30 px-2 py-0.5 font-mono text-[11px] font-bold text-amber-900 dark:text-amber-100 shrink-0">
                   <Timer className="h-3.5 w-3.5 text-amber-600 dark:text-amber-300 animate-spin" style={{ animationDuration: '4s' }} />
                   {countdown}
                 </span>
               </div>
             ) : (
-              <span className="font-medium truncate">
-                IA silenciada indefinidamente. Atendimento mantido pelo operador humano.
+              <span className="font-medium truncate" title={pauseReason || undefined}>
+                {pauseReason
+                  ? `IA pausada: ${pauseReason}`
+                  : formatPauseOrigin(pausedBy)
+                    ? `IA pausada (${formatPauseOrigin(pausedBy)}). Atendimento mantido pelo operador humano.`
+                    : "IA silenciada indefinidamente. Atendimento mantido pelo operador humano."}
               </span>
             )
           ) : (

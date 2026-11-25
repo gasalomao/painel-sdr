@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { checkTenantRateLimit, getTenantSaasLimits } from "@/lib/saas-limits";
 import { indexKnowledgeDocument } from "@/lib/rag";
 import { getAiKeys } from "@/lib/ai-keys";
 import { invalidateAgentConfigCache } from "@/lib/agent-config-cache";
@@ -10,6 +11,15 @@ export const dynamic = "force-dynamic";
 export async function POST(req: NextRequest) {
   const auth = await requireClientId(req);
   if (!auth.ok) return auth.response;
+  if (!auth.isAdmin) {
+    const rl = checkTenantRateLimit(`kb_save:${auth.clientId}`, 15, 60_000);
+    if (!rl.allowed) {
+      return NextResponse.json(
+        { error: `Muitas atualizações na base em sequência. Aguarde ${rl.retryAfterSec ?? 1}s.` },
+        { status: 429 }
+      );
+    }
+  }
   if (!supabaseAdmin) {
     return NextResponse.json({ success: false, error: "Banco de dados indisponível" }, { status: 500 });
   }
@@ -21,6 +31,34 @@ export async function POST(req: NextRequest) {
     const numAgentId = Number(agent_id) || 1;
     const titleToUse = String(title || "").trim() || "Catálogo de Produtos";
     const contentToUse = String(content || "").trim();
+
+    if (!auth.isAdmin && (action === "create" || action === "update")) {
+      const limits = await getTenantSaasLimits(auth.clientId, false);
+      if (contentToUse.length > limits.max_kb_chars) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: `Documento excede o limite do seu plano (${contentToUse.length}/${limits.max_kb_chars} caracteres).`,
+          },
+          { status: 400 }
+        );
+      }
+      if (action === "create" && limits.max_kb_docs !== null) {
+        const { count } = await supabaseAdmin
+          .from("agent_knowledge")
+          .select("id", { count: "exact", head: true })
+          .eq("client_id", auth.clientId);
+        if ((count ?? 0) >= limits.max_kb_docs) {
+          return NextResponse.json(
+            {
+              success: false,
+              error: `Seu plano permite no máximo ${limits.max_kb_docs} documento(s) na base de conhecimento.`,
+            },
+            { status: 403 }
+          );
+        }
+      }
+    }
 
     if (action === "create") {
       if (!contentToUse) {

@@ -48,7 +48,7 @@ describe.each([
 ])("/api/automations/[id]/$action", ({ action, POST, worker }) => {
   beforeEach(() => {
     vi.resetAllMocks();
-    mocks.verifySession.mockResolvedValue({ clientId: "tenant-A", sessionId: "session-A" });
+    mocks.verifySession.mockResolvedValue({ clientId: "tenant-A", sessionId: "session-A", features: { automacao: true } });
     mocks.isSessionLiveStrict.mockResolvedValue(true);
     mocks.startAutomation.mockResolvedValue({ ok: true });
     mocks.pauseAutomation.mockResolvedValue({ ok: true });
@@ -77,7 +77,7 @@ describe.each([
   });
 
   it("impede tenant B de controlar a automação do tenant A", async () => {
-    mocks.verifySession.mockResolvedValue({ clientId: "tenant-B", sessionId: "session-B" });
+    mocks.verifySession.mockResolvedValue({ clientId: "tenant-B", sessionId: "session-B", features: { automacao: true } });
 
     const response = await POST(request(action), context);
 

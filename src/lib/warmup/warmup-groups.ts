@@ -2,7 +2,15 @@ import { supabaseAdmin } from "@/lib/supabase_admin";
 import { evolution } from "@/lib/evolution";
 import { getBrazilDayKey, logWarmupAction } from "./warmup-engine";
 import { getRandomStatusQuote } from "./warmup-dialogues";
-import type { WarmupGroup } from "./warmup-types";
+import {
+  canonicalBrazilPhoneKey,
+  getPersistedFlapCount24h,
+  getRecentSocketFlapCount,
+  isChipInSoftRecovery,
+  pruneMapToLimit,
+  type WarmupPhoneMemoryEntry,
+} from "./warmup-phone-memory";
+import type { WarmupConfig, WarmupGroup } from "./warmup-types";
 
 // Anti-flood para grupos orgânicos passivos
 const _organicGroupChipCache = new Map<
@@ -447,14 +455,35 @@ export async function processIncomingGroupMessage(params: {
       .catch(() => {});
   }, readDelayMs);
 
-  // 3. Heurística de Reação com Emoji (Zero-Token Tier)
+  // 3. Carência de 72h pós-entrada em grupos recém-ingressados (apenas leitura passiva nos 3 primeiros dias)
+  let inNewJoinGrace = false;
+  if (warmupCheck.groupId) {
+    try {
+      const { data: memRow } = await supabaseAdmin
+        .from("whatsapp_warmup_group_members")
+        .select("joined_at, status")
+        .eq("client_id", clientId)
+        .eq("group_id", warmupCheck.groupId)
+        .eq("instance_name", instanceName)
+        .maybeSingle();
+
+      if (memRow?.joined_at) {
+        const joinedAgeMs = Date.now() - new Date(String(memRow.joined_at)).getTime();
+        if (Number.isFinite(joinedAgeMs) && joinedAgeMs >= 0 && joinedAgeMs < 72 * 60 * 60 * 1000) {
+          inNewJoinGrace = true;
+        }
+      }
+    } catch {}
+  }
+
+  // 4. Heurística de Reação com Emoji (Zero-Token Tier)
   const antiFloodKey = `${instanceName}:${groupJid}`;
   const lastReaction = _lastReactionPerChipGroup.get(antiFloodKey) || 0;
   const cooldownPassed = Date.now() - lastReaction > 90 * 1000; // Mínimo de 90s entre reações no mesmo grupo
 
   let reactionChosen: string | null = null;
 
-  if (cooldownPassed && messageText && messageText.trim()) {
+  if (!inNewJoinGrace && cooldownPassed && messageText && messageText.trim()) {
     const textLower = messageText.toLowerCase();
 
     for (const rule of ZERO_TOKEN_HEURISTICS) {
@@ -498,10 +527,22 @@ export async function processIncomingGroupMessage(params: {
           details: { groupJid, participant, emoji: reactionChosen },
         });
 
+        let syncedReactionCount = nextReactionsCount;
+        try {
+          const { data: latestGroup } = await supabaseAdmin
+            .from("whatsapp_warmup_groups")
+            .select("total_reactions_sent")
+            .eq("group_jid", groupJid)
+            .maybeSingle();
+          if (typeof latestGroup?.total_reactions_sent === "number") {
+            syncedReactionCount = Math.max(nextReactionsCount, latestGroup.total_reactions_sent + 1);
+          }
+        } catch {}
+
         await supabaseAdmin
           .from("whatsapp_warmup_groups")
           .update({
-            total_reactions_sent: nextReactionsCount,
+            total_reactions_sent: syncedReactionCount,
             updated_at: new Date().toISOString(),
           })
           .eq("group_jid", groupJid);
@@ -687,8 +728,11 @@ export async function syncGroupMembershipForChips(
       return (totalJoinedByChip.get(a.instance_name) || 0) - (totalJoinedByChip.get(b.instance_name) || 0);
     });
 
+    const MAX_JOINS_PER_RUN = 6;
     for (const group of groups as WarmupGroup[]) {
+      if (joinedCount >= MAX_JOINS_PER_RUN) break;
       for (const chipCfg of prioritizedChips) {
+        if (joinedCount >= MAX_JOINS_PER_RUN) break;
         const chip = chipCfg.instance_name;
         const key = `${group.id}:${chip}`;
         if (memberSet.has(key)) continue;
@@ -823,15 +867,15 @@ export async function hydrateChipProfile(
     }
     await evolution.updateProfileStatus(pickedStatus, instanceName).catch(() => {});
 
-    // Publica status inicial se ainda não tiver postado
+    // Publica status inicial se ainda não tiver postado (e só grava timestamp se o envio confirmar)
     const quote = getRandomStatusQuote();
-    await evolution.sendStatus(quote, "text", instanceName).catch(() => {});
+    const statusOk = await evolution.sendStatus(quote, "text", instanceName).catch(() => null);
 
     await supabaseAdmin
       .from("whatsapp_warmup_configs")
       .update({
         profile_hydrated: true,
-        last_status_post_at: new Date().toISOString(),
+        ...(statusOk ? { last_status_post_at: new Date().toISOString() } : {}),
         updated_at: new Date().toISOString(),
       })
       .eq("instance_name", instanceName)
@@ -892,18 +936,15 @@ export async function auditChipDay0Hygiene(
         .findProxy(instanceName)
         .catch(() => null);
       if (pr?.enabled && pr.host) {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 2500);
-        const geoRes = await fetch(
-          `http://ip-api.com/json/${encodeURIComponent(String(pr.host))}?fields=status,countryCode,country,hosting`,
-          { signal: ctrl.signal }
-        )
-          .then((r) => r.json())
-          .catch(() => null);
-        clearTimeout(timer);
-        if (geoRes?.status === "success" && geoRes.countryCode && geoRes.countryCode !== "BR") {
+        const geoRes = await checkProxyIpIntel(String(pr.host), { forceInTests: opts?.forceInTests });
+        if (geoRes?.countryCode && geoRes.countryCode !== "BR") {
           warnings.push(
             `proxy estrangeiro (${geoRes.country || geoRes.countryCode}) em chip +55 — recomendado proxy BR ou conexão direta`
+          );
+        }
+        if (geoRes?.hosting) {
+          warnings.push(
+            `proxy em servidor datacenter/ASN (${geoRes.isp || pr.host}) — risco elevado de flapping e bloqueio 401; prefira IP residencial/4G`
           );
         }
       }
@@ -956,4 +997,226 @@ export function extractDay0WarningsByInstance(
     if (parts.length > 0) map.set(log.sender_instance, parts);
   }
   return map;
+}
+
+export interface ProxyIpIntel {
+  countryCode: string | null;
+  country: string | null;
+  hosting: boolean;
+  isp: string | null;
+  checkedAt: number;
+}
+
+const _proxyIntelCache = new Map<string, ProxyIpIntel>();
+const PROXY_INTEL_TTL_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Verifica reputação geográfica e ASN de um host de proxy (com cache em RAM de 6h).
+ */
+export async function checkProxyIpIntel(
+  host: string,
+  opts?: { forceInTests?: boolean }
+): Promise<ProxyIpIntel | null> {
+  const cleanHost = String(host || "").trim().toLowerCase();
+  if (!cleanHost) return null;
+
+  const now = Date.now();
+  const cached = _proxyIntelCache.get(cleanHost);
+  if (cached && now - cached.checkedAt < PROXY_INTEL_TTL_MS) {
+    return cached;
+  }
+
+  if (!opts?.forceInTests && (process.env.VITEST === "true" || process.env.NODE_ENV === "test")) {
+    return null;
+  }
+
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 2500);
+    const geoRes = (await fetch(
+      `http://ip-api.com/json/${encodeURIComponent(cleanHost)}?fields=status,countryCode,country,hosting,isp`,
+      { signal: ctrl.signal }
+    )
+      .then((r) => r.json())
+      .catch(() => null)) as {
+      status?: string;
+      countryCode?: string;
+      country?: string;
+      hosting?: boolean;
+      isp?: string;
+    } | null;
+    clearTimeout(timer);
+
+    if (geoRes?.status === "success") {
+      const entry: ProxyIpIntel = {
+        countryCode: geoRes.countryCode ? String(geoRes.countryCode) : null,
+        country: geoRes.country ? String(geoRes.country) : null,
+        hosting: Boolean(geoRes.hosting),
+        isp: geoRes.isp ? String(geoRes.isp) : null,
+        checkedAt: now,
+      };
+      pruneMapToLimit(_proxyIntelCache, 500);
+      _proxyIntelCache.set(cleanHost, entry);
+      return entry;
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * Sinaliza grupos silenciosos há > 72h que não estão gerando aquecimento passivo real.
+ */
+export function isWarmupGroupDead(
+  group: Pick<WarmupGroup, "status" | "last_activity_at" | "created_at" | "total_messages_received">,
+  nowMs = Date.now()
+): boolean {
+  if (!group || group.status !== "active") return false;
+  const thresholdMs = 72 * 60 * 60 * 1000;
+  if (group.last_activity_at) {
+    const lastMs = new Date(group.last_activity_at).getTime();
+    return Number.isFinite(lastMs) && nowMs - lastMs > thresholdMs;
+  }
+  if (group.created_at && (group.total_messages_received || 0) === 0) {
+    const createdMs = new Date(group.created_at).getTime();
+    return Number.isFinite(createdMs) && nowMs - createdMs > thresholdMs;
+  }
+  return false;
+}
+
+export interface ClusterNetworkAnalysis {
+  warnings: string[];
+  flaps24h: number;
+  softRecovery: boolean;
+  sharedProxyPeers: string[];
+  proxyHosting: boolean;
+  proxyForeign: boolean;
+}
+
+/**
+ * Analisa saúde de rede/proxy e estabilidade do chip em relação à frota:
+ * - Colisão de IP de proxy entre múltiplas instâncias
+ * - Proxy em datacenter (`hosting`) ou estrangeiro (`!= BR`)
+ * - Oscilações excessivas (> 8 desconexões em 24h)
+ * - Estado de Retomada Suave (50% pós-hiato/quarentena)
+ */
+export function analyzeChipClusterHealth(params: {
+  clientId: string;
+  instanceName: string;
+  config: WarmupConfig;
+  proxyByInstance: Map<string, { enabled: boolean; host: string | null }>;
+  proxyIntelByHost?: Map<string, ProxyIpIntel | null>;
+  phoneMemoryMap?: Record<string, WarmupPhoneMemoryEntry>;
+  nowMs?: number;
+}): ClusterNetworkAnalysis {
+  const {
+    clientId,
+    instanceName,
+    config,
+    proxyByInstance,
+    proxyIntelByHost,
+    phoneMemoryMap = {},
+    nowMs = Date.now(),
+  } = params;
+
+  const warnings: string[] = [];
+  const pKey = canonicalBrazilPhoneKey(config.phone_number);
+  const memEntry =
+    (pKey && phoneMemoryMap[pKey]) ||
+    Object.values(phoneMemoryMap).find((e) => e.lastInstanceName === instanceName) ||
+    null;
+
+  const flaps24h = Math.max(
+    getRecentSocketFlapCount(clientId, instanceName, nowMs),
+    getPersistedFlapCount24h(memEntry, nowMs)
+  );
+
+  if (flaps24h > 8) {
+    warnings.push(
+      `Instabilidade severa: ${flaps24h} quedas/reconexões em 24h — troque o proxy ou rede antes de ganhar banimento 401.`
+    );
+  }
+
+  const ownProxy = proxyByInstance.get(instanceName);
+  const sharedProxyPeers: string[] = [];
+  let proxyHosting = false;
+  let proxyForeign = false;
+
+  if (ownProxy?.enabled && ownProxy.host) {
+    const ownHost = ownProxy.host.trim().toLowerCase();
+    for (const [peerName, peerProxy] of proxyByInstance.entries()) {
+      if (peerName === instanceName) continue;
+      if (peerProxy.enabled && peerProxy.host && peerProxy.host.trim().toLowerCase() === ownHost) {
+        sharedProxyPeers.push(peerName);
+      }
+    }
+    if (sharedProxyPeers.length > 0) {
+      warnings.push(
+        `Colisão de proxy (${ownProxy.host}): compartilhado com ${sharedProxyPeers.join(", ")} — risco de banimento em dominó.`
+      );
+    }
+
+    const intel = proxyIntelByHost?.get(ownHost) || _proxyIntelCache.get(ownHost) || null;
+    if (intel?.hosting) {
+      proxyHosting = true;
+      warnings.push(
+        `Proxy em servidor Datacenter/ASN (${intel.isp || ownProxy.host}) — prefira IP residencial/4G brasileiro.`
+      );
+    }
+    if (intel?.countryCode && intel.countryCode !== "BR") {
+      proxyForeign = true;
+      warnings.push(
+        `Proxy localizado fora do Brasil (${intel.country || intel.countryCode}) — divergência geográfica para chip +55.`
+      );
+    }
+  }
+
+  const softRecovery = isChipInSoftRecovery(config, memEntry, nowMs);
+
+  return {
+    warnings,
+    flaps24h,
+    softRecovery,
+    sharedProxyPeers,
+    proxyHosting,
+    proxyForeign,
+  };
+}
+
+/**
+ * Gera conteúdo vCard 3.0 único com todos os chips válidos e deduplicados por telefone canônico,
+ * permitindo importar toda a colmeia na agenda do celular em 1 clique.
+ */
+export function buildClusterVcfContent(
+  chips: Array<{ instanceName: string; phoneNumber?: string | null }>
+): string {
+  const seenKeys = new Set<string>();
+  const cards: string[] = [];
+
+  for (const chip of chips) {
+    const rawDigits = String(chip.phoneNumber || "").replace(/\D/g, "");
+    if (rawDigits.length < 10) continue;
+
+    const canonical = canonicalBrazilPhoneKey(rawDigits) || rawDigits;
+    if (seenKeys.has(canonical)) continue;
+    seenKeys.add(canonical);
+
+    const e164 = rawDigits.startsWith("55") || rawDigits.length >= 12 ? `+${rawDigits}` : `+55${rawDigits}`;
+    const safeName = String(chip.instanceName || `Chip ${rawDigits.slice(-4)}`)
+      .replace(/[\r\n;,]/g, " ")
+      .trim();
+
+    cards.push(
+      [
+        "BEGIN:VCARD",
+        "VERSION:3.0",
+        `FN:${safeName}`,
+        `N:${safeName};;;;`,
+        `TEL;TYPE=CELL:${e164}`,
+        "NOTE:Contato Colmeia Aquecimento WhatsApp",
+        "END:VCARD",
+      ].join("\r\n")
+    );
+  }
+
+  return cards.length > 0 ? `${cards.join("\r\n")}\r\n` : "";
 }

@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { hashPassword, isAdminRequest } from "@/lib/auth";
+import { ALL_ADMIN_FEATURES, DEFAULT_SAAS_CLIENT_FEATURES, SAAS_PLAN_PRESETS, normalizeSaasLimits } from "@/lib/saas-policy";
+import { getAllTenantSaasLimits, getAllTenantsMonthlyUsage, logAdminAudit, saveTenantSaasLimits } from "@/lib/saas-limits";
 import { DEFAULT_KANBAN_COLUMNS } from "@/app/api/kanban-columns/route";
 
 export const dynamic = "force-dynamic";
@@ -22,7 +24,18 @@ export async function GET(req: NextRequest) {
     .select("id, name, email, is_admin, is_active, default_ai_model, features, organizer_enabled, organizer_prompt, created_at, updated_at, notes")
     .order("created_at", { ascending: false });
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
-  return NextResponse.json({ ok: true, clients: data });
+  const clientList = (data || []) as Array<Record<string, unknown> & { id: string; is_admin?: boolean | null }>;
+  const clientIds = clientList.map((c) => c.id);
+  const [limitsMap, usageMap] = await Promise.all([
+    getAllTenantSaasLimits(clientIds),
+    getAllTenantsMonthlyUsage(clientIds),
+  ]);
+  const clientsWithLimits = clientList.map((c) => ({
+    ...c,
+    limits: c.is_admin ? { ...SAAS_PLAN_PRESETS.unlimited } : limitsMap[c.id],
+    monthly_usage: usageMap[c.id] || { tokens: 0, usd: 0 },
+  }));
+  return NextResponse.json({ ok: true, clients: clientsWithLimits });
 }
 
 export async function POST(req: NextRequest) {
@@ -31,7 +44,7 @@ export async function POST(req: NextRequest) {
   }
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
   const body = await req.json().catch(() => ({}));
-  const { name, email, password, features, default_ai_model, organizer_prompt, organizer_enabled, notes, is_admin } = body;
+  const { name, email, password, features, default_ai_model, organizer_prompt, organizer_enabled, notes, is_admin, limits } = body;
 
   if (!name || !email || !password) {
     return NextResponse.json({ ok: false, error: "name, email e password são obrigatórios" }, { status: 400 });
@@ -40,19 +53,27 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "Senha precisa ter no mínimo 8 caracteres" }, { status: 400 });
   }
 
+  const isAdminFlag = !!is_admin;
+  const resolvedFeatures =
+    features && typeof features === "object"
+      ? features
+      : isAdminFlag
+        ? { ...ALL_ADMIN_FEATURES }
+        : { ...DEFAULT_SAAS_CLIENT_FEATURES };
+
   const { data, error } = await supabaseAdmin
     .from("clients")
     .insert({
       name: String(name).trim(),
       email: String(email).trim().toLowerCase(),
       password_hash: hashPassword(password),
-      is_admin: !!is_admin,
+      is_admin: isAdminFlag,
       is_active: true,
       default_ai_model: default_ai_model || null,
-      features: features || undefined, // deixa o default do schema
+      features: resolvedFeatures,
       organizer_prompt: organizer_prompt || null,
-      // Default = TRUE quando não enviado (organizador roda por padrão)
-      organizer_enabled: typeof organizer_enabled === "boolean" ? organizer_enabled : true,
+      // Admin herda organizador ativo por padrão; cliente SaaS novo inicia desligado para evitar cron de IA sem opt-in
+      organizer_enabled: typeof organizer_enabled === "boolean" ? organizer_enabled : isAdminFlag,
       notes: notes || null,
     })
     .select("id, name, email, is_admin, is_active, default_ai_model, features, organizer_enabled, organizer_prompt")
@@ -73,13 +94,29 @@ export async function POST(req: NextRequest) {
 
   // Seed do Agente padrão pro cliente novo
   await supabaseAdmin.from("agent_settings").insert([
-    { 
-      client_id: data.id, 
-      name: "Agente Principal", 
+    {
+      client_id: data.id,
+      name: "Agente Principal",
       main_prompt: "Você é o assistente virtual oficial da empresa. Seu objetivo é qualificar leads e agendar reuniões.",
       is_active: true
     }
   ]).then(({ error: agErr }) => agErr && console.warn("[admin/clients] seed agent:", agErr.message));
 
-  return NextResponse.json({ ok: true, client: data });
+  const savedLimits = await saveTenantSaasLimits(
+    data.id,
+    limits && typeof limits === "object"
+      ? normalizeSaasLimits(limits, isAdminFlag ? SAAS_PLAN_PRESETS.unlimited : SAAS_PLAN_PRESETS.starter)
+      : isAdminFlag
+        ? SAAS_PLAN_PRESETS.unlimited
+        : SAAS_PLAN_PRESETS.starter
+  ).catch(() => (isAdminFlag ? SAAS_PLAN_PRESETS.unlimited : SAAS_PLAN_PRESETS.starter));
+
+  await logAdminAudit({
+    actorId: data.id,
+    targetClientId: data.id,
+    action: "client_created",
+    details: { plan: savedLimits.plan, is_admin: isAdminFlag },
+  });
+
+  return NextResponse.json({ ok: true, client: { ...data, limits: savedLimits } });
 }

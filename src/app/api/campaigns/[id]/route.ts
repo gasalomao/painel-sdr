@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { startCampaign, pauseCampaign, cancelCampaign, isCampaignActive } from "@/lib/campaign-worker";
 import { requireClientId } from "@/lib/tenant";
+import { requireFeatureAccess } from "@/lib/saas-limits";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 import { validateCampaignInstanceAccess, validateClientAgentAccess } from "@/lib/campaign-instance-access";
 
@@ -15,6 +16,8 @@ export const dynamic = "force-dynamic";
 async function ownsCampaign(req: NextRequest, id: string): Promise<{ ok: true; isAdmin: boolean; clientId: string } | { ok: false; res: NextResponse }> {
   const tenant = await requireClientId(req);
   if (!tenant.ok) return { ok: false, res: tenant.response };
+  const denied = requireFeatureAccess(tenant, "disparo");
+  if (denied) return { ok: false, res: denied };
   const { data } = await supabase.from("campaigns").select("client_id").eq("id", id).maybeSingle();
   if (!data) return { ok: false, res: NextResponse.json({ success: false, error: "Não encontrada" }, { status: 404 }) };
   if (!tenant.isAdmin && data.client_id !== tenant.clientId) {
@@ -94,9 +97,18 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   for (const k of ALLOWED_FIELDS) {
     if (k in body) update[k] = body[k];
   }
+  if (!own.isAdmin && "use_web_search" in update) {
+    update.use_web_search = false;
+  }
 
   if ("min_interval_seconds" in update || "max_interval_seconds" in update) {
     const min = Number(update.min_interval_seconds);
+    if (!own.isAdmin && Number.isFinite(min) && min < 15) {
+      return NextResponse.json(
+        { success: false, error: "Intervalo mínimo permitido para disparo é de 15 segundos." },
+        { status: 400 }
+      );
+    }
     const max = Number(update.max_interval_seconds);
     if (min && min < 1) return NextResponse.json({ success: false, error: "Intervalo mínimo: 1s" }, { status: 400 });
     if (min && max && min > max) return NextResponse.json({ success: false, error: "min > max" }, { status: 400 });

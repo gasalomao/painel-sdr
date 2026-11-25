@@ -26,6 +26,7 @@ import {
 import { logTokenUsage } from "@/lib/token-usage";
 import { registerPendingAutomatedSend } from "@/lib/manual-send-registry";
 import { isInstanceOwnedByClient } from "@/lib/tenant";
+import { checkTenantAiQuota, isClientActiveCached, isClientAdminCached } from "@/lib/saas-limits";
 import { evaluateWeekendB2BGuard, isAutoPoolInstance } from "@/lib/campaign-pool";
 import { getBrazilPhoneVariants } from "@/lib/jid-utils";
 import { isChatRowInbound, isChatRowOutbound } from "@/lib/chat-direction";
@@ -580,31 +581,44 @@ async function processTarget(
   //    modelo pode ser OpenRouter; personalizeFollowupWithAI resolve a chave
   //    certa pelo provedor e, se faltar, o catch abaixo cai na mensagem-base.)
   if (camp.ai_enabled && camp.ai_model) {
-    aiInputText = text;
-    try {
-      await addFollowupLog(camp.id, camp.client_id, `Personalizando mensagem com IA para ${nomeLead}...`, "info");
-      const history = await getConversationHistory(target.remote_jid, camp.client_id, 20);
-      const ai = await personalizeFollowupWithAI({
-        baseMessage: text,
-        customPrompt: camp.ai_prompt ? renderTemplate(camp.ai_prompt, renderCtx) : "",
-        model: camp.ai_model,
-        nome_empresa: target.nome_negocio || "",
-        ramo: target.ramo_negocio || "",
-        history,
-        apiKey,
-        stepNumber: target.current_step + 1,
-        campaignId: camp.id,
-        campaignName: camp.name,
-        clientId: camp.client_id,
-        remoteJid: target.remote_jid,  // ← injeta briefing
-      });
-      if (ai && ai.trim()) {
-        text = ai.trim();
-        await addFollowupLog(camp.id, camp.client_id, `IA gerou: "${text.slice(0, 140)}${text.length > 140 ? "…" : ""}"`, "success");
+    const adminTenant = await isClientAdminCached(camp.client_id);
+    const quota: { allowed: boolean; reason?: string } = adminTenant
+      ? { allowed: true }
+      : await checkTenantAiQuota(camp.client_id, false);
+    if (!quota.allowed) {
+      await addFollowupLog(
+        camp.id,
+        camp.client_id,
+        `Cota mensal de IA atingida (${quota.reason || "plano"}) — enviando template direto sem personalização IA.`,
+        "warning"
+      );
+    } else {
+      aiInputText = text;
+      try {
+        await addFollowupLog(camp.id, camp.client_id, `Personalizando mensagem com IA para ${nomeLead}...`, "info");
+        const history = await getConversationHistory(target.remote_jid, camp.client_id, 20);
+        const ai = await personalizeFollowupWithAI({
+          baseMessage: text,
+          customPrompt: camp.ai_prompt ? renderTemplate(camp.ai_prompt, renderCtx) : "",
+          model: camp.ai_model,
+          nome_empresa: target.nome_negocio || "",
+          ramo: target.ramo_negocio || "",
+          history,
+          apiKey,
+          stepNumber: target.current_step + 1,
+          campaignId: camp.id,
+          campaignName: camp.name,
+          clientId: camp.client_id,
+          remoteJid: target.remote_jid,  // ← injeta briefing
+        });
+        if (ai && ai.trim()) {
+          text = ai.trim();
+          await addFollowupLog(camp.id, camp.client_id, `IA gerou: "${text.slice(0, 140)}${text.length > 140 ? "…" : ""}"`, "success");
+        }
+      } catch (e: any) {
+        console.warn(`[FOLLOWUP ${camp.name}] IA falhou, usando template: ${e.message}`);
+        await addFollowupLog(camp.id, camp.client_id, `IA falhou (${e.message}). Enviando template cru.`, "warning");
       }
-    } catch (e: any) {
-      console.warn(`[FOLLOWUP ${camp.name}] IA falhou, usando template: ${e.message}`);
-      await addFollowupLog(camp.id, camp.client_id, `IA falhou (${e.message}). Enviando template cru.`, "warning");
     }
   }
 
@@ -989,6 +1003,9 @@ export async function tickCampaign(campaignId: string, clientId: string): Promis
   error?: string;
 }> {
   if (!clientId?.trim()) return { ok: false, processed: 0, error: "clientId é obrigatório" };
+  if (!(await isClientActiveCached(clientId))) {
+    return { ok: true, processed: 0 };
+  }
   const camp = await loadCampaign(campaignId, clientId);
   if (!camp) return { ok: false, processed: 0, error: "Campanha não encontrada" };
   if (camp.status !== "active" && camp.status !== "draft") {

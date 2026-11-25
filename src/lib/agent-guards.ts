@@ -9,6 +9,7 @@ export interface GuardHistoryMessage {
   sender?: string | null;
   sender_type?: string | null;
   content?: string | null;
+  message_id?: string | null;
 }
 
 export interface LoopDetectionResult {
@@ -91,9 +92,11 @@ function extractBlocks(text: string): string[] {
 export function detectBotOrUraLoop(params: {
   currentText: string;
   history: GuardHistoryMessage[];
+  currentMessageId?: string | null;
 }): LoopDetectionResult {
   const currentText = (params.currentText || "").trim();
   const history = Array.isArray(params.history) ? params.history : [];
+  const currentMessageId = params.currentMessageId ? String(params.currentMessageId).trim() : "";
   if (!currentText || history.length === 0) {
     return { isLoop: false, reason: null };
   }
@@ -119,6 +122,9 @@ export function detectBotOrUraLoop(params: {
     }
 
     if (!isCustomerEntry(msg)) continue;
+    if (currentMessageId && msg.message_id && String(msg.message_id).trim() === currentMessageId) {
+      continue;
+    }
 
     const matchesAuto = URA_MENU_OR_ERROR_REGEX.test(content) || AUTO_REPLY_GREETING_REGEX.test(content);
     // Só conta URA/auto-reply se houver resposta nossa depois (ou antes) no histórico.

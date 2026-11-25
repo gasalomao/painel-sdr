@@ -423,10 +423,84 @@ export const evolution = {
     }
   },
 
-  async sendTextMessage(number: string, text: string, instance?: string) {
+  async sendTextMessage(
+    number: string,
+    text: string,
+    instance?: string,
+    options?: {
+      delay?: number;
+      quoted?: { key: { id: string; remoteJid?: string; fromMe?: boolean }; message?: { conversation?: string } };
+      linkPreview?: boolean;
+    }
+  ) {
     instance = await resolveInstance(instance);
     const target = resolveEvolutionTargetJid(number);
-    return evoFetch(`/message/sendText/${instance}`, "POST", { number: target, text });
+    const payload: Record<string, unknown> = { number: target, text };
+    if (options?.delay && Number.isFinite(options.delay) && options.delay > 0) {
+      payload.delay = Math.round(options.delay);
+    }
+    if (options?.quoted?.key?.id) {
+      payload.quoted = options.quoted;
+    }
+    if (options?.linkPreview !== undefined) {
+      payload.linkPreview = options.linkPreview;
+    }
+    return evoFetch(`/message/sendText/${instance}`, "POST", payload);
+  },
+
+  /**
+   * Envia figurinha (Sticker WebP) via Evolution API v2.
+   * POST /message/sendSticker/:instance
+   */
+  async sendSticker(
+    number: string,
+    stickerBase64OrUrl: string,
+    instance?: string,
+    options?: {
+      delay?: number;
+      quoted?: { key: { id: string; remoteJid?: string; fromMe?: boolean }; message?: { conversation?: string } };
+    }
+  ) {
+    instance = await resolveInstance(instance);
+    const target = resolveEvolutionTargetJid(number);
+    const cleanSticker = String(stickerBase64OrUrl || "").replace(/^data:[^;]+;base64,/, "");
+    const payload: Record<string, unknown> = {
+      number: target,
+      sticker: cleanSticker,
+    };
+    if (options?.delay && Number.isFinite(options.delay) && options.delay > 0) {
+      payload.delay = Math.round(options.delay);
+    }
+    if (options?.quoted?.key?.id) {
+      payload.quoted = options.quoted;
+    }
+    return evoFetch(`/message/sendSticker/${instance}`, "POST", payload, 30000);
+  },
+
+  /**
+   * Envia enquete nativa no WhatsApp via Evolution API v2.
+   * POST /message/sendPoll/:instance
+   */
+  async sendPoll(
+    number: string,
+    name: string,
+    values: string[],
+    selectableCount: number = 1,
+    instance?: string
+  ) {
+    instance = await resolveInstance(instance);
+    const target = resolveEvolutionTargetJid(number);
+    return evoFetch(
+      `/message/sendPoll/${instance}`,
+      "POST",
+      {
+        number: target,
+        name,
+        selectableCount: Math.max(1, selectableCount),
+        values,
+      },
+      15000
+    );
   },
 
   async sendMessage(
@@ -605,28 +679,50 @@ export const evolution = {
 
   /**
    * Envia publicação de Status (Stories do WhatsApp) na Evolution API v2.
+   * Varia cor de fundo e fonte naturalmente para não gerar assinatura fixa.
    * POST /message/sendStatus/:instance
    */
   async sendStatus(
     content: string,
     type: "text" | "image" = "text",
     instance?: string,
-    statusJidList: string[] = []
+    statusJidList: string[] = [],
+    options?: { backgroundColor?: string; font?: number }
   ) {
     instance = await resolveInstance(instance).catch(() => "");
     if (!instance || !content) return null;
+    const palette = [
+      "#075e54",
+      "#128c7e",
+      "#1e3a8a",
+      "#334155",
+      "#7f1d1d",
+      "#4c1d95",
+      "#0f766e",
+      "#78350f",
+    ];
+    const pickedColor =
+      options?.backgroundColor || palette[Math.floor(Math.random() * palette.length)];
+    const pickedFont =
+      options?.font !== undefined ? options.font : Math.floor(Math.random() * 5);
+
     try {
       const cleanJidList = statusJidList
         .map((j) => j.replace(/\D/g, ""))
         .filter((j) => j.length >= 10);
 
-      return await evoFetch(`/message/sendStatus/${instance}`, "POST", {
-        type,
-        content,
-        statusJidList: cleanJidList,
-        backgroundColor: "#075e54",
-        font: 1,
-      }, 15000);
+      return await evoFetch(
+        `/message/sendStatus/${instance}`,
+        "POST",
+        {
+          type,
+          content,
+          statusJidList: cleanJidList,
+          backgroundColor: pickedColor,
+          font: pickedFont,
+        },
+        20000
+      );
     } catch {
       return null;
     }

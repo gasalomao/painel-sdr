@@ -2,8 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { evolution } from "@/lib/evolution";
 import { evolutionGo } from "@/lib/providers/evolution-go";
 import { requireClientId } from "@/lib/tenant";
+import { getTenantSaasLimits } from "@/lib/saas-limits";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import * as channel from "@/lib/channel";
+import { reconcileWarmupIdentityByPhone } from "@/lib/warmup/warmup-phone-memory";
 
 export const dynamic = 'force-dynamic';
 
@@ -117,6 +119,11 @@ export async function GET(req: NextRequest) {
                 .update({ instance_name: i.instanceName })
                 .eq("instance_name", phoneInstanceName)
                 .eq("client_id", session.clientId),
+              reconcileWarmupIdentityByPhone({
+                clientId: session.clientId,
+                instanceName: i.instanceName,
+                phone,
+              }).catch(() => {}),
             ]);
           })
       ).catch(() => {});
@@ -191,6 +198,20 @@ export async function GET(req: NextRequest) {
       import("@/lib/auto-link-agent")
         .then(({ autoLinkAgentOnConnect }) => autoLinkAgentOnConnect(instanceName))
         .catch(() => {});
+
+      const statusOwner =
+        (statusData.data as { owner?: string; instance?: { owner?: string } } | undefined)?.owner ||
+        (statusData.data as { owner?: string; instance?: { owner?: string } } | undefined)?.instance?.owner ||
+        (ch?.provider_config as { owner_phone?: string } | null)?.owner_phone ||
+        null;
+      const phone = statusOwner ? String(statusOwner).replace(/\D/g, "") : "";
+      if (phone) {
+        reconcileWarmupIdentityByPhone({
+          clientId: session.clientId,
+          instanceName,
+          phone,
+        }).catch(() => {});
+      }
     }
 
     return NextResponse.json({ success: true, state: statusData.state, data: statusData.data });
@@ -240,6 +261,24 @@ export async function POST(req: NextRequest) {
     switch (action) {
       case "connect": {
         if (!existingConn) {
+          if (!session.isAdmin) {
+            const limits = await getTenantSaasLimits(session.clientId, false);
+            if (limits.max_instances !== null) {
+              const { count } = await supabaseAdmin
+                .from("channel_connections")
+                .select("instance_name", { count: "exact", head: true })
+                .eq("client_id", session.clientId);
+              if ((count ?? 0) >= limits.max_instances) {
+                return NextResponse.json(
+                  {
+                    success: false,
+                    error: `Seu plano permite no máximo ${limits.max_instances} conexão(ões) de WhatsApp. Fale com o administrador para ampliar o limite.`,
+                  },
+                  { status: 403 }
+                );
+              }
+            }
+          }
           await supabaseAdmin.from("channel_connections").insert({
             instance_name: instanceName,
             client_id: session.clientId,
@@ -251,6 +290,18 @@ export async function POST(req: NextRequest) {
         // Já conectado? Não regera QR — devolve o estado pra UI mostrar "online".
         const pre = await channel.getStatus(instanceName);
         if (pre.state === "open") {
+          const preOwner =
+            (pre.data as { owner?: string; instance?: { owner?: string } } | undefined)?.owner ||
+            (pre.data as { owner?: string; instance?: { owner?: string } } | undefined)?.instance?.owner ||
+            null;
+          const phone = preOwner ? String(preOwner).replace(/\D/g, "") : "";
+          if (phone) {
+            reconcileWarmupIdentityByPhone({
+              clientId: session.clientId,
+              instanceName,
+              phone,
+            }).catch(() => {});
+          }
           return NextResponse.json({ success: true, qrCode: null, pairingCode: null, state: "open", data: pre.data });
         }
 

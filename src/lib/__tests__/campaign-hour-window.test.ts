@@ -1,5 +1,10 @@
-import { describe, it, expect } from "vitest";
-import { isHourInWindow, isWithinHourWindow } from "../campaign-worker";
+import { describe, it, expect, beforeEach } from "vitest";
+import {
+  isHourInWindow,
+  isWithinHourWindow,
+  resetCampaignWarningThrottleForTests,
+  shouldEmitCampaignWarning,
+} from "../campaign-worker";
 
 describe("isHourInWindow & isWithinHourWindow — Janela de Disparo", () => {
   it("janela comercial comum (8h às 18h): permite de 8h às 17h59 e BLOQUEIA às 18h", () => {
@@ -46,5 +51,24 @@ describe("isHourInWindow & isWithinHourWindow — Janela de Disparo", () => {
     const h = Number(new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", hour12: false }).format(new Date()));
     expect(isWithinHourWindow(0, 23)).toBe(true);
     expect(isWithinHourWindow(h, h + 1)).toBe(true);
+  });
+});
+
+describe("shouldEmitCampaignWarning — Debounce de CAMPAIGN_WARNING", () => {
+  beforeEach(() => {
+    resetCampaignWarningThrottleForTests();
+  });
+
+  it("suprime avisos idênticos em < 30 min e volta a emitir se mudar mensagem ou expirar cooldown", () => {
+    const t0 = 1_700_000_000_000;
+    expect(shouldEmitCampaignWarning("camp-1", "out_of_hours", "Fora do horário", t0)).toBe(true);
+    // Mesmo aviso dentro de 30 min -> suprimido
+    expect(shouldEmitCampaignWarning("camp-1", "out_of_hours", "Fora do horário", t0 + 5 * 60_000)).toBe(false);
+    // Outro motivo ou outra campanha -> independe
+    expect(shouldEmitCampaignWarning("camp-2", "out_of_hours", "Fora do horário", t0 + 5 * 60_000)).toBe(true);
+    // Mudou a mensagem -> emite imediatamente
+    expect(shouldEmitCampaignWarning("camp-1", "out_of_hours", "Janela alterada", t0 + 6 * 60_000)).toBe(true);
+    // Passou 30 min -> volta a emitir
+    expect(shouldEmitCampaignWarning("camp-1", "out_of_hours", "Janela alterada", t0 + 37 * 60_000)).toBe(true);
   });
 });

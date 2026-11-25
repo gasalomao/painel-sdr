@@ -12,6 +12,7 @@ import {
   auditLeadWebsite,
   computeLeadQualificationScore,
 } from "@/lib/scraper-lead-enrichment";
+import { buildSdrLeadDossierBlock } from "@/lib/agent/sdr-enrichment-dossier";
 import { evaluateLeadFilters, type ScraperSettings } from "@/lib/scraper-engine";
 
 function makeSyncState(overrides: Partial<ScraperFilterSyncState> = {}): ScraperFilterSyncState {
@@ -409,6 +410,99 @@ describe("auditLeadWebsite — qualidade profunda, 256KB e detecção de platafo
     expect(res.status).toBe("weak_site");
     expect(res.issueCode).toBe("under_construction");
     expect((res.siteQualityScore ?? 100)).toBeLessThanOrEqual(25);
+  });
+
+  it("trata HTTP 403/429 WAF genérico como active_site (auditUncertain) mas mantém 403 de conta suspensa como broken_site", async () => {
+    const litespeed403 = vi.fn().mockResolvedValueOnce(
+      new Response("<html><body>Forbidden by security policy</body></html>", {
+        status: 403,
+        headers: { "content-type": "text/html", server: "LiteSpeed" },
+      }),
+    );
+    const lsOut = await auditLeadWebsite("https://clinicasegura.com.br", litespeed403 as unknown as typeof fetch);
+    expect(lsOut.status).toBe("active_site");
+    expect(lsOut.issueCode).toBe("waf_protected");
+    expect(lsOut.auditUncertain).toBe(true);
+
+    const plain429 = vi.fn().mockResolvedValueOnce(
+      new Response("Too Many Requests", { status: 429, headers: { "content-type": "text/plain" } }),
+    );
+    const rateOut = await auditLeadWebsite("https://lojasegura.com.br", plain429 as unknown as typeof fetch);
+    expect(rateOut.status).toBe("active_site");
+    expect(rateOut.issueCode).toBe("waf_protected");
+    expect(rateOut.auditUncertain).toBe(true);
+
+    const suspended403 = vi.fn().mockResolvedValueOnce(
+      new Response("<html><body><h1>Conta suspensa</h1></body></html>", {
+        status: 403,
+        headers: { "content-type": "text/html" },
+      }),
+    );
+    const suspOut = await auditLeadWebsite("https://contasuspensa.com.br", suspended403 as unknown as typeof fetch);
+    expect(suspOut.status).toBe("broken_site");
+    expect(suspOut.issueCode).toBe("account_suspended");
+  });
+
+  it("tenta retry com www em timeout transitório e marca falha por timeout persistente como active_site não verificado", async () => {
+    const retryWorks = vi
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new Error("timed out"), { name: "TimeoutError" }))
+      .mockResolvedValueOnce(
+        new Response(
+          `<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Clinica Moderna</title></head><body><h1>Clínica Moderna</h1><a href="https://wa.me/5511999990000">WhatsApp</a></body></html>`,
+          { status: 200, headers: { "content-type": "text/html" } },
+        ),
+      );
+    const recovered = await auditLeadWebsite("https://clinicamoderna.com.br", retryWorks as unknown as typeof fetch);
+    expect(retryWorks).toHaveBeenCalledTimes(2);
+    expect(recovered.status).toBe("active_site");
+    expect(recovered.finalUrl).toContain("www.clinicamoderna.com.br");
+
+    const alwaysTimeout = vi
+      .fn()
+      .mockRejectedValue(Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" }));
+    const unverified = await auditLeadWebsite("https://sitelento.com.br", alwaysTimeout as unknown as typeof fetch);
+    expect(unverified.status).toBe("active_site");
+    expect(unverified.issueCode).toBe("audit_timeout_unverified");
+    expect(unverified.auditUncertain).toBe(true);
+    expect(unverified.diagnosticoComercial).toBe("");
+  });
+
+  it("não marca sites Wix / Webflow / Framer / Elementor / Shopify com viewport e HTTPS como weak_site", async () => {
+    const htmlSamples = [
+      `<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><script src="https://static.wixstatic.com/app.js"></script><title>Home</title></head><body><div id="SITE_CONTAINER"></div></body></html>`,
+      `<!doctype html><html data-wf-site="abc"><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Studio</title></head><body><div>Carregando...</div></body></html>`,
+      `<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><script src="https://framerusercontent.com/bundle.js"></script><title>Framer</title></head><body><div></div></body></html>`,
+      `<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/wp-content/plugins/elementor/assets/css/frontend.min.css"><title>Clínica</title></head><body class="elementor-page"></body></html>`,
+      `<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><script src="https://cdn.shopify.com/s/files/theme.js"></script><title>Loja</title></head><body><div></div></body></html>`,
+    ];
+
+    for (const html of htmlSamples) {
+      const fetchMock = vi.fn().mockResolvedValueOnce(
+        new Response(html, { status: 200, headers: { "content-type": "text/html" } }),
+      );
+      const res = await auditLeadWebsite("https://sitemoderno.com.br", fetchMock as unknown as typeof fetch);
+      expect(res.status).toBe("active_site");
+    }
+  });
+
+  it("dossiê da Sarah orienta a NÃO afirmar que o site está quebrado quando auditUncertain = true", () => {
+    const dossier = buildSdrLeadDossierBlock(
+      {
+        nome_negocio: "Clínica Protegida",
+        website: "https://clinicaprotegida.com.br",
+        business_details: {
+          enrichment: {
+            siteHealth: "active_site",
+            siteStatusLabel: "Site ativo (protegido)",
+            siteIssueCode: "waf_protected",
+            auditUncertain: true,
+          },
+        },
+      },
+      "strategic",
+    );
+    expect(dossier).toContain("PROIBIDO dizer ou insinuar que o site está fora do ar, quebrado ou com erro");
   });
 });
 

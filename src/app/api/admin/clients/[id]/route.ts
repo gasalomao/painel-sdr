@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { hashPassword, isAdminRequest, revokeAllClientSessions } from "@/lib/auth";
+import { getTenantSaasLimits, invalidateClientStatusCache, logAdminAudit, saveTenantSaasLimits } from "@/lib/saas-limits";
 
 export const dynamic = "force-dynamic";
 
@@ -24,7 +25,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     .maybeSingle();
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   if (!data) return NextResponse.json({ ok: false, error: "Cliente não encontrado" }, { status: 404 });
-  return NextResponse.json({ ok: true, client: data });
+  const limits = await getTenantSaasLimits(data.id, data.is_admin);
+  return NextResponse.json({ ok: true, client: { ...data, limits } });
 }
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -71,7 +73,24 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   }
 
   if (revokeAfter) await revokeAllClientSessions(id).catch(() => {});
-  return NextResponse.json({ ok: true, client: data });
+  if ("is_active" in patch || "is_admin" in patch) {
+    invalidateClientStatusCache(id);
+  }
+  let limits = await getTenantSaasLimits(id, data.is_admin);
+  if (body.limits && typeof body.limits === "object") {
+    limits = await saveTenantSaasLimits(id, body.limits);
+  }
+  await logAdminAudit({
+    actorId: id,
+    targetClientId: id,
+    action: "client_updated",
+    details: {
+      changed_keys: Object.keys(patch).filter((k) => k !== "password_hash" && k !== "updated_at"),
+      limits_updated: Boolean(body.limits),
+      plan: limits.plan,
+    },
+  });
+  return NextResponse.json({ ok: true, client: { ...data, limits } });
 }
 
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -88,5 +107,7 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
   // (Vamos validar isso na UI também; aqui é só guarda extra.)
   const { error } = await supabaseAdmin.from("clients").delete().eq("id", id);
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+  invalidateClientStatusCache(id);
+  await logAdminAudit({ actorId: id, targetClientId: id, action: "client_deleted" });
   return NextResponse.json({ ok: true });
 }

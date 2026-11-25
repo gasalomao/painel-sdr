@@ -31,6 +31,7 @@ import {
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
 import { BRAND } from "@/lib/brand";
+import { isFeatureEnabledForSession } from "@/lib/saas-policy";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import type { LucideIcon } from "lucide-react";
@@ -120,14 +121,11 @@ function useSession(): SessionData | null {
 function filterNav(items: NavItem[], session: SessionData | null) {
   if (!session?.authenticated) return [];
   const isAdmin = !!session.isAdmin && !session.impersonating;
-  const features = session.features || {};
   return items.filter((item) => {
     if (item.adminOnly) return isAdmin;
     if (isAdmin) return true; // admin vê tudo
     if (!item.feature) return true;
-    // "sites" é premium opt-in: exige flag true (o backend também fail-closed).
-    if (item.feature === "sites") return features[item.feature] === true;
-    return features[item.feature] !== false; // default true se não setado
+    return isFeatureEnabledForSession(item.feature, session);
   });
 }
 

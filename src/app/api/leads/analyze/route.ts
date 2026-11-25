@@ -19,6 +19,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { analyzeLead } from "@/lib/lead-intelligence";
 import { requireClientId } from "@/lib/tenant";
+import { checkTenantAiQuota, checkTenantRateLimit } from "@/lib/saas-limits";
 import { getAiKeys } from "@/lib/ai-keys";
 
 /** Mantém apenas IDs cujo client_id bate com o do auth. */
@@ -69,6 +70,22 @@ export async function POST(req: NextRequest) {
   try {
     const auth = await requireClientId(req);
     if (!auth.ok) return auth.response;
+    if (!auth.isAdmin) {
+      const rl = checkTenantRateLimit(`leads_analyze:${auth.clientId}`, 10, 60_000);
+      if (!rl.allowed) {
+        return NextResponse.json(
+          { success: false, error: `Muitas análises seguidas. Aguarde ${rl.retryAfterSec ?? 1}s.` },
+          { status: 429 },
+        );
+      }
+      const quota = await checkTenantAiQuota(auth.clientId, false);
+      if (!quota.allowed) {
+        return NextResponse.json(
+          { success: false, error: quota.reason || "Limite mensal de IA do plano atingido." },
+          { status: 429 },
+        );
+      }
+    }
     const body = await req.json().catch(() => ({}));
     const force = !!body.force;
     // SaaS guard: apenas admin pode escolher modelo em runtime via body; cliente comum usa o configurado.
@@ -102,7 +119,9 @@ export async function POST(req: NextRequest) {
 
     // ───────── Modo batch ─────────
     if (Array.isArray(body.lead_ids) && body.lead_ids.length > 0) {
-      const requested = body.lead_ids.map(Number).filter(Boolean).slice(0, 200); // hard cap
+      const maxBatch = auth.isAdmin ? 200 : 20;
+      const batchForce = auth.isAdmin ? force : false;
+      const requested = body.lead_ids.map(Number).filter(Boolean).slice(0, maxBatch);
       const ids = await filterLeadIdsByOwnership(requested, auth.clientId);
       const results: any[] = [];
       const errors: { lead_id: number; error: string }[] = [];
@@ -112,7 +131,7 @@ export async function POST(req: NextRequest) {
       for (let i = 0; i < ids.length; i += CHUNK) {
         const batch = ids.slice(i, i + CHUNK);
         const settled = await Promise.allSettled(
-          batch.map((id: number) => analyzeLead({ leadId: id, apiKey, model, force, clientId: auth.clientId })),
+          batch.map((id: number) => analyzeLead({ leadId: id, apiKey, model, force: batchForce, clientId: auth.clientId })),
         );
         settled.forEach((s, idx) => {
           if (s.status === "fulfilled") {

@@ -17,6 +17,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { checkTenantAiQuota, checkTenantRateLimit } from "@/lib/saas-limits";
 import { getRagEmbeddingRef, indexKnowledgeDocument } from "@/lib/rag";
 import { getAiKeys } from "@/lib/ai-keys";
 import { parseModelRef } from "@/lib/ai-provider";
@@ -27,6 +28,22 @@ export const dynamic = "force-dynamic";
 export async function POST(req: NextRequest) {
   const auth = await requireClientId(req);
   if (!auth.ok) return auth.response;
+  if (!auth.isAdmin) {
+    const rl = checkTenantRateLimit(`kb_reindex:${auth.clientId}`, 5, 5 * 60_000);
+    if (!rl.allowed) {
+      return NextResponse.json(
+        { ok: false, error: `Limite de reindexação atingido. Aguarde ${rl.retryAfterSec ?? 1}s.` },
+        { status: 429 },
+      );
+    }
+    const quota = await checkTenantAiQuota(auth.clientId, false);
+    if (!quota.allowed) {
+      return NextResponse.json(
+        { ok: false, error: quota.reason || "Limite mensal de IA do plano atingido." },
+        { status: 429 },
+      );
+    }
+  }
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
 
   const body = await req.json().catch(() => ({}));

@@ -35,6 +35,10 @@ declare global {
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
+  if (process.env.DISABLE_BACKGROUND_WORKERS === "true") {
+    console.info("[SCHEDULER] Desabilitado neste processo (DISABLE_BACKGROUND_WORKERS=true).");
+    return;
+  }
 
   if (globalThis.schedulerStarted) {
     console.log("[SCHEDULER] Já iniciado, pulando duplicidade.");
@@ -120,7 +124,8 @@ export async function register() {
       const { data: clients, error: clientsErr } = await supabase
         .from("clients")
         .select("id, name, organizer_execution_hour, organizer_last_run, organizer_enabled")
-        .neq("organizer_enabled", false);
+        .neq("organizer_enabled", false)
+        .neq("is_active", false);
       if (clientsErr) {
         console.warn("[SCHEDULER] Erro lendo clients:", clientsErr.message);
         return;
@@ -471,6 +476,32 @@ export async function register() {
     }
     globalThis.schedulerStarted = false;
   };
+
+  // ============================================================
+  // RETENÇÃO DE LOGS — Expurga webhook_logs > 30 dias (1x/dia)
+  // Mantém ADMIN_AUDIT intacto e evita crescimento ilimitado no Postgres.
+  // ============================================================
+  const retentionGlobal = globalThis as typeof globalThis & { __logRetentionLastRun?: number };
+  const runLogRetention = async () => {
+    const now = Date.now();
+    if (retentionGlobal.__logRetentionLastRun && now - retentionGlobal.__logRetentionLastRun < 24 * 3600_000) {
+      return;
+    }
+    retentionGlobal.__logRetentionLastRun = now;
+    try {
+      const { supabaseAdmin } = await import("@/lib/supabase_admin");
+      if (!supabaseAdmin) return;
+      const cutoff = new Date(now - 30 * 24 * 3600_000).toISOString();
+      await supabaseAdmin
+        .from("webhook_logs")
+        .delete()
+        .lt("created_at", cutoff)
+        .neq("event", "ADMIN_AUDIT");
+    } catch {
+      // non-fatal
+    }
+  };
+  void runLogRetention();
   const runtimeProcess = Reflect.get(globalThis, "process") as NodeJS.Process | undefined;
   runtimeProcess?.once?.("SIGTERM", stopBackgroundWorkers);
   runtimeProcess?.once?.("SIGINT", stopBackgroundWorkers);

@@ -59,6 +59,7 @@ import {
   tickWarmupWorker,
   resetWarmupWorkerRuntimeState,
   selectAsymmetricWarmupPair,
+  filterChipsWithoutActiveCampaign,
 } from "../warmup-worker";
 
 function config(overrides: Partial<WarmupConfig> = {}): WarmupConfig {
@@ -425,5 +426,53 @@ describe("tickWarmupWorker — segurança", () => {
         receiver_instance: "circuit_breaker",
       })
     );
+  });
+
+  it("filterChipsWithoutActiveCampaign e tickWarmupWorker pulam chips com campanha ativa (status = 'running')", async () => {
+    const filtered = filterChipsWithoutActiveCampaign(
+      [{ instance_name: "chip-1" }, { instance_name: "chip-2" }, { instance_name: "chip-3" }],
+      ["CHIP-1"],
+    );
+    expect(filtered.eligible.map((c) => c.instance_name)).toEqual(["chip-2", "chip-3"]);
+    expect(filtered.skipped.map((c) => c.instance_name)).toEqual(["chip-1"]);
+
+    mocks.from.mockImplementation((table: string) => {
+      if (table === "campaigns") {
+        const chain: Record<string, unknown> = {
+          select: () => chain,
+          eq: () => chain,
+          then: (resolve: (v: { data: Array<{ instance_name: string }>; error: null }) => unknown) =>
+            Promise.resolve({ data: [{ instance_name: "chip-1" }], error: null }).then(resolve),
+        };
+        return chain;
+      }
+      return conversationBuilder();
+    });
+
+    mocks.readConfigs.mockResolvedValue({
+      source: "table",
+      configs: {
+        "chip-1": config({ instance_name: "chip-1", profile_hydrated: true }),
+        "chip-2": config({ instance_name: "chip-2", profile_hydrated: true }),
+        "chip-3": config({ instance_name: "chip-3", profile_hydrated: true }),
+      },
+    });
+    mocks.ensure.mockResolvedValue({
+      created: [],
+      enabledNew: [],
+      source: "table",
+      connections: [
+        { instance_name: "chip-1", status: "open", phone_number: null },
+        { instance_name: "chip-2", status: "open", phone_number: null },
+        { instance_name: "chip-3", status: "open", phone_number: null },
+      ],
+    });
+
+    await tickWarmupWorker();
+
+    expect(mocks.insertConv).toHaveBeenCalledTimes(1);
+    const convPayload = mocks.insertConv.mock.calls[0][0] as { instance_a: string; instance_b: string };
+    expect(convPayload.instance_a).not.toBe("chip-1");
+    expect(convPayload.instance_b).not.toBe("chip-1");
   });
 });

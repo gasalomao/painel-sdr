@@ -118,6 +118,7 @@ beforeEach(() => {
     clientId: "tenant-a",
     isAdmin: false,
     impersonating: false,
+    claims: { features: { disparo: true } },
   });
   tenantMocks.isInstanceOwnedByClient.mockResolvedValue(true);
 });

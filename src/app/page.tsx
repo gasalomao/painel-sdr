@@ -22,6 +22,7 @@ import { buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { DashboardCalendarWidget } from "@/components/dashboard-calendar-widget";
 import { DashboardRemindersWidget } from "@/components/dashboard-reminders-widget";
+import { isFeatureEnabledForSession, type SaasTenantLimits } from "@/lib/saas-policy";
 import { cn } from "@/lib/utils";
 import styles from "./dashboard.module.css";
 
@@ -41,6 +42,23 @@ interface RecentLead {
   nome_negocio: string;
   ramo_negocio: string;
   created_at: string;
+}
+
+interface AccountUsage {
+  plan: SaasTenantLimits["plan"];
+  limits: SaasTenantLimits;
+  usage: {
+    tokens: number;
+    usd: number;
+    tokenPercent: number | null;
+    usdPercent: number | null;
+  };
+  resources: {
+    agents: number;
+    instances: number;
+    kbDocs: number;
+  };
+  status: "ok" | "warning" | "exceeded";
 }
 
 function greeting() {
@@ -87,6 +105,7 @@ export default function DashboardPage(): React.JSX.Element {
   const [userName, setUserName] = useState("");
   const [features, setFeatures] = useState<Record<string, boolean>>({});
   const [isAdminView, setIsAdminView] = useState(false);
+  const [accountUsage, setAccountUsage] = useState<AccountUsage | null>(null);
 
   useEffect(() => {
     async function loadDashboard() {
@@ -103,14 +122,25 @@ export default function DashboardPage(): React.JSX.Element {
         const clientId = session.clientId;
         if (!isAdmin && !clientId) return;
 
-        const summaryRes = await fetch("/api/dashboard/summary", { cache: "no-store" });
+        const [summaryRes, usageRes] = await Promise.all([
+          fetch("/api/dashboard/summary", { cache: "no-store" }),
+          fetch("/api/account/usage", { cache: "no-store" }).catch(() => null),
+        ]);
         const summary = await summaryRes.json().catch(() => null);
-        if (!summaryRes.ok || !summary?.success) return;
-
-        if (summary.metrics) {
-          setMetrics(summary.metrics);
+        if (summaryRes.ok && summary?.success) {
+          if (summary.metrics) {
+            setMetrics(summary.metrics);
+          }
+          setRecentLeads(Array.isArray(summary.recentLeads) ? summary.recentLeads : []);
         }
-        setRecentLeads(Array.isArray(summary.recentLeads) ? summary.recentLeads : []);
+        if (usageRes && usageRes.ok) {
+          const usageJson = await usageRes.json().catch(() => null);
+          if (usageJson?.ok && usageJson?.limits) {
+            setAccountUsage(usageJson as AccountUsage);
+          }
+        } else if (summary?.saas?.limits) {
+          setAccountUsage(summary.saas as AccountUsage);
+        }
       } catch (error) {
         console.error("Erro ao carregar dashboard:", error);
       } finally {
@@ -123,7 +153,8 @@ export default function DashboardPage(): React.JSX.Element {
     return () => window.clearInterval(interval);
   }, []);
 
-  const hasFeature = (key: string) => isAdminView || features[key] !== false;
+  const hasFeature = (key: string) =>
+    isFeatureEnabledForSession(key, { isAdmin: isAdminView, impersonating: false, features });
   const isFirstTime = !loading && metrics.totalLeads === 0 && metrics.instanciasOnline === 0 && metrics.iaInteracoesHoje === 0;
 
   const primaryMetrics = [
@@ -271,6 +302,65 @@ export default function DashboardPage(): React.JSX.Element {
                 </dl>
               </CardContent>
             </Card>
+            {!isAdminView && accountUsage && accountUsage.limits.plan !== "unlimited" && (
+              <Card className="border border-border bg-card py-0 shadow-none ring-0">
+                <CardContent className="p-5 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <h2 className="text-base font-semibold">Consumo do Plano</h2>
+                    <Badge
+                      variant="secondary"
+                      className={cn(
+                        "uppercase text-[10px]",
+                        accountUsage.status === "exceeded" && "bg-red-500/20 text-red-200",
+                        accountUsage.status === "warning" && "bg-amber-500/20 text-amber-200",
+                      )}
+                    >
+                      {accountUsage.plan}
+                    </Badge>
+                  </div>
+                  {accountUsage.status !== "ok" && (
+                    <p className={cn("text-xs leading-relaxed", accountUsage.status === "exceeded" ? "text-red-300" : "text-amber-300")}>
+                      {accountUsage.status === "exceeded"
+                        ? "Limite mensal de IA atingido. As respostas automáticas foram pausadas até a renovação ou upgrade."
+                        : "Seu consumo mensal de IA passou de 80% do limite do plano."}
+                    </p>
+                  )}
+                  <div className="space-y-2 text-xs">
+                    {accountUsage.limits.monthly_token_limit !== null && (
+                      <div>
+                        <div className="flex justify-between text-muted-foreground mb-1">
+                          <span>Tokens IA no mês</span>
+                          <span className="tabular-nums text-foreground">
+                            {accountUsage.usage.tokens.toLocaleString("pt-BR")} / {accountUsage.limits.monthly_token_limit.toLocaleString("pt-BR")}
+                          </span>
+                        </div>
+                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary">
+                          <div
+                            className={cn(
+                              "h-full transition-all",
+                              accountUsage.status === "exceeded" ? "bg-red-400" : accountUsage.status === "warning" ? "bg-amber-400" : "bg-primary",
+                            )}
+                            style={{ width: `${Math.min(100, accountUsage.usage.tokenPercent ?? 0)}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                    <div className="flex justify-between text-muted-foreground pt-1">
+                      <span>Agentes IA</span>
+                      <span className="tabular-nums text-foreground">
+                        {accountUsage.resources.agents}{accountUsage.limits.max_agents !== null ? ` / ${accountUsage.limits.max_agents}` : ""}
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-muted-foreground">
+                      <span>Conexões WhatsApp</span>
+                      <span className="tabular-nums text-foreground">
+                        {accountUsage.resources.instances}{accountUsage.limits.max_instances !== null ? ` / ${accountUsage.limits.max_instances}` : ""}
+                      </span>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
           </div>
         </section>
       </main>

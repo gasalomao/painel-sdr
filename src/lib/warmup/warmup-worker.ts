@@ -1,19 +1,21 @@
 import { supabaseAdmin } from "@/lib/supabase_admin";
+import { isClientActiveCached } from "@/lib/saas-limits";
 import {
   calculateElapsedDaysFromCreatedAt,
   evaluateDailyAutoProgress,
   executeWarmupTurn,
   getAutoCareerPurpose,
   getBrazilDayKey,
-  getHourlySendCap,
+  getCircadianHourlyCap,
   getMaxStageForDaysActive,
   getOrganicScheduleDecision,
+  isBrazilWeekend,
   isWithinOperatingHours,
   logWarmupAction,
+  runIsolatedStatusPost,
 } from "./warmup-engine";
 import {
   calculateInterConversationCooldownSec,
-   getRandomStatusQuote,
   pickEffectiveConversationTheme,
 } from "./warmup-dialogues";
 import { STAGE_DEFAULTS, type WarmupConfig, type WarmupConversation, type WarmupStage } from "./warmup-types";
@@ -31,6 +33,13 @@ import {
   releaseWarmupTickLock,
   type TenantConnection,
 } from "./warmup-config-service";
+import {
+  canonicalBrazilPhoneKey,
+  isChipInSoftRecovery,
+  mapWithConcurrency,
+  pruneMapToLimit,
+  readPhoneMemoryMap,
+} from "./warmup-phone-memory";
 
 const _lastWarningLogged: Record<string, number> = {};
 
@@ -52,6 +61,7 @@ export function resetWarmupWorkerRuntimeState(): void {
   _pairCooldownUntil.clear();
   _lastSymbioticPulseAt.clear();
   _hydratedWarmupTenants.clear();
+  _lastCampaignSkipWarnAt.clear();
 }
 
 async function hydrateWarmupHourlyCountsIfNeeded(clientId: string, nowMs = Date.now()): Promise<void> {
@@ -93,12 +103,17 @@ async function hydrateWarmupHourlyCountsIfNeeded(clientId: string, nowMs = Date.
  *   tenha menor razão `sent_today / max(1, received_today)`, evitando que chips novos
  *   ou marcados como "inbound" iniciem conversas contra chips maduros.
  */
-export function selectAsymmetricWarmupPair(
+/**
+ * Seleciona múltiplos pares assimétricos disjuntos para novas conversas simultâneas na Colmeia,
+ * permitindo escalabilidade horizontal para qualquer quantidade N de chips sem sobreposição.
+ */
+export function selectAsymmetricWarmupPairs(
   idleChips: WarmupConfig[],
   activePairs: Set<string>,
+  maxPairs: number = 1,
   nowMs = Date.now()
-): { initiator: WarmupConfig; partner: WarmupConfig } | null {
-  if (idleChips.length < 2) return null;
+): Array<{ initiator: WarmupConfig; partner: WarmupConfig }> {
+  if (idleChips.length < 2 || maxPairs <= 0) return [];
 
   const initiatorScore = (c: WarmupConfig): number => {
     const stageScore = (c.stage || 1) * 100;
@@ -112,10 +127,16 @@ export function selectAsymmetricWarmupPair(
   const sortedForInitiator = [...idleChips].sort(
     (a, b) => initiatorScore(b) - initiatorScore(a)
   );
+  const usedInTick = new Set<string>();
+  const picked: Array<{ initiator: WarmupConfig; partner: WarmupConfig }> = [];
 
   for (const initiator of sortedForInitiator) {
+    if (picked.length >= maxPairs) break;
+    if (usedInTick.has(initiator.instance_name)) continue;
+
     const candidates = idleChips.filter((c) => {
       if (c.instance_name === initiator.instance_name) return false;
+      if (usedInTick.has(c.instance_name)) return false;
       const pairKey = [initiator.instance_name, c.instance_name].sort().join("::");
       if (activePairs.has(pairKey)) return false;
       const cooldownUntil = _pairCooldownUntil.get(pairKey) || 0;
@@ -133,25 +154,42 @@ export function selectAsymmetricWarmupPair(
     const topSlice = partnerSorted.slice(0, Math.min(2, partnerSorted.length));
     const partner = topSlice[Math.floor(Math.random() * topSlice.length)];
     if (partner) {
-      return { initiator, partner };
+      usedInTick.add(initiator.instance_name);
+      usedInTick.add(partner.instance_name);
+      picked.push({ initiator, partner });
     }
   }
 
-  return null;
+  return picked;
+}
+
+export function selectAsymmetricWarmupPair(
+  idleChips: WarmupConfig[],
+  activePairs: Set<string>,
+  nowMs = Date.now()
+): { initiator: WarmupConfig; partner: WarmupConfig } | null {
+  return selectAsymmetricWarmupPairs(idleChips, activePairs, 1, nowMs)[0] || null;
 }
 
 function recordChipHourSend(instanceName: string, nowMs = Date.now()): void {
+  pruneMapToLimit(_hourlySendTimestamps, 3000);
   const oneHourAgo = nowMs - 60 * 60 * 1000;
   const current = (_hourlySendTimestamps.get(instanceName) || []).filter((ts) => ts > oneHourAgo);
   current.push(nowMs);
   _hourlySendTimestamps.set(instanceName, current);
 }
 
-function isChipWithinHourlyPace(cfg: WarmupConfig, nowMs = Date.now()): boolean {
+function isChipWithinHourlyPace(
+  cfg: WarmupConfig,
+  nowMs = Date.now(),
+  softRecovery = false
+): boolean {
   const oneHourAgo = nowMs - 60 * 60 * 1000;
   const recent = (_hourlySendTimestamps.get(cfg.instance_name) || []).filter((ts) => ts > oneHourAgo);
   _hourlySendTimestamps.set(cfg.instance_name, recent);
-  const cap = getHourlySendCap(cfg, effectiveTarget(cfg));
+  const now = new Date(nowMs);
+  const target = effectiveTargetWithContext(cfg, now, softRecovery);
+  const cap = getCircadianHourlyCap(cfg, target, now);
   return recent.length < cap;
 }
 
@@ -169,9 +207,58 @@ function scheduleGroupSync(clientId: string): void {
 
 // Máximo de turnos por chip dentro do mesmo tick, para não gerar rajada.
 const MAX_TURNS_PER_CHIP_PER_TICK = 1;
+const _lastCampaignSkipWarnAt = new Map<string, number>();
+const CAMPAIGN_SKIP_WARN_COOLDOWN_MS = 30 * 60 * 1000;
+
+/**
+ * Exclui do tick de aquecimento chips que possuem campanha ativa (`running`),
+ * preservando 100% da reputação e capacidade de envio para a prospecção fria.
+ */
+export function filterChipsWithoutActiveCampaign<T extends { instance_name: string }>(
+  configs: T[],
+  runningInstances: Iterable<string>,
+): { eligible: T[]; skipped: T[] } {
+  const activeSet = new Set<string>();
+  for (const inst of runningInstances) {
+    const clean = String(inst || "").trim().toLowerCase();
+    if (clean) activeSet.add(clean);
+  }
+
+  const eligible: T[] = [];
+  const skipped: T[] = [];
+  for (const cfg of configs) {
+    const key = String(cfg.instance_name || "").trim().toLowerCase();
+    if (key && activeSet.has(key)) {
+      skipped.push(cfg);
+    } else {
+      eligible.push(cfg);
+    }
+  }
+  return { eligible, skipped };
+}
 
 function effectiveTarget(config: WarmupConfig): number {
   return getEffectiveDailyTarget(config);
+}
+
+export function effectiveTargetWithContext(
+  config: WarmupConfig,
+  now: Date = new Date(),
+  softRecovery: boolean = false
+): number {
+  const base = effectiveTarget(config);
+  const afterWeekend = isBrazilWeekend(now) ? Math.max(Math.min(4, base), Math.floor(base * 0.55)) : base;
+  return softRecovery ? Math.max(Math.min(3, afterWeekend), Math.floor(afterWeekend * 0.5)) : afterWeekend;
+}
+
+function getEffectiveOperatingWindow(cfg: WarmupConfig, now: Date, isTestEnv: boolean): { start: number; end: number } {
+  const rawStart = cfg.allowed_start_hour ?? 8;
+  const rawEnd = cfg.allowed_end_hour ?? 21;
+  if (isTestEnv || !isBrazilWeekend(now)) {
+    return { start: rawStart, end: rawEnd };
+  }
+  const shiftedStart = rawStart < rawEnd ? Math.min(rawStart + 1, Math.max(rawStart, rawEnd - 1), 10) : rawStart;
+  return { start: shiftedStart, end: rawEnd };
 }
 
 /**
@@ -426,7 +513,7 @@ export async function tickWarmupWorker(): Promise<{
         }
 
         // Validação de chips não em quarentena
-        const nonQuarantined = configs.filter((c) => !c.is_quarantined);
+        let nonQuarantined = configs.filter((c) => !c.is_quarantined);
 
         // Se temos apenas 1 chip: aquece passivamente via grupos da colmeia e Status (apenas dentro do horário comercial)
         if (nonQuarantined.length < 2) {
@@ -442,32 +529,19 @@ export async function tickWarmupWorker(): Promise<{
             continue;
           }
 
+          if (!(await isClientActiveCached(clientId))) {
+            continue;
+          }
+
           scheduleGroupSync(clientId);
 
-          // Publica Status periódicos mesmo quando há apenas 1 chip conectado
-          if (
-            soleChip.enable_status_posts !== false &&
-            (!soleChip.last_status_post_at ||
-              nowMs - new Date(soleChip.last_status_post_at).getTime() > 24 * 60 * 60 * 1000)
-          ) {
-            try {
-              const { evolution } = await import("@/lib/evolution");
-              const quote = getRandomStatusQuote();
-              await evolution.sendStatus(quote, "text", soleChip.instance_name);
-              await supabaseAdmin
-                .from("whatsapp_warmup_configs")
-                .update({ last_status_post_at: nowIso, updated_at: nowIso })
-                .eq("instance_name", soleChip.instance_name)
-                .eq("client_id", clientId);
-
-              await logWarmupAction({
-                client_id: clientId,
-                sender_instance: soleChip.instance_name,
-                receiver_instance: "status@broadcast",
-                message_text: `Publicou Story no WhatsApp Status (modo passivo): "${quote}"`,
-                action_type: "status",
-              });
-            } catch {}
+          // Publica Status de forma isolada quando há apenas 1 chip conectado
+          if (soleChip.enable_status_posts !== false) {
+            await runIsolatedStatusPost({
+              clientId,
+              senderConfig: soleChip,
+              peerPhones: [],
+            });
           }
 
           const lastWarn = _lastWarningLogged[clientId] || 0;
@@ -489,24 +563,84 @@ export async function tickWarmupWorker(): Promise<{
         scheduleGroupSync(clientId);
 
         // Pré-filtra pelo ritmo em RAM; se houver chips elegíveis, hidrata contadores reais do banco na 1ª passada
+        const isTestEnv = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
         let availableChips = nonQuarantined.filter(
-          (c) => (c.sent_today || 0) < effectiveTarget(c) && isChipWithinHourlyPace(c, nowMs)
+          (c) => (c.sent_today || 0) < effectiveTargetWithContext(c, now) && isChipWithinHourlyPace(c, nowMs)
         );
 
         if (availableChips.length === 0) {
           continue;
         }
+
+        if (!(await isClientActiveCached(clientId))) {
+          continue;
+        }
+
+        // Identifica chips em Retomada Suave (50% da meta por 24h pós-hiato >= 48h ou quarentena)
+        const softRecoverySet = new Set<string>();
+        try {
+          const phoneMemMap = await readPhoneMemoryMap(clientId);
+          for (const chip of nonQuarantined) {
+            const pKey = canonicalBrazilPhoneKey(chip.phone_number);
+            const memEntry = (pKey && phoneMemMap[pKey]) || Object.values(phoneMemMap).find((e) => e.lastInstanceName === chip.instance_name);
+            if (isChipInSoftRecovery(chip, memEntry, nowMs)) {
+              softRecoverySet.add(chip.instance_name);
+            }
+          }
+        } catch {}
 
         await hydrateWarmupHourlyCountsIfNeeded(clientId, nowMs);
-        availableChips = nonQuarantined.filter(
-          (c) => (c.sent_today || 0) < effectiveTarget(c) && isChipWithinHourlyPace(c, nowMs)
-        );
+        availableChips = nonQuarantined.filter((c) => {
+          const inSoft = softRecoverySet.has(c.instance_name);
+          return (
+            (c.sent_today || 0) < effectiveTargetWithContext(c, now, inSoft) &&
+            isChipWithinHourlyPace(c, nowMs, inSoft)
+          );
+        });
         if (availableChips.length === 0) {
           continue;
         }
 
-        // 3. Consolida conversas ativas duplicadas do mesmo par (legado do bug de
-        // criação por tick). Mantém a mais antiga e encerra as demais.
+        // Não aquece chips que estão rodando campanha fria ativa (status = 'running').
+        let runningInstances: string[] = [];
+        try {
+          const { data: runningCamps } = await supabaseAdmin
+            .from("campaigns")
+            .select("instance_name")
+            .eq("client_id", clientId)
+            .eq("status", "running");
+          if (Array.isArray(runningCamps)) {
+            runningInstances = runningCamps
+              .map((row) => String((row as { instance_name?: string | null })?.instance_name || "").trim())
+              .filter(Boolean);
+          }
+        } catch {}
+
+        if (runningInstances.length > 0) {
+          const availSplit = filterChipsWithoutActiveCampaign(availableChips, runningInstances);
+          availableChips = availSplit.eligible;
+          nonQuarantined = filterChipsWithoutActiveCampaign(nonQuarantined, runningInstances).eligible;
+          for (const skippedChip of availSplit.skipped) {
+            const warnKey = `${clientId}:${skippedChip.instance_name}`;
+            const prevWarnAt = _lastCampaignSkipWarnAt.get(warnKey) || 0;
+            if (nowMs - prevWarnAt >= CAMPAIGN_SKIP_WARN_COOLDOWN_MS) {
+              _lastCampaignSkipWarnAt.set(warnKey, nowMs);
+              pruneMapToLimit(_lastCampaignSkipWarnAt, 2000);
+              await logWarmupAction({
+                client_id: clientId,
+                sender_instance: skippedChip.instance_name,
+                receiver_instance: "campaign_guard",
+                message_text: `⏸️ Aquecimento pausado temporariamente para ${skippedChip.instance_name} enquanto há disparo ativo em andamento.`,
+                action_type: "system",
+              });
+            }
+          }
+          if (availableChips.length === 0) {
+            continue;
+          }
+        }
+
+        // 3. Consolida conversas ativas duplicadas do mesmo par e limpa conversas zumbis (> 12h sem atualizar)
         let activePairs = new Set<string>();
         try {
           const { data: activeAll } = await supabaseAdmin
@@ -525,6 +659,28 @@ export async function tickWarmupWorker(): Promise<{
             else keptPairs.add(pairKey);
           }
 
+          // Reap opcional de conversas zumbis > 12h (somente quando o client Postgres suportar .lt)
+          try {
+            const cutoff12hIso = new Date(nowMs - 12 * 60 * 60 * 1000).toISOString();
+            const qZombie = supabaseAdmin
+              .from("whatsapp_warmup_conversations")
+              .select("id, instance_a, instance_b")
+              .eq("client_id", clientId)
+              .eq("status", "active") as unknown as {
+                lt?: (col: string, val: string) => Promise<{ data?: Array<{ id: string; instance_a?: string; instance_b?: string }> | null }>;
+              };
+            if (typeof qZombie?.lt === "function") {
+              const { data: zombies } = await qZombie.lt("updated_at", cutoff12hIso);
+              for (const z of zombies || []) {
+                if (z?.id && !duplicateIds.includes(z.id)) {
+                  duplicateIds.push(z.id);
+                  const zKey = [z.instance_a, z.instance_b].filter(Boolean).sort().join("::");
+                  if (zKey) keptPairs.delete(zKey);
+                }
+              }
+            }
+          } catch {}
+
           if (duplicateIds.length > 0) {
             await supabaseAdmin
               .from("whatsapp_warmup_conversations")
@@ -535,7 +691,8 @@ export async function tickWarmupWorker(): Promise<{
           activePairs = keptPairs;
         } catch {}
 
-        // 4. Processa conversas ativas com turno pendente (next_turn_at <= now())
+        // 4. Processa conversas ativas pendentes em paralelo com limite escalável por quantidade N de chips
+        const dynamicDueLimit = Math.min(Math.max(6, availableChips.length), 30);
         const { data: dueConvs } = await supabaseAdmin
           .from("whatsapp_warmup_conversations")
           .select("*")
@@ -543,105 +700,141 @@ export async function tickWarmupWorker(): Promise<{
           .eq("status", "active")
           .lte("next_turn_at", nowIso)
           .order("next_turn_at", { ascending: true })
-          .limit(3);
+          .limit(dynamicDueLimit);
 
         const busyChips = new Set<string>();
         const sentThisTick = new Map<string, number>();
 
         if (dueConvs && dueConvs.length > 0) {
+          const runnableDue: Array<{
+            activeConv: WarmupConversation;
+            instA: WarmupConfig;
+            instB: WarmupConfig;
+            senderCfg: WarmupConfig;
+            receiverCfg: WarmupConfig;
+          }> = [];
+          const staleOrCappedIds: string[] = [];
+
           for (const activeConv of dueConvs as WarmupConversation[]) {
+            if (
+              activeConv.updated_at &&
+              nowMs - new Date(activeConv.updated_at).getTime() > 12 * 60 * 60 * 1000
+            ) {
+              staleOrCappedIds.push(activeConv.id);
+              continue;
+            }
+
             const instA = nonQuarantined.find((c) => c.instance_name === activeConv.instance_a);
             const instB = nonQuarantined.find((c) => c.instance_name === activeConv.instance_b);
+            if (!instA || !instB) continue;
 
-            if (instA && instB) {
-              busyChips.add(instA.instance_name);
-              busyChips.add(instB.instance_name);
+            busyChips.add(instA.instance_name);
+            busyChips.add(instB.instance_name);
 
-              const senderCfg = activeConv.last_sender === instA.instance_name ? instB : instA;
-              const receiverCfg = senderCfg.instance_name === instA.instance_name ? instB : instA;
+            const senderCfg = activeConv.last_sender === instA.instance_name ? instB : instA;
+            const receiverCfg = senderCfg.instance_name === instA.instance_name ? instB : instA;
+            const inSoft = softRecoverySet.has(senderCfg.instance_name);
 
-              // Anti-rajada: no máximo 1 turno por chip dentro do mesmo tick e respeita ritmo por hora.
-              if (
-                (sentThisTick.get(senderCfg.instance_name) || 0) >= MAX_TURNS_PER_CHIP_PER_TICK ||
-                !isChipWithinHourlyPace(senderCfg, nowMs)
-              ) {
-                continue;
-              }
-
-              // Fora da janela do chip remetente: não chama o motor
-              if (
-                !isWithinOperatingHours(
-                  senderCfg.allowed_start_hour ?? 8,
-                  senderCfg.allowed_end_hour ?? 21
-                )
-              ) {
-                continue;
-              }
-
-              if ((senderCfg.sent_today || 0) < effectiveTarget(senderCfg)) {
-                const turnRes = await executeWarmupTurn({
-                  clientId,
-                  senderConfig: senderCfg,
-                  receiverConfig: receiverCfg,
-                  conversation: activeConv,
-                });
-                if (turnRes.success) {
-                  exchangesCount++;
-                  senderCfg.sent_today = (senderCfg.sent_today || 0) + 1;
-                  receiverCfg.received_today = (receiverCfg.received_today || 0) + 1;
-                  sentThisTick.set(
-                    senderCfg.instance_name,
-                    (sentThisTick.get(senderCfg.instance_name) || 0) + 1
-                  );
-                  recordChipHourSend(senderCfg.instance_name, nowMs);
-
-                  // Se este turno encerrou a conversa, aplica cooldown humano entre sessões do par
-                  if ((activeConv.turn_count || 0) + 1 >= (activeConv.max_turns || 6)) {
-                    const pairKey = [instA.instance_name, instB.instance_name].sort().join("::");
-                    const cooldownSec = calculateInterConversationCooldownSec(
-                      Math.min(instA.stage || 1, instB.stage || 1)
-                    );
-                    _pairCooldownUntil.set(pairKey, nowMs + cooldownSec * 1000);
-                  }
-                }
-              } else {
-                await supabaseAdmin
-                  .from("whatsapp_warmup_conversations")
-                  .update({ status: "finished", updated_at: nowIso })
-                  .eq("id", activeConv.id);
-              }
+            if ((senderCfg.sent_today || 0) >= effectiveTargetWithContext(senderCfg, now, inSoft)) {
+              staleOrCappedIds.push(activeConv.id);
+              continue;
             }
+
+            if (
+              (sentThisTick.get(senderCfg.instance_name) || 0) >= MAX_TURNS_PER_CHIP_PER_TICK ||
+              !isChipWithinHourlyPace(senderCfg, nowMs, inSoft)
+            ) {
+              continue;
+            }
+
+            const win = getEffectiveOperatingWindow(senderCfg, now, isTestEnv);
+            if (!isWithinOperatingHours(win.start, win.end)) {
+              continue;
+            }
+
+            // Garante que dois turnos concorrentes no mesmo tick não usem o mesmo chip
+            if (
+              runnableDue.some(
+                (t) =>
+                  t.instA.instance_name === instA.instance_name ||
+                  t.instA.instance_name === instB.instance_name ||
+                  t.instB.instance_name === instA.instance_name ||
+                  t.instB.instance_name === instB.instance_name
+              )
+            ) {
+              continue;
+            }
+
+            sentThisTick.set(senderCfg.instance_name, (sentThisTick.get(senderCfg.instance_name) || 0) + 1);
+            runnableDue.push({ activeConv, instA, instB, senderCfg, receiverCfg });
+          }
+
+          if (staleOrCappedIds.length > 0) {
+            await supabaseAdmin
+              .from("whatsapp_warmup_conversations")
+              .update({ status: "finished", updated_at: nowIso })
+              .in("id", staleOrCappedIds);
+          }
+
+          if (runnableDue.length > 0) {
+            await mapWithConcurrency(runnableDue, 4, async (task, idx) => {
+              // Dessincroniza o segundo exato do disparo (quebra metrônomo :10/:11 entre múltiplos pares)
+              if (!isTestEnv) {
+                const microJitterMs = Math.floor(Math.random() * 4500) + idx * 350;
+                await new Promise((r) => setTimeout(r, Math.min(microJitterMs, 6500)));
+              }
+              const turnRes = await executeWarmupTurn({
+                clientId,
+                senderConfig: task.senderCfg,
+                receiverConfig: task.receiverCfg,
+                conversation: task.activeConv,
+              });
+              if (turnRes.success) {
+                exchangesCount++;
+                task.senderCfg.sent_today = (task.senderCfg.sent_today || 0) + 1;
+                task.receiverCfg.received_today = (task.receiverCfg.received_today || 0) + 1;
+                recordChipHourSend(task.senderCfg.instance_name, nowMs);
+
+                if ((task.activeConv.turn_count || 0) + 1 >= (task.activeConv.max_turns || 6)) {
+                  const pairKey = [task.instA.instance_name, task.instB.instance_name].sort().join("::");
+                  const cooldownSec = calculateInterConversationCooldownSec(
+                    Math.min(task.instA.stage || 1, task.instB.stage || 1)
+                  );
+                  pruneMapToLimit(_pairCooldownUntil, 3000);
+                  _pairCooldownUntil.set(pairKey, nowMs + cooldownSec * 1000);
+                }
+              }
+            });
           }
         }
 
-        // 5. Se houver chips ociosos disponíveis, cria novas conversas em malha (Mesh Swarm Assimétrico)
+        // 5. Se houver chips ociosos disponíveis, cria novas conversas em malha escalável (Mesh Swarm Assimétrico N-Chips)
         const idleChips = availableChips.filter(
           (c) => !busyChips.has(c.instance_name) && !sentThisTick.has(c.instance_name)
         );
 
-        const pickedPair = selectAsymmetricWarmupPair(idleChips, activePairs, nowMs);
-        if (pickedPair) {
-          const { initiator, partner } = pickedPair;
-          const scheduleDecision =
-            process.env.VITEST === "true" || process.env.NODE_ENV === "test"
+        const maxNewPairs = Math.min(Math.max(1, Math.floor(idleChips.length / 2)), 20);
+        const pickedPairs = selectAsymmetricWarmupPairs(idleChips, activePairs, maxNewPairs, nowMs);
+
+        if (pickedPairs.length > 0) {
+          await mapWithConcurrency(pickedPairs, 4, async ({ initiator, partner }, idx) => {
+            const win = getEffectiveOperatingWindow(initiator, now, isTestEnv);
+            const scheduleDecision = isTestEnv
               ? {
-                  allowed: isWithinOperatingHours(
-                    initiator.allowed_start_hour ?? 8,
-                    initiator.allowed_end_hour ?? 21
-                  ),
+                  allowed: isWithinOperatingHours(win.start, win.end),
                   inLunchLull: false,
                 }
-              : getOrganicScheduleDecision(
-                  initiator.instance_name,
-                  initiator.allowed_start_hour ?? 8,
-                  initiator.allowed_end_hour ?? 21,
-                  now
-                );
+              : getOrganicScheduleDecision(initiator.instance_name, win.start, win.end, now);
 
-          // Durante a pausa orgânica do almoço/jantar, reduz em 65% o início de novas conversas
-          const skipForLunch = scheduleDecision.inLunchLull && Math.random() < 0.65;
+            // Durante a pausa orgânica do almoço/jantar, reduz em 65% o início de novas conversas
+            const skipForLunch = scheduleDecision.inLunchLull && Math.random() < 0.65;
+            if (!scheduleDecision.allowed || skipForLunch) return;
 
-          if (scheduleDecision.allowed && !skipForLunch) {
+            if (!isTestEnv) {
+              const microJitterMs = Math.floor(Math.random() * 5000) + idx * 400;
+              await new Promise((r) => setTimeout(r, Math.min(microJitterMs, 7000)));
+            }
+
             const effectiveTheme = pickEffectiveConversationTheme(initiator.ai_theme);
             const maxTurns = Math.floor(Math.random() * 4) + 4; // 4 a 7 turnos
 
@@ -676,6 +869,37 @@ export async function tickWarmupWorker(): Promise<{
                 recordChipHourSend(initiator.instance_name, nowMs);
               }
             }
+          });
+        }
+
+        // 6. Rotina isolada de Stories (Status): roda apenas em chips ociosos que NÃO dispararam neste tick
+        if (!isTestEnv) {
+          const allPeerPhones = nonQuarantined
+            .map((c) => c.phone_number?.replace(/\D/g, ""))
+            .filter((p): p is string => Boolean(p && p.length >= 10));
+
+          const statusDueChips = nonQuarantined
+            .filter((c) => {
+              if (sentThisTick.has(c.instance_name) || c.enable_status_posts === false) return false;
+              const win = getEffectiveOperatingWindow(c, now, false);
+              if (!isWithinOperatingHours(win.start, win.end)) return false;
+              return (
+                !c.last_status_post_at ||
+                nowMs - new Date(c.last_status_post_at).getTime() > 24 * 60 * 60 * 1000
+              );
+            })
+            .slice(0, 2);
+
+          if (statusDueChips.length > 0) {
+            await mapWithConcurrency(statusDueChips, 2, async (cfg) => {
+              const cleanSelf = cfg.phone_number?.replace(/\D/g, "");
+              const peers = allPeerPhones.filter((p) => p !== cleanSelf);
+              await runIsolatedStatusPost({
+                clientId,
+                senderConfig: cfg,
+                peerPhones: peers,
+              });
+            });
           }
         }
       } catch (tenantErr) {
@@ -1241,6 +1465,13 @@ export async function triggerSwarmCycle(
  * 2. O chip de prospecção RESPONDE (`reply_rate` sobe) e tem sua resposta lida/reagida.
  * 3. Dilui a sequência de conversas iniciadas no vácuo (Unanswered Out-Degree Spike).
  */
+function isChipQuarantinedNow(cfg: Partial<WarmupConfig> | undefined, nowMs = Date.now()): boolean {
+  if (!cfg?.is_quarantined) return false;
+  if (!cfg.quarantine_until) return true;
+  const untilMs = new Date(cfg.quarantine_until).getTime();
+  return Number.isNaN(untilMs) || untilMs > nowMs;
+}
+
 export async function triggerSymbioticWarmupPulse(
   clientId: string,
   coldSenderInstance: string,
@@ -1261,54 +1492,151 @@ export async function triggerSymbioticWarmupPulse(
       readTenantWarmupConfigs(clientId),
     ]);
 
+    const coldCfg = configMap[coldSenderInstance];
+    if (isChipQuarantinedNow(coldCfg, nowMs)) {
+      return { triggered: false, reason: "cold_chip_quarantined" };
+    }
+
     const statusByInstance = new Map(connections.map((c) => [c.instance_name, c.status]));
     const candidatePeers = Object.values(configMap)
       .filter((c) => {
         if (!c || c.instance_name === coldSenderInstance) return false;
-        if (c.is_quarantined) return false;
+        if (isChipQuarantinedNow(c, nowMs)) return false;
         if ((c.health_score ?? 100) < 45) return false;
         const connStatus = statusByInstance.get(c.instance_name);
         return connStatus ? isConnectedStatus(connStatus) : true;
       })
       .sort((a, b) => (b.health_score ?? 100) - (a.health_score ?? 100));
 
-    if (candidatePeers.length === 0) {
-      // Fallback: tenta conexões abertas mesmo sem linha explícita no configMap
-      const openConnPeer = connections.find(
-        (c) => c.instance_name !== coldSenderInstance && isConnectedStatus(c.status)
-      );
+    let peerConfig: WarmupConfig | null = candidatePeers[0] || null;
+    if (!peerConfig) {
+      // Fallback seguro: somente conexões abertas que NÃO estão em quarentena/degradadas no configMap
+      const openConnPeer = connections.find((c) => {
+        if (c.instance_name === coldSenderInstance || !isConnectedStatus(c.status)) return false;
+        const cfg = configMap[c.instance_name];
+        return !cfg || (!isChipQuarantinedNow(cfg, nowMs) && (cfg.health_score ?? 100) >= 45);
+      });
       if (!openConnPeer) {
         return { triggered: false, reason: "no_peer_available" };
       }
-      _lastSymbioticPulseAt.set(coldSenderInstance, nowMs);
-      const res = await triggerMutualWarmup(clientId, openConnPeer.instance_name, coldSenderInstance, false);
-      return {
-        triggered: res.success,
-        peerInstance: openConnPeer.instance_name,
-        reason: res.success ? "ok" : res.error || "mutual_failed",
+      peerConfig = {
+        client_id: clientId,
+        instance_name: openConnPeer.instance_name,
+        enabled: true,
+        stage: 2,
+        stage_auto_progress: true,
+        days_active: 4,
+        consecutive_successful_days: 1,
+        health_score: 100,
+        is_quarantined: false,
+        daily_target: 25,
+        sent_today: 0,
+        received_today: 0,
+        error_count_today: 0,
+        min_interval_seconds: 150,
+        max_interval_seconds: 420,
+        min_typing_seconds: 3,
+        max_typing_seconds: 8,
+        allowed_start_hour: 8,
+        allowed_end_hour: 21,
+        ai_model: "fallback",
+        ai_theme: "dia_a_dia",
+        enable_typing: true,
+        enable_blue_ticks: true,
+        enable_reactions: true,
+        enable_audio: true,
+        enable_vcard: true,
+        enable_status_posts: true,
+        continuous_warmup: true,
       };
     }
 
-    const peer = candidatePeers[0];
-    _lastSymbioticPulseAt.set(coldSenderInstance, nowMs);
+    const receiverConfig: WarmupConfig = coldCfg || {
+      client_id: clientId,
+      instance_name: coldSenderInstance,
+      enabled: true,
+      stage: 2,
+      stage_auto_progress: true,
+      days_active: 4,
+      consecutive_successful_days: 1,
+      health_score: 100,
+      is_quarantined: false,
+      daily_target: 25,
+      sent_today: 0,
+      received_today: 0,
+      error_count_today: 0,
+      min_interval_seconds: 150,
+      max_interval_seconds: 420,
+      min_typing_seconds: 3,
+      max_typing_seconds: 8,
+      allowed_start_hour: 8,
+      allowed_end_hour: 21,
+      ai_model: "fallback",
+      ai_theme: "dia_a_dia",
+      enable_typing: true,
+      enable_blue_ticks: true,
+      enable_reactions: true,
+      enable_audio: true,
+      enable_vcard: true,
+      enable_status_posts: true,
+      continuous_warmup: true,
+    };
 
-    // Importante: `peer.instance_name` envia PRIMEIRO para `coldSenderInstance`,
-    // para que o chip que está prospectando no frio RECEBA uma mensagem inbound e responda!
-    const res = await triggerMutualWarmup(clientId, peer.instance_name, coldSenderInstance, false);
+    // Agenda 1 turno assíncrono não-manual (peer -> coldSender); o retorno acontece em 3–7 min no worker,
+    // eliminando rajadas síncronas de 24 segundos detectáveis por heurística anti-spam.
+    const nowIso = new Date(nowMs).toISOString();
+    const convId = `symbiotic_${[peerConfig.instance_name, coldSenderInstance].sort().join("_")}_${Math.floor(nowMs / (60 * 60 * 1000))}`;
+    const convPayload: WarmupConversation = {
+      id: convId,
+      client_id: clientId,
+      instance_a: peerConfig.instance_name,
+      instance_b: coldSenderInstance,
+      topic: pickEffectiveConversationTheme(peerConfig.ai_theme),
+      history: [],
+      turn_count: 0,
+      max_turns: 4,
+      status: "active",
+      next_turn_at: new Date(nowMs + 180 * 1000).toISOString(),
+    };
+
+    try {
+      await supabaseAdmin
+        .from("whatsapp_warmup_conversations")
+        .upsert(
+          {
+            ...convPayload,
+            created_at: nowIso,
+            updated_at: nowIso,
+          },
+          { onConflict: "id" }
+        );
+    } catch {}
+
+    _lastSymbioticPulseAt.set(coldSenderInstance, nowMs);
+    pruneMapToLimit?.(_lastSymbioticPulseAt, 2000);
+
+    const res = await executeWarmupTurn({
+      clientId,
+      senderConfig: peerConfig,
+      receiverConfig,
+      conversation: convPayload,
+      isManualTrigger: false,
+    });
+
     if (res.success) {
       await logWarmupAction({
         client_id: clientId,
-        sender_instance: peer.instance_name,
+        sender_instance: peerConfig.instance_name,
         receiver_instance: coldSenderInstance,
-        message_text: `🛡️ Escudo Simbiótico: pulso bidirecional (${peer.instance_name} ⇄ ${coldSenderInstance}) intercalado na prospecção fria para blindar a taxa de resposta na Meta.`,
+        message_text: `🛡️ Escudo Simbiótico: turno orgânico assíncrono (${peerConfig.instance_name} → ${coldSenderInstance}) intercalado na prospecção fria.`,
         action_type: "system",
       });
     }
 
     return {
       triggered: res.success,
-      peerInstance: peer.instance_name,
-      reason: res.success ? "ok" : res.error || "mutual_failed",
+      peerInstance: peerConfig.instance_name,
+      reason: res.success ? "ok" : res.error || "turn_failed",
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

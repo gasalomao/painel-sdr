@@ -50,7 +50,7 @@ function request(body: unknown): Request {
 describe("/api/scraper tenant scope", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.verifySession.mockResolvedValue({ clientId: tenantId, sessionId: "session-A" });
+    mocks.verifySession.mockResolvedValue({ clientId: tenantId, sessionId: "session-A", features: { captador: true } });
     mocks.isSessionLiveStrict.mockResolvedValue(true);
     mocks.startScraperRun.mockReturnValue({ ok: true });
     mocks.stopScraper.mockReturnValue(true);

@@ -11,12 +11,37 @@ let features: Record<string, boolean>;
 let empty: boolean;
 
 beforeEach(() => {
-  features = {};
+  features = { captador: true };
   empty = false;
   summaryCalls.length = 0;
   from.mockClear();
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
+    if (url.startsWith("/api/account/usage")) {
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          isAdmin: false,
+          plan: "starter",
+          limits: {
+            plan: "starter",
+            max_instances: 1,
+            max_agents: 2,
+            max_kb_docs: 15,
+            max_kb_chars: 15000,
+            max_prompt_chars: 12000,
+            max_output_tokens: 1024,
+            max_upload_mb: 15,
+            monthly_token_limit: 500000,
+            monthly_usd_limit: 5,
+          },
+          usage: { tokens: 100000, usd: 1, tokenPercent: 20, usdPercent: 20 },
+          resources: { agents: 1, instances: 1, kbDocs: 2 },
+          status: "ok",
+        }),
+        { status: 200 },
+      );
+    }
     if (url.startsWith("/api/dashboard/summary")) {
       summaryCalls.push(url);
       return new Response(
@@ -72,5 +97,13 @@ describe("Dashboard — regressão do refinamento visual", () => {
     expect(screen.getByRole("link", { name: "Conectar WhatsApp" }).getAttribute("href")).toBe("/whatsapp");
     expect(screen.getByText("Comece conectando seu canal de atendimento")).toBeDefined();
     expect(screen.getByRole("region", { name: "Resumo da operação" }).textContent).toContain("Conversas0");
+  });
+
+  it("oculta Captar leads para cliente SaaS sem feature restrita e exibe consumo do plano", async () => {
+    features = {};
+    render(<DashboardPage />);
+    await screen.findByText("Consumo do Plano");
+    expect(screen.queryByRole("link", { name: "Captar leads" })).toBeNull();
+    expect(screen.getByText(/100\.000 \/ 500\.000/)).toBeDefined();
   });
 });

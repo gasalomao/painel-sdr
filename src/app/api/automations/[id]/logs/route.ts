@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { requireFeatureAccess } from "@/lib/saas-limits";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +25,8 @@ export async function GET(
 ): Promise<NextResponse> {
   const auth = await requireClientId(req);
   if (!auth.ok) return auth.response;
+  const denied = requireFeatureAccess(auth, ["automacao", "prospeccao_sites"]);
+  if (denied) return denied;
   if (!supabaseAdmin) {
     return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
   }

@@ -22,6 +22,7 @@ import { isManualSend } from "@/lib/manual-send-registry";
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { shouldLogOnce } from "@/lib/webhook-security";
+import { checkTenantAiQuota, isClientActiveCached, isClientAdminCached } from "@/lib/saas-limits";
 
 export const dynamic = "force-dynamic";
 
@@ -316,6 +317,16 @@ export async function POST(req: NextRequest) {
       // Provider da transcrição (UI only — badge no chat; nunca vai pro agente).
       let transcribeProvider: string | null = null;
 
+      // SaaS cost & status guard: conta inativa ou acima da cota mensal não gasta IA.
+      const clientActive = await isClientActiveCached(clientId);
+      const adminTenant = clientActive ? await isClientAdminCached(clientId) : false;
+      const aiQuotaResult = !clientActive
+        ? { allowed: false, reason: "Conta desativada" }
+        : adminTenant
+          ? { allowed: true }
+          : await checkTenantAiQuota(clientId, false);
+      const aiQuotaAllowed = aiQuotaResult.allowed;
+
       // ===== Mídia: baixar + transcrever/descrever ANTES de salvar (o chat só mostra
       // o áudio já transcrito ou imagem/doc descrito; placeholder apenas se falhou) =====
       if (m.mediaId && !groupDisabled && (m.type === "audio" || m.type === "image" || m.type === "document" || m.type === "video")) {
@@ -341,19 +352,27 @@ export async function POST(req: NextRequest) {
                 clientId
               );
               if (m.type === "audio") {
-                const orModels = sessionRow?.agent_id ? await getTranscriptionModels(sessionRow.agent_id) : [];
-                const det = await transcribeAudioDetailed(base64, fMime || "audio/ogg", m.messageId, transcriptionMethod, { models: orModels, clientId });
-                content = det ? `🎤 ${det.text}` : "[🎤 O cliente enviou um áudio que não consegui transcrever]";
-                if (det) transcribeProvider = det.provider;
+                if (clientActive && aiQuotaAllowed) {
+                  const orModels = sessionRow?.agent_id ? await getTranscriptionModels(sessionRow.agent_id) : [];
+                  const det = await transcribeAudioDetailed(base64, fMime || "audio/ogg", m.messageId, transcriptionMethod, { models: orModels, clientId });
+                  content = det ? `🎤 ${det.text}` : "[🎤 O cliente enviou um áudio que não consegui transcrever]";
+                  if (det) transcribeProvider = det.provider;
+                } else if (!content) {
+                  content = "[🎤 Áudio recebido]";
+                }
               } else if (m.type === "image") {
-                const desc = await describeImage(base64, fMime || "image/jpeg", clientId);
+                const desc = clientActive && aiQuotaAllowed
+                  ? await describeImage(base64, fMime || "image/jpeg", clientId)
+                  : null;
                 if (desc) {
                   content = content ? `${content}\n📷 ${desc}` : `📷 ${desc}`;
                 } else if (!content) {
                   content = "[📷 Imagem]";
                 }
               } else if (m.type === "document") {
-                const desc = await describeDocument(base64, fMime || "application/pdf", m.fileName || null, clientId);
+                const desc = clientActive && aiQuotaAllowed
+                  ? await describeDocument(base64, fMime || "application/pdf", m.fileName || null, clientId)
+                  : null;
                 if (desc) {
                   const docLine = `📄 ${m.fileName ? `[${m.fileName}] ` : ""}${desc}`;
                   content = content ? `${content}\n${docLine}` : docLine;
@@ -492,6 +511,31 @@ export async function POST(req: NextRequest) {
             .catch(() => {});
         }
       } else if (content && (m.text || m.caption || m.type === "audio" || m.type === "image" || m.type === "document") && sessionRow?.id && !groupDisabled) {
+        if (!clientActive) {
+          if (shouldLogOnce("inactive_cloud", clientId)) {
+            supabase.from("webhook_logs").insert({
+              client_id: clientId,
+              instance_name: instanceName,
+              event: "AGENT_SKIP_INACTIVE_TENANT",
+              payload: { remote_jid: maskJid(effectiveJid), reason: "Conta desativada", source: "cloud" },
+              created_at: new Date().toISOString(),
+            }).then(() => {}, () => {});
+          }
+        } else if (!aiQuotaAllowed) {
+          if (shouldLogOnce("quota_cloud", clientId)) {
+            supabase.from("webhook_logs").insert({
+              client_id: clientId,
+              instance_name: instanceName,
+              event: "AGENT_QUOTA_EXCEEDED",
+              payload: {
+                remote_jid: maskJid(effectiveJid),
+                reason: aiQuotaResult.reason || "Limite mensal de IA do plano atingido.",
+                source: "cloud",
+              },
+              created_at: new Date().toISOString(),
+            }).then(() => {}, () => {});
+          }
+        } else {
         const eff = await getEffectiveStatus(sessionRow as any);
         if (eff.isActive) {
           // Precondição: sem secret interno o /api/agent/process responde 401
@@ -550,6 +594,7 @@ export async function POST(req: NextRequest) {
               .then((m) => m.scheduleRealtimeLeadEvaluation(clientId, effectiveJid))
               .catch(() => {});
           }
+        }
         }
       }
 

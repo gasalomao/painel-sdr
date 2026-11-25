@@ -57,7 +57,12 @@ describe("minReviews nas APIs de automações", () => {
     mocks.beforeWrite = null;
     mocks.filterReadError = null;
     mocks.writeError = null;
-    mocks.requireClientId.mockResolvedValue({ ok: true, clientId: "tenant-A", isAdmin: false });
+    mocks.requireClientId.mockResolvedValue({
+      ok: true,
+      clientId: "tenant-A",
+      isAdmin: false,
+      claims: { features: { automacao: true } },
+    });
     mocks.isInstanceOwnedByClient.mockResolvedValue(true);
     mocks.enforceClientDefaultModel.mockResolvedValue(undefined);
     mocks.from.mockImplementation(() => {

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { requireFeatureAccess } from "@/lib/saas-limits";
 import { validateCampaignInstanceAccess } from "@/lib/campaign-instance-access";
 import { startCampaign, pauseCampaign, cancelCampaign, resetCampaign, isCampaignActive } from "@/lib/campaign-worker";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
@@ -10,6 +11,8 @@ export const dynamic = "force-dynamic";
 async function ownsProspeccaoCampaign(req: NextRequest, id: string) {
   const ctx = await requireClientId(req);
   if (!ctx.ok) return { ok: false as const, res: ctx.response };
+  const denied = requireFeatureAccess(ctx, "prospeccao_sites");
+  if (denied) return { ok: false as const, res: denied };
   const { data } = await supabase
     .from("campaigns")
     .select("client_id, campaign_type")
@@ -86,6 +89,12 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   if ("min_interval_seconds" in update || "max_interval_seconds" in update) {
     const min = Number(update.min_interval_seconds);
     const max = Number(update.max_interval_seconds);
+    if (!own.ctx.isAdmin && Number.isFinite(min) && min < 15) {
+      return NextResponse.json(
+        { success: false, error: "Intervalo mínimo permitido para disparo é de 15 segundos." },
+        { status: 400 }
+      );
+    }
     if (min && min < 1) return NextResponse.json({ success: false, error: "Intervalo mínimo: 1s" }, { status: 400 });
     if (min && max && min > max) return NextResponse.json({ success: false, error: "min > max" }, { status: 400 });
   }

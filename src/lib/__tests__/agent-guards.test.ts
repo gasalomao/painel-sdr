@@ -87,6 +87,22 @@ describe("detectBotOrUraLoop", () => {
 
     expect(result).toEqual({ isLoop: false, reason: null });
   });
+
+  it("não dispara falso positivo quando a única ocorrência no histórico tem o mesmo message_id da mensagem atual (disparo em 2 partes)", () => {
+    const autoGreeting =
+      "Seja bem-vindo à Clínica! Agradecemos o seu contato, em breve alguém da nossa equipe vai lhe atender.";
+    const result = detectBotOrUraLoop({
+      currentText: autoGreeting,
+      currentMessageId: "wamid-auto-1",
+      history: [
+        { role: "model", content: "Oi, tudo bem? Parte 1 do disparo" },
+        { role: "user", content: autoGreeting, message_id: "wamid-auto-1" },
+        { role: "model", content: "Parte 2 do disparo" },
+      ],
+    });
+
+    expect(result).toEqual({ isLoop: false, reason: null });
+  });
 });
 
 describe("shouldAutoPauseAfterClosing", () => {

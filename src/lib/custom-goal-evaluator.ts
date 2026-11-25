@@ -115,10 +115,53 @@ export function parseBinaryGoalResponse(rawText: string): boolean {
 }
 
 /**
+ * Respostas puras de espera em fila/URA onde o agente apenas aguarda transferência
+ * humana sem ter alcançado um objetivo de agendamento ou fechamento.
+ */
+const PURE_QUEUE_HOLD_AGENT_REGEX =
+  /^(?:(?:combinado|perfeito|certo|beleza|show|entendido|ok|tudo\s+bem|sem\s+problemas?)[,!.\s]*)?(?:eu\s+)?(?:fico|estou|vou\s+ficar|aguardo)\s+(?:no\s+aguardo|aguardando(?:\s+(?:por\s+aqui|o\s+retorno|voc[eê]s?|a\s+equipe|o\s+atendimento))?)(?:\s+por\s+aqui)?[!.\s😊👍🙏]*$/i;
+
+/**
+ * Detecta quando o próprio texto do objetivo proíbe explicitamente pausar se a IA
+ * ainda fez uma pergunta ao cliente.
+ */
+const GOAL_FORBIDS_QUESTION_PAUSE_REGEX =
+  /(?:nunca|n[aã]o)\s+pausar[^.\n]*pergunta|sem\s+(?:nenhuma\s+)?pergunta/i;
+
+function endsWithOpenQuestion(text: string): boolean {
+  const cleaned = (text || "")
+    .replace(/[\s"'”’)\]}>\u{1F300}-\u{1FAFF}\u2600-\u27BF]+$/gu, "")
+    .trim();
+  return cleaned.endsWith("?");
+}
+
+function shouldSkipGoalEvalDeterministically(
+  cleanGoal: string,
+  recent: CustomGoalMessage[],
+): boolean {
+  const lastAgentMsg = [...recent].reverse().find((m) => m.role === "agent");
+  if (!lastAgentMsg) return false;
+
+  const agentText = lastAgentMsg.content.trim();
+  if (!agentText) return false;
+
+  if (PURE_QUEUE_HOLD_AGENT_REGEX.test(agentText)) {
+    return true;
+  }
+
+  if (GOAL_FORBIDS_QUESTION_PAUSE_REGEX.test(cleanGoal) && endsWithOpenQuestion(agentText)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Executa a avaliação binária ultra-leve do objetivo personalizado.
  *
  * Otimizações aplicadas:
- * 1. Curto-circuito com 0 tokens se o objetivo estiver vazio ou sem mensagens.
+ * 1. Curto-circuito com 0 tokens se o objetivo estiver vazio, sem mensagens,
+ *    em resposta pura de espera em URA/fila ou com pergunta aberta proibida pelo objetivo.
  * 2. Janela máxima de 4 mensagens (últimos 2 turnos), truncadas em 220 caracteres cada.
  * 3. `reasoningMode: 0` (zero gasto com thinking tokens ocultos).
  * 4. `maxOutputTokens: 5` e `temperature: 0` (resposta determinística de 1 token: SIM/NAO).
@@ -131,7 +174,12 @@ export async function evaluateCustomGoal(opts: {
   openrouterApiKey?: string | null;
   nvidiaApiKey?: string | null;
 }): Promise<CustomGoalEvaluationResult> {
-  const cleanGoal = (opts.goalText || "").trim().replace(/\s+/g, " ").slice(0, 240);
+  const cleanGoal = (opts.goalText || "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+    .slice(0, 2000);
   if (!cleanGoal) {
     return { achieved: false, method: "skipped", tokensUsed: 0 };
   }
@@ -141,6 +189,10 @@ export async function evaluateCustomGoal(opts: {
     .slice(-4);
 
   if (recent.length === 0) {
+    return { achieved: false, method: "skipped", tokensUsed: 0 };
+  }
+
+  if (shouldSkipGoalEvalDeterministically(cleanGoal, recent)) {
     return { achieved: false, method: "skipped", tokensUsed: 0 };
   }
 
