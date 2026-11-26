@@ -394,6 +394,15 @@ export function MmzapPairModal({
                 <button
                   type="button"
                   disabled={busy}
+                  onClick={() => void sendInput({ type: "goto", url: "https://web.whatsapp.com" })}
+                  className={styles.secondaryAction}
+                >
+                  <Monitor className="w-3.5 h-3.5" />
+                  WhatsApp Web
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
                   onClick={() => void handleRefreshScreenshot()}
                   className={styles.secondaryAction}
                 >

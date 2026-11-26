@@ -46,14 +46,17 @@ export async function getExtensionStatus() {
   try {
     const raw = await fs.readFile(manifestPath, "utf8");
     const manifest = JSON.parse(raw);
+    const defaultPopup =
+      manifest.action?.default_popup || manifest.browser_action?.default_popup || null;
     return {
       installed: true,
       name: String(manifest.name || "MMZap"),
       version: String(manifest.version || ""),
+      defaultPopup: defaultPopup ? String(defaultPopup).replace(/^\/+/, "") : null,
       dir: EXTENSION_DIR,
     };
   } catch {
-    return { installed: false, name: null, version: null, dir: EXTENSION_DIR };
+    return { installed: false, name: null, version: null, defaultPopup: null, dir: EXTENSION_DIR };
   }
 }
 
@@ -301,7 +304,14 @@ export async function getPairingQr(instanceName) {
     session.qrCodeBase64 = null;
     session.status = session.needsExtensionSetup ? "needs_extension_setup" : "idle";
     session.updatedAt = new Date().toISOString();
-    if (session.mode === "pair") {
+    if (session.needsExtensionSetup) {
+      // Mantém o Chromium logado aberto para o admin concluir a 1ª configuração da extensão no modal
+      session.mode = "setup";
+      if (session.timer) clearTimeout(session.timer);
+      session.timer = setTimeout(() => {
+        void stopSession(safeName, "setup_timeout");
+      }, 10 * 60 * 1000);
+    } else if (session.mode === "pair") {
       // Pareamento concluído: fecha o Chromium para liberar RAM imediatamente até o próximo turno agendado
       setTimeout(() => void stopSession(safeName, "paired_complete"), 1500);
     }
@@ -338,7 +348,11 @@ export async function getPairingQr(instanceName) {
 export async function openSetupSession({ instanceName, clientId, proxy, setupUrl }) {
   const safeName = sanitizeInstanceName(instanceName);
   const existing = sessions.get(safeName);
-  if (existing && existing.status !== "setup") {
+  if (
+    existing &&
+    existing.status !== "setup" &&
+    existing.status !== "needs_extension_setup"
+  ) {
     await stopSession(safeName, "enter_setup");
   }
 
@@ -366,20 +380,31 @@ export async function openSetupSession({ instanceName, clientId, proxy, setupUrl
   }
 
   const session = sessions.get(safeName);
+  session.status = "setup";
+  session.mode = "setup";
+  session.updatedAt = new Date().toISOString();
+
   if (setupUrl) {
     await session.page.goto(setupUrl, { waitUntil: "domcontentloaded", timeout: 20_000 }).catch(() => {});
   } else {
-    // Tenta localizar o ID da extensão carregada para abrir popup/options direto na viewport
+    const extStatus = await getExtensionStatus();
     const serviceWorkers = session.context.serviceWorkers();
     const bgPages = session.context.backgroundPages();
-    const firstUrl =
-      serviceWorkers[0]?.url() || bgPages[0]?.url() || "";
+    const firstUrl = serviceWorkers[0]?.url() || bgPages[0]?.url() || "";
     const extMatch = firstUrl.match(/^chrome-extension:\/\/([^/]+)/);
-    if (extMatch?.[1]) {
+
+    if (extStatus.defaultPopup && extMatch?.[1]) {
       const extBase = `chrome-extension://${extMatch[1]}`;
-      await session.page.goto(`${extBase}/popup.html`, { timeout: 8000 }).catch(async () => {
-        await session.page.goto("chrome://extensions", { timeout: 8000 }).catch(() => {});
+      await session.page.goto(`${extBase}/${extStatus.defaultPopup}`, { timeout: 8000 }).catch(async () => {
+        await session.page.goto("https://web.whatsapp.com", { waitUntil: "domcontentloaded", timeout: 20_000 }).catch(() => {});
       });
+    } else {
+      // MMZap v2.0.5 injeta a interface diretamente no DOM do WhatsApp Web via content_script
+      const curUrl = session.page.url() || "";
+      if (!curUrl.startsWith("https://web.whatsapp.com")) {
+        await session.page.goto("https://web.whatsapp.com", { waitUntil: "domcontentloaded", timeout: 25_000 }).catch(() => {});
+      }
+      await new Promise((r) => setTimeout(r, 3000));
     }
   }
 
