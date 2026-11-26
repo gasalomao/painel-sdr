@@ -1029,7 +1029,7 @@ export function sanitizeMmzapGovernorPatch(
   base: MmzapGovernorSettings = DEFAULT_MMZAP_GOVERNOR_SETTINGS
 ): MmzapGovernorSettings {
   const startHour = clampInt(raw.allowed_start_hour, 0, 23, base.allowed_start_hour);
-  const rawEndHour = clampInt(raw.allowed_end_hour, 0, 23, base.allowed_end_hour);
+  const rawEndHour = clampInt(raw.allowed_end_hour, 1, 24, base.allowed_end_hour);
   const endHour = rawEndHour >= startHour ? rawEndHour : startHour;
   const rawAutoStage = Number(raw.auto_disable_stage);
   const autoDisableStage: 3 | 4 =

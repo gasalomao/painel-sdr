@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { evolution } from "@/lib/evolution";
 import {
@@ -14,7 +15,7 @@ import {
   readTenantWarmupConfigs,
 } from "./warmup-config-service";
 import { logWarmupAction } from "./warmup-engine";
-import { cleanupDeadWarmupGroups, hydrateChipProfile } from "./warmup-groups";
+import { checkProxyIpIntel, cleanupDeadWarmupGroups, hydrateChipProfile } from "./warmup-groups";
 import { pruneMapToLimit } from "./warmup-phone-memory";
 
 const SELF_HEALING_LOG_PREFIX = "warmup_self_healing_log_";
@@ -202,8 +203,9 @@ export async function runWarmupSelfHealingForTenant(
     return { checkedChips: 0, fixedCount: 0, needsAttentionCount: 0, actions: [] };
   }
 
-  // Lê provider_config de channel_connections para preservar webhook_secret existente ao reparar
+  // Lê provider_config de channel_connections para preservar/provisionar webhook_secret existente ao reparar
   const webhookSecretByInst = new Map<string, string>();
+  const providerConfigByInst = new Map<string, Record<string, unknown>>();
   try {
     const { data: connRows } = await supabaseAdmin
       .from("channel_connections")
@@ -215,7 +217,11 @@ export async function runWarmupSelfHealingForTenant(
       provider_config?: Record<string, unknown> | null;
     }>) {
       if (!row?.instance_name) continue;
-      const secret = row.provider_config?.webhook_secret;
+      const pCfg = (row.provider_config && typeof row.provider_config === "object"
+        ? { ...row.provider_config }
+        : {}) as Record<string, unknown>;
+      providerConfigByInst.set(row.instance_name, pCfg);
+      const secret = pCfg.webhook_secret;
       if (typeof secret === "string" && secret.trim()) {
         webhookSecretByInst.set(row.instance_name, secret.trim());
       }
@@ -242,7 +248,8 @@ export async function runWarmupSelfHealingForTenant(
   }
 
   // 3. Verifica e auto-repara Webhooks na Evolution + coleta proxies ao vivo para checar colisão/saúde
-  const proxyHolders = new Map<string, string[]>();
+  // Colisão indexada pelo HOST/IP (não host:port) para capturar múltiplos chips no mesmo IP em portas distintas
+  const proxyHoldersByHost = new Map<string, string[]>();
   const proxyDetailsByInst = new Map<
     string,
     { enabled: boolean; host: string; port: number; protocol: "http" | "https" | "socks4" | "socks5"; username: string; password: string }
@@ -291,21 +298,48 @@ export async function runWarmupSelfHealingForTenant(
       }
     }
 
-    // 3b. Verificação e reparo automático do Webhook (essencial para MMZap e grupos)
+    // 3b. Verificação e reparo automático do Webhook (essencial para MMZap, grupos e feedback de entrega)
     if (typeof evolution.findWebhook === "function" && typeof evolution.setWebhook === "function") {
       try {
-        const wh = await evolution.findWebhook(inst);
+        const wh = (await evolution.findWebhook(inst)) as {
+          enabled?: boolean;
+          url?: string;
+          events?: string[];
+          headers?: Record<string, string>;
+        } | null;
         const events = Array.isArray(wh?.events) ? wh.events.map((e) => String(e).toUpperCase()) : [];
         const hasUpsert = events.includes("MESSAGES_UPSERT");
+        const hasUpdate = events.includes("MESSAGES_UPDATE");
         const hasConn = events.includes("CONNECTION_UPDATE");
         const urlOk = Boolean(wh?.url && wh.url.includes("/api/webhooks/whatsapp"));
-        if (!wh?.enabled || !urlOk || !hasUpsert || !hasConn) {
-          await evolution.setWebhook(expectedWebhookUrl, inst, webhookSecretByInst.get(inst) || null);
+        if (!wh?.enabled || !urlOk || !hasUpsert || !hasUpdate || !hasConn) {
+          let effectiveSecret =
+            webhookSecretByInst.get(inst) ||
+            wh?.headers?.["x-webhook-secret"] ||
+            wh?.headers?.["X-Webhook-Secret"] ||
+            null;
+
+          // Se não houver secret salvo, provisiona um secret seguro e persiste em channel_connections
+          // para evitar 401 no strict auth do webhook!
+          if (!effectiveSecret) {
+            effectiveSecret = crypto.randomBytes(24).toString("hex");
+            webhookSecretByInst.set(inst, effectiveSecret);
+            const curCfg = providerConfigByInst.get(inst) || {};
+            const nextCfg = { ...curCfg, webhook_secret: effectiveSecret };
+            providerConfigByInst.set(inst, nextCfg);
+            await supabaseAdmin
+              .from("channel_connections")
+              .update({ provider_config: nextCfg })
+              .eq("client_id", clientId)
+              .eq("instance_name", inst);
+          }
+
+          await evolution.setWebhook(expectedWebhookUrl, inst, effectiveSecret);
           actions.push(
             makeAction(
               inst,
               "Webhook ausente ou sem eventos críticos na Evolution",
-              "Webhook reconfigurado automaticamente (MESSAGES_UPSERT + CONNECTION_UPDATE).",
+              "Webhook reconfigurado automaticamente (MESSAGES_UPSERT + MESSAGES_UPDATE + CONNECTION_UPDATE) preservando secret.",
               "fixed",
               nowIso
             )
@@ -328,10 +362,10 @@ export async function runWarmupSelfHealingForTenant(
           password?: string;
         } | null;
         if (px?.enabled && px.host && px.port) {
-          const endpoint = `${px.host}:${px.port}`;
-          const holders = proxyHolders.get(endpoint) || [];
+          const normalizedHost = String(px.host).trim().toLowerCase();
+          const holders = proxyHoldersByHost.get(normalizedHost) || [];
           holders.push(inst);
-          proxyHolders.set(endpoint, holders);
+          proxyHoldersByHost.set(normalizedHost, holders);
           const protocol = (["http", "https", "socks4", "socks5"].includes(String(px.protocol || ""))
             ? px.protocol
             : "http") as "http" | "https" | "socks4" | "socks5";
@@ -378,21 +412,41 @@ export async function runWarmupSelfHealingForTenant(
     }
   }
 
-  // 4. Resolve proxies mortos e colisões de IP entre chips ADM
+  // 4. Resolve proxies mortos, audita geo/ASN honesto e impede colisão anti-dominó (proxy compartilhado ou VPS compartilhada)
+  const directVpsChips: string[] = [];
+  for (const inst of instanceList) {
+    const connRow = ensured.connections.find((c) => c.instance_name === inst);
+    const live = liveStatusByInst.get(inst) || connRow?.status || "";
+    if (isConnectedStatus(live) && !proxyDetailsByInst.has(inst)) {
+      directVpsChips.push(inst);
+    }
+  }
+
+  const isTestEnv = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
+  const PROXY_PROBE_TIMEOUT_MS = 5500;
+
   for (const [inst, px] of proxyDetailsByInst.entries()) {
-    const probe = await probeFn(
-      {
-        host: px.host,
-        port: px.port,
-        protocol: px.protocol,
-        username: px.username,
-        password: px.password,
-      },
-      2500
-    ).catch((err: unknown) => ({
+    const proxyInput = {
+      host: px.host,
+      port: px.port,
+      protocol: px.protocol,
+      username: px.username,
+      password: px.password,
+    };
+
+    // Timeout >= 5000ms + exigência de 2 falhas consecutivas protege proxies residenciais/4G BR de rotação falsa
+    let probe = await probeFn(proxyInput, PROXY_PROBE_TIMEOUT_MS).catch((err: unknown) => ({
       ok: false,
       error: err instanceof Error ? err.message : "Timeout no proxy",
     }));
+
+    if (!probe.ok) {
+      await new Promise((r) => setTimeout(r, isTestEnv ? 5 : 1200));
+      probe = await probeFn(proxyInput, PROXY_PROBE_TIMEOUT_MS).catch((err: unknown) => ({
+        ok: false,
+        error: err instanceof Error ? err.message : "Timeout no proxy",
+      }));
+    }
 
     if (!probe.ok) {
       if (poolOverview.hasPool) {
@@ -403,6 +457,9 @@ export async function runWarmupSelfHealingForTenant(
           forWarmup: true,
           probeFn,
         });
+        if (res.usedVpsFallback) {
+          directVpsChips.push(inst);
+        }
         actions.push(
           makeAction(
             inst,
@@ -416,6 +473,7 @@ export async function runWarmupSelfHealingForTenant(
         );
       } else {
         await fallbackInstanceToVps(inst, clientId, `Auto-cura: proxy ${px.host}:${px.port} offline`);
+        directVpsChips.push(inst);
         actions.push(
           makeAction(
             inst,
@@ -426,10 +484,35 @@ export async function runWarmupSelfHealingForTenant(
           )
         );
       }
+      continue;
+    }
+
+    // Higiene honesta de Geo/ASN (cached 6h via ip-api, sem pular hosts do pool)
+    const intel = await checkProxyIpIntel(px.host).catch(() => null);
+    if (intel?.countryCode && intel.countryCode !== "BR") {
+      actions.push(
+        makeAction(
+          inst,
+          `Proxy estrangeiro (${intel.country || intel.countryCode}) em chip +55`,
+          "Substitua por um proxy residencial/ISP brasileiro para reduzir risco de bloqueio geográfico.",
+          "needs_attention",
+          nowIso
+        )
+      );
+    } else if (intel?.hosting) {
+      actions.push(
+        makeAction(
+          inst,
+          `Proxy datacenter/ASN detectado (${intel.isp || px.host})`,
+          "IPs de datacenter aumentam quedas 428 e risco de restrição; prefira proxy residencial/4G BR.",
+          "needs_attention",
+          nowIso
+        )
+      );
     }
   }
 
-  for (const [endpoint, holders] of proxyHolders.entries()) {
+  for (const [host, holders] of proxyHoldersByHost.entries()) {
     if (holders.length <= 1) continue;
     if (poolOverview.hasPool) {
       for (const secondaryInst of holders.slice(1)) {
@@ -440,10 +523,13 @@ export async function runWarmupSelfHealingForTenant(
           forWarmup: true,
           probeFn,
         });
+        if (rot.usedVpsFallback) {
+          directVpsChips.push(secondaryInst);
+        }
         actions.push(
           makeAction(
             secondaryInst,
-            `Colisão de IP detectada (${holders.join(" e ")} em ${endpoint})`,
+            `Colisão de IP detectada (${holders.join(" e ")} no host ${host})`,
             rot.mode === "pool_assigned"
               ? `Isolado automaticamente para proxy exclusivo (${rot.host || "pool BR"}).`
               : "Pool esgotado ao isolar — movido temporariamente para IP da VPS até importar novos proxies.",
@@ -456,8 +542,52 @@ export async function runWarmupSelfHealingForTenant(
       actions.push(
         makeAction(
           holders.join(", "),
-          `Mesmo proxy (${endpoint}) usado em ${holders.length} chips ADM`,
+          `Mesmo IP de proxy (${host}) usado em ${holders.length} chips ADM`,
           "Importe um arquivo .txt de proxies BR em Configurações/WhatsApp para o sistema isolar 1 IP por chip automaticamente.",
+          "needs_attention",
+          nowIso
+        )
+      );
+    }
+  }
+
+  // Anti-dominó na VPS: se 2+ chips conectados estiverem compartilhando o IP direto da VPS
+  const uniqueVpsChips = Array.from(new Set(directVpsChips));
+  if (uniqueVpsChips.length >= 2) {
+    const remainingOnVps: string[] = [uniqueVpsChips[0]];
+    if (poolOverview.hasPool) {
+      for (const extraChip of uniqueVpsChips.slice(1)) {
+        const isolated = await ensureProxyForInstance({
+          instanceName: extraChip,
+          clientId,
+          reason: "warmup",
+          forWarmup: true,
+          probeFn,
+        }).catch(() => ({ ok: false, mode: "vps_fallback" as const, usedVpsFallback: true, host: undefined }));
+        if (isolated.mode === "pool_assigned") {
+          actions.push(
+            makeAction(
+              extraChip,
+              `Anti-dominó VPS: ${uniqueVpsChips.length} chips no mesmo IP da VPS`,
+              `Chip isolado automaticamente para proxy exclusivo (${isolated.host || "pool BR"}).`,
+              "fixed",
+              nowIso
+            )
+          );
+        } else {
+          remainingOnVps.push(extraChip);
+        }
+      }
+    } else {
+      remainingOnVps.push(...uniqueVpsChips.slice(1));
+    }
+
+    if (remainingOnVps.length >= 2) {
+      actions.push(
+        makeAction(
+          remainingOnVps.join(", "),
+          `Risco anti-dominó: ${remainingOnVps.length} chips operando no mesmo IP da VPS`,
+          "Adicione proxies residenciais BR dedicados (1 IP por chip) para isolar a reputação da frota.",
           "needs_attention",
           nowIso
         )

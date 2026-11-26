@@ -225,6 +225,28 @@ export interface WarmupConversation {
   updated_at?: string;
 }
 
+export type ChipReadinessTier =
+  | "blocked"
+  | "nursery"
+  | "inbound_ready"
+  | "outbound_light"
+  | "outbound_ready"
+  | "veteran";
+
+export interface ChipReadinessSummary {
+  score: number;
+  tier: ChipReadinessTier;
+  tierLabel: string;
+  badge: string;
+  isVeteran: boolean;
+  coldOutreachAllowed: boolean;
+  safeDailyColdCapacity: number;
+  daysActive: number;
+  stage: WarmupStage;
+  healthScore: number;
+  blockers: string[];
+}
+
 export const STAGE_DEFAULTS: Record<
   WarmupStage,
   {
@@ -241,7 +263,7 @@ export const STAGE_DEFAULTS: Record<
   1: {
     name: "Fase 1 · Frio",
     badge: "🧊 Frio",
-    description: "Chip novo ou recém-ativado (dias 1 a 3). O sistema prioriza receber mensagens mais do que enviar, com intervalos longos e troca de vCards para criar raiz na agenda.",
+    description: "Berçário para chip novo ou recém-ativado (dias 1 a 3). Prioriza receber mensagens (MMZap + grupos) com intervalos longos e troca de vCards para criar raiz na agenda.",
     recommendedDays: "Dias 1 a 3",
     dailyTarget: 10,
     minInterval: 180,
@@ -251,7 +273,7 @@ export const STAGE_DEFAULTS: Record<
   2: {
     name: "Fase 2 · Morno",
     badge: "☕ Morno",
-    description: "Chip com primeiros dias concluídos com sucesso (dias 4 a 7). Introdução de áudios casuais gravados na hora (PTT Opus), reações com emoji e tiques azuis.",
+    description: "Chip com primeiros dias concluídos com sucesso (dias 4 a 7). Pronto para tráfego inbound, com áudios PTT Opus, reações com emoji e tiques azuis.",
     recommendedDays: "Dias 4 a 7",
     dailyTarget: 25,
     minInterval: 120,
@@ -261,8 +283,8 @@ export const STAGE_DEFAULTS: Record<
   3: {
     name: "Fase 3 · Quente",
     badge: "🔥 Quente",
-    description: "Volume operacional saudável (dias 8 a 12). Postagem de status (Stories), participação em grupos internos e aceleração controlada do fluxo de mensagens.",
-    recommendedDays: "Dias 8 a 12",
+    description: "Volume operacional saudável (dias 8 a 14). Pronto para prospecção leve gradual, postagem de status (Stories) e participação em grupos internos.",
+    recommendedDays: "Dias 8 a 14",
     dailyTarget: 50,
     minInterval: 90,
     maxInterval: 180,
@@ -271,8 +293,8 @@ export const STAGE_DEFAULTS: Record<
   4: {
     name: "Fase 4 · Blindado",
     badge: "🛡️ Blindado",
-    description: "Chip maturado e com alta reputação (dia 13+). Liberado com segurança para campanhas de vendas e disparos comerciais, mantendo o aquecimento contínuo em segundo plano.",
-    recommendedDays: "Dia 13 em diante",
+    description: "Chip maturado com alta reputação (dia 15+; selo Veterano a partir do dia 21+). Liberado com segurança para campanhas comerciais de escala com aquecimento contínuo.",
+    recommendedDays: "Dia 15 em diante",
     dailyTarget: 70,
     minInterval: 60,
     maxInterval: 150,

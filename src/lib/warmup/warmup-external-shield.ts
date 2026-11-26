@@ -80,6 +80,8 @@ export function resolveMmzapMaxSendsCap(
   return governorSettings.max_sends_stage4;
 }
 
+export const MMZAP_UNANSWERED_GRACE_MS = 15 * 60_000;
+
 export function evaluateMmzapShiftGovernor(
   input: EvaluateMmzapGovernorInput
 ): EvaluateMmzapGovernorResult {
@@ -111,7 +113,7 @@ export function evaluateMmzapShiftGovernor(
   const currentHour = getBrazilHour(new Date(nowMs));
   if (
     currentHour < governorSettings.allowed_start_hour ||
-    currentHour > governorSettings.allowed_end_hour
+    currentHour >= governorSettings.allowed_end_hour
   ) {
     return { shouldStop: true, reason: "outside_window", maxSendsCap };
   }
@@ -128,17 +130,24 @@ export function evaluateMmzapShiftGovernor(
     return { shouldStop: true, reason: "max_sends_reached", maxSendsCap };
   }
 
+  const startedMs = mmzapShiftStartedAt ? new Date(mmzapShiftStartedAt).getTime() : NaN;
+  const elapsedShiftMs = Number.isFinite(startedMs) ? nowMs - startedMs : NaN;
+  const withinUnansweredGrace =
+    Number.isFinite(elapsedShiftMs) &&
+    elapsedShiftMs >= 0 &&
+    elapsedShiftMs < MMZAP_UNANSWERED_GRACE_MS;
+
   if (
+    !withinUnansweredGrace &&
     mmzapSentToday > 0 &&
     mmzapSentToday - mmzapInboundToday >= governorSettings.unanswered_brake_threshold
   ) {
     return { shouldStop: true, reason: "unanswered_brake", maxSendsCap };
   }
 
-  if (mmzapShiftStartedAt) {
-    const startedMs = new Date(mmzapShiftStartedAt).getTime();
+  if (Number.isFinite(elapsedShiftMs)) {
     const limitMs = Math.max(1, governorSettings.shift_duration_minutes) * 60_000;
-    if (Number.isFinite(startedMs) && nowMs - startedMs >= limitMs) {
+    if (elapsedShiftMs >= limitMs) {
       return { shouldStop: true, reason: "shift_timeout", maxSendsCap };
     }
   }
@@ -400,6 +409,40 @@ async function isKnownCrmOrCampaignSender(
     if (Array.isArray(targetRows) && targetRows.length > 0) return true;
   } catch { /* ignore */ }
 
+  // Leads extraídos (Maps/importação) — garante que lead comercial que chama primeiro nunca seja engolido
+  try {
+    const { data: leadJidRows } = await supabaseAdmin
+      .from("leads_extraidos")
+      .select("id")
+      .eq("client_id", clientId)
+      .in("remoteJid", jidCandidates)
+      .limit(1);
+    if (Array.isArray(leadJidRows) && leadJidRows.length > 0) return true;
+  } catch { /* ignore */ }
+
+  if (variants.length > 0) {
+    try {
+      const { data: leadPhoneRows } = await supabaseAdmin
+        .from("leads_extraidos")
+        .select("id")
+        .eq("client_id", clientId)
+        .in("telefone", variants)
+        .limit(1);
+      if (Array.isArray(leadPhoneRows) && leadPhoneRows.length > 0) return true;
+    } catch { /* ignore */ }
+  }
+
+  // Alvos ativos/enviados de campanhas de follow-up
+  try {
+    const { data: fuRows } = await supabaseAdmin
+      .from("followup_targets")
+      .select("id")
+      .eq("client_id", clientId)
+      .in("remote_jid", jidCandidates)
+      .limit(1);
+    if (Array.isArray(fuRows) && fuRows.length > 0) return true;
+  } catch { /* ignore */ }
+
   return false;
 }
 
@@ -454,16 +497,17 @@ async function recordQuarantineAndStats(params: {
   const preview = messageText ? String(messageText).trim().slice(0, 180) : null;
 
   try {
-    const { data: existing } = await supabaseAdmin
+    const { data: existing, error: selErr } = await supabaseAdmin
       .from("warmup_external_quarantine")
       .select("id, seen_count")
       .eq("client_id", clientId)
       .eq("instance_name", instanceName)
       .eq("canonical_sender_phone", canonicalPhone || remoteJid)
       .maybeSingle();
+    if (selErr) throw selErr;
 
     if (existing?.id) {
-      await supabaseAdmin
+      const { error: updErr } = await supabaseAdmin
         .from("warmup_external_quarantine")
         .update({
           remote_jid: remoteJid,
@@ -475,8 +519,9 @@ async function recordQuarantineAndStats(params: {
           last_seen_at: nowIso,
         })
         .eq("id", existing.id);
+      if (updErr) throw updErr;
     } else {
-      await supabaseAdmin.from("warmup_external_quarantine").insert({
+      const { error: insErr } = await supabaseAdmin.from("warmup_external_quarantine").insert({
         client_id: clientId,
         instance_name: instanceName,
         canonical_sender_phone: canonicalPhone || remoteJid,
@@ -490,6 +535,7 @@ async function recordQuarantineAndStats(params: {
         first_seen_at: nowIso,
         last_seen_at: nowIso,
       });
+      if (insErr) throw insErr;
     }
   } catch {
     // Fallback em app_settings se migration 031 ainda não rodou
@@ -711,6 +757,11 @@ export async function checkExternalWarmupInbound(
   const { canonical, variants } = resolveSenderPhoneVariants(remoteJid, remoteJidAlt);
 
   if (fromMe) {
+    // Só classifica fromMe como self_echo do MMZap quando houver turno MMZap realmente ativo;
+    // caso contrário, mensagens manuais do operador no celular para novos leads passam livremente.
+    if (snap.mmzap_browser_status !== "running") {
+      return { blocked: false, classification: "none", mode: snap.external_warmup_mode, canonicalPhone: canonical };
+    }
     if (
       (messageId && (isAiSend(messageId) || isWarmupSend(messageId) || isManualSend(messageId))) ||
       isPendingAutomatedSend(instanceName, remoteJid, messageText || "")

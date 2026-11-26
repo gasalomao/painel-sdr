@@ -5,6 +5,7 @@ import { runWarmupSelfHealingForTenant } from "./warmup-self-healing";
 import {
   calculateElapsedDaysFromCreatedAt,
   evaluateDailyAutoProgress,
+  evaluateExternalShieldGraduation,
   evaluateRehabGraduation,
   executeWarmupTurn,
   getAutoCareerPurpose,
@@ -53,7 +54,13 @@ import {
   drainDuePendingWarmupActions,
   shouldCheckPendingWarmupActions,
 } from "./warmup-pending-actions";
-import { tickMmzapBrowserOrchestrator } from "./mmzap-browser-orchestrator";
+import {
+  isNonRecoverableMmzapError,
+  stopMmzapSessionForChip,
+  tickMmzapBrowserOrchestrator,
+} from "./mmzap-browser-orchestrator";
+import { isMmzapWorkerConfigured } from "./mmzap-browser-client";
+import { invalidateExternalShieldCache } from "./warmup-external-shield";
 
 const _lastWarningLogged: Record<string, number> = {};
 
@@ -233,10 +240,18 @@ const _lastCampaignSkipWarnAt = new Map<string, number>();
 const CAMPAIGN_SKIP_WARN_COOLDOWN_MS = 30 * 60 * 1000;
 
 /**
- * Exclui do tick de aquecimento chips que possuem campanha ativa (`running`),
- * preservando 100% da reputação e capacidade de envio para a prospecção fria.
+ * Exclui do tick de aquecimento/MMZap chips que possuem campanha fria ou follow-up ativo (`running`),
+ * incluindo campanhas em modo `__auto_pool__` (excluindo chips aptos a outbound, preservando berçário/rehab),
+ * para preservar 100% da reputação e impedir colisão Evolution + MMZap.
  */
-export function filterChipsWithoutActiveCampaign<T extends { instance_name: string }>(
+export function filterChipsWithoutActiveCampaign<
+  T extends {
+    instance_name: string;
+    stage?: number;
+    days_active?: number;
+    career_mode?: string;
+  },
+>(
   configs: T[],
   runningInstances: Iterable<string>,
 ): { eligible: T[]; skipped: T[] } {
@@ -245,12 +260,20 @@ export function filterChipsWithoutActiveCampaign<T extends { instance_name: stri
     const clean = String(inst || "").trim().toLowerCase();
     if (clean) activeSet.add(clean);
   }
+  const hasAutoPoolActive = activeSet.has("__auto_pool__");
 
   const eligible: T[] = [];
   const skipped: T[] = [];
   for (const cfg of configs) {
     const key = String(cfg.instance_name || "").trim().toLowerCase();
-    if (key && activeSet.has(key)) {
+    const isDirectMatch = Boolean(key && activeSet.has(key));
+    const isPoolParticipant =
+      hasAutoPoolActive &&
+      cfg.career_mode !== "rehab" &&
+      (typeof cfg.stage !== "number" ||
+        (cfg.stage >= 2 && (typeof cfg.days_active !== "number" || cfg.days_active >= 7)));
+
+    if (isDirectMatch || isPoolParticipant) {
       skipped.push(cfg);
     } else {
       eligible.push(cfg);
@@ -470,20 +493,84 @@ export async function tickWarmupWorker(): Promise<{
               });
               if (careerCheck.graduated) {
                 cfg.purpose = careerCheck.nextPurpose;
-                await supabaseAdmin
+                const shieldGrad = evaluateExternalShieldGraduation({
+                  currentMode: cfg.external_warmup_mode,
+                  stage: cfg.stage,
+                  purpose: careerCheck.nextPurpose,
+                  purposeGraduated: true,
+                  mmzapBrowserEnabled: cfg.mmzap_browser_enabled,
+                  nowMs,
+                });
+                const careerPatch: Record<string, unknown> = {
+                  purpose: careerCheck.nextPurpose,
+                  updated_at: nowIso,
+                };
+                if (shieldGrad.shouldTransition) {
+                  careerPatch.external_warmup_mode = shieldGrad.nextMode;
+                  cfg.external_warmup_mode = shieldGrad.nextMode;
+                }
+                const { error: careerErr } = await supabaseAdmin
                   .from("whatsapp_warmup_configs")
-                  .update({ purpose: careerCheck.nextPurpose, updated_at: nowIso })
+                  .update(careerPatch)
                   .eq("id", cfg.id)
                   .eq("client_id", clientId);
+                if (careerErr && "external_warmup_mode" in careerPatch) {
+                  await supabaseAdmin
+                    .from("whatsapp_warmup_configs")
+                    .update({ purpose: careerCheck.nextPurpose, updated_at: nowIso })
+                    .eq("id", cfg.id)
+                    .eq("client_id", clientId);
+                }
+                if (shieldGrad.shouldTransition) {
+                  invalidateExternalShieldCache(clientId, cfg.instance_name);
+                }
 
                 await logWarmupAction({
                   client_id: clientId,
                   sender_instance: cfg.instance_name,
                   receiver_instance: "auto_career",
-                  message_text: `🎓 Esteira Autônoma: Chip ${cfg.instance_name} graduou automaticamente para finalidade "${careerCheck.nextPurpose}" (${realDays} dias de maturação).`,
+                  message_text: shieldGrad.shouldTransition
+                    ? `🎓 Esteira Autônoma: Chip ${cfg.instance_name} graduou para "${careerCheck.nextPurpose}" (${realDays} dias) e o Escudo Externo mudou automaticamente para "${shieldGrad.nextMode}" (leads comerciais liberados).`
+                    : `🎓 Esteira Autônoma: Chip ${cfg.instance_name} graduou automaticamente para finalidade "${careerCheck.nextPurpose}" (${realDays} dias de maturação).`,
                   action_type: "system",
                 });
               }
+            }
+          }
+
+          // Graduação automática do Escudo Externo em Fase 4 após >= 48h sem tráfego externo (hybrid_quarantine -> off)
+          if (
+            cfg.external_warmup_mode === "hybrid_quarantine" &&
+            cfg.stage >= 4 &&
+            cfg.mmzap_browser_enabled === false
+          ) {
+            const quietGrad = evaluateExternalShieldGraduation({
+              currentMode: cfg.external_warmup_mode,
+              stage: cfg.stage,
+              purpose: cfg.purpose,
+              mmzapBrowserEnabled: false,
+              externalWarmupLastAt: cfg.external_warmup_last_at ?? null,
+              externalWarmupInboundToday: cfg.external_warmup_inbound_today ?? 0,
+              mmzapLastShiftEndedAt: cfg.mmzap_last_shift_ended_at ?? null,
+              nowMs,
+            });
+            if (quietGrad.shouldTransition && quietGrad.nextMode === "off") {
+              cfg.external_warmup_mode = "off";
+              try {
+                await supabaseAdmin
+                  .from("whatsapp_warmup_configs")
+                  .update({ external_warmup_mode: "off", updated_at: nowIso })
+                  .eq("id", cfg.id)
+                  .eq("client_id", clientId);
+              } catch {}
+              invalidateExternalShieldCache(clientId, cfg.instance_name);
+              await logWarmupAction({
+                client_id: clientId,
+                sender_instance: cfg.instance_name,
+                receiver_instance: "external_shield",
+                message_text: `🛡️ Escudo Externo desativado automaticamente no chip ${cfg.instance_name} (Fase 4 + MMZap desligado + >= 48h sem tráfego externo).`,
+                action_type: "system",
+              });
             }
           }
 
@@ -518,6 +605,18 @@ export async function tickWarmupWorker(): Promise<{
             updated_at: nowIso,
           };
 
+          // Auto-descongelamento diário do MMZap: libera "paused_safety" e "error" transitório (nunca "qr_required"/unpaired)
+          const prevMmzapStatus = cfg.mmzap_browser_status;
+          const shouldAutoResetMmzapStatus =
+            prevMmzapStatus === "paused_safety" ||
+            (prevMmzapStatus === "error" && !isNonRecoverableMmzapError(cfg.mmzap_last_error));
+          if (shouldAutoResetMmzapStatus) {
+            update.mmzap_browser_status = "idle";
+            update.mmzap_last_error = null;
+            cfg.mmzap_browser_status = "idle";
+            cfg.mmzap_last_error = null;
+          }
+
           cfg.sent_today = 0;
           cfg.received_today = 0;
           cfg.error_count_today = 0;
@@ -545,6 +644,22 @@ export async function tickWarmupWorker(): Promise<{
             cfg.purpose = newPurpose;
           }
 
+          const dailyShieldGrad = evaluateExternalShieldGraduation({
+            currentMode: cfg.external_warmup_mode,
+            stage: newStage,
+            purpose: newPurpose,
+            purposeGraduated,
+            mmzapBrowserEnabled: cfg.mmzap_browser_enabled,
+            externalWarmupLastAt: cfg.external_warmup_last_at ?? null,
+            externalWarmupInboundToday: 0,
+            mmzapLastShiftEndedAt: cfg.mmzap_last_shift_ended_at ?? null,
+            nowMs,
+          });
+          if (dailyShieldGrad.shouldTransition) {
+            update.external_warmup_mode = dailyShieldGrad.nextMode;
+            cfg.external_warmup_mode = dailyShieldGrad.nextMode;
+          }
+
           const rehabCheck = evaluateRehabGraduation(cfg, nowIso);
           if (rehabCheck.graduated) {
             update.career_mode = rehabCheck.nextCareerMode;
@@ -562,18 +677,24 @@ export async function tickWarmupWorker(): Promise<{
             const {
               career_mode: _c,
               rehab_until: _r,
+              external_warmup_mode: _ewm,
               external_warmup_inbound_today: _ei,
               external_mmzap_sent_today: _ems,
               mmzap_minutes_today: _mm,
               mmzap_shifts_today: _ms,
+              mmzap_browser_status: _mbs,
+              mmzap_last_error: _mle,
               ...fallbackUpd
             } = update;
             void _c;
             void _r;
+            void _ewm;
             void _ei;
             void _ems;
             void _mm;
             void _ms;
+            void _mbs;
+            void _mle;
             await supabaseAdmin
               .from("whatsapp_warmup_configs")
               .update(fallbackUpd)
@@ -581,8 +702,22 @@ export async function tickWarmupWorker(): Promise<{
               .eq("client_id", clientId);
           }
 
+          if (shouldAutoResetMmzapStatus || dailyShieldGrad.shouldTransition) {
+            invalidateExternalShieldCache(clientId, cfg.instance_name);
+          }
+
           nextDailyState[cfg.instance_name] = getBrazilDayKey(nowIso);
           dailyStateDirty = true;
+
+          if (shouldAutoResetMmzapStatus) {
+            await logWarmupAction({
+              client_id: clientId,
+              sender_instance: cfg.instance_name,
+              receiver_instance: "mmzap_governor",
+              message_text: `🔄 Virada de dia: MMZap do chip ${cfg.instance_name} liberado automaticamente de "${prevMmzapStatus}" para "idle".`,
+              action_type: "system",
+            });
+          }
 
           if (stagePromoted) {
             await logWarmupAction({
@@ -599,7 +734,17 @@ export async function tickWarmupWorker(): Promise<{
               client_id: clientId,
               sender_instance: cfg.instance_name,
               receiver_instance: "auto_career",
-              message_text: `🎓 Esteira Autônoma: Chip ${cfg.instance_name} liberado automaticamente para "${newPurpose}" após atingir ${newDaysActive} dias saudáveis.`,
+              message_text: dailyShieldGrad.shouldTransition
+                ? `🎓 Esteira Autônoma: Chip ${cfg.instance_name} liberado para "${newPurpose}" (${newDaysActive} dias) e Escudo Externo ajustado automaticamente para "${dailyShieldGrad.nextMode}".`
+                : `🎓 Esteira Autônoma: Chip ${cfg.instance_name} liberado automaticamente para "${newPurpose}" após atingir ${newDaysActive} dias saudáveis.`,
+              action_type: "system",
+            });
+          } else if (dailyShieldGrad.shouldTransition) {
+            await logWarmupAction({
+              client_id: clientId,
+              sender_instance: cfg.instance_name,
+              receiver_instance: "external_shield",
+              message_text: `🛡️ Escudo Externo do chip ${cfg.instance_name} graduado automaticamente para "${dailyShieldGrad.nextMode}".`,
               action_type: "system",
             });
           }
@@ -619,7 +764,88 @@ export async function tickWarmupWorker(): Promise<{
         // Validação de chips não em quarentena
         let nonQuarantined = configs.filter((c) => !c.is_quarantined);
 
-        // Se temos apenas 1 chip: aquece passivamente via grupos da colmeia e Status (apenas dentro do horário comercial)
+        // Loader memoizado de campanhas frias e follow-ups ativos (status = 'running') para exclusão mútua estrita
+        // ANTES do orquestrador MMZap e ANTES dos turnos internos 1x1 (incluindo __auto_pool__).
+        let runningCampaignsLoaded = false;
+        let runningInstances: string[] = [];
+        const loadRunningCampaignInstances = async (): Promise<string[]> => {
+          if (runningCampaignsLoaded) return runningInstances;
+          runningCampaignsLoaded = true;
+          const found = new Set<string>();
+          try {
+            const { data: runningCamps } = await supabaseAdmin
+              .from("campaigns")
+              .select("instance_name")
+              .eq("client_id", clientId)
+              .eq("status", "running");
+            if (Array.isArray(runningCamps)) {
+              for (const row of runningCamps) {
+                const name = String((row as { instance_name?: string | null })?.instance_name || "").trim();
+                if (name) found.add(name);
+              }
+            }
+          } catch {}
+          try {
+            const { data: runningFollowups } = await supabaseAdmin
+              .from("followup_campaigns")
+              .select("instance_name")
+              .eq("client_id", clientId)
+              .eq("status", "running");
+            if (Array.isArray(runningFollowups)) {
+              for (const row of runningFollowups) {
+                const name = String((row as { instance_name?: string | null })?.instance_name || "").trim();
+                if (name) found.add(name);
+              }
+            }
+          } catch {}
+          runningInstances = Array.from(found);
+          return runningInstances;
+        };
+
+        const runMmzapWithCampaignExclusion = async (
+          candidateChips: WarmupConfig[]
+        ): Promise<{ excludedByCampaign: Set<string> }> => {
+          const hasMmzapActivity =
+            isMmzapWorkerConfigured() ||
+            candidateChips.some(
+              (c) => Boolean(c.mmzap_browser_enabled) || c.mmzap_browser_status === "running"
+            );
+
+          if (!hasMmzapActivity) {
+            return { excludedByCampaign: new Set() };
+          }
+
+          const activeCampaigns = await loadRunningCampaignInstances();
+          const campaignSplit = filterChipsWithoutActiveCampaign(candidateChips, activeCampaigns);
+          const excludedByCampaign = new Set(
+            campaignSplit.skipped.map((c) => c.instance_name.trim().toLowerCase())
+          );
+
+          // Se qualquer chip com campanha rodando estiver com MMZap "running", encerra imediatamente
+          for (const campChip of campaignSplit.skipped) {
+            if (campChip.mmzap_browser_status === "running") {
+              await stopMmzapSessionForChip(clientId, campChip.instance_name, "campaign_active").catch(
+                () => null
+              );
+              campChip.mmzap_browser_status = "idle";
+              campChip.mmzap_last_shift_ended_at = nowIso;
+            }
+          }
+
+          if (campaignSplit.eligible.length > 0) {
+            await tickMmzapBrowserOrchestrator({
+              clientId,
+              configs: campaignSplit.eligible,
+              connectedInstanceNames: new Set(campaignSplit.eligible.map((c) => c.instance_name)),
+              activeCampaignInstances: new Set(activeCampaigns),
+              nowMs,
+            }).catch(() => null);
+          }
+
+          return { excludedByCampaign };
+        };
+
+        // Se temos apenas 1 chip: aquece passivamente via grupos da colmeia, MMZap e Status (apenas dentro do horário comercial)
         if (nonQuarantined.length < 2) {
           const soleChip = nonQuarantined[0];
           if (!soleChip) continue;
@@ -637,14 +863,12 @@ export async function tickWarmupWorker(): Promise<{
             continue;
           }
 
-          await ensureWarmupClusterProxies(clientId, [soleChip]);
+          const { excludedByCampaign } = await runMmzapWithCampaignExclusion(nonQuarantined);
+          if (excludedByCampaign.has(soleChip.instance_name.trim().toLowerCase())) {
+            continue;
+          }
 
-          await tickMmzapBrowserOrchestrator({
-            clientId,
-            configs: nonQuarantined,
-            connectedInstanceNames: new Set(nonQuarantined.map((c) => c.instance_name)),
-            nowMs,
-          }).catch(() => null);
+          await ensureWarmupClusterProxies(clientId, [soleChip]);
 
           scheduleGroupSync(clientId);
 
@@ -675,13 +899,8 @@ export async function tickWarmupWorker(): Promise<{
         // Sincroniza adesão nos grupos (com throttle anti-flood)
         scheduleGroupSync(clientId);
 
-        // Orquestrador MMZap (turnos curtos no browser com mesma proxy e exclusividade temporal)
-        await tickMmzapBrowserOrchestrator({
-          clientId,
-          configs: nonQuarantined,
-          connectedInstanceNames: new Set(nonQuarantined.map((c) => c.instance_name)),
-          nowMs,
-        }).catch(() => null);
+        // Orquestrador MMZap com exclusão mútua estrita contra campanhas ativas
+        await runMmzapWithCampaignExclusion(nonQuarantined);
 
         // Pré-filtra pelo ritmo em RAM; se houver chips elegíveis, hidrata contadores reais do banco na 1ª passada
         const isTestEnv = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
@@ -731,19 +950,7 @@ export async function tickWarmupWorker(): Promise<{
         }
 
         // Não aquece chips que estão rodando campanha fria ativa (status = 'running').
-        let runningInstances: string[] = [];
-        try {
-          const { data: runningCamps } = await supabaseAdmin
-            .from("campaigns")
-            .select("instance_name")
-            .eq("client_id", clientId)
-            .eq("status", "running");
-          if (Array.isArray(runningCamps)) {
-            runningInstances = runningCamps
-              .map((row) => String((row as { instance_name?: string | null })?.instance_name || "").trim())
-              .filter(Boolean);
-          }
-        } catch {}
+        await loadRunningCampaignInstances();
 
         if (runningInstances.length > 0) {
           const availSplit = filterChipsWithoutActiveCampaign(availableChips, runningInstances);
@@ -1324,12 +1531,22 @@ export async function enablePairAutopilot(
     if (row?.instance_name) existingByInst.set(row.instance_name, row);
   }
 
+  const nowMs = Date.now();
   const pairConfigs = [instanceA, instanceB].map((name) => {
     const prev = existingByInst.get(name);
     const realDays = calculateElapsedDaysFromCreatedAt(prev?.created_at, nowIso);
-    const stage: WarmupStage =
-      realDays !== null ? getMaxStageForDaysActive(realDays) : ((prev?.stage || 1) as WarmupStage);
+    const effectiveDays =
+      prev?.days_active && realDays !== null
+        ? Math.min(prev.days_active, realDays)
+        : (prev?.days_active ?? 1);
+    const maxStage = getMaxStageForDaysActive(effectiveDays);
+    const prevStage = Math.max(1, Math.min(4, Number(prev?.stage || 1))) as WarmupStage;
+    const stage: WarmupStage = (Math.min(prevStage, maxStage) || 1) as WarmupStage;
     const stageDefaults = STAGE_DEFAULTS[stage];
+    const hasActiveQuarantine = Boolean(
+      prev?.is_quarantined &&
+        (!prev.quarantine_until || new Date(prev.quarantine_until).getTime() > nowMs)
+    );
 
     return {
       client_id: clientId,
@@ -1344,8 +1561,8 @@ export async function enablePairAutopilot(
       enable_reactions: true,
       enable_status_posts: true,
       continuous_warmup: true,
-      is_quarantined: false,
-      quarantine_reason: null,
+      is_quarantined: hasActiveQuarantine,
+      quarantine_reason: hasActiveQuarantine ? (prev?.quarantine_reason ?? null) : null,
       min_interval_seconds: stageDefaults.minInterval,
       max_interval_seconds: stageDefaults.maxInterval,
       min_typing_seconds: prev?.min_typing_seconds || 3,
@@ -1435,13 +1652,23 @@ export async function enableSwarmAutopilot(
     }
 
     const nowIso = new Date().toISOString();
+    const nowMs = Date.now();
 
     for (const instName of targetInstances) {
       const prev = existingByInst.get(instName);
       const realDays = calculateElapsedDaysFromCreatedAt(prev?.created_at, nowIso);
-      const stage: WarmupStage =
-        realDays !== null ? getMaxStageForDaysActive(realDays) : ((prev?.stage || 1) as WarmupStage);
+      const effectiveDays =
+        prev?.days_active && realDays !== null
+          ? Math.min(prev.days_active, realDays)
+          : (prev?.days_active ?? 1);
+      const maxStage = getMaxStageForDaysActive(effectiveDays);
+      const prevStage = Math.max(1, Math.min(4, Number(prev?.stage || 1))) as WarmupStage;
+      const stage: WarmupStage = (Math.min(prevStage, maxStage) || 1) as WarmupStage;
       const stageDefaults = STAGE_DEFAULTS[stage];
+      const hasActiveQuarantine = Boolean(
+        prev?.is_quarantined &&
+          (!prev.quarantine_until || new Date(prev.quarantine_until).getTime() > nowMs)
+      );
 
       await supabaseAdmin
         .from("whatsapp_warmup_configs")
@@ -1461,8 +1688,8 @@ export async function enableSwarmAutopilot(
             enable_reactions: true,
             enable_status_posts: true,
             continuous_warmup: true,
-            is_quarantined: false,
-            quarantine_reason: null,
+            is_quarantined: hasActiveQuarantine,
+            quarantine_reason: hasActiveQuarantine ? (prev?.quarantine_reason ?? null) : null,
             min_interval_seconds: stageDefaults.minInterval,
             max_interval_seconds: stageDefaults.maxInterval,
             min_typing_seconds: prev?.min_typing_seconds || 3,

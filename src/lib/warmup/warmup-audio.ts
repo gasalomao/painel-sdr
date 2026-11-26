@@ -83,7 +83,7 @@ export function uniquifyOggOpusBuffer(source: Buffer, uniqueSeed?: string): Buff
     const uid =
       uniqueSeed ||
       `${Date.now().toString(36)}_${crypto.randomBytes(6).toString("hex")}`;
-    const commentStr = `warmup_uid=${uid}`;
+    const commentStr = `DATE=${uid}`;
     const commentBuf = Buffer.from(commentStr, "utf8");
     const entryBuf = Buffer.alloc(4 + commentBuf.length);
     entryBuf.writeUInt32LE(commentBuf.length, 0);

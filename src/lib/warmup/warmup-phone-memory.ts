@@ -327,6 +327,12 @@ function buildEntryFromConfig(
     lastDisconnectedAt: extra?.lastDisconnectedAt !== undefined ? extra.lastDisconnectedAt : (prev?.lastDisconnectedAt ?? null),
     softRecoveryUntil: extra?.softRecoveryUntil !== undefined ? extra.softRecoveryUntil : (prev?.softRecoveryUntil ?? null),
     disconnectCount24h: extra?.disconnectCount24h !== undefined ? extra.disconnectCount24h : (prev?.disconnectCount24h ?? 0),
+    flapTimestamps:
+      extra?.flapTimestamps !== undefined
+        ? extra.flapTimestamps
+        : Array.isArray(prev?.flapTimestamps)
+          ? [...prev.flapTimestamps]
+          : undefined,
     lastDisconnectReason: extra?.lastDisconnectReason !== undefined ? extra.lastDisconnectReason : (prev?.lastDisconnectReason ?? null),
     careerMode: (extra?.careerMode ?? cfg.career_mode ?? prev?.careerMode ?? "maturing") as WarmupCareerMode,
     banCount: extra?.banCount !== undefined ? extra.banCount : (prev?.banCount ?? 0),

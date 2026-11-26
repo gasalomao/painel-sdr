@@ -29,7 +29,7 @@ const INTERNAL_BASE = `http://localhost:${process.env.PORT || 3000}`;
 // ============================================================
 
 export const STATUS_MAP: Record<number | string, string> = {
-  0: "error", 1: "delivered", 2: "read", 3: "played", 4: "read", 5: "played",
+  0: "error", 1: "sent", 2: "sent", 3: "delivered", 4: "read", 5: "played",
   "ERROR": "error", "FAILED": "error",
   "PENDING": "sent", "SERVER_ACK": "sent",
   "DELIVERY_ACK": "delivered", "DELIVERED": "delivered",

@@ -60,68 +60,115 @@ function pngChunk(type: string, data: Buffer): Buffer {
   return Buffer.concat([lenBuf, crcInput, crcBuf]);
 }
 
+const ORGANIC_IMAGE_DIMENSIONS: ReadonlyArray<{ width: number; height: number }> = [
+  { width: 320, height: 240 },
+  { width: 280, height: 360 },
+  { width: 256, height: 256 },
+  { width: 360, height: 270 },
+  { width: 240, height: 320 },
+  { width: 336, height: 224 },
+  { width: 288, height: 288 },
+  { width: 300, height: 380 },
+];
+
 /**
- * Gera uma imagem PNG real (192x192 RGBA) com padrão abstrato minimalista e
- * ruído criptográfico imperceptível para garantir hash SHA-256 único a cada envio.
+ * Gera uma imagem PNG real (RGBA com dimensões orgânicas variadas entre retrato, quadrado e paisagem)
+ * com composição multi-banda suave e micro-ruído criptográfico para garantir dimensões e hash SHA-256
+ * únicos a cada envio (evitando fingerprint de imagem estática 192x192).
  */
 export function createDynamicWarmupImage(seed?: string): {
   base64: string;
   mimetype: string;
   caption: string;
   sha256: string;
+  width: number;
+  height: number;
 } {
   const entropy = crypto
     .createHash("sha256")
     .update(`${seed || "wup"}:${Date.now()}:${crypto.randomBytes(16).toString("hex")}`)
     .digest();
 
-  const width = 192;
-  const height = 192;
+  const preset = ORGANIC_IMAGE_DIMENSIONS[entropy[12] % ORGANIC_IMAGE_DIMENSIONS.length];
+  const widthJitter = (entropy[13] % 7) * 2; // 0..12px
+  const heightJitter = (entropy[14] % 7) * 2; // 0..12px
+  const width = preset.width + widthJitter;
+  const height = preset.height + heightJitter;
   const stride = 1 + width * 4;
   const raw = Buffer.alloc(stride * height);
 
-  const bgR = 24 + (entropy[0] % 48);
-  const bgG = 36 + (entropy[1] % 56);
-  const bgB = 52 + (entropy[2] % 64);
-  const acR = 120 + (entropy[3] % 110);
-  const acG = 140 + (entropy[4] % 95);
-  const acB = 130 + (entropy[5] % 105);
+  // Paletas suaves naturais (céu/ambiente, quente ou neutro)
+  const bgR = 26 + (entropy[0] % 58);
+  const bgG = 38 + (entropy[1] % 64);
+  const bgB = 54 + (entropy[2] % 72);
+  const acR = 115 + (entropy[3] % 115);
+  const acG = 135 + (entropy[4] % 100);
+  const acB = 125 + (entropy[5] % 110);
+  const band2R = 70 + (entropy[15] % 95);
+  const band2G = 90 + (entropy[16] % 95);
+  const band2B = 105 + (entropy[17] % 95);
 
-  const cx = 64 + (entropy[6] % 64);
-  const cy = 64 + (entropy[7] % 64);
-  const radius = 38 + (entropy[8] % 34);
-  const diagShift = entropy[9] % 40;
+  const cx = Math.floor(width * (0.28 + (entropy[6] / 255) * 0.44));
+  const cy = Math.floor(height * (0.25 + (entropy[7] / 255) * 0.45));
+  const minDim = Math.min(width, height);
+  const radius = Math.floor(minDim * (0.17 + (entropy[8] / 255) * 0.14));
+  const radiusSq = radius * radius;
+  const diagShift = entropy[9] % 56;
+  const horizonBase = Math.floor(height * (0.56 + (entropy[18] / 255) * 0.18));
+  const waveAmp = 8 + (entropy[19] % 14);
+  const waveFreq = 0.018 + (entropy[20] % 12) * 0.002;
+  const wavePhase = (entropy[21] / 255) * Math.PI * 2;
+  const stripePeriod = 38 + (entropy[22] % 24);
+  const stripeWidth = 8 + (entropy[23] % 8);
 
   for (let y = 0; y < height; y++) {
     const rowStart = y * stride;
     raw[rowStart] = 0; // filter None
+    const yRatio = y / height;
+
     for (let x = 0; x < width; x++) {
       const idx = rowStart + 1 + x * 4;
+      const xRatio = x / width;
       const dx = x - cx;
       const dy = y - cy;
-      const inCircle = dx * dx + dy * dy <= radius * radius;
-      const inBand = Math.abs((x + y + diagShift) % 48) < 10;
+      const distSq = dx * dx + dy * dy;
 
-      // Variação mínima de +/- 1 bits por pixel aleatório impede duplicação de hash binário
-      const microNoise = ((entropy[(x + y) % entropy.length] ^ (x * 7 + y * 13)) & 1) === 1 ? 1 : 0;
+      const horizonY = horizonBase + Math.sin(x * waveFreq + wavePhase) * waveAmp;
+      const belowHorizon = y >= horizonY;
+      const inBand = ((x + y + diagShift) % stripePeriod) < stripeWidth;
 
-      let r = Math.min(255, bgR + Math.floor((x / width) * 55) + microNoise);
-      let g = Math.min(255, bgG + Math.floor((y / height) * 55));
-      let b = Math.min(255, bgB + Math.floor(((x + y) / (width + height)) * 45));
+      // Micro-ruído de 1-2 bits por pixel impede duplicação de hash binário ou perceptual simples
+      const eByte = entropy[(x * 3 + y * 5) % entropy.length];
+      const microR = ((eByte ^ (x * 7 + y * 13)) & 3) === 1 ? 1 : 0;
+      const microG = (((eByte >> 2) ^ (x * 11 + y * 3)) & 3) === 2 ? 1 : 0;
+      const microB = (((eByte >> 4) ^ (x * 5 + y * 17)) & 3) === 3 ? 1 : 0;
 
-      if (inCircle) {
-        r = Math.min(255, acR + microNoise);
-        g = Math.min(255, acG);
-        b = Math.min(255, acB);
+      let r = bgR + Math.floor(xRatio * 52 + yRatio * 24);
+      let g = bgG + Math.floor(yRatio * 58 + (1 - xRatio) * 18);
+      let b = bgB + Math.floor(((xRatio + yRatio) * 0.5) * 48);
+
+      if (belowHorizon) {
+        const depth = Math.min(1, (y - horizonY) / Math.max(1, height - horizonBase));
+        r = Math.floor(r * 0.55 + band2R * 0.45 * (1 - depth * 0.25));
+        g = Math.floor(g * 0.55 + band2G * 0.45 * (1 - depth * 0.2));
+        b = Math.floor(b * 0.55 + band2B * 0.45 * (1 - depth * 0.15));
       } else if (inBand) {
-        r = Math.min(255, r + 18);
-        g = Math.min(255, g + 22);
-        b = Math.min(255, b + 16);
+        r += 14;
+        g += 18;
+        b += 14;
       }
 
-      raw[idx] = r;
-      raw[idx + 1] = g;
-      raw[idx + 2] = b;
+      if (distSq <= radiusSq) {
+        const falloff = 1 - Math.sqrt(distSq) / Math.max(1, radius);
+        const blend = 0.45 + falloff * 0.5;
+        r = Math.floor(r * (1 - blend) + acR * blend);
+        g = Math.floor(g * (1 - blend) + acG * blend);
+        b = Math.floor(b * (1 - blend) + acB * blend);
+      }
+
+      raw[idx] = Math.min(255, Math.max(0, r + microR));
+      raw[idx + 1] = Math.min(255, Math.max(0, g + microG));
+      raw[idx + 2] = Math.min(255, Math.max(0, b + microB));
       raw[idx + 3] = 255;
     }
   }
@@ -154,6 +201,8 @@ export function createDynamicWarmupImage(seed?: string): {
     mimetype: "image/png",
     caption,
     sha256: crypto.createHash("sha256").update(pngBuffer).digest("hex"),
+    width,
+    height,
   };
 }
 

@@ -49,7 +49,8 @@ vi.mock("../warmup-engine", async (importOriginal) => {
 vi.mock("../warmup-groups", () => ({
   syncGroupMembershipForChips: mocks.syncGroups,
   hydrateChipProfile: mocks.hydrate,
-  cleanupDeadWarmupGroups: vi.fn(async () => 0),
+  cleanupDeadWarmupGroups: vi.fn(async () => ({ leftGroups: 0 })),
+  runInternalSwarmGroupCycle: vi.fn(async () => ({ created: 0, posted: 0 })),
 }));
 
 vi.mock("../warmup-admin-guard", () => ({

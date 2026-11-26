@@ -205,12 +205,13 @@ describe("MMZap External Warmup Shield (receive_only & hybrid_quarantine)", () =
     expect(state.whatsapp_phone_passports[0].external_warmup_inbound_total).toBe(6);
   });
 
-  it("no modo receive_only: intercepta eco fromMe=true da extensão Chrome como self_echo sem acionar pausa manual", async () => {
+  it("no modo receive_only: intercepta eco fromMe=true quando MMZap está ativo como self_echo e libera envio manual quando inativo", async () => {
     state.whatsapp_warmup_configs.push({
       client_id: CLIENT_ID,
       instance_name: "chip_mmzap_01",
       phone_number: "5511999990001",
       external_warmup_mode: "receive_only",
+      mmzap_browser_status: "running",
       enable_blue_ticks: true,
       received_today: 0,
       external_warmup_inbound_today: 0,
@@ -232,6 +233,20 @@ describe("MMZap External Warmup Shield (receive_only & hybrid_quarantine)", () =
     // Self-echo não soma inbound de terceiros nem agenda leitura
     expect(state.whatsapp_warmup_configs[0].received_today).toBe(0);
     expect(pendingActionsEnqueued).toHaveLength(0);
+
+    // Quando MMZap NÃO está rodando (ex: idle/unpaired), envio manual do operador no celular passa livremente
+    state.whatsapp_warmup_configs[0].mmzap_browser_status = "idle";
+    invalidateExternalShieldCache();
+    const manualRes = await checkExternalWarmupInbound({
+      clientId: CLIENT_ID,
+      instanceName: "chip_mmzap_01",
+      remoteJid: "5521977778888@s.whatsapp.net",
+      messageId: "PHONE-MANUAL-1",
+      messageText: "Oi! Tudo bem?",
+      fromMe: true,
+    });
+    expect(manualRes.blocked).toBe(false);
+    expect(manualRes.classification).toBe("none");
   });
 
   it("NUNCA bloqueia um lead real do CRM ou alvo de campanha mesmo com receive_only ativo", async () => {

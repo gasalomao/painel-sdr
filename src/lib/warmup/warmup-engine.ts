@@ -8,6 +8,7 @@ import { checkTenantAiQuota } from "@/lib/saas-limits";
 import { getRandomWarmupVoiceBase64 } from "./warmup-audio";
 import {
   blacklistInstanceProxy,
+  ensureProxyForInstance,
   getProxyPoolOverviewCache,
   recordInstanceProxyStrike,
 } from "@/lib/proxy-pool";
@@ -40,6 +41,9 @@ import {
 } from "./warmup-dialogues";
 import {
   STAGE_DEFAULTS,
+  type ChipReadinessSummary,
+  type ChipReadinessTier,
+  type ExternalWarmupMode,
   type WarmupConfig,
   type WarmupConversation,
   type WarmupConversationTurn,
@@ -47,6 +51,8 @@ import {
   type WarmupPurpose,
   type WarmupStage,
 } from "./warmup-types";
+
+export type { ChipReadinessSummary, ChipReadinessTier };
 
 // Base64 de um áudio sintético super leve de voz silenciosa/neutra (OPUS) para fallback de PTT
 const CASUAL_OPUS_BASE64 = "GkXfo59ChoEBQveBAULygQRC84EIQoKEd2VibUKHgQRChYECGFOAZwEAAAAAAAA+1icBAAAAAAAAPtYnAQAAAAAAAA==";
@@ -231,14 +237,14 @@ export function isSameBrazilDay(
 
 /**
  * Fase máxima permitida pela idade real (dias ativos) do chip quando o
- * piloto automático está ligado:
- * - Dias 1..3: Fase 1 (Frio)
- * - Dias 4..7: Fase 2 (Morno)
- * - Dias 8..12: Fase 3 (Quente)
- * - Dia 13+: Fase 4 (Blindado)
+ * piloto automático está ligado (calibragem Nov 2026):
+ * - Dias 1..3: Fase 1 (Frio / Berçário)
+ * - Dias 4..7: Fase 2 (Morno / Pronto para Inbound)
+ * - Dias 8..14: Fase 3 (Quente / Prospecção Leve)
+ * - Dia 15+: Fase 4 (Blindado / Produção Completa; Dia 21+ = Veterano)
  */
 export function getMaxStageForDaysActive(daysActive: number): WarmupStage {
-  if (daysActive >= 13) return 4;
+  if (daysActive >= 15) return 4;
   if (daysActive >= 8) return 3;
   if (daysActive >= 4) return 2;
   return 1;
@@ -581,11 +587,30 @@ export function isTransientInfraError(message: string): boolean {
   );
 }
 
+/**
+ * Classifica sinais reais de logout/banimento/restrição no WhatsApp.
+ * IMPORTANTE: 428 (connectionClosed), 408 (timedOut) e 515 (restartRequired)
+ * no Baileys/Evolution são quedas transitórias de WebSocket/proxy, NUNCA banimento!
+ */
 export function isSevereDisconnectReason(reason: unknown): boolean {
   const reasonStr = reason != null ? String(reason).trim() : "";
   if (!reasonStr) return false;
-  return /(?:^|\D)(401|403|405|428)(?:\D|$)|logged.?out|ban|blocked|restricted|removed|refused/i.test(
+  return /(?:^|\D)(401|403|405)(?:\D|$)|logged.?out|ban|blocked|restricted|removed|refused/i.test(
     reasonStr
+  );
+}
+
+/**
+ * Identifica desconexões transitórias de rede/WebSocket/proxy (ex: 428, 408, 515).
+ */
+export function isTransientDisconnectReason(reason: unknown): boolean {
+  const reasonStr = reason != null ? String(reason).trim() : "";
+  if (!reasonStr) return true;
+  if (isSevereDisconnectReason(reasonStr)) return false;
+  return (
+    /(?:^|\D)(408|428|515)(?:\D|$)|connection.?closed|connection.?lost|restart.?required|timed.?out|timeout|socket|econnreset|epipe|desconex/i.test(
+      reasonStr
+    ) || true
   );
 }
 
@@ -663,13 +688,19 @@ export async function handleInstanceFailure(
 }
 
 const _lastDisconnectReportAt = new Map<string, number>();
-const DISCONNECT_REPORT_COOLDOWN_MS = 5 * 60 * 1000;
 const _lastDisconnectAlertAt = new Map<string, number>();
 const DISCONNECT_ALERT_COOLDOWN_MS = 30 * 60 * 1000;
+const _transientDisconnectFlaps = new Map<string, number[]>();
+const _lastTransientRotationAt = new Map<string, number>();
+export const TRANSIENT_FLAP_WINDOW_MS = 30 * 60 * 1000;
+export const TRANSIENT_FLAP_ROTATION_THRESHOLD = 5;
+const TRANSIENT_ROTATION_COOLDOWN_MS = 30 * 60 * 1000;
 
 export function resetDisconnectAlertCooldownForTests(): void {
   _lastDisconnectAlertAt.clear();
   _lastDisconnectReportAt.clear();
+  _transientDisconnectFlaps.clear();
+  _lastTransientRotationAt.clear();
 }
 
 async function notifySevereDisconnectAlert(params: {
@@ -756,45 +787,105 @@ async function notifySevereDisconnectAlert(params: {
 
 /**
  * Responde a quedas/desconexões recebidas via webhook `connection.update`:
- * - Reporta falha ao circuito do Aquecedor (com cooldown de 5 min em oscilações comuns,
- *   ou imediato em erros 401/403/loggedOut/ban).
- * - Em logout/banimento severo, pausa campanhas exclusivas do chip para interromper disparos em erro.
+ * - Quedas transitórias (ex: 428 connectionClosed, 408, 515, oscilações de WebSocket/proxy):
+ *   registram apenas um flap leve; somente se >= 5 quedas ocorrerem em 30 min dispara
+ *   verificação/rotação preventiva de proxy (`reason: "rotation"`) e aviso leve, SEM colocar
+ *   o chip em quarentena/rehab 72h nem queimar proxy saudável como "banned".
+ * - Logout/banimento severo (401/403/405/logged_out/ban/blocked/restricted/removed/refused):
+ *   aciona quarentena imediata 24h, reabilitação 72h, trava fria 96h, pausa campanhas exclusivas
+ *   e coloca o proxy na blacklist como "banned".
  */
 export async function handleWebhookConnectionClosed(params: {
   clientId: string;
   instanceName: string;
   statusReason?: unknown;
   nowMs?: number;
-}): Promise<{ severe: boolean; pausedCampaigns: number }> {
+}): Promise<{
+  severe: boolean;
+  pausedCampaigns: number;
+  transientFlapCount?: number;
+  proxyRotated?: boolean;
+}> {
   const { clientId, instanceName, statusReason, nowMs = Date.now() } = params;
   if (!clientId || !instanceName) return { severe: false, pausedCampaigns: 0 };
 
   const reasonStr = statusReason != null && String(statusReason).trim() ? String(statusReason).trim() : "desconexão";
   const severe = isSevereDisconnectReason(reasonStr);
-  const lastAt = _lastDisconnectReportAt.get(instanceName) || 0;
 
   markPhoneDisconnected(clientId, instanceName, reasonStr, nowMs);
 
-  if (severe || nowMs - lastAt >= DISCONNECT_REPORT_COOLDOWN_MS) {
-    _lastDisconnectReportAt.set(instanceName, nowMs);
-    try {
-      const { data: wCfg } = await supabaseAdmin
-        .from("whatsapp_warmup_configs")
-        .select("*")
-        .eq("client_id", clientId)
-        .eq("instance_name", instanceName)
-        .maybeSingle();
+  if (!severe) {
+    const flapKey = `${clientId}:${instanceName}`;
+    pruneMapToLimit(_transientDisconnectFlaps, 3000);
+    pruneMapToLimit(_lastTransientRotationAt, 3000);
+    const cutoff = nowMs - TRANSIENT_FLAP_WINDOW_MS;
+    const recentFlaps = (_transientDisconnectFlaps.get(flapKey) || []).filter((ts) => ts >= cutoff);
+    recentFlaps.push(nowMs);
+    _transientDisconnectFlaps.set(flapKey, recentFlaps);
 
-      if (wCfg) {
-        await handleInstanceFailure(
-          clientId,
-          wCfg as WarmupConfig,
-          `[Webhook] Conexão fechada (${reasonStr})`,
-          { immediateQuarantine: severe }
-        );
+    const flapCount = recentFlaps.length;
+    let proxyRotated = false;
+
+    if (flapCount >= TRANSIENT_FLAP_ROTATION_THRESHOLD) {
+      const lastRot = _lastTransientRotationAt.get(flapKey) || 0;
+      if (nowMs - lastRot >= TRANSIENT_ROTATION_COOLDOWN_MS) {
+        _lastTransientRotationAt.set(flapKey, nowMs);
+        _transientDisconnectFlaps.delete(flapKey);
+
+        const overview = await getProxyPoolOverviewCache().catch(() => ({ hasPool: false }));
+        if (overview.hasPool) {
+          const rotRes = await ensureProxyForInstance({
+            instanceName,
+            clientId,
+            reason: "rotation",
+            forWarmup: true,
+          }).catch(() => null);
+          proxyRotated = Boolean(rotRes?.ok);
+        }
+
+        await logWarmupAction({
+          client_id: clientId,
+          sender_instance: instanceName,
+          receiver_instance: "socket_flapping",
+          message_text: proxyRotated
+            ? `⚠️ Oscilação de socket no chip ${instanceName} (${flapCount} quedas transitórias em 30 min · motivo: ${reasonStr}). Verificação/rotação preventiva de proxy executada sem entrar em rehab.`
+            : `⚠️ Oscilação de socket no chip ${instanceName} (${flapCount} quedas transitórias em 30 min · motivo: ${reasonStr}). Estabilidade monitorada sem acionar quarentena ou rehab.`,
+          action_type: "system",
+          details: {
+            reason: reasonStr,
+            transient_flaps_30m: flapCount,
+            proxy_rotated: proxyRotated,
+          },
+        }).catch(() => {});
       }
-    } catch { }
+    }
+
+    return {
+      severe: false,
+      pausedCampaigns: 0,
+      transientFlapCount: flapCount,
+      proxyRotated,
+    };
   }
+
+  _lastDisconnectReportAt.set(instanceName, nowMs);
+  try {
+    const { data: wCfg } = await supabaseAdmin
+      .from("whatsapp_warmup_configs")
+      .select("*")
+      .eq("client_id", clientId)
+      .eq("instance_name", instanceName)
+      .maybeSingle();
+
+    if (wCfg) {
+      await handleInstanceFailure(
+        clientId,
+        wCfg as WarmupConfig,
+        `[Webhook] Conexão fechada (${reasonStr})`,
+        { immediateQuarantine: true }
+      );
+    }
+  } catch { }
 
   let pausedCampaigns = 0;
   if (severe) {
@@ -1039,14 +1130,24 @@ export function evaluateDailyAutoProgress(
     };
   }
 
-  const hadSuccess = (cfg.sent_today || 0) > 0 && (cfg.error_count_today || 0) === 0;
+  const hadSuccess =
+    (cfg.error_count_today || 0) === 0 &&
+    ((cfg.sent_today || 0) > 0 ||
+      (cfg.external_mmzap_sent_today || 0) > 0 ||
+      (cfg.external_warmup_inbound_today || 0) >= 3 ||
+      (cfg.received_today || 0) >= 5);
   const newConsecutiveDays = hadSuccess
     ? (cfg.consecutive_successful_days || 0) + 1
     : Math.max(0, (cfg.consecutive_successful_days || 0) - 1);
 
-  // Dias ativos: só avança quando houve tráfego real no dia anterior e limita saltos após hiatos offline (>=48h)
+  // Dias ativos: só avança quando houve tráfego real no dia anterior (interno, MMZap ou grupos)
+  // e limita saltos após hiatos offline (>=48h)
   const elapsedFromCreated = calculateElapsedDaysFromCreatedAt(cfg.created_at, nowIso);
-  const hadWarmupActivity = (cfg.sent_today || 0) > 0 || (cfg.received_today || 0) > 0;
+  const hadWarmupActivity =
+    (cfg.sent_today || 0) > 0 ||
+    (cfg.received_today || 0) > 0 ||
+    (cfg.external_mmzap_sent_today || 0) > 0 ||
+    (cfg.external_warmup_inbound_today || 0) > 0;
   const lastActMs = cfg.last_activity_at ? new Date(cfg.last_activity_at).getTime() : NaN;
   const nowMs = new Date(nowIso).getTime();
   const hasOfflineGap =
@@ -1080,7 +1181,7 @@ export function evaluateDailyAutoProgress(
     }
   }
 
-  // PILOTO AUTOMÁTICO DE ESCADA DE FASES
+  // PILOTO AUTOMÁTICO DE ESCADA DE FASES (calibragem Nov 2026)
   // Só promove com dias suficientes E pelo menos 2 dias consecutivos saudáveis.
   if (cfg.stage_auto_progress !== false && newConsecutiveDays >= 2 && !stageReconciled) {
     if (newStage === 1 && newDaysActive >= 4) {
@@ -1089,7 +1190,7 @@ export function evaluateDailyAutoProgress(
     } else if (newStage === 2 && newDaysActive >= 8) {
       newStage = 3;
       stagePromoted = true;
-    } else if (newStage === 3 && newDaysActive >= 13) {
+    } else if (newStage === 3 && newDaysActive >= 15) {
       newStage = 4;
       stagePromoted = true;
     }
@@ -1143,6 +1244,231 @@ export function evaluateRehabGraduation(
     return { graduated: true, nextCareerMode: "maturing" };
   }
   return { graduated: false, nextCareerMode: "rehab" };
+}
+
+export const EXTERNAL_SHIELD_QUIET_OFF_HOURS = 48;
+
+/**
+ * Graduação automática do Escudo Externo (MMZap):
+ * - Quando o chip gradua para `inbound`/`outbound` OU o MMZap auto-desativa por fase:
+ *   transita `receive_only` -> `hybrid_quarantine` (libera leads comerciais imediatos para Sarah/CRM
+ *   enquanto continua quarentenando ruído residual do MMZap).
+ * - Na Fase 4 com MMZap desligado (`mmzap_browser_enabled === false`) e >= 48h sem tráfego externo:
+ *   transita `hybrid_quarantine` -> `off` (operação 100% comercial sem filtro).
+ */
+export function evaluateExternalShieldGraduation(opts: {
+  currentMode?: ExternalWarmupMode | null;
+  stage: WarmupStage;
+  purpose?: WarmupPurpose | null;
+  purposeGraduated?: boolean;
+  mmzapAutoDisabled?: boolean;
+  mmzapBrowserEnabled?: boolean | null;
+  externalWarmupLastAt?: string | null;
+  externalWarmupInboundToday?: number | null;
+  mmzapLastShiftEndedAt?: string | null;
+  nowMs?: number;
+}): {
+  shouldTransition: boolean;
+  nextMode: ExternalWarmupMode;
+  reason?: "purpose_graduated" | "mmzap_auto_disabled" | "stage4_quiet_48h";
+} {
+  const current: ExternalWarmupMode = opts.currentMode || "off";
+  const nowMs = opts.nowMs ?? Date.now();
+
+  if (current === "receive_only") {
+    if (opts.purposeGraduated && (opts.purpose === "inbound" || opts.purpose === "outbound")) {
+      return {
+        shouldTransition: true,
+        nextMode: "hybrid_quarantine",
+        reason: "purpose_graduated",
+      };
+    }
+    if (opts.mmzapAutoDisabled) {
+      return {
+        shouldTransition: true,
+        nextMode: "hybrid_quarantine",
+        reason: "mmzap_auto_disabled",
+      };
+    }
+  }
+
+  if (current === "hybrid_quarantine" && opts.stage >= 4 && opts.mmzapBrowserEnabled === false) {
+    const quietMs = EXTERNAL_SHIELD_QUIET_OFF_HOURS * 60 * 60 * 1000;
+    const lastExtMs = opts.externalWarmupLastAt ? new Date(opts.externalWarmupLastAt).getTime() : NaN;
+    const lastShiftMs = opts.mmzapLastShiftEndedAt ? new Date(opts.mmzapLastShiftEndedAt).getTime() : NaN;
+    const inboundToday = Number(opts.externalWarmupInboundToday || 0);
+
+    let quietLongEnough = false;
+    if (Number.isFinite(lastExtMs)) {
+      quietLongEnough = nowMs - lastExtMs >= quietMs;
+    } else if (inboundToday === 0) {
+      quietLongEnough = Number.isFinite(lastShiftMs) ? nowMs - lastShiftMs >= quietMs : true;
+    }
+
+    if (quietLongEnough) {
+      return {
+        shouldTransition: true,
+        nextMode: "off",
+        reason: "stage4_quiet_48h",
+      };
+    }
+  }
+
+  return { shouldTransition: false, nextMode: current };
+}
+
+/**
+ * Calcula pontuação de prontidão (0-100), nível operacional, capacidade segura diária
+ * de prospecção fria (calibragem Nov 2026) e bloqueios/alertas do chip.
+ */
+export function computeChipReadinessSummary(
+  cfg: Partial<WarmupConfig>,
+  opts?: {
+    isConnected?: boolean;
+    proxyForeign?: boolean;
+    proxyHosting?: boolean;
+    flaps24h?: number;
+    nowMs?: number;
+  }
+): ChipReadinessSummary {
+  const nowMs = opts?.nowMs ?? Date.now();
+  const stage = Math.max(1, Math.min(4, Number(cfg.stage || 1))) as WarmupStage;
+  const daysActive = Math.max(0, Math.floor(Number(cfg.days_active ?? 1)));
+  const healthScore = Math.max(0, Math.min(100, Math.round(Number(cfg.health_score ?? 100))));
+  const blockers: string[] = [];
+
+  const quarantineActive = Boolean(
+    cfg.is_quarantined &&
+      (!cfg.quarantine_until || new Date(cfg.quarantine_until).getTime() > nowMs)
+  );
+  const coldLockActive = Boolean(
+    cfg.cold_outreach_locked_until &&
+      new Date(cfg.cold_outreach_locked_until).getTime() > nowMs
+  );
+  const inRehab = cfg.career_mode === "rehab" || coldLockActive;
+  const disconnected = opts?.isConnected === false;
+
+  if (disconnected) {
+    blockers.push("Chip desconectado na Evolution API");
+  }
+  if (quarantineActive) {
+    blockers.push(
+      cfg.quarantine_reason
+        ? `Chip em quarentena preventiva (${cfg.quarantine_reason})`
+        : "Chip em quarentena preventiva (24h)"
+    );
+  }
+  if (inRehab) {
+    blockers.push("Chip em reabilitação pós-incidente (trava de disparo frio ativa)");
+  }
+  if (healthScore < 40) {
+    blockers.push(`Saúde crítica (${healthScore}%) — disparos frios bloqueados`);
+  }
+
+  let baseColdCap = 0;
+  let isVeteran = false;
+  if (stage >= 4 && daysActive >= 21 && healthScore >= 90) {
+    baseColdCap = 80;
+    isVeteran = true;
+  } else if (stage >= 4 && daysActive >= 15) {
+    baseColdCap = 50;
+  } else if (stage >= 3 && daysActive >= 11) {
+    baseColdCap = 30;
+  } else if (stage >= 2 && daysActive >= 7) {
+    baseColdCap = 15;
+  }
+
+  const hardBlocked = disconnected || quarantineActive || inRehab || healthScore < 40;
+  let safeDailyColdCapacity = hardBlocked ? 0 : baseColdCap;
+
+  if (!hardBlocked && safeDailyColdCapacity > 0 && healthScore < 75) {
+    safeDailyColdCapacity = Math.floor(safeDailyColdCapacity / 2);
+    blockers.push(`Saúde moderada (${healthScore}%) — capacidade diária reduzida em 50%`);
+  }
+
+  if (!hardBlocked && baseColdCap === 0) {
+    if (stage < 2 || daysActive < 7) {
+      blockers.push(`Em maturação — liberar prospecção fria a partir do Dia 7 e Fase 2 (atual: Dia ${daysActive}/7)`);
+    }
+  }
+
+  if (cfg.mmzap_browser_status === "unpaired" || cfg.mmzap_last_error === "qr_required") {
+    blockers.push("MMZap aguardando pareamento de QR Code");
+  }
+  if (opts?.proxyForeign) {
+    blockers.push("Proxy estrangeiro em chip +55 (prefira IP brasileiro)");
+  }
+  if (opts?.proxyHosting) {
+    blockers.push("Proxy Datacenter/ASN (prefira IP residencial/4G BR)");
+  }
+  if (typeof opts?.flaps24h === "number" && opts.flaps24h >= 5) {
+    blockers.push(`Instabilidade de socket nas últimas 24h (${opts.flaps24h} quedas)`);
+  }
+
+  const agePoints = Math.min(35, Math.round((Math.min(daysActive, 21) / 21) * 35));
+  const stagePointsMap: Record<WarmupStage, number> = { 1: 5, 2: 12, 3: 19, 4: 25 };
+  const stagePoints = stagePointsMap[stage];
+  const healthPoints = Math.round((healthScore / 100) * 25);
+  const streak = Math.max(0, Number(cfg.consecutive_successful_days || 0));
+  const hygienePoints =
+    (cfg.profile_hydrated ? 5 : 0) +
+    Math.min(5, Math.round((Math.min(streak, 3) / 3) * 5)) +
+    (!quarantineActive && !inRehab && !opts?.proxyForeign && !opts?.proxyHosting ? 5 : 0);
+
+  let score = Math.min(100, Math.max(0, agePoints + stagePoints + healthPoints + hygienePoints));
+  if (healthScore < 40) score = Math.min(score, 20);
+  else if (quarantineActive || inRehab) score = Math.min(score, 25);
+  else if (disconnected) score = Math.min(score, 30);
+
+  let tier: ChipReadinessTier;
+  let tierLabel: string;
+  let badge: string;
+
+  if (hardBlocked) {
+    tier = "blocked";
+    tierLabel = quarantineActive
+      ? "Quarentena"
+      : inRehab
+        ? "Reabilitação"
+        : disconnected
+          ? "Desconectado"
+          : "Saúde Crítica";
+    badge = "⛔ Bloqueado";
+  } else if (isVeteran) {
+    tier = "veteran";
+    tierLabel = "Veterano Blindado";
+    badge = `🏆 Veterano · ${safeDailyColdCapacity} frios/dia`;
+  } else if (stage >= 4 && daysActive >= 15) {
+    tier = "outbound_ready";
+    tierLabel = "Blindado · Produção";
+    badge = `🛡️ Pronto · ${safeDailyColdCapacity} frios/dia`;
+  } else if (safeDailyColdCapacity > 0) {
+    tier = "outbound_light";
+    tierLabel = "Prospecção Leve";
+    badge = `🔥 Leve · ${safeDailyColdCapacity} frios/dia`;
+  } else if (stage >= 2 && daysActive >= 4) {
+    tier = "inbound_ready";
+    tierLabel = "Pronto p/ Inbound";
+    badge = `🎯 Inbound (Dia ${daysActive}/7)`;
+  } else {
+    tier = "nursery";
+    tierLabel = "Berçário";
+    badge = `🧊 Berçário (Dia ${daysActive}/7)`;
+  }
+
+  return {
+    score,
+    tier,
+    tierLabel,
+    badge,
+    isVeteran,
+    coldOutreachAllowed: safeDailyColdCapacity > 0,
+    safeDailyColdCapacity,
+    daysActive,
+    stage,
+    healthScore,
+    blockers,
+  };
 }
 
 /**

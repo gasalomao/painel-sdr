@@ -462,7 +462,7 @@ describe("Aquecedor Autônomo 2026 — Passaporte por Telefone, Anti-Ban e Escal
     expect(db.channel_connections[0].status).toBe("open");
   });
 
-  it("3. Status desacoplado, erro transitório não zera streak e desconexão 401/428 dá quarentena no 1º golpe", async () => {
+  it("3. Status desacoplado, erro transitório não zera streak, 428 não dá falso-ban e 401 dá quarentena no 1º golpe", async () => {
     const clientId = "tenant-bugs";
     const chipA = makeWarmupConfig({
       client_id: clientId,
@@ -522,8 +522,19 @@ describe("Aquecedor Autônomo 2026 — Passaporte por Telefone, Anti-Ban e Escal
     expect(db.whatsapp_warmup_configs[0].error_count_today).toBe(0);
     expect(db.whatsapp_warmup_configs[0].is_quarantined).toBe(false);
 
-    // D) Erro severo 401/428 no webhook coloca em quarentena imediata no 1º strike e pausa campanha
+    // D1) Queda transitória 428 (connectionClosed) NÃO é ban: nunca dá quarentena nem pausa campanha
     db.campaigns.push({ client_id: clientId, instance_name: "chip-a", status: "running" });
+    const transientRes = await handleWebhookConnectionClosed({
+      clientId,
+      instanceName: "chip-a",
+      statusReason: 428,
+    });
+    expect(transientRes.severe).toBe(false);
+    expect(transientRes.pausedCampaigns).toBe(0);
+    expect(db.whatsapp_warmup_configs[0].is_quarantined).toBe(false);
+    expect(db.campaigns[0].status).toBe("running");
+
+    // D2) Erro severo 401 no webhook coloca em quarentena imediata no 1º strike e pausa campanha
     const closedRes = await handleWebhookConnectionClosed({
       clientId,
       instanceName: "chip-a",

@@ -16,7 +16,6 @@ import {
   type WarmupPhoneMemoryEntry,
 } from "./warmup-phone-memory";
 import type { WarmupConfig, WarmupGroup } from "./warmup-types";
-import { getProxyPoolOverviewCache } from "@/lib/proxy-pool";
 
 // Anti-flood para grupos orgânicos passivos e de aquecimento
 const _organicGroupChipCache = new Map<
@@ -1002,22 +1001,17 @@ export async function auditChipDay0Hygiene(
         .catch(() => null);
       if (pr?.enabled && pr.host) {
         const cleanHost = String(pr.host).trim().toLowerCase();
-        const poolOverview = await getProxyPoolOverviewCache().catch(() => ({
-          hasPool: false,
-          brHosts: new Set<string>(),
-        }));
-        if (!poolOverview.brHosts.has(cleanHost)) {
-          const geoRes = await checkProxyIpIntel(cleanHost, { forceInTests: opts?.forceInTests });
-          if (geoRes?.countryCode && geoRes.countryCode !== "BR") {
-            warnings.push(
-              `proxy estrangeiro (${geoRes.country || geoRes.countryCode}) em chip +55 — recomendado proxy BR ou conexão direta`
-            );
-          }
-          if (geoRes?.hosting) {
-            warnings.push(
-              `proxy em servidor datacenter/ASN (${geoRes.isp || pr.host}) — risco elevado de flapping e bloqueio 401; prefira IP residencial/4G`
-            );
-          }
+        // Verifica SEMPRE país real (BR) e ASN/hosting via ip-api (cache 6h), inclusive para hosts no proxy_pool
+        const geoRes = await checkProxyIpIntel(cleanHost, { forceInTests: opts?.forceInTests });
+        if (geoRes?.countryCode && geoRes.countryCode !== "BR") {
+          warnings.push(
+            `proxy estrangeiro (${geoRes.country || geoRes.countryCode}) em chip +55 — recomendado proxy BR ou conexão direta`
+          );
+        }
+        if (geoRes?.hosting) {
+          warnings.push(
+            `proxy em servidor datacenter/ASN (${geoRes.isp || pr.host}) — risco elevado de flapping e bloqueio 401; prefira IP residencial/4G`
+          );
         }
       }
     }
@@ -1081,6 +1075,10 @@ export interface ProxyIpIntel {
 
 const _proxyIntelCache = new Map<string, ProxyIpIntel>();
 const PROXY_INTEL_TTL_MS = 6 * 60 * 60 * 1000;
+
+export function resetProxyIntelCacheForTests(): void {
+  _proxyIntelCache.clear();
+}
 
 /**
  * Verifica reputação geográfica e ASN de um host de proxy (com cache em RAM de 6h).
@@ -1548,21 +1546,20 @@ export function analyzeChipClusterHealth(params: {
       );
     }
 
-    const isManagedBrPool = Boolean(managedBrPoolHosts?.has(ownHost));
-    if (!isManagedBrPool) {
-      const intel = proxyIntelByHost?.get(ownHost) || _proxyIntelCache.get(ownHost) || null;
-      if (intel?.hosting) {
-        proxyHosting = true;
-        warnings.push(
-          `Proxy em servidor Datacenter/ASN (${intel.isp || ownProxy.host}) — prefira IP residencial/4G brasileiro.`
-        );
-      }
-      if (intel?.countryCode && intel.countryCode !== "BR") {
-        proxyForeign = true;
-        warnings.push(
-          `Proxy localizado fora do Brasil (${intel.country || intel.countryCode}) — divergência geográfica para chip +55.`
-        );
-      }
+    // Sempre avalia geo/ASN real — nunca ignora hosts do pool (Webshare/datacenter pode ter IP estrangeiro ou hosting)
+    void managedBrPoolHosts;
+    const intel = proxyIntelByHost?.get(ownHost) || _proxyIntelCache.get(ownHost) || null;
+    if (intel?.hosting) {
+      proxyHosting = true;
+      warnings.push(
+        `Proxy em servidor Datacenter/ASN (${intel.isp || ownProxy.host}) — prefira IP residencial/4G brasileiro.`
+      );
+    }
+    if (intel?.countryCode && intel.countryCode !== "BR") {
+      proxyForeign = true;
+      warnings.push(
+        `Proxy localizado fora do Brasil (${intel.country || intel.countryCode}) — divergência geográfica para chip +55.`
+      );
     }
   }
 

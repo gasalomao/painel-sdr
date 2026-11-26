@@ -171,16 +171,28 @@ describe("Piloto Automático de Fases (evaluateDailyAutoProgress)", () => {
     expect(res.newDailyTarget).toBe(STAGE_DEFAULTS[3].dailyTarget);
   });
 
-  it("promotes from Stage 3 (Quente) to Stage 4 (Blindado) on day 13", () => {
-    const cfgDay12: WarmupConfig = {
+  it("promotes from Stage 3 (Quente) to Stage 4 (Blindado) on day 15 (keeping day 14 in Stage 3)", () => {
+    const cfgDay13: WarmupConfig = {
       ...baseConfig,
       stage: 3,
-      days_active: 12,
-      consecutive_successful_days: 12,
+      days_active: 13,
+      consecutive_successful_days: 13,
     };
-    const res = evaluateDailyAutoProgress(cfgDay12, "2026-11-10T14:00:00Z");
+    const resDay14 = evaluateDailyAutoProgress(cfgDay13, "2026-11-10T14:00:00Z");
+    expect(resDay14.isNewDay).toBe(true);
+    expect(resDay14.newDaysActive).toBe(14);
+    expect(resDay14.stagePromoted).toBe(false);
+    expect(resDay14.newStage).toBe(3);
+
+    const cfgDay14: WarmupConfig = {
+      ...baseConfig,
+      stage: 3,
+      days_active: 14,
+      consecutive_successful_days: 14,
+    };
+    const res = evaluateDailyAutoProgress(cfgDay14, "2026-11-10T14:00:00Z");
     expect(res.isNewDay).toBe(true);
-    expect(res.newDaysActive).toBe(13);
+    expect(res.newDaysActive).toBe(15);
     expect(res.stagePromoted).toBe(true);
     expect(res.newStage).toBe(4);
     expect(res.newDailyTarget).toBe(STAGE_DEFAULTS[4].dailyTarget);

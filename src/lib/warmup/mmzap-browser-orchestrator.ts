@@ -5,7 +5,11 @@ import {
   getEffectiveDailyTarget,
   getMmzapGovernorSettings,
 } from "./warmup-config-service";
-import { getBrazilHour, logWarmupAction } from "./warmup-engine";
+import {
+  evaluateExternalShieldGraduation,
+  getBrazilHour,
+  logWarmupAction,
+} from "./warmup-engine";
 import {
   evaluateMmzapShiftGovernor,
   invalidateExternalShieldCache,
@@ -16,12 +20,63 @@ import {
   startMmzapWorkerShift,
   stopMmzapWorkerSession,
   type MmzapWorkerProxyInput,
+  type MmzapWorkerSessionStatus,
 } from "./mmzap-browser-client";
 import type {
+  ExternalWarmupMode,
   MmzapBrowserStatus,
   MmzapGovernorSettings,
   WarmupConfig,
+  WarmupStage,
 } from "./warmup-types";
+
+export const MMZAP_ERROR_AUTO_RECOVERY_MS = 3 * 60 * 60 * 1000;
+
+type WorkerSessionWithWatchdog = MmzapWorkerSessionStatus & {
+  sessionLoggedOut?: boolean;
+  mmzapWatchdogRecoveries?: number;
+  lastWatchdogCheckAt?: string | null;
+  proxyLatencyMs?: number | null;
+};
+
+/**
+ * Identifica erros MMZap que exigem ação humana (re-escanear QR ou configurar extensão)
+ * e portanto NÃO devem ser resetados automaticamente para "idle".
+ */
+export function isNonRecoverableMmzapError(lastError?: string | null): boolean {
+  const raw = String(lastError || "").trim().toLowerCase();
+  if (!raw) return false;
+  return (
+    raw === "qr_required" ||
+    raw.includes("qr_required") ||
+    raw.includes("session_logged_out") ||
+    raw === "needs_extension_setup" ||
+    raw === "unpaired"
+  );
+}
+
+/**
+ * Consulta somente leitura do host de proxy atualmente atribuído à instância no `proxy_pool`
+ * (sem acionar `ensureProxyForInstance` nem probe TCP de 2.5s a cada tick de 60s).
+ */
+export async function readAssignedProxyHostReadOnly(instanceName: string): Promise<string | null> {
+  if (!instanceName) return null;
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("proxy_pool")
+      .select("host")
+      .eq("assigned_instance", instanceName)
+      .eq("status", "assigned")
+      .maybeSingle();
+
+    if (!error && data?.host) {
+      return String(data.host);
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
 
 export async function resolveMmzapProxyForInstance(
   clientId: string,
@@ -97,10 +152,11 @@ export async function stopMmzapSessionForChip(
 
   let prevMinutes = 0;
   let startedAtMs: number | null = null;
+  let currentExternalMode: ExternalWarmupMode | null = null;
   try {
     const { data } = await supabaseAdmin
       .from("whatsapp_warmup_configs")
-      .select("mmzap_minutes_today, mmzap_shift_started_at")
+      .select("mmzap_minutes_today, mmzap_shift_started_at, external_warmup_mode")
       .eq("client_id", clientId)
       .eq("instance_name", instanceName)
       .maybeSingle();
@@ -111,6 +167,10 @@ export async function stopMmzapSessionForChip(
       if (startedIso) {
         const parsed = new Date(startedIso).getTime();
         if (Number.isFinite(parsed)) startedAtMs = parsed;
+      }
+      const rawMode = (data as { external_warmup_mode?: string | null }).external_warmup_mode;
+      if (rawMode === "off" || rawMode === "receive_only" || rawMode === "hybrid_quarantine") {
+        currentExternalMode = rawMode;
       }
     }
   } catch {
@@ -130,8 +190,13 @@ export async function stopMmzapSessionForChip(
     updated_at: nowIso,
   };
 
+  let graduatedShieldToHybrid = false;
   if (reason === "auto_disabled_stage") {
     updateFields.mmzap_browser_enabled = false;
+    if (currentExternalMode === "receive_only") {
+      updateFields.external_warmup_mode = "hybrid_quarantine";
+      graduatedShieldToHybrid = true;
+    }
   }
 
   await updateMmzapConfigFields(clientId, instanceName, updateFields);
@@ -140,7 +205,9 @@ export async function stopMmzapSessionForChip(
     client_id: clientId,
     sender_instance: instanceName,
     receiver_instance: "mmzap_governor",
-    message_text: `⏸️ Turno MMZap encerrado para ${instanceName} (motivo: ${reason}).`,
+    message_text: graduatedShieldToHybrid
+      ? `⏸️ Turno MMZap encerrado e auto-desativado por fase para ${instanceName}. Escudo Externo graduado automaticamente para "hybrid_quarantine" (leads comerciais liberados para a Sarah/CRM).`
+      : `⏸️ Turno MMZap encerrado para ${instanceName} (motivo: ${reason}).`,
     action_type: "system",
   }).catch(() => {});
 
@@ -172,7 +239,7 @@ export function selectNextMmzapShiftCandidate(params: {
   if (!governor.enabled) return null;
 
   const currentHour = getBrazilHour(new Date(nowMs));
-  if (currentHour < governor.allowed_start_hour || currentHour > governor.allowed_end_hour) {
+  if (currentHour < governor.allowed_start_hour || currentHour >= governor.allowed_end_hour) {
     return null;
   }
 
@@ -255,9 +322,16 @@ export async function tickMmzapBrowserOrchestrator(params: {
   clientId: string;
   configs: WarmupConfig[];
   connectedInstanceNames: Set<string>;
+  activeCampaignInstances?: Set<string>;
   nowMs?: number;
 }): Promise<{ started: string[]; stopped: string[] }> {
-  const { clientId, configs, connectedInstanceNames, nowMs = Date.now() } = params;
+  const {
+    clientId,
+    configs,
+    connectedInstanceNames,
+    activeCampaignInstances,
+    nowMs = Date.now(),
+  } = params;
   const started: string[] = [];
   const stopped: string[] = [];
 
@@ -268,14 +342,22 @@ export async function tickMmzapBrowserOrchestrator(params: {
     return { started, stopped };
   }
 
+  const activeCampaignSet = new Set<string>();
+  if (activeCampaignInstances) {
+    for (const inst of activeCampaignInstances) {
+      const clean = String(inst || "").trim().toLowerCase();
+      if (clean) activeCampaignSet.add(clean);
+    }
+  }
+
   const governor = await getMmzapGovernorSettings(clientId);
   const health = await getMmzapWorkerHealth();
   if (!health.reachable) {
     return { started, stopped };
   }
 
-  const workerSessionsMap = new Map(
-    health.sessions.map((s) => [s.instanceName, s])
+  const workerSessionsMap = new Map<string, WorkerSessionWithWatchdog>(
+    health.sessions.map((s) => [s.instanceName, s as WorkerSessionWithWatchdog])
   );
   const activeWorkerNames = new Set(
     health.sessions
@@ -283,37 +365,176 @@ export async function tickMmzapBrowserOrchestrator(params: {
       .map((s) => s.instanceName)
   );
 
-  // 1. Reconcilia e aplica o governador nas sessões atualmente "running"
+  // 1. Reconcilia, auto-recupera erros transitórios e aplica o governador nas sessões "running"
   for (const cfg of configs) {
     const status = cfg.mmzap_browser_status || "unpaired";
-    const stage = cfg.stage || 1;
+    const stage = Math.max(1, Math.min(4, Number(cfg.stage || 1))) as WarmupStage;
+    const isCampaignActive = activeCampaignSet.has(cfg.instance_name.trim().toLowerCase());
 
-    // Auto-desativação automática ao atingir Fase configurada (ex: Fase 3), salvo override manual
+    // Exclusão mútua estrita: campanha fria ativa e MMZap nunca rodam juntos no mesmo chip
+    if (isCampaignActive) {
+      if (status === "running") {
+        await stopMmzapSessionForChip(clientId, cfg.instance_name, "campaign_active");
+        stopped.push(cfg.instance_name);
+        cfg.mmzap_browser_status = "idle";
+        cfg.mmzap_last_shift_ended_at = new Date(nowMs).toISOString();
+        activeWorkerNames.delete(cfg.instance_name);
+      }
+      continue;
+    }
+
+    // Auto-desativação automática ao atingir Fase configurada (ex: Fase 4), salvo override manual
     if (
       cfg.mmzap_browser_enabled &&
       stage >= governor.auto_disable_stage &&
       (cfg.mmzap_max_sends_override === null || cfg.mmzap_max_sends_override === undefined)
     ) {
+      const shieldGrad = evaluateExternalShieldGraduation({
+        currentMode: cfg.external_warmup_mode,
+        stage,
+        purpose: cfg.purpose,
+        mmzapAutoDisabled: true,
+        mmzapBrowserEnabled: false,
+        nowMs,
+      });
+
       if (status === "running") {
         await stopMmzapSessionForChip(clientId, cfg.instance_name, "auto_disabled_stage");
         stopped.push(cfg.instance_name);
         cfg.mmzap_browser_status = "idle";
+        if (shieldGrad.shouldTransition) {
+          cfg.external_warmup_mode = shieldGrad.nextMode;
+        }
       } else {
-        await updateMmzapConfigFields(clientId, cfg.instance_name, {
+        const autoDisableFields: Record<string, unknown> = {
           mmzap_browser_enabled: false,
           mmzap_last_error: "auto_disabled_stage",
           updated_at: new Date(nowMs).toISOString(),
-        });
+        };
+        if (shieldGrad.shouldTransition) {
+          autoDisableFields.external_warmup_mode = shieldGrad.nextMode;
+          cfg.external_warmup_mode = shieldGrad.nextMode;
+        }
+        await updateMmzapConfigFields(clientId, cfg.instance_name, autoDisableFields);
+        if (shieldGrad.shouldTransition) {
+          await logWarmupAction({
+            client_id: clientId,
+            sender_instance: cfg.instance_name,
+            receiver_instance: "external_shield",
+            message_text: `🛡️ MMZap auto-desativado na Fase ${stage} para ${cfg.instance_name}. Escudo Externo graduado automaticamente para "${shieldGrad.nextMode}".`,
+            action_type: "system",
+          }).catch(() => {});
+        }
       }
       cfg.mmzap_browser_enabled = false;
       activeWorkerNames.delete(cfg.instance_name);
       continue;
     }
 
+    // Graduação automática do Escudo Externo em Fase 4 após >= 48h sem tráfego externo (hybrid_quarantine -> off)
+    if (cfg.external_warmup_mode === "hybrid_quarantine" && stage >= 4 && cfg.mmzap_browser_enabled === false) {
+      const quietGrad = evaluateExternalShieldGraduation({
+        currentMode: cfg.external_warmup_mode,
+        stage,
+        purpose: cfg.purpose,
+        mmzapBrowserEnabled: false,
+        externalWarmupLastAt: cfg.external_warmup_last_at ?? null,
+        externalWarmupInboundToday: cfg.external_warmup_inbound_today ?? 0,
+        mmzapLastShiftEndedAt: cfg.mmzap_last_shift_ended_at ?? null,
+        nowMs,
+      });
+      if (quietGrad.shouldTransition && quietGrad.nextMode === "off") {
+        await updateMmzapConfigFields(clientId, cfg.instance_name, {
+          external_warmup_mode: "off",
+          updated_at: new Date(nowMs).toISOString(),
+        });
+        cfg.external_warmup_mode = "off";
+        await logWarmupAction({
+          client_id: clientId,
+          sender_instance: cfg.instance_name,
+          receiver_instance: "external_shield",
+          message_text: `🛡️ Escudo Externo desativado automaticamente no chip ${cfg.instance_name} (Fase 4 + MMZap desligado + >= 48h sem tráfego externo).`,
+          action_type: "system",
+        }).catch(() => {});
+      }
+    }
+
+    // Auto-recuperação após 3h de cooldown para erros transitórios de rede/worker (nunca para qr_required/unpaired/extension)
+    if (
+      status === "error" &&
+      cfg.mmzap_browser_enabled &&
+      !isNonRecoverableMmzapError(cfg.mmzap_last_error)
+    ) {
+      const refIso = cfg.updated_at || cfg.mmzap_last_shift_ended_at;
+      const refMs = refIso ? new Date(refIso).getTime() : NaN;
+      if (Number.isFinite(refMs) && nowMs - refMs >= MMZAP_ERROR_AUTO_RECOVERY_MS) {
+        const prevError = cfg.mmzap_last_error || "erro transitório";
+        const nowIso = new Date(nowMs).toISOString();
+        await updateMmzapConfigFields(clientId, cfg.instance_name, {
+          mmzap_browser_status: "idle",
+          mmzap_last_error: null,
+          updated_at: nowIso,
+        });
+        cfg.mmzap_browser_status = "idle";
+        cfg.mmzap_last_error = null;
+        cfg.updated_at = nowIso;
+        await logWarmupAction({
+          client_id: clientId,
+          sender_instance: cfg.instance_name,
+          receiver_instance: "mmzap_governor",
+          message_text: `🔄 Auto-recuperação MMZap: chip ${cfg.instance_name} saiu de erro transitório (${prevError}) após 3h e retornou para "idle".`,
+          action_type: "system",
+        }).catch(() => {});
+      }
+      continue;
+    }
+
     if (status !== "running") continue;
 
     const workerSess = workerSessionsMap.get(cfg.instance_name);
-    if (!workerSess || (workerSess.status !== "running" && workerSess.status !== "qr_pending")) {
+
+    // Watchdog de logout no WhatsApp Web: transita de forma limpa para "unpaired" + alerta acionável ao ADM
+    if (
+      workerSess &&
+      (workerSess.sessionLoggedOut === true ||
+        workerSess.status === "qr_pending" ||
+        workerSess.lastError === "qr_required")
+    ) {
+      const nowIso = new Date(nowMs).toISOString();
+      await stopMmzapWorkerSession(cfg.instance_name, "qr_required").catch(() => null);
+      const startedMs = cfg.mmzap_shift_started_at ? new Date(cfg.mmzap_shift_started_at).getTime() : NaN;
+      const deltaMin = Number.isFinite(startedMs) ? Math.max(0, Math.round((nowMs - startedMs) / 60_000)) : 0;
+      const totalMin = Number(cfg.mmzap_minutes_today || 0) + deltaMin;
+
+      await updateMmzapConfigFields(clientId, cfg.instance_name, {
+        mmzap_browser_status: "unpaired",
+        mmzap_last_error: "qr_required",
+        mmzap_shift_started_at: null,
+        mmzap_last_shift_ended_at: nowIso,
+        mmzap_minutes_today: totalMin,
+        updated_at: nowIso,
+      });
+
+      cfg.mmzap_browser_status = "unpaired";
+      cfg.mmzap_last_error = "qr_required";
+      cfg.mmzap_shift_started_at = null;
+      cfg.mmzap_last_shift_ended_at = nowIso;
+      cfg.mmzap_minutes_today = totalMin;
+      stopped.push(cfg.instance_name);
+      activeWorkerNames.delete(cfg.instance_name);
+
+      await logWarmupAction({
+        client_id: clientId,
+        sender_instance: cfg.instance_name,
+        receiver_instance: "mmzap_governor",
+        message_text: `🚨 ALERTA ADM: Sessão MMZap do chip ${cfg.instance_name} deslogou no WhatsApp Web (QR necessário). Abra /aquecer-chips e clique em "Re-parear QR" para reconectar.`,
+        action_type: "system",
+        details: { alert: "mmzap_qr_required", session_logged_out: true },
+      }).catch(() => {});
+      continue;
+    }
+
+    if (!workerSess || workerSess.status !== "running") {
       // Sessão caiu/reciclou no container; volta para idle registrando parada
       await stopMmzapSessionForChip(clientId, cfg.instance_name, "worker_session_ended");
       stopped.push(cfg.instance_name);
@@ -333,12 +554,12 @@ export async function tickMmzapBrowserOrchestrator(params: {
       continue;
     }
 
-    // Checa se o proxy da instância rotacionou na Evolution: garante IP idêntico reiniciando o turno
-    const currentProxy = await resolveMmzapProxyForInstance(clientId, cfg.instance_name);
+    // Checa em modo somente-leitura se o proxy da instância rotacionou na Evolution (sem probe TCP a cada 60s)
+    const currentProxyHost = await readAssignedProxyHostReadOnly(cfg.instance_name);
     if (
-      currentProxy?.sourceHost &&
+      currentProxyHost &&
       cfg.mmzap_proxy_endpoint &&
-      currentProxy.sourceHost !== cfg.mmzap_proxy_endpoint
+      currentProxyHost !== cfg.mmzap_proxy_endpoint
     ) {
       await stopMmzapSessionForChip(clientId, cfg.instance_name, "proxy_rotated");
       stopped.push(cfg.instance_name);
@@ -374,16 +595,21 @@ export async function tickMmzapBrowserOrchestrator(params: {
     return { started, stopped };
   }
 
-  // 2. Inicia próximo(s) turno(s) respeitando o limite de browsers simultâneos (RAM)
+  // 2. Inicia próximo(s) turno(s) respeitando o limite de browsers simultâneos (RAM) e exclusão de campanhas
   const cap = Math.min(governor.max_concurrent_browsers, Math.max(1, health.maxConcurrent || 2));
   const freeSlots = Math.max(0, cap - activeWorkerNames.size);
   if (freeSlots === 0) {
     return { started, stopped };
   }
 
+  const nonCampaignConfigs =
+    activeCampaignSet.size > 0
+      ? configs.filter((c) => !activeCampaignSet.has(c.instance_name.trim().toLowerCase()))
+      : configs;
+
   for (let i = 0; i < freeSlots; i++) {
     const candidate = selectNextMmzapShiftCandidate({
-      configs,
+      configs: nonCampaignConfigs,
       governor,
       activeWorkerNames,
       connectedInstances: connectedInstanceNames,
@@ -400,7 +626,9 @@ export async function tickMmzapBrowserOrchestrator(params: {
       slowMode: true,
     });
 
-    if (startRes.ok) {
+    const startData = startRes.data as WorkerSessionWithWatchdog | undefined;
+
+    if (startRes.ok && startData?.sessionLoggedOut !== true && startData?.status !== "qr_pending") {
       const nowIso = new Date(nowMs).toISOString();
       const nextShifts = (candidate.mmzap_shifts_today || 0) + 1;
       await updateMmzapConfigFields(clientId, candidate.instance_name, {
@@ -426,13 +654,35 @@ export async function tickMmzapBrowserOrchestrator(params: {
         message_text: `🌐 Turno MMZap iniciado para ${candidate.instance_name} (${governor.shift_duration_minutes} min · proxy ${proxy?.sourceHost || "VPS"}).`,
         action_type: "system",
       }).catch(() => {});
-    } else if (startRes.data?.needsExtensionSetup) {
+    } else if (startData?.needsExtensionSetup) {
       await updateMmzapConfigFields(clientId, candidate.instance_name, {
         mmzap_browser_status: "needs_extension_setup",
         mmzap_last_error: "needs_extension_setup",
         updated_at: new Date(nowMs).toISOString(),
       });
       candidate.mmzap_browser_status = "needs_extension_setup";
+    } else if (
+      startData?.sessionLoggedOut === true ||
+      startData?.status === "qr_pending" ||
+      isNonRecoverableMmzapError(startRes.error)
+    ) {
+      const nowIso = new Date(nowMs).toISOString();
+      await updateMmzapConfigFields(clientId, candidate.instance_name, {
+        mmzap_browser_status: "unpaired",
+        mmzap_last_error: "qr_required",
+        mmzap_shift_started_at: null,
+        updated_at: nowIso,
+      });
+      candidate.mmzap_browser_status = "unpaired";
+      candidate.mmzap_last_error = "qr_required";
+      await logWarmupAction({
+        client_id: clientId,
+        sender_instance: candidate.instance_name,
+        receiver_instance: "mmzap_governor",
+        message_text: `🚨 ALERTA ADM: Chip ${candidate.instance_name} requer novo pareamento QR no MMZap para iniciar turno.`,
+        action_type: "system",
+        details: { alert: "mmzap_qr_required", session_logged_out: true },
+      }).catch(() => {});
     } else if (startRes.statusCode === 429) {
       break;
     } else {
