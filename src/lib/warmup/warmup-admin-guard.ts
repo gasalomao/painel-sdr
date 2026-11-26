@@ -8,6 +8,30 @@ export interface WarmupAuthLike {
 
 const ADMIN_WARMUP_DENIED_MESSAGE =
   "Aquecimento de chips é exclusivo para números de contas Administradoras.";
+const ENV_ERROR_LOG_COOLDOWN_MS = 10 * 60 * 1000;
+const _lastEnvErrorLogByTenant = new Map<string, number>();
+
+async function logPermissionEnvErrorOnce(clientId: string, errMessage?: string): Promise<void> {
+  const now = Date.now();
+  const prev = _lastEnvErrorLogByTenant.get(clientId) || 0;
+  if (now - prev < ENV_ERROR_LOG_COOLDOWN_MS) return;
+  _lastEnvErrorLogByTenant.set(clientId, now);
+  try {
+    await supabaseAdmin.from("webhook_logs").insert({
+      client_id: clientId,
+      instance_name: "warmup_shield",
+      event: "WARMUP_SHIELD_ENV_ERROR",
+      payload: {
+        message:
+          "Permissão negada na tabela clients (provável ausência de SUPABASE_SERVICE_ROLE_KEY no container). Escudo MMZap e auto-cura exigem SUPABASE_SERVICE_ROLE_KEY configurada.",
+        error: errMessage || "42501",
+      },
+      created_at: new Date(now).toISOString(),
+    });
+  } catch {
+    /* silencioso */
+  }
+}
 
 /**
  * Garante que apenas sessões ADM reais (nunca clientes comuns nem admin impersonando cliente)
@@ -51,6 +75,11 @@ export async function isTenantWarmupAdmin(clientId: string): Promise<boolean> {
       .maybeSingle();
 
     if (error) {
+      const code = String((error as { code?: string }).code || "");
+      const msg = String((error as { message?: string }).message || "");
+      if (code === "42501" || msg.toLowerCase().includes("permission denied")) {
+        await logPermissionEnvErrorOnce(cleanId, msg);
+      }
       return false;
     }
 

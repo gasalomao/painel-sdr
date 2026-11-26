@@ -6,9 +6,14 @@ import {
   ArrowRightLeft,
   CheckCircle2,
   ChevronDown,
+  Globe,
+  Pause,
+  Play,
+  QrCode,
   RefreshCw,
   Send,
   ShieldCheck,
+  Wrench,
   WifiOff,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
@@ -17,11 +22,46 @@ import {
   PURPOSE_METADATA,
   STAGE_DEFAULTS,
   type ExternalWarmupMode,
+  type MmzapBrowserStatus,
   type WarmupConfig,
   type WarmupPurpose,
   type WarmupStage,
 } from "@/lib/warmup/warmup-types";
 import type { ExternalDiagnostic, InstanceItem } from "./types";
+
+const MMZAP_BROWSER_STATUS_UI: Record<
+  MmzapBrowserStatus,
+  { label: string; cls: string }
+> = {
+  unpaired: {
+    label: "Não pareado",
+    cls: "border-[#303a32] bg-[#131914] text-[#a5b1a8]",
+  },
+  qr_pending: {
+    label: "QR pendente",
+    cls: "border-amber-500/35 bg-amber-500/10 text-amber-200",
+  },
+  needs_extension_setup: {
+    label: "Configurar 1ª vez",
+    cls: "border-amber-500/35 bg-amber-500/10 text-amber-200",
+  },
+  idle: {
+    label: "Pronto",
+    cls: "border-emerald-500/30 bg-emerald-500/10 text-emerald-200",
+  },
+  running: {
+    label: "Turno ativo",
+    cls: "border-emerald-500/40 bg-emerald-500/15 text-emerald-200",
+  },
+  paused_safety: {
+    label: "Freio segurança",
+    cls: "border-amber-500/40 bg-amber-500/15 text-amber-200",
+  },
+  error: {
+    label: "Erro worker",
+    cls: "border-red-500/40 bg-red-500/15 text-red-200",
+  },
+};
 
 const STAGE_LABEL: Record<WarmupStage, string> = {
   1: "Fase 1 · Frio",
@@ -48,6 +88,7 @@ export interface ChipAutopilotRowProps {
   isDirty: boolean;
   isSaving: boolean;
   isReauditing: boolean;
+  workerConfigured?: boolean;
   styles: Record<string, string>;
   onToggleEnabled: (instanceName: string, nextEnabled: boolean) => void;
   onChangeField: (
@@ -57,6 +98,12 @@ export interface ChipAutopilotRowProps {
   ) => void;
   onSaveConfig: (instanceName: string) => void;
   onChangeMmzapMode: (instanceName: string, mode: ExternalWarmupMode) => Promise<void>;
+  onOpenMmzapPairModal?: (instanceName: string, mode?: "pair" | "setup") => void;
+  onMmzapBrowserAction?: (
+    instanceName: string,
+    action: "start_shift" | "stop_shift" | "toggle_enabled" | "reset_profile",
+    extra?: Record<string, unknown>
+  ) => Promise<void>;
   onReauditDay0: (instanceName: string) => void;
   onOpenPairModal: (instanceName: string) => void;
   onOpenTestModal: (instanceName: string) => void;
@@ -68,11 +115,14 @@ export function ChipAutopilotRow({
   isDirty,
   isSaving,
   isReauditing,
+  workerConfigured = false,
   styles,
   onToggleEnabled,
   onChangeField,
   onSaveConfig,
   onChangeMmzapMode,
+  onOpenMmzapPairModal,
+  onMmzapBrowserAction,
   onReauditDay0,
   onOpenPairModal,
   onOpenTestModal,
@@ -90,6 +140,10 @@ export function ChipAutopilotRow({
   const mmzapMode = (cfg.external_warmup_mode || "off") as ExternalWarmupMode;
   const mmzapToday =
     diagnostic?.inbound_today ?? cfg.external_warmup_inbound_today ?? 0;
+  const mmzapSentToday = cfg.external_mmzap_sent_today ?? 0;
+  const mmzapBrowserStatus = (cfg.mmzap_browser_status || "unpaired") as MmzapBrowserStatus;
+  const mmzapStatusUi =
+    MMZAP_BROWSER_STATUS_UI[mmzapBrowserStatus] || MMZAP_BROWSER_STATUS_UI.unpaired;
 
   const isQuarantined = Boolean(cfg.is_quarantined);
   const hasDay0Warnings = Boolean(item.day0_warnings && item.day0_warnings.length > 0);
@@ -283,8 +337,107 @@ export function ChipAutopilotRow({
             })}
           </div>
           <span className="text-[11px] font-mono tabular-nums text-[#a5b1a8]">
-            {mmzapToday} hoje
+            {mmzapToday} rec · {mmzapSentToday} env
           </span>
+
+          {workerConfigured && (
+            <>
+              <span
+                className={cn(
+                  "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px]",
+                  mmzapStatusUi.cls
+                )}
+              >
+                <Globe className="w-3 h-3 shrink-0" />
+                {mmzapStatusUi.label}
+              </span>
+
+              {mmzapBrowserStatus === "running" && onMmzapBrowserAction ? (
+                <button
+                  type="button"
+                  disabled={mmzapBusy}
+                  onClick={async () => {
+                    setMmzapBusy(true);
+                    try {
+                      await onMmzapBrowserAction(instName, "stop_shift");
+                    } finally {
+                      setMmzapBusy(false);
+                    }
+                  }}
+                  className={styles.secondaryAction}
+                >
+                  <Pause className="w-3 h-3 text-amber-300" />
+                  Parar turno
+                </button>
+              ) : mmzapBrowserStatus === "needs_extension_setup" && onOpenMmzapPairModal ? (
+                <button
+                  type="button"
+                  disabled={mmzapBusy}
+                  onClick={() => onOpenMmzapPairModal(instName, "setup")}
+                  className={styles.secondaryAction}
+                >
+                  <Wrench className="w-3 h-3 text-amber-300" />
+                  Configurar MMZap
+                </button>
+              ) : (mmzapBrowserStatus === "unpaired" ||
+                  mmzapBrowserStatus === "qr_pending" ||
+                  mmzapBrowserStatus === "error") &&
+                onOpenMmzapPairModal ? (
+                <button
+                  type="button"
+                  disabled={mmzapBusy}
+                  onClick={() => onOpenMmzapPairModal(instName, "pair")}
+                  className={styles.secondaryAction}
+                >
+                  <QrCode className="w-3 h-3 text-emerald-400" />
+                  Parear MMZap
+                </button>
+              ) : (
+                onMmzapBrowserAction && (
+                  <button
+                    type="button"
+                    disabled={mmzapBusy}
+                    onClick={async () => {
+                      setMmzapBusy(true);
+                      try {
+                        await onMmzapBrowserAction(instName, "start_shift");
+                      } finally {
+                        setMmzapBusy(false);
+                      }
+                    }}
+                    className={styles.secondaryAction}
+                  >
+                    <Play className="w-3 h-3 text-emerald-400" />
+                    Rodar turno
+                  </button>
+                )
+              )}
+
+              {(mmzapBrowserStatus === "idle" ||
+                mmzapBrowserStatus === "running" ||
+                mmzapBrowserStatus === "paused_safety") &&
+                onMmzapBrowserAction && (
+                  <label className="inline-flex items-center gap-1.5 text-[11px] text-[#cedbd1] cursor-pointer">
+                    <Switch
+                      checked={Boolean(cfg.mmzap_browser_enabled)}
+                      disabled={mmzapBusy}
+                      onCheckedChange={async (checked) => {
+                        setMmzapBusy(true);
+                        try {
+                          await onMmzapBrowserAction(instName, "toggle_enabled", {
+                            enabled: checked,
+                          });
+                        } finally {
+                          setMmzapBusy(false);
+                        }
+                      }}
+                      aria-label={`Turnos automáticos MMZap de ${instName}`}
+                    />
+                    <span>Turnos auto</span>
+                  </label>
+                )}
+            </>
+          )}
         </div>
       </div>
 

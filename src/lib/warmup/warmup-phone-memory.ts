@@ -77,6 +77,8 @@ export interface WarmupPhoneMemoryEntry {
   externalWarmupMode?: ExternalWarmupMode;
   externalWarmupInboundTotal?: number;
   externalWarmupInboundToday?: number;
+  externalMmzapSentTotal?: number;
+  externalMmzapSentToday?: number;
   externalWarmupLastAt?: string | null;
   previousInstances?: string[];
   updatedAt: string;
@@ -349,6 +351,14 @@ function buildEntryFromConfig(
       extra?.externalWarmupInboundToday !== undefined
         ? extra.externalWarmupInboundToday
         : Number(cfg.external_warmup_inbound_today ?? prev?.externalWarmupInboundToday ?? 0),
+    externalMmzapSentTotal:
+      extra?.externalMmzapSentTotal !== undefined
+        ? extra.externalMmzapSentTotal
+        : Math.max(Number(cfg.external_mmzap_sent_total || 0), Number(prev?.externalMmzapSentTotal || 0)),
+    externalMmzapSentToday:
+      extra?.externalMmzapSentToday !== undefined
+        ? extra.externalMmzapSentToday
+        : Number(cfg.external_mmzap_sent_today ?? prev?.externalMmzapSentToday ?? 0),
     externalWarmupLastAt:
       extra?.externalWarmupLastAt !== undefined
         ? extra.externalWarmupLastAt
@@ -375,34 +385,53 @@ export async function syncPhonePassportRow(
   entry: WarmupPhoneMemoryEntry
 ): Promise<void> {
   if (!clientId || !entry?.canonicalPhone) return;
+  const payload = {
+    client_id: clientId,
+    canonical_phone: entry.canonicalPhone,
+    current_instance_name: entry.lastInstanceName || null,
+    previous_instances: entry.previousInstances || [],
+    stage: entry.stage,
+    days_active: entry.daysActive,
+    health_score: entry.healthScore,
+    career_mode: entry.careerMode || "maturing",
+    ban_count: entry.banCount || 0,
+    last_ban_at: entry.lastBanAt || null,
+    last_ban_reason: entry.lastBanReason || null,
+    rehab_until: entry.rehabUntil || null,
+    cold_outreach_locked_until: entry.coldOutreachLockedUntil || null,
+    external_warmup_mode: entry.externalWarmupMode || "off",
+    external_warmup_inbound_total: entry.externalWarmupInboundTotal || 0,
+    external_warmup_inbound_today: entry.externalWarmupInboundToday || 0,
+    external_mmzap_sent_total: entry.externalMmzapSentTotal || 0,
+    external_mmzap_sent_today: entry.externalMmzapSentToday || 0,
+    external_warmup_last_at: entry.externalWarmupLastAt || null,
+    updated_at: entry.updatedAt || new Date().toISOString(),
+  };
+
   try {
-    await supabaseAdmin
+    const { error } = await supabaseAdmin
       .from("whatsapp_phone_passports")
-      .upsert(
-        {
-          client_id: clientId,
-          canonical_phone: entry.canonicalPhone,
-          current_instance_name: entry.lastInstanceName || null,
-          previous_instances: entry.previousInstances || [],
-          stage: entry.stage,
-          days_active: entry.daysActive,
-          health_score: entry.healthScore,
-          career_mode: entry.careerMode || "maturing",
-          ban_count: entry.banCount || 0,
-          last_ban_at: entry.lastBanAt || null,
-          last_ban_reason: entry.lastBanReason || null,
-          rehab_until: entry.rehabUntil || null,
-          cold_outreach_locked_until: entry.coldOutreachLockedUntil || null,
-          external_warmup_mode: entry.externalWarmupMode || "off",
-          external_warmup_inbound_total: entry.externalWarmupInboundTotal || 0,
-          external_warmup_inbound_today: entry.externalWarmupInboundToday || 0,
-          external_warmup_last_at: entry.externalWarmupLastAt || null,
-          updated_at: entry.updatedAt || new Date().toISOString(),
-        },
-        { onConflict: "client_id,canonical_phone" }
-      );
+      .upsert(payload, { onConflict: "client_id,canonical_phone" });
+
+    if (
+      error &&
+      (error.code === "42703" ||
+        error.code === "PGRST204" ||
+        String(error.message || "").includes("external_mmzap_sent_"))
+    ) {
+      const {
+        external_mmzap_sent_total: _omitTotal,
+        external_mmzap_sent_today: _omitToday,
+        ...legacyPayload
+      } = payload;
+      void _omitTotal;
+      void _omitToday;
+      await supabaseAdmin
+        .from("whatsapp_phone_passports")
+        .upsert(legacyPayload, { onConflict: "client_id,canonical_phone" });
+    }
   } catch {
-    /* fail-open antes da migration 031 */
+    /* fail-open antes da migration 031/032 */
   }
 }
 
@@ -465,6 +494,8 @@ export async function findPhoneMemory(
           external_warmup_mode: (p.external_warmup_mode as ExternalWarmupMode) || "off",
           external_warmup_inbound_today: Number(p.external_warmup_inbound_today || 0),
           external_warmup_inbound_total: Number(p.external_warmup_inbound_total || 0),
+          external_mmzap_sent_today: Number(p.external_mmzap_sent_today || 0),
+          external_mmzap_sent_total: Number(p.external_mmzap_sent_total || 0),
           external_warmup_last_at: (p.external_warmup_last_at as string | null) ?? null,
         },
         phone!,
@@ -682,6 +713,7 @@ export function applyPhoneMemoryToNewConfig(
     cold_outreach_locked_until: memory.coldOutreachLockedUntil ?? base.cold_outreach_locked_until ?? null,
     external_warmup_mode: (memory.externalWarmupMode || base.external_warmup_mode || "off") as ExternalWarmupMode,
     external_warmup_inbound_total: Number(memory.externalWarmupInboundTotal || 0),
+    external_mmzap_sent_total: Number(memory.externalMmzapSentTotal || 0),
     created_at: memory.firstSeenAt || nowIso,
     updated_at: nowIso,
   };

@@ -31,6 +31,7 @@ const APPENDED_MIGRATIONS = [
   "029_followup_reschedule.sql",
   "030_proxy_pool.sql",
   "031_warmup_passport_and_mentor.sql",
+  "032_mmzap_browser_governor.sql",
 ];
 
 let sql = readFileSync(sqlPath, "utf8");

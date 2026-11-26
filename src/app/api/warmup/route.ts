@@ -197,8 +197,19 @@ function buildDisplayConfig(params: {
     external_warmup_mode: existing?.external_warmup_mode || "off",
     external_warmup_inbound_today: existing?.external_warmup_inbound_today ?? 0,
     external_warmup_inbound_total: existing?.external_warmup_inbound_total ?? 0,
+    external_mmzap_sent_today: existing?.external_mmzap_sent_today ?? 0,
+    external_mmzap_sent_total: existing?.external_mmzap_sent_total ?? 0,
     external_warmup_last_at: existing?.external_warmup_last_at || null,
     internal_groups_enabled: existing?.internal_groups_enabled ?? true,
+    mmzap_browser_enabled: existing?.mmzap_browser_enabled ?? false,
+    mmzap_browser_status: existing?.mmzap_browser_status || "unpaired",
+    mmzap_shift_started_at: existing?.mmzap_shift_started_at || null,
+    mmzap_last_shift_ended_at: existing?.mmzap_last_shift_ended_at || null,
+    mmzap_minutes_today: existing?.mmzap_minutes_today ?? 0,
+    mmzap_shifts_today: existing?.mmzap_shifts_today ?? 0,
+    mmzap_max_sends_override: existing?.mmzap_max_sends_override ?? null,
+    mmzap_last_error: existing?.mmzap_last_error || null,
+    mmzap_proxy_endpoint: existing?.mmzap_proxy_endpoint || null,
   };
 }
 
@@ -470,6 +481,10 @@ export async function GET(req: NextRequest) {
           totalGroups,
           mmzapInboundToday: warmable.reduce(
             (acc, i) => acc + (i.config.external_warmup_inbound_today || 0),
+            0
+          ),
+          mmzapSentToday: warmable.reduce(
+            (acc, i) => acc + (i.config.external_mmzap_sent_today || 0),
             0
           ),
         },

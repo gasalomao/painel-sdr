@@ -1,5 +1,7 @@
 import type {
   ExternalWarmupMode,
+  MmzapBrowserStatus,
+  MmzapGovernorSettings,
   WarmupConfig,
   WarmupLog,
   WarmupPurpose,
@@ -78,6 +80,7 @@ export interface WarmupStats {
   totalReceivedToday: number;
   totalGroups?: number;
   mmzapInboundToday?: number;
+  mmzapSentToday?: number;
 }
 
 export type GlobalSettings = {
@@ -103,6 +106,8 @@ export type GlobalSettings = {
 
 export type {
   ExternalWarmupMode,
+  MmzapBrowserStatus,
+  MmzapGovernorSettings,
   WarmupConfig,
   WarmupLog,
   WarmupPurpose,

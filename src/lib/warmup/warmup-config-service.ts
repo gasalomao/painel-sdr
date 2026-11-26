@@ -11,9 +11,11 @@
 
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import {
+  DEFAULT_MMZAP_GOVERNOR_SETTINGS,
   PURPOSE_METADATA,
   STAGE_DEFAULTS,
   type ExternalWarmupMode,
+  type MmzapGovernorSettings,
   type WarmupCareerMode,
   type WarmupConfig,
   type WarmupPurpose,
@@ -128,6 +130,8 @@ export const WARMUP_EDITABLE_FIELDS = [
   "career_mode",
   "external_warmup_mode",
   "internal_groups_enabled",
+  "mmzap_browser_enabled",
+  "mmzap_max_sends_override",
 ] as const;
 
 type WarmupEditableField = (typeof WARMUP_EDITABLE_FIELDS)[number];
@@ -207,6 +211,10 @@ export function sanitizeWarmupPatch(input: Record<string, unknown>): WarmupConfi
       case "max_groups_per_chip":
         patch.max_groups_per_chip = clampInt(raw, 0, 100, 10);
         break;
+      case "mmzap_max_sends_override":
+        patch.mmzap_max_sends_override =
+          raw === null || raw === undefined || raw === "" ? null : clampInt(raw, 0, 50, 4);
+        break;
       case "ai_model":
         patch.ai_model = String(raw ?? "fallback").trim() || "fallback";
         break;
@@ -221,7 +229,8 @@ export function sanitizeWarmupPatch(input: Record<string, unknown>): WarmupConfi
         if (field === "enabled" || field === "stage_auto_progress" || field === "continuous_warmup" ||
           field === "enable_typing" || field === "enable_blue_ticks" || field === "enable_reactions" ||
           field === "enable_audio" || field === "enable_vcard" || field === "enable_status_posts" ||
-          field === "group_auto_join" || field === "swarm_active" || field === "internal_groups_enabled") {
+          field === "group_auto_join" || field === "swarm_active" || field === "internal_groups_enabled" ||
+          field === "mmzap_browser_enabled") {
           (patch as Record<string, unknown>)[field] = Boolean(raw);
         }
         break;
@@ -267,6 +276,17 @@ const MIGRATION_031_WARMUP_COLS = new Set([
   "external_warmup_inbound_today",
   "external_warmup_inbound_total",
   "external_warmup_last_at",
+  "external_mmzap_sent_today",
+  "external_mmzap_sent_total",
+  "mmzap_browser_enabled",
+  "mmzap_browser_status",
+  "mmzap_shift_started_at",
+  "mmzap_last_shift_ended_at",
+  "mmzap_minutes_today",
+  "mmzap_shifts_today",
+  "mmzap_max_sends_override",
+  "mmzap_proxy_endpoint",
+  "mmzap_last_error",
   "internal_groups_enabled",
 ]);
 
@@ -889,6 +909,7 @@ export function getEffectiveDailyTarget(config: WarmupConfig): number {
 }
 
 const DAILY_STATE_PREFIX = "warmup_daily_state_";
+const MMZAP_GOVERNOR_PREFIX = "mmzap_governor_settings_";
 const TICK_LOCK_PREFIX = "warmup_tick_lock_";
 const TICK_LOCK_STALE_MS = 2 * 60 * 1000;
 
@@ -1001,4 +1022,81 @@ export async function writeDailyResetState(
   } catch {
     /* próximo tick tenta de novo */
   }
+}
+
+export function sanitizeMmzapGovernorPatch(
+  raw: Partial<MmzapGovernorSettings> | Record<string, unknown>,
+  base: MmzapGovernorSettings = DEFAULT_MMZAP_GOVERNOR_SETTINGS
+): MmzapGovernorSettings {
+  const startHour = clampInt(raw.allowed_start_hour, 0, 23, base.allowed_start_hour);
+  const rawEndHour = clampInt(raw.allowed_end_hour, 0, 23, base.allowed_end_hour);
+  const endHour = rawEndHour >= startHour ? rawEndHour : startHour;
+  const rawAutoStage = Number(raw.auto_disable_stage);
+  const autoDisableStage: 3 | 4 =
+    rawAutoStage === 3 || rawAutoStage === 4 ? rawAutoStage : base.auto_disable_stage;
+
+  return {
+    enabled: typeof raw.enabled === "boolean" ? raw.enabled : base.enabled,
+    max_concurrent_browsers: clampInt(raw.max_concurrent_browsers, 1, 3, base.max_concurrent_browsers),
+    shift_duration_minutes: clampInt(raw.shift_duration_minutes, 15, 120, base.shift_duration_minutes),
+    min_rest_minutes: clampInt(raw.min_rest_minutes, 15, 360, base.min_rest_minutes),
+    max_shifts_stage1: clampInt(raw.max_shifts_stage1, 0, 6, base.max_shifts_stage1),
+    max_shifts_stage2: clampInt(raw.max_shifts_stage2, 0, 8, base.max_shifts_stage2),
+    max_shifts_stage3: clampInt(raw.max_shifts_stage3, 0, 10, base.max_shifts_stage3),
+    max_sends_stage1: clampInt(raw.max_sends_stage1, 0, 30, base.max_sends_stage1),
+    max_sends_stage2: clampInt(raw.max_sends_stage2, 0, 60, base.max_sends_stage2),
+    max_sends_stage3: clampInt(raw.max_sends_stage3, 0, 80, base.max_sends_stage3),
+    max_sends_stage4: clampInt(raw.max_sends_stage4, 0, 100, base.max_sends_stage4),
+    unanswered_brake_threshold: clampInt(
+      raw.unanswered_brake_threshold,
+      1,
+      20,
+      base.unanswered_brake_threshold
+    ),
+    daily_inbound_target: clampInt(raw.daily_inbound_target, 5, 200, base.daily_inbound_target),
+    auto_disable_stage: autoDisableStage,
+    day0_cooldown_hours: clampInt(raw.day0_cooldown_hours, 0, 72, base.day0_cooldown_hours),
+    allowed_start_hour: startHour,
+    allowed_end_hour: endHour,
+  };
+}
+
+export async function getMmzapGovernorSettings(clientId: string): Promise<MmzapGovernorSettings> {
+  if (!clientId) return { ...DEFAULT_MMZAP_GOVERNOR_SETTINGS };
+  try {
+    const { data } = await supabaseAdmin
+      .from("app_settings")
+      .select("value")
+      .eq("key", `${MMZAP_GOVERNOR_PREFIX}${clientId}`)
+      .maybeSingle();
+
+    if (!data?.value) return { ...DEFAULT_MMZAP_GOVERNOR_SETTINGS };
+    const parsed = JSON.parse(data.value) as Record<string, unknown>;
+    return sanitizeMmzapGovernorPatch(parsed, DEFAULT_MMZAP_GOVERNOR_SETTINGS);
+  } catch {
+    return { ...DEFAULT_MMZAP_GOVERNOR_SETTINGS };
+  }
+}
+
+export async function saveMmzapGovernorSettings(
+  clientId: string,
+  patch: Partial<MmzapGovernorSettings> | Record<string, unknown>
+): Promise<MmzapGovernorSettings> {
+  const current = await getMmzapGovernorSettings(clientId);
+  const merged = sanitizeMmzapGovernorPatch(patch, current);
+  if (!clientId) return merged;
+
+  try {
+    await supabaseAdmin.from("app_settings").upsert(
+      {
+        key: `${MMZAP_GOVERNOR_PREFIX}${clientId}`,
+        value: JSON.stringify(merged),
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "key" }
+    );
+  } catch {
+    /* fail-open para testes/ambiente sem app_settings */
+  }
+  return merged;
 }

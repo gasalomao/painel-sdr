@@ -2,6 +2,54 @@ export type WarmupStage = 1 | 2 | 3 | 4;
 export type WarmupPurpose = "contingency" | "inbound" | "outbound";
 export type WarmupCareerMode = "maturing" | "production_light" | "maintenance" | "rehab";
 export type ExternalWarmupMode = "off" | "receive_only" | "hybrid_quarantine";
+export type MmzapBrowserStatus =
+  | "unpaired"
+  | "qr_pending"
+  | "needs_extension_setup"
+  | "idle"
+  | "running"
+  | "paused_safety"
+  | "error";
+
+export interface MmzapGovernorSettings {
+  enabled: boolean;
+  max_concurrent_browsers: number;
+  shift_duration_minutes: number;
+  min_rest_minutes: number;
+  max_shifts_stage1: number;
+  max_shifts_stage2: number;
+  max_shifts_stage3: number;
+  max_sends_stage1: number;
+  max_sends_stage2: number;
+  max_sends_stage3: number;
+  max_sends_stage4: number;
+  unanswered_brake_threshold: number;
+  daily_inbound_target: number;
+  auto_disable_stage: 3 | 4;
+  day0_cooldown_hours: number;
+  allowed_start_hour: number;
+  allowed_end_hour: number;
+}
+
+export const DEFAULT_MMZAP_GOVERNOR_SETTINGS: MmzapGovernorSettings = {
+  enabled: true,
+  max_concurrent_browsers: 2,
+  shift_duration_minutes: 40,
+  min_rest_minutes: 90,
+  max_shifts_stage1: 1,
+  max_shifts_stage2: 2,
+  max_shifts_stage3: 1,
+  max_sends_stage1: 4,
+  max_sends_stage2: 8,
+  max_sends_stage3: 6,
+  max_sends_stage4: 0,
+  unanswered_brake_threshold: 3,
+  daily_inbound_target: 15,
+  auto_disable_stage: 4,
+  day0_cooldown_hours: 12,
+  allowed_start_hour: 8,
+  allowed_end_hour: 20,
+};
 
 export interface WarmupConfig {
   id?: string;
@@ -51,6 +99,17 @@ export interface WarmupConfig {
   external_warmup_inbound_today?: number;
   external_warmup_inbound_total?: number;
   external_warmup_last_at?: string | null;
+  external_mmzap_sent_today?: number;
+  external_mmzap_sent_total?: number;
+  mmzap_browser_enabled?: boolean;
+  mmzap_browser_status?: MmzapBrowserStatus;
+  mmzap_shift_started_at?: string | null;
+  mmzap_last_shift_ended_at?: string | null;
+  mmzap_minutes_today?: number;
+  mmzap_shifts_today?: number;
+  mmzap_max_sends_override?: number | null;
+  mmzap_proxy_endpoint?: string | null;
+  mmzap_last_error?: string | null;
   internal_groups_enabled?: boolean;
   custom_prompt?: string | null;
   created_at?: string;

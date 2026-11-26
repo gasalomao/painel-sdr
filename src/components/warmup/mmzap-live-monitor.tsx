@@ -1,18 +1,26 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { type ChangeEvent, useCallback, useEffect, useState } from "react";
 import {
   ArrowRightLeft,
   ArrowUpRight,
   CheckCircle2,
   FlaskConical,
+  Globe,
   RefreshCw,
   ShieldCheck,
+  Upload,
   Wrench,
 } from "lucide-react";
 import { toast } from "sonner";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
-import type { ExternalWarmupMode } from "@/lib/warmup/warmup-types";
+import type { MmzapWorkerHealth } from "@/lib/warmup/mmzap-browser-client";
+import {
+  DEFAULT_MMZAP_GOVERNOR_SETTINGS,
+  type ExternalWarmupMode,
+  type MmzapGovernorSettings,
+} from "@/lib/warmup/warmup-types";
 import type {
   ExternalDiagnostic,
   InstanceItem,
@@ -42,6 +50,8 @@ export interface MmzapLiveMonitorProps {
   chips: InstanceItem[];
   diagnostics: ExternalDiagnostic[];
   selfHealingLog: SelfHealingActionRecord[];
+  workerHealth?: MmzapWorkerHealth | null;
+  governorSettings?: MmzapGovernorSettings | null;
   styles: Record<string, string>;
   selfHealingBusy: boolean;
   onRunSelfHealing: () => Promise<void>;
@@ -52,6 +62,8 @@ export function MmzapLiveMonitor({
   chips,
   diagnostics,
   selfHealingLog,
+  workerHealth = null,
+  governorSettings = null,
   styles,
   selfHealingBusy,
   onRunSelfHealing,
@@ -70,6 +82,73 @@ export function MmzapLiveMonitor({
   const [hotswapOld, setHotswapOld] = useState<string>("");
   const [hotswapNew, setHotswapNew] = useState<string>("");
   const [swapping, setSwapping] = useState(false);
+  const [govForm, setGovForm] = useState<MmzapGovernorSettings>(
+    governorSettings || DEFAULT_MMZAP_GOVERNOR_SETTINGS
+  );
+  const [savingGovernor, setSavingGovernor] = useState(false);
+  const [uploadingExt, setUploadingExt] = useState(false);
+
+  useEffect(() => {
+    if (governorSettings) setGovForm(governorSettings);
+  }, [governorSettings]);
+
+  const handleSaveGovernor = async () => {
+    setSavingGovernor(true);
+    try {
+      const res = await fetch("/api/warmup/mmzap-browser", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "save_governor", governor: govForm }),
+      });
+      const json = (await res.json().catch(() => null)) as {
+        success?: boolean;
+        error?: string;
+        governor?: MmzapGovernorSettings;
+      } | null;
+      if (!res.ok || !json?.success) {
+        toast.error(json?.error || "Falha ao salvar governador MMZap.");
+        return;
+      }
+      if (json.governor) setGovForm(json.governor);
+      toast.success("Governador MMZap atualizado.");
+      await onRefreshAll();
+    } finally {
+      setSavingGovernor(false);
+    }
+  };
+
+  const handleUploadExtensionZip = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setUploadingExt(true);
+    try {
+      const buf = await file.arrayBuffer();
+      let binary = "";
+      const bytes = new Uint8Array(buf);
+      for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const zipBase64 = btoa(binary);
+      const res = await fetch("/api/warmup/mmzap-browser", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "upload_extension", zipBase64 }),
+      });
+      const json = (await res.json().catch(() => null)) as {
+        success?: boolean;
+        error?: string;
+      } | null;
+      if (!res.ok || !json?.success) {
+        toast.error(json?.error || "Falha ao instalar extensão no worker.");
+        return;
+      }
+      toast.success("Extensão MMZap instalada no volume do worker.");
+      await onRefreshAll();
+    } finally {
+      setUploadingExt(false);
+    }
+  };
 
   const loadQuarantine = useCallback(async () => {
     setLoadingQuarantine(true);
@@ -258,7 +337,7 @@ export function MmzapLiveMonitor({
                   <th>Webhook Evolution</th>
                   <th>Último evento</th>
                   <th>Modo MMZap</th>
-                  <th>Recebidas MMZap</th>
+                  <th>Recebidas / Enviadas MMZap</th>
                   <th className="text-right">Teste real</th>
                 </tr>
               </thead>
@@ -281,6 +360,7 @@ export function MmzapLiveMonitor({
                       diag?.inbound_today ??
                       chip.config?.external_warmup_inbound_today ??
                       0;
+                    const sentToday = chip.config?.external_mmzap_sent_today ?? 0;
                     const total =
                       diag?.inbound_total ??
                       chip.config?.external_warmup_inbound_total ??
@@ -309,7 +389,7 @@ export function MmzapLiveMonitor({
                         </td>
                         <td className="text-xs text-[#d3ded6]">{MODE_LABEL[mode]}</td>
                         <td className="text-xs font-mono tabular-nums text-[#edf2ee]">
-                          {today} hoje · {total} total
+                          {today} rec · {sentToday} env ({total} total)
                         </td>
                         <td className="text-right">
                           <button
@@ -328,6 +408,234 @@ export function MmzapLiveMonitor({
                 )}
               </tbody>
             </table>
+          </div>
+        </section>
+
+        {/* Seção 1.5: Governador MMZap (Browser VPS) */}
+        <section className="p-5 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-[#edf2ee] flex items-center gap-2">
+                <Globe className="w-4 h-4 text-emerald-400" />
+                Governador MMZap (Browser VPS)
+              </h3>
+              <p className="text-xs text-[#a5b1a8] mt-0.5">
+                Turnos curtos em Chromium isolado com a mesma proxy exclusiva e corte automático pelo teto de envios/dia.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={cn(
+                  "inline-flex items-center rounded-md border px-2.5 py-1 text-[11px] font-medium tabular-nums",
+                  workerHealth?.reachable
+                    ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-200"
+                    : workerHealth?.configured
+                      ? "border-red-500/35 bg-red-500/10 text-red-200"
+                      : "border-[#303a32] bg-[#131914] text-[#a5b1a8]"
+                )}
+              >
+                {workerHealth?.reachable
+                  ? `Worker online · ${workerHealth.activeSessions}/${workerHealth.maxConcurrent} sessões${workerHealth.totalRssMb ? ` · ${workerHealth.totalRssMb} MB` : ""}`
+                  : workerHealth?.configured
+                    ? "Worker offline"
+                    : "Worker não configurado"}
+              </span>
+
+              {workerHealth?.reachable && (
+                <label className={cn(styles.secondaryAction, "cursor-pointer")}>
+                  <Upload className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>
+                    {uploadingExt
+                      ? "Enviando..."
+                      : workerHealth.extension?.installed
+                        ? `Extensão v${workerHealth.extension.version || "ok"}`
+                        : "Enviar extensão (.zip)"}
+                  </span>
+                  <input
+                    type="file"
+                    accept=".zip"
+                    className="sr-only"
+                    disabled={uploadingExt}
+                    onChange={(e) => void handleUploadExtensionZip(e)}
+                  />
+                </label>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 items-end">
+            <label className="flex items-center justify-between gap-3 rounded-lg border border-[#303a32] px-3 py-2 text-xs text-[#d3ded6] cursor-pointer sm:col-span-2">
+              <span>Rodízio automático de turnos MMZap</span>
+              <Switch
+                checked={govForm.enabled}
+                onCheckedChange={(v) => setGovForm((prev) => ({ ...prev, enabled: v }))}
+                aria-label="Ativar rodízio automático MMZap"
+              />
+            </label>
+
+            <div className={styles.fieldGroup}>
+              <label htmlFor="gov-concurrent" className={styles.fieldLabel}>
+                Browsers simultâneos (1–3)
+              </label>
+              <input
+                id="gov-concurrent"
+                type="number"
+                min={1}
+                max={3}
+                value={govForm.max_concurrent_browsers}
+                onChange={(e) =>
+                  setGovForm((prev) => ({
+                    ...prev,
+                    max_concurrent_browsers: Number(e.target.value || 1),
+                  }))
+                }
+                className={styles.fieldSelect}
+              />
+            </div>
+
+            <div className={styles.fieldGroup}>
+              <label htmlFor="gov-shift-min" className={styles.fieldLabel}>
+                Duração do turno (min)
+              </label>
+              <input
+                id="gov-shift-min"
+                type="number"
+                min={15}
+                max={120}
+                value={govForm.shift_duration_minutes}
+                onChange={(e) =>
+                  setGovForm((prev) => ({
+                    ...prev,
+                    shift_duration_minutes: Number(e.target.value || 45),
+                  }))
+                }
+                className={styles.fieldSelect}
+              />
+            </div>
+
+            <div className={styles.fieldGroup}>
+              <label htmlFor="gov-rest-min" className={styles.fieldLabel}>
+                Descanso mínimo (min)
+              </label>
+              <input
+                id="gov-rest-min"
+                type="number"
+                min={15}
+                max={360}
+                value={govForm.min_rest_minutes}
+                onChange={(e) =>
+                  setGovForm((prev) => ({
+                    ...prev,
+                    min_rest_minutes: Number(e.target.value || 90),
+                  }))
+                }
+                className={styles.fieldSelect}
+              />
+            </div>
+
+            <div className={styles.fieldGroup}>
+              <label htmlFor="gov-sends-f1" className={styles.fieldLabel}>
+                Teto envios F1 / F2
+              </label>
+              <div className="flex gap-2">
+                <input
+                  id="gov-sends-f1"
+                  type="number"
+                  min={0}
+                  max={30}
+                  value={govForm.max_sends_stage1}
+                  onChange={(e) =>
+                    setGovForm((prev) => ({
+                      ...prev,
+                      max_sends_stage1: Number(e.target.value || 0),
+                    }))
+                  }
+                  className={styles.fieldSelect}
+                />
+                <input
+                  type="number"
+                  min={0}
+                  max={60}
+                  aria-label="Teto envios Fase 2"
+                  value={govForm.max_sends_stage2}
+                  onChange={(e) =>
+                    setGovForm((prev) => ({
+                      ...prev,
+                      max_sends_stage2: Number(e.target.value || 0),
+                    }))
+                  }
+                  className={styles.fieldSelect}
+                />
+              </div>
+            </div>
+
+            <div className={styles.fieldGroup}>
+              <label htmlFor="gov-brake" className={styles.fieldLabel}>
+                Freio saldo s/ retorno · Meta inbound
+              </label>
+              <div className="flex gap-2">
+                <input
+                  id="gov-brake"
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={govForm.unanswered_brake_threshold}
+                  onChange={(e) =>
+                    setGovForm((prev) => ({
+                      ...prev,
+                      unanswered_brake_threshold: Number(e.target.value || 6),
+                    }))
+                  }
+                  className={styles.fieldSelect}
+                />
+                <input
+                  type="number"
+                  min={5}
+                  max={200}
+                  aria-label="Meta inbound diária MMZap"
+                  value={govForm.daily_inbound_target}
+                  onChange={(e) =>
+                    setGovForm((prev) => ({
+                      ...prev,
+                      daily_inbound_target: Number(e.target.value || 30),
+                    }))
+                  }
+                  className={styles.fieldSelect}
+                />
+              </div>
+            </div>
+
+            <div className={styles.fieldGroup}>
+              <label htmlFor="gov-autodisable" className={styles.fieldLabel}>
+                Desligar auto na Fase
+              </label>
+              <select
+                id="gov-autodisable"
+                value={govForm.auto_disable_stage}
+                onChange={(e) =>
+                  setGovForm((prev) => ({
+                    ...prev,
+                    auto_disable_stage: Number(e.target.value) === 4 ? 4 : 3,
+                  }))
+                }
+                className={styles.fieldSelect}
+              >
+                <option value={3}>Fase 3 (Quente)</option>
+                <option value={4}>Fase 4 (Blindado)</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="flex justify-end">
+            <button
+              type="button"
+              disabled={savingGovernor}
+              onClick={() => void handleSaveGovernor()}
+              className={styles.primaryAction}
+            >
+              <CheckCircle2 className="w-4 h-4" />
+              {savingGovernor ? "Salvando..." : "Salvar governador"}
+            </button>
           </div>
         </section>
 

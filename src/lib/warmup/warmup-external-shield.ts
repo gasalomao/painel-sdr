@@ -12,17 +12,138 @@ import {
   canonicalBrazilPhoneKey,
   savePhoneMemoryFromConfig,
 } from "./warmup-phone-memory";
-import type { ExternalWarmupMode, WarmupConfig } from "./warmup-types";
+import type {
+  ExternalWarmupMode,
+  MmzapGovernorSettings,
+  WarmupConfig,
+} from "./warmup-types";
 import { isTenantWarmupAdmin } from "./warmup-admin-guard";
+import { getMmzapGovernorSettings } from "./warmup-config-service";
+import { getBrazilHour } from "./warmup-engine";
 
 export interface ExternalShieldConfigSnapshot {
   external_warmup_mode: ExternalWarmupMode;
   enable_blue_ticks: boolean;
   phone_number?: string | null;
+  stage?: number;
+  daily_target?: number;
   sent_today?: number;
   received_today?: number;
   external_warmup_inbound_today?: number;
   external_warmup_inbound_total?: number;
+  external_mmzap_sent_today?: number;
+  external_mmzap_sent_total?: number;
+  mmzap_browser_status?: string | null;
+  mmzap_max_sends_override?: number | null;
+  mmzap_shift_started_at?: string | null;
+}
+
+export interface EvaluateMmzapGovernorInput {
+  stage: number;
+  mmzapSentToday: number;
+  mmzapInboundToday: number;
+  internalSentToday: number;
+  dailyTarget: number;
+  mmzapMaxSendsOverride?: number | null;
+  mmzapShiftStartedAt?: string | null;
+  mmzapBrowserStatus?: string | null;
+  governorSettings: MmzapGovernorSettings;
+  nowMs?: number;
+}
+
+export type MmzapStopReason =
+  | "max_sends_reached"
+  | "inbound_target_reached"
+  | "unanswered_brake"
+  | "shift_timeout"
+  | "daily_budget_reached"
+  | "auto_disabled_stage"
+  | "outside_window";
+
+export interface EvaluateMmzapGovernorResult {
+  shouldStop: boolean;
+  reason?: MmzapStopReason;
+  maxSendsCap: number;
+}
+
+export function resolveMmzapMaxSendsCap(
+  stage: number,
+  governorSettings: MmzapGovernorSettings,
+  override?: number | null
+): number {
+  if (typeof override === "number" && Number.isFinite(override) && override >= 0) {
+    return Math.round(override);
+  }
+  if (stage <= 1) return governorSettings.max_sends_stage1;
+  if (stage === 2) return governorSettings.max_sends_stage2;
+  if (stage === 3) return governorSettings.max_sends_stage3;
+  return governorSettings.max_sends_stage4;
+}
+
+export function evaluateMmzapShiftGovernor(
+  input: EvaluateMmzapGovernorInput
+): EvaluateMmzapGovernorResult {
+  const {
+    stage,
+    mmzapSentToday,
+    mmzapInboundToday,
+    internalSentToday,
+    dailyTarget,
+    mmzapMaxSendsOverride = null,
+    mmzapShiftStartedAt = null,
+    governorSettings,
+    nowMs = Date.now(),
+  } = input;
+
+  const maxSendsCap = resolveMmzapMaxSendsCap(
+    stage,
+    governorSettings,
+    mmzapMaxSendsOverride
+  );
+
+  if (
+    stage >= governorSettings.auto_disable_stage &&
+    (mmzapMaxSendsOverride === null || mmzapMaxSendsOverride === undefined)
+  ) {
+    return { shouldStop: true, reason: "auto_disabled_stage", maxSendsCap };
+  }
+
+  const currentHour = getBrazilHour(new Date(nowMs));
+  if (
+    currentHour < governorSettings.allowed_start_hour ||
+    currentHour > governorSettings.allowed_end_hour
+  ) {
+    return { shouldStop: true, reason: "outside_window", maxSendsCap };
+  }
+
+  if (dailyTarget > 0 && internalSentToday + mmzapSentToday >= dailyTarget) {
+    return { shouldStop: true, reason: "daily_budget_reached", maxSendsCap };
+  }
+
+  if (mmzapInboundToday >= governorSettings.daily_inbound_target) {
+    return { shouldStop: true, reason: "inbound_target_reached", maxSendsCap };
+  }
+
+  if (mmzapSentToday >= maxSendsCap) {
+    return { shouldStop: true, reason: "max_sends_reached", maxSendsCap };
+  }
+
+  if (
+    mmzapSentToday > 0 &&
+    mmzapSentToday - mmzapInboundToday >= governorSettings.unanswered_brake_threshold
+  ) {
+    return { shouldStop: true, reason: "unanswered_brake", maxSendsCap };
+  }
+
+  if (mmzapShiftStartedAt) {
+    const startedMs = new Date(mmzapShiftStartedAt).getTime();
+    const limitMs = Math.max(1, governorSettings.shift_duration_minutes) * 60_000;
+    if (Number.isFinite(startedMs) && nowMs - startedMs >= limitMs) {
+      return { shouldStop: true, reason: "shift_timeout", maxSendsCap };
+    }
+  }
+
+  return { shouldStop: false, maxSendsCap };
 }
 
 export interface CheckExternalWarmupInboundInput {
@@ -137,14 +258,32 @@ async function loadExternalShieldConfig(
 
   let snap: ExternalShieldConfigSnapshot | null = null;
   try {
-    const { data, error } = await supabaseAdmin
+    let { data, error } = await supabaseAdmin
       .from("whatsapp_warmup_configs")
       .select(
-        "external_warmup_mode, enable_blue_ticks, phone_number, sent_today, received_today, external_warmup_inbound_today, external_warmup_inbound_total"
+        "external_warmup_mode, enable_blue_ticks, phone_number, stage, daily_target, sent_today, received_today, external_warmup_inbound_today, external_warmup_inbound_total, external_mmzap_sent_today, external_mmzap_sent_total, mmzap_browser_status, mmzap_max_sends_override, mmzap_shift_started_at"
       )
       .eq("client_id", clientId)
       .eq("instance_name", instanceName)
       .maybeSingle();
+
+    if (
+      error &&
+      (String(error.code || "") === "42703" ||
+        String(error.code || "") === "PGRST204" ||
+        String(error.message || "").includes("mmzap_"))
+    ) {
+      const legacyRes = await supabaseAdmin
+        .from("whatsapp_warmup_configs")
+        .select(
+          "external_warmup_mode, enable_blue_ticks, phone_number, sent_today, received_today, external_warmup_inbound_today, external_warmup_inbound_total"
+        )
+        .eq("client_id", clientId)
+        .eq("instance_name", instanceName)
+        .maybeSingle();
+      data = legacyRes.data as typeof data;
+      error = legacyRes.error;
+    }
 
     if (!error && data) {
       const row = data as Record<string, unknown>;
@@ -156,10 +295,18 @@ async function loadExternalShieldConfig(
           : "off") as ExternalWarmupMode,
         enable_blue_ticks: row.enable_blue_ticks !== false,
         phone_number: (row.phone_number as string | null) ?? null,
+        stage: row.stage !== undefined ? Number(row.stage) : undefined,
+        daily_target: row.daily_target !== undefined ? Number(row.daily_target) : undefined,
         sent_today: Number(row.sent_today || 0),
         received_today: Number(row.received_today || 0),
         external_warmup_inbound_today: Number(row.external_warmup_inbound_today || 0),
         external_warmup_inbound_total: Number(row.external_warmup_inbound_total || 0),
+        external_mmzap_sent_today: Number(row.external_mmzap_sent_today || 0),
+        external_mmzap_sent_total: Number(row.external_mmzap_sent_total || 0),
+        mmzap_browser_status: (row.mmzap_browser_status as string | null) ?? null,
+        mmzap_max_sends_override:
+          typeof row.mmzap_max_sends_override === "number" ? row.mmzap_max_sends_override : null,
+        mmzap_shift_started_at: (row.mmzap_shift_started_at as string | null) ?? null,
       };
     }
   } catch {
@@ -181,10 +328,17 @@ async function loadExternalShieldConfig(
             external_warmup_mode: cfg.external_warmup_mode,
             enable_blue_ticks: cfg.enable_blue_ticks !== false,
             phone_number: cfg.phone_number ?? null,
+            stage: cfg.stage,
+            daily_target: cfg.daily_target,
             sent_today: Number(cfg.sent_today || 0),
             received_today: Number(cfg.received_today || 0),
             external_warmup_inbound_today: Number(cfg.external_warmup_inbound_today || 0),
             external_warmup_inbound_total: Number(cfg.external_warmup_inbound_total || 0),
+            external_mmzap_sent_today: Number(cfg.external_mmzap_sent_today || 0),
+            external_mmzap_sent_total: Number(cfg.external_mmzap_sent_total || 0),
+            mmzap_browser_status: cfg.mmzap_browser_status ?? null,
+            mmzap_max_sends_override: cfg.mmzap_max_sends_override ?? null,
+            mmzap_shift_started_at: cfg.mmzap_shift_started_at ?? null,
           };
         }
       }
@@ -385,7 +539,52 @@ async function recordQuarantineAndStats(params: {
     } catch { /* ignore */ }
   }
 
-  if (classification !== "self_echo") {
+  if (classification === "self_echo") {
+    const nextMmzapSentToday = (snap.external_mmzap_sent_today || 0) + 1;
+    const nextMmzapSentTotal = (snap.external_mmzap_sent_total || 0) + 1;
+    snap.external_mmzap_sent_today = nextMmzapSentToday;
+    snap.external_mmzap_sent_total = nextMmzapSentTotal;
+
+    try {
+      const { error } = await supabaseAdmin
+        .from("whatsapp_warmup_configs")
+        .update({
+          external_mmzap_sent_today: nextMmzapSentToday,
+          external_mmzap_sent_total: nextMmzapSentTotal,
+          external_warmup_last_at: nowIso,
+          last_activity_at: nowIso,
+          updated_at: nowIso,
+        })
+        .eq("client_id", clientId)
+        .eq("instance_name", instanceName);
+
+      if (error && (String(error.code || "") === "42703" || String(error.code || "") === "PGRST204")) {
+        await supabaseAdmin
+          .from("whatsapp_warmup_configs")
+          .update({
+            last_activity_at: nowIso,
+            updated_at: nowIso,
+          })
+          .eq("client_id", clientId)
+          .eq("instance_name", instanceName);
+      }
+    } catch { /* ignore */ }
+
+    if (snap.phone_number) {
+      await savePhoneMemoryFromConfig(
+        clientId,
+        {
+          instance_name: instanceName,
+          phone_number: snap.phone_number,
+          last_activity_at: nowIso,
+          external_warmup_mode: snap.external_warmup_mode,
+          external_mmzap_sent_today: nextMmzapSentToday,
+          external_mmzap_sent_total: nextMmzapSentTotal,
+          external_warmup_last_at: nowIso,
+        }
+      ).catch(() => null);
+    }
+  } else {
     const nextReceived = (snap.received_today || 0) + 1;
     const nextExtToday = (snap.external_warmup_inbound_today || 0) + 1;
     const nextExtTotal = (snap.external_warmup_inbound_total || 0) + 1;
@@ -433,6 +632,39 @@ async function recordQuarantineAndStats(params: {
           external_warmup_last_at: nowIso,
         }
       ).catch(() => null);
+    }
+  }
+
+  // Kill-switch em tempo real: se uma sessão MMZap estiver rodando e atingir teto/freio/meta,
+  // solicita parada imediata sem esperar o próximo tick de 1 minuto.
+  if (snap.mmzap_browser_status === "running") {
+    try {
+      const governor = await getMmzapGovernorSettings(clientId);
+      const decision = evaluateMmzapShiftGovernor({
+        stage: snap.stage || 1,
+        mmzapSentToday: snap.external_mmzap_sent_today || 0,
+        mmzapInboundToday: snap.external_warmup_inbound_today || 0,
+        internalSentToday: snap.sent_today || 0,
+        dailyTarget: snap.daily_target || 20,
+        mmzapMaxSendsOverride: snap.mmzap_max_sends_override ?? null,
+        mmzapShiftStartedAt: snap.mmzap_shift_started_at ?? null,
+        mmzapBrowserStatus: snap.mmzap_browser_status,
+        governorSettings: governor,
+        nowMs,
+      });
+
+      if (decision.shouldStop) {
+        snap.mmzap_browser_status =
+          decision.reason === "unanswered_brake" ? "paused_safety" : "idle";
+        const { stopMmzapSessionForChip } = await import("./mmzap-browser-orchestrator");
+        await stopMmzapSessionForChip(
+          clientId,
+          instanceName,
+          decision.reason || "governor_stop"
+        ).catch(() => null);
+      }
+    } catch {
+      /* fail-open para nunca travar o webhook */
     }
   }
 }

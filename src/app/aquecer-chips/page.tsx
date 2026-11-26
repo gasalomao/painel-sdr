@@ -43,6 +43,8 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { ChipAutopilotRow } from "@/components/warmup/chip-autopilot-row";
 import { MmzapLiveMonitor } from "@/components/warmup/mmzap-live-monitor";
+import { MmzapPairModal } from "@/components/warmup/mmzap-pair-modal";
+import type { MmzapWorkerHealth } from "@/lib/warmup/mmzap-browser-client";
 import type {
   ExternalDiagnostic,
   GlobalSettings,
@@ -55,8 +57,10 @@ import { useClientSession } from "@/lib/use-session";
 import { cn } from "@/lib/utils";
 import { WARMUP_THEMES } from "@/lib/warmup/warmup-dialogues";
 import {
+  DEFAULT_MMZAP_GOVERNOR_SETTINGS,
   STAGE_DEFAULTS,
   type ExternalWarmupMode,
+  type MmzapGovernorSettings,
   type WarmupConfig,
   type WarmupLog,
   type WarmupStage,
@@ -219,6 +223,34 @@ export default function AquecerChipsPage() {
   const [mutualLoading, setMutualLoading] = useState(false);
   const [autopilotLoading, setAutopilotLoading] = useState(false);
 
+  const [mmzapWorkerHealth, setMmzapWorkerHealth] = useState<MmzapWorkerHealth | null>(null);
+  const [mmzapGovernor, setMmzapGovernor] = useState<MmzapGovernorSettings>(
+    DEFAULT_MMZAP_GOVERNOR_SETTINGS
+  );
+  const [mmzapModalOpen, setMmzapModalOpen] = useState(false);
+  const [mmzapModalInstance, setMmzapModalInstance] = useState<string | null>(null);
+  const [mmzapModalMode, setMmzapModalMode] = useState<"pair" | "setup">("pair");
+
+  const loadMmzapWorkerState = useCallback(async () => {
+    try {
+      const res = await fetch("/api/warmup/mmzap-browser", { cache: "no-store" });
+      if (!res.ok) return;
+      const json = (await res.json().catch(() => null)) as {
+        success?: boolean;
+        data?: {
+          worker?: MmzapWorkerHealth;
+          governor?: MmzapGovernorSettings;
+        };
+      } | null;
+      if (json?.success && json.data) {
+        if (json.data.worker) setMmzapWorkerHealth(json.data.worker);
+        if (json.data.governor) setMmzapGovernor(json.data.governor);
+      }
+    } catch {
+      /* silencioso */
+    }
+  }, []);
+
   const loadDiagnostics = useCallback(async () => {
     try {
       const res = await fetch("/api/warmup/external-shield?limit=40", { cache: "no-store" });
@@ -310,8 +342,14 @@ export default function AquecerChipsPage() {
       setLoading(false);
       return;
     }
-    void Promise.all([loadData(), loadDiagnostics(), loadModels(), loadGroups()]);
-  }, [sessionLoading, isAdmin, loadData, loadDiagnostics, loadModels, loadGroups]);
+    void Promise.all([
+      loadData(),
+      loadDiagnostics(),
+      loadModels(),
+      loadGroups(),
+      loadMmzapWorkerState(),
+    ]);
+  }, [sessionLoading, isAdmin, loadData, loadDiagnostics, loadModels, loadGroups, loadMmzapWorkerState]);
 
   useEffect(() => {
     if (!autoRefreshLogs || !isAdmin) return;
@@ -328,8 +366,37 @@ export default function AquecerChipsPage() {
   }, [autoRefreshLogs, isAdmin]);
 
   const handleRefreshAll = useCallback(async () => {
-    await Promise.all([loadData(true), loadDiagnostics(), loadGroups()]);
-  }, [loadData, loadDiagnostics, loadGroups]);
+    await Promise.all([loadData(true), loadDiagnostics(), loadGroups(), loadMmzapWorkerState()]);
+  }, [loadData, loadDiagnostics, loadGroups, loadMmzapWorkerState]);
+
+  const handleOpenMmzapPairModal = (instanceName: string, mode: "pair" | "setup" = "pair") => {
+    setMmzapModalInstance(instanceName);
+    setMmzapModalMode(mode);
+    setMmzapModalOpen(true);
+  };
+
+  const handleMmzapBrowserAction = async (
+    instanceName: string,
+    action: "start_shift" | "stop_shift" | "toggle_enabled" | "reset_profile",
+    extra?: Record<string, unknown>
+  ) => {
+    const res = await fetch("/api/warmup/mmzap-browser", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, instance_name: instanceName, ...extra }),
+    });
+    const json = (await res.json().catch(() => null)) as {
+      success?: boolean;
+      error?: string;
+    } | null;
+    if (!res.ok || !json?.success) {
+      toast.error(json?.error || "Falha ao acionar navegador MMZap.");
+      await handleRefreshAll();
+      return;
+    }
+    toast.success("Estado MMZap atualizado.");
+    await handleRefreshAll();
+  };
 
   const handleRunSelfHealing = async () => {
     setSelfHealingBusy(true);
@@ -758,6 +825,9 @@ export default function AquecerChipsPage() {
   const mmzapInboundToday =
     stats.mmzapInboundToday ??
     instances.reduce((acc, i) => acc + (i.config?.external_warmup_inbound_today || 0), 0);
+  const mmzapSentToday =
+    stats.mmzapSentToday ??
+    instances.reduce((acc, i) => acc + (i.config?.external_mmzap_sent_today || 0), 0);
   const totalDailyTarget = instances.reduce((acc, i) => acc + (i.config?.daily_target || 0), 0);
   const fixedSelfHealCount = selfHealingLog.filter((a) => a.status === "fixed").length;
   const attentionSelfHealCount = selfHealingLog.filter((a) => a.status === "needs_attention").length;
@@ -957,7 +1027,7 @@ export default function AquecerChipsPage() {
               <span className={styles.summaryLabel}>MMZap recebido hoje</span>
               <span className={styles.summaryValue}>{mmzapInboundToday}</span>
               <span className={styles.summarySubtext}>
-                blindagem CRM e Sarah ativa
+                {mmzapSentToday} enviadas · blindagem CRM ativa
               </span>
             </div>
 
@@ -1084,6 +1154,7 @@ export default function AquecerChipsPage() {
                         isDirty={isDirty}
                         isSaving={Boolean(savingMap[instName])}
                         isReauditing={Boolean(reauditLoadingMap[instName])}
+                        workerConfigured={Boolean(mmzapWorkerHealth?.configured)}
                         styles={styles}
                         onToggleEnabled={(name, next) =>
                           void handleToggleChipEnabled(name, next)
@@ -1091,6 +1162,8 @@ export default function AquecerChipsPage() {
                         onChangeField={handleUpdateConfigField}
                         onSaveConfig={(name) => void handleSaveConfig(name)}
                         onChangeMmzapMode={handleChangeMmzapMode}
+                        onOpenMmzapPairModal={handleOpenMmzapPairModal}
+                        onMmzapBrowserAction={handleMmzapBrowserAction}
                         onReauditDay0={(name) => void handleReauditDay0(name)}
                         onOpenPairModal={openPairModal}
                         onOpenTestModal={openTestModal}
@@ -1108,6 +1181,8 @@ export default function AquecerChipsPage() {
               chips={instances.filter((i) => !i.orphan)}
               diagnostics={diagnostics}
               selfHealingLog={selfHealingLog}
+              workerHealth={mmzapWorkerHealth}
+              governorSettings={mmzapGovernor}
               styles={styles}
               selfHealingBusy={selfHealingBusy}
               onRunSelfHealing={handleRunSelfHealing}
@@ -1757,6 +1832,15 @@ export default function AquecerChipsPage() {
               </div>
             </DialogContent>
           </Dialog>
+
+          <MmzapPairModal
+            open={mmzapModalOpen}
+            instanceName={mmzapModalInstance}
+            initialMode={mmzapModalMode}
+            styles={styles}
+            onOpenChange={setMmzapModalOpen}
+            onCompleted={handleRefreshAll}
+          />
         </div>
       </main>
     </div>

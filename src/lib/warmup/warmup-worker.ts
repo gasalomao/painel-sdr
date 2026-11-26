@@ -53,6 +53,7 @@ import {
   drainDuePendingWarmupActions,
   shouldCheckPendingWarmupActions,
 } from "./warmup-pending-actions";
+import { tickMmzapBrowserOrchestrator } from "./mmzap-browser-orchestrator";
 
 const _lastWarningLogged: Record<string, number> = {};
 
@@ -508,6 +509,10 @@ export async function tickWarmupWorker(): Promise<{
             sent_today: 0,
             received_today: 0,
             error_count_today: 0,
+            external_warmup_inbound_today: 0,
+            external_mmzap_sent_today: 0,
+            mmzap_minutes_today: 0,
+            mmzap_shifts_today: 0,
             days_active: newDaysActive,
             consecutive_successful_days: newConsecutiveDays,
             updated_at: nowIso,
@@ -516,6 +521,10 @@ export async function tickWarmupWorker(): Promise<{
           cfg.sent_today = 0;
           cfg.received_today = 0;
           cfg.error_count_today = 0;
+          cfg.external_warmup_inbound_today = 0;
+          cfg.external_mmzap_sent_today = 0;
+          cfg.mmzap_minutes_today = 0;
+          cfg.mmzap_shifts_today = 0;
           cfg.days_active = newDaysActive;
           cfg.consecutive_successful_days = newConsecutiveDays;
 
@@ -549,8 +558,22 @@ export async function tickWarmupWorker(): Promise<{
             .update(update)
             .eq("id", cfg.id)
             .eq("client_id", clientId);
-          if (updErr && "career_mode" in update) {
-            const { career_mode: _c, rehab_until: _r, ...fallbackUpd } = update;
+          if (updErr) {
+            const {
+              career_mode: _c,
+              rehab_until: _r,
+              external_warmup_inbound_today: _ei,
+              external_mmzap_sent_today: _ems,
+              mmzap_minutes_today: _mm,
+              mmzap_shifts_today: _ms,
+              ...fallbackUpd
+            } = update;
+            void _c;
+            void _r;
+            void _ei;
+            void _ems;
+            void _mm;
+            void _ms;
             await supabaseAdmin
               .from("whatsapp_warmup_configs")
               .update(fallbackUpd)
@@ -616,6 +639,13 @@ export async function tickWarmupWorker(): Promise<{
 
           await ensureWarmupClusterProxies(clientId, [soleChip]);
 
+          await tickMmzapBrowserOrchestrator({
+            clientId,
+            configs: nonQuarantined,
+            connectedInstanceNames: new Set(nonQuarantined.map((c) => c.instance_name)),
+            nowMs,
+          }).catch(() => null);
+
           scheduleGroupSync(clientId);
 
           // Publica Status de forma isolada quando há apenas 1 chip conectado
@@ -645,10 +675,22 @@ export async function tickWarmupWorker(): Promise<{
         // Sincroniza adesão nos grupos (com throttle anti-flood)
         scheduleGroupSync(clientId);
 
+        // Orquestrador MMZap (turnos curtos no browser com mesma proxy e exclusividade temporal)
+        await tickMmzapBrowserOrchestrator({
+          clientId,
+          configs: nonQuarantined,
+          connectedInstanceNames: new Set(nonQuarantined.map((c) => c.instance_name)),
+          nowMs,
+        }).catch(() => null);
+
         // Pré-filtra pelo ritmo em RAM; se houver chips elegíveis, hidrata contadores reais do banco na 1ª passada
         const isTestEnv = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
         let availableChips = nonQuarantined.filter(
-          (c) => (c.sent_today || 0) < effectiveTargetWithContext(c, now) && isChipWithinHourlyPace(c, nowMs)
+          (c) =>
+            c.mmzap_browser_status !== "running" &&
+            (c.sent_today || 0) + (c.external_mmzap_sent_today || 0) <
+              effectiveTargetWithContext(c, now) &&
+            isChipWithinHourlyPace(c, nowMs)
         );
 
         if (availableChips.length === 0) {
@@ -678,7 +720,9 @@ export async function tickWarmupWorker(): Promise<{
         availableChips = nonQuarantined.filter((c) => {
           const inSoft = softRecoverySet.has(c.instance_name);
           return (
-            (c.sent_today || 0) < effectiveTargetWithContext(c, now, inSoft) &&
+            c.mmzap_browser_status !== "running" &&
+            (c.sent_today || 0) + (c.external_mmzap_sent_today || 0) <
+              effectiveTargetWithContext(c, now, inSoft) &&
             isChipWithinHourlyPace(c, nowMs, inSoft)
           );
         });
@@ -787,7 +831,11 @@ export async function tickWarmupWorker(): Promise<{
           .order("next_turn_at", { ascending: true })
           .limit(dynamicDueLimit);
 
-        const busyChips = new Set<string>();
+        const busyChips = new Set<string>(
+          nonQuarantined
+            .filter((c) => c.mmzap_browser_status === "running")
+            .map((c) => c.instance_name)
+        );
         const sentThisTick = new Map<string, number>();
 
         if (dueConvs && dueConvs.length > 0) {
@@ -820,7 +868,11 @@ export async function tickWarmupWorker(): Promise<{
             const receiverCfg = senderCfg.instance_name === instA.instance_name ? instB : instA;
             const inSoft = softRecoverySet.has(senderCfg.instance_name);
 
-            if ((senderCfg.sent_today || 0) >= effectiveTargetWithContext(senderCfg, now, inSoft)) {
+            if (
+              senderCfg.mmzap_browser_status === "running" ||
+              (senderCfg.sent_today || 0) + (senderCfg.external_mmzap_sent_today || 0) >=
+                effectiveTargetWithContext(senderCfg, now, inSoft)
+            ) {
               staleOrCappedIds.push(activeConv.id);
               continue;
             }
