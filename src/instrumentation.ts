@@ -123,13 +123,15 @@ export async function register() {
       }
       const { data: clients, error: clientsErr } = await supabase
         .from("clients")
-        .select("id, name, organizer_execution_hour, organizer_last_run, organizer_enabled")
-        .neq("organizer_enabled", false)
+        .select("id, name, is_admin, is_active, features, organizer_execution_hour, organizer_last_run, organizer_enabled")
         .neq("is_active", false);
       if (clientsErr) {
         console.warn("[SCHEDULER] Erro lendo clients:", clientsErr.message);
         return;
       }
+
+      const { isFeatureEnabledForSession } = await import("@/lib/saas-policy");
+      const { checkTenantAiQuota } = await import("@/lib/saas-limits");
 
       const now = new Date();
       const fmtBrt = (d: Date) => ({
@@ -152,6 +154,27 @@ export async function register() {
       let fired = 0;
 
       for (const c of clients || []) {
+        const clientRow = c as {
+          id: string;
+          name?: string;
+          is_admin?: boolean | null;
+          is_active?: boolean | null;
+          features?: Record<string, boolean> | null;
+          organizer_execution_hour?: number | null;
+          organizer_last_run?: string | null;
+          organizer_enabled?: boolean | null;
+        };
+        if (clientRow.is_active === false) continue;
+        if (!clientRow.is_admin) {
+          if (clientRow.organizer_enabled !== true) continue;
+          if (!isFeatureEnabledForSession("organizador", { isAdmin: false, features: clientRow.features || {} })) {
+            continue;
+          }
+          const quota = await checkTenantAiQuota(clientRow.id, false).catch(() => ({ allowed: true }));
+          if (!quota.allowed) continue;
+        } else if (clientRow.organizer_enabled === false) {
+          continue;
+        }
         const hour = typeof c.organizer_execution_hour === "number" ? c.organizer_execution_hour : 20;
         const lastRunDate = c.organizer_last_run ? fmtBrt(new Date(c.organizer_last_run)).day : null;
         const ranToday = lastRunDate === brtNow.day;

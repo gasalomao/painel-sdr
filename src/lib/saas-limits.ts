@@ -69,6 +69,120 @@ export function resetSaasLimitsStateForTests(): void {
   rateLimitBuckets.clear();
 }
 
+const DEFAULT_USAGE_PAGE_SIZE = 1_000;
+const MAX_USAGE_PAGES = 50;
+
+type PagedQueryLike = PromiseLike<{ data?: unknown; error?: unknown }> & {
+  order?: (col: string, opts?: { ascending?: boolean }) => PagedQueryLike;
+  range?: (from: number, to: number) => PromiseLike<{ data?: unknown; error?: unknown }>;
+};
+
+async function fetchPagedRows<T>(
+  makeQuery: () => unknown,
+  pageSize = DEFAULT_USAGE_PAGE_SIZE,
+  maxPages = MAX_USAGE_PAGES,
+): Promise<{ data: T[]; error: unknown }> {
+  const probe = makeQuery() as PagedQueryLike;
+  if (typeof probe?.range !== "function") {
+    const res = await probe;
+    return {
+      data: Array.isArray(res?.data) ? (res.data as T[]) : [],
+      error: res?.error ?? null,
+    };
+  }
+
+  const all: T[] = [];
+  for (let page = 0; page < maxPages; page++) {
+    const from = page * pageSize;
+    const to = from + pageSize - 1;
+    let q = makeQuery() as PagedQueryLike;
+    if (typeof q.order === "function") {
+      q = q.order("id", { ascending: true });
+    }
+    const { data, error } = await q.range!(from, to);
+    if (error) {
+      return { data: all, error };
+    }
+    if (!Array.isArray(data) || data.length === 0) break;
+    all.push(...(data as T[]));
+    if (data.length < pageSize) break;
+  }
+  return { data: all, error: null };
+}
+
+async function assertTenantResourceCap(params: {
+  clientId: string;
+  isAdmin: boolean;
+  table: "channel_connections" | "agent_settings";
+  countColumn: string;
+  limitSelector: (limits: SaasTenantLimits) => number | null;
+  errorMessage: (limit: number) => string;
+}): Promise<NextResponse | null> {
+  if (params.isAdmin || !params.clientId || !hasDb()) return null;
+
+  const limits = await getTenantSaasLimits(params.clientId, false);
+  const maxAllowed = params.limitSelector(limits);
+  if (maxAllowed === null) return null;
+
+  const res = (await supabaseAdmin
+    .from(params.table)
+    .select(params.countColumn, { count: "exact", head: true })
+    .eq("client_id", params.clientId)) as { count?: number | null; data?: unknown[] | null };
+
+  const currentCount =
+    typeof res?.count === "number"
+      ? res.count
+      : Array.isArray(res?.data)
+        ? res.data.length
+        : 0;
+
+  if (currentCount >= maxAllowed) {
+    const message = params.errorMessage(maxAllowed);
+    return NextResponse.json(
+      { ok: false, success: false, error: message },
+      { status: 403 },
+    );
+  }
+
+  return null;
+}
+
+/**
+ * Valida se o tenant ainda pode criar/vincular uma nova instância de WhatsApp dentro do plano.
+ */
+export async function assertTenantCanCreateInstance(
+  clientId: string,
+  isAdmin = false,
+): Promise<NextResponse | null> {
+  return assertTenantResourceCap({
+    clientId,
+    isAdmin,
+    table: "channel_connections",
+    countColumn: "instance_name",
+    limitSelector: (l) => l.max_instances,
+    errorMessage: (max) =>
+      `Seu plano permite no máximo ${max} conexão(ões) de WhatsApp. Fale com o administrador para ampliar o limite.`,
+  });
+}
+
+/**
+ * Valida se o tenant ainda pode criar um novo agente de IA dentro do plano.
+ */
+export async function assertTenantCanCreateAgent(
+  clientId: string,
+  isAdmin = false,
+): Promise<NextResponse | null> {
+  return assertTenantResourceCap({
+    clientId,
+    isAdmin,
+    table: "agent_settings",
+    countColumn: "id",
+    limitSelector: (l) => l.max_agents,
+    errorMessage: (max) =>
+      `Seu plano permite no máximo ${max} agente(s). Fale com o administrador para ampliar o limite.`,
+  });
+}
+
 /**
  * Valida acesso a uma feature (ou lista de features com semântica OR).
  * Retorna NextResponse 403 se negado, ou null se permitido.
@@ -311,11 +425,13 @@ export async function getTenantMonthlyAiUsage(
 
   try {
     const monthStartIso = `${monthKey}-01T00:00:00.000Z`;
-    const { data, error } = await supabaseAdmin
-      .from("ai_token_usage")
-      .select("total_tokens, cost_usd")
-      .eq("client_id", cleanId)
-      .gte("created_at", monthStartIso);
+    const { data, error } = await fetchPagedRows<{ total_tokens?: number | null; cost_usd?: number | null }>(() =>
+      supabaseAdmin
+        .from("ai_token_usage")
+        .select("total_tokens, cost_usd")
+        .eq("client_id", cleanId)
+        .gte("created_at", monthStartIso),
+    );
 
     if (error || !Array.isArray(data)) {
       return cached && cached.monthKey === monthKey
@@ -325,7 +441,7 @@ export async function getTenantMonthlyAiUsage(
 
     let tokens = 0;
     let usd = 0;
-    for (const row of data as Array<{ total_tokens?: number | null; cost_usd?: number | null }>) {
+    for (const row of data) {
       const t = Number(row?.total_tokens || 0);
       if (Number.isFinite(t) && t > 0) tokens += t;
       const c = Number(row?.cost_usd || 0);
@@ -351,14 +467,16 @@ export async function getAllTenantsMonthlyUsage(
   try {
     const monthKey = currentUtcMonthKey(nowMs);
     const monthStartIso = `${monthKey}-01T00:00:00.000Z`;
-    const { data, error } = await supabaseAdmin
-      .from("ai_token_usage")
-      .select("client_id, total_tokens, cost_usd")
-      .in("client_id", cleanIds)
-      .gte("created_at", monthStartIso);
+    const { data, error } = await fetchPagedRows<{ client_id?: string | null; total_tokens?: number | null; cost_usd?: number | null }>(() =>
+      supabaseAdmin
+        .from("ai_token_usage")
+        .select("client_id, total_tokens, cost_usd")
+        .in("client_id", cleanIds)
+        .gte("created_at", monthStartIso),
+    );
 
     if (error || !Array.isArray(data)) return out;
-    for (const row of data as Array<{ client_id?: string | null; total_tokens?: number | null; cost_usd?: number | null }>) {
+    for (const row of data) {
       const cid = String(row.client_id || "").trim();
       if (!cid || !out[cid]) continue;
       const t = Number(row.total_tokens || 0);
@@ -540,13 +658,14 @@ export function checkTenantRateLimit(
 ): { allowed: boolean; retryAfterSec?: number } {
   if (!key || maxRequests <= 0 || windowMs <= 0) return { allowed: true };
 
-  if (rateLimitBuckets.size > RATE_LIMIT_MAX_KEYS) {
+  if (rateLimitBuckets.size >= Math.floor(RATE_LIMIT_MAX_KEYS * 0.9)) {
     for (const [k, entry] of rateLimitBuckets.entries()) {
       if (entry.resetAt <= nowMs) rateLimitBuckets.delete(k);
     }
-    if (rateLimitBuckets.size > RATE_LIMIT_MAX_KEYS) {
+    while (rateLimitBuckets.size > RATE_LIMIT_MAX_KEYS) {
       const oldest = rateLimitBuckets.keys().next().value;
-      if (oldest) rateLimitBuckets.delete(oldest);
+      if (!oldest) break;
+      rateLimitBuckets.delete(oldest);
     }
   }
 

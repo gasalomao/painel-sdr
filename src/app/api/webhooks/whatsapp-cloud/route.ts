@@ -551,10 +551,8 @@ export async function POST(req: NextRequest) {
             }).then(() => {}, () => {});
           }
           try {
-            // FIX crítico: era fetch fire-and-forget — Next standalone CANCELA o
-            // trabalho pendente quando o handler retorna (mesmo bug já corrigido
-            // nos webhooks legado e GO). Agora invoca em-processo, awaited.
             const agentMod = await import("@/app/api/agent/process/route");
+            const { dispatchAgentTurnBounded } = await import("@/lib/webhook-dispatch");
             const fakeReq = new NextRequest("http://internal/api/agent/process", {
               method: "POST",
               headers: {
@@ -569,8 +567,7 @@ export async function POST(req: NextRequest) {
                 sessionId: sessionRow.id,
               }),
             });
-            // Invoca agent/process diretamente — serialização e buffer são gerenciados internamente
-            await agentMod.POST(fakeReq);
+            await dispatchAgentTurnBounded(() => agentMod.POST(fakeReq));
           } catch (e: any) {
             console.warn("[Cloud Webhook] dispatch do agente falhou:", e?.message);
             supabase.from("webhook_logs").insert({

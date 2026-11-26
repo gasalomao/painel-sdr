@@ -12,7 +12,22 @@ import { randomUUID } from "crypto";
 // Rate limit login: 10 tentativas por janela de 15 min (por IP+email).
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = 10;
+const LOGIN_ATTEMPTS_MAX_KEYS = 10_000;
 const LOGIN_ATTEMPTS = new Map<string, { count: number; windowStart: number; blockedUntil: number }>();
+
+function pruneLoginAttempts(now: number): void {
+  if (LOGIN_ATTEMPTS.size < LOGIN_ATTEMPTS_MAX_KEYS) return;
+  for (const [k, v] of LOGIN_ATTEMPTS) {
+    if (now - v.windowStart > LOGIN_WINDOW_MS * 2 && v.blockedUntil < now) {
+      LOGIN_ATTEMPTS.delete(k);
+    }
+  }
+  while (LOGIN_ATTEMPTS.size >= LOGIN_ATTEMPTS_MAX_KEYS) {
+    const oldest = LOGIN_ATTEMPTS.keys().next().value;
+    if (!oldest) break;
+    LOGIN_ATTEMPTS.delete(oldest);
+  }
+}
 // Higiene: limpa entradas velhas quando o mapa cresce (evita leak de memória).
 if (typeof setInterval !== "undefined") {
   const timer = setInterval(() => {
@@ -42,6 +57,7 @@ export async function POST(req: NextRequest) {
     // In-memory — suficiente pra painel single-instance; reseta no redeploy.
     const rlKey = `${req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "local"}|${String(email).toLowerCase()}`;
     const now = Date.now();
+    pruneLoginAttempts(now);
     const entry = LOGIN_ATTEMPTS.get(rlKey);
     if (entry && entry.blockedUntil > now) {
       return NextResponse.json({ ok: false, error: "Muitas tentativas. Tente novamente em alguns minutos." }, { status: 429 });

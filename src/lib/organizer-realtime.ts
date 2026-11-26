@@ -1,6 +1,8 @@
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
 import { inferStageRole, type KanbanColLite } from "@/lib/organizer-prompt";
+import { isFeatureEnabledForSession } from "@/lib/saas-policy";
+import { checkTenantAiQuota, isClientActiveCached } from "@/lib/saas-limits";
 
 declare global {
   var organizerRealtimeTimers: Map<string, NodeJS.Timeout> | undefined;
@@ -177,13 +179,30 @@ async function executeRealtimeEvaluation(clientId: string, remoteJid: string): P
   inFlight.add(key);
   try {
     if (!supabaseAdmin) return;
+    if (!(await isClientActiveCached(clientId))) return;
+
     const { data: cli } = await supabaseAdmin
       .from("clients")
-      .select("organizer_enabled")
+      .select("is_admin, is_active, features, organizer_enabled")
       .eq("id", clientId)
       .maybeSingle();
 
-    if (cli?.organizer_enabled === false) return;
+    const typedCli = cli as {
+      is_admin?: boolean | null;
+      is_active?: boolean | null;
+      features?: Record<string, boolean> | null;
+      organizer_enabled?: boolean | null;
+    } | null;
+
+    if (typedCli?.is_active === false || typedCli?.organizer_enabled === false) return;
+    if (typedCli && !typedCli.is_admin) {
+      if (typedCli.organizer_enabled !== true) return;
+      if (!isFeatureEnabledForSession("organizador", { isAdmin: false, features: typedCli.features || {} })) {
+        return;
+      }
+      const quota = await checkTenantAiQuota(clientId, false).catch(() => ({ allowed: true }));
+      if (!quota.allowed) return;
+    }
 
     const { NextRequest } = await import("next/server");
     const { POST: runAiOrganize } = await import("@/app/api/ai-organize/route");

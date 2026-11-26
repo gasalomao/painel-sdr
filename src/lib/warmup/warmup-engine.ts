@@ -1,10 +1,16 @@
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { evolution } from "@/lib/evolution";
+import * as channel from "@/lib/channel";
 import { generateText } from "@/lib/ai-provider";
 import { getAiKeys } from "@/lib/ai-keys";
 import { registerWarmupSend } from "@/lib/manual-send-registry";
 import { checkTenantAiQuota } from "@/lib/saas-limits";
 import { getRandomWarmupVoiceBase64 } from "./warmup-audio";
+import { getProxyPoolOverviewCache, recordInstanceProxyStrike } from "@/lib/proxy-pool";
+import {
+  claimAndRunPendingWarmupAction,
+  enqueuePendingWarmupAction,
+} from "./warmup-pending-actions";
 import { invalidateWarmupFirewallCache, persistResolvedChipPhone } from "./warmup-firewall";
 import {
   createDynamicWarmupImage,
@@ -42,7 +48,28 @@ const CASUAL_OPUS_BASE64 = "GkXfo59ChoEBQveBAULygQRC84EIQoKEd2VibUKHgQRChYECGFOA
 
 // Memória recente por instância para evitar repetição das mesmas frases em conversas seguidas
 const _recentTextsBySender = new Map<string, string[]>();
+const _providerCache = new Map<string, { provider: string; at: number }>();
 const MAX_RECENT_TEXTS_PER_SENDER = 30;
+
+async function resolveWarmupChannelProvider(clientId: string, instanceName: string): Promise<string> {
+  const key = `${clientId}:${instanceName}`;
+  const cached = _providerCache.get(key);
+  if (cached && Date.now() - cached.at < 60_000) return cached.provider;
+  try {
+    const { data } = await supabaseAdmin
+      .from("channel_connections")
+      .select("provider")
+      .eq("client_id", clientId)
+      .eq("instance_name", instanceName)
+      .maybeSingle();
+    const provider = String((data as { provider?: string | null } | null)?.provider || "evolution");
+    pruneMapToLimit(_providerCache, 2000);
+    _providerCache.set(key, { provider, at: Date.now() });
+    return provider;
+  } catch {
+    return "evolution";
+  }
+}
 
 export function recordRecentWarmupText(senderKey: string, text: string): void {
   const clean = text.trim();
@@ -308,7 +335,7 @@ export async function resolveInstancePhone(
     if (warmupCfg?.phone_number && warmupCfg.phone_number.trim()) {
       return warmupCfg.phone_number.trim().replace(/\D/g, "");
     }
-  } catch {}
+  } catch { }
 
   // 2. Tenta ler de channel_connections (provider_config)
   try {
@@ -325,12 +352,12 @@ export async function resolveInstancePhone(
     if (candidate) {
       const clean = String(candidate).replace(/@.*$/, "").replace(/\D/g, "");
       if (clean.length >= 10) {
-        persistResolvedChipPhone(clientId, instanceName, clean).catch(() => {});
+        persistResolvedChipPhone(clientId, instanceName, clean).catch(() => { });
         invalidateWarmupFirewallCache(clientId);
         return clean;
       }
     }
-  } catch {}
+  } catch { }
 
   // 3. Fallback: consulta ao vivo status da Evolution API
   try {
@@ -344,12 +371,12 @@ export async function resolveInstancePhone(
     if (owner) {
       const clean = String(owner).replace(/@.*$/, "").replace(/\D/g, "");
       if (clean.length >= 10) {
-        persistResolvedChipPhone(clientId, instanceName, clean).catch(() => {});
+        persistResolvedChipPhone(clientId, instanceName, clean).catch(() => { });
         invalidateWarmupFirewallCache(clientId);
         return clean;
       }
     }
-  } catch {}
+  } catch { }
 
   return null;
 }
@@ -516,7 +543,7 @@ export async function logWarmupAction(log: WarmupLog): Promise<void> {
       details: log.details || {},
       created_at: nowIso,
     });
-  } catch {}
+  } catch { }
 
   // Buffer em app_settings para persistência garantida
   try {
@@ -540,7 +567,7 @@ export async function logWarmupAction(log: WarmupLog): Promise<void> {
         },
         { onConflict: "key" }
       );
-  } catch {}
+  } catch { }
 }
 
 export function isTransientInfraError(message: string): boolean {
@@ -616,6 +643,18 @@ export async function handleInstanceFailure(
       immediate_quarantine: immediateQuarantine,
     },
   });
+
+  if (/proxy|407|ECONNREFUSED|ETIMEDOUT|ECONNRESET|SOCKS|socket/i.test(errorMessage)) {
+    const overview = await getProxyPoolOverviewCache().catch(() => ({ hasPool: false }));
+    if (overview.hasPool) {
+      await recordInstanceProxyStrike({
+        instanceName: cfg.instance_name,
+        clientId,
+        errorMessage,
+        isBan401Or403: immediateQuarantine,
+      }).catch(() => null);
+    }
+  }
 }
 
 const _lastDisconnectReportAt = new Map<string, number>();
@@ -655,7 +694,7 @@ async function notifySevereDisconnectAlert(params: {
       },
       created_at: new Date(nowMs).toISOString(),
     });
-  } catch {}
+  } catch { }
 
   try {
     const { data: peers } = await supabaseAdmin
@@ -685,7 +724,7 @@ async function notifySevereDisconnectAlert(params: {
           break;
         }
       }
-    } catch {}
+    } catch { }
 
     if (!ownerPhone) {
       ownerPhone = String(process.env.ADMIN_WHATSAPP_PHONE || process.env.OWNER_PHONE || "").replace(/\D/g, "");
@@ -703,11 +742,11 @@ async function notifySevereDisconnectAlert(params: {
     try {
       const { registerPendingAutomatedSend } = await import("@/lib/manual-send-registry");
       registerPendingAutomatedSend(peerInstance, ownerJid, alertText);
-    } catch {}
+    } catch { }
 
     const { sendMessage } = await import("@/lib/channel");
     await sendMessage(ownerJid, alertText, peerInstance);
-  } catch {}
+  } catch { }
 }
 
 /**
@@ -749,7 +788,7 @@ export async function handleWebhookConnectionClosed(params: {
           { immediateQuarantine: severe }
         );
       }
-    } catch {}
+    } catch { }
   }
 
   let pausedCampaigns = 0;
@@ -768,7 +807,7 @@ export async function handleWebhookConnectionClosed(params: {
         .eq("status", "running")
         .select("id");
       pausedCampaigns = Array.isArray(paused) ? paused.length : 0;
-    } catch {}
+    } catch { }
 
     await notifySevereDisconnectAlert({
       clientId,
@@ -777,6 +816,16 @@ export async function handleWebhookConnectionClosed(params: {
       pausedCampaigns,
       nowMs,
     });
+
+    const overview = await getProxyPoolOverviewCache().catch(() => ({ hasPool: false }));
+    if (overview.hasPool) {
+      await recordInstanceProxyStrike({
+        instanceName,
+        clientId,
+        errorMessage: reasonStr,
+        isBan401Or403: true,
+      }).catch(() => null);
+    }
   }
 
   return { severe, pausedCampaigns };
@@ -847,7 +896,7 @@ export async function recordWebhookDeliveryFeedback(params: {
         );
         return { triggered: true, cleared: false, recentErrors: recent.length };
       }
-    } catch {}
+    } catch { }
   }
 
   return { triggered: false, cleared: false, recentErrors: recent.length };
@@ -1193,7 +1242,7 @@ export async function executeWarmupTurn(opts: {
         .update({ vcard_exchanged_peers: updatedPeers })
         .eq("instance_name", senderConfig.instance_name)
         .eq("client_id", clientId);
-    } catch {}
+    } catch { }
   }
 
   // 5. POSTAGEM DE STATUS (WhatsApp Stories) — Desacoplada do turno automático
@@ -1284,7 +1333,7 @@ export async function executeWarmupTurn(opts: {
 
     try {
       await evolution.sendPresence(targetJid, presenceType, senderConfig.instance_name);
-    } catch {}
+    } catch { }
 
     const effectiveWait = isManualTrigger ? Math.min(typingMs, 3500) : typingMs;
     await new Promise((r) => setTimeout(r, effectiveWait));
@@ -1296,7 +1345,7 @@ export async function executeWarmupTurn(opts: {
         await new Promise((r) => setTimeout(r, isTestEnv ? 10 : 750 + Math.floor(Math.random() * 650)));
         await evolution.sendPresence(targetJid, "composing", senderConfig.instance_name);
         await new Promise((r) => setTimeout(r, isTestEnv ? 10 : 900 + Math.floor(Math.random() * 800)));
-      } catch {}
+      } catch { }
     }
   }
 
@@ -1328,29 +1377,47 @@ export async function executeWarmupTurn(opts: {
   })();
 
   // 8. Envio Efetivo (Áudio, Figurinha, Foto única, Enquete ou Texto com quoted/split orgânico)
+  const senderProvider = await resolveWarmupChannelProvider(clientId, senderConfig.instance_name);
+  const useChannelGo = senderProvider === "evolution_go";
   let sendResult: any = null;
   try {
     if (isAudioTurn) {
       const voiceB64 = getRandomWarmupVoiceBase64() || CASUAL_OPUS_BASE64;
-      sendResult = await evolution.sendMedia(
-        targetJid,
-        "",
-        { type: "audio", base64: voiceB64, mimetype: "audio/ogg; codecs=opus" },
-        senderConfig.instance_name,
-        { delay: 1200 + Math.floor(Math.random() * 900), encoding: true }
-      );
+      sendResult = useChannelGo
+        ? await channel.sendMedia(
+          targetJid,
+          "",
+          { type: "audio", base64: voiceB64, mimetype: "audio/ogg; codecs=opus" },
+          senderConfig.instance_name,
+          { delay: 1200 + Math.floor(Math.random() * 900) },
+        )
+        : await evolution.sendMedia(
+          targetJid,
+          "",
+          { type: "audio", base64: voiceB64, mimetype: "audio/ogg; codecs=opus" },
+          senderConfig.instance_name,
+          { delay: 1200 + Math.floor(Math.random() * 900), encoding: true }
+        );
     } else if (isStickerTurn && stickerB64) {
       sendResult = await evolution.sendSticker(targetJid, stickerB64, senderConfig.instance_name, {
         delay: 700 + Math.floor(Math.random() * 600),
       });
     } else if (isImageTurn && imagePayload) {
-      sendResult = await evolution.sendMedia(
-        targetJid,
-        imagePayload.caption,
-        { type: "image", base64: imagePayload.base64, mimetype: imagePayload.mimetype },
-        senderConfig.instance_name,
-        { delay: 1100 + Math.floor(Math.random() * 900) }
-      );
+      sendResult = useChannelGo
+        ? await channel.sendMedia(
+          targetJid,
+          imagePayload.caption,
+          { type: "image", base64: imagePayload.base64, mimetype: imagePayload.mimetype },
+          senderConfig.instance_name,
+          { delay: 1100 + Math.floor(Math.random() * 900) },
+        )
+        : await evolution.sendMedia(
+          targetJid,
+          imagePayload.caption,
+          { type: "image", base64: imagePayload.base64, mimetype: imagePayload.mimetype },
+          senderConfig.instance_name,
+          { delay: 1100 + Math.floor(Math.random() * 900) }
+        );
     } else if (isPollTurn && pollPayload) {
       sendResult = await evolution.sendPoll(
         targetJid,
@@ -1360,21 +1427,32 @@ export async function executeWarmupTurn(opts: {
         senderConfig.instance_name
       );
     } else if (splitParts) {
-      const part1Res: any = await evolution.sendTextMessage(targetJid, splitParts[0], senderConfig.instance_name);
-      registerWarmupSend(part1Res?.key?.id || part1Res?.id || part1Res?.data?.key?.id);
+      const part1Res: any = useChannelGo
+        ? await channel.sendMessage(targetJid, splitParts[0], senderConfig.instance_name)
+        : await evolution.sendTextMessage(targetJid, splitParts[0], senderConfig.instance_name);
+      registerWarmupSend(part1Res?.key?.id || part1Res?.id || part1Res?.messageId || part1Res?.data?.key?.id);
       if (senderConfig.enable_typing) {
         try {
           await evolution.sendPresence(targetJid, "composing", senderConfig.instance_name);
-        } catch {}
+        } catch { }
         await new Promise((r) => setTimeout(r, isTestEnv ? 10 : 800 + Math.floor(Math.random() * 900)));
       }
-      sendResult = await evolution.sendTextMessage(targetJid, splitParts[1], senderConfig.instance_name);
+      sendResult = useChannelGo
+        ? await channel.sendMessage(targetJid, splitParts[1], senderConfig.instance_name)
+        : await evolution.sendTextMessage(targetJid, splitParts[1], senderConfig.instance_name);
     } else if (quotedOpt) {
-      sendResult = await evolution.sendTextMessage(targetJid, messageText, senderConfig.instance_name, {
-        quoted: quotedOpt,
-      });
+      sendResult = useChannelGo
+        ? await channel.sendMessage(targetJid, messageText, senderConfig.instance_name)
+        : await evolution.sendTextMessage(targetJid, messageText, senderConfig.instance_name, {
+          quoted: quotedOpt,
+        });
     } else {
-      sendResult = await evolution.sendTextMessage(targetJid, messageText, senderConfig.instance_name);
+      sendResult = useChannelGo
+        ? await channel.sendMessage(targetJid, messageText, senderConfig.instance_name)
+        : await evolution.sendTextMessage(targetJid, messageText, senderConfig.instance_name);
+    }
+    if (sendResult && typeof sendResult === "object" && "ok" in sendResult && sendResult.ok === false) {
+      throw new Error(String(sendResult.error || "Falha no provedor WhatsApp"));
     }
   } catch (err: any) {
     const rawErrMsg = err?.message || String(err);
@@ -1388,6 +1466,7 @@ export async function executeWarmupTurn(opts: {
   const messageId =
     sendResult?.key?.id ||
     sendResult?.id ||
+    sendResult?.messageId ||
     sendResult?.data?.key?.id ||
     `wup_${Date.now()}`;
   registerWarmupSend(messageId);
@@ -1417,7 +1496,7 @@ export async function executeWarmupTurn(opts: {
     },
   });
 
-  // 9. Confirmação de Leitura e Tique Azul no Destinatário (com Atraso Humano Variável)
+  // 9. Confirmação de Leitura e Tique Azul no Destinatário (com Atraso Humano Variável + Fila Persistente)
   if (receiverConfig.enable_blue_ticks !== false && senderPhone) {
     const senderJid = `${senderPhone}@s.whatsapp.net`;
     const readDelayMs = calculateReadReceiptDelayMs(Boolean(isManualTrigger));
@@ -1447,11 +1526,31 @@ export async function executeWarmupTurn(opts: {
       await new Promise((r) => setTimeout(r, Math.min(readDelayMs, 3500)));
       await performReadConfirmation();
     } else {
-      setTimeout(performReadConfirmation, readDelayMs);
+      const queuedRead = await enqueuePendingWarmupAction(clientId, {
+        type: "read",
+        dueAt: Date.now() + readDelayMs,
+        actorInstance: receiverConfig.instance_name,
+        peerInstance: senderConfig.instance_name,
+        actorPhone: receiverPhone,
+        peerPhone: senderPhone,
+        targetJid: senderJid,
+        messageId,
+        delayMs: readDelayMs,
+      }).catch(() => null);
+      const t = setTimeout(() => {
+        if (queuedRead) {
+          void claimAndRunPendingWarmupAction(clientId, queuedRead.id);
+        } else {
+          void performReadConfirmation();
+        }
+      }, readDelayMs);
+      if (typeof (t as { unref?: () => void }).unref === "function") {
+        (t as { unref: () => void }).unref();
+      }
     }
   }
 
-  // 10. Reação de Emoji (probabilidade ~28% com atraso humano variável)
+  // 10. Reação de Emoji (probabilidade ~28% com atraso humano variável + Fila Persistente)
   if (receiverConfig.enable_reactions !== false && senderPhone && (isManualTrigger || Math.random() < 0.28)) {
     const reactionEmoji = getRandomReaction();
     const reactionDelayMs = calculateReactionDelayMs(Boolean(isManualTrigger));
@@ -1477,14 +1576,36 @@ export async function executeWarmupTurn(opts: {
           action_type: "reaction",
           details: { reaction: reactionEmoji, target_msg_id: messageId, delay_ms: reactionDelayMs },
         });
-      } catch {}
+      } catch { }
     };
 
     if (isManualTrigger) {
       await new Promise((r) => setTimeout(r, reactionDelayMs));
       await performReaction();
     } else {
-      setTimeout(performReaction, reactionDelayMs);
+      const senderJid = `${senderPhone}@s.whatsapp.net`;
+      const queuedReact = await enqueuePendingWarmupAction(clientId, {
+        type: "react",
+        dueAt: Date.now() + reactionDelayMs,
+        actorInstance: receiverConfig.instance_name,
+        peerInstance: senderConfig.instance_name,
+        actorPhone: receiverPhone,
+        peerPhone: senderPhone,
+        targetJid: senderJid,
+        messageId,
+        delayMs: reactionDelayMs,
+        emoji: reactionEmoji,
+      }).catch(() => null);
+      const t = setTimeout(() => {
+        if (queuedReact) {
+          void claimAndRunPendingWarmupAction(clientId, queuedReact.id);
+        } else {
+          void performReaction();
+        }
+      }, reactionDelayMs);
+      if (typeof (t as { unref?: () => void }).unref === "function") {
+        (t as { unref: () => void }).unref();
+      }
     }
   }
 
@@ -1532,7 +1653,7 @@ export async function executeWarmupTurn(opts: {
       sent_today: newSent,
       health_score: newHealth,
       last_activity_at: nowIso,
-    }).catch(() => {});
+    }).catch(() => { });
   }
   if (receiverPhone) {
     savePhoneMemoryFromConfig(clientId, {
@@ -1541,7 +1662,7 @@ export async function executeWarmupTurn(opts: {
       received_today: newReceived,
       health_score: Math.min(100, (receiverConfig.health_score ?? 100) + 1),
       last_activity_at: nowIso,
-    }).catch(() => {});
+    }).catch(() => { });
   }
 
   // 12. Atualização da conversa ativa (com cooldown longo ao encerrar sessão e jitter nos segundos)

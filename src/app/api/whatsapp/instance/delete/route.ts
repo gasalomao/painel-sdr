@@ -31,6 +31,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId, invalidateInstanceCache } from "@/lib/tenant";
 import { evolution } from "@/lib/evolution";
+import { retireInstanceProxyAsUsed } from "@/lib/proxy-pool";
 import {
   removePhoneMemory,
   savePhoneMemoryFromConfig,
@@ -209,6 +210,14 @@ export async function POST(req: NextRequest) {
       await Promise.all([remap("chats_dashboard"), remap("sessions"), remap("messages")]);
     }
   }
+
+  // Proxy vinculado vai para a Lista Negra (`used`) antes de remover a conexão,
+  // garantindo que nenhuma outra instância reuse esse IP neste ciclo rotativo.
+  await retireInstanceProxyAsUsed(
+    instanceName,
+    tenantId,
+    typeof conn.provider === "string" ? conn.provider : undefined,
+  ).catch(() => {});
 
   // channel_connections: SEMPRE deleta (é o que torna a instância "instância")
   // Filtra por client_id pra blindar contra cross-tenant.

@@ -351,7 +351,11 @@ export const evolution = {
    * Conectar, a instância sai padronizada — não importa o estado prévio.
    * Retorna o resultado de /instance/connect (com QR/pairingCode).
    */
-  async ensureInstanceConfigured(instance: string, publicAppUrl?: string) {
+  async ensureInstanceConfigured(
+    instance: string,
+    publicAppUrl?: string,
+    onBeforeConnect?: () => Promise<void>,
+  ) {
     const status = await this.getStatus(instance).catch(() => ({ state: "not_found" as const, data: null }));
     if (status.state === "not_found") {
       await this.createInstance(instance);
@@ -360,6 +364,9 @@ export const evolution = {
     } else {
       // Já existe — só re-padroniza settings (não-fatal se falhar)
       try { await this.setSettings(instance); } catch { /* ignore */ }
+    }
+    if (onBeforeConnect) {
+      await onBeforeConnect();
     }
     if (publicAppUrl) {
       const baseUrl = publicAppUrl.endsWith("/") ? publicAppUrl.slice(0, -1) : publicAppUrl;

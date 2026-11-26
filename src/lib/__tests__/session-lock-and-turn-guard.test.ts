@@ -95,4 +95,45 @@ describe("extractUnansweredCustomerMessagesAfterAi (anti-atropelamento KS Limpez
     expect(res.answeredByNewerAi).toBe(true);
     expect(res.unansweredCustomerMessages).toEqual([]);
   });
+
+  it("nunca repesca mensagem humana recebida ANTES da abertura da IA (cenário real KS Limpeza)", () => {
+    const chrono = [
+      {
+        message_id: "camp-1",
+        sender_type: "ai",
+        content: "Bom dia, é o pessoal da KS Limpeza?",
+        created_at: "2026-11-25T11:46:01.000Z",
+      },
+      {
+        message_id: "auto-1",
+        sender_type: "customer",
+        content: "K.S. Limpeza e higienização de Ar-Condicionado...",
+        created_at: "2026-11-25T11:46:04.000Z",
+      },
+      {
+        message_id: "human-1",
+        sender_type: "customer",
+        content: "Bom dia, sim, em que posso ajudá-la?",
+        created_at: "2026-11-25T11:46:57.000Z",
+      },
+      {
+        message_id: "ai-open-1",
+        sender_type: "ai",
+        content: "Oi! Tudo bem? Vi a KS Limpeza no Google... Hoje vocês têm site próprio ou usam mais Instagram e WhatsApp?",
+        created_at: "2026-11-25T11:47:36.000Z",
+      },
+    ];
+
+    const res = extractUnansweredCustomerMessagesAfterAi(
+      chrono,
+      "2026-11-25T11:46:02.000Z",
+      {
+        currentMessageId: "human-1",
+        isMessageHandled: () => false,
+      },
+    );
+
+    expect(res.answeredByNewerAi).toBe(true);
+    expect(res.unansweredCustomerMessages).toEqual([]);
+  });
 });

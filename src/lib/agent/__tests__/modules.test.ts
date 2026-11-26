@@ -160,6 +160,51 @@ describe("src/lib/agent/tool-declarations & image-whitelist", () => {
     expect(leadA.turnContextBlock).toContain("Clínica Alpha");
     expect(leadB.turnContextBlock).toContain("Clínica Beta");
     expect(leadB.turnContextBlock).toContain("plano: Enterprise");
+
+    const noFunnel = buildAgentPromptBundle({
+      ...common,
+      funilInstrucao: "",
+      capturedVariablesPrompt: "",
+      leadContextBlock: "Empresa: Clínica Gama",
+      promptVariablesLines: [],
+    });
+    expect(noFunnel.turnContextBlock).not.toContain("<current_funnel_stage>");
+    expect(noFunnel.turnContextBlock).not.toContain("<data_collection_goals>");
+  });
+
+  it("appendSitePreviewContextLines injeta apenas fatos de estado sem sobrescrever roteiro nem pular o Passo 5.1", async () => {
+    const { appendSitePreviewContextLines } = await import("../site-preview-context");
+
+    const phase1Lines: string[] = [];
+    appendSitePreviewContextLines(
+      phase1Lines,
+      { nome_negocio: "Piu Piu Ar condicionado Franco da Rocha", previa_status: null },
+      { options: {} },
+      true,
+    );
+    const phase1Text = phase1Lines.join("\n");
+    expect(phase1Text).toContain("AINDA NÃO SOLICITADA");
+    expect(phase1Text).toContain("solicitar_previa_site");
+    expect(phase1Text).not.toContain("Msg 8.1");
+    expect(phase1Text).not.toContain("Msg 8.2");
+    expect(phase1Text).not.toContain("a gente já te chama aqui com o link");
+
+    const phase2Lines: string[] = [];
+    appendSitePreviewContextLines(
+      phase2Lines,
+      {
+        nome_negocio: "Piu Piu Ar condicionado Franco da Rocha",
+        previa_status: "PREVIA_PRONTA",
+        link_previa: "https://piupiu.vercel.app",
+      },
+      { options: { site_preview_confirm_before_link: false } },
+      true,
+    );
+    const phase2Text = phase2Lines.join("\n");
+    expect(phase2Text).toContain("https://piupiu.vercel.app");
+    expect(phase2Text).toContain("PRIORIDADE DE ROTEIRO");
+    expect(phase2Text).not.toContain("2 a 5 min");
+    expect(phase2Text).not.toContain("Proibido falar domínio");
   });
 });
 

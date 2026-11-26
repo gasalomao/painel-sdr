@@ -1,3 +1,9 @@
+import {
+  cleanShortCompanyName,
+  sanitizeHumanFirstName,
+  sanitizeHumanPersonName,
+} from "@/lib/lead-name-hygiene";
+
 /**
  * Variáveis de template — usadas tanto no prompt do agente quanto no template
  * do disparo em massa e follow-up. Resolvidas em runtime.
@@ -235,17 +241,8 @@ function stripGoogleUiGlyphs(raw: string): string {
   return GOOGLE_MAPS_UI_NOISE_LABEL_RE.test(cleaned) ? "" : cleaned;
 }
 
-function deriveShortCompanyName(rawName: string | null | undefined): string {
-  if (!rawName || typeof rawName !== "string") return "";
-  let cleaned = rawName.trim();
-  cleaned = cleaned.replace(/\s+-\s+.+$/, "").trim();
-  cleaned = cleaned.replace(/\s+\|\s+.+$/, "").trim();
-  cleaned = cleaned
-    .replace(/\b(LTDA\.?|EIRELI|MEI|EPP|S\.?\/?A\.?|S\.A\.|COM[ÉE]RCIO(?:\s+DE)?|SERVI[ÇC]OS(?:\s+DE)?|M\.?E\.?)\b/gi, "")
-    .replace(/[.,;:/\\-]+$/g, "")
-    .replace(/\s{2,}/g, " ")
-    .trim();
-  return cleaned || rawName.trim();
+function deriveShortCompanyName(rawName: string | null | undefined, cidade?: string | null): string {
+  return cleanShortCompanyName(rawName, cidade);
 }
 
 function formatStringList(raw: unknown, separator = ", "): string {
@@ -504,22 +501,43 @@ export function renderTemplate(
       ? { servicoPrincipal: overrides.servicoPrincipal ?? "" }
       : {}),
   };
-  const proprietarioVal = (
-    (Object.prototype.hasOwnProperty.call(overrides, "socioDecisor") && typeof overrides.socioDecisor === "string"
-      ? overrides.socioDecisor
-      : "") ||
+  const hasManualSocioOverride =
+    Object.prototype.hasOwnProperty.call(overrides, "socioDecisor") &&
+    typeof overrides.socioDecisor === "string" &&
+    overrides.socioDecisor.trim().length > 0;
+  const humanCtx = {
+    businessName: ctx.nome_negocio,
+    cidade: cidadeVal,
+    bairro: bairroVal,
+    ramo: ctx.ramo_negocio,
+  };
+  const proprietarioRaw = (
+    (hasManualSocioOverride ? (overrides.socioDecisor as string) : "") ||
     ctx.proprietario ||
     ctx.owner_name ||
     (typeof enr.socioDecisor === "string" ? enr.socioDecisor : "")
   ).trim();
-  const nomeSocioVal = (
-    (typeof enr.socioDecisor === "string" ? enr.socioDecisor : "") ||
+  const proprietarioVal = hasManualSocioOverride
+    ? proprietarioRaw
+    : sanitizeHumanPersonName(proprietarioRaw, humanCtx);
+  const nomeSocioRaw = (
+    (hasManualSocioOverride ? (overrides.socioDecisor as string) : "") ||
+    (typeof enr.socioDecisor === "string" ? sanitizeHumanPersonName(enr.socioDecisor, humanCtx) : "") ||
     proprietarioVal
   ).trim();
-  const primeiroNomeSocioVal = (
+  const nomeSocioVal = hasManualSocioOverride
+    ? nomeSocioRaw
+    : sanitizeHumanPersonName(nomeSocioRaw, humanCtx);
+  const primeiroNomeRaw = (
+    (hasManualSocioOverride && typeof overrides.primeiroNomeSocio === "string"
+      ? overrides.primeiroNomeSocio
+      : "") ||
     (typeof enr.primeiroNomeSocio === "string" ? enr.primeiroNomeSocio : "") ||
     firstName(nomeSocioVal)
   ).trim();
+  const primeiroNomeSocioVal = hasManualSocioOverride
+    ? primeiroNomeRaw
+    : sanitizeHumanFirstName(nomeSocioVal || primeiroNomeRaw, humanCtx);
   const rawCnpj = typeof enr.cnpj === "string" ? enr.cnpj.replace(/\D/g, "") : "";
   const cnpjVal = rawCnpj.length === 14
     ? `${rawCnpj.slice(0, 2)}.${rawCnpj.slice(2, 5)}.${rawCnpj.slice(5, 8)}/${rawCnpj.slice(8, 12)}-${rawCnpj.slice(12, 14)}`
@@ -541,8 +559,10 @@ export function renderTemplate(
   const diagnosticoSiteVal = typeof enr.siteDiagnostico === "string" ? enr.siteDiagnostico.trim() : "";
   const telefoneSocioVal = typeof enr.telefoneSocio === "string" ? enr.telefoneSocio.trim() : "";
   const empresaCurtaVal =
-    (typeof enr.empresaCurta === "string" && enr.empresaCurta.trim()) ||
-    deriveShortCompanyName(ctx.nome_negocio);
+    cleanShortCompanyName(
+      (typeof enr.empresaCurta === "string" && enr.empresaCurta.trim()) || ctx.nome_negocio,
+      cidadeVal,
+    ) || deriveShortCompanyName(ctx.nome_negocio, cidadeVal);
   const servicoPrincipalVal =
     stripGoogleUiGlyphs(typeof enr.servicoPrincipal === "string" ? enr.servicoPrincipal : "") ||
     rawServicesList[0] ||

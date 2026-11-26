@@ -149,7 +149,7 @@ beforeEach(() => {
     clientId: CLIENT_ID,
     isAdmin: false,
     impersonating: true,
-    claims: {},
+    claims: { features: { organizador: true } },
   });
   mocks.hasInternalSecret.mockReturnValue(false);
 });

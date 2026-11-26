@@ -19,6 +19,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId, clientIdFromInstance } from "@/lib/tenant";
 import { getOrganizerConfig } from "@/lib/organizer-config-cache";
+import { getAiKeys } from "@/lib/ai-keys";
 import { resolveModelForClient } from "@/lib/ai-default-model";
 import { getInternalSecret } from "@/lib/internal-auth";
 
@@ -91,12 +92,25 @@ export async function GET(req: NextRequest) {
     agent = a;
   }
 
-  // 4) API Key Gemini configurada?
-  const orgCfg = await getOrganizerConfig();
-  const hasApiKey = !!(orgCfg?.api_key && orgCfg.api_key.trim());
+  // 4) API Key configurada (Gemini, OpenRouter, NVIDIA ou Gateway)?
+  const [orgCfg, aiKeys] = await Promise.all([
+    getOrganizerConfig(),
+    getAiKeys().catch(() => null),
+  ]);
+  const hasApiKey = Boolean(
+    (orgCfg?.api_key && orgCfg.api_key.trim()) ||
+    aiKeys?.gemini ||
+    aiKeys?.openrouter ||
+    (aiKeys?.openrouterKeys?.length || 0) > 0 ||
+    aiKeys?.nvidia ||
+    (aiKeys?.nvidiaAccounts?.length || 0) > 0 ||
+    aiKeys?.gatewayBaseUrl ||
+    (aiKeys?.gatewayEndpoints?.length || 0) > 0,
+  );
 
   // 5) Modelo IA efetivo pra esse cliente
-  const effectiveModel = await resolveModelForClient(conn?.client_id || auth.clientId);
+  const scopedClientId = conn?.client_id || auth.clientId;
+  const effectiveModel = await resolveModelForClient(scopedClientId);
 
   // 6) Bot status / pausa pra esse contato (se passou remote_jid)
   let session: any = null;
@@ -106,6 +120,7 @@ export async function GET(req: NextRequest) {
       .from("contacts")
       .select("id")
       .eq("remote_jid", remoteJid)
+      .eq("client_id", scopedClientId)
       .maybeSingle();
     if (contact) {
       const { data: s } = await supabaseAdmin
@@ -113,6 +128,7 @@ export async function GET(req: NextRequest) {
         .select("id, bot_status, paused_by, paused_at, resume_at")
         .eq("contact_id", contact.id)
         .eq("instance_name", instanceName)
+        .eq("client_id", scopedClientId)
         .maybeSingle();
       session = s;
     }

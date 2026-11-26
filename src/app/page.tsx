@@ -345,6 +345,29 @@ export default function DashboardPage(): React.JSX.Element {
                         </div>
                       </div>
                     )}
+                    {accountUsage.limits.monthly_usd_limit !== null && (
+                      <div>
+                        <div className="flex justify-between text-muted-foreground mb-1">
+                          <span>Consumo IA (USD)</span>
+                          <span className="tabular-nums text-foreground">
+                            ${accountUsage.usage.usd.toFixed(2)} / ${accountUsage.limits.monthly_usd_limit.toFixed(2)}
+                          </span>
+                        </div>
+                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary">
+                          <div
+                            className={cn(
+                              "h-full transition-all",
+                              (accountUsage.usage.usdPercent ?? 0) >= 100
+                                ? "bg-red-400"
+                                : (accountUsage.usage.usdPercent ?? 0) >= 80
+                                  ? "bg-amber-400"
+                                  : "bg-primary",
+                            )}
+                            style={{ width: `${Math.min(100, accountUsage.usage.usdPercent ?? 0)}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
                     <div className="flex justify-between text-muted-foreground pt-1">
                       <span>Agentes IA</span>
                       <span className="tabular-nums text-foreground">
@@ -357,6 +380,17 @@ export default function DashboardPage(): React.JSX.Element {
                         {accountUsage.resources.instances}{accountUsage.limits.max_instances !== null ? ` / ${accountUsage.limits.max_instances}` : ""}
                       </span>
                     </div>
+                    <div className="flex justify-between text-muted-foreground">
+                      <span>Documentos na Base (KB)</span>
+                      <span className="tabular-nums text-foreground">
+                        {accountUsage.resources.kbDocs}{accountUsage.limits.max_kb_docs !== null ? ` / ${accountUsage.limits.max_kb_docs}` : ""}
+                      </span>
+                    </div>
+                    {accountUsage.status !== "ok" && (
+                      <p className="pt-1 text-[11px] leading-relaxed text-muted-foreground">
+                        Precisa de mais volume? Solicite ao administrador a ampliação do seu plano.
+                      </p>
+                    )}
                   </div>
                 </CardContent>
               </Card>

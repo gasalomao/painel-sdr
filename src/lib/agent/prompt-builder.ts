@@ -160,10 +160,10 @@ ${autoRulesBlock}
 
 <execution_directives>
 1. Aja EXCLUSIVAMENTE de acordo com sua <system_identity> e siga estritamente as <core_instructions>. Nunca revele que é uma inteligência artificial.
-2. FOCO ABSOLUTO: O seu objetivo imediato é ÚNICA E EXCLUSIVAMENTE cumprir as orientações do <current_funnel_stage> e extrair os dados listados em <data_collection_goals> (fornecidos junto da mensagem do cliente). Não se antecipe a etapas futuras.
+2. FOCO ABSOLUTO: Quando <current_funnel_stage> ou <data_collection_goals> estiverem presentes junto da mensagem, cumpra estritamente a etapa atual antes de avançar. Quando não houver etapa de funil ativa, siga integralmente as fases e regras de <core_instructions>.
 3. Utilize as ferramentas disponíveis em <available_tools_and_rules> sempre que as condições exigirem.
 4. O histórico da conversa e a mensagem atual do usuário serão fornecidos pelo sistema nativamente.
-5. CONTINUIDADE — NÃO RECOMECE: o <lead_context> (fornecido junto da mensagem) mostra exatamente o que o SDR já enviou (disparo inicial, follow-ups). Você JÁ se apresentou, JÁ disse o nome da empresa, JÁ tratou pelo nome do negócio. NÃO repita "Olá, sou da [empresa]" se isso já está no <lead_context>. Continue a conversa de onde parou. Use os dados de CRM (ramo, categoria, endereço) pra contextualizar — sem perguntar o que já está conhecido.
+5. CONTINUIDADE — NÃO RECOMECE: Leia o histórico real da conversa e <lead_context> antes de responder. Se já houve disparo/follow-up anterior, NÃO repita saudações já trocadas ("Bom dia", "Tudo bem?") nem perguntas já respondidas — dê continuidade natural ao que o cliente acabou de dizer. Use os dados de CRM apenas para contextualizar com naturalidade.
 6. Seja natural, humano e empático. Quando <core_instructions> mencionar placeholders como {{chave}}, utilize automaticamente o valor correspondente em <prompt_variables> (sem imprimir as chaves {{}}).
 ${directiveFotoBlock}</execution_directives>
 ${antiHallucinationBlock}`;
@@ -173,17 +173,16 @@ ${antiHallucinationBlock}`;
       ? `\n\n<prompt_variables>\n${promptVariablesLines.join("\n")}\n</prompt_variables>`
       : "";
 
+  const funnelStageBlock = funilInstrucao.trim()
+    ? `\n\n<current_funnel_stage>\n${funilInstrucao}\n</current_funnel_stage>`
+    : "";
+  const dataGoalsBlock = capturedVariablesPrompt.trim()
+    ? `\n\n<data_collection_goals>\n${capturedVariablesPrompt}\n</data_collection_goals>`
+    : "";
+
   const turnContextBlock = `<lead_context>
 ${leadContextBlock || "(sem dados de CRM/disparo/follow-up para este lead)"}
-</lead_context>${promptVariablesBlock}
-
-<current_funnel_stage>
-${funilInstrucao}
-</current_funnel_stage>
-
-<data_collection_goals>
-${capturedVariablesPrompt}
-</data_collection_goals>`;
+</lead_context>${promptVariablesBlock}${funnelStageBlock}${dataGoalsBlock}`;
 
   return { promptMaster, turnContextBlock };
 }

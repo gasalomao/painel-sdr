@@ -12,21 +12,62 @@
  */
 
 const locks = new Map<string, Promise<unknown>>();
+const DEFAULT_SESSION_LOCK_TTL_MS = 90_000;
 
-export async function acquireSessionLock(sessionId: string): Promise<() => void> {
+/**
+ * Adquire lock sequencial por sessão com watchdog TTL automático.
+ * Se uma execução anterior travar por erro inesperado/hang, o watchdog libera
+ * a fila após `ttlMs` para impedir deadlock permanente na conversa.
+ */
+export async function acquireSessionLock(
+  sessionId: string,
+  ttlMs = DEFAULT_SESSION_LOCK_TTL_MS,
+): Promise<() => void> {
   const previous = locks.get(sessionId) ?? Promise.resolve();
-  let release!: () => void;
-  const current = new Promise<void>((resolve) => { release = resolve; });
+  let released = false;
+  let releaseResolve!: () => void;
+  const current = new Promise<void>((resolve) => {
+    releaseResolve = resolve;
+  });
   locks.set(sessionId, current);
-  await previous;
-  return () => {
-    release();
-    if (locks.get(sessionId) === current) locks.delete(sessionId);
+
+  let watchdog: ReturnType<typeof setTimeout> | null = null;
+  const doRelease = () => {
+    if (released) return;
+    released = true;
+    if (watchdog) {
+      clearTimeout(watchdog);
+      watchdog = null;
+    }
+    releaseResolve();
+    if (locks.get(sessionId) === current) {
+      locks.delete(sessionId);
+    }
   };
+
+  await previous;
+
+  if (Number.isFinite(ttlMs) && ttlMs > 0) {
+    watchdog = setTimeout(() => {
+      if (!released) {
+        console.warn(`[session-lock] Watchdog liberou trava órfã após ${ttlMs}ms (${sessionId}).`);
+        doRelease();
+      }
+    }, ttlMs);
+    if (typeof (watchdog as { unref?: () => void }).unref === "function") {
+      (watchdog as { unref: () => void }).unref();
+    }
+  }
+
+  return doRelease;
 }
 
-export async function withSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
-  const release = await acquireSessionLock(sessionId);
+export async function withSessionLock<T>(
+  sessionId: string,
+  fn: () => Promise<T>,
+  ttlMs = DEFAULT_SESSION_LOCK_TTL_MS,
+): Promise<T> {
+  const release = await acquireSessionLock(sessionId, ttlMs);
   try {
     return await fn();
   } finally {

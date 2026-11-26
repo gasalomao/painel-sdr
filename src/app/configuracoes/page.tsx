@@ -10,6 +10,7 @@ import { Settings2, Key, Save, CheckCircle2, XCircle, Loader2, Info, Database, C
 import { cn } from "@/lib/utils";
 import { ModelOptions } from "@/components/ai-module-shared";
 import { AiCombosManager } from "@/components/ai-combos-manager";
+import { AdminProxyPoolCard } from "@/components/admin-proxy-pool-card";
 import styles from "./configuracoes.module.css";
 
 const settingsSections = [
@@ -2839,6 +2840,8 @@ export default function ConfiguracoesPage() {
                     )}
                   </CardContent>
                 </Card>
+
+                <AdminProxyPoolCard />
               </div>
             )}
 

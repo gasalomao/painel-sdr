@@ -25,6 +25,22 @@ import {
   reconcileWarmupIdentityByPhone,
   savePhoneMemoryFromConfig,
 } from "./warmup-phone-memory";
+import { ensureProxyForInstance, getProxyPoolOverviewCache } from "@/lib/proxy-pool";
+
+async function ensureWarmupProxyBestEffort(clientId: string, instanceName: string): Promise<void> {
+  try {
+    const overview = await getProxyPoolOverviewCache();
+    if (!overview.hasPool) return;
+    await ensureProxyForInstance({
+      instanceName,
+      clientId,
+      reason: "warmup",
+      forWarmup: true,
+    });
+  } catch {
+    // non-fatal: fail-open para IP padrão da VPS
+  }
+}
 
 export type WarmupConfigSource = "table" | "settings";
 
@@ -487,6 +503,9 @@ export async function saveWarmupConfig(
           await savePhoneMemoryFromConfig(clientId, fullRow as WarmupConfig);
         }
       } catch { /* best-effort */ }
+      if (patch.enabled === true) {
+        await ensureWarmupProxyBestEffort(clientId, name);
+      }
       return {
         ok: true,
         config: savedCfg,
@@ -549,6 +568,11 @@ export async function setWarmupEnabledForAll(
       .update({ enabled, updated_at: nowIso })
       .eq("client_id", clientId);
     if (!error) updated = Object.keys(configs).length;
+    if (enabled) {
+      for (const cfg of Object.values(configs)) {
+        await ensureWarmupProxyBestEffort(clientId, cfg.instance_name);
+      }
+    }
   } else {
     for (const cfg of Object.values(configs)) {
       const res = await saveWarmupConfig(clientId, cfg.instance_name, { enabled });
@@ -671,7 +695,10 @@ export async function ensureWarmupConfigsForTenant(
           .upsert(row, { onConflict: "client_id,instance_name", ignoreDuplicates: true });
         if (!error) {
           created.push(connection.instance_name);
-          if (row.enabled) enabledNew.push(connection.instance_name);
+          if (row.enabled) {
+            enabledNew.push(connection.instance_name);
+            await ensureWarmupProxyBestEffort(clientId, connection.instance_name);
+          }
           if (restoredMeta) {
             restored.push({ instanceName: connection.instance_name, ...restoredMeta });
           }

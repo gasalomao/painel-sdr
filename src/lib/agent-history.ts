@@ -199,8 +199,6 @@ export function extractUnansweredCustomerMessagesAfterAi(
   }
 
   const isHandled = options?.isMessageHandled ?? (() => false);
-  const currentMessageId = options?.currentMessageId ? String(options.currentMessageId).trim() : "";
-  const seenIds = new Set<string>();
   const unanswered: HistoryMessage[] = [];
 
   for (let i = latestAiIdx + 1; i < chrono.length; i++) {
@@ -208,21 +206,7 @@ export function extractUnansweredCustomerMessagesAfterAi(
     const sender = String(msg.sender_type || msg.sender || "").toLowerCase();
     if (sender !== "customer") continue;
     if (isHandled(msg.message_id)) continue;
-    const idKey = msg.message_id ? String(msg.message_id).trim() : "";
-    if (idKey) seenIds.add(idKey);
     unanswered.push(msg);
-  }
-
-  // Caso raro: a mensagem gatilho do Turno 2 chegou 1-2s ANTES da IA do Turno 1
-  // gravar sua resposta no banco, mas NÃO entrou no lote do Turno 1 (não marcada como handled).
-  if (currentMessageId && !seenIds.has(currentMessageId) && !isHandled(currentMessageId)) {
-    const triggerMsg = chrono.slice(0, latestAiIdx).find((msg) => {
-      const sender = String(msg.sender_type || msg.sender || "").toLowerCase();
-      return sender === "customer" && msg.message_id && String(msg.message_id).trim() === currentMessageId;
-    });
-    if (triggerMsg) {
-      unanswered.unshift(triggerMsg);
-    }
   }
 
   return {

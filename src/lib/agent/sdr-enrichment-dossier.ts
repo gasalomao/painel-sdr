@@ -4,6 +4,11 @@
  */
 
 import {
+  cleanShortCompanyName,
+  sanitizeHumanFirstName,
+  sanitizeHumanPersonName,
+} from "@/lib/lead-name-hygiene";
+import {
   sanitizePromptSignal,
   type AgentAiDossierMode,
   type LeadCrmOverrides,
@@ -90,7 +95,9 @@ export function buildSdrLeadDossierBlock(
   const overrides = (lead.business_details?.crm_overrides || {}) as Partial<LeadCrmOverrides>;
 
   const website = asString(lead.website, 220);
-  const nomeEmpresa = asString(enr.empresaCurta, 120) || asString(lead.nome_negocio, 120);
+  const nomeEmpresa = cleanShortCompanyName(
+    asString(enr.empresaCurta, 120) || asString(lead.nome_negocio, 120),
+  );
   const hasOverrideServico = Object.prototype.hasOwnProperty.call(overrides, "servicoPrincipal");
   const especialidade =
     (hasOverrideServico ? asString(overrides.servicoPrincipal, 120) : "") ||
@@ -99,13 +106,23 @@ export function buildSdrLeadDossierBlock(
     asString(lead.ramo_negocio, 120);
 
   const hasOverrideSocio = Object.prototype.hasOwnProperty.call(overrides, "socioDecisor");
-  const socioDecisor = hasOverrideSocio
+  const humanCtx = {
+    businessName: lead.nome_negocio,
+    ramo: lead.ramo_negocio || lead.categoria,
+  };
+  const socioDecisorRaw = hasOverrideSocio
     ? asString(overrides.socioDecisor, 120)
     : asString(enr.socioDecisor, 120) || asString(lead.owner_name, 120);
+  const socioDecisor = hasOverrideSocio
+    ? socioDecisorRaw
+    : sanitizeHumanPersonName(socioDecisorRaw, humanCtx);
 
-  const primeiroNomeSocio =
+  const primeiroNomeSocioRaw =
     (hasOverrideSocio ? asString(overrides.primeiroNomeSocio, 60) : asString(enr.primeiroNomeSocio, 60)) ||
     (socioDecisor ? socioDecisor.split(/\s+/)[0] || "" : "");
+  const primeiroNomeSocio = hasOverrideSocio
+    ? primeiroNomeSocioRaw
+    : sanitizeHumanFirstName(socioDecisor || primeiroNomeSocioRaw, humanCtx);
 
   const rawChannel = Object.prototype.hasOwnProperty.call(overrides, "canalWhatsapp")
     ? overrides.canalWhatsapp

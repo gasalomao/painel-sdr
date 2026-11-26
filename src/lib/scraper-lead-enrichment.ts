@@ -5,6 +5,12 @@
  * WhatsApp do sócio decisor sem custo de API externa.
  */
 
+import {
+  cleanShortCompanyName,
+  isPlausibleHumanPersonName,
+  NON_PERSON_NOISE_TOKENS,
+  sanitizeHumanPersonName,
+} from "@/lib/lead-name-hygiene";
 import { isPrivateOrLocalUrl } from "@/lib/url-guard";
 import { webSearch, type SearchResult } from "@/lib/web-search";
 import {
@@ -1151,21 +1157,9 @@ export function detectAbandonedCopyrightYear(
   return latestYear <= referenceYear - 4 ? latestYear : undefined;
 }
 
-const HUMAN_NAME_NOISE_TOKENS = new Set([
-  "clinica", "centro", "estetica", "saude", "odonto", "odontologia", "consultorio",
-  "instituto", "studio", "espaco", "salao", "salon", "barbearia", "oficina", "pet",
-  "vet", "veterinaria", "ltda", "eireli", "epp", "sao", "paulo", "curitiba", "belo",
-  "horizonte", "rio", "janeiro", "brasilia", "porto", "alegre", "campinas", "santos",
-  "goiania", "recife", "salvador", "fortaleza", "manaus", "equipe", "atendimento",
-  "recepcao", "direcao", "gerencia", "administracao", "admin", "owner", "proprietario",
-  "responsavel", "dono", "paciente", "cliente", "implantes", "harmonizacao", "facial",
-  "corporal", "avancada", "integrada", "medico", "medica", "dentista", "fisioterapia",
-  "psicologia", "dermatologia", "unidade", "matriz", "filial", "oficial", "brasil",
-  "dr", "dra", "prof", "beleza", "viva", "vida", "prime", "vip", "concept", "spa",
-  "beauty", "care", "smile", "sorriso", "laser", "clean", "total", "concept", "center",
-]);
+const HUMAN_NAME_NOISE_TOKENS = NON_PERSON_NOISE_TOKENS;
 
-function normalizeHumanCandidate(raw: string): string | undefined {
+function normalizeHumanCandidate(raw: string, businessName?: string): string | undefined {
   const cleaned = String(raw || "")
     .replace(/^\s*(?:dr\.?|dra\.?|prof\.?|arq\.?|adv\.?|eng\.?)\s+/i, "")
     .replace(/\s+/g, " ")
@@ -1181,6 +1175,7 @@ function normalizeHumanCandidate(raw: string): string | undefined {
     const norm = normSearchText(token);
     if (norm.length < 2 || HUMAN_NAME_NOISE_TOKENS.has(norm)) return undefined;
   }
+  if (!isPlausibleHumanPersonName(title, { businessName })) return undefined;
   return title;
 }
 
@@ -1192,12 +1187,17 @@ export function extractPersonNameFromLeadSignals(input: {
   leadName?: string;
   reviews?: ReadonlyArray<{ texto?: string; respostaDono?: string }>;
 }): string | undefined {
+  const rawLeadName = String(input.leadName || "").trim();
   if (input.ownerName) {
-    const fromOwner = normalizeHumanCandidate(input.ownerName);
-    if (fromOwner) return fromOwner;
+    const sanitized = sanitizeHumanPersonName(input.ownerName, { businessName: rawLeadName || undefined });
+    const fromOwner = sanitized
+      ? sanitized.replace(/^\s*(?:dr\.?|dra\.?|prof\.?|arq\.?|adv\.?|eng\.?)\s+/i, "").trim()
+      : normalizeHumanCandidate(input.ownerName, rawLeadName || undefined);
+    if (fromOwner && normalizeHumanCandidate(fromOwner, rawLeadName || undefined)) {
+      return normalizeHumanCandidate(fromOwner, rawLeadName || undefined);
+    }
   }
 
-  const rawLeadName = String(input.leadName || "").trim();
   if (rawLeadName) {
     const drMatch = rawLeadName.match(
       /(?:^|[\s\-–|:()])(?:dr\.?|dra\.?|prof\.?)\s+([A-Za-zÀ-ÿ]+(?:\s+(?:da|de|do|dos|das|e)?\s*[A-Za-zÀ-ÿ]+){1,3})/i,
@@ -1211,20 +1211,14 @@ export function extractPersonNameFromLeadSignals(input: {
     }
 
     const segments = rawLeadName.split(/\s*(?:\||–|—|•|:|\s+-\s+|\bpor\b)\s*/i).map((s) => s.trim());
-    for (const seg of segments) {
-      if (!seg || seg === rawLeadName && !/\b(?:dr\.?|dra\.?)\b/i.test(seg)) {
-        // Só testa segmento secundário para evitar confundir nome fantasia de empresa comum com nome de pessoa
-        if (segments.length <= 1) continue;
+    for (let idx = 0; idx < segments.length; idx++) {
+      const seg = segments[idx];
+      if (!seg) continue;
+      if (idx === 0 && !/\b(?:dr\.?|dra\.?|prof\.?)\b/i.test(seg)) {
+        // Ignora segmento principal da marca sem título para não confundir nome fantasia com pessoa
+        continue;
       }
-      const candidate = normalizeHumanCandidate(seg);
-      if (candidate) return candidate;
-    }
-
-    const tailMatch = rawLeadName.match(
-      /\b(?:dr\.?|dra\.?)?\s*([A-ZÀ-Ú][a-zà-ú]{2,}\s+(?:(?:da|de|do|dos|das)\s+)?[A-ZÀ-Ú][a-zà-ú]{2,})\s*$/,
-    );
-    if (tailMatch?.[1]) {
-      const candidate = normalizeHumanCandidate(tailMatch[1]);
+      const candidate = normalizeHumanCandidate(seg, rawLeadName);
       if (candidate) return candidate;
     }
   }
@@ -2422,66 +2416,7 @@ const PT_UF_CODE_SET = new Set([
  * Extrai um nome curto e natural da empresa para o 1º contato e abordagem humana no WhatsApp.
  */
 export function extractShortCompanyName(rawName: string, cidade?: string): string {
-  const withoutParens = String(rawName || "")
-    .replace(/\([^)]*\)/g, " ")
-    .replace(/\[[^\]]*\]/g, " ")
-    .replace(/[\u{1F300}-\u{1FAFF}\u2600-\u27BF]+/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!withoutParens) return "";
-
-  const segments = withoutParens
-    .split(/\s*(?:\||–|—|•|:|\s+-\s+)\s*/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  let core = segments[0] || withoutParens;
-  if (segments.length > 1) {
-    if (/^(?:dr\.?|dra\.?)$/i.test(core)) {
-      core = `${core} ${segments[1]}`.trim();
-    } else if (core.length <= 3 && !PT_UF_CODE_SET.has(normSearchText(core))) {
-      const nextWords = segments[1].split(/\s+/).filter(Boolean);
-      const firstSubstantive = nextWords.find(
-        (w) => w.length >= 3 && !PT_BR_PREPOSITIONS.has(w.toLowerCase()),
-      );
-      core = firstSubstantive ? `${core} ${firstSubstantive}` : `${core} ${segments[1]}`;
-    }
-  }
-
-  // Remove "/SP", "-SP", ", SP" no fim do nome
-  core = core.replace(/\s*[\/,\-]\s*(?:AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)\s*$/i, "").trim();
-
-  // Remove sufixo de cidade ("Clínica do Dente Campinas" -> "Clínica do Dente") mantendo marca preservada
-  const cityClean = normSearchText(cidade || "");
-  if (cityClean.length >= 4) {
-    const tokens = core.split(/\s+/).filter(Boolean);
-    const cityWords = cityClean.split(" ");
-    if (tokens.length > cityWords.length) {
-      const tailNorm = normSearchText(tokens.slice(-cityWords.length).join(" "));
-      if (tailNorm === cityClean) {
-        const remainingTokens = tokens.slice(0, -cityWords.length);
-        while (
-          remainingTokens.length > 1 &&
-          /^(?:de|da|do|em|no|na)$/i.test(remainingTokens[remainingTokens.length - 1])
-        ) {
-          remainingTokens.pop();
-        }
-        const candidate = remainingTokens.join(" ").trim();
-        if (remainingTokens.length >= 2 || candidate.length >= 10) {
-          core = candidate;
-        }
-      }
-    }
-  }
-
-  // Remove sufixos societários comuns em razão social (LTDA, EIRELI, EPP, MEI, S/A, ME no fim)
-  core = core
-    .replace(/\b(?:LTDA\.?|EIRELI|MEI|EPP|S\.?\/?A\.?|S\.A\.)\b/gi, "")
-    .replace(/\bME\s*$/i, "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  return core.replace(/[-–—,|:\s]+$/, "").replace(/\s+/g, " ").trim();
+  return cleanShortCompanyName(rawName, cidade);
 }
 
 const MAPS_UI_SERVICE_NOISE_RE = /^(?:salvos?|recentes?|baixar o aplicativo|compartilhar|rotas?|salvar|enviar para|reivindicar|vis[aã]o geral|avalia[çc][õo]es|sobre|fotos|fechado|aberto agora|aberto 24 horas|outros hor[aá]rios)$/i;

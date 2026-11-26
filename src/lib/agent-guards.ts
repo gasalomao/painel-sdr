@@ -26,7 +26,10 @@ const URA_MENU_OR_ERROR_REGEX =
   /(?:n[aã]o entendemos sua mensagem|op[cç][aã]o inv[aá]lida|digite (?:uma )?op[cç][aã]o v[aá]lida|escolha uma das (?:seguintes )?op[cç][oõ]es|selecione uma das op[cç][oõ]es|menu principal|voltar ao menu|para alterar seu nome|digite\s*[*#]?[a-z0-9]{2,}|(?:^|\n)\s*[?•]?\s*\*?seu\s+(?:id|protocolo|c[oó]digo)\s*:?\*?\s*\S+|(?:^|\n)\s*\*?[1-9]\*?\s*[-–.)]\s*\S+[\s\S]*\n\s*\*?[2-9]\*?\s*[-–.)]\s*\S+)/i;
 
 const AUTO_REPLY_GREETING_REGEX =
-  /(?:seja bem[- ]?vind[oa]|agradece(?:mos)? (?:o )?seu contato|nossa equipe (?:j[aá] )?vai (?:lhe |te )?atender|em breve (?:um de nossos|algu[eé]m|nossa equipe)|aguarde.{0,30}(?:atendido|momento)|fora do (?:nosso )?hor[aá]rio de atendimento|atendimento autom[aá]tico|assistente virtual|chatbot|recebemos sua mensagem)/i;
+  /(?:seja bem[- ]?vind[oa]|agradece(?:mos)? (?:o )?seu contato|nossa equipe (?:j[aá] )?vai (?:lhe |te )?atender|em breve (?:um de nossos|algu[eé]m|nossa equipe)|aguarde.{0,30}(?:atendido|momento)|fora do (?:nosso )?hor[aá]rio(?: de atendimento)?|no momento(?:,\s*)?n[aã]o estamos|em descanso|responderemos em breve|atendimento autom[aá]tico|assistente virtual|chatbot|recebemos sua mensagem)/i;
+
+const PURE_QUEUE_HOLD_REGEX =
+  /^(?:(?:combinado|perfeito|certo|beleza|show|entendido|ok|tudo\s+bem|tranquilo|sem\s+problemas?)[,!.\s]*)?(?:eu\s+)?(?:fico|estou|vou\s+ficar|aguardo)\s+(?:no\s+aguardo|aguardando(?:\s+(?:por\s+aqui|o\s+retorno|voc[eê]s?|a\s+equipe|o\s+atendimento))?)(?:\s+por\s+aqui)?[!.\s😊👍🙏]*$/i;
 
 const EXPLICIT_CLOSING_PHRASE_REGEX =
   /(?:respeit(?:o|amos) (?:totalmente )?sua decis[aã]o|n[aã]o (?:te |lhe |vamos )?incomod(?:o|ar|aremos) mais|a gente para por aqui|encerr(?:o|amos)(?: o contato| o atendimento| a conversa)? por aqui|muito sucesso(?: para| pra)? voc[eê]s?|sucesso (?:nos neg[oó]cios|(?:para|pra) voc[eê]s?)|desculp[ae] (?:qualquer |o )?inc[oô]modo|remov(?:i|emos|endo) (?:o )?seu (?:contato|n[uú]mero))/i;
@@ -179,13 +182,18 @@ export function shouldAutoPauseAfterClosing(params: {
   const assistantText = (params.assistantText || "").trim();
   if (!assistantText) return { shouldPause: false, reason: null };
 
-  // Se a IA fez qualquer pergunta, a conversa continua ativa esperando o lead.
-  if (assistantText.includes("?")) {
+  // Se a IA fez qualquer pergunta ou enviou espera pura de fila/URA, a conversa continua ativa.
+  if (assistantText.includes("?") || PURE_QUEUE_HOLD_REGEX.test(assistantText)) {
     return { shouldPause: false, reason: null };
   }
 
   if (EXPLICIT_CLOSING_PHRASE_REGEX.test(assistantText)) {
     return { shouldPause: true, reason: "explicit_closing" };
+  }
+
+  // Auto-saudação ou aviso de ausência do WhatsApp Business nunca é recusa comercial.
+  if (AUTO_REPLY_GREETING_REGEX.test(customerText) || URA_MENU_OR_ERROR_REGEX.test(customerText)) {
+    return { shouldPause: false, reason: null };
   }
 
   const saysMissingSite = /(?:n[aã]o temos|ainda n[aã]o tem(?:os)?)\s+site/i.test(customerText);

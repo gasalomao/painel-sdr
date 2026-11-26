@@ -15,6 +15,7 @@ import {
   mapWithConcurrency,
   readPhoneMemoryMap,
 } from "@/lib/warmup/warmup-phone-memory";
+import { getProxyPoolOverviewCache } from "@/lib/proxy-pool";
 import {
   STAGE_DEFAULTS,
   type WarmupConfig,
@@ -287,6 +288,11 @@ export async function GET(req: NextRequest) {
     const day0WarningsByInstance = extractDay0WarningsByInstance(logs);
     const deliveryMetricsByInstance = await getChipDeliveryMetricsMap(clientId);
 
+    const poolOverview = await getProxyPoolOverviewCache().catch(() => ({
+      hasPool: false,
+      brHosts: new Set<string>(),
+    }));
+
     const instancesList = connections.map((connection) => {
       const existingCfg = cfgMap[connection.instance_name];
       const liveState = liveStatusByInstance.get(connection.instance_name);
@@ -327,6 +333,7 @@ export async function GET(req: NextRequest) {
         config,
         proxyByInstance,
         proxyIntelByHost,
+        managedBrPoolHosts: poolOverview.brHosts,
         phoneMemoryMap,
         nowMs,
       });

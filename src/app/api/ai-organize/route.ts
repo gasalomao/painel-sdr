@@ -11,6 +11,14 @@ import {
 import { chunkArray, formatChatMessageLine, hashChatContent } from "@/lib/organizer-hash";
 import { requireClientId } from "@/lib/tenant";
 import { hasInternalSecret } from "@/lib/internal-auth";
+import { isFeatureEnabledForSession } from "@/lib/saas-policy";
+import {
+  checkTenantAiQuota,
+  checkTenantRateLimit,
+  isClientActiveCached,
+  isClientAdminCached,
+  requireFeatureAccess,
+} from "@/lib/saas-limits";
 
 const adminClient = supabaseAdmin;
 
@@ -127,8 +135,19 @@ export async function POST(req: NextRequest) {
   if (!isInternal) {
     const ctx = await requireClientId(req);
     if (!ctx.ok) return ctx.response;
+    const denied = requireFeatureAccess(ctx, "organizador");
+    if (denied) return denied;
     sessionClientId = ctx.clientId;
     sessionIsAdmin = ctx.isAdmin;
+    if (!sessionIsAdmin) {
+      const rl = checkTenantRateLimit(`ai_organize:${sessionClientId}`, 5, 60_000);
+      if (!rl.allowed) {
+        return NextResponse.json(
+          { success: false, error: `Muitas execuções em sequência. Aguarde ${rl.retryAfterSec ?? 1}s.` },
+          { status: 429 }
+        );
+      }
+    }
   }
 
   try {
@@ -172,6 +191,60 @@ export async function POST(req: NextRequest) {
         { success: false, error: "clientId é obrigatório para executar o organizador" },
         { status: 400 },
       );
+    }
+
+    const clientActive = await isClientActiveCached(clientIdScope);
+    if (!clientActive) {
+      return NextResponse.json(
+        { success: false, status: "inactive_tenant", error: "Conta desativada.", updatedCount: 0 },
+        { status: isInternal ? 200 : 403 },
+      );
+    }
+
+    const effectiveAdmin = sessionIsAdmin || (isInternal && (await isClientAdminCached(clientIdScope)));
+    if (!effectiveAdmin) {
+      if (isInternal) {
+        try {
+          const { data: cliRow } = await adminClient
+            .from("clients")
+            .select("is_admin, is_active, features, organizer_enabled")
+            .eq("id", clientIdScope)
+            .maybeSingle();
+          if (cliRow && typeof cliRow === "object" && !Array.isArray(cliRow) && "features" in cliRow) {
+            const cRow = cliRow as {
+              is_admin?: boolean | null;
+              is_active?: boolean | null;
+              features?: Record<string, boolean> | null;
+              organizer_enabled?: boolean | null;
+            };
+            const featureOk = isFeatureEnabledForSession("organizador", {
+              isAdmin: Boolean(cRow.is_admin),
+              features: cRow.features || {},
+            });
+            if (cRow.is_active === false || !featureOk || (triggerLabel === "auto" && cRow.organizer_enabled !== true)) {
+              return NextResponse.json({
+                success: true,
+                skipped: true,
+                message: "Organizador desativado ou não liberado para esta conta.",
+                updatedCount: 0,
+              });
+            }
+          }
+        } catch {}
+      }
+
+      const quota = await checkTenantAiQuota(clientIdScope, false);
+      if (!quota.allowed) {
+        return NextResponse.json(
+          {
+            success: false,
+            status: "quota_exceeded",
+            error: quota.reason || "Limite mensal de IA do plano atingido.",
+            updatedCount: 0,
+          },
+          { status: isInternal ? 200 : 429 },
+        );
+      }
     }
 
     const { providerDisplayName, providerOf, generateText } = await import("@/lib/ai-provider");

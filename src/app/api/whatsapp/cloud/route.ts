@@ -13,7 +13,7 @@ import { supabaseAdmin as supabase } from "@/lib/supabase_admin";
 import { whatsappCloud } from "@/lib/whatsapp-cloud";
 import { resolveChannel, invalidateChannelCache, sendMessage as sendViaChannel } from "@/lib/channel";
 import { requireClientId } from "@/lib/tenant";
-import { getTenantSaasLimits } from "@/lib/saas-limits";
+import { assertTenantCanCreateInstance } from "@/lib/saas-limits";
 
 export const dynamic = "force-dynamic";
 
@@ -108,23 +108,9 @@ export async function POST(req: NextRequest) {
 
   // SAVE
   if (action === "save") {
-    if (own === "new" && !auth.isAdmin) {
-      const limits = await getTenantSaasLimits(auth.clientId, false);
-      if (limits.max_instances !== null) {
-        const { count } = await supabase
-          .from("channel_connections")
-          .select("instance_name", { count: "exact", head: true })
-          .eq("client_id", auth.clientId);
-        if ((count ?? 0) >= limits.max_instances) {
-          return NextResponse.json(
-            {
-              success: false,
-              error: `Seu plano permite no máximo ${limits.max_instances} conexão(ões) de WhatsApp. Fale com o administrador para ampliar o limite.`,
-            },
-            { status: 403 },
-          );
-        }
-      }
+    if (own === "new") {
+      const instDenied = await assertTenantCanCreateInstance(auth.clientId, auth.isAdmin);
+      if (instDenied) return instDenied;
     }
     const cfgIn = body.config || {};
     if (!cfgIn.phone_number_id || !cfgIn.access_token) {

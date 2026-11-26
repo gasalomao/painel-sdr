@@ -177,6 +177,28 @@ describe("Custom Goal Evaluator (Objetivo Personalizado)", () => {
       expect(res).toEqual({ achieved: false, method: "skipped", tokensUsed: 0 });
       expect(generateTextMock).not.toHaveBeenCalled();
     });
+
+    it("faz curto-circuito com 0 tokens no cenário Val Ar Condicionado e em pergunta seguida de frase curta", async () => {
+      const valHold = await evaluateCustomGoal({
+        goalText:
+          "Pausar SOMENTE nos encerramentos finais.\nNUNCA pausar se a última mensagem tiver pergunta nem em espera de fila.",
+        messages: [
+          { role: "user", content: "Val Ar Condicionado agradece contato. Horário 09h - 18h." },
+          { role: "agent", content: "Combinado, fico no aguardo por aqui!" },
+        ],
+      });
+      expect(valHold).toEqual({ achieved: false, method: "skipped", tokensUsed: 0 });
+
+      const inlineQuestion = await evaluateCustomGoal({
+        goalText: "Pausar SOMENTE sem nenhuma pergunta no final.",
+        messages: [
+          { role: "user", content: "Pode fazer sim" },
+          { role: "agent", content: "Levo até 2 dias. Posso usar o Instagram de vocês? Fico no aguardo!" },
+        ],
+      });
+      expect(inlineQuestion).toEqual({ achieved: false, method: "skipped", tokensUsed: 0 });
+      expect(generateTextMock).not.toHaveBeenCalled();
+    });
   });
 });
 

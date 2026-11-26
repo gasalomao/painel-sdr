@@ -57,12 +57,43 @@ export async function GET(req: NextRequest) {
     if (!adminClient) {
       return NextResponse.json({ success: false, error: "DB indisponível" }, { status: 500 });
     }
-    let q = adminClient.from("ai_token_usage").select("*").order("created_at", { ascending: false });
-    if (!ctx.isAdmin) q = q.eq("client_id", ctx.clientId);
-    if (fromIso) q = q.gte("created_at", fromIso);
-    if (toIso) q = q.lte("created_at", toIso);
+    const buildTokensQuery = () => {
+      let q = adminClient.from("ai_token_usage").select("*").order("created_at", { ascending: false });
+      if (!ctx.isAdmin) q = q.eq("client_id", ctx.clientId);
+      if (fromIso) q = q.gte("created_at", fromIso);
+      if (toIso) q = q.lte("created_at", toIso);
+      return q;
+    };
 
-    const { data, error } = await q.limit(20000);
+    type UsageQueryRow = Record<string, unknown>;
+    let data: UsageQueryRow[] | null = null;
+    let error: { code?: string; message?: string } | null = null;
+    const probe = buildTokensQuery() as unknown as {
+      range?: (from: number, to: number) => Promise<{ data: UsageQueryRow[] | null; error: { code?: string; message?: string } | null }>;
+      limit: (n: number) => Promise<{ data: UsageQueryRow[] | null; error: { code?: string; message?: string } | null }>;
+    };
+    if (typeof probe.range === "function") {
+      const paged: UsageQueryRow[] = [];
+      for (let page = 0; page < 20; page++) {
+        const from = page * 1000;
+        const to = from + 999;
+        const res = await (buildTokensQuery() as unknown as {
+          range: (f: number, t: number) => Promise<{ data: UsageQueryRow[] | null; error: { code?: string; message?: string } | null }>;
+        }).range(from, to);
+        if (res.error) {
+          error = res.error;
+          break;
+        }
+        const chunk = Array.isArray(res.data) ? res.data : [];
+        paged.push(...chunk);
+        if (chunk.length < 1000) break;
+      }
+      data = paged;
+    } else {
+      const res = await probe.limit(20000);
+      data = res.data;
+      error = res.error;
+    }
     if (error) {
       if ((error as any).code === "42P01") {
         return NextResponse.json({

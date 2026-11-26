@@ -541,6 +541,7 @@ export async function POST(req: NextRequest) {
         } else {
           try {
             const agentMod = await import("@/app/api/agent/process/route");
+            const { dispatchAgentTurnBounded } = await import("@/lib/webhook-dispatch");
             const fakeReq = new NextRequest("http://internal/api/agent/process", {
               method: "POST",
               headers: {
@@ -557,9 +558,7 @@ export async function POST(req: NextRequest) {
                 sessionId: session.id,
               }),
             });
-            // FIX Next 16: NÃO fire-and-forget. Next standalone cancela trabalho
-            // Invoca agent/process diretamente — serialização e buffer são gerenciados internamente
-            await agentMod.POST(fakeReq);
+            await dispatchAgentTurnBounded(() => agentMod.POST(fakeReq));
           } catch (e: any) {
             console.warn("[evo-go-webhook] agente falhou:", e?.message);
             await supabase

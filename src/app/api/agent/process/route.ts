@@ -25,6 +25,7 @@ import { getCachedAgentStaticBundle } from "@/lib/agent-config-cache";
 import { buildAgentFunctionDeclarations } from "@/lib/agent/tool-declarations";
 import { isSitePreviewAllowedForLead } from "@/lib/sites/preview-policy";
 import { buildAgentPromptBundle } from "@/lib/agent/prompt-builder";
+import { appendSitePreviewContextLines } from "@/lib/agent/site-preview-context";
 import { buildSdrLeadDossierBlock } from "@/lib/agent/sdr-enrichment-dossier";
 import { resolveEffectiveAiDossierMode } from "@/lib/crm-lead-profile";
 import { collectValidImageUrls, sanitizeHallucinatedImages, splitChunkSegmentsWithCaptions } from "@/lib/agent/image-whitelist";
@@ -93,61 +94,6 @@ async function logAgentUsage(
       ...context.extraMetadata,
     },
   })));
-}
-
-function appendSitePreviewContextLines(
-  lines: string[],
-  lead: Record<string, any>,
-  agentConfig: Record<string, any> | null,
-  sitePreviewAutoDetect: boolean,
-): void {
-  if (lead.previa_status) lines.push(`Status da Prévia de Site: ${lead.previa_status}`);
-  if (lead.link_previa) lines.push(`Link da Prévia: ${lead.link_previa}`);
-
-  // DIRETRIZES ESPECÍFICAS DA SARAH SDR & CLOSER PARA PROSPECÇÃO DE SITES
-  if (lead.previa_status === "PREVIA_PRONTA" && lead.link_previa) {
-    const pingEnviado = !!lead.previa_ping_enviado_em;
-    const confirmBeforeLink = agentConfig?.options?.site_preview_confirm_before_link ?? true;
-    const customPingTemplate = agentConfig?.options?.site_preview_ping_message || DEFAULT_SITE_PREVIEW_PING_MESSAGE;
-    const pingText = renderTemplate(customPingTemplate, { nome_negocio: lead.nome_negocio || "sua empresa" });
-
-    lines.push("");
-    lines.push("# 🎯 MODO SARAH CLOSER ATIVO (PRÉVIA PRONTA NO AR):");
-    lines.push(`- Link da prévia: ${lead.link_previa}`);
-    lines.push(`- Estratégia de envio: ${confirmBeforeLink ? "Confirmar disponibilidade antes do link (Duplo Vínculo)" : "Envio direto do link"}`);
-
-    if (confirmBeforeLink) {
-      lines.push(`- Pergunta de disponibilidade enviada anteriormente: ${pingEnviado ? "SIM" : "NÃO"}`);
-      if (!pingEnviado) {
-        lines.push(`- AÇÃO OBRIGATÓRIA NESTE TURNO: Envie a pergunta de disponibilidade perguntando se pode dar uma olhadinha agora: "${pingText}"`);
-        lines.push(`- REGRA CRÍTICA: NÃO envie o link da prévia neste turno. Aguarde a confirmação de que o cliente pode visualizar agora.`);
-      } else {
-        lines.push(`- AÇÃO OBRIGATÓRIA: O cliente respondeu à pergunta de disponibilidade! Envie agora o link (${lead.link_previa}) com a introdução: "Dá uma olhadinha aí no celular! Como é uma prévia inicial, montamos com o que encontramos disponível na internet só para você ter uma ideia de como a estrutura funciona, mas depois deixamos 100% do seu jeito, com as suas fotos e cores preferidas. Me conta: o que achou dessa ideia para a ${lead.nome_negocio || "empresa"}?"`);
-        lines.push(`- MATRIZ DE FECHAMENTO:`);
-        lines.push(`  1. ZERO PREÇO POR TEXTO: Nunca passe valores por mensagem.`);
-        lines.push(`  2. ZERO TERMOS TÉCNICOS: Proibido falar domínio, hospedagem, servidor ou DNS.`);
-        lines.push(`  3. REGRA DO DUPLO VÍNCULO: Agende uma call rápida de 2 a 5 min no WhatsApp.`);
-        lines.push(`  4. Se o cliente concordar com um horário, chame OBRIGATORIAMENTE a tool "agendar_reuniao_fechamento".`);
-      }
-    } else {
-      lines.push(`- AÇÃO OBRIGATÓRIA NESTE TURNO: Envie o link da prévia (${lead.link_previa}) diretamente para o cliente com a introdução: "Oi! Tudo bem? Finalizei a prévia do site da ${lead.nome_negocio || "sua empresa"} e já subi no ar para teste! Segue o link para dar uma olhadinha: ${lead.link_previa}. Me conta: o que achou dessa estrutura inicial?"`);
-      lines.push(`- MATRIZ DE FECHAMENTO:`);
-      lines.push(`  1. ZERO PREÇO POR TEXTO: Nunca passe valores por mensagem.`);
-      lines.push(`  2. ZERO TERMOS TÉCNICOS: Proibido falar domínio, hospedagem, servidor ou DNS.`);
-      lines.push(`  3. REGRA DO DUPLO VÍNCULO: Agende uma call rápida de 2 a 5 min no WhatsApp.`);
-      lines.push(`  4. Se o cliente concordar com um horário, chame OBRIGATORIAMENTE a tool "agendar_reuniao_fechamento".`);
-    }
-  } else if (lead.previa_status === "PREVIA_SOLICITADA") {
-    lines.push("");
-    lines.push("# 🎯 STATUS DA PRÉVIA: EM PRODUÇÃO NA VPS.");
-    lines.push("- O cliente já confirmou o pedido de prévia e o sistema está gerando o site. Se ele perguntar algo, avise que está sendo finalizado com todo o carinho e que em breve o link de teste será enviado aqui.");
-  } else if ((!lead.previa_status || lead.previa_status === "PREVIA_FALHOU" || lead.previa_status === "novo") && sitePreviewAutoDetect) {
-    lines.push("");
-    lines.push("# 🎯 MODO SARAH SDR ATIVO (QUALIFICAÇÃO E TRAVA ANTI-DESPERDÍCIO):");
-    lines.push(`- Se o cliente demonstrar interesse em ver a prévia gratuita, peça o aceite formal (Msg 8.1): "Show, já passei aqui para a nossa equipe montar a prévia da ${lead.nome_negocio || "empresa"}! Como a gente cria algo personalizado pro seu negócio mesmo, leva até 2 dias úteis para ficar pronto. Como o pessoal vai dedicar um tempo exclusivo nisso, quando a gente finalizar e te mandar o link por aqui você consegue dar uma olhadinha rápida para dizer o que achou?"`);
-    lines.push(`- Quando o cliente responder confirmando (Msg 8.2), responda: "Perfeito então, combinado! Assim que ficar pronto a gente já te chama aqui com o link. Bom trabalho por aí!" e chame OBRIGATORIAMENTE a tool "solicitar_previa_site".`);
-    lines.push(`- DETECÇÃO AUTOMÁTICA ATIVA: O sistema possui uma IA avaliadora dedicada em segundo plano. Assim que o cliente concordar com a prévia, o pipeline do OpenCode será acionado automaticamente.`);
-  }
 }
 
 export async function POST(req: NextRequest) {
@@ -549,7 +495,8 @@ export async function POST(req: NextRequest) {
     // ============================================================
     // NOVO: SISTEMA DE AGRUPAMENTO (BUFFER) DE MENSAGENS
     // ============================================================
-    const bufferSeconds = agentConfig.options?.message_buffer_seconds || 0;
+    const rawBufferSec = Number(agentConfig.options?.message_buffer_seconds) || 0;
+    const bufferSeconds = Number.isFinite(rawBufferSec) ? Math.min(20, Math.max(0, rawBufferSec)) : 0;
     const sessionLockKey = sessionId || `${clientId}:${remoteJid}`;
     let batchStartTime: string | null = null;
     let skipBufferWait = false;
@@ -1098,9 +1045,7 @@ export async function POST(req: NextRequest) {
       if (testLeadData.endereco) lines.push(`Endereço: ${testLeadData.endereco}`);
       if (testLeadData.website) lines.push(`Website: ${testLeadData.website}`);
       if (testLeadData.telefone) lines.push(`Telefone: ${testLeadData.telefone}`);
-      if (leadRow) {
-        appendSitePreviewContextLines(lines, leadRow, agentConfig, effectiveSitePreviewAutoDetect);
-      }
+      appendSitePreviewContextLines(lines, leadRow || testLeadData, agentConfig, effectiveSitePreviewAutoDetect);
       const testEffectiveMode = resolveEffectiveAiDossierMode(
         (leadRow || testLeadData) as Record<string, unknown>,
         agentConfig?.options as Record<string, unknown> | undefined,

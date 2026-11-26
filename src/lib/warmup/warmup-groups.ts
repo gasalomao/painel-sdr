@@ -11,6 +11,7 @@ import {
   type WarmupPhoneMemoryEntry,
 } from "./warmup-phone-memory";
 import type { WarmupConfig, WarmupGroup } from "./warmup-types";
+import { getProxyPoolOverviewCache } from "@/lib/proxy-pool";
 
 // Anti-flood para grupos orgânicos passivos
 const _organicGroupChipCache = new Map<
@@ -936,16 +937,23 @@ export async function auditChipDay0Hygiene(
         .findProxy(instanceName)
         .catch(() => null);
       if (pr?.enabled && pr.host) {
-        const geoRes = await checkProxyIpIntel(String(pr.host), { forceInTests: opts?.forceInTests });
-        if (geoRes?.countryCode && geoRes.countryCode !== "BR") {
-          warnings.push(
-            `proxy estrangeiro (${geoRes.country || geoRes.countryCode}) em chip +55 — recomendado proxy BR ou conexão direta`
-          );
-        }
-        if (geoRes?.hosting) {
-          warnings.push(
-            `proxy em servidor datacenter/ASN (${geoRes.isp || pr.host}) — risco elevado de flapping e bloqueio 401; prefira IP residencial/4G`
-          );
+        const cleanHost = String(pr.host).trim().toLowerCase();
+        const poolOverview = await getProxyPoolOverviewCache().catch(() => ({
+          hasPool: false,
+          brHosts: new Set<string>(),
+        }));
+        if (!poolOverview.brHosts.has(cleanHost)) {
+          const geoRes = await checkProxyIpIntel(cleanHost, { forceInTests: opts?.forceInTests });
+          if (geoRes?.countryCode && geoRes.countryCode !== "BR") {
+            warnings.push(
+              `proxy estrangeiro (${geoRes.country || geoRes.countryCode}) em chip +55 — recomendado proxy BR ou conexão direta`
+            );
+          }
+          if (geoRes?.hosting) {
+            warnings.push(
+              `proxy em servidor datacenter/ASN (${geoRes.isp || pr.host}) — risco elevado de flapping e bloqueio 401; prefira IP residencial/4G`
+            );
+          }
         }
       }
     }
@@ -1105,6 +1113,7 @@ export function analyzeChipClusterHealth(params: {
   config: WarmupConfig;
   proxyByInstance: Map<string, { enabled: boolean; host: string | null }>;
   proxyIntelByHost?: Map<string, ProxyIpIntel | null>;
+  managedBrPoolHosts?: Set<string>;
   phoneMemoryMap?: Record<string, WarmupPhoneMemoryEntry>;
   nowMs?: number;
 }): ClusterNetworkAnalysis {
@@ -1114,6 +1123,7 @@ export function analyzeChipClusterHealth(params: {
     config,
     proxyByInstance,
     proxyIntelByHost,
+    managedBrPoolHosts,
     phoneMemoryMap = {},
     nowMs = Date.now(),
   } = params;
@@ -1155,18 +1165,21 @@ export function analyzeChipClusterHealth(params: {
       );
     }
 
-    const intel = proxyIntelByHost?.get(ownHost) || _proxyIntelCache.get(ownHost) || null;
-    if (intel?.hosting) {
-      proxyHosting = true;
-      warnings.push(
-        `Proxy em servidor Datacenter/ASN (${intel.isp || ownProxy.host}) — prefira IP residencial/4G brasileiro.`
-      );
-    }
-    if (intel?.countryCode && intel.countryCode !== "BR") {
-      proxyForeign = true;
-      warnings.push(
-        `Proxy localizado fora do Brasil (${intel.country || intel.countryCode}) — divergência geográfica para chip +55.`
-      );
+    const isManagedBrPool = Boolean(managedBrPoolHosts?.has(ownHost));
+    if (!isManagedBrPool) {
+      const intel = proxyIntelByHost?.get(ownHost) || _proxyIntelCache.get(ownHost) || null;
+      if (intel?.hosting) {
+        proxyHosting = true;
+        warnings.push(
+          `Proxy em servidor Datacenter/ASN (${intel.isp || ownProxy.host}) — prefira IP residencial/4G brasileiro.`
+        );
+      }
+      if (intel?.countryCode && intel.countryCode !== "BR") {
+        proxyForeign = true;
+        warnings.push(
+          `Proxy localizado fora do Brasil (${intel.country || intel.countryCode}) — divergência geográfica para chip +55.`
+        );
+      }
     }
   }
 

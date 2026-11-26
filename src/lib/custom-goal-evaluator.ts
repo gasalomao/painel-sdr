@@ -119,7 +119,7 @@ export function parseBinaryGoalResponse(rawText: string): boolean {
  * humana sem ter alcançado um objetivo de agendamento ou fechamento.
  */
 const PURE_QUEUE_HOLD_AGENT_REGEX =
-  /^(?:(?:combinado|perfeito|certo|beleza|show|entendido|ok|tudo\s+bem|sem\s+problemas?)[,!.\s]*)?(?:eu\s+)?(?:fico|estou|vou\s+ficar|aguardo)\s+(?:no\s+aguardo|aguardando(?:\s+(?:por\s+aqui|o\s+retorno|voc[eê]s?|a\s+equipe|o\s+atendimento))?)(?:\s+por\s+aqui)?[!.\s😊👍🙏]*$/i;
+  /^(?:(?:combinado|perfeito|certo|beleza|show|entendido|ok|tudo\s+bem|tranquilo|sem\s+problemas?)[,!.\s]*)?(?:eu\s+)?(?:fico|estou|vou\s+ficar|aguardo)\s+(?:no\s+aguardo|aguardando(?:\s+(?:por\s+aqui|o\s+retorno|voc[eê]s?|a\s+equipe|o\s+atendimento))?)(?:\s+o\s+retorno)?(?:\s+por\s+aqui)?[!.\s😊👍🙏]*$/i;
 
 /**
  * Detecta quando o próprio texto do objetivo proíbe explicitamente pausar se a IA
@@ -132,7 +132,10 @@ function endsWithOpenQuestion(text: string): boolean {
   const cleaned = (text || "")
     .replace(/[\s"'”’)\]}>\u{1F300}-\u{1FAFF}\u2600-\u27BF]+$/gu, "")
     .trim();
-  return cleaned.endsWith("?");
+  if (cleaned.endsWith("?")) return true;
+  // Cobre casos como "Vocês têm Instagram? Fico no aguardo!"
+  const tail = cleaned.slice(-160);
+  return tail.includes("?");
 }
 
 function shouldSkipGoalEvalDeterministically(

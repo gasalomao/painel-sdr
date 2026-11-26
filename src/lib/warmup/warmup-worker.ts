@@ -20,6 +20,7 @@ import {
 } from "./warmup-dialogues";
 import { STAGE_DEFAULTS, type WarmupConfig, type WarmupConversation, type WarmupStage } from "./warmup-types";
 import { syncGroupMembershipForChips, hydrateChipProfile } from "./warmup-groups";
+import { ensureProxyForInstance, getProxyPoolOverviewCache } from "@/lib/proxy-pool";
 import {
   ensureWarmupConfigsForTenant,
   listWarmupTenantIds,
@@ -40,6 +41,10 @@ import {
   pruneMapToLimit,
   readPhoneMemoryMap,
 } from "./warmup-phone-memory";
+import {
+  drainDuePendingWarmupActions,
+  shouldCheckPendingWarmupActions,
+} from "./warmup-pending-actions";
 
 const _lastWarningLogged: Record<string, number> = {};
 
@@ -262,6 +267,39 @@ function getEffectiveOperatingWindow(cfg: WarmupConfig, now: Date, isTestEnv: bo
 }
 
 /**
+ * Garante que todos os chips ativos no Aquecedor tenham proxy exclusivo do pool
+ * (sem colisão e com fail-open automático para o IP padrão da VPS se esgotar).
+ */
+async function ensureWarmupClusterProxies(clientId: string, chips: WarmupConfig[]): Promise<void> {
+  if (!chips || chips.length === 0) return;
+  try {
+    const poolOverview = await getProxyPoolOverviewCache();
+    if (!poolOverview.hasPool) return;
+    const { data: assignedPoolRows } = await supabaseAdmin
+      .from("proxy_pool")
+      .select("assigned_instance")
+      .eq("status", "assigned");
+    const hasAssignedSet = new Set(
+      ((assignedPoolRows || []) as Array<{ assigned_instance?: string | null }>)
+        .map((r) => r.assigned_instance)
+        .filter((x): x is string => Boolean(x)),
+    );
+    for (const cfg of chips) {
+      if (!hasAssignedSet.has(cfg.instance_name)) {
+        await ensureProxyForInstance({
+          instanceName: cfg.instance_name,
+          clientId,
+          reason: "warmup",
+          forWarmup: true,
+        }).catch(() => null);
+      }
+    }
+  } catch {
+    // non-fatal se tabela proxy_pool não existir
+  }
+}
+
+/**
  * Agendador principal de maturação.
  * Executado a cada 60s pelo instrumentation / worker pool.
  */
@@ -352,6 +390,11 @@ export async function tickWarmupWorker(): Promise<{
           return status ? isConnectedStatus(status) : true;
         });
         if (configs.length === 0) continue;
+
+        // Drena ações comportamentais pendentes (tique azul/reação) apenas se houver fila ou recuperação pós-boot
+        if (shouldCheckPendingWarmupActions(clientId)) {
+          await drainDuePendingWarmupActions(clientId, nowMs).catch(() => 0);
+        }
 
         // 2.1 Reset diário idempotente (uma vez por dia civil) + Reconciliação de fase pela idade real
         const dailyState = await readDailyResetState(clientId);
@@ -533,6 +576,8 @@ export async function tickWarmupWorker(): Promise<{
             continue;
           }
 
+          await ensureWarmupClusterProxies(clientId, [soleChip]);
+
           scheduleGroupSync(clientId);
 
           // Publica Status de forma isolada quando há apenas 1 chip conectado
@@ -575,6 +620,8 @@ export async function tickWarmupWorker(): Promise<{
         if (!(await isClientActiveCached(clientId))) {
           continue;
         }
+
+        await ensureWarmupClusterProxies(clientId, availableChips);
 
         // Identifica chips em Retomada Suave (50% da meta por 24h pós-hiato >= 48h ou quarentena)
         const softRecoverySet = new Set<string>();

@@ -25,6 +25,14 @@ const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string }
   unknown: { label: "Não verificado", color: "text-orange-400", bg: "bg-orange-500/10 border-orange-500/20" },
 };
 
+type ProxySummary = {
+  auto_proxy: boolean;
+  mode: "pool_assigned" | "manual" | "vps_fallback" | "direct";
+  protected: boolean;
+  waiting_rotation: boolean;
+  last_fallback_reason?: string | null;
+};
+
 type InstanceData = {
   id: string;
   instance_name: string;
@@ -32,6 +40,7 @@ type InstanceData = {
   status: string;
   provider?: string;
   provider_config?: any;
+  proxy_summary?: ProxySummary;
 };
 
 type CloudForm = {
@@ -54,6 +63,7 @@ export default function WhatsAppPage() {
   const [qrCodes, setQrCodes] = useState<Record<string, string>>({});
   const [statusMap, setStatusMap] = useState<Record<string, { state: string; owner?: string; profileName?: string }>>({});
   const [novaInstancia, setNovaInstancia] = useState("");
+  const [createAutoProxy, setCreateAutoProxy] = useState(false);
   const connectionsRef = useRef(connections);
 
   // === WHATSAPP CLOUD API (Meta oficial) ===
@@ -296,11 +306,7 @@ export default function WhatsAppPage() {
     }
   };
 
-  // Carrega o status de proxy de TODAS as instâncias na primeira renderização
-  useEffect(() => {
-    connections.forEach(c => loadProxy(c.instance_name));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connections.length]);
+  // Abre o dialog manual de proxy para o Admin (sem N+1 na listagem inicial).
 
   // Check status de uma instancia na Evolution API
   const checkStatus = async (instanceName: string) => {
@@ -490,7 +496,10 @@ export default function WhatsAppPage() {
     const res = await fetch("/api/instances", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ raw_name: novaInstancia }),
+      body: JSON.stringify({
+        raw_name: novaInstancia,
+        ...(createAutoProxy ? { auto_proxy: true } : {}),
+      }),
     });
     const data = await res.json().catch(() => null);
     if (!res.ok || !data?.ok) {
@@ -498,7 +507,29 @@ export default function WhatsAppPage() {
     }
 
     setNovaInstancia("");
+    setCreateAutoProxy(false);
     loadData();
+  };
+
+  const handleToggleAutoProxy = async (instanceName: string, nextValue: boolean) => {
+    setActionLoading(prev => ({ ...prev, [`${instanceName}_auto_proxy`]: true }));
+    try {
+      const res = await fetch("/api/instances", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instance_name: instanceName, auto_proxy: nextValue }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.ok) {
+        alert(data?.error || "Erro ao atualizar proxy automático");
+        return;
+      }
+      await loadData();
+    } catch (err: any) {
+      alert("Erro: " + (err?.message || "falha ao atualizar proxy"));
+    } finally {
+      setActionLoading(prev => ({ ...prev, [`${instanceName}_auto_proxy`]: false }));
+    }
   };
 
   const handleConnect = async (instanceName: string) => {
@@ -935,6 +966,14 @@ export default function WhatsAppPage() {
               <Button type="submit" className={styles.primaryAction}><Plus className="w-4 h-4" aria-hidden="true" /> Criar conexão</Button>
             </div>
             <p id="connection-name-help">Use um nome sem espaços para identificar este número.</p>
+            <label className="mt-2 inline-flex items-center gap-2 text-xs text-muted-foreground cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={createAutoProxy}
+                onChange={e => setCreateAutoProxy(e.target.checked)}
+              />
+              <span>Vincular proxy automático do pool ao conectar (opcional · 1 IP dedicado se disponível)</span>
+            </label>
           </form>
         </section>
 
@@ -1029,8 +1068,28 @@ export default function WhatsAppPage() {
                        <Button onClick={() => handleDiagnose(conn.instance_name)} disabled={actionLoading[`${conn.instance_name}_diagnose`]} variant="outline" className={styles.secondaryAction}>
                          {actionLoading[`${conn.instance_name}_diagnose`] ? <Loader2 className="w-4 h-4 animate-spin" /> : <Stethoscope className="w-4 h-4" />} Diagnosticar webhook
                        </Button>
+                       <label className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-black/25 border border-white/10 text-xs text-muted-foreground cursor-pointer col-span-full">
+                         <span className="flex items-center gap-2">
+                           <ShieldCheck className="w-4 h-4 text-emerald-400" aria-hidden="true" />
+                           <span>
+                             Proxy automático do pool
+                             {conn.proxy_summary?.mode === "pool_assigned" && (
+                               <strong className="ml-1.5 text-emerald-300 font-semibold">· IP dedicado ativo</strong>
+                             )}
+                             {conn.proxy_summary?.mode === "vps_fallback" && (
+                               <strong className="ml-1.5 text-amber-300 font-semibold">· IP padrão VPS (sem proxy livre)</strong>
+                             )}
+                           </span>
+                         </span>
+                         <input
+                           type="checkbox"
+                           checked={Boolean(conn.proxy_summary?.auto_proxy)}
+                           disabled={Boolean(actionLoading[`${conn.instance_name}_auto_proxy`])}
+                           onChange={e => handleToggleAutoProxy(conn.instance_name, e.target.checked)}
+                         />
+                       </label>
                        <Button onClick={() => openProxyDialog(conn.instance_name)} variant="outline" className={styles.secondaryAction}>
-                         <Shield className="w-4 h-4" aria-hidden="true" /> {proxyMap[conn.instance_name]?.enabled && proxyMap[conn.instance_name]?.host ? "Proxy ativo · Configurar" : "Configurar proxy"}
+                         <Shield className="w-4 h-4" aria-hidden="true" /> {(proxyMap[conn.instance_name]?.enabled && proxyMap[conn.instance_name]?.host) || conn.proxy_summary?.protected ? "Proxy ativo · Configurar" : "Configurar proxy"}
                        </Button>
                        {!isOnline && (connState === "close" || connState === "disconnected") && (
                          <Button onClick={() => handleRestart(conn.instance_name)} disabled={isLoadingRestart} variant="outline" className={styles.secondaryAction}>

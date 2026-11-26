@@ -22,6 +22,7 @@ const warmupSql = readFileSync(resolve(process.cwd(), "migrations/026_whatsapp_w
 const warmupFixSql = readFileSync(resolve(process.cwd(), "migrations/027_whatsapp_warmup_schema_fix.sql"), "utf8");
 const warmupSwarmSql = readFileSync(resolve(process.cwd(), "migrations/028_whatsapp_warmup_swarm_groups.sql"), "utf8");
 const followupRescheduleSql = readFileSync(resolve(process.cwd(), "migrations/029_followup_reschedule.sql"), "utf8");
+const proxyPoolSql = readFileSync(resolve(process.cwd(), "migrations/030_proxy_pool.sql"), "utf8");
 const tempDirs: string[] = [];
 
 function writeAllAppendedMigrations(cwd: string): void {
@@ -41,6 +42,7 @@ function writeAllAppendedMigrations(cwd: string): void {
   writeFileSync(join(cwd, "migrations", "027_whatsapp_warmup_schema_fix.sql"), warmupFixSql, "utf8");
   writeFileSync(join(cwd, "migrations", "028_whatsapp_warmup_swarm_groups.sql"), warmupSwarmSql, "utf8");
   writeFileSync(join(cwd, "migrations", "029_followup_reschedule.sql"), followupRescheduleSql, "utf8");
+  writeFileSync(join(cwd, "migrations", "030_proxy_pool.sql"), proxyPoolSql, "utf8");
 }
 
 function makeTempProject(): string {
@@ -70,11 +72,12 @@ describe("scripts/build-setup-sql.mjs", () => {
     expect(generated).toContain("migrations/SETUP_COMPLETO.sql");
     const sql = runInNewContext(generated.replace("export const SETUP_SQL =", "globalThis.sql =")) as string;
     expect(sql).toBe(
-      `SELECT 'CANONICA';\n\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n\n\n${dashboardTasksSql.trim()}\n\n\n${followupsTableSql.trim()}\n\n\n${impeccableSql.trim()}\n\n\n${backupConfigSql.trim()}\n\n\n${backupSecurityRunsSql.trim()}\n\n\n${followupClaimsSql.trim()}\n\n\n${backupDiagnosticsSql.trim()}\n\n\n${performanceLeadsSql.trim()}\n\n\n${enterpriseSecuritySql.trim()}\n\n\n${previaSql.trim()}\n\n\n${warmupSql.trim()}\n\n\n${warmupFixSql.trim()}\n\n\n${warmupSwarmSql.trim()}\n\n\n${followupRescheduleSql.trim()}\n`,
+      `SELECT 'CANONICA';\n\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n\n\n${dashboardTasksSql.trim()}\n\n\n${followupsTableSql.trim()}\n\n\n${impeccableSql.trim()}\n\n\n${backupConfigSql.trim()}\n\n\n${backupSecurityRunsSql.trim()}\n\n\n${followupClaimsSql.trim()}\n\n\n${backupDiagnosticsSql.trim()}\n\n\n${performanceLeadsSql.trim()}\n\n\n${enterpriseSecuritySql.trim()}\n\n\n${previaSql.trim()}\n\n\n${warmupSql.trim()}\n\n\n${warmupFixSql.trim()}\n\n\n${warmupSwarmSql.trim()}\n\n\n${followupRescheduleSql.trim()}\n\n\n${proxyPoolSql.trim()}\n`,
     );
     expect(sql).toContain("CREATE OR REPLACE FUNCTION public.website_complete_run");
     expect(sql).toContain("CREATE OR REPLACE FUNCTION public.reschedule_agent_followup");
     expect(sql).toContain("CREATE OR REPLACE FUNCTION public.claim_backup_run");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION public.claim_next_proxy");
   });
 
   it("preserva as fontes SQL reais no round-trip e gera saída determinística", () => {
@@ -89,7 +92,7 @@ describe("scripts/build-setup-sql.mjs", () => {
     const generated = readFileSync(output, "utf8");
     const sql = runInNewContext(generated.replace("export const SETUP_SQL =", "globalThis.sql =")) as string;
     expect(sql).toBe(
-      `${canonical}\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n\n\n${dashboardTasksSql.trim()}\n\n\n${followupsTableSql.trim()}\n\n\n${impeccableSql.trim()}\n\n\n${backupConfigSql.trim()}\n\n\n${backupSecurityRunsSql.trim()}\n\n\n${followupClaimsSql.trim()}\n\n\n${backupDiagnosticsSql.trim()}\n\n\n${performanceLeadsSql.trim()}\n\n\n${enterpriseSecuritySql.trim()}\n\n\n${previaSql.trim()}\n\n\n${warmupSql.trim()}\n\n\n${warmupFixSql.trim()}\n\n\n${warmupSwarmSql.trim()}\n\n\n${followupRescheduleSql.trim()}\n`,
+      `${canonical}\n\n${websiteSql.trim()}\n\n\n${completionGuardSql.trim()}\n\n\n${dashboardTasksSql.trim()}\n\n\n${followupsTableSql.trim()}\n\n\n${impeccableSql.trim()}\n\n\n${backupConfigSql.trim()}\n\n\n${backupSecurityRunsSql.trim()}\n\n\n${followupClaimsSql.trim()}\n\n\n${backupDiagnosticsSql.trim()}\n\n\n${performanceLeadsSql.trim()}\n\n\n${enterpriseSecuritySql.trim()}\n\n\n${previaSql.trim()}\n\n\n${warmupSql.trim()}\n\n\n${warmupFixSql.trim()}\n\n\n${warmupSwarmSql.trim()}\n\n\n${followupRescheduleSql.trim()}\n\n\n${proxyPoolSql.trim()}\n`,
     );
     expect(spawnSync(process.execPath, [scriptPath], { cwd, encoding: "utf8" }).status).toBe(0);
     expect(readFileSync(output, "utf8")).toBe(generated);

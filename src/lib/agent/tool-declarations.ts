@@ -120,7 +120,7 @@ export function buildAgentFunctionDeclarations(params: BuildToolDeclarationsPara
     functionDeclarations.push({
       name: "agendar_reuniao_fechamento",
       description:
-        "Chame quando o cliente concordar com um horário para a ligação rápida de 5 minutos no WhatsApp para alinhamento e fechamento do site.",
+        "Chame quando o cliente concordar com um horário para a reunião rápida de alinhamento e fechamento do site (seguindo a duração e o roteiro de <core_instructions>; quando Google Calendar estiver ativo e exigido pelo roteiro, priorize schedule_google_calendar).",
       parameters: {
         type: SchemaType.OBJECT,
         properties: {

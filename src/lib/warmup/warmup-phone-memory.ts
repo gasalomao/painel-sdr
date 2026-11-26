@@ -157,11 +157,59 @@ export async function readPhoneMemoryMap(
   }
 }
 
+/**
+ * Remove entradas antigas/órfãs (> `maxIdleDays` sem atividade) e limita o total
+ * de chips no JSON do passaporte por tenant, evitando crescimento ilimitado em `app_settings`.
+ */
+export function prunePhoneMemoryMap(
+  map: Record<string, WarmupPhoneMemoryEntry>,
+  maxEntries = 200,
+  maxIdleDays = 120,
+  nowMs = Date.now()
+): boolean {
+  const keys = Object.keys(map);
+  if (keys.length === 0) return false;
+
+  let changed = false;
+  const maxIdleMs = Math.max(1, maxIdleDays) * 24 * 60 * 60 * 1000;
+
+  for (const k of keys) {
+    const entry = map[k];
+    if (!entry) {
+      delete map[k];
+      changed = true;
+      continue;
+    }
+    const refIso = entry.lastActivityAt || entry.lastConnectedAt || entry.updatedAt;
+    const refMs = refIso ? new Date(refIso).getTime() : NaN;
+    if (Number.isFinite(refMs) && nowMs - refMs > maxIdleMs) {
+      delete map[k];
+      changed = true;
+    }
+  }
+
+  const remaining = Object.entries(map);
+  if (remaining.length > maxEntries) {
+    remaining.sort((a, b) => {
+      const ta = new Date(a[1]?.updatedAt || a[1]?.lastActivityAt || 0).getTime() || 0;
+      const tb = new Date(b[1]?.updatedAt || b[1]?.lastActivityAt || 0).getTime() || 0;
+      return tb - ta;
+    });
+    for (let i = maxEntries; i < remaining.length; i++) {
+      delete map[remaining[i][0]];
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
 async function writePhoneMemoryMap(
   clientId: string,
   map: Record<string, WarmupPhoneMemoryEntry>
 ): Promise<void> {
   try {
+    prunePhoneMemoryMap(map);
     await supabaseAdmin
       .from("app_settings")
       .upsert(

@@ -149,5 +149,22 @@ describe("shouldAutoPauseAfterClosing", () => {
 
     expect(result).toEqual({ shouldPause: false, reason: null });
   });
+
+  it("nunca pausa em espera de fila/URA nem confunde auto-saudação de ausência com recusa (cenário Val Ar Condicionado)", () => {
+    expect(
+      shouldAutoPauseAfterClosing({
+        customerText:
+          "Val Ar Condicionado agradece contato. Horário de funcionamento de segunda a sexta 09h - 18h.",
+        assistantText: "Combinado, fico no aguardo por aqui!",
+      }),
+    ).toEqual({ shouldPause: false, reason: null });
+
+    expect(
+      shouldAutoPauseAfterClosing({
+        customerText: "No momento não estamos atendendo, responderemos em breve.",
+        assistantText: "Entendido, fico à disposição e desejo um ótimo dia.",
+      }),
+    ).toEqual({ shouldPause: false, reason: null });
+  });
 });
 

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
-import { getTenantSaasLimits } from "@/lib/saas-limits";
+import { assertTenantCanCreateAgent, assertTenantCanCreateInstance, getTenantSaasLimits } from "@/lib/saas-limits";
 import { invalidateAgentConfigCache } from "@/lib/agent-config-cache";
 
 export const dynamic = "force-dynamic";
@@ -300,75 +300,75 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
           : Boolean(existingOpts.web_search_enabled),
         reasoning_mode: auth.isAdmin
           ? (incomingOpts.reasoning_mode === 0 ||
-              incomingOpts.reasoning_mode === 1 ||
-              incomingOpts.reasoning_mode === 2 ||
-              incomingOpts.reasoning_mode === 3
-                ? incomingOpts.reasoning_mode
-                : 0)
+            incomingOpts.reasoning_mode === 1 ||
+            incomingOpts.reasoning_mode === 2 ||
+            incomingOpts.reasoning_mode === 3
+            ? incomingOpts.reasoning_mode
+            : 0)
           : (existingOpts.reasoning_mode === 0 || existingOpts.reasoning_mode === 1
-              ? existingOpts.reasoning_mode
-              : 0),
+            ? existingOpts.reasoning_mode
+            : 0),
         thinking_budget: auth.isAdmin
           ? (incomingOpts.thinking_budget === 0 ||
-              incomingOpts.thinking_budget === 1 ||
-              incomingOpts.thinking_budget === 2 ||
-              incomingOpts.thinking_budget === 3
-                ? incomingOpts.thinking_budget
-                : 0)
+            incomingOpts.thinking_budget === 1 ||
+            incomingOpts.thinking_budget === 2 ||
+            incomingOpts.thinking_budget === 3
+            ? incomingOpts.thinking_budget
+            : 0)
           : (typeof existingOpts.thinking_budget === "number" ? Math.min(1, existingOpts.thinking_budget) : 0),
         custom_tools: auth.isAdmin
           ? (Array.isArray(incomingOpts.custom_tools)
-              ? incomingOpts.custom_tools.filter((t): t is { name: string; description: string; webhook_url: string } => {
-                  if (!t || typeof t !== "object") return false;
-                  const obj = t as Record<string, unknown>;
-                  return typeof obj.name === "string" && obj.name.trim().length > 0 && typeof obj.webhook_url === "string" && obj.webhook_url.trim().length > 0;
-                })
-              : [])
+            ? incomingOpts.custom_tools.filter((t): t is { name: string; description: string; webhook_url: string } => {
+              if (!t || typeof t !== "object") return false;
+              const obj = t as Record<string, unknown>;
+              return typeof obj.name === "string" && obj.name.trim().length > 0 && typeof obj.webhook_url === "string" && obj.webhook_url.trim().length > 0;
+            })
+            : [])
           : (Array.isArray(existingOpts.custom_tools) ? existingOpts.custom_tools : []),
         site_preview_auto_detect: auth.isAdmin
           ? Boolean(incomingOpts.site_preview_auto_detect)
           : Boolean(existingOpts.site_preview_auto_detect),
         sdr_enrichment_dossier_enabled: auth.isAdmin
           ? (incomingOpts.sdr_enrichment_dossier_enabled !== undefined
-              ? Boolean(incomingOpts.sdr_enrichment_dossier_enabled)
-              : Boolean(existingOpts.sdr_enrichment_dossier_enabled))
+            ? Boolean(incomingOpts.sdr_enrichment_dossier_enabled)
+            : Boolean(existingOpts.sdr_enrichment_dossier_enabled))
           : Boolean(existingOpts.sdr_enrichment_dossier_enabled),
         sdr_enrichment_dossier_mode: auth.isAdmin
           ? (incomingOpts.sdr_enrichment_dossier_mode === "strategic" ||
-              incomingOpts.sdr_enrichment_dossier_mode === "full" ||
-              incomingOpts.sdr_enrichment_dossier_mode === "off"
-                ? incomingOpts.sdr_enrichment_dossier_mode
-                : existingOpts.sdr_enrichment_dossier_mode === "strategic" ||
-                    existingOpts.sdr_enrichment_dossier_mode === "full" ||
-                    existingOpts.sdr_enrichment_dossier_mode === "off"
-                  ? existingOpts.sdr_enrichment_dossier_mode
-                  : undefined)
+            incomingOpts.sdr_enrichment_dossier_mode === "full" ||
+            incomingOpts.sdr_enrichment_dossier_mode === "off"
+            ? incomingOpts.sdr_enrichment_dossier_mode
+            : existingOpts.sdr_enrichment_dossier_mode === "strategic" ||
+              existingOpts.sdr_enrichment_dossier_mode === "full" ||
+              existingOpts.sdr_enrichment_dossier_mode === "off"
+              ? existingOpts.sdr_enrichment_dossier_mode
+              : undefined)
           : existingOpts.sdr_enrichment_dossier_mode,
         site_preview_confirm_before_link: auth.isAdmin
           ? (incomingOpts.site_preview_confirm_before_link !== undefined
-              ? Boolean(incomingOpts.site_preview_confirm_before_link)
-              : true)
+            ? Boolean(incomingOpts.site_preview_confirm_before_link)
+            : true)
           : (existingOpts.site_preview_confirm_before_link ?? true),
         site_preview_eval_prompt: auth.isAdmin
           ? (typeof incomingOpts.site_preview_eval_prompt === "string"
-              ? incomingOpts.site_preview_eval_prompt
-              : existingOpts.site_preview_eval_prompt)
+            ? incomingOpts.site_preview_eval_prompt
+            : existingOpts.site_preview_eval_prompt)
           : existingOpts.site_preview_eval_prompt,
         site_preview_ping_message: auth.isAdmin
           ? (typeof incomingOpts.site_preview_ping_message === "string"
-              ? incomingOpts.site_preview_ping_message
-              : existingOpts.site_preview_ping_message)
+            ? incomingOpts.site_preview_ping_message
+            : existingOpts.site_preview_ping_message)
           : existingOpts.site_preview_ping_message,
         site_preview_eval_model: auth.isAdmin
           ? (typeof incomingOpts.site_preview_eval_model === "string"
-              ? incomingOpts.site_preview_eval_model
-              : existingOpts.site_preview_eval_model)
+            ? incomingOpts.site_preview_eval_model
+            : existingOpts.site_preview_eval_model)
           : existingOpts.site_preview_eval_model,
         // Segurança: apenas admin pode configurar modelo reserva (mesmo controle de custo de target_model).
         fallback_model: auth.isAdmin
           ? (typeof incomingOpts.fallback_model === "string"
-              ? incomingOpts.fallback_model.trim()
-              : existingOpts.fallback_model || "")
+            ? incomingOpts.fallback_model.trim()
+            : existingOpts.fallback_model || "")
           : existingOpts.fallback_model || "",
       });
 
@@ -482,8 +482,8 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
         // Segurança: apenas admin real altera o modelo de resumo do dono.
         owner_summary_model: auth.isAdmin
           ? (typeof incomingSched.owner_summary_model === "string" && incomingSched.owner_summary_model.trim()
-              ? incomingSched.owner_summary_model.trim()
-              : null)
+            ? incomingSched.owner_summary_model.trim()
+            : null)
           : (existingSched.owner_summary_model ?? null),
         auto_promote_from_status:
           typeof incomingSched.auto_promote_from_status === "string" ? incomingSched.auto_promote_from_status : "",
@@ -561,23 +561,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const action = String(body.action || "");
 
     if (action === "create_agent") {
-      if (!auth.isAdmin) {
-        const limits = await getTenantSaasLimits(auth.clientId, false);
-        if (limits.max_agents !== null) {
-          const { count } = await supabaseAdmin
-            .from("agent_settings")
-            .select("id", { count: "exact", head: true })
-            .eq("client_id", auth.clientId);
-          if ((count ?? 0) >= limits.max_agents) {
-            return NextResponse.json(
-              {
-                error: `Seu plano permite no máximo ${limits.max_agents} agente(s). Fale com o administrador para ampliar o limite.`,
-              },
-              { status: 403 }
-            );
-          }
-        }
-      }
+      const agentDenied = await assertTenantCanCreateAgent(auth.clientId, auth.isAdmin);
+      if (agentDenied) return agentDenied;
       const name = String(body.name || "").trim();
       if (!name) {
         return NextResponse.json({ error: "Nome do agente é obrigatório" }, { status: 400 });
@@ -656,6 +641,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           },
           { status: 409 },
         );
+      }
+
+      if (!existingConn) {
+        const instDenied = await assertTenantCanCreateInstance(auth.clientId, auth.isAdmin);
+        if (instDenied) return instDenied;
       }
 
       const { error: upsertErr } = await supabaseAdmin

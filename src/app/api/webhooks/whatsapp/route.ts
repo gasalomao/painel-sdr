@@ -1233,6 +1233,7 @@ export async function POST(req: NextRequest) {
               }).then(() => { }, () => { });
               try {
                 const agentMod = await import("@/app/api/agent/process/route");
+                const { dispatchAgentTurnBounded } = await import("@/lib/webhook-dispatch");
                 // Mantém o INTERNAL_SECRET_HEADER pra passar pelo gate do agent/process
                 const fakeReq = new Request(`${INTERNAL_BASE}/api/agent/process`, {
                   method: "POST",
@@ -1250,9 +1251,14 @@ export async function POST(req: NextRequest) {
                     sessionId: session.id,
                   }),
                 });
-                // Invoca agent/process diretamente — serialização e buffer são gerenciados internamente
-                await agentMod.POST(fakeReq as any);
-                console.log("[Webhook] ✓ Agent dispatch concluído pra", maskJid(remoteJid));
+                // Invoca agent/process com orçamento HTTP seguro para evitar retries em buffers longos
+                const dispatch = await dispatchAgentTurnBounded(() => agentMod.POST(fakeReq as any));
+                console.log(
+                  dispatch.timedOut
+                    ? "[Webhook] ⏱ Agent prosseguindo em background para evitar timeout de webhook:"
+                    : "[Webhook] ✓ Agent dispatch concluído pra",
+                  maskJid(remoteJid),
+                );
               } catch (e: any) {
                 console.error("[Webhook] Erro ao disparar IA:", e?.message);
                 await supabase.from("webhook_logs").insert({
@@ -1316,7 +1322,7 @@ export async function POST(req: NextRequest) {
                   statusText,
                 })
               )
-              .catch(() => {});
+              .catch(() => { });
           }
         }
       }
@@ -1413,7 +1419,7 @@ export async function POST(req: NextRequest) {
                       phone,
                     })
                   )
-                  .catch(() => {});
+                  .catch(() => { });
               }
             }
           } catch (err: any) {

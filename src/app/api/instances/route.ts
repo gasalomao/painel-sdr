@@ -14,7 +14,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
+import { assertTenantCanCreateAgent, assertTenantCanCreateInstance } from "@/lib/saas-limits";
 import { invalidateAgentConfigCache } from "@/lib/agent-config-cache";
+import {
+  buildSafeProxySummary,
+  ensureProxyForInstance,
+  retireInstanceProxyAsUsed,
+} from "@/lib/proxy-pool";
 
 export const dynamic = "force-dynamic";
 
@@ -40,6 +46,7 @@ function sanitizeConnection(row: ConnectionRow) {
     status: row.status ?? null,
     agent_id: row.agent_id ?? null,
     created_at: row.created_at ?? null,
+    proxy_summary: buildSafeProxySummary(cfg),
     ...(phoneNumberId ? { phone_number_id: phoneNumberId } : {}),
   };
 }
@@ -135,6 +142,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: false, error: "Você já tem uma instância com esse nome!" }, { status: 409 });
   }
 
+  const instDenied = await assertTenantCanCreateInstance(auth.clientId, auth.isAdmin);
+  if (instDenied) return instDenied;
+
   const { data: agentsList } = await supabaseAdmin
     .from("agent_settings")
     .select("id")
@@ -146,6 +156,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     agentsList && agentsList.length > 0 ? Number(agentsList[0].id) : null;
 
   if (!targetAgentId) {
+    const agDenied = await assertTenantCanCreateAgent(auth.clientId, auth.isAdmin);
+    if (agDenied) return agDenied;
+
     const { data: newAg, error: agErr } = await supabaseAdmin
       .from("agent_settings")
       .insert({
@@ -162,14 +175,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
   }
 
+  const autoProxyRequested = body?.auto_proxy === true;
   const { data: created, error: insErr } = await supabaseAdmin
     .from("channel_connections")
     .insert({
       instance_name: instanceName,
       agent_id: targetAgentId,
       client_id: auth.clientId,
+      ...(autoProxyRequested ? { provider_config: { auto_proxy: true } } : {}),
     })
-    .select("id, instance_name, client_id, provider, status, agent_id, created_at")
+    .select("id, instance_name, client_id, provider, status, agent_id, created_at, provider_config")
     .single();
 
   if (insErr) {
@@ -197,7 +212,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
 
   const { data: current, error: curErr } = await supabaseAdmin
     .from("channel_connections")
-    .select("id, client_id, agent_id, status")
+    .select("id, client_id, agent_id, status, provider, provider_config")
     .eq("instance_name", instanceName)
     .eq("client_id", auth.clientId)
     .maybeSingle();
@@ -210,6 +225,8 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   }
 
   const patch: Record<string, unknown> = {};
+  const hasAutoProxyPatch = typeof body?.auto_proxy === "boolean";
+  const nextAutoProxy = hasAutoProxyPatch ? Boolean(body?.auto_proxy) : undefined;
 
   if (typeof body?.status === "string" && (body.status === "open" || body.status === "close")) {
     patch.status = body.status;
@@ -232,6 +249,18 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     patch.agent_id = nextAgentId;
   }
 
+  if (hasAutoProxyPatch) {
+    const curCfg =
+      (current as { provider_config?: Record<string, unknown> | null }).provider_config || {};
+    patch.provider_config = {
+      ...curCfg,
+      auto_proxy: nextAutoProxy,
+      ...(!nextAutoProxy
+        ? { proxy_mode: "direct", proxy_pending_rotation: false, proxy_pool_id: null }
+        : {}),
+    };
+  }
+
   if (Object.keys(patch).length === 0) {
     return NextResponse.json({ ok: false, error: "Nenhum campo válido para atualizar" }, { status: 400 });
   }
@@ -246,10 +275,34 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: false, error: updErr.message }, { status: 500 });
   }
 
+  if (hasAutoProxyPatch) {
+    const prov = typeof (current as { provider?: string }).provider === "string"
+      ? (current as { provider?: string }).provider
+      : undefined;
+    if (nextAutoProxy) {
+      await ensureProxyForInstance({
+        instanceName,
+        clientId: auth.clientId,
+        reason: "manual_auto",
+        forWarmup: false,
+        providerHint: prov,
+      }).catch(() => null);
+    } else {
+      await retireInstanceProxyAsUsed(instanceName, auth.clientId, prov, { forceCleanup: true }).catch(() => {});
+    }
+  }
+
   if (patch.agent_id !== undefined) {
     if (current.agent_id) invalidateAgentConfigCache(Number(current.agent_id));
     invalidateAgentConfigCache(Number(patch.agent_id));
   }
 
-  return NextResponse.json({ ok: true, instance_name: instanceName, ...patch });
+  const { provider_config: _hiddenCfg, ...publicPatch } = patch;
+  void _hiddenCfg;
+  return NextResponse.json({
+    ok: true,
+    instance_name: instanceName,
+    ...publicPatch,
+    ...(hasAutoProxyPatch ? { auto_proxy: nextAutoProxy } : {}),
+  });
 }

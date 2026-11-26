@@ -333,3 +333,58 @@ export const evolutionGo: WhatsAppProvider = {
     return url;
   },
 };
+
+export interface EvolutionGoProxyPayload {
+  enabled: boolean;
+  host?: string;
+  port?: string | number;
+  protocol?: "http" | "https" | "socks4" | "socks5";
+  username?: string;
+  password?: string;
+}
+
+async function resolveGoInstanceId(instanceName: string, token: string): Promise<string> {
+  try {
+    const allRes = await goFetch("/instance/all", undefined, token, 10_000);
+    const list = Array.isArray(allRes?.data) ? allRes.data : [];
+    const match = (list as Array<{ id?: string | number; name?: string }>).find(
+      (item) => item?.name === instanceName,
+    );
+    if (match?.id != null) return String(match.id);
+  } catch {
+    // Fallback para o próprio instanceName caso /instance/all falhe
+  }
+  return instanceName;
+}
+
+export async function setEvolutionGoProxy(
+  instanceName: string,
+  proxy: EvolutionGoProxyPayload,
+): Promise<unknown> {
+  const token = await resolveInstanceToken(instanceName);
+  const targetId = await resolveGoInstanceId(instanceName, token);
+  return goFetch(
+    `/instance/proxy/${encodeURIComponent(targetId)}`,
+    {
+      enabled: Boolean(proxy.enabled),
+      host: proxy.host || "",
+      port: String(proxy.port || ""),
+      protocol: proxy.protocol || "http",
+      username: proxy.username || "",
+      password: proxy.password || "",
+    },
+    token,
+    15_000,
+  );
+}
+
+export async function removeEvolutionGoProxy(instanceName: string): Promise<unknown> {
+  return setEvolutionGoProxy(instanceName, {
+    enabled: false,
+    host: "",
+    port: "",
+    protocol: "http",
+    username: "",
+    password: "",
+  });
+}
