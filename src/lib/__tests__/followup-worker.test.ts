@@ -197,6 +197,7 @@ vi.mock("@/lib/token-usage", () => ({
 }));
 
 vi.mock("@/lib/manual-send-registry", () => ({
+  registerPendingAutomatedMedia: vi.fn(),
   registerPendingAutomatedSend: vi.fn(),
 }));
 
@@ -237,8 +238,10 @@ vi.mock("@/lib/lead-intelligence", () => ({
 import {
   tickCampaign,
   enrollLeads,
+  evaluateColdFollowupSpacing,
   getConversationHistory,
   personalizeFollowupWithAI,
+  resetFollowupWarningThrottleForTests,
   tickAllAutoCampaigns,
 } from "../followup-worker";
 
@@ -1278,5 +1281,127 @@ describe("consistência BR 9º dígito & Modo Comercial B2B no follow-up", () =>
     expect(mockTableState.followup_targets[0].status).toBe("skipped");
     expect(mockTableState.leads_extraidos[0].status).toBe("follow-up");
     expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("suporta followup_weekend_guard='sunday_only' (libera sábado 100%, pausa domingo sem spammar logs)", async () => {
+    resetFollowupWarningThrottleForTests();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      // Sábado 12:00 BRT -> liberado em sunday_only
+      vi.setSystemTime(new Date("2026-11-14T15:00:00Z"));
+      setTable("followup_campaigns", [makeCampaign()]);
+      setTable("followup_targets", [makeTarget()]);
+      setTable("leads_extraidos", [makeLead()]);
+      setTable("app_settings", [{ key: "followup_weekend_guard:camp-001", value: "sunday_only" }]);
+
+      const { sendMessage } = await import("@/lib/channel");
+      (sendMessage as any).mockClear();
+
+      const satRes = await tickCampaign("camp-001", "client-123");
+      expect(satRes.processed).toBe(1);
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+
+      // Domingo 12:00 BRT -> pausado e aviso deduplicado (sem spam em 2 ticks seguidos)
+      vi.setSystemTime(new Date("2026-11-15T15:00:00Z"));
+      setTable("followup_logs", []);
+      setTable("followup_targets", [makeTarget({ id: "t-sun" })]);
+      (sendMessage as any).mockClear();
+
+      await tickCampaign("camp-001", "client-123");
+      await tickCampaign("camp-001", "client-123");
+      expect(sendMessage).not.toHaveBeenCalled();
+      expect(mockTableState.followup_logs.length).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("respeita quarentena/rehab ANTES de chamar IA (0 tokens queimados) e aplica espaçamento anti-spam + teto de retries", async () => {
+    const { generateText } = await import("@/lib/ai-provider");
+    const { sendMessage, sendMedia } = await import("@/lib/channel");
+    const { registerPendingAutomatedMedia } = await import("@/lib/manual-send-registry");
+    (generateText as any).mockClear();
+    (sendMessage as any).mockClear();
+
+    // 1. Chip em rehab -> adia 15 min ANTES de chamar LLM
+    setTable("whatsapp_warmup_configs", [
+      {
+        client_id: "client-123",
+        instance_name: "test_instance",
+        stage: 3,
+        days_active: 14,
+        health_score: 85,
+        career_mode: "rehab",
+        is_quarantined: false,
+      },
+    ]);
+    setTable("followup_campaigns", [makeCampaign({ ai_enabled: true, ai_model: "gemini-1.5-flash" })]);
+    setTable("followup_targets", [makeTarget({ id: "t-rehab" })]);
+    setTable("leads_extraidos", [makeLead()]);
+
+    await tickCampaign("camp-001", "client-123");
+    expect(generateText).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(mockTableState.followup_targets[0].status).toBe("waiting");
+
+    // 2. Espaçamento anti-spam: lead sem resposta abordado há 4h é reagendado para +24h sem travar o próximo target
+    const nowMs = Date.parse("2026-11-16T15:00:00Z");
+    const spacingCheck = evaluateColdFollowupSpacing({
+      currentStep: 0,
+      lastSentAt: null,
+      recentMessages: [
+        { sender_type: "ai", created_at: new Date(nowMs - 4 * 3600_000).toISOString() },
+      ],
+      nowMs,
+    });
+    expect(spacingCheck.action).toBe("reschedule");
+    expect(spacingCheck.requiredHours).toBe(24);
+
+    // 2º follow-up sem resposta exige 48h; >= 3 follow-ups sem nenhuma resposta encerra ("exhaust")
+    const escalated = evaluateColdFollowupSpacing({
+      currentStep: 1,
+      lastSentAt: new Date(nowMs - 30 * 3600_000).toISOString(),
+      recentMessages: [],
+      nowMs,
+    });
+    expect(escalated.action).toBe("reschedule");
+    expect(escalated.requiredHours).toBe(48);
+
+    const exhausted = evaluateColdFollowupSpacing({
+      currentStep: 3,
+      lastSentAt: new Date(nowMs - 72 * 3600_000).toISOString(),
+      recentMessages: [{ sender_type: "ai", created_at: new Date(nowMs - 72 * 3600_000).toISOString() }],
+      nowMs,
+    });
+    expect(exhausted.action).toBe("exhaust");
+
+    // 3. Mídia registra registerPendingAutomatedMedia para evitar falso auto-pause no webhook
+    setTable("whatsapp_warmup_configs", []);
+    setTable("followup_campaigns", [
+      makeCampaign({
+        media_url: "https://example.com/foto.jpg",
+        media_type: "image",
+        steps: [{ day_offset: 2, template: "Oi {{nome_empresa}}!" }],
+      }),
+    ]);
+    setTable("followup_targets", [makeTarget({ id: "t-media", current_step: 0 })]);
+    setTable("leads_extraidos", [makeLead()]);
+    (registerPendingAutomatedMedia as any).mockClear();
+
+    await tickCampaign("camp-001", "client-123");
+    expect(sendMedia).toHaveBeenCalled();
+    expect(registerPendingAutomatedMedia).toHaveBeenCalledWith("test_instance", "5511999999999@s.whatsapp.net");
+
+    // 4. Após 3ª falha consecutiva -> marca skipped e avança next_send_at nas falhas anteriores (sem loop infinito)
+    setTable("followup_campaigns", [makeCampaign()]);
+    setTable("followup_targets", [
+      makeTarget({ id: "t-fail3", error_message: "[tentativa 2/3] timeout" }),
+    ]);
+    setTable("leads_extraidos", [makeLead()]);
+    (sendMessage as any).mockRejectedValueOnce(new Error("timeout persistente"));
+
+    await tickCampaign("camp-001", "client-123");
+    expect(mockTableState.followup_targets[0].status).toBe("skipped");
+    expect(mockTableState.followup_targets[0].error_message).toContain("Limite de 3 falhas");
   });
 });

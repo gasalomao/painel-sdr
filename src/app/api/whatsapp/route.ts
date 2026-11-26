@@ -6,7 +6,13 @@ import { assertTenantCanCreateInstance } from "@/lib/saas-limits";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import * as channel from "@/lib/channel";
 import { reconcileWarmupIdentityByPhone } from "@/lib/warmup/warmup-phone-memory";
-import { ensureProxyForInstance, recordInstanceProxyStrike } from "@/lib/proxy-pool";
+import {
+  ensureProxyForInstance,
+  hasAvailablePoolProxies,
+  recordInstanceProxyStrike,
+  retireInstanceProxyAsUsed,
+  type EnsureProxyResult,
+} from "@/lib/proxy-pool";
 
 export const dynamic = 'force-dynamic';
 
@@ -273,7 +279,24 @@ export async function POST(req: NextRequest) {
             ? ((existingConn as { provider_config?: Record<string, unknown> }).provider_config || {})
             : {};
         const hasExplicitAuto = typeof body?.autoProxy === "boolean";
-        const autoProxyOpt = hasExplicitAuto ? Boolean(body.autoProxy) : Boolean(existingCfg.auto_proxy);
+        // Para tenants Admin em instância inédita: se o pool tiver proxies disponíveis e `autoProxy`
+        // não foi explicitamente desativado, nasce com proxy dedicado ANTES do 1º QR Code.
+        const defaultAdminAutoProxy =
+          !hasExplicitAuto &&
+          !existingConn &&
+          Boolean(session.isAdmin) &&
+          !session.impersonating &&
+          (await hasAvailablePoolProxies().catch(() => false));
+        const autoProxyOpt = hasExplicitAuto
+          ? Boolean(body.autoProxy)
+          : defaultAdminAutoProxy
+            ? true
+            : Boolean(existingCfg.auto_proxy);
+        const existingWebhookSecret =
+          typeof existingCfg.webhook_secret === "string" && existingCfg.webhook_secret.trim()
+            ? existingCfg.webhook_secret.trim()
+            : null;
+        let proxyEnsureResult: EnsureProxyResult | null = null;
 
         if (!existingConn) {
           const instDenied = await assertTenantCanCreateInstance(session.clientId, session.isAdmin);
@@ -297,7 +320,7 @@ export async function POST(req: NextRequest) {
         const pre = await channel.getStatus(instanceName);
         if (pre.state === "open") {
           if (autoProxyOpt && existingCfg.proxy_mode !== "pool_assigned") {
-            await ensureProxyForInstance({
+            proxyEnsureResult = await ensureProxyForInstance({
               instanceName,
               clientId: session.clientId,
               reason: "connect",
@@ -387,7 +410,7 @@ export async function POST(req: NextRequest) {
 
             // Se opt-in de proxy automático estiver ligado, vincula antes de gerar QR no Evolution GO
             if (autoProxyOpt) {
-              await ensureProxyForInstance({
+              proxyEnsureResult = await ensureProxyForInstance({
                 instanceName,
                 clientId: session.clientId,
                 reason: "connect",
@@ -432,18 +455,44 @@ export async function POST(req: NextRequest) {
 
         // Fallback / default: Evolution API v2
         if (!qrCode && !pairingCode) {
-          const beforeConnectHook = autoProxyOpt
-            ? async () => {
-                await ensureProxyForInstance({
-                  instanceName,
-                  clientId: session.clientId,
-                  reason: "connect",
-                  providerHint: "evolution",
-                }).catch(() => null);
-              }
-            : undefined;
+          const applyPreservedWebhook = async () => {
+            if (
+              existingWebhookSecret &&
+              publicUrl &&
+              typeof (evolution as { setWebhook?: unknown }).setWebhook === "function"
+            ) {
+              const baseUrl = publicUrl.endsWith("/") ? publicUrl.slice(0, -1) : publicUrl;
+              await evolution
+                .setWebhook(`${baseUrl}/api/webhooks/whatsapp`, instanceName, existingWebhookSecret)
+                .catch(() => null);
+            }
+          };
+
+          const beforeConnectHook =
+            autoProxyOpt || (existingWebhookSecret && publicUrl)
+              ? async () => {
+                  if (autoProxyOpt) {
+                    proxyEnsureResult = await ensureProxyForInstance({
+                      instanceName,
+                      clientId: session.clientId,
+                      reason: "connect",
+                      providerHint: "evolution",
+                    }).catch(() => null);
+                  }
+                  await applyPreservedWebhook();
+                }
+              : undefined;
+
+          // Quando já existe `webhook_secret` salvo, não passa `publicUrl` para ensureInstanceConfigured
+          // para impedir que ele chame setWebhook sem o header X-Webhook-Secret (que quebraria auth com 401).
+          const safePublicUrlForEnsure = existingWebhookSecret ? undefined : publicUrl;
+
           try {
-            const res = await evolution.ensureInstanceConfigured(instanceName, publicUrl, beforeConnectHook);
+            const res = await evolution.ensureInstanceConfigured(
+              instanceName,
+              safePublicUrlForEnsure,
+              beforeConnectHook,
+            );
             qrCode = res.qrcode?.base64 || res.base64 || res.qrcode?.code || res.code || null;
             pairingCode = res.qrcode?.pairingCode || res.pairingCode || null;
           } catch (err: any) {
@@ -455,7 +504,11 @@ export async function POST(req: NextRequest) {
                 errorMessage: err?.message || "Erro connect com proxy",
               }).catch(() => null);
               try {
-                const retryRes = await evolution.ensureInstanceConfigured(instanceName, publicUrl);
+                const retryRes = await evolution.ensureInstanceConfigured(
+                  instanceName,
+                  safePublicUrlForEnsure,
+                  existingWebhookSecret && publicUrl ? applyPreservedWebhook : undefined,
+                );
                 qrCode = retryRes.qrcode?.base64 || retryRes.base64 || retryRes.qrcode?.code || retryRes.code || null;
                 pairingCode = retryRes.qrcode?.pairingCode || retryRes.pairingCode || null;
               } catch (retryErr: any) {
@@ -467,10 +520,19 @@ export async function POST(req: NextRequest) {
           }
         }
 
+        const proxyWarning = proxyEnsureResult?.geoWarning ?? proxyEnsureResult?.vpsWarning ?? null;
         return NextResponse.json({
           success: true,
           qrCode,
           pairingCode,
+          autoProxy: autoProxyOpt,
+          ...(proxyEnsureResult
+            ? {
+                proxyMode: proxyEnsureResult.mode,
+                vpsSharedCount: proxyEnsureResult.vpsSharedCount ?? 0,
+                ...(proxyWarning ? { proxyWarning } : {}),
+              }
+            : {}),
         });
       }
 
@@ -522,6 +584,7 @@ export async function POST(req: NextRequest) {
         }
         try { await evolution.logout(instanceName); } catch { /* ignore */ }
         await evolution.deleteInstance(instanceName).catch(() => { });
+        await retireInstanceProxyAsUsed(instanceName, session.clientId, providerType).catch(() => null);
         return NextResponse.json({ success: true });
       }
 

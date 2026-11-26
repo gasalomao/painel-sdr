@@ -167,10 +167,44 @@ export function cleanCompanyNameForApproach(rawName: string | null | undefined):
 }
 
 /**
+ * Detecta se o template usa o modelo de alta conversão (Elogio Personalizado Google/Instagram
+ * + Pergunta Fácil de 1 Palavra sobre site próprio vs Instagram/WhatsApp, sem pitch/link/crítica).
+ */
+export function isPersonalizedPraiseOpenerTemplate(template: string): boolean {
+  const raw = String(template || "").trim();
+  if (!raw) return false;
+  const norm = raw.toLowerCase().replace(/\s+/g, " ");
+
+  // Templates com URL ou oferta agressiva explícita não são aberturas de elogio limpo
+  if (/https?:\/\/|www\.|wa\.me\//i.test(norm)) return false;
+
+  const hasRatingOrReviewsVar =
+    /\{\{?\s*(nota|avaliacao|avalia[cç][aã]o|nota_google|rating|estrelas|avaliacoes|avalia[cç][õo]es|reviews|qtd_avaliacoes|total_avaliacoes)\s*\}?\}/i.test(
+      raw
+    );
+  const hasSiteQuestion =
+    /\b(site\s+pr[oó]prio|t[eê]m\s+site|tem\s+site|possuem\s+site|usam\s+site|usando\s+site)\b/i.test(
+      norm
+    );
+  const hasSocialChannel = /\b(instagram|insta|whatsapp|redes\s+sociais)\b/i.test(norm);
+
+  if (hasSiteQuestion && hasSocialChannel) return true;
+  if (
+    hasRatingOrReviewsVar &&
+    norm.length <= 360 &&
+    (hasSiteQuestion || hasSocialChannel || /\b(google|parab[eé]ns|elogio|avalia[cç][õo]es|estrelas|perfil)\b/i.test(norm))
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Detecta se o template é o modelo curto de abordagem inicial (quebra-gelo sem oferta)
  * ou equivalente a "{{saudacao}}! Tudo bem? {{nome_empresa}}?".
  */
 export function isShortIcebreakerTemplate(template: string): boolean {
+  if (isPersonalizedPraiseOpenerTemplate(template)) return false;
   const norm = String(template || "")
     .trim()
     .toLowerCase()
@@ -265,6 +299,202 @@ const WITHOUT_COMPANY_PATTERNS: Array<(gCap: string, gLow: string) => string> = 
   (_G, g) => `Oi, ${g}! Tudo tranquilo por aí?`,
 ];
 
+type PraiseWithRatingPattern = (
+  gCap: string,
+  gLow: string,
+  company: string,
+  ratingLabel: string,
+  reviewsCount: number | null
+) => string;
+
+type PraiseWithoutRatingPattern = (gCap: string, gLow: string, company: string) => string;
+
+/**
+ * 16 estruturas sintáticas de alta conversão com elogio à nota/avaliações do Google
+ * + pergunta fácil de 1 palavra (site próprio vs Instagram/WhatsApp).
+ * Regras: máx 2 linhas, ZERO pitch, ZERO links, ZERO crítica.
+ */
+const PRAISE_WITH_RATING_PATTERNS: PraiseWithRatingPattern[] = [
+  (G, _g, c, r, rev) =>
+    `${G}! Vi a ${c} aqui no Google com nota ${r}${rev ? ` e ${rev} avaliações` : ""} — parabéns pelo trabalho!\nHoje vocês têm site próprio ou atendem mais pelo Instagram e WhatsApp?`,
+  (_G, g, c, r, rev) =>
+    `Oi, ${g}! Passei pelo perfil da ${c} no Google (${r} estrelas${rev ? `, ${rev} avaliações` : ""}) e achei bem elogiado.\nVocês já usam site próprio hoje ou focam mais no Instagram e WhatsApp?`,
+  (_G, g, c, r, rev) =>
+    `Olá, ${g}! Tudo bem? Vi as avaliações da ${c} no Google (nota ${r}${rev ? ` com ${rev} opiniões` : ""}), pessoal elogia bastante.\nHoje vocês têm site próprio ou usam mais Instagram e WhatsApp?`,
+  (_G, g, c, r, rev) =>
+    `Opa, ${g}! Encontrei a ${c} no Google com ${r} de nota${rev ? ` em ${rev} avaliações` : ""}, muito bom ver um negócio tão bem avaliado.\nPor aí vocês têm site próprio ou o movimento vem mais do Instagram e WhatsApp?`,
+  (G, _g, c, r, rev) =>
+    `${G}, pessoal da ${c}! Vi no Google que vocês estão com nota ${r}${rev ? ` (${rev} avaliações)` : ""} — trabalho caprichado.\nHoje vocês trabalham com site próprio ou usam mais Instagram e WhatsApp?`,
+  (_G, g, c, r, rev) =>
+    `Oi, ${g}! Estava olhando a ${c} no Google e chamou atenção a nota ${r}${rev ? ` com ${rev} avaliações` : ""}.\nUma dúvida rápida: vocês têm site próprio hoje ou usam mais Instagram e WhatsApp?`,
+  (_G, g, c, r, rev) =>
+    `Olá, ${g}! Tudo certo? Vi o perfil da ${c} no Google com ${r} estrelas${rev ? ` e ${rev} avaliações` : ""}, super bem recomendado.\nAtualmente vocês têm site próprio ou atendem mais via Instagram e WhatsApp?`,
+  (G, _g, c, r, rev) =>
+    `${G}! Tudo tranquilo? Acompanhei as avaliações da ${c} no Google (${r}${rev ? ` · ${rev} avaliações` : ""}), parabéns pelo atendimento!\nVocês mantêm site próprio ou concentram mais no Instagram e WhatsApp?`,
+  (_G, g, c, r, rev) =>
+    `Opa, ${g}, tudo bem? Vi a reputação da ${c} no Google com nota ${r}${rev ? ` e ${rev} avaliações` : ""} — destaque total.\nHoje a divulgação de vocês usa site próprio ou fica mais no Instagram e WhatsApp?`,
+  (G, _g, c, r, rev) =>
+    `Oi! ${G}! Dei uma olhada na ${c} no Google e vi ${r} estrelas${rev ? ` (${rev} avaliações)` : ""}, pessoal fala super bem.\nVocês têm site próprio hoje ou tocam tudo pelo Instagram e WhatsApp?`,
+  (G, _g, c, r, rev) =>
+    `${G}, tudo certo? Acabei de ver a ${c} no Google Maps com nota ${r}${rev ? ` em ${rev} avaliações` : ""}, excelente reputação!\nSó por curiosidade: vocês usam site próprio ou mais Instagram e WhatsApp?`,
+  (G, _g, c, r, rev) =>
+    `Olá! ${G}, tudo bem? Vi os elogios para a ${c} no Google (nota ${r}${rev ? ` · ${rev} avaliações` : ""}).\nHoje vocês têm site próprio no ar ou usam mais o Instagram e o WhatsApp?`,
+  (_G, g, c, r, rev) =>
+    `Oi, ${g}, tudo joia? Notei a ${c} super bem avaliada no Google com ${r} estrelas${rev ? ` e ${rev} avaliações` : ""}.\nPor aí vocês têm site próprio ou preferem trabalhar só com Instagram e WhatsApp?`,
+  (G, _g, c, r, rev) =>
+    `${G}! Vi a ficha da ${c} no Google com ${r} de avaliação${rev ? ` (${rev} comentários)` : ""} — parabéns pela constância!\nHoje o atendimento de vocês conta com site próprio ou é mais Instagram e WhatsApp?`,
+  (_G, g, c, r, rev) =>
+    `Opa, ${g}! Tudo certo por aí? Vi a ${c} bem recomendada no Google (${r} estrelas${rev ? `, ${rev} avaliações` : ""}).\nVocês já têm site próprio ou usam mais Instagram e WhatsApp no dia a dia?`,
+  (_G, g, c, r, rev) =>
+    `Olá, ${g}! Encontrei a ${c} no Google com ótima nota (${r}${rev ? ` e ${rev} avaliações` : ""}) e vim mandar um oi.\nHoje vocês têm site próprio ou focam o contato no Instagram e WhatsApp?`,
+];
+
+/**
+ * 14 estruturas sintáticas de alta conversão sem menção à nota (quando nota ausente ou < 4.0):
+ * elogia presença/trabalho da empresa + pergunta fácil de 1 palavra (site próprio vs Instagram/WhatsApp).
+ * Regras: máx 2 linhas, ZERO pitch, ZERO links, ZERO crítica.
+ */
+const PRAISE_WITHOUT_RATING_PATTERNS: PraiseWithoutRatingPattern[] = [
+  (G, _g, c) =>
+    `${G}! Vi o trabalho da ${c} por aqui e curti bastante a presença de vocês.\nHoje vocês têm site próprio ou usam mais Instagram e WhatsApp?`,
+  (_G, g, c) =>
+    `Oi, ${g}! Tudo bem? Encontrei a ${c} aqui no Google e achei bem legal a estrutura de vocês.\nVocês já usam site próprio hoje ou focam mais no Instagram e WhatsApp?`,
+  (_G, g, c) =>
+    `Olá, ${g}! Passei pelo perfil da ${c} agora há pouco — parabéns pelo trabalho!\nHoje vocês têm site próprio ou atendem mais pelo Instagram e WhatsApp?`,
+  (_G, g, c) =>
+    `Opa, ${g}, tudo certo? Vi a ${c} aqui nas buscas do Google e vim tirar uma dúvida rápida.\nVocês têm site próprio hoje ou o contato fica mais no Instagram e WhatsApp?`,
+  (G, _g, c) =>
+    `${G}, pessoal da ${c}! Vi vocês aqui no Google e gostei bastante do que vocês fazem.\nAtualmente vocês mantêm site próprio ou usam mais Instagram e WhatsApp?`,
+  (_G, g, c) =>
+    `Oi, ${g}, tudo tranquilo? Acabei de ver o perfil da ${c} por aqui.\nUma pergunta rápida: hoje vocês têm site próprio ou trabalham mais com Instagram e WhatsApp?`,
+  (_G, g, c) =>
+    `Olá, ${g}! Tudo bem por aí? Encontrei a ${c} pesquisando empresas da região e curti o perfil.\nVocês têm site próprio no ar ou focam mais no Instagram e WhatsApp?`,
+  (G, _g, c) =>
+    `${G}! Tudo joia? Dei uma olhada no perfil da ${c} aqui no Google.\nHoje a divulgação de vocês usa site próprio ou vai mais pelo Instagram e WhatsApp?`,
+  (_G, g, c) =>
+    `Opa, ${g}! Vi a ${c} aqui no Google Maps e achei bem bacana o posicionamento de vocês.\nVocês têm site próprio hoje ou tocam tudo pelo Instagram e WhatsApp?`,
+  (G, _g, c) =>
+    `Oi! ${G}, tudo certo? Estava vendo o perfil da ${c} aqui no Google.\nSó pra saber: vocês já têm site próprio ou usam mais o Instagram e o WhatsApp?`,
+  (G, _g, c) =>
+    `${G}, tudo bem? Vi a ficha da ${c} aqui nas buscas e achei bem organizada.\nHoje vocês trabalham com site próprio ou atendem mais via Instagram e WhatsApp?`,
+  (G, _g, c) =>
+    `Olá! ${G}! Encontrei a ${c} no Google agora há pouco e vim dar um alô.\nVocês usam site próprio hoje ou concentram o atendimento no Instagram e WhatsApp?`,
+  (_G, g, c) =>
+    `Oi, ${g}! Tudo bem com vocês? Vi a ${c} aqui no Google e gostei da proposta.\nPor aí vocês têm site próprio ou preferem focar no Instagram e WhatsApp?`,
+  (_G, g, c) =>
+    `Opa, ${g}, tudo tranquilo? Vi o perfil da ${c} por aqui e bateu uma curiosidade rápida.\nHoje vocês têm site próprio ou usam mais Instagram e WhatsApp no dia a dia?`,
+];
+
+const PRAISE_NO_COMPANY_PATTERNS: Array<(gCap: string, gLow: string) => string> = [
+  (G) => `${G}! Tudo bem? Vi o perfil de vocês aqui no Google.\nHoje vocês têm site próprio ou usam mais Instagram e WhatsApp?`,
+  (_G, g) => `Oi, ${g}! Passei pelo perfil de vocês agora há pouco.\nVocês já usam site próprio hoje ou focam mais no Instagram e WhatsApp?`,
+  (_G, g) => `Olá, ${g}! Tudo certo? Encontrei vocês aqui nas buscas do Google.\nHoje o atendimento de vocês conta com site próprio ou é mais Instagram e WhatsApp?`,
+  (_G, g) => `Opa, ${g}, tudo tranquilo? Vi vocês aqui no Google Maps.\nSó por curiosidade: vocês têm site próprio ou usam mais Instagram e WhatsApp?`,
+  (G) => `${G}! Tudo joia? Dei uma olhada no perfil de vocês no Google.\nAtualmente vocês mantêm site próprio ou atendem mais pelo Instagram e WhatsApp?`,
+  (_G, g) => `Oi, ${g}! Tudo bem por aí? Achei o perfil de vocês no Google.\nHoje vocês trabalham com site próprio ou ficam mais no Instagram e WhatsApp?`,
+];
+
+export const PRAISE_OPENER_PATTERN_COUNTS = {
+  withRating: PRAISE_WITH_RATING_PATTERNS.length,
+  withoutRating: PRAISE_WITHOUT_RATING_PATTERNS.length,
+  total: PRAISE_WITH_RATING_PATTERNS.length + PRAISE_WITHOUT_RATING_PATTERNS.length,
+} as const;
+
+function parsePositiveGoogleRating(
+  explicitRating?: number | string | null,
+  renderedText?: string
+): string | null {
+  const tryParse = (raw: unknown): number | null => {
+    if (raw === null || raw === undefined || raw === "") return null;
+    const normalized = String(raw).trim().replace(",", ".");
+    const num = Number(normalized);
+    if (!Number.isFinite(num) || num < 4.0 || num > 5.0) return null;
+    return num;
+  };
+
+  let num = tryParse(explicitRating);
+  if (num === null && renderedText) {
+    const m =
+      renderedText.match(/(?:nota|avalia[cç][aã]o|google)[^0-9]{0,16}([45](?:[.,]\d)?)\b/i) ||
+      renderedText.match(/\b([45][.,]\d)\s*(?:estrelas?|★|no\s+google)/i);
+    if (m?.[1]) {
+      num = tryParse(m[1]);
+    }
+  }
+  if (num === null) return null;
+  return num.toFixed(1).replace(".", ",");
+}
+
+function parsePositiveReviewsCount(
+  explicitReviews?: number | string | null,
+  renderedText?: string
+): number | null {
+  const tryParse = (raw: unknown): number | null => {
+    if (raw === null || raw === undefined || raw === "") return null;
+    const digits = String(raw).replace(/\D/g, "");
+    if (!digits) return null;
+    const num = Number(digits);
+    if (!Number.isFinite(num) || num < 5) return null;
+    return Math.floor(num);
+  };
+
+  let count = tryParse(explicitReviews);
+  if (count === null && renderedText) {
+    const m = renderedText.match(/\b(\d{1,5})\s*(?:avalia[cç][õo]es|reviews?|opini[õo]es|coment[aá]rios)\b/i);
+    if (m?.[1]) {
+      count = tryParse(m[1]);
+    }
+  }
+  return count;
+}
+
+/**
+ * Gera uma abertura personalizada de alta conversão (elogio Google/presença + pergunta fácil de 1 palavra),
+ * com 30 variações sintáticas (16 com nota >= 4.0 + 14 sem nota), sempre <= 2 linhas e sem pitch/links/crítica.
+ */
+export function generatePersonalizedPraiseOpener(params: {
+  companyName?: string | null;
+  rating?: number | string | null;
+  reviews?: number | string | null;
+  renderedText?: string;
+  now?: Date;
+  scopeKey?: string;
+  deterministicIndex?: number;
+}): string {
+  const now = params.now || new Date();
+  const scopeKey = params.scopeKey || "default";
+  const gCap = greetingFor(now);
+  const gLow = gCap.toLowerCase();
+  const cleanCompany = cleanCompanyNameForApproach(params.companyName);
+  const ratingLabel = parsePositiveGoogleRating(params.rating, params.renderedText);
+  const reviewsCount = parsePositiveReviewsCount(params.reviews, params.renderedText);
+
+  if (!cleanCompany) {
+    const idx = pickNonRepeatingIndex(
+      `${scopeKey}:praise_nocomp`,
+      PRAISE_NO_COMPANY_PATTERNS.length,
+      params.deterministicIndex
+    );
+    return PRAISE_NO_COMPANY_PATTERNS[idx](gCap, gLow);
+  }
+
+  if (ratingLabel) {
+    const idx = pickNonRepeatingIndex(
+      `${scopeKey}:praise_rated`,
+      PRAISE_WITH_RATING_PATTERNS.length,
+      params.deterministicIndex
+    );
+    return PRAISE_WITH_RATING_PATTERNS[idx](gCap, gLow, cleanCompany, ratingLabel, reviewsCount);
+  }
+
+  const idx = pickNonRepeatingIndex(
+    `${scopeKey}:praise_norating`,
+    PRAISE_WITHOUT_RATING_PATTERNS.length,
+    params.deterministicIndex
+  );
+  return PRAISE_WITHOUT_RATING_PATTERNS[idx](gCap, gLow, cleanCompany);
+}
+
 function pickNonRepeatingIndex(scopeKey: string, total: number, deterministicIndex?: number): number {
   if (typeof deterministicIndex === "number" && deterministicIndex >= 0) {
     return deterministicIndex % total;
@@ -284,8 +514,11 @@ function pickNonRepeatingIndex(scopeKey: string, total: number, deterministicInd
 
 /**
  * Aplica o Misturador Anti-Ban na mensagem.
+ * - Se for o template de Elogio Personalizado Google/Instagram + Pergunta Fácil (1 palavra),
+ *   sorteia uma das 30 variações sintáticas humanas (16 com nota >= 4.0 + 14 sem nota),
+ *   sem pitch, sem links e sem crítica.
  * - Se for o template base curto ("{{saudacao}}! Tudo bem? {{nome_empresa}}?"),
- *   sorteia uma das 24 variações semânticas humanas (sem repetir em sequência)
+ *   sorteia uma das 48 variações semânticas humanas (sem repetir em sequência)
  *   com o nome da empresa limpo e a saudação da hora exata.
  * - Se for um template customizado maior, varia de forma inteligente a saudação/cumprimento
  *   inicial e sincroniza o horário.
@@ -295,6 +528,9 @@ export function applyAntiBanMixer(params: {
   renderedText?: string;
   renderedFallback?: string;
   companyName?: string | null;
+  rating?: number | string | null;
+  reviews?: number | string | null;
+  ramo?: string | null;
   enabled?: boolean;
   now?: Date;
   scopeKey?: string;
@@ -309,6 +545,18 @@ export function applyAntiBanMixer(params: {
   const gCap = greetingFor(now);
   const gLow = gCap.toLowerCase();
   const cleanCompany = cleanCompanyNameForApproach(params.companyName);
+
+  if (isPersonalizedPraiseOpenerTemplate(params.template)) {
+    return generatePersonalizedPraiseOpener({
+      companyName: cleanCompany || params.companyName,
+      rating: params.rating,
+      reviews: params.reviews,
+      renderedText: baseText,
+      now,
+      scopeKey,
+      deterministicIndex: params.deterministicIndex,
+    });
+  }
 
   if (isShortIcebreakerTemplate(params.template)) {
     if (cleanCompany) {
@@ -329,29 +577,63 @@ export function applyAntiBanMixer(params: {
 }
 
 /**
- * Blindagem Two-Step Handshake para o 1º contato frio:
- * Quando o operador configurou um template curto de quebra-gelo (ex: "{{saudacao}}! Tudo bem? {{nome_empresa}}?"),
- * impede que a IA injete links (http/wa.me) ou textos longos de vendas (> 140 chars) no 1º disparo,
- * garantindo que o lead responda o primeiro "Oi" e desative o botão de Denunciar do WhatsApp.
+ * Blindagem de 1º Contato Frio (Two-Step Handshake & Elogio Personalizado):
+ * - Em template curto de quebra-gelo ("{{saudacao}}! Tudo bem? {{nome_empresa}}?"),
+ *   impede URLs, pitch comercial ou textos > 140 chars.
+ * - Em template de Elogio Google/Instagram + Pergunta Fácil ("site próprio ou Instagram e WhatsApp"),
+ *   impede URLs, pitch comercial, críticas negativas ao negócio e textos > 2 linhas / > 280 chars.
  */
 export function enforceShortHandshakeGuard(params: {
   template: string;
   candidateText: string;
   companyName?: string | null;
+  rating?: number | string | null;
+  reviews?: number | string | null;
+  ramo?: string | null;
   now?: Date;
   scopeKey?: string;
 }): string {
   const now = params.now || new Date();
   const candidate = String(params.candidateText || "").trim();
+
+  const hasUrl = /https?:\/\/|www\.|wa\.me\//i.test(candidate);
+  const hasSalesBuzzwords =
+    /\b(promo[cç][aã]o|desconto|or[cç]amento\s+gr[aá]tis|compre\s+agora|clique\s+no\s+link|oferta\s+especial|cria[cç][aã]o\s+de\s+sites?|nossa\s+ag[eê]ncia|fechar\s+contrato|valores\s+a\s+partir)\b/i.test(
+      candidate
+    );
+
+  if (isPersonalizedPraiseOpenerTemplate(params.template)) {
+    const nonEmptyLines = candidate
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const isTooLongForPraise = candidate.length > 280 || nonEmptyLines.length > 2;
+    const hasCriticism =
+      /\b(n[aã]o\s+t[eê]m\s+site|sem\s+site|site\s+(?:desatualizado|ruim|amador|fraco|antigo)|perdendo\s+(?:clientes|vendas)|perfil\s+(?:fraco|incompleto))\b/i.test(
+        candidate
+      );
+
+    if (!candidate || hasUrl || isTooLongForPraise || hasSalesBuzzwords || hasCriticism) {
+      return applyAntiBanMixer({
+        template: params.template,
+        renderedText: candidate,
+        companyName: params.companyName,
+        rating: params.rating,
+        reviews: params.reviews,
+        ramo: params.ramo,
+        enabled: true,
+        now,
+        scopeKey: params.scopeKey,
+      });
+    }
+    return syncGreetingToCurrentHour(candidate, now);
+  }
+
   if (!isShortIcebreakerTemplate(params.template)) {
     return syncGreetingToCurrentHour(candidate, now);
   }
 
-  const hasUrl = /https?:\/\/|www\.|wa\.me\//i.test(candidate);
   const isTooLongForHandshake = candidate.length > 140;
-  const hasSalesBuzzwords = /\b(promo[cç][aã]o|desconto|or[cç]amento\s+gr[aá]tis|compre\s+agora|clique\s+no\s+link|oferta\s+especial)\b/i.test(
-    candidate
-  );
 
   if (!candidate || hasUrl || isTooLongForHandshake || hasSalesBuzzwords) {
     return applyAntiBanMixer({

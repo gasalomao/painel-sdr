@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  __resetAntiBanHistoryForTests,
   applyAntiBanMixer,
   cleanCompanyNameForApproach,
   effectiveDateForWindow,
   enforceShortHandshakeGuard,
+  generatePersonalizedPraiseOpener,
   isDefaultApproachTemplate,
+  isPersonalizedPraiseOpenerTemplate,
+  PRAISE_OPENER_PATTERN_COUNTS,
   syncGreetingToCurrentHour,
 } from "../antiban-mixer";
 import { greetingFor } from "../template-vars";
@@ -128,6 +132,77 @@ describe("antiban-mixer & saudação inteligente por horário real", () => {
     });
     expect(blockedLongPitch.length).toBeLessThanOrEqual(140);
     expect(blockedLongPitch).toContain("Vidraçaria Silva");
+  });
+
+  it("Personalized Google/IG Praise + Easy 1-Word Question Opener oferece >= 24 variações (com e sem nota), máx 2 linhas, sem pitch/links/crítica", () => {
+    __resetAntiBanHistoryForTests();
+    const nineAmBrt = new Date("2026-11-09T12:15:00.000Z"); // 09:15 BRT
+    const praiseTemplate =
+      "{{saudacao}}! Vi a {{nome_empresa}} no Google com nota {{nota}} ({{avaliacoes}} avaliações).\nHoje vocês têm site próprio ou usam mais Instagram e WhatsApp?";
+
+    expect(isPersonalizedPraiseOpenerTemplate(praiseTemplate)).toBe(true);
+    expect(isDefaultApproachTemplate(praiseTemplate)).toBe(false);
+    expect(PRAISE_OPENER_PATTERN_COUNTS.total).toBeGreaterThanOrEqual(24);
+
+    // 1. Com nota >= 4.0 e avaliações: 16 variações sintáticas distintas, <= 2 linhas, sem URL/pitch/crítica
+    const withRatingSet = new Set<string>();
+    for (let i = 0; i < PRAISE_OPENER_PATTERN_COUNTS.withRating; i++) {
+      const msg = applyAntiBanMixer({
+        template: praiseTemplate,
+        companyName: "CLÍNICA SORRISO - IMPLANTES LTDA",
+        rating: 4.9,
+        reviews: 142,
+        now: nineAmBrt,
+        scopeKey: "praise-rated",
+        deterministicIndex: i,
+      });
+      const lines = msg.split(/\r?\n/).filter((l) => l.trim().length > 0);
+      expect(lines.length).toBeLessThanOrEqual(2);
+      expect(msg.toLowerCase()).toContain("bom dia");
+      expect(msg).toContain("Clínica Sorriso");
+      expect(msg).toContain("4,9");
+      expect(msg).toContain("142");
+      expect(msg.toLowerCase()).toContain("site próprio");
+      expect(msg.toLowerCase()).toContain("instagram");
+      expect(msg).not.toMatch(/https?:\/\/|wa\.me|promoção|desconto|não têm site|sem site/i);
+      withRatingSet.add(msg);
+    }
+    expect(withRatingSet.size).toBe(PRAISE_OPENER_PATTERN_COUNTS.withRating);
+
+    // 2. Sem nota ou com nota baixa (< 4.0): cai nas variações sem menção à nota (nunca elogia nota ruim!)
+    const withoutRatingSet = new Set<string>();
+    for (let i = 0; i < PRAISE_OPENER_PATTERN_COUNTS.withoutRating; i++) {
+      const msg = generatePersonalizedPraiseOpener({
+        companyName: "Padaria Central MEI",
+        rating: 2.8,
+        reviews: 12,
+        now: nineAmBrt,
+        scopeKey: "praise-norating",
+        deterministicIndex: i,
+      });
+      const lines = msg.split(/\r?\n/).filter((l) => l.trim().length > 0);
+      expect(lines.length).toBeLessThanOrEqual(2);
+      expect(msg).toContain("Padaria Central");
+      expect(msg).not.toContain("2,8");
+      expect(msg).not.toContain("2.8");
+      expect(msg.toLowerCase()).toContain("site próprio");
+      withoutRatingSet.add(msg);
+    }
+    expect(withoutRatingSet.size).toBe(PRAISE_OPENER_PATTERN_COUNTS.withoutRating);
+
+    // 3. enforceShortHandshakeGuard bloqueia URLs, pitch e críticas negativas no 1º contato de elogio
+    const guardedCriticism = enforceShortHandshakeGuard({
+      template: praiseTemplate,
+      candidateText: "Bom dia! Vi que vocês não têm site e estão perdendo clientes. Veja https://agencia.test",
+      companyName: "Clínica Sorriso",
+      rating: 4.8,
+      reviews: 90,
+      now: nineAmBrt,
+      scopeKey: "praise-guard",
+    });
+    expect(guardedCriticism).not.toMatch(/https?:\/\/|não têm site|perdendo clientes/i);
+    expect(guardedCriticism).toContain("Clínica Sorriso");
+    expect(guardedCriticism.split(/\r?\n/).filter(Boolean).length).toBeLessThanOrEqual(2);
   });
 });
 

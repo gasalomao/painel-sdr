@@ -125,4 +125,15 @@ describe("recoverRunningCampaigns — crash recovery", () => {
     expect(recovered).toBe(0);
     expect(state.campaigns[0].status).toBe("running");
   });
+
+  it("não gera CAMPAIGN_ERROR repetido para campanhas já pausadas com target antigo em processing", async () => {
+    state.campaigns.push({ id: "camp-paused", client_id: "client-1", name: "Já Pausada", status: "paused" });
+    state.campaign_targets.push({ id: "target-stale", campaign_id: "camp-paused", status: "processing" });
+
+    const recovered = await recoverRunningCampaigns();
+
+    expect(recovered).toBe(0);
+    expect(state.campaign_logs).toHaveLength(0);
+    expect(state.webhook_logs).toHaveLength(0);
+  });
 });

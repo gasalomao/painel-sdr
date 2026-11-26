@@ -19,13 +19,14 @@ import * as channel from "@/lib/channel";
 import { leadRowToTemplateContext, renderTemplate } from "@/lib/template-vars";
 import { webSearch, formatResultsForAI } from "@/lib/web-search";
 import { logTokenUsage } from "@/lib/token-usage";
-import { registerAiSend, registerPendingAutomatedSend } from "@/lib/manual-send-registry";
+import { registerAiSend, registerPendingAutomatedMedia, registerPendingAutomatedSend } from "@/lib/manual-send-registry";
 import { splitMessage } from "@/lib/agent-format";
 import { isInstanceOwnedByClient } from "@/lib/tenant";
 import { checkTenantAiQuota, isClientActiveCached, isClientAdminCached } from "@/lib/saas-limits";
 import {
   evaluateWeekendB2BGuard,
   isAutoPoolInstance,
+  parseWeekendB2BGuardMode,
   type WeekendB2BGuardMode,
   type WeekendB2BGuardResult,
 } from "@/lib/campaign-pool";
@@ -38,6 +39,7 @@ import {
   effectiveDateForWindow,
   enforceShortHandshakeGuard,
   exportAntiBanHistory,
+  isPersonalizedPraiseOpenerTemplate,
   isShortIcebreakerTemplate,
   seedAntiBanHistory,
   syncGreetingToCurrentHour,
@@ -47,9 +49,15 @@ export type ColdOutreachPolicy = {
   allowed: boolean;
   dailyColdCap: number;
   hourlyColdCap: number;
+  dailyFollowupCap: number;
+  hourlyFollowupCap: number;
   minSafeIntervalSec: number;
   symbioticEveryN: number;
+  zeroReplyThreshold: number;
+  veteranTier?: boolean;
   throttledByHealth?: boolean;
+  throttledByReplyRate?: boolean;
+  boostedByReplyRate?: boolean;
   reason?: string;
 };
 
@@ -70,16 +78,22 @@ export function extractBrazilDdd(phoneOrJid?: string | null): string | null {
 }
 
 /**
- * Política Anti-Ban da Meta para Prospecção Fria (First-Contact Outbound) baseada
- * no estágio de maturação (`stage 1..4`) e saúde (`health_score`) do chip:
- * - Fase 1 (Berçário, dias 1..3): BLOQUEADO de disparos frios (risco extremo de ban).
- * - Saúde < 40: BLOQUEADO até se recuperar no aquecimento.
- * - Saúde 40..74: Freio Dinâmico (cota diária/horária reduzida pela metade e mais pulsos simbióticos).
+ * Política Anti-Ban Nov 2026 para Prospecção Fria (First-Contact Outbound) baseada
+ * no estágio de maturação (`stage 1..4`), dias ativos (`daysActive`), saúde (`health_score`)
+ * e taxa de resposta recente (`recentReplyRate`):
+ * - Fase 1 ou `daysActive < 7`: BLOQUEADO de disparos frios (risco extremo de ban em chip novo).
+ * - Fase 2 (Dias 7–10): 15 frios/dia, 4/hora, 120s, pulso simbiótico a cada 3, freio zero-reply em 8.
+ * - Fase 3 (Dias 11–14): 30 frios/dia, 6/hora, 75s, pulso simbiótico a cada 3, freio zero-reply em 10.
+ * - Fase 4A (Dias 15–20): 50 frios/dia, 10/hora, 55s, pulso simbiótico a cada 4, freio zero-reply em 12.
+ * - Fase 4B Veterano (stage 4, >= 21 dias, saúde >= 90): 80 frios/dia, 14/hora, 45s, pulso a cada 4, freio em 14.
+ * - Saúde < 40: BLOQUEADO até recuperar no aquecimento.
+ * - Saúde 40..74: Freio Dinâmico (cota diária/horária pela metade e mais pulsos simbióticos).
  */
 export type ColdOutreachPolicyOptions = {
   daysActive?: number;
   careerMode?: string | null;
   coldOutreachLockedUntil?: string | null;
+  recentReplyRate?: number | null;
   nowMs?: number;
 };
 
@@ -95,8 +109,11 @@ export function getColdOutreachPolicyForStage(
       allowed: false,
       dailyColdCap: 0,
       hourlyColdCap: 0,
+      dailyFollowupCap: 0,
+      hourlyFollowupCap: 0,
       minSafeIntervalSec: 300,
       symbioticEveryN: 2,
+      zeroReplyThreshold: 8,
       reason: "post_ban_rehab",
     };
   }
@@ -107,8 +124,11 @@ export function getColdOutreachPolicyForStage(
         allowed: false,
         dailyColdCap: 0,
         hourlyColdCap: 0,
+        dailyFollowupCap: 0,
+        hourlyFollowupCap: 0,
         minSafeIntervalSec: 300,
         symbioticEveryN: 2,
+        zeroReplyThreshold: 8,
         reason: "post_ban_rehab",
       };
     }
@@ -118,18 +138,24 @@ export function getColdOutreachPolicyForStage(
       allowed: false,
       dailyColdCap: 0,
       hourlyColdCap: 0,
+      dailyFollowupCap: 0,
+      hourlyFollowupCap: 0,
       minSafeIntervalSec: 300,
       symbioticEveryN: 2,
+      zeroReplyThreshold: 8,
       reason: "nursery_stage_1",
     };
   }
-  if (normalizedStage === 2 && opts?.daysActive !== undefined && opts.daysActive < 4) {
+  if (opts?.daysActive !== undefined && opts.daysActive < 7) {
     return {
       allowed: false,
       dailyColdCap: 0,
       hourlyColdCap: 0,
+      dailyFollowupCap: 0,
+      hourlyFollowupCap: 0,
       minSafeIntervalSec: 300,
       symbioticEveryN: 2,
+      zeroReplyThreshold: 8,
       reason: "insufficient_active_days",
     };
   }
@@ -138,19 +164,63 @@ export function getColdOutreachPolicyForStage(
       allowed: false,
       dailyColdCap: 0,
       hourlyColdCap: 0,
+      dailyFollowupCap: 0,
+      hourlyFollowupCap: 0,
       minSafeIntervalSec: 300,
       symbioticEveryN: 2,
+      zeroReplyThreshold: 8,
       reason: "low_health",
     };
   }
 
   let policy: ColdOutreachPolicy;
   if (normalizedStage === 2) {
-    policy = { allowed: true, dailyColdCap: 18, hourlyColdCap: 5, minSafeIntervalSec: 150, symbioticEveryN: 3 };
+    policy = {
+      allowed: true,
+      dailyColdCap: 15,
+      hourlyColdCap: 4,
+      dailyFollowupCap: 15,
+      hourlyFollowupCap: 4,
+      minSafeIntervalSec: 120,
+      symbioticEveryN: 3,
+      zeroReplyThreshold: 8,
+    };
   } else if (normalizedStage === 3) {
-    policy = { allowed: true, dailyColdCap: 35, hourlyColdCap: 8, minSafeIntervalSec: 120, symbioticEveryN: 3 };
+    policy = {
+      allowed: true,
+      dailyColdCap: 30,
+      hourlyColdCap: 6,
+      dailyFollowupCap: 25,
+      hourlyFollowupCap: 6,
+      minSafeIntervalSec: 75,
+      symbioticEveryN: 3,
+      zeroReplyThreshold: 10,
+    };
+  } else if (opts?.daysActive !== undefined && opts.daysActive >= 21 && healthScore >= 90) {
+    // Stage 4B Veterano: 2 chips veteranos em __auto_pool__ atingem 150-160 frios + 70-80 follow-ups/dia
+    policy = {
+      allowed: true,
+      dailyColdCap: 80,
+      hourlyColdCap: 14,
+      dailyFollowupCap: 40,
+      hourlyFollowupCap: 10,
+      minSafeIntervalSec: 45,
+      symbioticEveryN: 4,
+      zeroReplyThreshold: 14,
+      veteranTier: true,
+    };
   } else {
-    policy = { allowed: true, dailyColdCap: 60, hourlyColdCap: 12, minSafeIntervalSec: 90, symbioticEveryN: 4 };
+    // Stage 4A (Dias 15-20 ou Stage 4 padrão)
+    policy = {
+      allowed: true,
+      dailyColdCap: 50,
+      hourlyColdCap: 10,
+      dailyFollowupCap: 35,
+      hourlyFollowupCap: 8,
+      minSafeIntervalSec: 55,
+      symbioticEveryN: 4,
+      zeroReplyThreshold: 12,
+    };
   }
 
   // Freio Dinâmico por Saúde: se health_score cair abaixo de 75, corta ritmo pela metade antes da crise
@@ -159,16 +229,51 @@ export function getColdOutreachPolicyForStage(
       ...policy,
       dailyColdCap: Math.max(2, Math.floor(policy.dailyColdCap / 2)),
       hourlyColdCap: Math.max(1, Math.floor(policy.hourlyColdCap / 2)),
+      dailyFollowupCap: Math.max(2, Math.floor(policy.dailyFollowupCap / 2)),
+      hourlyFollowupCap: Math.max(1, Math.floor(policy.hourlyFollowupCap / 2)),
       minSafeIntervalSec: policy.minSafeIntervalSec + 60,
       symbioticEveryN: 2,
+      zeroReplyThreshold: Math.max(5, policy.zeroReplyThreshold - 2),
       throttledByHealth: true,
     };
+  }
+
+  // Escalonamento Adaptativo por Taxa de Resposta (Adaptive Reply-Rate Scaling):
+  // - < 5% de resposta recente: reduz ritmo em ~35% e aperta intervalo/freio para proteger reputação.
+  // - >= 25% de resposta recente (saúde >= 90, estágio >= 3): bônus seguro de até +15% na cota fria.
+  if (
+    opts?.recentReplyRate !== undefined &&
+    opts.recentReplyRate !== null &&
+    Number.isFinite(opts.recentReplyRate)
+  ) {
+    const rate = Math.max(0, Math.min(1, Number(opts.recentReplyRate)));
+    if (rate < 0.05) {
+      return {
+        ...policy,
+        dailyColdCap: Math.max(3, Math.floor(policy.dailyColdCap * 0.65)),
+        hourlyColdCap: Math.max(1, Math.floor(policy.hourlyColdCap * 0.7)),
+        dailyFollowupCap: Math.max(3, Math.floor(policy.dailyFollowupCap * 0.7)),
+        hourlyFollowupCap: Math.max(1, Math.floor(policy.hourlyFollowupCap * 0.75)),
+        minSafeIntervalSec: policy.minSafeIntervalSec + 30,
+        symbioticEveryN: Math.min(policy.symbioticEveryN, 2),
+        zeroReplyThreshold: Math.max(6, policy.zeroReplyThreshold - 2),
+        throttledByReplyRate: true,
+      };
+    }
+    if (rate >= 0.25 && healthScore >= 90 && normalizedStage >= 3) {
+      return {
+        ...policy,
+        dailyColdCap: Math.round(policy.dailyColdCap * 1.15),
+        hourlyColdCap: Math.min(16, policy.hourlyColdCap + 2),
+        boostedByReplyRate: true,
+      };
+    }
   }
 
   return policy;
 }
 
-const STAGE_COMBINED_DAILY_CAP: Record<number, number> = { 1: 0, 2: 32, 3: 55, 4: 90 };
+export const STAGE_COMBINED_DAILY_CAP: Record<number, number> = { 1: 0, 2: 35, 3: 65, 4: 115 };
 
 export { evaluateWeekendB2BGuard, type WeekendB2BGuardResult };
 
@@ -179,20 +284,40 @@ type ColdBatchState = {
 };
 
 const _coldSendTimestampsByInstance = new Map<string, number[]>();
+const _followupSendTimestampsByInstance = new Map<string, number[]>();
 const _coldBatchStateByInstance = new Map<string, ColdBatchState>();
 const _verifiedCanonicalJids = new Map<string, { jid: string; exists: boolean; verifiedAt: number }>();
 const _hydratedColdQuotaTenants = new Set<string>();
 const _hydratedExtraAntiBanTenants = new Set<string>();
 const _coldQuotaClientInstances = new Map<string, Set<string>>();
-const _recentColdJidsByInstance = new Map<string, string[]>();
+const _recentColdJidsByInstance = new Map<string, Array<{ jid: string; sentAt: number }>>();
 const _zeroReplyBrakeUntil = new Map<string, number>();
 const _zeroReplyClientInstances = new Map<string, Set<string>>();
+const _recentReplyRateByInstance = new Map<
+  string,
+  { rate: number; repliedCount: number; sampleSize: number; updatedAt: number }
+>();
 const CANONICAL_JID_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
-const ZERO_REPLY_BATCH_THRESHOLD = 15;
+const REPLY_RATE_TELEMETRY_TTL_MS = 6 * 60 * 60 * 1000;
+const ZERO_REPLY_BATCH_THRESHOLD = 12;
+const MAX_ZERO_REPLY_TRACKED = 20;
 const ZERO_REPLY_BRAKE_MS = 25 * 60 * 1000;
+const MAX_COMBINED_HOURLY_PER_CHIP = 20;
+
+export function getStartOfBrtDayMs(nowMs = Date.now()): number {
+  const spDay = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(nowMs));
+  const parsed = Date.parse(`${spDay}T00:00:00-03:00`);
+  return Number.isFinite(parsed) ? parsed : nowMs - 24 * 60 * 60 * 1000;
+}
 
 export function __resetCampaignAntiBanStateForTests(): void {
   _coldSendTimestampsByInstance.clear();
+  _followupSendTimestampsByInstance.clear();
   _coldBatchStateByInstance.clear();
   _verifiedCanonicalJids.clear();
   _hydratedColdQuotaTenants.clear();
@@ -201,12 +326,29 @@ export function __resetCampaignAntiBanStateForTests(): void {
   _recentColdJidsByInstance.clear();
   _zeroReplyBrakeUntil.clear();
   _zeroReplyClientInstances.clear();
+  _recentReplyRateByInstance.clear();
+  _lastSelectedInstanceByCampaign.clear();
 }
 
 export function clearZeroReplyBrakeForInstance(instanceName: string): void {
   if (!instanceName) return;
   _zeroReplyBrakeUntil.delete(instanceName);
   _recentColdJidsByInstance.delete(instanceName);
+  _recentReplyRateByInstance.delete(instanceName);
+}
+
+export function getRecentReplyRateForInstance(
+  instanceName: string,
+  nowMs = Date.now()
+): { rate: number; repliedCount: number; sampleSize: number } | null {
+  if (!instanceName) return null;
+  const hit = _recentReplyRateByInstance.get(instanceName);
+  if (!hit) return null;
+  if (nowMs - hit.updatedAt > REPLY_RATE_TELEMETRY_TTL_MS) {
+    _recentReplyRateByInstance.delete(instanceName);
+    return null;
+  }
+  return { rate: hit.rate, repliedCount: hit.repliedCount, sampleSize: hit.sampleSize };
 }
 
 function buildJidLookupVariants(remoteJid: string): string[] {
@@ -252,7 +394,17 @@ async function hydrateZeroReplyAndMixerIfNeeded(clientId: string, nowMs = Date.n
             if (!Array.isArray(list)) continue;
             instSet.add(inst);
             if (!_recentColdJidsByInstance.has(inst)) {
-              _recentColdJidsByInstance.set(inst, list.slice(-ZERO_REPLY_BATCH_THRESHOLD));
+              const normalized = (list as Array<string | { jid?: string; sentAt?: number }>)
+                .map((item) =>
+                  typeof item === "string"
+                    ? { jid: item, sentAt: nowMs }
+                    : item && typeof item.jid === "string"
+                      ? { jid: item.jid, sentAt: Number.isFinite(item.sentAt) ? Number(item.sentAt) : nowMs }
+                      : null
+                )
+                .filter((x): x is { jid: string; sentAt: number } => Boolean(x?.jid))
+                .slice(-MAX_ZERO_REPLY_TRACKED);
+              _recentColdJidsByInstance.set(inst, normalized);
             }
           }
         }
@@ -282,11 +434,11 @@ function persistZeroReplyStateAsync(clientId: string, instanceName: string, nowM
   instSet.add(instanceName);
   _zeroReplyClientInstances.set(clientId, instSet);
 
-  const recent: Record<string, string[]> = {};
+  const recent: Record<string, Array<{ jid: string; sentAt: number }>> = {};
   const brakeUntil: Record<string, number> = {};
   for (const inst of instSet) {
     const jids = _recentColdJidsByInstance.get(inst);
-    if (jids && jids.length > 0) recent[inst] = jids.slice(-ZERO_REPLY_BATCH_THRESHOLD);
+    if (jids && jids.length > 0) recent[inst] = jids.slice(-MAX_ZERO_REPLY_TRACKED);
     const until = _zeroReplyBrakeUntil.get(inst) || 0;
     if (until > nowMs) brakeUntil[inst] = until;
   }
@@ -321,70 +473,120 @@ function persistAntiBanMixerAsync(clientId: string): void {
 }
 
 /**
- * Auditoria de "Vácuo Silencioso" (Zero-Reply Brake):
- * Acompanha os últimos 15 contatos frios abordados pelo chip. Se nenhum deles
- * respondeu (0 de 15 no `chats_dashboard`), ativa descanso preventivo de 25 min
- * para interromper a perda silenciosa de reputação na Meta.
+ * Auditoria de "Vácuo Silencioso" (Zero-Reply Brake) + Telemetria de Taxa de Resposta:
+ * Acompanha os últimos N contatos frios abordados pelo chip (conforme estágio: 8/10/12/14).
+ * - Filtra outbound no banco (exclui `sender_type` ai/human/system) e valida timestamp contra
+ *   o início do lote para que chunks outbound nem respostas antigas mascarem o vácuo real.
+ * - Se nenhum respondeu (0 de N), ativa descanso preventivo de 25 min.
+ * - Atualiza a taxa de resposta recente (`replyRate`) para escalonamento adaptativo de ritmo.
  */
 export async function checkZeroReplyBrakeForInstance(
   clientId: string,
   instanceName: string,
   sentRemoteJid: string,
-  nowMs = Date.now()
-): Promise<{ brakeTriggered: boolean; checkedCount: number }> {
+  nowMs = Date.now(),
+  threshold = ZERO_REPLY_BATCH_THRESHOLD
+): Promise<{ brakeTriggered: boolean; checkedCount: number; threshold: number; replyRate: number | null }> {
   await hydrateZeroReplyAndMixerIfNeeded(clientId, nowMs);
 
-  const jids = _recentColdJidsByInstance.get(instanceName) || [];
-  if (sentRemoteJid && !jids.includes(sentRemoteJid)) {
-    jids.push(sentRemoteJid);
+  const effectiveThreshold = Math.max(4, Math.min(MAX_ZERO_REPLY_TRACKED, Math.floor(Number(threshold) || ZERO_REPLY_BATCH_THRESHOLD)));
+  const entries = _recentColdJidsByInstance.get(instanceName) || [];
+  if (sentRemoteJid && !entries.some((e) => e.jid === sentRemoteJid)) {
+    entries.push({ jid: sentRemoteJid, sentAt: nowMs });
   }
-  _recentColdJidsByInstance.set(instanceName, jids);
+  _recentColdJidsByInstance.set(instanceName, entries);
 
-  if (jids.length < ZERO_REPLY_BATCH_THRESHOLD) {
+  if (entries.length < effectiveThreshold) {
     persistZeroReplyStateAsync(clientId, instanceName, nowMs);
-    return { brakeTriggered: false, checkedCount: jids.length };
+    return { brakeTriggered: false, checkedCount: entries.length, threshold: effectiveThreshold, replyRate: null };
   }
 
-  const batch = jids.splice(0, jids.length);
+  const batch = entries.splice(0, entries.length);
   _recentColdJidsByInstance.set(instanceName, []);
-  const expandedBatch = Array.from(
-    new Set(batch.flatMap((jid) => buildJidLookupVariants(jid)))
-  );
+  const minSentAtMs = batch.reduce((min, item) => Math.min(min, item.sentAt), nowMs);
+  const replyCutoffMs = minSentAtMs - 60_000; // 60s tolerância de clock skew
+  const variantToTargetIdx = new Map<string, number>();
+  batch.forEach((entry, idx) => {
+    for (const v of buildJidLookupVariants(entry.jid)) {
+      variantToTargetIdx.set(v, idx);
+    }
+  });
+  const expandedBatch = Array.from(variantToTargetIdx.keys());
 
   try {
     let { data, error } = await supabase
       .from("chats_dashboard")
-      .select("id, sender_type, is_from_me")
+      .select("id, remote_jid, sender_type, is_from_me, created_at")
       .eq("client_id", clientId)
       .in("remote_jid", expandedBatch)
-      .limit(50);
+      .neq("sender_type", "ai")
+      .neq("sender_type", "human")
+      .neq("sender_type", "system")
+      .limit(200);
 
     if (error && /is_from_me|column/i.test(String(error.message || ""))) {
       const retry = await supabase
         .from("chats_dashboard")
-        .select("id, sender_type")
+        .select("id, remote_jid, sender_type, created_at")
         .eq("client_id", clientId)
         .in("remote_jid", expandedBatch)
-        .limit(50);
+        .neq("sender_type", "ai")
+        .neq("sender_type", "human")
+        .neq("sender_type", "system")
+        .limit(200);
       data = retry.data as any;
       error = retry.error;
     }
 
     if (error) {
       persistZeroReplyStateAsync(clientId, instanceName, nowMs);
-      return { brakeTriggered: false, checkedCount: batch.length };
-    }
-    if (Array.isArray(data) && data.some((row) => isChatRowInbound(row as any))) {
-      persistZeroReplyStateAsync(clientId, instanceName, nowMs);
-      return { brakeTriggered: false, checkedCount: batch.length };
+      return { brakeTriggered: false, checkedCount: batch.length, threshold: effectiveThreshold, replyRate: null };
     }
 
+    const inboundRows = Array.isArray(data)
+      ? data.filter((row) => {
+          if (!isChatRowInbound(row as any)) return false;
+          const createdAt = (row as { created_at?: string | null }).created_at;
+          if (createdAt) {
+            const ts = new Date(createdAt).getTime();
+            if (Number.isFinite(ts) && ts < replyCutoffMs) return false;
+          }
+          return true;
+        })
+      : [];
+    if (inboundRows.length > 0) {
+      const repliedIndices = new Set<number>();
+      for (const row of inboundRows) {
+        const rjid = String((row as { remote_jid?: string }).remote_jid || "");
+        const mappedIdx = variantToTargetIdx.get(rjid);
+        if (mappedIdx !== undefined) {
+          repliedIndices.add(mappedIdx);
+        }
+      }
+      const repliedCount = Math.max(1, repliedIndices.size);
+      const replyRate = Math.min(1, repliedCount / batch.length);
+      _recentReplyRateByInstance.set(instanceName, {
+        rate: replyRate,
+        repliedCount,
+        sampleSize: batch.length,
+        updatedAt: nowMs,
+      });
+      persistZeroReplyStateAsync(clientId, instanceName, nowMs);
+      return { brakeTriggered: false, checkedCount: batch.length, threshold: effectiveThreshold, replyRate };
+    }
+
+    _recentReplyRateByInstance.set(instanceName, {
+      rate: 0,
+      repliedCount: 0,
+      sampleSize: batch.length,
+      updatedAt: nowMs,
+    });
     _zeroReplyBrakeUntil.set(instanceName, nowMs + ZERO_REPLY_BRAKE_MS);
     persistZeroReplyStateAsync(clientId, instanceName, nowMs);
-    return { brakeTriggered: true, checkedCount: batch.length };
+    return { brakeTriggered: true, checkedCount: batch.length, threshold: effectiveThreshold, replyRate: 0 };
   } catch {
     persistZeroReplyStateAsync(clientId, instanceName, nowMs);
-    return { brakeTriggered: false, checkedCount: batch.length };
+    return { brakeTriggered: false, checkedCount: batch.length, threshold: effectiveThreshold, replyRate: null };
   }
 }
 
@@ -393,27 +595,39 @@ async function hydrateColdSendCountsIfNeeded(clientId: string, nowMs = Date.now(
   _hydratedColdQuotaTenants.add(clientId);
 
   try {
-    const { data } = await supabase
+    const startOfDayMs = getStartOfBrtDayMs(nowMs);
+    const pruneCutoff = Math.min(startOfDayMs, nowMs - 60 * 60 * 1000);
+    const instSet = _coldQuotaClientInstances.get(clientId) || new Set<string>();
+
+    const hydrateIntoMap = (raw: string | undefined | null, targetMap: Map<string, number[]>) => {
+      if (!raw) return;
+      const parsed = JSON.parse(String(raw)) as Record<string, number[]>;
+      if (!parsed || typeof parsed !== "object") return;
+      for (const [inst, timestamps] of Object.entries(parsed)) {
+        if (!Array.isArray(timestamps)) continue;
+        instSet.add(inst);
+        const existing = targetMap.get(inst) || [];
+        const merged = [...existing, ...timestamps]
+          .filter((ts) => Number.isFinite(ts) && ts >= pruneCutoff)
+          .sort((a, b) => a - b);
+        targetMap.set(inst, merged);
+      }
+    };
+
+    const { data: coldRow } = await supabase
       .from("app_settings")
       .select("value")
       .eq("key", `cold_sends_${clientId}`)
       .maybeSingle();
+    hydrateIntoMap(coldRow?.value, _coldSendTimestampsByInstance);
 
-    if (!data?.value) return;
-    const parsed = JSON.parse(String(data.value)) as Record<string, number[]>;
-    if (!parsed || typeof parsed !== "object") return;
+    const { data: fuRow } = await supabase
+      .from("app_settings")
+      .select("value")
+      .eq("key", `followup_sends_${clientId}`)
+      .maybeSingle();
+    hydrateIntoMap(fuRow?.value, _followupSendTimestampsByInstance);
 
-    const oneDayAgo = nowMs - 24 * 60 * 60 * 1000;
-    const instSet = _coldQuotaClientInstances.get(clientId) || new Set<string>();
-    for (const [inst, timestamps] of Object.entries(parsed)) {
-      if (!Array.isArray(timestamps)) continue;
-      instSet.add(inst);
-      const existing = _coldSendTimestampsByInstance.get(inst) || [];
-      const merged = [...existing, ...timestamps]
-        .filter((ts) => Number.isFinite(ts) && ts > oneDayAgo)
-        .sort((a, b) => a - b);
-      _coldSendTimestampsByInstance.set(inst, merged);
-    }
     _coldQuotaClientInstances.set(clientId, instSet);
   } catch {
     /* persistência em app_settings é best-effort */
@@ -427,11 +641,11 @@ function persistColdSendCountsAsync(clientId: string, instanceName: string, nowM
   instSet.add(instanceName);
   _coldQuotaClientInstances.set(clientId, instSet);
 
-  const oneDayAgo = nowMs - 24 * 60 * 60 * 1000;
+  const pruneCutoff = Math.min(getStartOfBrtDayMs(nowMs), nowMs - 60 * 60 * 1000);
   const snapshot: Record<string, number[]> = {};
   for (const inst of instSet) {
-    const valid = (_coldSendTimestampsByInstance.get(inst) || []).filter((ts) => ts > oneDayAgo);
-    if (valid.length > 0) snapshot[inst] = valid.slice(-120);
+    const valid = (_coldSendTimestampsByInstance.get(inst) || []).filter((ts) => ts >= pruneCutoff);
+    if (valid.length > 0) snapshot[inst] = valid.slice(-140);
   }
 
   supabase
@@ -439,6 +653,33 @@ function persistColdSendCountsAsync(clientId: string, instanceName: string, nowM
     .upsert(
       {
         key: `cold_sends_${clientId}`,
+        value: JSON.stringify(snapshot),
+        updated_at: new Date(nowMs).toISOString(),
+      },
+      { onConflict: "key" }
+    )
+    .then(() => {}, () => {});
+}
+
+function persistFollowupSendCountsAsync(clientId: string, instanceName: string, nowMs = Date.now()): void {
+  if (!clientId || process.env.VITEST === "true" || process.env.NODE_ENV === "test") return;
+
+  const instSet = _coldQuotaClientInstances.get(clientId) || new Set<string>();
+  instSet.add(instanceName);
+  _coldQuotaClientInstances.set(clientId, instSet);
+
+  const pruneCutoff = Math.min(getStartOfBrtDayMs(nowMs), nowMs - 60 * 60 * 1000);
+  const snapshot: Record<string, number[]> = {};
+  for (const inst of instSet) {
+    const valid = (_followupSendTimestampsByInstance.get(inst) || []).filter((ts) => ts >= pruneCutoff);
+    if (valid.length > 0) snapshot[inst] = valid.slice(-140);
+  }
+
+  supabase
+    .from("app_settings")
+    .upsert(
+      {
+        key: `followup_sends_${clientId}`,
         value: JSON.stringify(snapshot),
         updated_at: new Date(nowMs).toISOString(),
       },
@@ -456,11 +697,48 @@ export function getColdSendCounts(
   nowMs = Date.now()
 ): { hourlyCount: number; dailyCount: number } {
   const oneHourAgo = nowMs - 60 * 60 * 1000;
-  const oneDayAgo = nowMs - 24 * 60 * 60 * 1000;
-  const list = (_coldSendTimestampsByInstance.get(instanceName) || []).filter((ts) => ts > oneDayAgo);
+  const startOfDayMs = getStartOfBrtDayMs(nowMs);
+  const pruneCutoff = Math.min(startOfDayMs, oneHourAgo);
+  const list = (_coldSendTimestampsByInstance.get(instanceName) || []).filter((ts) => ts >= pruneCutoff);
   _coldSendTimestampsByInstance.set(instanceName, list);
   const hourlyCount = list.filter((ts) => ts > oneHourAgo).length;
-  return { hourlyCount, dailyCount: list.length };
+  const dailyCount = list.filter((ts) => ts >= startOfDayMs).length;
+  return { hourlyCount, dailyCount };
+}
+
+export function getFollowupSendCounts(
+  instanceName: string,
+  nowMs = Date.now()
+): { hourlyCount: number; dailyCount: number } {
+  const oneHourAgo = nowMs - 60 * 60 * 1000;
+  const startOfDayMs = getStartOfBrtDayMs(nowMs);
+  const pruneCutoff = Math.min(startOfDayMs, oneHourAgo);
+  const list = (_followupSendTimestampsByInstance.get(instanceName) || []).filter((ts) => ts >= pruneCutoff);
+  _followupSendTimestampsByInstance.set(instanceName, list);
+  const hourlyCount = list.filter((ts) => ts > oneHourAgo).length;
+  const dailyCount = list.filter((ts) => ts >= startOfDayMs).length;
+  return { hourlyCount, dailyCount };
+}
+
+export function recordFollowupOutreachSend(
+  instanceName: string,
+  nowMs = Date.now(),
+  clientId?: string
+): { hourlyCount: number; dailyCount: number } {
+  const oneHourAgo = nowMs - 60 * 60 * 1000;
+  const startOfDayMs = getStartOfBrtDayMs(nowMs);
+  const pruneCutoff = Math.min(startOfDayMs, oneHourAgo);
+  const list = (_followupSendTimestampsByInstance.get(instanceName) || []).filter((ts) => ts >= pruneCutoff);
+  list.push(nowMs);
+  _followupSendTimestampsByInstance.set(instanceName, list);
+
+  if (clientId) {
+    persistFollowupSendCountsAsync(clientId, instanceName, nowMs);
+  }
+  return {
+    hourlyCount: list.filter((ts) => ts > oneHourAgo).length,
+    dailyCount: list.filter((ts) => ts >= startOfDayMs).length,
+  };
 }
 
 /**
@@ -536,8 +814,8 @@ export function recordColdOutreachSend(
   nowMs = Date.now(),
   clientId?: string
 ): ColdBatchState {
-  const oneDayAgo = nowMs - 24 * 60 * 60 * 1000;
-  const list = (_coldSendTimestampsByInstance.get(instanceName) || []).filter((ts) => ts > oneDayAgo);
+  const pruneCutoff = Math.min(getStartOfBrtDayMs(nowMs), nowMs - 60 * 60 * 1000);
+  const list = (_coldSendTimestampsByInstance.get(instanceName) || []).filter((ts) => ts >= pruneCutoff);
   list.push(nowMs);
   _coldSendTimestampsByInstance.set(instanceName, list);
 
@@ -849,11 +1127,12 @@ async function preflightCheck(campaignId: string): Promise<{ ok: boolean; error?
   if (isAutoPoolInstance(c.instance_name)) {
     const poolCheck = await resolveHealthyCampaignChip(c.client_id, c.instance_name, {
       bypassColdShield: !coldShieldEnabled,
+      dryRun: true,
     });
     if (!poolCheck.ok) {
       return {
         ok: false,
-        error: `Nenhum chip saudável/maduro disponível no Pool Automático (${poolCheck.reason || "sem chips prontos"}). Aguarde os chips passarem da Fase 1 ou saírem da quarentena.`,
+        error: `Nenhum chip saudável/maduro disponível no Pool Automático (${poolCheck.reason || "sem chips prontos"}). Aguarde os chips completarem 7 dias de aquecimento (Fase 2+) ou saírem da quarentena.`,
       };
     }
   } else {
@@ -1150,6 +1429,24 @@ export async function persistOutgoingMessage(opts: {
 }
 const _lastSelectedInstanceByCampaign = new Map<string, { instanceName: string; stageMinIntervalSec?: number; coldShieldEnabled?: boolean }>();
 
+/**
+ * Encerra preventivamente o turno ativo do MMZap Browser antes de disparar via Evolution,
+ * garantindo ZERO colisão simultânea (duplo-bot no mesmo número WhatsApp).
+ */
+async function stopActiveMmzapBeforeSend(clientId: string, instanceName: string): Promise<boolean> {
+  if (!clientId || !instanceName) return false;
+  try {
+    const mod = await import("@/lib/warmup/mmzap-browser-orchestrator");
+    if (typeof mod.stopMmzapSessionForChip === "function") {
+      const res = await mod.stopMmzapSessionForChip(clientId, instanceName, "campaign_active");
+      return Boolean(res?.stopped);
+    }
+  } catch {
+    /* fail-open se worker/orquestrador MMZap não estiver habilitado */
+  }
+  return false;
+}
+
 export async function resolveHealthyCampaignChip(
   clientId: string,
   primaryInstanceName: string,
@@ -1158,8 +1455,12 @@ export async function resolveHealthyCampaignChip(
     preferredInstanceName?: string | null;
     nowMs?: number;
     hourlyFactor?: number;
+    /** Tipo de envio: "cold" (prospecção fria) ou "followup" (cota dedicada dentro do teto combinado). */
+    mode?: "cold" | "followup";
     /** Desliga a Proteção Anti-Ban (cotas, berçário, saúde, quarentena e freio de vácuo) só para este envio. */
     bypassColdShield?: boolean;
+    /** Somente consulta elegibilidade sem executar handover de parada do MMZap. */
+    dryRun?: boolean;
   } = Date.now()
 ): Promise<{
   ok: boolean;
@@ -1167,6 +1468,8 @@ export async function resolveHealthyCampaignChip(
   rotated: boolean;
   policy: ColdOutreachPolicy | null;
   reason?: string;
+  mmzapBrowserStatus?: string | null;
+  mmzapHandoverStopped?: boolean;
 }> {
   const nowMs =
     typeof nowMsOrOpts === "number" ? nowMsOrOpts : nowMsOrOpts?.nowMs ?? Date.now();
@@ -1178,8 +1481,12 @@ export async function resolveHealthyCampaignChip(
     typeof nowMsOrOpts === "object" && typeof nowMsOrOpts?.hourlyFactor === "number"
       ? Math.max(0, Math.min(1, nowMsOrOpts.hourlyFactor))
       : 1;
+  const outreachMode: "cold" | "followup" =
+    typeof nowMsOrOpts === "object" && nowMsOrOpts?.mode === "followup" ? "followup" : "cold";
   const bypassColdShield =
     typeof nowMsOrOpts === "object" ? Boolean(nowMsOrOpts?.bypassColdShield) : false;
+  const dryRun =
+    typeof nowMsOrOpts === "object" ? Boolean(nowMsOrOpts?.dryRun) : false;
   const targetDdd = extractBrazilDdd(targetRemoteJid);
 
   try {
@@ -1190,7 +1497,7 @@ export async function resolveHealthyCampaignChip(
 
     let { data: warmupRows, error } = await supabase
       .from("whatsapp_warmup_configs")
-      .select("instance_name, phone_number, enabled, stage, days_active, health_score, is_quarantined, quarantine_until, purpose, sent_today, career_mode, cold_outreach_locked_until")
+      .select("instance_name, phone_number, enabled, stage, days_active, health_score, is_quarantined, quarantine_until, purpose, sent_today, career_mode, cold_outreach_locked_until, mmzap_browser_status")
       .eq("client_id", clientId);
 
     if (
@@ -1247,20 +1554,34 @@ export async function resolveHealthyCampaignChip(
         new Date(String(row.quarantine_until)).getTime() > nowMs;
       const zeroReplyUntil = _zeroReplyBrakeUntil.get(inst) || 0;
       const normalizedStage = Math.max(1, Math.min(4, Math.floor(Number(row.stage || 1))));
+      const parsedDaysActive =
+        row.days_active !== undefined && row.days_active !== null && Number.isFinite(Number(row.days_active))
+          ? Number(row.days_active)
+          : undefined;
+      const replyTelemetry = getRecentReplyRateForInstance(inst, nowMs);
       const policy = getColdOutreachPolicyForStage(normalizedStage, Number(row.health_score ?? 100), {
-        daysActive: row.days_active !== undefined ? Number(row.days_active) : undefined,
+        daysActive: parsedDaysActive,
         careerMode: row.career_mode ?? null,
         coldOutreachLockedUntil: row.cold_outreach_locked_until ?? null,
+        recentReplyRate: replyTelemetry && replyTelemetry.sampleSize >= 8 ? replyTelemetry.rate : null,
         nowMs,
       });
-      const { hourlyCount, dailyCount } = getColdSendCounts(inst, nowMs);
+      const coldCounts = getColdSendCounts(inst, nowMs);
+      const followupCounts = getFollowupSendCounts(inst, nowMs);
+      const hourlyCount = outreachMode === "followup" ? followupCounts.hourlyCount : coldCounts.hourlyCount;
+      const dailyCount = outreachMode === "followup" ? followupCounts.dailyCount : coldCounts.dailyCount;
+      const combinedHourlyCount = coldCounts.hourlyCount + followupCounts.hourlyCount;
       const warmupSentToday = Math.max(0, Number(row.sent_today || 0));
-      const combinedCeiling = STAGE_COMBINED_DAILY_CAP[normalizedStage] ?? 90;
-      const effectiveDailyCap = Math.min(policy.dailyColdCap, Math.max(0, combinedCeiling - warmupSentToday));
+      const baseCombinedCeiling = STAGE_COMBINED_DAILY_CAP[normalizedStage] ?? 115;
+      const combinedCeiling = policy.veteranTier ? Math.max(baseCombinedCeiling, 120) : baseCombinedCeiling;
+      const otherModeDailyUsed = outreachMode === "followup" ? coldCounts.dailyCount : followupCounts.dailyCount;
+      const modeDailyCap = outreachMode === "followup" ? policy.dailyFollowupCap : policy.dailyColdCap;
+      const modeHourlyCap = outreachMode === "followup" ? policy.hourlyFollowupCap : policy.hourlyColdCap;
+      const effectiveDailyCap = Math.min(modeDailyCap, Math.max(0, combinedCeiling - warmupSentToday - otherModeDailyUsed));
       const effectiveHourlyCap =
         hourlyFactor < 1 && policy.allowed
-          ? Math.max(1, Math.floor(policy.hourlyColdCap * hourlyFactor))
-          : policy.hourlyColdCap;
+          ? Math.max(1, Math.floor(modeHourlyCap * hourlyFactor))
+          : modeHourlyCap;
       const ddd = extractBrazilDdd(row.phone_number || connPhoneByInstance.get(inst) || null);
 
       if (bypassColdShield) {
@@ -1277,14 +1598,19 @@ export async function resolveHealthyCampaignChip(
       if (!policy.allowed) {
         return { eligible: false, policy, hourlyCount, dailyCount, ddd, reason: policy.reason || "policy_blocked" };
       }
-      if (hourlyCount >= effectiveHourlyCap) {
+      if (hourlyCount >= effectiveHourlyCap || combinedHourlyCount >= MAX_COMBINED_HOURLY_PER_CHIP) {
         return {
           eligible: false,
           policy,
           hourlyCount,
           dailyCount,
           ddd,
-          reason: hourlyFactor < 1 ? "weekend_hourly_cap" : "hourly_cold_cap",
+          reason:
+            hourlyFactor < 1
+              ? "weekend_hourly_cap"
+              : outreachMode === "followup"
+                ? "hourly_followup_cap"
+                : "hourly_cold_cap",
         };
       }
       if (dailyCount >= effectiveDailyCap) {
@@ -1294,7 +1620,12 @@ export async function resolveHealthyCampaignChip(
           hourlyCount,
           dailyCount,
           ddd,
-          reason: warmupSentToday > 0 && effectiveDailyCap < policy.dailyColdCap ? "combined_daily_cap" : "daily_cold_cap",
+          reason:
+            (warmupSentToday > 0 || otherModeDailyUsed > 0) && effectiveDailyCap < modeDailyCap
+              ? "combined_daily_cap"
+              : outreachMode === "followup"
+                ? "daily_followup_cap"
+                : "daily_cold_cap",
         };
       }
       return { eligible: true, policy, hourlyCount, dailyCount, ddd };
@@ -1303,6 +1634,9 @@ export async function resolveHealthyCampaignChip(
     const scoreChipCandidate = (row: any, ev: ReturnType<typeof isChipEligible>, isPrimary: boolean): number => {
       let score = Number(row.health_score ?? 100);
       score -= ev.hourlyCount * 22;
+      if (String(row.mmzap_browser_status || "").toLowerCase() === "running") {
+        score -= 25; // Prefere chip livre para não interromper turno ativo do MMZap sem necessidade
+      }
       if (preferredInstanceName && row.instance_name === preferredInstanceName) {
         score += 150; // Sticky Sender: prioriza o mesmo chip que já iniciou conversa com o lead
       }
@@ -1329,11 +1663,18 @@ export async function resolveHealthyCampaignChip(
 
       const primaryEval = isChipEligible(primaryRow);
       if (primaryEval.eligible) {
+        const mmzapStatus = String((primaryRow as any).mmzap_browser_status || "").toLowerCase() || null;
+        let mmzapHandoverStopped = false;
+        if (!dryRun && mmzapStatus === "running") {
+          mmzapHandoverStopped = await stopActiveMmzapBeforeSend(clientId, primaryInstanceName);
+        }
         return {
           ok: true,
           instanceName: primaryInstanceName,
           rotated: false,
           policy: primaryEval.policy,
+          mmzapBrowserStatus: mmzapStatus,
+          ...(mmzapHandoverStopped ? { mmzapHandoverStopped: true } : {}),
         };
       }
 
@@ -1364,6 +1705,12 @@ export async function resolveHealthyCampaignChip(
 
     if (poolCandidates.length > 0) {
       const chosen = poolCandidates[0];
+      const chosenName = String(chosen.row.instance_name);
+      const mmzapStatus = String((chosen.row as any).mmzap_browser_status || "").toLowerCase() || null;
+      let mmzapHandoverStopped = false;
+      if (!dryRun && mmzapStatus === "running") {
+        mmzapHandoverStopped = await stopActiveMmzapBeforeSend(clientId, chosenName);
+      }
       const reason =
         preferredInstanceName && chosen.row.instance_name === preferredInstanceName
           ? "sticky_sender"
@@ -1372,10 +1719,12 @@ export async function resolveHealthyCampaignChip(
             : "auto_pool";
       return {
         ok: true,
-        instanceName: String(chosen.row.instance_name),
+        instanceName: chosenName,
         rotated: true,
         policy: chosen.eval.policy,
         reason,
+        mmzapBrowserStatus: mmzapStatus,
+        ...(mmzapHandoverStopped ? { mmzapHandoverStopped: true } : {}),
       };
     }
 
@@ -1595,7 +1944,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     return "out_of_hours";
   }
 
-  let weekendGuardMode: WeekendB2BGuardMode = Boolean((c as any).weekend_guard);
+  let weekendGuardMode: WeekendB2BGuardMode = parseWeekendB2BGuardMode((c as any).weekend_guard);
   if (!weekendGuardMode && (c as any).automation_id) {
     try {
       const { data: autoRow } = await supabase
@@ -1603,8 +1952,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
         .select("scrape_filters")
         .eq("id", (c as any).automation_id)
         .maybeSingle();
-      const rawWg = autoRow?.scrape_filters?.weekend_guard;
-      weekendGuardMode = rawWg === "sunday_only" ? "sunday_only" : Boolean(rawWg);
+      weekendGuardMode = parseWeekendB2BGuardMode(autoRow?.scrape_filters?.weekend_guard);
     } catch {}
   }
   if (!weekendGuardMode) {
@@ -1614,11 +1962,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
         .select("value")
         .eq("key", `campaign_weekend_guard:${c.id}`)
         .maybeSingle();
-      if (wgCfg?.value === "sunday_only") {
-        weekendGuardMode = "sunday_only";
-      } else {
-        weekendGuardMode = wgCfg?.value === "true" || wgCfg?.value === "1";
-      }
+      weekendGuardMode = parseWeekendB2BGuardMode(wgCfg?.value);
     } catch {}
   }
   const weekendGuard = evaluateWeekendB2BGuard(weekendGuardMode);
@@ -1717,8 +2061,8 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
   });
   if (!chipResolution.ok) {
     const restMsg =
-      chipResolution.reason === "nursery_stage_1"
-        ? `🍼 Proteção Berçário Anti-Ban: o chip "${c.instance_name}" ainda está na Fase 1 (dias 1–3) e não pode iniciar prospecção fria ainda. Aguardando amadurecer ou outro chip disponível.`
+      chipResolution.reason === "nursery_stage_1" || chipResolution.reason === "insufficient_active_days"
+        ? `🍼 Proteção Berçário Anti-Ban: o chip "${c.instance_name}" ainda está em maturação inicial (dias 1–6 / Fase 1 — mínimo 7 dias antes de prospecção fria). Aguardando amadurecer ou outro chip disponível.`
         : `🛡️ Proteção Anti-Ban: chip(s) atingiram o teto seguro de prospecção fria da hora/estágio (${chipResolution.reason || "cold_cap"}). Descansando 15 min antes de retomar automaticamente.`;
     console.log(`[CAMPAIGN ${c.name}] ${restMsg}`);
     await addCampaignLog(campaignId, restMsg, "warning");
@@ -1731,6 +2075,14 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     stageMinIntervalSec: coldShieldEnabled ? chipResolution.policy?.minSafeIntervalSec : undefined,
     coldShieldEnabled,
   });
+
+  if (chipResolution.mmzapHandoverStopped) {
+    await addCampaignLog(
+      campaignId,
+      `⏸️ Handover MMZap: turno de aquecimento pausado no chip "${effectiveInstanceName}" antes do disparo para evitar duplo-bot simultâneo.`,
+      "info"
+    );
+  }
 
   if (chipResolution.rotated && effectiveInstanceName !== c.instance_name) {
     const rotLabel =
@@ -1987,6 +2339,9 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
       template: c.message_template,
       renderedText: text,
       companyName: effectiveCompanyName,
+      rating: renderCtx.avaliacao ?? renderCtx.nota ?? null,
+      reviews: renderCtx.reviews ?? renderCtx.avaliacoes ?? null,
+      ramo: renderCtx.ramo_negocio || renderCtx.categoria || null,
       now: new Date(),
       scopeKey: c.id,
     });
@@ -2075,6 +2430,9 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     template: c.message_template,
     candidateText: text,
     companyName: effectiveCompanyName,
+    rating: renderCtx.avaliacao ?? renderCtx.nota ?? null,
+    reviews: renderCtx.reviews ?? renderCtx.avaliacoes ?? null,
+    ramo: renderCtx.ramo_negocio || renderCtx.categoria || null,
     now: new Date(),
     scopeKey: c.id,
   });
@@ -2183,6 +2541,12 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     if (c.media_url && c.media_type) {
       try {
         await new Promise((r) => setTimeout(r, 1500)); // gap natural entre texto e mídia
+        if (typeof registerPendingAutomatedMedia === "function") {
+          registerPendingAutomatedMedia(effectiveInstanceName, sendJid);
+        }
+        if (c.media_caption) {
+          registerPendingAutomatedSend(effectiveInstanceName, sendJid, c.media_caption);
+        }
         const mediaResult = await channel.sendMedia(
           sendJid,
           c.media_caption || "",
@@ -2199,6 +2563,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
           throw new Error(mediaResult?.error || "Provider recusou o envio da mídia");
         }
         const mediaMsgId = (mediaResult as any)?.messageId || (mediaResult as any)?.key?.id || `media-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        registerAiSend(mediaMsgId);
         await addCampaignLog(campaignId, `📎 Mídia enviada → ${target.nome_negocio || target.remote_jid}`, "info");
         try {
           await persistOutgoingMessage({
@@ -2242,8 +2607,14 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     // ───────── CONTABILIZAÇÃO ANTI-BAN & PULSO SIMBIÓTICO + FREIO DE VÁCUO SILENCIOSO ─────────
     const batchState = recordColdOutreachSend(effectiveInstanceName, Date.now(), clientId);
     const brakeRes = coldShieldEnabled
-      ? await checkZeroReplyBrakeForInstance(clientId, effectiveInstanceName, sendJid)
-      : { brakeTriggered: false, checkedCount: 0 };
+      ? await checkZeroReplyBrakeForInstance(
+          clientId,
+          effectiveInstanceName,
+          sendJid,
+          Date.now(),
+          chipResolution.policy?.zeroReplyThreshold
+        )
+      : { brakeTriggered: false, checkedCount: 0, threshold: ZERO_REPLY_BATCH_THRESHOLD, replyRate: null };
     if (brakeRes.brakeTriggered) {
       await addCampaignLog(
         campaignId,
@@ -2531,30 +2902,131 @@ async function loop(campaignId: string) {
 }
 
 /**
- * Pré-valida um lote de números pendentes de uma campanha com antecedência,
- * armazenando o JID canônico em cache para que o momento do envio não precise
- * disparar `USyncQuery (onWhatsApp)` milissegundos antes de `sendMessage`.
+ * Jitter humanizado (1.5s a 3.5s) entre consultas `onWhatsApp` (`USyncQuery`) na pré-validação,
+ * evitando rajadas sincronizadas que levantam flag anti-automação na Meta.
+ */
+export function calculatePreValidateJitterMs(): number {
+  return 1500 + Math.floor(Math.random() * 2001);
+}
+
+/**
+ * Em modo Pool Automático (`__auto_pool__`), escolhe preferencialmente um chip standby/contingência
+ * saudável (com menor carga fria e diferente do disparador principal ativo) para executar
+ * `USyncQuery (onWhatsApp)`, evitando picos de consultas no chip que está disparando agora.
+ */
+export async function resolvePreValidationChip(
+  clientId: string,
+  campaignInstanceName: string,
+  campaignId?: string,
+  nowMs = Date.now()
+): Promise<string | null> {
+  if (!isAutoPoolInstance(campaignInstanceName)) {
+    return campaignInstanceName || null;
+  }
+
+  try {
+    let { data: warmupRows, error } = await supabase
+      .from("whatsapp_warmup_configs")
+      .select("instance_name, enabled, stage, health_score, is_quarantined, quarantine_until, purpose, career_mode, mmzap_browser_status")
+      .eq("client_id", clientId);
+
+    if (
+      error &&
+      (String(error.code || "") === "42703" ||
+        String(error.code || "") === "PGRST204" ||
+        /column/i.test(String(error.message || "")))
+    ) {
+      const legacy = await supabase
+        .from("whatsapp_warmup_configs")
+        .select("instance_name, enabled, stage, health_score, is_quarantined, quarantine_until, purpose")
+        .eq("client_id", clientId);
+      warmupRows = legacy.data as typeof warmupRows;
+      error = legacy.error;
+    }
+
+    const { data: connRows } = await supabase
+      .from("channel_connections")
+      .select("instance_name, status")
+      .eq("client_id", clientId);
+
+    const openSet = new Set<string>();
+    for (const r of connRows || []) {
+      const inst = String((r as any)?.instance_name || "");
+      const st = String((r as any)?.status || "").toLowerCase();
+      if (inst && (st === "open" || st === "connected" || st === "online")) {
+        openSet.add(inst);
+      }
+    }
+
+    if (!error && Array.isArray(warmupRows) && warmupRows.length > 0) {
+      const activeSender = campaignId ? _lastSelectedInstanceByCampaign.get(campaignId)?.instanceName || null : null;
+      const scored = warmupRows
+        .filter((r: any) => {
+          const inst = String(r?.instance_name || "");
+          if (!inst) return false;
+          if (openSet.size > 0 && !openSet.has(inst)) return false;
+          const quarantined =
+            Boolean(r.is_quarantined) &&
+            Boolean(r.quarantine_until) &&
+            new Date(String(r.quarantine_until)).getTime() > nowMs;
+          if (quarantined) return false;
+          if (r.career_mode === "rehab") return false;
+          if (Number(r.health_score ?? 100) < 50) return false;
+          return true;
+        })
+        .map((r: any) => {
+          const inst = String(r.instance_name);
+          const counts = getColdSendCounts(inst, nowMs);
+          const purpose = String(r.purpose || "").toLowerCase();
+          const isStandby = purpose === "contingency" || purpose === "standby" || purpose === "inbound" || purpose === "backup";
+          const isActiveColdSender = (activeSender && inst === activeSender) || counts.hourlyCount > 0;
+          let score = Number(r.health_score ?? 100);
+          if (isStandby) score += 120;
+          if (!isActiveColdSender) score += 100;
+          if (activeSender && inst === activeSender) score -= 180;
+          score -= counts.dailyCount * 4;
+          score -= counts.hourlyCount * 25;
+          if (Number(r.stage || 1) <= 1) score -= 60;
+          if (String(r.mmzap_browser_status || "").toLowerCase() === "running") score -= 35;
+          return { inst, score };
+        })
+        .sort((a, b) => b.score - a.score);
+
+      if (scored.length > 0) {
+        return scored[0].inst;
+      }
+    }
+  } catch {
+    /* fallback seguro para resolveHealthyCampaignChip */
+  }
+
+  const poolChoice = await resolveHealthyCampaignChip(clientId, campaignInstanceName, { dryRun: true, nowMs });
+  return poolChoice.ok && poolChoice.instanceName ? poolChoice.instanceName : null;
+}
+
+/**
+ * Pré-valida um lote reduzido (padrão 6) de números pendentes de uma campanha com antecedência
+ * e jitter humanizado (1.5s–3.5s), armazenando o JID canônico em cache para desacoplar
+ * `USyncQuery (onWhatsApp)` do momento do `sendMessage`.
+ * Em `__auto_pool__`, prioriza chip standby/contingência em vez do disparador frio ativo.
  */
 export async function preValidateCampaignNumbers(
   campaignId: string,
-  maxBatch = 15
-): Promise<{ checked: number; skippedInvalid: number }> {
+  maxBatch = 6
+): Promise<{ checked: number; skippedInvalid: number; instanceUsed?: string | null }> {
   let checked = 0;
   let skippedInvalid = 0;
+  let checkInstance: string | null = null;
   try {
     const { data: c } = await supabase
       .from("campaigns")
       .select("id, client_id, instance_name, status, skipped_count")
       .eq("id", campaignId)
       .maybeSingle();
-    if (!c || c.status !== "running") return { checked: 0, skippedInvalid: 0 };
+    if (!c || c.status !== "running") return { checked: 0, skippedInvalid: 0, instanceUsed: null };
 
-    let checkInstance = c.instance_name;
-    if (isAutoPoolInstance(checkInstance)) {
-      const poolChoice = await resolveHealthyCampaignChip(c.client_id, checkInstance);
-      if (!poolChoice.ok || !poolChoice.instanceName) return { checked: 0, skippedInvalid: 0 };
-      checkInstance = poolChoice.instanceName;
-    }
+    checkInstance = await resolvePreValidationChip(c.client_id, c.instance_name, campaignId);
+    if (!checkInstance) return { checked: 0, skippedInvalid: 0, instanceUsed: null };
 
     const { data: targets } = await supabase
       .from("campaign_targets")
@@ -2566,15 +3038,20 @@ export async function preValidateCampaignNumbers(
       .limit(maxBatch);
 
     if (!Array.isArray(targets) || targets.length === 0) {
-      return { checked: 0, skippedInvalid: 0 };
+      return { checked: 0, skippedInvalid: 0, instanceUsed: checkInstance };
     }
 
-    for (const t of targets) {
+    for (let idx = 0; idx < targets.length; idx++) {
+      const t = targets[idx];
       const rjid = String((t as any).remote_jid || "");
       if (!rjid || rjid.includes("@g.us") || rjid.includes("@lid")) continue;
       const phone = rjid.replace(/@.*$/, "").replace(/\D/g, "");
       if (!phone) continue;
       if (getCachedCanonicalJid(checkInstance, phone)) continue;
+
+      if (checked > 0 && process.env.VITEST !== "true" && process.env.NODE_ENV !== "test") {
+        await new Promise((r) => setTimeout(r, calculatePreValidateJitterMs()));
+      }
 
       try {
         const res = await channel.checkWhatsAppNumbersDetailed([phone], checkInstance);
@@ -2600,16 +3077,32 @@ export async function preValidateCampaignNumbers(
               .from("campaign_targets")
               .update({ remote_jid: entry.jid })
               .eq("id", (t as any).id);
+            try {
+              const { error: leadJidErr } = await supabase
+                .from("leads_extraidos")
+                .update({ remoteJid: entry.jid })
+                .eq("remoteJid", rjid)
+                .eq("client_id", c.client_id);
+              if (leadJidErr && (leadJidErr.code === "23505" || String(leadJidErr.message || "").includes("unique"))) {
+                // JID canônico já existe em leads_extraidos — evita duplicidade sem falhar a pré-validação
+              }
+            } catch {}
           }
         }
       } catch {}
+    }
 
-      if (process.env.VITEST !== "true" && process.env.NODE_ENV !== "test") {
-        await new Promise((r) => setTimeout(r, 1200 + Math.floor(Math.random() * 1300)));
-      }
+    if (skippedInvalid > 0) {
+      await supabase
+        .from("campaigns")
+        .update({
+          skipped_count: (Number((c as any).skipped_count) || 0) + skippedInvalid,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", campaignId);
     }
   } catch {}
-  return { checked, skippedInvalid };
+  return { checked, skippedInvalid, instanceUsed: checkInstance };
 }
 
 export async function startCampaign(campaignId: string): Promise<{ ok: boolean; error?: string }> {
@@ -2683,17 +3176,22 @@ export async function recoverRunningCampaigns(): Promise<number> {
     if (stuckErr) throw stuckErr;
 
     const stuckCampaignIds = [...new Set((stuck || []).map((r: any) => r.campaign_id).filter(Boolean))];
+    let pausedByRecovery = 0;
     for (const stuckCampaignId of stuckCampaignIds) {
       const msg = "Recuperação encontrou target(s) em 'processing'. Para evitar reenvio duplicado após crash, a campanha foi pausada; revise o envio no WhatsApp e retome manualmente.";
-      await supabase
+      const { data: pausedRows } = await supabase
         .from("campaigns")
         .update({ status: "paused", last_error: msg, last_error_at: new Date().toISOString(), updated_at: new Date().toISOString() })
         .eq("id", stuckCampaignId)
-        .eq("status", "running");
-      await addCampaignLog(stuckCampaignId, msg, "error");
+        .eq("status", "running")
+        .select("id");
+      if (Array.isArray(pausedRows) && pausedRows.length > 0) {
+        pausedByRecovery++;
+        await addCampaignLog(stuckCampaignId, msg, "error");
+      }
     }
-    if (stuckCampaignIds.length > 0) {
-      console.warn(`[CAMPAIGN RECOVER] ${stuckCampaignIds.length} campanha(s) pausada(s) por processing ambíguo.`);
+    if (pausedByRecovery > 0) {
+      console.warn(`[CAMPAIGN RECOVER] ${pausedByRecovery} campanha(s) pausada(s) por processing ambíguo.`);
     }
   } catch (e) {
     console.error("[CAMPAIGN RECOVER] falha ao auditar processing — retries manuais necessários:", (e as Error).message);
@@ -2861,6 +3359,9 @@ export async function preGenerateCampaignMessages(campaignId: string): Promise<{
         template: c.message_template,
         renderedText: baseText,
         companyName: effectiveCompanyName,
+        rating: renderCtx.avaliacao ?? renderCtx.nota ?? null,
+        reviews: renderCtx.reviews ?? renderCtx.avaliacoes ?? null,
+        ramo: renderCtx.ramo_negocio || renderCtx.categoria || null,
         now: windowRefDate,
         scopeKey: c.id,
       });
@@ -2902,6 +3403,9 @@ export async function preGenerateCampaignMessages(campaignId: string): Promise<{
       template: c.message_template,
       candidateText: text,
       companyName: leadFull?.nome_negocio || target.nome_negocio,
+      rating: renderCtx.avaliacao ?? renderCtx.nota ?? null,
+      reviews: renderCtx.reviews ?? renderCtx.avaliacoes ?? null,
+      ramo: renderCtx.ramo_negocio || renderCtx.categoria || null,
       now: windowRefDate,
       scopeKey: c.id,
     });
@@ -2983,6 +3487,7 @@ async function personalizeWithAI(opts: {
   }
 
   // Se a campanha tem um prompt custom salvo, usa ele. Senão usa o padrão.
+  const isPraiseOpener = isPersonalizedPraiseOpenerTemplate(opts.baseMessage);
   const isHandshake = isShortIcebreakerTemplate(opts.baseMessage);
   const customInstructions = opts.customPrompt?.trim();
   const sys = customInstructions
@@ -3000,6 +3505,24 @@ ${opts.baseMessage}
 ${opts.useWebSearch ? "Ferramenta web_search disponível: use no máximo 1x pra pegar UM detalhe relevante da empresa." : ""}
 
 Devolva APENAS a mensagem final, em PT-BR, sem aspas, sem explicação.`
+    : isPraiseOpener
+    ? `Você é uma pessoa real iniciando um primeiro contato de alta conversão via WhatsApp (Elogio Personalizado + Pergunta Fácil de 1 Palavra).
+
+DADOS DO LEAD:
+- Empresa: ${opts.nomeEmpresa || "(não informada)"}
+- Ramo: ${opts.ramo || "(não informado)"}
+
+MENSAGEM-BASE:
+"""
+${opts.baseMessage}
+"""
+
+REGRAS OBRIGATÓRIAS:
+- Máximo 2 linhas curtas em PT-BR, variando a formulação de forma natural.
+- Linha 1: saudação + elogio sincero à empresa/avaliação no Google (sem inventar notas).
+- Linha 2: pergunta fácil de responder em 1 palavra sobre se usam site próprio ou mais Instagram e WhatsApp.
+- PROIBIDO fazer pitch de vendas, falar de serviços/preços, colocar links ou fazer críticas ao negócio.
+- Devolva APENAS a mensagem final, sem aspas e sem explicação.`
     : isHandshake
     ? `Você é uma pessoa real iniciando um primeiro contato rápido via WhatsApp para confirmar se está falando com a empresa certa (abordagem Two-Step Handshake anti-ban).
 
@@ -3160,6 +3683,9 @@ export async function previewCampaignMessageGeneration(opts: {
       template: opts.messageTemplate,
       renderedText: text,
       companyName: effectiveCompanyName || rawCompanyName,
+      rating: renderCtx.avaliacao ?? renderCtx.nota ?? null,
+      reviews: renderCtx.reviews ?? renderCtx.avaliacoes ?? null,
+      ramo: ramoNegocio || null,
       now,
       scopeKey: "dryrun-preview",
     });
@@ -3200,6 +3726,9 @@ export async function previewCampaignMessageGeneration(opts: {
     template: opts.messageTemplate,
     candidateText: text,
     companyName: effectiveCompanyName || rawCompanyName,
+    rating: renderCtx.avaliacao ?? renderCtx.nota ?? null,
+    reviews: renderCtx.reviews ?? renderCtx.avaliacoes ?? null,
+    ramo: ramoNegocio || null,
     now,
     scopeKey: "dryrun-preview",
   });

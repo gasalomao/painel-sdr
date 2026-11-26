@@ -13,6 +13,20 @@ export function formatInstanceLabel(name?: string | null): string {
 
 export type WeekendB2BGuardMode = boolean | "full" | "sunday_only";
 
+export const DEFAULT_B2B_WEEKEND_GUARD_MODE: WeekendB2BGuardMode = "sunday_only";
+
+/**
+ * Normaliza valores vindos do banco/app_settings/API para `WeekendB2BGuardMode`,
+ * preservando `"sunday_only"` (sábado 100%, domingo pausado — janela pico B2B local).
+ */
+export function parseWeekendB2BGuardMode(raw: unknown): WeekendB2BGuardMode {
+  if (raw === "sunday_only") return "sunday_only";
+  if (raw === "full" || raw === true || raw === "true" || raw === "1" || raw === 1) {
+    return "full";
+  }
+  return false;
+}
+
 export type WeekendB2BGuardResult = {
   allowed: boolean;
   hourlyFactor: number;
@@ -21,9 +35,41 @@ export type WeekendB2BGuardResult = {
 };
 
 /**
+ * Identifica se o horário atual em Brasília corresponde às janelas de maior taxa
+ * de resposta de donos de negócios locais B2B (sábado comercial e dias úteis 18h–20h).
+ */
+export function isB2BPeakReplyWindow(now: Date = new Date()): {
+  isPeak: boolean;
+  weekday: string;
+  hourBrt: number;
+  windowLabel: string;
+} {
+  const weekday = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Sao_Paulo",
+    weekday: "short",
+  }).format(now);
+  const hourBrt =
+    Number(
+      new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/Sao_Paulo",
+        hour: "2-digit",
+        hour12: false,
+      }).format(now)
+    ) % 24;
+
+  if (weekday === "Sat" && hourBrt >= 9 && hourBrt < 20) {
+    return { isPeak: true, weekday, hourBrt, windowLabel: "saturday_owner_window" };
+  }
+  if (weekday !== "Sun" && weekday !== "Sat" && hourBrt >= 18 && hourBrt < 21) {
+    return { isPeak: true, weekday, hourBrt, windowLabel: "evening_b2b_peak" };
+  }
+  return { isPeak: false, weekday, hourBrt, windowLabel: "standard" };
+}
+
+/**
  * Modo Comercial B2B (opt-in por campanha/follow-up):
  * - Domingo: pausa disparos frios automaticamente (alta taxa de denúncia B2B).
- * - Sábado: `true`/`"full"` reduz pela metade (`hourlyFactor = 0.5`), `"sunday_only"` libera 100% (`hourlyFactor = 1`).
+ * - Sábado: `true`/`"full"` reduz pela metade (`hourlyFactor = 0.5`), `"sunday_only"` libera 100% (`hourlyFactor = 1`, janela pico de resposta B2B).
  * - Seg–Sex (ou quando desabilitado): operação normal (hourlyFactor = 1).
  */
 export function evaluateWeekendB2BGuard(

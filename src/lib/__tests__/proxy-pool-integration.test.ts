@@ -10,6 +10,9 @@ const mocks = vi.hoisted(() => ({
   evoRemoveProxy: vi.fn(),
   evoFindProxy: vi.fn(),
   evoEnsureConfigured: vi.fn(),
+  evoSetWebhook: vi.fn(),
+  evoLogout: vi.fn(),
+  evoDeleteInstance: vi.fn(),
   evoStatus: vi.fn(),
   goSetProxy: vi.fn(),
   goRemoveProxy: vi.fn(),
@@ -32,6 +35,9 @@ vi.mock("@/lib/evolution", () => ({
     removeProxy: mocks.evoRemoveProxy,
     findProxy: mocks.evoFindProxy,
     ensureInstanceConfigured: mocks.evoEnsureConfigured,
+    setWebhook: mocks.evoSetWebhook,
+    logout: mocks.evoLogout,
+    deleteInstance: mocks.evoDeleteInstance,
     getStatus: mocks.evoStatus,
     fetchProfilePicture: vi.fn().mockResolvedValue("https://pic.test/avatar.jpg"),
   },
@@ -221,6 +227,8 @@ import {
   parseWebshareProxyText,
   importProxyPoolBatch,
   ensureProxyForInstance,
+  fallbackInstanceToVps,
+  getProxyPoolOverviewCache,
   recordInstanceProxyStrike,
   retireInstanceProxyAsUsed,
   invalidateProxyPoolCache,
@@ -250,6 +258,9 @@ describe("Proxy Pool BR + Lista Negra + Fail-Open VPS", () => {
     mocks.evoRemoveProxy.mockReset().mockResolvedValue({ ok: true });
     mocks.evoFindProxy.mockReset().mockResolvedValue({ enabled: false });
     mocks.evoEnsureConfigured.mockReset().mockResolvedValue({ qrcode: { base64: "data:image/png;base64,QR" } });
+    mocks.evoSetWebhook.mockReset().mockResolvedValue({ ok: true });
+    mocks.evoLogout.mockReset().mockResolvedValue({ ok: true });
+    mocks.evoDeleteInstance.mockReset().mockResolvedValue({ ok: true });
     mocks.evoStatus.mockReset().mockResolvedValue({ state: "close", data: null });
     mocks.goSetProxy.mockReset().mockResolvedValue({ ok: true });
     mocks.goRemoveProxy.mockReset().mockResolvedValue({ ok: true });
@@ -450,35 +461,121 @@ describe("Proxy Pool BR + Lista Negra + Fail-Open VPS", () => {
     expect(snap.stats.assigned).toBe(1);
   });
 
-  it("calibra Auditoria Dia-0 e saúde de cluster para proxies BR do pool oficial sem falsos alertas", async () => {
-    mocks.proxyRows.push({
-      id: "p-br",
-      host: "198.51.100.77",
-      port: 6000,
-      protocol: "http",
-      status: "assigned",
-      assigned_instance: "chip-br-1",
-      country_code: "BR",
-    });
+  it("classifica Geo/ASN honestamente: alerta datacenter/estrangeiro e reporta vpsSharedCount no fallback VPS", async () => {
+    // 1. Proxies Webshare não verificados/datacenter NÃO entram cegamente em brHosts
+    mocks.proxyRows.push(
+      {
+        id: "p-dc",
+        host: "198.51.100.77",
+        port: 6000,
+        protocol: "http",
+        status: "assigned",
+        assigned_instance: "chip-dc-1",
+        country_code: "BR",
+        provider_label: "webshare",
+      },
+      {
+        id: "p-res",
+        host: "198.51.100.78",
+        port: 6001,
+        protocol: "http",
+        status: "available",
+        country_code: "BR",
+        provider_label: "webshare:br_residential",
+      }
+    );
     invalidateProxyPoolCache();
 
-    mocks.evoFindProxy.mockResolvedValueOnce({ enabled: true, host: "198.51.100.77", port: "6000" });
-    mocks.warmupRows.push({ client_id: "t1", instance_name: "chip-br-1", phone_number: "5511999998888" });
+    const overview = await getProxyPoolOverviewCache();
+    expect(overview.brHosts.has("198.51.100.77")).toBe(false);
+    expect(overview.brHosts.has("198.51.100.78")).toBe(true);
+    expect(overview.availableCount).toBe(1);
 
-    const day0 = await auditChipDay0Hygiene("t1", "chip-br-1", { forceInTests: true });
-    expect(day0.ok).toBe(true);
-    expect(day0.warnings).toEqual([]);
-
-    const clusterHealth = analyzeChipClusterHealth({
+    // Proxy BR residencial limpo passa na saúde de cluster sem alertas falsos
+    const cleanCluster = analyzeChipClusterHealth({
       clientId: "t1",
-      instanceName: "chip-br-1",
-      config: { client_id: "t1", instance_name: "chip-br-1", enabled: true } as never,
-      proxyByInstance: new Map([["chip-br-1", { enabled: true, host: "198.51.100.77" }]]),
-      proxyIntelByHost: new Map([["198.51.100.77", { countryCode: "BR", country: "Brazil", hosting: true, isp: "Webshare", checkedAt: Date.now() }]]),
-      managedBrPoolHosts: new Set(["198.51.100.77"]),
+      instanceName: "chip-br-res",
+      config: { client_id: "t1", instance_name: "chip-br-res", enabled: true } as never,
+      proxyByInstance: new Map([["chip-br-res", { enabled: true, host: "198.51.100.78" }]]),
+      proxyIntelByHost: new Map([
+        ["198.51.100.78", { countryCode: "BR", country: "Brazil", hosting: false, isp: "Vivo Fibra", checkedAt: Date.now() }],
+      ]),
     });
-    expect(clusterHealth.proxyHosting).toBe(false);
-    expect(clusterHealth.warnings).toEqual([]);
+    expect(cleanCluster.proxyHosting).toBe(false);
+    expect(cleanCluster.warnings).toEqual([]);
+
+    // Proxy Datacenter é denunciado honestamente mesmo quando localizado no Brasil
+    const dcCluster = analyzeChipClusterHealth({
+      clientId: "t1",
+      instanceName: "chip-dc-1",
+      config: { client_id: "t1", instance_name: "chip-dc-1", enabled: true } as never,
+      proxyByInstance: new Map([["chip-dc-1", { enabled: true, host: "198.51.100.77" }]]),
+      proxyIntelByHost: new Map([
+        ["198.51.100.77", { countryCode: "BR", country: "Brazil", hosting: true, isp: "Latitude.sh", checkedAt: Date.now() }],
+      ]),
+    });
+    expect(dcCluster.proxyHosting).toBe(true);
+    expect(dcCluster.warnings.some((w) => /Datacenter\/ASN/i.test(w))).toBe(true);
+
+    // Auditoria Dia-0 flagra datacenter real quando fetch retorna hosting=true
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({ status: "success", countryCode: "US", country: "United States", hosting: true, isp: "DigitalOcean" })
+        )
+      )
+    );
+    mocks.evoFindProxy.mockResolvedValueOnce({ enabled: true, host: "198.51.100.77", port: "6000" });
+    mocks.warmupRows.push({ client_id: "t1", instance_name: "chip-dc-1", phone_number: "5511999998888" });
+    const day0 = await auditChipDay0Hygiene("t1", "chip-dc-1", { forceInTests: true });
+    expect(day0.ok).toBe(false);
+    expect(day0.warnings.some((w) => /datacenter|estrangeiro/i.test(w))).toBe(true);
+
+    // 2. Importação + ensureProxyForInstance gera geoWarning honesto quando proxy é datacenter/não-BR
+    mocks.proxyRows.length = 0;
+    mocks.connRows.push(
+      { id: "c-geo", instance_name: "chip-geo", client_id: "t1", provider: "evolution", status: "open", provider_config: {} },
+      { id: "c-vps-1", instance_name: "chip-vps-a", client_id: "t1", provider: "evolution", status: "open", provider_config: { proxy_mode: "direct" } },
+      { id: "c-vps-2", instance_name: "chip-vps-b", client_id: "t1", provider: "evolution", status: "open", provider_config: { proxy_mode: "vps_fallback" } }
+    );
+    const importRes = await importProxyPoolBatch({
+      rawText: "203.0.113.200:6000:u:p",
+      applyToInstances: false,
+      geoProbeFn: async () => ({
+        countryCode: "US",
+        country: "United States",
+        hosting: true,
+        proxy: true,
+        isp: "Webshare DC",
+        checkedAt: Date.now(),
+      }),
+    });
+    expect(importRes.datacenterCount).toBe(1);
+    expect(importRes.nonBrCount).toBe(1);
+    expect(importRes.geoWarnings?.length).toBeGreaterThan(0);
+
+    const assignedGeo = await ensureProxyForInstance({
+      instanceName: "chip-geo",
+      clientId: "t1",
+      reason: "connect",
+      geoProbeFn: async () => ({
+        countryCode: "US",
+        country: "United States",
+        hosting: true,
+        isp: "Webshare DC",
+        checkedAt: Date.now(),
+      }),
+    });
+    expect(assignedGeo.mode).toBe("pool_assigned");
+    expect(assignedGeo.isDatacenter).toBe(true);
+    expect(assignedGeo.countryCode).toBe("US");
+    expect(assignedGeo.geoWarning).toMatch(/Datacenter\/ASN|fora do Brasil/i);
+
+    // 3. Fallback VPS reporta vpsSharedCount com precisão (chip-vps-a + chip-vps-b = 2)
+    const fbRes = await fallbackInstanceToVps("chip-novo-vps", "t1");
+    expect(fbRes.vpsSharedCount).toBe(2);
+    expect(fbRes.warning).toMatch(/2 outra\(s\) instância\(s\)/i);
   });
 
   it("renderiza AdminProxyPoolCard sob demanda e envia upload .txt para /api/admin/proxies", async () => {
@@ -635,6 +732,88 @@ describe("Proxy Pool BR + Lista Negra + Fail-Open VPS", () => {
     expect(offRes.status).toBe(200);
     expect(mocks.evoRemoveProxy).toHaveBeenCalledWith("t1_inst_opt");
     expect(mocks.proxyRows.find((p) => p.id === "p-inst")).toMatchObject({
+      status: "blacklisted",
+      blacklist_reason: "used",
+    });
+  });
+
+  it("POST /api/whatsapp ativa autoProxy por padrão para Admin em chip novo, preserva webhook_secret no reconnect e aposenta proxy no delete", async () => {
+    mocks.proxyRows.push({
+      id: "p-admin-auto",
+      host: "203.0.113.95",
+      port: 6300,
+      protocol: "http",
+      username: "u",
+      password: "p",
+      status: "available",
+      country_code: "BR",
+      provider_label: "webshare:br_residential",
+      fail_count: 0,
+    });
+    invalidateProxyPoolCache();
+
+    const events: string[] = [];
+    mocks.evoSetProxy.mockImplementation(async (inst: string) => {
+      events.push(`setProxy:${inst}`);
+      return { ok: true };
+    });
+    mocks.evoEnsureConfigured.mockImplementation(
+      async (inst: string, url?: string, onBeforeConnect?: () => Promise<void>) => {
+        if (onBeforeConnect) await onBeforeConnect();
+        events.push(`connect:${inst}:${url ?? "no-url"}`);
+        return { qrcode: { base64: "data:image/png;base64,QR_ADMIN" } };
+      },
+    );
+
+    const { POST: whatsappPost } = await import("@/app/api/whatsapp/route");
+
+    // 1. Admin omite autoProxy em instância nova -> ativa autoProxy=true automaticamente ANTES do 1º QR
+    const resAdmin = await whatsappPost(
+      new NextRequest("http://localhost/api/whatsapp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "connect", instanceName: "admin_new_chip" }),
+      }),
+    );
+    const jsonAdmin = await resAdmin.json();
+    expect(resAdmin.status).toBe(200);
+    expect(jsonAdmin.autoProxy).toBe(true);
+    expect(events).toEqual(["setProxy:admin_new_chip", "connect:admin_new_chip:no-url"]);
+
+    // 2. Reconexão de instância com webhook_secret salvo NÃO sobrescreve header (repassa secret para setWebhook)
+    mocks.settingsRows.set("public_url", "https://app.example.test");
+    mocks.connRows.push({
+      id: "c-secret",
+      instance_name: "chip_with_secret",
+      client_id: "admin-tenant",
+      provider: "evolution",
+      status: "close",
+      provider_config: { webhook_secret: "sec-xyz-999", auto_proxy: false },
+    });
+    const resReconn = await whatsappPost(
+      new NextRequest("http://localhost/api/whatsapp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "connect", instanceName: "chip_with_secret" }),
+      }),
+    );
+    expect(resReconn.status).toBe(200);
+    expect(mocks.evoSetWebhook).toHaveBeenCalledWith(
+      "https://app.example.test/api/webhooks/whatsapp",
+      "chip_with_secret",
+      "sec-xyz-999"
+    );
+
+    // 3. action: "delete" aposenta o proxy atribuído na Lista Negra ('used') sem vazar assigned
+    const resDel = await whatsappPost(
+      new NextRequest("http://localhost/api/whatsapp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete", instanceName: "admin_new_chip" }),
+      }),
+    );
+    expect(resDel.status).toBe(200);
+    expect(mocks.proxyRows.find((p) => p.id === "p-admin-auto")).toMatchObject({
       status: "blacklisted",
       blacklist_reason: "used",
     });

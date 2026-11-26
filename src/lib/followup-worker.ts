@@ -24,10 +24,15 @@ import {
   jitterMs,
 } from "@/lib/campaign-worker";
 import { logTokenUsage } from "@/lib/token-usage";
-import { registerPendingAutomatedSend } from "@/lib/manual-send-registry";
+import { registerPendingAutomatedMedia, registerPendingAutomatedSend } from "@/lib/manual-send-registry";
 import { isInstanceOwnedByClient } from "@/lib/tenant";
 import { checkTenantAiQuota, isClientActiveCached, isClientAdminCached } from "@/lib/saas-limits";
-import { evaluateWeekendB2BGuard, isAutoPoolInstance } from "@/lib/campaign-pool";
+import {
+  evaluateWeekendB2BGuard,
+  isAutoPoolInstance,
+  parseWeekendB2BGuardMode,
+  type WeekendB2BGuardMode,
+} from "@/lib/campaign-pool";
 import { getBrazilPhoneVariants } from "@/lib/jid-utils";
 import { isChatRowInbound, isChatRowOutbound } from "@/lib/chat-direction";
 import { calculateChunkTypingMs, calculateTypingDelayMs, DEFAULT_TYPING_DELAY_CONFIG } from "@/lib/agent-delay";
@@ -73,6 +78,7 @@ type FollowupTarget = {
   last_sent_at: string | null;
   next_send_at: string | null;
   status: string;
+  error_message?: string | null;
   last_message_id: string | null;
 };
 
@@ -245,12 +251,23 @@ async function moveLeadExhausted(opts: {
   const motivo = `Fiz ${opts.attempts} follow-up${opts.attempts === 1 ? "" : "s"} e 0 resposta. Campanha: "${opts.campaignName}".`;
   const resumo = `Cliente não respondeu após ${opts.attempts} tentativa${opts.attempts === 1 ? "" : "s"} de reengajamento.`;
 
-  const { data: lead } = await supabase
+  const jidVariants = expandBrazilJidVariants(opts.remoteJid, true);
+  let { data: lead } = await supabase
     .from("leads_extraidos")
     .select("id, status")
     .eq("remoteJid", opts.remoteJid)
     .eq("client_id", opts.clientId)
     .maybeSingle();
+
+  if (!lead && jidVariants.length > 1) {
+    const { data: fallbackLeads } = await supabase
+      .from("leads_extraidos")
+      .select("id, status")
+      .in("remoteJid", jidVariants)
+      .eq("client_id", opts.clientId)
+      .limit(1);
+    lead = Array.isArray(fallbackLeads) ? fallbackLeads[0] || null : null;
+  }
 
   const nowIso = new Date().toISOString();
 
@@ -288,12 +305,23 @@ async function moveLeadExhausted(opts: {
  * estiver num estágio mais alto).
  */
 async function moveLeadResponded(remoteJid: string, clientId: string) {
-  const { data: lead } = await supabase
+  const jidVariants = expandBrazilJidVariants(remoteJid, true);
+  let { data: lead } = await supabase
     .from("leads_extraidos")
     .select("id, status")
     .eq("remoteJid", remoteJid)
     .eq("client_id", clientId)
     .maybeSingle();
+
+  if (!lead && jidVariants.length > 1) {
+    const { data: fallbackLeads } = await supabase
+      .from("leads_extraidos")
+      .select("id, status")
+      .in("remoteJid", jidVariants)
+      .eq("client_id", clientId)
+      .limit(1);
+    lead = Array.isArray(fallbackLeads) ? fallbackLeads[0] || null : null;
+  }
   if (!lead) return;
 
   const ordered = ["novo", "primeiro_contato", "interessado", "follow-up", "agendado", "fechado"];
@@ -432,6 +460,175 @@ Antes de escrever, faça essa análise mental (não devolva, é só pra você):
 }
 
 // ============================================================
+// Anti-Spam Hardening para Follow-ups Frios & Controle de Retries
+// ============================================================
+
+export const MIN_COLD_FOLLOWUP_SPACING_HOURS = 24;
+export const ESCALATED_COLD_FOLLOWUP_SPACING_HOURS = 48;
+export const MAX_UNANSWERED_COLD_FOLLOWUPS = 3;
+export const MAX_FOLLOWUP_RETRY_ATTEMPTS = 3;
+
+const FOLLOWUP_WARNING_COOLDOWN_MS = 60 * 60 * 1000;
+const _lastFollowupWarningMap = new Map<string, { at: number; message: string }>();
+
+export function resetFollowupWarningThrottleForTests(): void {
+  _lastFollowupWarningMap.clear();
+}
+
+export function shouldEmitFollowupWarning(
+  campaignId: string,
+  reasonKey: string,
+  message: string,
+  nowMs = Date.now()
+): boolean {
+  const key = `${campaignId}:${reasonKey}`;
+  const prev = _lastFollowupWarningMap.get(key);
+  if (prev && prev.message === message && nowMs - prev.at < FOLLOWUP_WARNING_COOLDOWN_MS) {
+    return false;
+  }
+  _lastFollowupWarningMap.set(key, { at: nowMs, message });
+  return true;
+}
+
+export function parseFollowupAttemptCount(errorMessage?: string | null): number {
+  if (!errorMessage) return 0;
+  const m = String(errorMessage).match(/^\[tentativa\s+(\d+)\/\d+\]/i);
+  return m?.[1] ? Math.max(0, Number(m[1]) || 0) : 0;
+}
+
+export type ColdFollowupSpacingDecision = {
+  action: "allow" | "reschedule" | "responded" | "exhaust";
+  nextSendAtIso?: string;
+  reason?: string;
+  unansweredStreak: number;
+  requiredHours?: number;
+};
+
+/**
+ * Blindagem Anti-Spam para follow-ups sem resposta (evita bombardear 3–4 mensagens
+ * rápidas no mesmo lead frio, principal gatilho de Spam Report na Meta):
+ * - Se no step 0 a última mensagem da conversa já for do CLIENTE, encerra como "responded".
+ * - Se já foram enviados >= 3 follow-ups frios sem nenhuma resposta do lead, encerra ("exhaust").
+ * - Impõe espaçamento mínimo de 24h após o 1º toque sem resposta e 48h entre toques
+ *   frios subsequentes sem resposta.
+ */
+export function evaluateColdFollowupSpacing(params: {
+  currentStep: number;
+  lastSentAt: string | null;
+  recentMessages: Array<{
+    sender_type?: string | null;
+    is_from_me?: boolean | null;
+    created_at?: string | null;
+  }>;
+  nowMs?: number;
+}): ColdFollowupSpacingDecision {
+  const nowMs = params.nowMs ?? Date.now();
+  const sorted = [...(params.recentMessages || [])].sort((a, b) => {
+    const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+    const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+    return tb - ta;
+  });
+
+  const hasAnyInbound = sorted.some((m) => isChatRowInbound(m as any));
+  const latest = sorted[0] || null;
+
+  if (!params.lastSentAt && latest && isChatRowInbound(latest as any)) {
+    return {
+      action: "responded",
+      reason: "latest_message_from_customer",
+      unansweredStreak: 0,
+    };
+  }
+
+  let unansweredOutboundCount = 0;
+  let newestUnansweredOutboundMs: number | null = null;
+  for (const m of sorted) {
+    if (isChatRowInbound(m as any)) break;
+    if (isChatRowOutbound(m as any)) {
+      unansweredOutboundCount++;
+      const ts = m.created_at ? new Date(m.created_at).getTime() : NaN;
+      if (Number.isFinite(ts) && (newestUnansweredOutboundMs === null || ts > newestUnansweredOutboundMs)) {
+        newestUnansweredOutboundMs = ts;
+      }
+    }
+  }
+
+  const lastSentMs = params.lastSentAt ? new Date(params.lastSentAt).getTime() : NaN;
+  const effectiveLastOutboundMs =
+    Number.isFinite(lastSentMs) && newestUnansweredOutboundMs !== null
+      ? Math.max(lastSentMs, newestUnansweredOutboundMs)
+      : Number.isFinite(lastSentMs)
+        ? lastSentMs
+        : newestUnansweredOutboundMs;
+
+  const unansweredStreak = Math.max(
+    unansweredOutboundCount,
+    !hasAnyInbound ? Math.max(0, Number(params.currentStep || 0)) : 0
+  );
+
+  if (!hasAnyInbound && Number(params.currentStep || 0) >= MAX_UNANSWERED_COLD_FOLLOWUPS) {
+    return {
+      action: "exhaust",
+      reason: "max_unanswered_cold_followups_reached",
+      unansweredStreak,
+    };
+  }
+
+  if (effectiveLastOutboundMs !== null && effectiveLastOutboundMs <= nowMs) {
+    const requiredHours =
+      unansweredStreak >= 2 || Number(params.currentStep || 0) >= 1
+        ? ESCALATED_COLD_FOLLOWUP_SPACING_HOURS
+        : MIN_COLD_FOLLOWUP_SPACING_HOURS;
+    const minSpacingMs = requiredHours * 60 * 60 * 1000;
+    const elapsedMs = nowMs - effectiveLastOutboundMs;
+    if (elapsedMs < minSpacingMs) {
+      return {
+        action: "reschedule",
+        nextSendAtIso: new Date(effectiveLastOutboundMs + minSpacingMs).toISOString(),
+        reason: "cold_followup_min_spacing",
+        unansweredStreak,
+        requiredHours,
+      };
+    }
+  }
+
+  return { action: "allow", unansweredStreak };
+}
+
+async function fetchRecentMessagesForSpacing(
+  remoteJid: string,
+  clientId: string
+): Promise<Array<{ sender_type?: string | null; is_from_me?: boolean | null; created_at?: string | null }>> {
+  const jidVariants = expandBrazilJidVariants(remoteJid);
+  if (jidVariants.length === 0) return [];
+  try {
+    const initialRes = await supabase
+      .from("chats_dashboard")
+      .select("sender_type, is_from_me, created_at")
+      .in("remote_jid", jidVariants)
+      .eq("client_id", clientId)
+      .order("created_at", { ascending: false })
+      .limit(12);
+    let data = initialRes.data;
+    const error = initialRes.error;
+
+    if (error && /is_from_me|column/i.test(String(error.message || ""))) {
+      const retry = await supabase
+        .from("chats_dashboard")
+        .select("sender_type, created_at")
+        .in("remote_jid", jidVariants)
+        .eq("client_id", clientId)
+        .order("created_at", { ascending: false })
+        .limit(12);
+      data = retry.data as any;
+    }
+    return Array.isArray(data) ? (data as any) : [];
+  } catch {
+    return [];
+  }
+}
+
+// ============================================================
 // Core: processa um target
 // ============================================================
 
@@ -456,12 +653,17 @@ async function resolveFollowupColdShield(camp: FollowupCampaign): Promise<boolea
   return true;
 }
 
+type ProcessTargetResult = {
+  outcome: "sent" | "responded" | "exhausted" | "failed" | "skipped" | "deferred" | "rescheduled";
+  minSafeIntervalSec?: number;
+};
+
 async function processTarget(
   camp: FollowupCampaign,
   target: FollowupTarget,
   apiKey: string | null,
   hourlyFactor = 1
-): Promise<"sent" | "responded" | "exhausted" | "failed" | "skipped" | "deferred"> {
+): Promise<ProcessTargetResult> {
   const nomeLead = target.nome_negocio || target.remote_jid.split("@")[0];
 
   // 0. Busca dados do lead (+ fallback BR 8/9 dígitos) e verifica opt_out ANTES de
@@ -527,7 +729,7 @@ async function processTarget(
       `⊘ ${nomeLead} pulado no follow-up — opt-out ativo.`,
       "warning"
     );
-    return "skipped";
+    return { outcome: "skipped" };
   }
 
   // 1. Cliente respondeu? Se sim, encerra follow-up.
@@ -546,7 +748,7 @@ async function processTarget(
         .eq("id", camp.id)
         .eq("client_id", camp.client_id);
       await addFollowupLog(camp.id, camp.client_id, `🎉 ${nomeLead} RESPONDEU ao follow-up — lead movido p/ "interessado" no CRM.`, "success");
-      return "responded";
+      return { outcome: "responded" };
     }
 
     const humanTookOver = await hasHumanRepliedSince(target.remote_jid, target.last_sent_at, camp.client_id);
@@ -562,7 +764,7 @@ async function processTarget(
         `🛑 Operador humano assumiu X1 manualmente com ${nomeLead} — follow-up automático cancelado.`,
         "info"
       );
-      return "skipped";
+      return { outcome: "skipped" };
     }
   }
 
@@ -587,7 +789,194 @@ async function processTarget(
       .eq("id", camp.id)
       .eq("client_id", camp.client_id);
     await addFollowupLog(camp.id, camp.client_id, `⊘ ${nomeLead} ESGOTADO — ${target.current_step} follow-ups sem resposta → CRM "sem_interesse".`, "warning");
-    return "exhausted";
+    return { outcome: "exhausted" };
+  }
+
+  // 2.5. Blindagem Anti-Spam (espaçamento mínimo 24h/48h em leads frios sem resposta + teto de toques frios)
+  const coldShieldEnabled = await resolveFollowupColdShield(camp);
+  if (coldShieldEnabled) {
+    const recentMsgs = await fetchRecentMessagesForSpacing(target.remote_jid, camp.client_id);
+    const spacing = evaluateColdFollowupSpacing({
+      currentStep: target.current_step,
+      lastSentAt: target.last_sent_at,
+      recentMessages: recentMsgs,
+    });
+    if (spacing.action === "responded") {
+      await supabase
+        .from("followup_targets")
+        .update({ status: "responded", updated_at: new Date().toISOString() })
+        .eq("id", target.id)
+        .eq("client_id", camp.client_id);
+      await moveLeadResponded(target.remote_jid, camp.client_id);
+      await supabase
+        .from("followup_campaigns")
+        .update({ total_responded: (await countByStatus(camp.id, camp.client_id, "responded")) })
+        .eq("id", camp.id)
+        .eq("client_id", camp.client_id);
+      await addFollowupLog(camp.id, camp.client_id, `🎉 ${nomeLead} já respondeu recentemente — follow-up encerrado sem sobreposição.`, "success");
+      return { outcome: "responded" };
+    }
+    if (spacing.action === "exhaust") {
+      await supabase
+        .from("followup_targets")
+        .update({ status: "exhausted", updated_at: new Date().toISOString() })
+        .eq("id", target.id)
+        .eq("client_id", camp.client_id);
+      await moveLeadExhausted({
+        remoteJid: target.remote_jid,
+        clientId: camp.client_id,
+        attempts: target.current_step,
+        campaignName: camp.name,
+      });
+      await supabase
+        .from("followup_campaigns")
+        .update({ total_exhausted: (await countByStatus(camp.id, camp.client_id, "exhausted")) })
+        .eq("id", camp.id)
+        .eq("client_id", camp.client_id);
+      await addFollowupLog(
+        camp.id,
+        camp.client_id,
+        `🛡️ Anti-spam: ${nomeLead} já recebeu ${target.current_step} follow-ups frios sem resposta — encerrado para evitar denúncia de spam.`,
+        "warning"
+      );
+      return { outcome: "exhausted" };
+    }
+    if (spacing.action === "reschedule" && spacing.nextSendAtIso) {
+      await supabase
+        .from("followup_targets")
+        .update({
+          status: "waiting",
+          next_send_at: spacing.nextSendAtIso,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", target.id)
+        .eq("client_id", camp.client_id);
+      await addFollowupLog(
+        camp.id,
+        camp.client_id,
+        `🛡️ Anti-spam: ${nomeLead} recebeu toque sem resposta há menos de ${spacing.requiredHours || MIN_COLD_FOLLOWUP_SPACING_HOURS}h — reagendado para ${new Date(spacing.nextSendAtIso).toLocaleString("pt-BR")}.`,
+        "warning"
+      );
+      return { outcome: "rescheduled" };
+    }
+  }
+
+  // 2.6. Blindagem Anti-Ban do Chip ANTES da personalização por IA (evita queimar tokens LLM quando chip está em cota/quarentena/rehab!)
+  let sendInstanceName = camp.instance_name;
+  let resolvedChipPolicy: { minSafeIntervalSec?: number; zeroReplyThreshold?: number } | null = null;
+  try {
+    let resolveChipFn: ((...args: any[]) => Promise<any>) | null = null;
+    try {
+      const cw: any = await import("@/lib/campaign-worker");
+      if (cw && typeof cw.resolveHealthyCampaignChip === "function") {
+        resolveChipFn = cw.resolveHealthyCampaignChip;
+      }
+    } catch {
+      resolveChipFn = null;
+    }
+
+    if (resolveChipFn) {
+      const chipRes = await resolveChipFn(camp.client_id, camp.instance_name, {
+        targetRemoteJid: target.remote_jid,
+        preferredInstanceName: leadFull?.instance_name || null,
+        hourlyFactor,
+        mode: "followup",
+        bypassColdShield: !coldShieldEnabled,
+      });
+      if (!chipRes.ok) {
+        const retryAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+        await supabase
+          .from("followup_targets")
+          .update({
+            status: "waiting",
+            next_send_at: retryAt,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", target.id)
+          .eq("client_id", camp.client_id);
+        await addFollowupLog(
+          camp.id,
+          camp.client_id,
+          `🛡️ Follow-up adiado 15 min (${chipRes.reason || "anti-ban cooldown"}) para proteger o chip.`,
+          "warning"
+        );
+        return { outcome: "deferred" };
+      }
+      if (chipRes.instanceName) {
+        sendInstanceName = chipRes.instanceName;
+      }
+      if (chipRes.policy) {
+        resolvedChipPolicy = chipRes.policy;
+      }
+    } else if (coldShieldEnabled && !isAutoPoolInstance(camp.instance_name)) {
+      const warmupRes = await supabase
+        .from("whatsapp_warmup_configs")
+        .select("is_quarantined, quarantine_until, health_score, stage, days_active, career_mode, cold_outreach_locked_until, mmzap_browser_status")
+        .eq("client_id", camp.client_id)
+        .eq("instance_name", camp.instance_name)
+        .maybeSingle();
+      let warmupCfg = warmupRes.data;
+      const wErr = warmupRes.error;
+
+      if (wErr && (String(wErr.code || "") === "42703" || String(wErr.code || "") === "PGRST204" || /column/i.test(String(wErr.message || "")))) {
+        const legacy = await supabase
+          .from("whatsapp_warmup_configs")
+          .select("is_quarantined, quarantine_until, health_score, stage")
+          .eq("client_id", camp.client_id)
+          .eq("instance_name", camp.instance_name)
+          .maybeSingle();
+        warmupCfg = legacy.data as any;
+      }
+
+      const nowMs = Date.now();
+      const inQuarantine =
+        Boolean(warmupCfg?.is_quarantined) &&
+        Boolean(warmupCfg?.quarantine_until) &&
+        new Date(String(warmupCfg?.quarantine_until)).getTime() > nowMs;
+      const inRehab =
+        warmupCfg?.career_mode === "rehab" ||
+        (Boolean(warmupCfg?.cold_outreach_locked_until) &&
+          new Date(String(warmupCfg?.cold_outreach_locked_until)).getTime() > nowMs);
+      const isNursery =
+        warmupCfg &&
+        (Number(warmupCfg.stage ?? 2) <= 1 ||
+          (warmupCfg.days_active !== undefined &&
+            warmupCfg.days_active !== null &&
+            Number(warmupCfg.days_active) < 7));
+      const lowHealth = Boolean(warmupCfg && Number(warmupCfg.health_score ?? 100) < 40);
+
+      if (inQuarantine || inRehab || isNursery || lowHealth) {
+        const retryAt = new Date(nowMs + 15 * 60 * 1000).toISOString();
+        const blockReason = inQuarantine
+          ? "quarentena"
+          : inRehab
+            ? "reabilitação pós-ban"
+            : isNursery
+              ? "berçário (< 7 dias)"
+              : "saúde crítica";
+        await supabase
+          .from("followup_targets")
+          .update({ status: "waiting", next_send_at: retryAt, updated_at: new Date().toISOString() })
+          .eq("id", target.id)
+          .eq("client_id", camp.client_id);
+        await addFollowupLog(
+          camp.id,
+          camp.client_id,
+          `🛡️ Follow-up adiado 15 min: chip "${camp.instance_name}" em ${blockReason}.`,
+          "warning"
+        );
+        return { outcome: "deferred" };
+      }
+
+      if (String((warmupCfg as any)?.mmzap_browser_status || "").toLowerCase() === "running") {
+        try {
+          const mod = await import("@/lib/warmup/mmzap-browser-orchestrator");
+          await mod.stopMmzapSessionForChip?.(camp.client_id, camp.instance_name, "campaign_active");
+        } catch {}
+      }
+    }
+  } catch {
+    /* degradado com segurança se módulo/tabela estiver ausente */
   }
 
   await addFollowupLog(camp.id, camp.client_id, `Processando ${nomeLead} — step ${target.current_step + 1}/${camp.steps.length}...`, "info");
@@ -686,73 +1075,6 @@ async function processTarget(
     ? applyFollowupTextVariation(text, new Date(), `followup:${camp.id}`)
     : syncGreetingToCurrentHour(text, new Date());
 
-  // 4.5. Blindagem Anti-Ban compartilhada (Quarentena, Berçário Fase 1, Cota Horária e Pool Multi-Chip c/ Sticky Sender)
-  // Pode ser desligada por campanha — nesse caso o follow-up ignora cotas,
-  // quarentena e descansos e segue no ritmo configurado.
-  const coldShieldEnabled = await resolveFollowupColdShield(camp);
-  let sendInstanceName = camp.instance_name;
-  try {
-    const cw: any = await import("@/lib/campaign-worker");
-    if (typeof cw.resolveHealthyCampaignChip === "function") {
-      const chipRes = await cw.resolveHealthyCampaignChip(camp.client_id, camp.instance_name, {
-        targetRemoteJid: target.remote_jid,
-        preferredInstanceName: leadFull?.instance_name || null,
-        hourlyFactor,
-        bypassColdShield: !coldShieldEnabled,
-      });
-      if (!chipRes.ok) {
-        const retryAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-        await supabase
-          .from("followup_targets")
-          .update({
-            status: "waiting",
-            next_send_at: retryAt,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", target.id)
-          .eq("client_id", camp.client_id);
-        await addFollowupLog(
-          camp.id,
-          camp.client_id,
-          `🛡️ Follow-up adiado 15 min (${chipRes.reason || "anti-ban cooldown"}) para proteger o chip.`,
-          "warning"
-        );
-        return "deferred";
-      }
-      if (chipRes.instanceName) {
-        sendInstanceName = chipRes.instanceName;
-      }
-    } else if (coldShieldEnabled && !isAutoPoolInstance(camp.instance_name)) {
-      const { data: warmupCfg } = await supabase
-        .from("whatsapp_warmup_configs")
-        .select("is_quarantined, quarantine_until, health_score, stage")
-        .eq("client_id", camp.client_id)
-        .eq("instance_name", camp.instance_name)
-        .maybeSingle();
-      const inQuarantine =
-        Boolean(warmupCfg?.is_quarantined) &&
-        Boolean(warmupCfg?.quarantine_until) &&
-        new Date(String(warmupCfg?.quarantine_until)) > new Date();
-      if (inQuarantine || (warmupCfg && Number(warmupCfg.health_score ?? 100) < 40)) {
-        const retryAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-        await supabase
-          .from("followup_targets")
-          .update({ status: "waiting", next_send_at: retryAt, updated_at: new Date().toISOString() })
-          .eq("id", target.id)
-          .eq("client_id", camp.client_id);
-        await addFollowupLog(
-          camp.id,
-          camp.client_id,
-          `🛡️ Follow-up adiado 15 min: chip "${camp.instance_name}" em quarentena/saúde crítica.`,
-          "warning"
-        );
-        return "deferred";
-      }
-    }
-  } catch {
-    /* degradado com segurança se módulo/tabela estiver ausente */
-  }
-
   // 5. Envia via Evolution
   try {
     // Picota a mensagem em chunks se humanize_messages estiver ativo
@@ -817,6 +1139,9 @@ async function processTarget(
     if (isLastStep && camp.media_url && camp.media_type) {
       try {
         await new Promise((r) => setTimeout(r, 1500));
+        if (typeof registerPendingAutomatedMedia === "function") {
+          registerPendingAutomatedMedia(sendInstanceName, target.remote_jid);
+        }
         if (camp.media_caption) {
           registerPendingAutomatedSend(sendInstanceName, target.remote_jid, camp.media_caption);
         }
@@ -858,11 +1183,19 @@ async function processTarget(
 
     try {
       const cw: any = await import("@/lib/campaign-worker");
-      if (typeof cw.recordColdOutreachSend === "function") {
+      if (typeof cw.recordFollowupOutreachSend === "function") {
+        cw.recordFollowupOutreachSend(sendInstanceName, Date.now(), camp.client_id);
+      } else if (typeof cw.recordColdOutreachSend === "function") {
         cw.recordColdOutreachSend(sendInstanceName, Date.now(), camp.client_id);
       }
       if (coldShieldEnabled && typeof cw.checkZeroReplyBrakeForInstance === "function") {
-        const brakeRes = await cw.checkZeroReplyBrakeForInstance(camp.client_id, sendInstanceName, target.remote_jid);
+        const brakeRes = await cw.checkZeroReplyBrakeForInstance(
+          camp.client_id,
+          sendInstanceName,
+          target.remote_jid,
+          Date.now(),
+          resolvedChipPolicy?.zeroReplyThreshold
+        );
         if (brakeRes?.brakeTriggered) {
           await addFollowupLog(
             camp.id,
@@ -878,11 +1211,12 @@ async function processTarget(
     const hasMore = !!camp.steps[nextStep];
     const nowIso = new Date().toISOString();
     // Quantos dias esperar antes do próximo tick:
-    //   - Se tem próximo step: usa day_offset do próximo
+    //   - Se tem próximo step: usa day_offset do próximo (mínimo 2 dias a partir do 2º follow-up com escudo ativo)
     //   - Se foi o último envio: espera o day_offset do step que acabou de ser enviado
     //     (dar ao cliente tempo de responder antes de marcar exhausted)
+    const minNextStepDays = coldShieldEnabled && nextStep >= 2 ? 2 : 1;
     const daysToWait = hasMore
-      ? Math.max(1, camp.steps[nextStep].day_offset)
+      ? Math.max(minNextStepDays, camp.steps[nextStep].day_offset)
       : Math.max(1, step.day_offset ?? 3);
     const nextSendAt = new Date(Date.now() + daysToWait * 24 * 60 * 60 * 1000).toISOString();
 
@@ -922,7 +1256,7 @@ async function processTarget(
     }
     if (upd.error) {
       console.error(`[FOLLOWUP] falha ao persistir avanço do target ${target.id}:`, upd.error.message);
-      return "failed";
+      return { outcome: "failed" };
     }
 
     await supabase
@@ -936,12 +1270,21 @@ async function processTarget(
     // anteriores ou no próprio follow-up.
     try {
       const nowIso2 = nowIso;
-      const { data: lead } = await supabase
+      let { data: lead } = await supabase
         .from("leads_extraidos")
         .select("id, status")
         .eq("remoteJid", target.remote_jid)
         .eq("client_id", camp.client_id)
         .maybeSingle();
+      if (!lead && leadJidVariants.length > 1) {
+        const { data: fallbackLeads } = await supabase
+          .from("leads_extraidos")
+          .select("id, status")
+          .in("remoteJid", leadJidVariants)
+          .eq("client_id", camp.client_id)
+          .limit(1);
+        lead = Array.isArray(fallbackLeads) ? fallbackLeads[0] || null : null;
+      }
       if (lead) {
         const orderRank: Record<string, number> = {
           "": 0, "novo": 0, "primeiro_contato": 1, "interessado": 2, "follow-up": 3, "agendado": 4, "fechado": 5,
@@ -980,9 +1323,26 @@ async function processTarget(
       `✓ Follow-up ${nextStep}/${camp.steps.length} → ${nomeLead}\n📨 "${fuPreview}${(text || "").length > 240 ? "…" : ""}"\nPróximo: ${new Date(nextSendAt).toLocaleDateString("pt-BR")}`,
       "success",
     );
-    return "sent";
+    return { outcome: "sent", minSafeIntervalSec: resolvedChipPolicy?.minSafeIntervalSec };
   } catch (err: any) {
     const errMsg = String(err?.message || err);
+    const numberDoesNotExist =
+      /"exists"\s*:\s*false/i.test(errMsg) || /number does not exist|not exists/i.test(errMsg);
+
+    if (numberDoesNotExist) {
+      await supabase
+        .from("followup_targets")
+        .update({
+          status: "skipped",
+          error_message: "Número não existe no WhatsApp",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", target.id)
+        .eq("client_id", camp.client_id);
+      await addFollowupLog(camp.id, camp.client_id, `⊘ ${nomeLead} pulado — número não existe no WhatsApp.`, "warning");
+      return { outcome: "skipped" };
+    }
+
     try {
       if (/429|rate|timeout|timed out|econn|disconnect|closed|50[0-4]/i.test(errMsg)) {
         const { data: cfgRow } = await supabase
@@ -998,18 +1358,35 @@ async function processTarget(
       }
     } catch {}
 
+    const prevAttempts = parseFollowupAttemptCount(target.error_message);
+    const nextAttempt = prevAttempts + 1;
+    const exhaustedRetries = nextAttempt >= MAX_FOLLOWUP_RETRY_ATTEMPTS;
+    const backoffMinutes = nextAttempt * 30; // 30 min -> 60 min (evita loop infinito por tick!)
+    const retryAtIso = new Date(Date.now() + backoffMinutes * 60 * 1000).toISOString();
+    const formattedError = `[tentativa ${nextAttempt}/${MAX_FOLLOWUP_RETRY_ATTEMPTS}] ${errMsg}`.slice(0, 300);
+
     await supabase
       .from("followup_targets")
       .update({
-        status: "failed",
-        error_message: errMsg.slice(0, 300),
+        status: exhaustedRetries ? "skipped" : "failed",
+        error_message: exhaustedRetries
+          ? `Limite de ${MAX_FOLLOWUP_RETRY_ATTEMPTS} falhas atingido: ${errMsg}`.slice(0, 300)
+          : formattedError,
+        next_send_at: exhaustedRetries ? target.next_send_at : retryAtIso,
         updated_at: new Date().toISOString(),
       })
       .eq("id", target.id)
       .eq("client_id", camp.client_id);
     console.error(`[FOLLOWUP ${camp.name}] ✗ ${target.remote_jid}: ${errMsg}`);
-    await addFollowupLog(camp.id, camp.client_id, `✗ Falha ao enviar p/ ${nomeLead}: ${errMsg}`, "error");
-    return "failed";
+    await addFollowupLog(
+      camp.id,
+      camp.client_id,
+      exhaustedRetries
+        ? `⊘ ${nomeLead} pulado após ${MAX_FOLLOWUP_RETRY_ATTEMPTS} falhas consecutivas (${errMsg}).`
+        : `✗ Falha ao enviar p/ ${nomeLead} (${nextAttempt}/${MAX_FOLLOWUP_RETRY_ATTEMPTS}, nova tentativa em ${backoffMinutes} min): ${errMsg}`,
+      "error"
+    );
+    return { outcome: "failed" };
   }
 }
 
@@ -1062,25 +1439,23 @@ export async function tickCampaign(campaignId: string, clientId: string): Promis
     return { ok: false, processed: 0, error: "Fora da janela permitida" };
   }
 
-  let weekendGuardEnabled = Boolean((camp as any).weekend_guard);
-  if (!weekendGuardEnabled) {
+  let weekendGuardMode: WeekendB2BGuardMode = parseWeekendB2BGuardMode((camp as any).weekend_guard);
+  if (!weekendGuardMode) {
     try {
       const { data: wgCfg } = await supabase
         .from("app_settings")
         .select("value")
         .eq("key", `followup_weekend_guard:${camp.id}`)
         .maybeSingle();
-      weekendGuardEnabled = wgCfg?.value === "true" || wgCfg?.value === "1";
+      weekendGuardMode = parseWeekendB2BGuardMode(wgCfg?.value);
     } catch {}
   }
-  const weekendGuard = evaluateWeekendB2BGuard(weekendGuardEnabled);
+  const weekendGuard = evaluateWeekendB2BGuard(weekendGuardMode);
   if (!weekendGuard.allowed) {
-    await addFollowupLog(
-      camp.id,
-      camp.client_id,
-      "📅 Modo Comercial B2B ativo — follow-up pausado aos domingos para preservar reputação; retoma na segunda-feira.",
-      "warning"
-    );
+    const msg = "📅 Modo Comercial B2B ativo — follow-up pausado aos domingos para preservar reputação; retoma na segunda-feira.";
+    if (shouldEmitFollowupWarning(camp.id, "weekend_b2b", msg)) {
+      await addFollowupLog(camp.id, camp.client_id, msg, "warning");
+    }
     return { ok: true, processed: 0 };
   }
 
@@ -1126,20 +1501,28 @@ export async function tickCampaign(campaignId: string, clientId: string): Promis
     }
 
     const claimedStep = t.current_step;
-    let r: string | null = null;
+    let stepResult: ProcessTargetResult = { outcome: "failed" };
     try {
-      r = await processTarget(camp, t, apiKey, weekendGuard.hourlyFactor);
+      stepResult = await processTarget(camp, t, apiKey, weekendGuard.hourlyFactor);
     } catch (err: any) {
-      // processTarget jogou exception — destrava o claim pra não ficar "processing" eterno.
+      // processTarget jogou exception — destrava o claim com coluna real `error_message` e backoff.
       console.error(`[FOLLOWUP] processTarget exception (target ${t.id}):`, err?.message);
+      const retryAtIso = new Date(Date.now() + 30 * 60 * 1000).toISOString();
       await supabase
         .from("followup_targets")
-        .update({ status: "failed", last_error: err?.message?.slice(0, 500) || "exception", updated_at: new Date().toISOString() })
+        .update({
+          status: "failed",
+          error_message: (err?.message?.slice(0, 300) || "exception"),
+          next_send_at: retryAtIso,
+          updated_at: new Date().toISOString(),
+        })
         .eq("id", t.id)
         .eq("client_id", clientId)
         .eq("status", "processing");
-      r = "failed";
+      stepResult = { outcome: "failed" };
     }
+
+    const r = stepResult.outcome;
 
     // Confirma posse depois do processamento, antes de contar/agendar o próximo.
     // Se recovery/outro ciclo reassumiu, este resultado é descartado — não se
@@ -1161,9 +1544,15 @@ export async function tickCampaign(campaignId: string, clientId: string): Promis
     if (r === "deferred") {
       break;
     }
+    if (r === "rescheduled") {
+      // Lead individual reagendado por espaçamento anti-spam — segue para os demais targets sem pausar campanha
+      continue;
+    }
     if (r === "sent" || r === "failed") {
       processed++;
-      const wait = jitterMs(camp.min_interval_seconds, camp.max_interval_seconds);
+      const minSec = Math.max(Number(camp.min_interval_seconds) || 30, Number(stepResult.minSafeIntervalSec) || 0);
+      const maxSec = Math.max(minSec + 10, Number(camp.max_interval_seconds) || 60);
+      const wait = jitterMs(minSec, maxSec);
       await new Promise((res) => setTimeout(res, wait));
     } else {
       // responded/exhausted/skipped — sem envio, sem jitter
