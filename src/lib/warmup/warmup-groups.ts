@@ -931,6 +931,50 @@ export async function hydrateChipProfile(
     }
     await evolution.updateProfileStatus(pickedStatus, instanceName).catch(() => {});
 
+    // Foto de perfil Dia-0 automática (se pool global configurado e chip estiver sem foto)
+    let avatarUpdated = false;
+    try {
+      const { getGlobalWarmupSettings } = await import("./warmup-config-service");
+      const globalCfg = await getGlobalWarmupSettings(clientId);
+      const avatarUrls = String(globalCfg.default_profile_avatar_urls || "")
+        .split(/[\n,]/)
+        .map((u) => u.trim())
+        .filter((u) => /^https:\/\/[^\s]+$/i.test(u));
+
+      if (
+        avatarUrls.length > 0 &&
+        typeof (evolution as { updateProfilePicture?: unknown }).updateProfilePicture === "function"
+      ) {
+        let hasExistingPhoto = false;
+        try {
+          const { data: chipRow } = await supabaseAdmin
+            .from("whatsapp_warmup_configs")
+            .select("phone_number")
+            .eq("client_id", clientId)
+            .eq("instance_name", instanceName)
+            .maybeSingle();
+          const cleanPhone = String(chipRow?.phone_number || "").replace(/\D/g, "");
+          if (cleanPhone && typeof (evolution as { fetchProfilePicture?: unknown }).fetchProfilePicture === "function") {
+            const pic = await evolution.fetchProfilePicture(cleanPhone, instanceName).catch(() => null);
+            hasExistingPhoto = Boolean(pic);
+          }
+        } catch {
+          /* ignore */
+        }
+
+        if (!hasExistingPhoto) {
+          const pickedAvatar = avatarUrls[Math.floor(Math.random() * avatarUrls.length)];
+          avatarUpdated = await (
+            evolution as { updateProfilePicture: (url: string, inst?: string) => Promise<boolean> }
+          )
+            .updateProfilePicture(pickedAvatar, instanceName)
+            .catch(() => false);
+        }
+      }
+    } catch {
+      /* fail-open */
+    }
+
     // Publica status inicial se ainda não tiver postado (e só grava timestamp se o envio confirmar)
     const quote = getRandomStatusQuote();
     const statusOk = await evolution.sendStatus(quote, "text", instanceName).catch(() => null);
@@ -949,7 +993,7 @@ export async function hydrateChipProfile(
       client_id: clientId,
       sender_instance: instanceName,
       receiver_instance: "profile_hydration",
-      message_text: `✨ Perfil hidratado automaticamente: Recado "${pickedStatus}" e publicação no WhatsApp Status.`,
+      message_text: `✨ Perfil hidratado automaticamente: Recado "${pickedStatus}"${avatarUpdated ? ", foto de perfil Dia-0" : ""} e publicação no WhatsApp Status.`,
       action_type: "system",
     });
 

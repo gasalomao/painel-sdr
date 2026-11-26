@@ -53,6 +53,15 @@ export interface MmzapWorkerCallResult<T> {
   statusCode?: number;
 }
 
+export interface MmzapWorkerLogoutResult {
+  ok: boolean;
+  instanceName: string;
+  loggedOutFromWhatsApp: boolean;
+  profileWiped: boolean;
+  profileDirExisted?: boolean;
+  usedFallbackDelete?: boolean;
+}
+
 function getWorkerBaseUrl(): string | null {
   const raw = String(
     process.env.MMZAP_WORKER_URL || process.env.MMZAP_BROWSER_WORKER_URL || ""
@@ -176,6 +185,7 @@ export async function startMmzapWorkerPairing(params: {
   clientId: string;
   proxy?: MmzapWorkerProxyInput | null;
   shiftDurationMinutes?: number;
+  resetProfile?: boolean;
 }): Promise<MmzapWorkerCallResult<MmzapWorkerSessionStatus>> {
   return callMmzapWorker<MmzapWorkerSessionStatus>(
     `/sessions/${encodeURIComponent(params.instanceName)}/pair`,
@@ -184,6 +194,7 @@ export async function startMmzapWorkerPairing(params: {
       clientId: params.clientId,
       proxy: params.proxy || null,
       shiftDurationMinutes: params.shiftDurationMinutes,
+      resetProfile: Boolean(params.resetProfile),
     },
     25_000
   );
@@ -259,6 +270,69 @@ export async function deleteMmzapWorkerSession(
     undefined,
     15_000
   );
+}
+
+export async function logoutMmzapWorkerSession(
+  instanceName: string
+): Promise<MmzapWorkerCallResult<MmzapWorkerLogoutResult>> {
+  const res = await callMmzapWorker<Partial<MmzapWorkerLogoutResult>>(
+    `/sessions/${encodeURIComponent(instanceName)}/logout`,
+    "POST",
+    {},
+    20_000
+  );
+
+  if (!res.configured) {
+    return { configured: false, ok: false, error: res.error };
+  }
+
+  if (res.ok) {
+    return {
+      configured: true,
+      ok: true,
+      statusCode: res.statusCode ?? 200,
+      data: {
+        ok: true,
+        instanceName: String(res.data?.instanceName || instanceName),
+        loggedOutFromWhatsApp: Boolean(res.data?.loggedOutFromWhatsApp),
+        profileWiped: res.data?.profileWiped !== false,
+        profileDirExisted: res.data?.profileDirExisted,
+        usedFallbackDelete: false,
+      },
+    };
+  }
+
+  if (res.statusCode === 404) {
+    const fallback = await deleteMmzapWorkerSession(instanceName);
+    if (fallback.ok || fallback.statusCode === 404) {
+      return {
+        configured: true,
+        ok: true,
+        statusCode: fallback.statusCode ?? 200,
+        data: {
+          ok: true,
+          instanceName,
+          loggedOutFromWhatsApp: false,
+          profileWiped: true,
+          profileDirExisted: fallback.statusCode !== 404,
+          usedFallbackDelete: true,
+        },
+      };
+    }
+    return {
+      configured: true,
+      ok: false,
+      statusCode: fallback.statusCode,
+      error: fallback.error || "Falha ao remover perfil no worker (fallback DELETE).",
+    };
+  }
+
+  return {
+    configured: true,
+    ok: false,
+    statusCode: res.statusCode,
+    error: res.error || "Falha ao desconectar sessão MMZap no worker.",
+  };
 }
 
 export async function markMmzapWorkerSetupDone(

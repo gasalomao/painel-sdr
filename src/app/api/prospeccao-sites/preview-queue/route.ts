@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireClientId } from "@/lib/tenant";
+import { validateCampaignInstanceAccess } from "@/lib/campaign-instance-access";
 import {
   cancelScheduledPreviewDelivery,
   enqueueScheduledPreviewDelivery,
@@ -43,6 +44,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const instanceName = String(body.instance_name || "").trim();
   const previewUrl = String(body.preview_url || "").trim();
   const slot = String(body.delivery_slot || "now") as NaturalDeliverySlot;
+
+  if (instanceName) {
+    const access = await validateCampaignInstanceAccess(auth.clientId, instanceName);
+    if (!access.ok) {
+      return NextResponse.json({ ok: false, error: access.error }, { status: access.status });
+    }
+  }
 
   const res = await enqueueScheduledPreviewDelivery({
     clientId: auth.clientId,

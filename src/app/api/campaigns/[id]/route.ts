@@ -5,6 +5,8 @@ import { requireClientId } from "@/lib/tenant";
 import { requireFeatureAccess } from "@/lib/saas-limits";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 import { validateCampaignInstanceAccess, validateClientAgentAccess } from "@/lib/campaign-instance-access";
+import { serializeWeekendB2BGuardMode } from "@/lib/campaign-pool";
+import { saveCampaignAbConfig } from "@/lib/campaign-ab-testing";
 
 export const dynamic = "force-dynamic";
 
@@ -90,8 +92,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     "name", "instance_name", "message_template", "agent_id",
     "min_interval_seconds", "max_interval_seconds",
     "allowed_start_hour", "allowed_end_hour",
-    "personalize_with_ai", "use_web_search", "ai_prompt", "ai_model",
+    "personalize_with_ai", "use_web_search", "humanize_messages", "ai_prompt", "ai_model",
     "media_url", "media_type", "media_caption", "media_file_name", "media_mimetype",
+    "max_daily_previews", "approach_strategy",
   ];
   const update: Record<string, any> = { updated_at: new Date().toISOString() };
   for (const k of ALLOWED_FIELDS) {
@@ -114,13 +117,26 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (min && max && min > max) return NextResponse.json({ success: false, error: "min > max" }, { status: 400 });
   }
 
-  const { data, error } = await supabase
+  let { data, error } = await supabase
     .from("campaigns")
     .update(update)
     .eq("id", id)
     .eq("client_id", own.clientId)
     .select()
     .single();
+  if (error && ((error as any).code === "PGRST204" || (error as any).code === "42703")) {
+    delete update.max_daily_previews;
+    delete update.approach_strategy;
+    const retry = await supabase
+      .from("campaigns")
+      .update(update)
+      .eq("id", id)
+      .eq("client_id", own.clientId)
+      .select()
+      .single();
+    data = retry.data;
+    error = retry.error;
+  }
   if (error) {
     console.error("[campaigns/PATCH] Erro:", error.message);
     return NextResponse.json({ success: false, error: "Falha ao atualizar campanha" }, { status: 500 });
@@ -139,7 +155,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     await supabase
       .from("app_settings")
       .upsert(
-        { key: `campaign_weekend_guard:${id}`, value: body.weekend_guard === true ? "true" : "false" },
+        { key: `campaign_weekend_guard:${id}`, value: serializeWeekendB2BGuardMode(body.weekend_guard) },
         { onConflict: "key" }
       )
       .then(() => undefined, () => undefined);
@@ -152,6 +168,19 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         { onConflict: "key" }
       )
       .then(() => undefined, () => undefined);
+  }
+  if (body.ab_test && typeof body.ab_test === "object") {
+    const abObj = body.ab_test as Record<string, unknown>;
+    await saveCampaignAbConfig(id, {
+      enabled: Boolean(abObj.enabled),
+      variantA_label: typeof abObj.variantA_label === "string" ? abObj.variantA_label : undefined,
+      variantA_template:
+        typeof body.message_template === "string" ? body.message_template : (data?.message_template ?? ""),
+      variantB_label: typeof abObj.variantB_label === "string" ? abObj.variantB_label : undefined,
+      variantB_template: typeof abObj.variantB_template === "string" ? abObj.variantB_template : "",
+      paused_variant: abObj.reset_pause ? null : undefined,
+      paused_reason: abObj.reset_pause ? null : undefined,
+    }).catch(() => undefined);
   }
 
   return NextResponse.json({ success: true, campaign: data });

@@ -59,6 +59,7 @@ import {
   stopMmzapSessionForChip,
   tickMmzapBrowserOrchestrator,
 } from "./mmzap-browser-orchestrator";
+import { maybeSendDailyWarmupOwnerSummary } from "./warmup-owner-report";
 import { isMmzapWorkerConfigured } from "./mmzap-browser-client";
 import { invalidateExternalShieldCache } from "./warmup-external-shield";
 
@@ -1245,6 +1246,10 @@ export async function tickWarmupWorker(): Promise<{
               });
             });
           }
+        }
+
+        if (!isTestEnv) {
+          void maybeSendDailyWarmupOwnerSummary(clientId, { now }).catch(() => {});
         }
       } catch (tenantErr) {
         const message = tenantErr instanceof Error ? tenantErr.message : String(tenantErr);

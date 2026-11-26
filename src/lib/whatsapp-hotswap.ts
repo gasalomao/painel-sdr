@@ -180,6 +180,16 @@ export async function hotswapBannedInstance(
     migratedAutomations = Array.isArray(movedAutos) ? movedAutos.length : 0;
   } catch { /* ignore */ }
 
+  // 5. Migra entregas de prévias agendadas pendentes (evita falha no chip banido)
+  try {
+    await supabaseAdmin
+      .from("scheduled_preview_deliveries")
+      .update({ instance_name: newInst, updated_at: new Date().toISOString() })
+      .eq("client_id", clientId)
+      .eq("instance_name", oldInst)
+      .eq("status", "pending");
+  } catch { /* tabela opcional sem 031 */ }
+
   return {
     ok: true,
     status: 200,

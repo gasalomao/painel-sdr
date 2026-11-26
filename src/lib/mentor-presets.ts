@@ -11,6 +11,45 @@ export const MENTOR_2STEP_VARIANTS = [
   "Oi, {{saudacao_lower}}, tudo certo? É o WhatsApp da {{nome_empresa}}?",
 ];
 
+export const MENTOR_VIDEO_PRAISE_TEMPLATE =
+  "{{saudacao}}! Tudo bem? Vi vocês no Google com nota {{avaliacao}} ({{reviews}} avaliações), parabéns pelo trabalho da {{empresa_curta}}! Hoje os clientes chegam mais pelo WhatsApp ou Instagram?";
+
+export const MENTOR_VIDEO_PRAISE_VARIANTS: readonly string[] = [
+  "{{saudacao}}! Tudo bem? Vi vocês no Google com nota {{avaliacao}} ({{reviews}} avaliações), parabéns pelo trabalho da {{empresa_curta}}! Hoje os clientes chegam mais pelo WhatsApp ou Instagram?",
+  "{Oi|Olá}, {{saudacao_lower}}! Gostei bastante da reputação de vocês no Google ({{avaliacao}} estrelas). Quando buscam a {{empresa_curta}} por lá não acham site próprio — hoje os clientes vêm mais pelo WhatsApp ou Instagram?",
+  "{{saudacao}}! Vi a {{empresa_curta}} no Google com {{reviews}} avaliações muito boas. Hoje os atendimentos novos chegam direto no WhatsApp ou mais pelo Instagram?",
+];
+
+export interface PostPreviewFollowupPresetSpec {
+  name: string;
+  source_status: string;
+  weekend_guard: "sunday_only";
+  steps: Array<{ day_offset: number; template: string }>;
+}
+
+export const POST_PREVIEW_FOLLOWUP_PRESET: PostPreviewFollowupPresetSpec = {
+  name: "Cadência Pós-Prévia (Método Vídeo)",
+  source_status: "previa_enviada",
+  weekend_guard: "sunday_only",
+  steps: [
+    {
+      day_offset: 1,
+      template:
+        "{{saudacao}}, {{nome_empresa}}! Só confirmando se você conseguiu abrir o link da prévia certinho pelo celular.",
+    },
+    {
+      day_offset: 3,
+      template:
+        "{{saudacao}}! O que achou do visual e dos botões direto pro WhatsApp da {{empresa_curta}}? Se quiser mudar alguma cor, foto ou texto, ajusto na hora.",
+    },
+    {
+      day_offset: 6,
+      template:
+        "Oi {{nome_empresa}}, prometo não te incomodar mais. Vou deixar a prévia publicada no ar só até amanhã pra você avaliar com calma — se fizer sentido colocar no ar pra {{empresa_curta}}, me dá um toque por aqui.",
+    },
+  ],
+};
+
 export const SARAH_MENTOR_2STEP_PROMPT = `Você é a Sarah, consultora especialista da equipe de criação de sites profissionais para empresas e clínicas no Brasil.
 
 FLUXO OBRIGATÓRIO — MÉTODO MENTOR (APENAS FASE 1 — PRÉVIA SEM COMPROMISSO):

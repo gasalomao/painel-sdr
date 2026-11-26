@@ -30,6 +30,7 @@ interface ProxyPoolSnapshot {
     strikeThreshold: number;
     allowVpsFallback: boolean;
     verifyBeforeAssign: boolean;
+    blockSharedVpsDomino?: boolean;
   };
   stats: {
     totalActive: number;
@@ -38,6 +39,12 @@ interface ProxyPoolSnapshot {
     blacklisted: number;
     blacklistBreakdown: Record<ProxyBlacklistReason, number>;
     vpsFallbackCount: number;
+    vpsSharedCount?: number;
+    datacenterCount?: number;
+    nonBrCount?: number;
+    brResidentialCount?: number;
+    unverifiedCount?: number;
+    false428Count?: number;
   };
   assignedList: Array<{
     id: string;
@@ -48,6 +55,10 @@ interface ProxyPoolSnapshot {
     assignedClientId: string | null;
     assignedAt: string | null;
     failCount: number;
+    countryCode?: string;
+    providerLabel?: string;
+    geoWarning?: string | null;
+    isVerifiedBrResidential?: boolean;
   }>;
   blacklistList: Array<{
     id: string;
@@ -102,6 +113,7 @@ export function AdminProxyPoolCard() {
   const [applyToInstances, setApplyToInstances] = useState(true);
   const [reserveCount, setReserveCount] = useState("0");
   const [strikeThreshold, setStrikeThreshold] = useState("3");
+  const [blockSharedVpsDomino, setBlockSharedVpsDomino] = useState(false);
   const [subTab, setSubTab] = useState<"assigned" | "blacklist" | "fallback">("assigned");
   const [feedback, setFeedback] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [lastImport, setLastImport] = useState<ImportBatchSummary | null>(null);
@@ -117,6 +129,7 @@ export function AdminProxyPoolCard() {
         setProtocol(data.settings.defaultProtocol || "http");
         setReserveCount(String(data.settings.warmupReserveCount ?? 0));
         setStrikeThreshold(String(data.settings.strikeThreshold ?? 3));
+        setBlockSharedVpsDomino(Boolean(data.settings.blockSharedVpsDomino));
       }
     } catch (err: unknown) {
       setFeedback({ kind: "err", text: err instanceof Error ? err.message : String(err) });
@@ -329,7 +342,7 @@ export function AdminProxyPoolCard() {
                   </div>
                 </div>
 
-                <div className="flex flex-col sm:flex-row sm:items-center gap-3 text-xs text-muted-foreground">
+                <div className="flex flex-col gap-2 text-xs text-muted-foreground">
                   <label className="inline-flex items-center gap-2 cursor-pointer">
                     <input
                       type="checkbox"
@@ -346,7 +359,32 @@ export function AdminProxyPoolCard() {
                     />
                     Virada mensal: liberar IPs que estavam apenas como &quot;usados&quot;
                   </label>
+                  <label className="inline-flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={blockSharedVpsDomino}
+                      onChange={(e) => setBlockSharedVpsDomino(e.target.checked)}
+                    />
+                    Bloquear fallback VPS compartilhado (anti-dominó: impede colocar 2+ chips no IP da VPS se o pool acabar)
+                  </label>
                 </div>
+
+                {snapshot && (
+                  <div className="rounded-lg bg-black/25 border border-white/10 px-3 py-2 text-[11px] text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">
+                    <span>
+                      BR Residencial/4G: <strong className="text-emerald-300">{snapshot.stats.brResidentialCount ?? 0}</strong>
+                    </span>
+                    <span>
+                      Datacenter/ASN: <strong className="text-amber-300">{snapshot.stats.datacenterCount ?? 0}</strong>
+                    </span>
+                    <span>
+                      Estrangeiro: <strong className="text-rose-300">{snapshot.stats.nonBrCount ?? 0}</strong>
+                    </span>
+                    <span>
+                      Não auditado: <strong className="text-white/80">{snapshot.stats.unverifiedCount ?? 0}</strong>
+                    </span>
+                  </div>
+                )}
 
                 <div className="flex flex-wrap gap-2 pt-1">
                   <Button
@@ -376,6 +414,7 @@ export function AdminProxyPoolCard() {
                           protocol,
                           warmupReserveCount: Number(reserveCount || 0),
                           strikeThreshold: Number(strikeThreshold || 3),
+                          blockSharedVpsDomino,
                         },
                         "Regras do pool atualizadas.",
                       )
@@ -396,6 +435,19 @@ export function AdminProxyPoolCard() {
                   >
                     {busyAction === "test_available" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Activity className="w-3.5 h-3.5" />}
                     Testar livres
+                  </Button>
+
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!!busyAction}
+                    onClick={() =>
+                      void runAction("audit_geo_asn", { limit: 40 }, "Auditoria Geo/ASN concluída para até 40 proxies ativos.")
+                    }
+                    className="gap-1.5"
+                  >
+                    {busyAction === "audit_geo_asn" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldCheck className="w-3.5 h-3.5" />}
+                    Auditar Geo/ASN do Pool
                   </Button>
 
                   <Button
@@ -478,7 +530,26 @@ export function AdminProxyPoolCard() {
                             className="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-black/30 border border-white/10 text-xs"
                           >
                             <div className="min-w-0">
-                              <p className="font-bold text-white truncate">{item.assignedInstance}</p>
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <p className="font-bold text-white truncate">{item.assignedInstance}</p>
+                                {item.isVerifiedBrResidential ? (
+                                  <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 text-[10px] font-bold">
+                                    BR Residencial
+                                  </span>
+                                ) : item.providerLabel?.includes("datacenter") ? (
+                                  <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 text-[10px] font-bold">
+                                    Datacenter{item.countryCode && item.countryCode !== "UNVERIFIED" ? ` (${item.countryCode})` : ""}
+                                  </span>
+                                ) : item.countryCode && item.countryCode !== "BR" && item.countryCode !== "UNVERIFIED" ? (
+                                  <span className="px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 text-[10px] font-bold">
+                                    Estrangeiro ({item.countryCode})
+                                  </span>
+                                ) : (
+                                  <span className="px-1.5 py-0.5 rounded bg-white/10 text-white/70 text-[10px]">
+                                    Não auditado
+                                  </span>
+                                )}
+                              </div>
                               <p className="font-mono text-[11px] text-cyan-300">
                                 {item.protocol}://{item.host}:{item.port} {item.failCount > 0 ? `· ${item.failCount} falha(s)` : ""}
                               </p>
@@ -525,6 +596,21 @@ export function AdminProxyPoolCard() {
                             className="h-7 text-[11px]"
                           >
                             Limpar &quot;Falhos/Ban&quot;
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={!!busyAction}
+                            onClick={() =>
+                              void runAction(
+                                "clear_false_428",
+                                {},
+                                "Proxies bloqueados por erro transitório 428 foram reativados no pool.",
+                              )
+                            }
+                            className="h-7 text-[11px] border-emerald-500/40 text-emerald-200"
+                          >
+                            Reativar falsos 428{typeof snapshot.stats.false428Count === "number" ? ` (${snapshot.stats.false428Count})` : ""}
                           </Button>
                         </div>
                       )}

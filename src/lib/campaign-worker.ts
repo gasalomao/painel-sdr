@@ -30,6 +30,13 @@ import {
   type WeekendB2BGuardMode,
   type WeekendB2BGuardResult,
 } from "@/lib/campaign-pool";
+import {
+  computeCampaignAbSummary,
+  getCampaignAbConfig,
+  recordCampaignAbSend,
+  selectCampaignAbVariant,
+  type AbVariantKey,
+} from "@/lib/campaign-ab-testing";
 import { getBrazilPhoneVariants } from "@/lib/jid-utils";
 import { isChatRowInbound } from "@/lib/chat-direction";
 import { calculateChunkTypingMs, calculateTypingDelayMs, DEFAULT_TYPING_DELAY_CONFIG } from "@/lib/agent-delay";
@@ -174,7 +181,56 @@ export function getColdOutreachPolicyForStage(
   }
 
   let policy: ColdOutreachPolicy;
-  if (normalizedStage === 2) {
+  if (opts?.daysActive !== undefined) {
+    // Paridade estrita com computeChipReadinessSummary (warmup-engine.ts) e computeChipColdReadiness (types.ts):
+    // Dia 7–10 = 15/dia · Dia 11–14 (Fase 3+) = 30/dia · Dia 15–20 (Fase 4+) = 50/dia · Dia 21+ & saúde >= 90 = 80/dia
+    if (normalizedStage >= 4 && opts.daysActive >= 21 && healthScore >= 90) {
+      policy = {
+        allowed: true,
+        dailyColdCap: 80,
+        hourlyColdCap: 14,
+        dailyFollowupCap: 40,
+        hourlyFollowupCap: 10,
+        minSafeIntervalSec: 45,
+        symbioticEveryN: 4,
+        zeroReplyThreshold: 14,
+        veteranTier: true,
+      };
+    } else if (normalizedStage >= 4 && opts.daysActive >= 15) {
+      policy = {
+        allowed: true,
+        dailyColdCap: 50,
+        hourlyColdCap: 10,
+        dailyFollowupCap: 35,
+        hourlyFollowupCap: 8,
+        minSafeIntervalSec: 55,
+        symbioticEveryN: 4,
+        zeroReplyThreshold: 12,
+      };
+    } else if (normalizedStage >= 3 && opts.daysActive >= 11) {
+      policy = {
+        allowed: true,
+        dailyColdCap: 30,
+        hourlyColdCap: 6,
+        dailyFollowupCap: 25,
+        hourlyFollowupCap: 6,
+        minSafeIntervalSec: 75,
+        symbioticEveryN: 3,
+        zeroReplyThreshold: 10,
+      };
+    } else {
+      policy = {
+        allowed: true,
+        dailyColdCap: 15,
+        hourlyColdCap: 4,
+        dailyFollowupCap: 15,
+        hourlyFollowupCap: 4,
+        minSafeIntervalSec: 120,
+        symbioticEveryN: 3,
+        zeroReplyThreshold: 8,
+      };
+    }
+  } else if (normalizedStage === 2) {
     policy = {
       allowed: true,
       dailyColdCap: 15,
@@ -196,21 +252,8 @@ export function getColdOutreachPolicyForStage(
       symbioticEveryN: 3,
       zeroReplyThreshold: 10,
     };
-  } else if (opts?.daysActive !== undefined && opts.daysActive >= 21 && healthScore >= 90) {
-    // Stage 4B Veterano: 2 chips veteranos em __auto_pool__ atingem 150-160 frios + 70-80 follow-ups/dia
-    policy = {
-      allowed: true,
-      dailyColdCap: 80,
-      hourlyColdCap: 14,
-      dailyFollowupCap: 40,
-      hourlyFollowupCap: 10,
-      minSafeIntervalSec: 45,
-      symbioticEveryN: 4,
-      zeroReplyThreshold: 14,
-      veteranTier: true,
-    };
   } else {
-    // Stage 4A (Dias 15-20 ou Stage 4 padrão)
+    // Stage 4A padrão quando daysActive não foi informado
     policy = {
       allowed: true,
       dailyColdCap: 50,
@@ -1497,7 +1540,7 @@ export async function resolveHealthyCampaignChip(
 
     let { data: warmupRows, error } = await supabase
       .from("whatsapp_warmup_configs")
-      .select("instance_name, phone_number, enabled, stage, days_active, health_score, is_quarantined, quarantine_until, purpose, sent_today, career_mode, cold_outreach_locked_until, mmzap_browser_status")
+      .select("instance_name, phone_number, enabled, stage, days_active, health_score, is_quarantined, quarantine_until, purpose, sent_today, career_mode, cold_outreach_locked_until, mmzap_browser_status, external_warmup_mode")
       .eq("client_id", clientId);
 
     if (
@@ -1689,11 +1732,13 @@ export async function resolveHealthyCampaignChip(
     }
 
     // Modo Pool Automático (__auto_pool__): avalia candidatos conectados e escolhe o melhor chip saudável
+    const hasConnInventory = Array.isArray(connRows) && connRows.length > 0;
     const poolCandidates = warmupRows
       .filter((r: any) => {
         if (!r?.instance_name) return false;
         if (r.enabled === false && r.purpose !== "outbound") return false;
-        if (openSet.size > 0 && !openSet.has(r.instance_name)) return false;
+        if (!bypassColdShield && String(r.external_warmup_mode || "").toLowerCase() === "receive_only") return false;
+        if (hasConnInventory && !openSet.has(r.instance_name)) return false;
         return true;
       })
       .map((r: any) => {
@@ -2329,14 +2374,38 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     push_name: pushName,
   });
 
+  // Seleção A/B automática (quando configurada na campanha)
+  let chosenAbVariant: AbVariantKey | null = null;
+  let effectiveTemplate = String(c.message_template || "");
+  try {
+    const abCfg = await getCampaignAbConfig(c.id);
+    if (abCfg?.enabled) {
+      const abEval = await computeCampaignAbSummary(clientId, c.id, c.name);
+      if (abEval.newlyPaused) {
+        await addCampaignLog(campaignId, `⏸️ Teste A/B: ${abEval.newlyPaused.reason}`, "warning");
+      }
+      if (abEval.newlyPaused) {
+        abCfg.paused_variant = abEval.newlyPaused.variant;
+      }
+      chosenAbVariant = selectCampaignAbVariant(abCfg, abEval.storedCounts);
+      if (chosenAbVariant === "B" && abCfg.variantB_template.trim()) {
+        effectiveTemplate = abCfg.variantB_template;
+      } else if (abCfg.variantA_template.trim()) {
+        effectiveTemplate = abCfg.variantA_template;
+      }
+    }
+  } catch {
+    /* fail-open: mantém template padrão */
+  }
+
   // Renderiza msg base substituindo variáveis ({{saudacao}}, {{nome_empresa}}, etc) e Spintax
-  let text = renderTemplate(c.message_template, renderCtx, { spintax: true });
+  let text = renderTemplate(effectiveTemplate, renderCtx, { spintax: true });
 
   // Se o Misturador Anti-Ban estiver ativo (variação semântica de abordagem),
   // aplica a mistura sobre a mensagem base antes da IA ou do envio direto.
   if (antibanMixerEnabled) {
     text = applyAntiBanMixer({
-      template: c.message_template,
+      template: effectiveTemplate,
       renderedText: text,
       companyName: effectiveCompanyName,
       rating: renderCtx.avaliacao ?? renderCtx.nota ?? null,
@@ -2354,7 +2423,8 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
 
   // MENSAGEM PRÉ-GERADA (pré-geração fora da janela): reaproveita o texto que
   // a IA já escreveu — sem nova chamada de IA no momento do envio.
-  if (c.personalize_with_ai && target.rendered_message) {
+  // Quando Teste A/B está ativo, não sobrescreve a variante sorteada com pré-geração da Variante A.
+  if (c.personalize_with_ai && target.rendered_message && !chosenAbVariant) {
     text = target.rendered_message;
     aiInputText = target.ai_input || null;
     await addCampaignLog(campaignId,
@@ -2427,7 +2497,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
   // corresponda EXATAMENTE ao horário real em que o disparo está saindo agora,
   // e impede links/pitch longo quando o template é de quebra-gelo curto.
   text = enforceShortHandshakeGuard({
-    template: c.message_template,
+    template: effectiveTemplate,
     candidateText: text,
     companyName: effectiveCompanyName,
     rating: renderCtx.avaliacao ?? renderCtx.nota ?? null,
@@ -2541,15 +2611,29 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     if (c.media_url && c.media_type) {
       try {
         await new Promise((r) => setTimeout(r, 1500)); // gap natural entre texto e mídia
+        let renderedCaption = c.media_caption
+          ? syncGreetingToCurrentHour(
+              renderTemplate(String(c.media_caption), renderCtx, { spintax: true }),
+              new Date()
+            )
+          : "";
+        if (renderedCaption && /\{\{.*?\}\}|\{.*?\}/.test(renderedCaption)) {
+          renderedCaption = renderedCaption
+            .replace(/\{\{\s*[\w-]+\s*\}\}/g, "")
+            .replace(/\{\s*[\w-]+\s*\}/g, "")
+            .replace(/[ \t]{2,}/g, " ")
+            .replace(/\s+([.,!?])/g, "$1")
+            .trim();
+        }
         if (typeof registerPendingAutomatedMedia === "function") {
           registerPendingAutomatedMedia(effectiveInstanceName, sendJid);
         }
-        if (c.media_caption) {
-          registerPendingAutomatedSend(effectiveInstanceName, sendJid, c.media_caption);
+        if (renderedCaption) {
+          registerPendingAutomatedSend(effectiveInstanceName, sendJid, renderedCaption);
         }
         const mediaResult = await channel.sendMedia(
           sendJid,
-          c.media_caption || "",
+          renderedCaption,
           {
             type: c.media_type as "image" | "video" | "audio" | "document",
             mediaUrl: c.media_url,
@@ -2571,7 +2655,7 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
             remoteJid: sendJid,
             instanceName: effectiveInstanceName,
             msgId: mediaMsgId,
-            text: c.media_caption || "",
+            text: renderedCaption,
             clientId,
           });
         } catch { /* best-effort */ }
@@ -2603,6 +2687,10 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
       sent_count: (c.sent_count || 0) + 1,
       updated_at: new Date().toISOString(),
     }).eq("id", campaignId);
+
+    if (chosenAbVariant) {
+      await recordCampaignAbSend(c.id, clientId, sendJid, chosenAbVariant).catch(() => {});
+    }
 
     // ───────── CONTABILIZAÇÃO ANTI-BAN & PULSO SIMBIÓTICO + FREIO DE VÁCUO SILENCIOSO ─────────
     const batchState = recordColdOutreachSend(effectiveInstanceName, Date.now(), clientId);
@@ -2959,12 +3047,13 @@ export async function resolvePreValidationChip(
     }
 
     if (!error && Array.isArray(warmupRows) && warmupRows.length > 0) {
+      const hasConnInventory = Array.isArray(connRows) && connRows.length > 0;
       const activeSender = campaignId ? _lastSelectedInstanceByCampaign.get(campaignId)?.instanceName || null : null;
       const scored = warmupRows
         .filter((r: any) => {
           const inst = String(r?.instance_name || "");
           if (!inst) return false;
-          if (openSet.size > 0 && !openSet.has(inst)) return false;
+          if (hasConnInventory && !openSet.has(inst)) return false;
           const quarantined =
             Boolean(r.is_quarantined) &&
             Boolean(r.quarantine_until) &&
@@ -3316,6 +3405,12 @@ export async function preGenerateCampaignMessages(campaignId: string): Promise<{
   if (!c.client_id) return { ok: false, generated: 0, skipped: 0, failed: 0, error: "Campanha sem client_id" };
   if (!c.personalize_with_ai) return { ok: true, generated: 0, skipped: 0, failed: 0 };
   if (c.status !== "running") return { ok: false, generated: 0, skipped: 0, failed: 0, error: "Campanha não está running" };
+
+  // Quando Teste A/B está habilitado, a variante (A ou B) e a auto-pausa precisam ser decididas no momento do envio.
+  const abCfg = await getCampaignAbConfig(campaignId).catch(() => null);
+  if (abCfg?.enabled) {
+    return { ok: true, generated: 0, skipped: 0, failed: 0 };
+  }
 
   const { data: targets } = await supabase
     .from("campaign_targets")

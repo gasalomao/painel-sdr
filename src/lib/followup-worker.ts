@@ -794,6 +794,31 @@ async function processTarget(
 
   // 2.5. Blindagem Anti-Spam (espaçamento mínimo 24h/48h em leads frios sem resposta + teto de toques frios)
   const coldShieldEnabled = await resolveFollowupColdShield(camp);
+  if (!coldShieldEnabled && !target.last_sent_at) {
+    // Mesmo com escudo anti-ban desligado, se o cliente já respondeu por último antes do step 0,
+    // encerra imediatamente como "responded" para nunca disparar follow-up por cima da resposta.
+    const recentMsgs = await fetchRecentMessagesForSpacing(target.remote_jid, camp.client_id);
+    const latest = [...recentMsgs].sort((a, b) => {
+      const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+      return tb - ta;
+    })[0];
+    if (latest && isChatRowInbound(latest as any)) {
+      await supabase
+        .from("followup_targets")
+        .update({ status: "responded", updated_at: new Date().toISOString() })
+        .eq("id", target.id)
+        .eq("client_id", camp.client_id);
+      await moveLeadResponded(target.remote_jid, camp.client_id);
+      await supabase
+        .from("followup_campaigns")
+        .update({ total_responded: (await countByStatus(camp.id, camp.client_id, "responded")) })
+        .eq("id", camp.id)
+        .eq("client_id", camp.client_id);
+      await addFollowupLog(camp.id, camp.client_id, `🎉 ${nomeLead} já respondeu recentemente — follow-up encerrado sem sobreposição.`, "success");
+      return { outcome: "responded" };
+    }
+  }
   if (coldShieldEnabled) {
     const recentMsgs = await fetchRecentMessagesForSpacing(target.remote_jid, camp.client_id);
     const spacing = evaluateColdFollowupSpacing({
@@ -1139,15 +1164,29 @@ async function processTarget(
     if (isLastStep && camp.media_url && camp.media_type) {
       try {
         await new Promise((r) => setTimeout(r, 1500));
+        let renderedMediaCaption = camp.media_caption
+          ? syncGreetingToCurrentHour(
+              renderTemplate(String(camp.media_caption), renderCtx, { spintax: true }),
+              new Date()
+            )
+          : "";
+        if (renderedMediaCaption && /\{\{.*?\}\}|\{.*?\}/.test(renderedMediaCaption)) {
+          renderedMediaCaption = renderedMediaCaption
+            .replace(/\{\{\s*[\w-]+\s*\}\}/g, "")
+            .replace(/\{\s*[\w-]+\s*\}/g, "")
+            .replace(/[ \t]{2,}/g, " ")
+            .replace(/\s+([.,!?])/g, "$1")
+            .trim();
+        }
         if (typeof registerPendingAutomatedMedia === "function") {
           registerPendingAutomatedMedia(sendInstanceName, target.remote_jid);
         }
-        if (camp.media_caption) {
-          registerPendingAutomatedSend(sendInstanceName, target.remote_jid, camp.media_caption);
+        if (renderedMediaCaption) {
+          registerPendingAutomatedSend(sendInstanceName, target.remote_jid, renderedMediaCaption);
         }
         const mediaResult = await channel.sendMedia(
           target.remote_jid,
-          camp.media_caption || "",
+          renderedMediaCaption,
           {
             type: camp.media_type as "image" | "video" | "audio" | "document",
             mediaUrl: camp.media_url,
@@ -1171,7 +1210,7 @@ async function processTarget(
             remoteJid: target.remote_jid,
             instanceName: sendInstanceName,
             msgId: mediaMsgId,
-            text: camp.media_caption || "",
+            text: renderedMediaCaption,
             clientId: camp.client_id,
           });
         } catch { /* best-effort */ }

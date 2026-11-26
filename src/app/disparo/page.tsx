@@ -21,7 +21,16 @@ import { mergeRealtimeLog } from "@/lib/realtime-logs";
 import { useClientSession } from "@/lib/use-session";
 import { LeadIntelligenceBatch } from "@/components/lead-intelligence-batch";
 import { ModelOptions } from "@/components/ai-module-shared";
-import { AUTO_POOL_INSTANCE, isAutoPoolInstance } from "@/lib/campaign-pool";
+import {
+  AUTO_POOL_INSTANCE,
+  isAutoPoolInstance,
+  parseWeekendB2BGuardMode,
+  type WeekendB2BGuardMode,
+} from "@/lib/campaign-pool";
+import {
+  MENTOR_2STEP_TEMPLATE,
+  MENTOR_VIDEO_PRAISE_TEMPLATE,
+} from "@/lib/mentor-presets";
 
 type Lead = {
   id: number;
@@ -62,8 +71,49 @@ type Campaign = {
   media_file_name?: string | null;
   media_mimetype?: string | null;
   antiban_mixer?: boolean;
-  weekend_guard?: boolean;
+  weekend_guard?: WeekendB2BGuardMode;
   cold_shield?: boolean;
+  ab_test?: {
+    enabled?: boolean;
+    variantA_label?: string;
+    variantB_label?: string;
+    variantB_template?: string;
+    paused_variant?: "A" | "B" | null;
+  } | null;
+};
+
+type MentorMetricsSnapshot = {
+  overall: {
+    sent: number;
+    responded: number;
+    preview_accepted: number;
+    taxa_resposta_1a_msg: number;
+    taxa_aceite_previa: number;
+  };
+  by_instance: Array<{
+    key: string;
+    sent: number;
+    responded: number;
+    preview_accepted: number;
+    taxa_resposta_1a_msg: number;
+  }>;
+};
+
+type AbCampaignCardRow = {
+  campaignId: string;
+  campaignName?: string | null;
+  paused_variant: "A" | "B" | null;
+  paused_reason: string | null;
+  winner_variant: "A" | "B" | null;
+  variants: Array<{
+    variant: "A" | "B";
+    label: string;
+    sent: number;
+    replied: number;
+    preview_accepted: number;
+    reply_rate_pct: number;
+    paused: boolean;
+  }>;
 };
 
 const DEFAULT_AI_PROMPT = `Você é um SDR experiente fazendo uma primeira abordagem PROFISSIONAL via WhatsApp.
@@ -97,8 +147,12 @@ export default function DisparoPage() {
   const [personalizeWithAI, setPersonalizeWithAI] = useState(false);
   const [humanizeMessages, setHumanizeMessages] = useState(false);
   const [antibanMixer, setAntibanMixer] = useState(true);
-  const [weekendGuard, setWeekendGuard] = useState(false);
+  const [weekendGuard, setWeekendGuard] = useState<WeekendB2BGuardMode>(false);
   const [coldShield, setColdShield] = useState(true);
+  const [abEnabled, setAbEnabled] = useState(false);
+  const [abVariantBTemplate, setAbVariantBTemplate] = useState(MENTOR_VIDEO_PRAISE_TEMPLATE);
+  const [mentorMetrics, setMentorMetrics] = useState<MentorMetricsSnapshot | null>(null);
+  const [abCampaigns, setAbCampaigns] = useState<AbCampaignCardRow[]>([]);
   const [prioritizeByScore, setPrioritizeByScore] = useState(true);
   const [spintaxSeed, setSpintaxSeed] = useState(0);
   const [useWebSearch, setUseWebSearch] = useState(false);
@@ -210,6 +264,17 @@ export default function DisparoPage() {
           });
           return changed ? next : prev;
         });
+      }
+      if (initial) {
+        fetch("/api/prospeccao-sites/mentor-metrics", { cache: "no-store" })
+          .then((mr) => mr.json())
+          .then((md) => {
+            if (md?.ok && md?.metrics) {
+              setMentorMetrics(md.metrics as MentorMetricsSnapshot);
+              setAbCampaigns(Array.isArray(md.ab_campaigns) ? (md.ab_campaigns as AbCampaignCardRow[]) : []);
+            }
+          })
+          .catch(() => {});
       }
     } finally {
       if (initial) setLoadingCampaigns(false);
@@ -456,6 +521,8 @@ export default function DisparoPage() {
     setAntibanMixer(true);
     setWeekendGuard(false);
     setColdShield(true);
+    setAbEnabled(false);
+    setAbVariantBTemplate(MENTOR_VIDEO_PRAISE_TEMPLATE);
     setPrioritizeByScore(true);
     setUseWebSearch(false);
     setMediaUrl(null); setMediaType(null); setMediaFileName(null); setMediaMimetype(null); setMediaCaption("");
@@ -478,8 +545,10 @@ export default function DisparoPage() {
     setHumanizeMessages(!!c.humanize_messages);
     setUseWebSearch(!!c.use_web_search);
     setAntibanMixer(c.antiban_mixer !== false);
-    setWeekendGuard(Boolean(c.weekend_guard));
+    setWeekendGuard(parseWeekendB2BGuardMode(c.weekend_guard));
     setColdShield(c.cold_shield !== false);
+    setAbEnabled(Boolean(c.ab_test?.enabled));
+    setAbVariantBTemplate(c.ab_test?.variantB_template || MENTOR_VIDEO_PRAISE_TEMPLATE);
     setAiModel(c.ai_model || "");
     setAiPrompt(c.ai_prompt || "");
     setMediaUrl(c.media_url ?? null);
@@ -523,6 +592,14 @@ export default function DisparoPage() {
         weekend_guard: weekendGuard,
         cold_shield: coldShield,
         prioritize_by_score: prioritizeByScore,
+        ab_test: abEnabled
+          ? {
+              enabled: true,
+              variantA_label: "Variante A (Template principal)",
+              variantB_label: "Variante B (Abridor Vídeo Nota Google)",
+              variantB_template: abVariantBTemplate,
+            }
+          : { enabled: false },
         ai_model: personalizeWithAI ? aiModel : null,
         ai_prompt: personalizeWithAI ? (aiPrompt.trim() || null) : null,
         media_url: mediaUrl,
@@ -678,6 +755,69 @@ export default function DisparoPage() {
                 <span><Send /><strong>
                   {campaigns.reduce((sum, c) => sum + (c.sent_count || 0), 0).toLocaleString("pt-BR")}
                 </strong> mensagens enviadas</span>
+              </div>
+            )}
+            {mentorMetrics && (mentorMetrics.overall.sent > 0 || abCampaigns.length > 0) && (
+              <div className={cn(styles.panel, "p-4 space-y-3")}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <BarChart3 className="w-4 h-4 text-emerald-400" />
+                    <h2 className="text-sm font-semibold text-white">Conversão A/B e por Chip</h2>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                    <span>
+                      Taxa de resposta 1ª msg:{" "}
+                      <strong className="text-emerald-300">{mentorMetrics.overall.taxa_resposta_1a_msg}%</strong>{" "}
+                      ({mentorMetrics.overall.responded}/{mentorMetrics.overall.sent})
+                    </span>
+                    <span>
+                      Aceite de prévia:{" "}
+                      <strong className="text-cyan-300">{mentorMetrics.overall.taxa_aceite_previa}%</strong>
+                    </span>
+                  </div>
+                </div>
+
+                {abCampaigns.length > 0 && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                    {abCampaigns.slice(0, 4).map((ab) => (
+                      <div key={ab.campaignId} className="rounded-lg border border-white/10 bg-black/25 p-3 space-y-2 text-xs">
+                        <div className="flex items-center justify-between gap-2">
+                          <strong className="text-white truncate">{ab.campaignName || "Campanha A/B"}</strong>
+                          {ab.winner_variant && (
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 text-[10px] font-bold">
+                              Vencedora: Var {ab.winner_variant}
+                            </span>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          {ab.variants.map((v) => (
+                            <div key={v.variant} className="rounded border border-white/10 bg-black/30 p-2 space-y-0.5">
+                              <div className="flex items-center justify-between gap-1">
+                                <span className="font-semibold text-white">Var {v.variant}</span>
+                                {v.paused && (
+                                  <span className="text-[10px] text-rose-300 font-semibold">Pausada (&lt;10%)</span>
+                                )}
+                              </div>
+                              <p className="text-[11px] text-muted-foreground">
+                                {v.sent} envios · <strong className="text-emerald-300">{v.reply_rate_pct}%</strong> resp. · {v.preview_accepted} prévias
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {mentorMetrics.by_instance.length > 0 && (
+                  <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
+                    {mentorMetrics.by_instance.slice(0, 6).map((inst) => (
+                      <span key={inst.key} className="px-2 py-1 rounded border border-white/10 bg-black/25">
+                        <strong className="text-white">{inst.key}</strong>: {inst.sent} env · {inst.taxa_resposta_1a_msg}% resp · {inst.preview_accepted} prévias
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
             {loadingCampaigns ? (
@@ -922,7 +1062,25 @@ export default function DisparoPage() {
                 </div>
                 <div className={styles.formBody}>
                   <div>
-                    <label htmlFor="campaign-template" className={styles.fieldLabel}>Mensagem-base</label>
+                    <div className={styles.fieldHeading}>
+                      <label htmlFor="campaign-template" className={styles.fieldLabel}>Mensagem-base</label>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setTemplate(MENTOR_2STEP_TEMPLATE)}
+                          className={styles.inlineAction}
+                        >
+                          Abridor 2-Step (Mentor)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setTemplate(MENTOR_VIDEO_PRAISE_TEMPLATE)}
+                          className={styles.inlineAction}
+                        >
+                          Abridor Vídeo (Nota Google + Site/Insta)
+                        </button>
+                      </div>
+                    </div>
                     <Textarea id="campaign-template" ref={templateRef} value={template} onChange={e => setTemplate(e.target.value)} onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); const v = e.dataTransfer.getData("text/plain"); if (!v) return; const ta = e.currentTarget; const start = ta.selectionStart ?? template.length; const end = ta.selectionEnd ?? template.length; setTemplate(template.slice(0, start) + v + template.slice(end)); }} className={cn(styles.field, styles.template)} />
                   </div>
                   <details>
@@ -955,6 +1113,34 @@ export default function DisparoPage() {
                       {previewMessage}
                     </p>
                     <p className={cn(styles.helper, "mt-3")}>Saudação atual: {greetingFor()}. {personalizeWithAI && "A IA reescreve este texto no momento do envio."}</p>
+                  </div>
+                  <div className="pt-2 border-t border-white/10 space-y-2">
+                    <label className={styles.option}>
+                      <input
+                        type="checkbox"
+                        checked={abEnabled}
+                        onChange={e => setAbEnabled(e.target.checked)}
+                        aria-label="Teste A/B automático 50/50"
+                      />
+                      <span>
+                        <strong>Teste A/B automático (50/50)</strong>
+                        <small>Alterna entre a mensagem principal (Variante A) e a Variante B. Pausa automaticamente a variante com taxa de resposta &lt; 10% após 20 envios.</small>
+                      </span>
+                    </label>
+                    {abEnabled && (
+                      <div>
+                        <label htmlFor="campaign-ab-b" className={styles.fieldLabel}>
+                          Variante B (ex.: Abridor Vídeo Nota Google)
+                        </label>
+                        <Textarea
+                          id="campaign-ab-b"
+                          value={abVariantBTemplate}
+                          onChange={e => setAbVariantBTemplate(e.target.value)}
+                          rows={3}
+                          className={cn(styles.field, styles.template)}
+                        />
+                      </div>
+                    )}
                   </div>
                 </div>
               </section>
@@ -1060,12 +1246,42 @@ export default function DisparoPage() {
                       </span>
                     </label>
                     <label className={styles.option}>
-                      <input type="checkbox" checked={weekendGuard} onChange={e => setWeekendGuard(e.target.checked)} aria-label="Modo Comercial B2B" aria-describedby="campaign-weekend-help" />
+                      <input
+                        type="checkbox"
+                        checked={Boolean(weekendGuard)}
+                        onChange={e => setWeekendGuard(e.target.checked ? "sunday_only" : false)}
+                        aria-label="Modo Comercial B2B"
+                        aria-describedby="campaign-weekend-help"
+                      />
                       <span>
                         <strong>Modo Comercial B2B (Proteção Fim de Semana)</strong>
-                        <small id="campaign-weekend-help">Pausa disparos frios aos domingos e reduz o ritmo pela metade aos sábados para evitar denúncias de empresas fora do expediente.</small>
+                        <small id="campaign-weekend-help">
+                          Evita denúncias B2B aos domingos. Quando ligado, escolha se o sábado opera em 100% ou 50% da cota.
+                        </small>
                       </span>
                     </label>
+                    {Boolean(weekendGuard) && (
+                      <div className={styles.aiSettings} role="group" aria-label="Regra de Sábado do Modo Comercial B2B">
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            aria-pressed={weekendGuard === "sunday_only"}
+                            onClick={() => setWeekendGuard("sunday_only")}
+                            className={styles.inlineAction}
+                          >
+                            {weekendGuard === "sunday_only" ? "● " : ""}Pausar só Domingo (Sábado 100% — Recomendado B2B)
+                          </button>
+                          <button
+                            type="button"
+                            aria-pressed={weekendGuard === "full" || weekendGuard === true}
+                            onClick={() => setWeekendGuard("full")}
+                            className={styles.inlineAction}
+                          >
+                            {weekendGuard === "full" || weekendGuard === true ? "● " : ""}Pausar Domingo + 50% Sábado
+                          </button>
+                        </div>
+                      </div>
+                    )}
                     <label className={styles.option}>
                       <input type="checkbox" checked={coldShield} onChange={e => setColdShield(e.target.checked)} aria-label="Proteção Anti-Ban" aria-describedby="campaign-cold-shield-help" />
                       <span>

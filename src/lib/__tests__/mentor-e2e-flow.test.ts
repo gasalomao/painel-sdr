@@ -21,6 +21,7 @@ vi.mock("@/lib/channel", () => ({
 
 vi.mock("@/lib/manual-send-registry", () => ({
   registerPendingAutomatedSend: vi.fn(),
+  registerAiSend: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase_admin", () => {

@@ -413,6 +413,9 @@ export type GlobalSettings = {
   continuous_warmup: boolean;
   auto_warmup_new_chips: boolean;
   custom_prompt: string;
+  daily_owner_summary_enabled?: boolean;
+  daily_owner_summary_phone?: string;
+  default_profile_avatar_urls?: string;
 };
 
 export type {

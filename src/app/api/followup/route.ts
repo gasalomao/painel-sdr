@@ -4,6 +4,7 @@ import { requireClientId } from "@/lib/tenant";
 import { requireFeatureAccess } from "@/lib/saas-limits";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 import { validateCampaignInstanceAccess } from "@/lib/campaign-instance-access";
+import { parseWeekendB2BGuardMode, serializeWeekendB2BGuardMode } from "@/lib/campaign-pool";
 
 export const dynamic = "force-dynamic";
 
@@ -47,7 +48,8 @@ export async function GET(req: NextRequest) {
   };
   for (const c of campaigns) {
     if (!c?.id) continue;
-    c.weekend_guard = readFlag(c.id, "followup_weekend_guard", false);
+    const rawWg = flagMap.get(`followup_weekend_guard:${c.id}`);
+    c.weekend_guard = rawWg !== undefined ? parseWeekendB2BGuardMode(rawWg) : false;
     c.cold_shield = readFlag(c.id, "followup_cold_shield", true);
   }
   return NextResponse.json({ success: true, campaigns });
@@ -159,7 +161,7 @@ export async function POST(req: NextRequest) {
       await supabase
         .from("app_settings")
         .upsert([
-          { key: `followup_weekend_guard:${data.id}`, value: String(Boolean(weekend_guard)) },
+          { key: `followup_weekend_guard:${data.id}`, value: serializeWeekendB2BGuardMode(weekend_guard) },
           { key: `followup_cold_shield:${data.id}`, value: String(cold_shield !== false) },
         ], { onConflict: "key" });
     } catch {}

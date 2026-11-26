@@ -5,6 +5,8 @@ import { requireFeatureAccess } from "@/lib/saas-limits";
 import { validateCampaignInstanceAccess } from "@/lib/campaign-instance-access";
 import { startCampaign, pauseCampaign, cancelCampaign, resetCampaign, isCampaignActive } from "@/lib/campaign-worker";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
+import { serializeWeekendB2BGuardMode } from "@/lib/campaign-pool";
+import { saveCampaignAbConfig } from "@/lib/campaign-ab-testing";
 
 export const dynamic = "force-dynamic";
 
@@ -81,7 +83,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     "min_interval_seconds", "max_interval_seconds",
     "allowed_start_hour", "allowed_end_hour",
     "personalize_with_ai", "ai_prompt", "ai_model",
-    "humanize_messages",
+    "humanize_messages", "max_daily_previews", "approach_strategy",
   ];
   const update: Record<string, any> = { updated_at: new Date().toISOString() };
   for (const k of ALLOWED) if (k in body) update[k] = body[k];
@@ -99,8 +101,57 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (min && max && min > max) return NextResponse.json({ success: false, error: "min > max" }, { status: 400 });
   }
 
-  const { data, error } = await supabase.from("campaigns").update(update).eq("id", id).select().single();
+  let { data, error } = await supabase.from("campaigns").update(update).eq("id", id).select().single();
+  if (error && ((error as any).code === "PGRST204" || (error as any).code === "42703")) {
+    delete update.max_daily_previews;
+    delete update.approach_strategy;
+    const retry = await supabase.from("campaigns").update(update).eq("id", id).select().single();
+    data = retry.data;
+    error = retry.error;
+  }
   if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+
+  if ("antiban_mixer" in body) {
+    await supabase
+      .from("app_settings")
+      .upsert(
+        { key: `campaign_antiban:${id}`, value: body.antiban_mixer !== false ? "true" : "false" },
+        { onConflict: "key" }
+      )
+      .then(() => undefined, () => undefined);
+  }
+  if ("weekend_guard" in body) {
+    await supabase
+      .from("app_settings")
+      .upsert(
+        { key: `campaign_weekend_guard:${id}`, value: serializeWeekendB2BGuardMode(body.weekend_guard) },
+        { onConflict: "key" }
+      )
+      .then(() => undefined, () => undefined);
+  }
+  if ("cold_shield" in body) {
+    await supabase
+      .from("app_settings")
+      .upsert(
+        { key: `campaign_cold_shield:${id}`, value: body.cold_shield !== false ? "true" : "false" },
+        { onConflict: "key" }
+      )
+      .then(() => undefined, () => undefined);
+  }
+  if (body.ab_test && typeof body.ab_test === "object") {
+    const abObj = body.ab_test as Record<string, unknown>;
+    await saveCampaignAbConfig(id, {
+      enabled: Boolean(abObj.enabled),
+      variantA_label: typeof abObj.variantA_label === "string" ? abObj.variantA_label : undefined,
+      variantA_template:
+        typeof body.message_template === "string" ? body.message_template : (data?.message_template ?? ""),
+      variantB_label: typeof abObj.variantB_label === "string" ? abObj.variantB_label : undefined,
+      variantB_template: typeof abObj.variantB_template === "string" ? abObj.variantB_template : "",
+      paused_variant: abObj.reset_pause ? null : undefined,
+      paused_reason: abObj.reset_pause ? null : undefined,
+    }).catch(() => undefined);
+  }
+
   return NextResponse.json({ success: true, campaign: data });
 }
 

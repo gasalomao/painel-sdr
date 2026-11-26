@@ -289,9 +289,9 @@ function buildEntryFromConfig(
     consecutiveSuccessfulDays:
       cfg.consecutive_successful_days !== undefined
         ? Math.max(
-            Number(cfg.consecutive_successful_days || 0),
-            cfg.instance_name === prev?.lastInstanceName ? 0 : Number(prev?.consecutiveSuccessfulDays || 0)
-          )
+          Number(cfg.consecutive_successful_days || 0),
+          cfg.instance_name === prev?.lastInstanceName ? 0 : Number(prev?.consecutiveSuccessfulDays || 0)
+        )
         : (prev?.consecutiveSuccessfulDays ?? 0),
     healthScore:
       cfg.health_score !== undefined
@@ -633,7 +633,7 @@ export function markPhoneDisconnected(
     entry.updatedAt = new Date(nowMs).toISOString();
     map[entry.canonicalPhone] = entry;
     await writePhoneMemoryMap(clientId, map);
-  }).catch(() => {});
+  }).catch(() => { });
 }
 
 /**
@@ -1016,6 +1016,49 @@ export async function markPhonePostBanRehab(params: {
       lastDisconnectedAt: nowIso,
       lastDisconnectReason: cleanReason,
       previousInstances: Array.from(new Set([...(entry.previousInstances || []), instanceName])).slice(-15),
+      updatedAt: nowIso,
+    };
+
+    map[updated.canonicalPhone] = updated;
+    await writePhoneMemoryMap(clientId, map);
+    await syncPhonePassportRow(clientId, updated);
+    return updated;
+  });
+}
+
+/**
+ * Libera manualmente a reabilitação pós-incidente e trava de disparo frio
+ * no passaporte permanente do telefone (`app_settings` + `whatsapp_phone_passports`),
+ * preservando o histórico (`banCount`, `daysActive`, `stage`, `previousInstances`).
+ */
+export async function clearPhonePostBanRehab(params: {
+  clientId: string;
+  instanceName: string;
+  phone?: string | null;
+  nowMs?: number;
+}): Promise<WarmupPhoneMemoryEntry | null> {
+  const { clientId, instanceName, phone, nowMs = Date.now() } = params;
+  if (!clientId || !instanceName) return null;
+
+  return enqueueTenantMemoryOp(clientId, async () => {
+    const map = await readPhoneMemoryMap(clientId);
+    const canonicalFromPhone = canonicalBrazilPhoneKey(phone);
+    const entry: WarmupPhoneMemoryEntry | null =
+      (canonicalFromPhone && map[canonicalFromPhone]) ||
+      Object.values(map).find((e) => e.lastInstanceName === instanceName) ||
+      null;
+
+    if (!entry) return null;
+
+    const nowIso = new Date(nowMs).toISOString();
+    const updated: WarmupPhoneMemoryEntry = {
+      ...entry,
+      lastInstanceName: instanceName,
+      healthScore: Math.max(entry.healthScore ?? 75, 75),
+      careerMode: "maturing",
+      rehabUntil: null,
+      coldOutreachLockedUntil: null,
+      softRecoveryUntil: null,
       updatedAt: nowIso,
     };
 

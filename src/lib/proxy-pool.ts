@@ -71,6 +71,7 @@ export interface ProxyPoolSettings {
   strikeThreshold: number;
   allowVpsFallback: boolean;
   verifyBeforeAssign: boolean;
+  blockSharedVpsDomino: boolean;
 }
 
 export const DEFAULT_PROXY_POOL_SETTINGS: ProxyPoolSettings = {
@@ -79,6 +80,7 @@ export const DEFAULT_PROXY_POOL_SETTINGS: ProxyPoolSettings = {
   strikeThreshold: 3,
   allowVpsFallback: true,
   verifyBeforeAssign: true,
+  blockSharedVpsDomino: false,
 };
 
 export interface ProxyGeoIntel {
@@ -289,6 +291,7 @@ export async function getProxyPoolSettings(): Promise<ProxyPoolSettings> {
           strikeThreshold: Math.max(1, Math.min(10, Math.round(Number(parsed.strikeThreshold || 3)))),
           allowVpsFallback: parsed.allowVpsFallback !== false,
           verifyBeforeAssign: parsed.verifyBeforeAssign !== false,
+          blockSharedVpsDomino: Boolean(parsed.blockSharedVpsDomino),
         };
       }
     }
@@ -320,6 +323,10 @@ export async function saveProxyPoolSettings(
     allowVpsFallback: patch.allowVpsFallback !== undefined ? Boolean(patch.allowVpsFallback) : current.allowVpsFallback,
     verifyBeforeAssign:
       patch.verifyBeforeAssign !== undefined ? Boolean(patch.verifyBeforeAssign) : current.verifyBeforeAssign,
+    blockSharedVpsDomino:
+      patch.blockSharedVpsDomino !== undefined
+        ? Boolean(patch.blockSharedVpsDomino)
+        : current.blockSharedVpsDomino,
   };
 
   if (supabaseAdmin && typeof supabaseAdmin.from === "function") {
@@ -893,8 +900,42 @@ export async function removeProxyFromProvider(instanceName: string, providerHint
 }
 
 /**
+ * Score de prioridade para seleção de proxy no pool:
+ * 0 = BR Residencial / 4G validado
+ * 1 = Geo ainda não auditado / neutro
+ * 2 = Datacenter/Hosting ou estrangeiro (menor prioridade)
+ */
+function scoreProxyPoolPriority(row: {
+  country_code?: string | null;
+  provider_label?: string | null;
+}): number {
+  if (isVerifiedCleanBrResidentialRow(row)) return 0;
+  const cc = String(row.country_code || "").trim().toUpperCase();
+  const label = String(row.provider_label || "").trim().toLowerCase();
+  if (label.includes("datacenter") || label.includes("hosting") || label.includes("foreign") || (cc && cc !== "BR" && cc !== "UNVERIFIED")) {
+    return 2;
+  }
+  return 1;
+}
+
+/**
+ * Identifica proxies enviados à Lista Negra apenas por erro transitório 428
+ * (não por ban 401/403 real ou erro 407 de credencial).
+ */
+export function isFalse428BlacklistRow(row: {
+  blacklist_reason?: string | null;
+  last_error?: string | null;
+}): boolean {
+  const err = String(row.last_error || "");
+  if (!err) return false;
+  if (/\b(401|403|407)\b|ban|logged.?out/i.test(err)) return false;
+  return /\b428\b|connection.?closed|precondition/i.test(err);
+}
+
+/**
  * Claim atômico de 1 proxy disponível para `instanceName` (exclusivo 1:1).
- * Usa RPC SQL com `FOR UPDATE SKIP LOCKED` e fallback Compare-And-Set caso o RPC não exista em mocks.
+ * Prioriza IPs BR residenciais/ISP validados antes de cair em datacenter;
+ * usa RPC SQL com `FOR UPDATE SKIP LOCKED` e fallback Compare-And-Set.
  */
 async function claimNextAvailableProxyRow(params: {
   instanceName: string;
@@ -907,6 +948,66 @@ async function claimNextAvailableProxyRow(params: {
   }
 
   const { instanceName, clientId = null, reserveForWarmup, forWarmup } = params;
+
+  // 0) Prioridade residencial BR: se já há proxy auditado como br_residential/br_mobile disponível,
+  // faz claim atômico CAS nele antes do RPC FIFO genérico.
+  try {
+    const existingCheck = await supabaseAdmin
+      .from("proxy_pool")
+      .select("*")
+      .eq("assigned_instance", instanceName)
+      .eq("status", "assigned")
+      .maybeSingle();
+    if (existingCheck?.data) {
+      return { row: existingCheck.data as ProxyPoolRecord };
+    }
+
+    let reserveAllows = true;
+    if (!forWarmup && reserveForWarmup > 0) {
+      const countRes = await supabaseAdmin
+        .from("proxy_pool")
+        .select("id", { count: "exact", head: true })
+        .eq("status", "available");
+      if (Number(countRes?.count || 0) <= reserveForWarmup) {
+        reserveAllows = false;
+      }
+    }
+
+    if (reserveAllows) {
+      const brRes = await supabaseAdmin
+        .from("proxy_pool")
+        .select("*")
+        .eq("status", "available")
+        .eq("country_code", "BR")
+        .order("created_at", { ascending: true })
+        .limit(25);
+      const residentialCandidates = ((brRes?.data || []) as ProxyPoolRecord[]).filter((r) =>
+        isVerifiedCleanBrResidentialRow(r),
+      );
+      for (const cand of residentialCandidates.slice(0, 5)) {
+        const nowIso = new Date().toISOString();
+        const updRes = await supabaseAdmin
+          .from("proxy_pool")
+          .update({
+            status: "assigned",
+            assigned_instance: instanceName,
+            assigned_client_id: clientId,
+            assigned_at: nowIso,
+            updated_at: nowIso,
+          })
+          .eq("id", cand.id)
+          .eq("status", "available")
+          .select("*")
+          .maybeSingle();
+        if (updRes?.data) {
+          invalidateProxyPoolCache();
+          return { row: updRes.data as ProxyPoolRecord };
+        }
+      }
+    }
+  } catch {
+    /* segue para RPC/CAS padrão */
+  }
 
   // 1) Tenta RPC atômico no Postgres
   if (typeof (supabaseAdmin as unknown as { rpc?: unknown }).rpc === "function") {
@@ -933,7 +1034,7 @@ async function claimNextAvailableProxyRow(params: {
     }
   }
 
-  // 2) Fallback Compare-And-Set no Postgres / mocks
+  // 2) Fallback Compare-And-Set no Postgres / mocks (ordenando residencial BR -> não auditado -> datacenter)
   try {
     const existingRes = await supabaseAdmin
       .from("proxy_pool")
@@ -966,9 +1067,12 @@ async function claimNextAvailableProxyRow(params: {
         .select("*")
         .eq("status", "available")
         .order("created_at", { ascending: true })
-        .limit(1);
+        .limit(25);
 
-      const candidate = (candRes.data as ProxyPoolRecord[] | null)?.[0];
+      const candidates = ((candRes.data as ProxyPoolRecord[] | null) || [])
+        .slice()
+        .sort((a, b) => scoreProxyPoolPriority(a) - scoreProxyPoolPriority(b));
+      const candidate = candidates[0];
       if (!candidate) return { row: null };
 
       const nowIso = new Date().toISOString();
@@ -1219,6 +1323,26 @@ export async function ensureProxyForInstance(params: {
 
     const row = claimed.row;
     if (!row) {
+      const { vpsSharedCount, vpsSharedInstances } = await countInstancesUsingVpsIp(instanceName);
+      if ((settings.blockSharedVpsDomino || !settings.allowVpsFallback) && vpsSharedCount >= 1) {
+        const dominoMsg = `Bloqueado pelo modo anti-dominó: IP da VPS já está em uso por ${vpsSharedCount} instância(s) (${vpsSharedInstances.slice(0, 3).join(", ")}). Adicione novos proxies BR ao pool.`;
+        await patchInstanceConnectionProxyMeta(instanceName, effectiveClientId, {
+          auto_proxy: true,
+          proxy_pending_rotation: true,
+          proxy_last_error: dominoMsg.slice(0, 280),
+          proxy_vps_shared_count: vpsSharedCount,
+          proxy_vps_warning: dominoMsg,
+        });
+        return {
+          ok: false,
+          mode: "direct",
+          usedVpsFallback: false,
+          reason: dominoMsg,
+          vpsSharedCount,
+          vpsWarning: dominoMsg,
+        };
+      }
+
       // Nenhum proxy livre no pool: respeita fail-open para IP padrão da VPS e reporta vpsSharedCount
       if (settings.allowVpsFallback && (overview.hasPool || explicitAuto || reason === "connect")) {
         const msg = triedErrors[triedErrors.length - 1] || "Pool sem proxies livres — usando IP padrão da VPS";
@@ -1232,7 +1356,6 @@ export async function ensureProxyForInstance(params: {
           vpsWarning: fb.warning,
         };
       }
-      const { vpsSharedCount } = await countInstancesUsingVpsIp(instanceName);
       return { ok: true, mode: "direct", usedVpsFallback: false, reason: "Sem proxy livre", vpsSharedCount };
     }
 
@@ -1328,8 +1451,27 @@ export async function ensureProxyForInstance(params: {
     };
   }
 
-  // Esgotaram as tentativas com falha: fail-open para IP padrão da VPS
+  // Esgotaram as tentativas com falha: respeita modo anti-dominó se IP da VPS já estiver compartilhado
   const failReason = triedErrors.join(" | ") || "Proxies testados falharam — fallback para IP da VPS";
+  const { vpsSharedCount, vpsSharedInstances } = await countInstancesUsingVpsIp(instanceName);
+  if ((settings.blockSharedVpsDomino || !settings.allowVpsFallback) && vpsSharedCount >= 1) {
+    const dominoMsg = `Bloqueado pelo modo anti-dominó: IP da VPS já está em uso por ${vpsSharedCount} instância(s) (${vpsSharedInstances.slice(0, 3).join(", ")}). (${failReason})`;
+    await patchInstanceConnectionProxyMeta(instanceName, effectiveClientId, {
+      auto_proxy: true,
+      proxy_pending_rotation: true,
+      proxy_last_error: dominoMsg.slice(0, 280),
+      proxy_vps_shared_count: vpsSharedCount,
+      proxy_vps_warning: dominoMsg,
+    });
+    return {
+      ok: false,
+      mode: "direct",
+      usedVpsFallback: false,
+      reason: dominoMsg,
+      vpsSharedCount,
+      vpsWarning: dominoMsg,
+    };
+  }
   const fb = await fallbackInstanceToVps(instanceName, effectiveClientId, failReason, provider);
   return {
     ok: true,
@@ -1905,6 +2047,9 @@ export async function getAdminProxyPoolSnapshot(): Promise<{
     vpsSharedCount: number;
     datacenterCount: number;
     nonBrCount: number;
+    brResidentialCount: number;
+    unverifiedCount: number;
+    false428Count: number;
   };
   assignedList: Array<{
     id: string;
@@ -1918,6 +2063,7 @@ export async function getAdminProxyPoolSnapshot(): Promise<{
     countryCode?: string;
     providerLabel?: string;
     geoWarning?: string | null;
+    isVerifiedBrResidential?: boolean;
   }>;
   blacklistList: Array<{
     id: string;
@@ -1960,6 +2106,9 @@ export async function getAdminProxyPoolSnapshot(): Promise<{
         vpsSharedCount: 0,
         datacenterCount: 0,
         nonBrCount: 0,
+        brResidentialCount: 0,
+        unverifiedCount: 0,
+        false428Count: 0,
       },
       assignedList: [],
       blacklistList: [],
@@ -1993,6 +2142,7 @@ export async function getAdminProxyPoolSnapshot(): Promise<{
     countryCode?: string;
     providerLabel?: string;
     geoWarning?: string | null;
+    isVerifiedBrResidential?: boolean;
   }> = [];
 
   const blacklistList: Array<{
@@ -2011,11 +2161,19 @@ export async function getAdminProxyPoolSnapshot(): Promise<{
   let blacklisted = 0;
   let datacenterCount = 0;
   let nonBrCount = 0;
+  let brResidentialCount = 0;
+  let unverifiedCount = 0;
+  let false428Count = 0;
 
   for (const r of rows) {
     const geoEval = buildProxyGeoWarning(r.host, null, r);
-    if (geoEval.isDatacenter) datacenterCount++;
+    const isRes = isVerifiedCleanBrResidentialRow(r);
+    if (isRes) brResidentialCount++;
+    else if (geoEval.isDatacenter) datacenterCount++;
     if (geoEval.countryCode && geoEval.countryCode !== "BR") nonBrCount++;
+    if (!isRes && !geoEval.isDatacenter && (!geoEval.countryCode || geoEval.countryCode === "UNVERIFIED")) {
+      unverifiedCount++;
+    }
 
     if (r.status === "available") {
       available++;
@@ -2033,11 +2191,13 @@ export async function getAdminProxyPoolSnapshot(): Promise<{
         countryCode: r.country_code,
         providerLabel: r.provider_label,
         geoWarning: geoEval.warning,
+        isVerifiedBrResidential: isRes,
       });
     } else if (r.status === "blacklisted") {
       blacklisted++;
       const reason = (r.blacklist_reason || "manual") as ProxyBlacklistReason;
       emptyBreakdown[reason] = (emptyBreakdown[reason] || 0) + 1;
+      if (isFalse428BlacklistRow(r)) false428Count++;
       blacklistList.push({
         id: r.id,
         host: r.host,
@@ -2118,6 +2278,9 @@ export async function getAdminProxyPoolSnapshot(): Promise<{
       vpsSharedCount,
       datacenterCount,
       nonBrCount,
+      brResidentialCount,
+      unverifiedCount,
+      false428Count,
     },
     assignedList,
     blacklistList,
@@ -2180,11 +2343,130 @@ export async function testAvailablePoolProxies(params?: {
   return { checked: rows.length, healthy, blacklisted };
 }
 
+export interface AuditProxyGeoResult {
+  auditedHosts: number;
+  updatedRows: number;
+  brResidentialCount: number;
+  brMobileCount: number;
+  datacenterCount: number;
+  foreignCount: number;
+  unverifiedCount: number;
+}
+
+/**
+ * Audita o Geo/ASN real (país + datacenter/residential) dos proxies ativos (`available`/`assigned`)
+ * sem suposições cegas, atualizando `country_code` e `provider_label`.
+ */
+export async function auditProxyPoolGeoAsn(params?: {
+  limit?: number;
+  geoProbeFn?: ProxyGeoProbe;
+  forceInTests?: boolean;
+}): Promise<AuditProxyGeoResult> {
+  if (!supabaseAdmin || typeof supabaseAdmin.from !== "function") {
+    return {
+      auditedHosts: 0,
+      updatedRows: 0,
+      brResidentialCount: 0,
+      brMobileCount: 0,
+      datacenterCount: 0,
+      foreignCount: 0,
+      unverifiedCount: 0,
+    };
+  }
+
+  const limit = Math.max(1, Math.min(100, params?.limit ?? 40));
+  const { data, error } = await supabaseAdmin
+    .from("proxy_pool")
+    .select("*")
+    .in("status", ["available", "assigned"])
+    .order("created_at", { ascending: true })
+    .limit(limit * 3);
+
+  if (error || !Array.isArray(data) || data.length === 0) {
+    return {
+      auditedHosts: 0,
+      updatedRows: 0,
+      brResidentialCount: 0,
+      brMobileCount: 0,
+      datacenterCount: 0,
+      foreignCount: 0,
+      unverifiedCount: 0,
+    };
+  }
+
+  const rows = (data as ProxyPoolRecord[])
+    .slice()
+    .sort((a, b) => {
+      const aUnv = String(a.country_code || "").toUpperCase() === "UNVERIFIED" || String(a.provider_label || "").includes("unverified") ? 0 : 1;
+      const bUnv = String(b.country_code || "").toUpperCase() === "UNVERIFIED" || String(b.provider_label || "").includes("unverified") ? 0 : 1;
+      return aUnv - bUnv;
+    })
+    .slice(0, limit);
+
+  const uniqueHosts = Array.from(new Set(rows.map((r) => String(r.host || "").trim().toLowerCase()).filter(Boolean)));
+  const isVitest = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
+  const geoByHost = new Map<string, ProxyGeoIntel | null>();
+
+  await mapPoolConcurrency(uniqueHosts, 4, isVitest ? 0 : 150, async (host) => {
+    const intel = await inspectProxyGeoAsn(host, {
+      geoProbeFn: params?.geoProbeFn,
+      forceInTests: params?.forceInTests,
+    }).catch(() => null);
+    geoByHost.set(host, intel);
+  });
+
+  let updatedRows = 0;
+  let brResidentialCount = 0;
+  let brMobileCount = 0;
+  let datacenterCount = 0;
+  let foreignCount = 0;
+  let unverifiedCount = 0;
+  const nowIso = new Date().toISOString();
+
+  for (const row of rows) {
+    const hostKey = String(row.host || "").trim().toLowerCase();
+    const intel = geoByHost.get(hostKey) ?? null;
+    if (!intel) {
+      unverifiedCount++;
+      continue;
+    }
+    const nextCc = intel.countryCode || row.country_code || "UNVERIFIED";
+    const nextLabel = formatHonestProviderLabel(intel, "webshare");
+    if (intel.hosting || intel.proxy) datacenterCount++;
+    else if (intel.countryCode === "BR" && intel.mobile) brMobileCount++;
+    else if (intel.countryCode === "BR") brResidentialCount++;
+    else if (intel.countryCode && intel.countryCode !== "BR") foreignCount++;
+    else unverifiedCount++;
+
+    const { error: updErr } = await supabaseAdmin
+      .from("proxy_pool")
+      .update({
+        country_code: nextCc,
+        provider_label: nextLabel,
+        last_checked_at: nowIso,
+        updated_at: nowIso,
+      })
+      .eq("id", row.id);
+    if (!updErr) updatedRows++;
+  }
+
+  if (updatedRows > 0) invalidateProxyPoolCache();
+  return {
+    auditedHosts: uniqueHosts.length,
+    updatedRows,
+    brResidentialCount,
+    brMobileCount,
+    datacenterCount,
+    foreignCount,
+    unverifiedCount,
+  };
+}
+
 /**
  * Gerencia itens na Lista Negra (reativar 1 item específico ou limpar por motivo).
  */
 export async function manageProxyBlacklist(params: {
-  action: "unblacklist_id" | "clear_used" | "clear_failed" | "clear_all";
+  action: "unblacklist_id" | "clear_used" | "clear_failed" | "clear_false_428" | "clear_all";
   proxyId?: string;
 }): Promise<{ updated: number }> {
   if (!supabaseAdmin || typeof supabaseAdmin.from !== "function") {
@@ -2200,6 +2482,24 @@ export async function manageProxyBlacklist(params: {
     last_error: null,
     updated_at: nowIso,
   };
+
+  if (params.action === "clear_false_428") {
+    const { data: blRows } = await supabaseAdmin
+      .from("proxy_pool")
+      .select("id, blacklist_reason, last_error")
+      .eq("status", "blacklisted");
+    const ids = ((blRows || []) as Array<{ id: string; blacklist_reason?: string | null; last_error?: string | null }>)
+      .filter((r) => isFalse428BlacklistRow(r))
+      .map((r) => r.id);
+    if (ids.length === 0) return { updated: 0 };
+    const { data: updatedRows } = await supabaseAdmin
+      .from("proxy_pool")
+      .update(clearPatch)
+      .in("id", ids)
+      .select("id");
+    invalidateProxyPoolCache();
+    return { updated: Array.isArray(updatedRows) ? updatedRows.length : ids.length };
+  }
 
   let q = supabaseAdmin
     .from("proxy_pool")

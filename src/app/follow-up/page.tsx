@@ -25,7 +25,14 @@ import {
   MessageSquare, FileText, Pencil, ChevronRight, BarChart3, Workflow,
 } from "lucide-react";
 import { TEMPLATE_VARIABLES, renderTemplate } from "@/lib/template-vars";
-import { AUTO_POOL_INSTANCE, formatInstanceLabel, isAutoPoolInstance } from "@/lib/campaign-pool";
+import {
+  AUTO_POOL_INSTANCE,
+  formatInstanceLabel,
+  isAutoPoolInstance,
+  parseWeekendB2BGuardMode,
+  type WeekendB2BGuardMode,
+} from "@/lib/campaign-pool";
+import { POST_PREVIEW_FOLLOWUP_PRESET } from "@/lib/mentor-presets";
 import { supabase } from "@/lib/supabase";
 import { mergeRealtimeLog } from "@/lib/realtime-logs";
 import { useClientSession } from "@/lib/use-session";
@@ -55,7 +62,7 @@ type FollowupCampaign = {
   created_at: string;
   last_error?: string | null;
   last_error_at?: string | null;
-  weekend_guard?: boolean;
+  weekend_guard?: WeekendB2BGuardMode;
   cold_shield?: boolean;
 };
 
@@ -121,7 +128,7 @@ export default function FollowUpPage(): ReactElement {
   const [startHour, setStartHour] = useState(9);
   const [endHour, setEndHour] = useState(20);
   const [autoExecute, setAutoExecute] = useState(true);
-  const [weekendGuard, setWeekendGuard] = useState(false);
+  const [weekendGuard, setWeekendGuard] = useState<WeekendB2BGuardMode>(false);
   const [coldShield, setColdShield] = useState(true);
 
   // Coluna do kanban que abastece a campanha. Default "follow-up" (estágio
@@ -348,7 +355,7 @@ export default function FollowUpPage(): ReactElement {
     setStartHour(c.allowed_start_hour);
     setEndHour(c.allowed_end_hour);
     setAutoExecute(!!c.auto_execute);
-    setWeekendGuard(Boolean((c as { weekend_guard?: boolean }).weekend_guard));
+    setWeekendGuard(parseWeekendB2BGuardMode(c.weekend_guard));
     setColdShield(c.cold_shield !== false);
     setSourceStatus((c as any).source_status || "follow-up");
     setShowForm(true);
@@ -1136,6 +1143,15 @@ export default function FollowUpPage(): ReactElement {
                     <SelectValue placeholder="Escolher coluna do Kanban">{kanbanCols.find(c => c.status_key === sourceStatus)?.label || sourceStatus}</SelectValue>
                   </SelectTrigger>
                   <SelectContent className={cn(styles.selectPopup, "max-h-72")}>
+                    {!kanbanCols.some((c) => c.status_key === "previa_enviada") && (
+                      <SelectItem value="previa_enviada">
+                        <span className="flex items-center gap-2">
+                          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: "#06b6d4" } as any} />
+                          <span className="font-bold">Prévia Enviada</span>
+                          <span className="text-[9px] font-mono text-muted-foreground">previa_enviada</span>
+                        </span>
+                      </SelectItem>
+                    )}
                     {kanbanCols.map((c) => (
                       <SelectItem key={c.status_key} value={c.status_key}>
                         <span className="flex items-center gap-2">
@@ -1212,7 +1228,22 @@ export default function FollowUpPage(): ReactElement {
             <section className={styles.sequenceSection} aria-labelledby="sequence-heading">
             <div className={styles.sectionHeading}>
               <div><h2 id="sequence-heading" className={styles.sectionTitle}>Sequência de mensagens</h2><p className={styles.helper}>Defina os dias de espera e a mensagem de cada etapa.</p></div>
-              <Button size="sm" variant="outline" onClick={addStep} className={styles.secondaryAction}><Plus className="w-4 h-4" aria-hidden="true" /> Adicionar etapa</Button>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    if (!name.trim()) setName(POST_PREVIEW_FOLLOWUP_PRESET.name);
+                    setSourceStatus(POST_PREVIEW_FOLLOWUP_PRESET.source_status);
+                    setWeekendGuard(POST_PREVIEW_FOLLOWUP_PRESET.weekend_guard);
+                    setSteps(POST_PREVIEW_FOLLOWUP_PRESET.steps.map((s) => ({ ...s })));
+                  }}
+                  className={styles.secondaryAction}
+                >
+                  <Sparkles className="w-3.5 h-3.5" aria-hidden="true" /> Cadência Pós-Prévia (Método Vídeo)
+                </Button>
+                <Button size="sm" variant="outline" onClick={addStep} className={styles.secondaryAction}><Plus className="w-4 h-4" aria-hidden="true" /> Adicionar etapa</Button>
+              </div>
             </div>
             <div className={styles.sampleLead}>
               <label htmlFor="preview-lead" className={styles.fieldLabel}>Lead para pré-visualização</label>
@@ -1330,9 +1361,23 @@ export default function FollowUpPage(): ReactElement {
                 <div><label htmlFor="campaign-auto" className={styles.fieldLabel}>Executar automaticamente</label><p className={styles.helper}>Respeita os dias e horários configurados. Desative para processar somente de forma manual.</p></div>
                 <Switch id="campaign-auto" checked={autoExecute} onCheckedChange={setAutoExecute} />
               </div>
-              <div className={styles.optionRow}>
-                <div><label htmlFor="campaign-weekend-b2b" className={styles.fieldLabel}>Modo Comercial B2B (Proteção Fim de Semana)</label><p className={styles.helper}>Pausa follow-ups aos domingos e reduz o teto por hora pela metade aos sábados para preservar a reputação.</p></div>
-                <Switch id="campaign-weekend-b2b" checked={weekendGuard} onCheckedChange={setWeekendGuard} />
+              <div className="space-y-1.5 pt-2">
+                <label htmlFor="campaign-weekend-b2b" className={styles.fieldLabel}>Modo Comercial B2B (Proteção Fim de Semana)</label>
+                <select
+                  id="campaign-weekend-b2b"
+                  aria-label="Modo Comercial B2B"
+                  value={weekendGuard === "sunday_only" ? "sunday_only" : weekendGuard ? "full" : "off"}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setWeekendGuard(v === "sunday_only" ? "sunday_only" : v === "full" ? "full" : false);
+                  }}
+                  className={styles.field}
+                >
+                  <option value="off">Desligado</option>
+                  <option value="sunday_only">Pausar só Domingo (Sábado 100%)</option>
+                  <option value="full">Pausar Domingo + 50% Sábado</option>
+                </select>
+                <p className={styles.helper}>Pausa follow-ups aos domingos e permite manter o sábado comercial em 100% ou 50%.</p>
               </div>
               <div className={styles.optionRow}>
                 <div><label htmlFor="campaign-cold-shield" className={styles.fieldLabel}>Proteção Anti-Ban (cotas do chip e descanso de 15 min)</label><p className={styles.helper}>Ligada: respeita o teto por hora/dia do chip e adia 15 min quando o teto é atingido. Desligada: este follow-up ignora cotas, berçário, quarentena e pausas automáticas — envia no ritmo configurado. Aumenta o risco de bloqueio.</p></div>

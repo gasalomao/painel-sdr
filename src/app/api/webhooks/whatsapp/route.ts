@@ -7,7 +7,7 @@ import { isManualSend, isAiSend, isPendingAutomatedSend, isPendingAutomatedMedia
 import { DEFAULT_CLIENT_ID } from "@/lib/tenant";
 import { getInternalSecret, INTERNAL_SECRET_HEADER } from "@/lib/internal-auth";
 import { maskJid, truncForLog } from "@/lib/pii";
-import { resolveAlternateWhatsappJid } from "@/lib/jid-utils";
+import { getBrazilPhoneVariants, resolveAlternateWhatsappJid } from "@/lib/jid-utils";
 import { describeDocument, describeImage, refreshProfilePicIfStale, sanitizeLogPayload, uploadMediaBase64 } from "../shared-helpers";
 import { safeSecretEqual, shouldLogOnce } from "@/lib/webhook-security";
 import { checkTenantAiQuota, isClientActiveCached, isClientAdminCached } from "@/lib/saas-limits";
@@ -1141,7 +1141,7 @@ export async function POST(req: NextRequest) {
                 .gte("created_at", recentSinceIso)
                 .limit(1);
               isEchoOfAi = !!(recentAi && recentAi.length > 0);
-            } else if (hasMedia && ["image", "document"].includes(msgType)) {
+            } else if (hasMedia && ["image", "video", "audio", "document"].includes(msgType)) {
               const { data: recentAiMedia } = await supabase
                 .from("chats_dashboard")
                 .select("id")
@@ -1186,6 +1186,43 @@ export async function POST(req: NextRequest) {
           import("@/lib/campaign-worker")
             .then((m) => m.clearZeroReplyBrakeForInstance?.(instanceName))
             .catch(() => { });
+
+          // Atribuição imediata de resposta (Teste A/B + Métricas Mentor + Stop-on-Reply de Follow-up):
+          // escopado estritamente por client_id + variantes 8/9º dígito BR.
+          if (!optedOutInTurn && msgType !== "reaction") {
+            try {
+              const replyVariants = new Set<string>([remoteJid]);
+              if (altWhatsappJid) replyVariants.add(altWhatsappJid);
+              for (const rawJid of [remoteJid, altWhatsappJid].filter(Boolean) as string[]) {
+                if (!rawJid.includes("@g.us") && !rawJid.includes("@lid")) {
+                  for (const digits of getBrazilPhoneVariants(rawJid)) {
+                    if (digits.length >= 10) {
+                      replyVariants.add(digits);
+                      replyVariants.add(`${digits}@s.whatsapp.net`);
+                    }
+                  }
+                }
+              }
+              const variantList = Array.from(replyVariants);
+              const replyNowIso = new Date().toISOString();
+              await Promise.all([
+                supabase
+                  .from("campaign_targets")
+                  .update({ status: "replied" })
+                  .eq("client_id", clientId)
+                  .in("remote_jid", variantList)
+                  .in("status", ["sent", "delivered"]),
+                supabase
+                  .from("followup_targets")
+                  .update({ status: "responded", updated_at: replyNowIso })
+                  .eq("client_id", clientId)
+                  .in("remote_jid", variantList)
+                  .in("status", ["pending", "waiting"]),
+              ]);
+            } catch {
+              /* atribuição best-effort para nunca travar o webhook */
+            }
+          }
         }
         if (!fromMe && msgType === "reaction" && session?.id) {
           console.log(`[Webhook] Reação de emoji (${truncForLog(agentText, 24)}) salva no chat sem acionar IA:`, maskJid(remoteJid));

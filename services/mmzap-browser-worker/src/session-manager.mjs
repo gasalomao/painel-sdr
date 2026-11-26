@@ -7,12 +7,25 @@ import { createAuthenticatedProxyTunnel } from "./proxy-tunnel.mjs";
 
 const execFileAsync = promisify(execFile);
 
-const DATA_DIR = path.resolve(process.env.DATA_DIR || "/data");
-const PROFILES_DIR = path.join(DATA_DIR, "profiles");
-const EXTENSION_DIR = path.join(DATA_DIR, "extensions", "mmzap");
+function getDataDir() {
+  return path.resolve(process.env.DATA_DIR || "/data");
+}
+
+function getProfilesDir() {
+  return path.join(getDataDir(), "profiles");
+}
+
+function getExtensionDir() {
+  return path.join(getDataDir(), "extensions", "mmzap");
+}
+
 const DEFAULT_EXTENSION_DIR = path.resolve(
   process.env.DEFAULT_EXTENSION_DIR || "/opt/mmzap-extension"
 );
+const RETRYABLE_WIPE_ERROR_CODES = new Set(["EBUSY", "EPERM", "ENOTEMPTY", "EACCES"]);
+const DEFAULT_WIPE_MAX_ATTEMPTS = 3;
+const DEFAULT_WIPE_RETRY_DELAY_MS = 350;
+const GRACEFUL_LOGOUT_TIMEOUT_MS = 5_000;
 const MAX_CONCURRENT = Math.max(
   1,
   Math.min(3, Number(process.env.MAX_CONCURRENT_BROWSERS || 2) || 2)
@@ -27,6 +40,31 @@ const WATCHDOG_INTERVAL_MS = Math.max(
 const WATCHDOG_RECOVERY_COOLDOWN_MS = 15 * 60 * 1000;
 
 const sessions = new Map();
+let lastNightlyRecycleDayKey = null;
+let lastNightlyRecycleAt = null;
+let nightlyRecycleRunning = false;
+
+export function getBrazilDateParts(nowMs = Date.now()) {
+  const dt = new Date(nowMs);
+  const dayKey = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(dt);
+  const hourStr = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Sao_Paulo",
+    hour: "2-digit",
+    hour12: false,
+  }).format(dt);
+  const hourBrt = Number(hourStr) % 24;
+  return { dayKey, hourBrt };
+}
+
+export function shouldRunDailyRecycleBrt(nowMs = Date.now(), prevDayKey = lastNightlyRecycleDayKey) {
+  const { dayKey, hourBrt } = getBrazilDateParts(nowMs);
+  return hourBrt === 3 && dayKey !== prevDayKey;
+}
 
 export function sanitizeInstanceName(name) {
   const safe = String(name || "")
@@ -48,8 +86,9 @@ async function fileExists(targetPath) {
 }
 
 export async function getExtensionStatus() {
+  const extensionDir = getExtensionDir();
   const candidates = [
-    { dir: EXTENSION_DIR, source: "override" },
+    { dir: extensionDir, source: "override" },
     { dir: DEFAULT_EXTENSION_DIR, source: "builtin" },
   ];
 
@@ -79,7 +118,7 @@ export async function getExtensionStatus() {
     name: null,
     version: null,
     defaultPopup: null,
-    dir: EXTENSION_DIR,
+    dir: extensionDir,
     source: null,
   };
 }
@@ -90,6 +129,53 @@ async function cleanStaleLocks(profileDir) {
       await fs.rm(path.join(profileDir, lockName), { force: true });
     } catch {}
   }
+}
+
+export async function removeDirectoryWithRetry(
+  targetDir,
+  {
+    maxAttempts = DEFAULT_WIPE_MAX_ATTEMPTS,
+    retryDelayMs = DEFAULT_WIPE_RETRY_DELAY_MS,
+    rmImpl = fs.rm,
+    existsImpl = fileExists,
+  } = {}
+) {
+  const existed = await existsImpl(targetDir);
+  if (!existed) {
+    return { existed: false, wiped: true, attempts: 0 };
+  }
+
+  let lastError = null;
+  const totalAttempts = Math.max(1, Number(maxAttempts) || DEFAULT_WIPE_MAX_ATTEMPTS);
+
+  for (let attempt = 1; attempt <= totalAttempts; attempt++) {
+    try {
+      if (rmImpl === fs.rm) {
+        await cleanStaleLocks(targetDir);
+      }
+      await rmImpl(targetDir, { recursive: true, force: true });
+      const stillExists = rmImpl === fs.rm ? await existsImpl(targetDir) : false;
+      if (!stillExists) {
+        return { existed: true, wiped: true, attempts: attempt };
+      }
+      lastError = "Diretório ainda existe após remoção";
+    } catch (err) {
+      const code = err && typeof err === "object" ? String(err.code || "") : "";
+      if (code === "ENOENT") {
+        return { existed: true, wiped: true, attempts: attempt };
+      }
+      lastError = err instanceof Error ? err.message : String(err);
+      if (attempt >= totalAttempts || !RETRYABLE_WIPE_ERROR_CODES.has(code)) {
+        return { existed: true, wiped: false, attempts: attempt, error: lastError };
+      }
+    }
+
+    if (attempt < totalAttempts && retryDelayMs > 0) {
+      await new Promise((r) => setTimeout(r, retryDelayMs));
+    }
+  }
+
+  return { existed: true, wiped: false, attempts: totalAttempts, error: lastError };
 }
 
 async function isSetupDone(profileDir) {
@@ -104,7 +190,7 @@ async function clearSavedLogoutMarker(profileDir) {
 
 export async function markSetupDone(instanceName) {
   const safe = sanitizeInstanceName(instanceName);
-  const profileDir = path.join(PROFILES_DIR, safe);
+  const profileDir = path.join(getProfilesDir(), safe);
   await fs.mkdir(profileDir, { recursive: true });
   await fs.writeFile(path.join(profileDir, ".mmzap-setup-done"), new Date().toISOString(), "utf8");
   const current = sessions.get(safe);
@@ -424,7 +510,7 @@ async function runSessionWatchdogTick(session) {
           session.unhealthyDomStreak = 0;
           session.updatedAt = nowIso;
 
-          await clearSavedLogoutMarker(path.join(PROFILES_DIR, session.instanceName));
+          await clearSavedLogoutMarker(path.join(getProfilesDir(), session.instanceName));
           clearSessionWatchdog(session);
           if (session.timer) clearTimeout(session.timer);
           session.timer = setTimeout(() => {
@@ -609,8 +695,9 @@ async function captureQrDataUrl(page) {
 }
 
 async function launchBrowserSession({ safeName, clientId, mode, proxy, shiftDurationMinutes }) {
-  await fs.mkdir(PROFILES_DIR, { recursive: true });
-  const profileDir = path.join(PROFILES_DIR, safeName);
+  const profilesDir = getProfilesDir();
+  await fs.mkdir(profilesDir, { recursive: true });
+  const profileDir = path.join(profilesDir, safeName);
   await fs.mkdir(profileDir, { recursive: true });
   await cleanStaleLocks(profileDir);
   await clearSavedLogoutMarker(profileDir);
@@ -797,10 +884,27 @@ export async function startPairingSession({
   clientId,
   proxy,
   shiftDurationMinutes,
+  resetProfile = false,
 }) {
   const safeName = sanitizeInstanceName(instanceName);
+  const profileDir = path.join(getProfilesDir(), safeName);
   const existing = sessions.get(safeName);
-  if (existing && existing.status !== "qr_pending") {
+  const existingIsDead = Boolean(
+    existing &&
+      (existing.sessionLoggedOut ||
+        existing.status === "error" ||
+        existing.status === "logged_out" ||
+        existing.lastError === "qr_required")
+  );
+  const hasLoggedOutMarker = await fileExists(path.join(profileDir, ".mmzap-logged-out"));
+  const shouldWipeBeforeLaunch = Boolean(resetProfile || existingIsDead || hasLoggedOutMarker);
+
+  if (shouldWipeBeforeLaunch) {
+    if (existing) {
+      await stopSession(safeName, "re_pair_wipe");
+    }
+    await removeDirectoryWithRetry(profileDir);
+  } else if (existing && existing.status !== "qr_pending") {
     await stopSession(safeName, "re_pair");
   } else if (existing) {
     if (existing.timer) clearTimeout(existing.timer);
@@ -821,6 +925,8 @@ export async function startPairingSession({
     };
   }
 
+  const profileExistedBeforeLaunch = !shouldWipeBeforeLaunch && (await fileExists(profileDir));
+
   const launched = await launchBrowserSession({
     safeName,
     clientId,
@@ -834,6 +940,33 @@ export async function startPairingSession({
   }
 
   await new Promise((r) => setTimeout(r, 2500));
+
+  // Se existia perfil antigo no disco mas abriu deslogado/cookies expirados, limpa perfil e reabre QR limpo uma vez
+  if (profileExistedBeforeLaunch && launched.session?.page && !launched.session.page.isClosed()) {
+    const alreadyAuth = await detectWhatsAppLoggedIn(launched.session.page, 2_500);
+    if (!alreadyAuth) {
+      const expiredOnDisk = await detectWhatsAppLoggedOut(launched.session.page, 2_500);
+      if (expiredOnDisk) {
+        console.warn(
+          `[mmzap-worker] Perfil antigo de ${safeName} abriu com sessão expirada; apagando perfil e gerando QR limpo.`
+        );
+        await stopSession(safeName, "stale_profile_wipe");
+        await removeDirectoryWithRetry(profileDir);
+        const cleanLaunched = await launchBrowserSession({
+          safeName,
+          clientId,
+          mode: "pair",
+          proxy,
+          shiftDurationMinutes: Number(shiftDurationMinutes || 40),
+        });
+        if (!cleanLaunched.ok) {
+          return { statusCode: 400, body: cleanLaunched };
+        }
+        await new Promise((r) => setTimeout(r, 2500));
+      }
+    }
+  }
+
   return getPairingQr(safeName);
 }
 
@@ -1250,15 +1383,119 @@ export async function getSessionStatus(instanceName) {
   };
 }
 
+async function clickFirstVisibleLocator(page, selectors, clickTimeoutMs = 900) {
+  if (!page || page.isClosed()) return false;
+  for (const selector of selectors) {
+    try {
+      const loc = page.locator(selector).first();
+      const visible = await loc.isVisible().catch(() => false);
+      if (visible) {
+        await loc.click({ timeout: clickTimeoutMs });
+        return true;
+      }
+    } catch {
+      /* tenta próximo seletor */
+    }
+  }
+  return false;
+}
+
+export async function attemptGracefulWhatsAppLogout(page, timeoutMs = GRACEFUL_LOGOUT_TIMEOUT_MS) {
+  if (!page || page.isClosed()) return false;
+
+  return withTimeout(
+    (async () => {
+      const authenticated = await detectWhatsAppLoggedIn(page, Math.min(1_500, timeoutMs));
+      if (!authenticated) return false;
+
+      const menuClicked = await clickFirstVisibleLocator(
+        page,
+        [
+          '[data-testid="menu"]',
+          'button[aria-label="Mais opções"]',
+          'button[aria-label="More options"]',
+          '[aria-label="Mais opções"]',
+          '[aria-label="More options"]',
+          'button[aria-label="Menu"]',
+          'button[title="Menu"]',
+          'span[data-icon="menu"]',
+          'span[data-icon="more-refreshed"]',
+        ],
+        1_000
+      );
+      if (!menuClicked) return false;
+
+      await new Promise((r) => setTimeout(r, 300));
+
+      const logoutItemClicked = await clickFirstVisibleLocator(
+        page,
+        [
+          '[data-testid="mi-logout"]',
+          '[aria-label="Desconectar"]',
+          '[aria-label="Log out"]',
+          'div[role="button"]:has-text("Desconectar")',
+          'div[role="button"]:has-text("Log out")',
+          'li:has-text("Desconectar")',
+          'li:has-text("Log out")',
+          '[role="menuitem"]:has-text("Desconectar")',
+          '[role="menuitem"]:has-text("Log out")',
+        ],
+        1_000
+      );
+      if (!logoutItemClicked) return false;
+
+      await new Promise((r) => setTimeout(r, 350));
+
+      const confirmed = await clickFirstVisibleLocator(
+        page,
+        [
+          '[data-testid="popup-controls-ok"]',
+          '[role="dialog"] button:has-text("Desconectar")',
+          '[role="dialog"] button:has-text("Log out")',
+          'button:has-text("Desconectar")',
+          'button:has-text("Log out")',
+        ],
+        1_200
+      );
+      if (!confirmed) return false;
+
+      await new Promise((r) => setTimeout(r, 600));
+      return true;
+    })().catch(() => false),
+    timeoutMs,
+    false
+  );
+}
+
+function resetSessionMemoryState(session) {
+  if (!session) return;
+  session.qrCodeBase64 = null;
+  session.screenshotBase64 = null;
+  session.mmzapUiDetected = false;
+  session.mmzapChipState = null;
+  session.mmzapStatusLabel = null;
+  session.needsExtensionSetup = false;
+  session.loggedOutStreak = 0;
+  session.unhealthyDomStreak = 0;
+  session.lastError = null;
+}
+
 export async function stopSession(instanceName, reason = "manual_stop") {
   const safeName = sanitizeInstanceName(instanceName);
   const session = sessions.get(safeName);
+  const shouldAutoWipeProfile =
+    reason === "whatsapp_web_logged_out" || reason === "qr_required";
+
   if (!session) {
+    if (shouldAutoWipeProfile) {
+      await removeDirectoryWithRetry(path.join(getProfilesDir(), safeName));
+    }
     return { statusCode: 200, body: { instanceName: safeName, status: "idle", reason } };
   }
 
   session.closing = true;
   clearSessionTimers(session);
+  resetSessionMemoryState(session);
   sessions.delete(safeName);
 
   try {
@@ -1270,13 +1507,57 @@ export async function stopSession(instanceName, reason = "manual_stop") {
     } catch {}
   }
 
+  let profileWiped = false;
+  if (shouldAutoWipeProfile) {
+    const wipe = await removeDirectoryWithRetry(path.join(getProfilesDir(), safeName));
+    profileWiped = wipe.wiped;
+    console.warn(
+      `[mmzap-worker] Auto-wipe de perfil executado em ${safeName} (reason=${reason}, wiped=${wipe.wiped}, existed=${wipe.existed}).`
+    );
+  }
+
   return {
     statusCode: 200,
     body: {
       instanceName: safeName,
       status: "idle",
       reason,
+      profileWiped,
       updatedAt: new Date().toISOString(),
+    },
+  };
+}
+
+export async function logoutSession(instanceName) {
+  const safeName = sanitizeInstanceName(instanceName);
+  const session = sessions.get(safeName);
+  let loggedOutFromWhatsApp = false;
+
+  if (session) {
+    session.closing = true;
+    clearSessionTimers(session);
+    if (session.page && !session.page.isClosed()) {
+      loggedOutFromWhatsApp = await attemptGracefulWhatsAppLogout(
+        session.page,
+        GRACEFUL_LOGOUT_TIMEOUT_MS
+      );
+    }
+    resetSessionMemoryState(session);
+    session.sessionLoggedOut = true;
+    await stopSession(safeName, "manual_logout");
+  }
+
+  const profileDir = path.join(getProfilesDir(), safeName);
+  const wipe = await removeDirectoryWithRetry(profileDir);
+
+  return {
+    statusCode: 200,
+    body: {
+      ok: true,
+      instanceName: safeName,
+      loggedOutFromWhatsApp,
+      profileWiped: wipe.wiped,
+      profileDirExisted: wipe.existed,
     },
   };
 }
@@ -1289,8 +1570,16 @@ export async function stopAllSessions(reason = "worker_shutdown") {
 export async function deleteSessionProfile(instanceName) {
   const safeName = sanitizeInstanceName(instanceName);
   await stopSession(safeName, "delete_profile");
-  await fs.rm(path.join(PROFILES_DIR, safeName), { recursive: true, force: true }).catch(() => {});
-  return { statusCode: 200, body: { ok: true, instanceName: safeName } };
+  const wipe = await removeDirectoryWithRetry(path.join(getProfilesDir(), safeName));
+  return {
+    statusCode: 200,
+    body: {
+      ok: true,
+      instanceName: safeName,
+      profileWiped: wipe.wiped,
+      profileDirExisted: wipe.existed,
+    },
+  };
 }
 
 export async function installExtensionZipBase64(zipBase64) {
@@ -1299,8 +1588,10 @@ export async function installExtensionZipBase64(zipBase64) {
     return { statusCode: 400, body: { error: "ZIP base64 vazio" } };
   }
 
-  const tmpZip = path.join(DATA_DIR, `mmzap-ext-${Date.now()}.zip`);
-  const tmpExtract = path.join(DATA_DIR, `mmzap-extract-${Date.now()}`);
+  const dataDir = getDataDir();
+  const extensionDir = getExtensionDir();
+  const tmpZip = path.join(dataDir, `mmzap-ext-${Date.now()}.zip`);
+  const tmpExtract = path.join(dataDir, `mmzap-extract-${Date.now()}`);
   await fs.mkdir(tmpExtract, { recursive: true });
   await fs.writeFile(tmpZip, Buffer.from(clean, "base64"));
 
@@ -1321,15 +1612,50 @@ export async function installExtensionZipBase64(zipBase64) {
       }
     }
 
-    await fs.rm(EXTENSION_DIR, { recursive: true, force: true });
-    await fs.mkdir(path.dirname(EXTENSION_DIR), { recursive: true });
-    await fs.cp(sourceDir, EXTENSION_DIR, { recursive: true });
+    await fs.rm(extensionDir, { recursive: true, force: true });
+    await fs.mkdir(path.dirname(extensionDir), { recursive: true });
+    await fs.cp(sourceDir, extensionDir, { recursive: true });
 
     const ext = await getExtensionStatus();
     return { statusCode: 200, body: { ok: true, extension: ext } };
   } finally {
     await fs.rm(tmpZip, { force: true }).catch(() => {});
     await fs.rm(tmpExtract, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+export async function runDailyNightlyRecycle(nowMs = Date.now()) {
+  if (nightlyRecycleRunning) return { ok: false, reason: "already_running" };
+  nightlyRecycleRunning = true;
+  try {
+    const { dayKey } = getBrazilDateParts(nowMs);
+    await stopAllSessions("nightly_03h_brt_recycle");
+
+    try {
+      const profilesDir = getProfilesDir();
+      const dataDir = getDataDir();
+      const profileEntries = await fs.readdir(profilesDir, { withFileTypes: true }).catch(() => []);
+      for (const entry of profileEntries) {
+        if (entry.isDirectory()) {
+          await cleanStaleLocks(path.join(profilesDir, entry.name));
+        }
+      }
+      const dataEntries = await fs.readdir(dataDir, { withFileTypes: true }).catch(() => []);
+      for (const entry of dataEntries) {
+        if (/^mmzap-(ext|extract)-/.test(entry.name)) {
+          await fs.rm(path.join(dataDir, entry.name), { recursive: true, force: true }).catch(() => {});
+        }
+      }
+    } catch {
+      /* limpeza best-effort */
+    }
+
+    lastNightlyRecycleDayKey = dayKey;
+    lastNightlyRecycleAt = new Date(nowMs).toISOString();
+    console.log(`[mmzap-worker] Reciclagem noturna 03h BRT concluída (${dayKey}).`);
+    return { ok: true, dayKey, recycledAt: lastNightlyRecycleAt };
+  } finally {
+    nightlyRecycleRunning = false;
   }
 }
 
@@ -1353,14 +1679,21 @@ export async function getHealthSnapshot() {
     activeSessions: sessions.size,
     maxConcurrent: MAX_CONCURRENT,
     totalRssMb: Math.round((process.memoryUsage().rss / (1024 * 1024)) * 10) / 10,
+    lastNightlyRecycleAt,
     extension: ext,
     sessions: list,
   };
 }
 
-// Watchdog de RAM (30s): garante que nenhum Chromium passe de MAX_RSS_MB na VPS de 4 GB
+// Watchdog de RAM (30s) + Reciclagem limpa agendada às 03h BRT
 setInterval(() => {
   void (async () => {
+    const nowMs = Date.now();
+    if (shouldRunDailyRecycleBrt(nowMs, lastNightlyRecycleDayKey)) {
+      await runDailyNightlyRecycle(nowMs);
+      return;
+    }
+
     for (const sess of Array.from(sessions.values())) {
       const pid = sess.context?.browser?.()?.process?.()?.pid;
       const rssMb = await readLinuxProcessTreeRssMb(pid);

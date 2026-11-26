@@ -119,6 +119,177 @@ export function uniquifyOggOpusBuffer(source: Buffer, uniqueSeed?: string): Buff
   }
 }
 
+export type OggOpusDurationMode = "short" | "normal" | "extended";
+
+interface ParsedOggPage {
+  headerType: number;
+  granulePos: bigint;
+  serial: number;
+  seqNum: number;
+  segmentTable: Buffer;
+  payload: Buffer;
+}
+
+function parseOggPages(buf: Buffer): ParsedOggPage[] | null {
+  if (!buf || buf.length < 28) return null;
+  const pages: ParsedOggPage[] = [];
+  let offset = 0;
+  while (offset + 27 <= buf.length) {
+    if (buf.subarray(offset, offset + 4).toString("ascii") !== "OggS") return null;
+    const segCount = buf[offset + 26];
+    const hdrLen = 27 + segCount;
+    if (offset + hdrLen > buf.length) return null;
+    const segmentTable = Buffer.from(buf.subarray(offset + 27, offset + hdrLen));
+    let dataLen = 0;
+    for (let i = 0; i < segCount; i++) dataLen += segmentTable[i];
+    if (offset + hdrLen + dataLen > buf.length) return null;
+    const payload = Buffer.from(buf.subarray(offset + hdrLen, offset + hdrLen + dataLen));
+    pages.push({
+      headerType: buf[offset + 5],
+      granulePos: buf.readBigUInt64LE(offset + 6),
+      serial: buf.readUInt32LE(offset + 14),
+      seqNum: buf.readUInt32LE(offset + 18),
+      segmentTable,
+      payload,
+    });
+    offset += hdrLen + dataLen;
+  }
+  return pages.length >= 3 && offset === buf.length ? pages : null;
+}
+
+function encodeOggPage(page: ParsedOggPage): Buffer {
+  const hdr = Buffer.alloc(27);
+  hdr.write("OggS", 0, 4, "ascii");
+  hdr[4] = 0; // stream_structure_version
+  hdr[5] = page.headerType & 0xff;
+  hdr.writeBigUInt64LE(page.granulePos, 6);
+  hdr.writeUInt32LE(page.serial >>> 0, 14);
+  hdr.writeUInt32LE(page.seqNum >>> 0, 18);
+  hdr.writeUInt32LE(0, 22);
+  hdr[26] = page.segmentTable.length;
+  const full = Buffer.concat([hdr, page.segmentTable, page.payload]);
+  const crc = computeOggCrc32(full);
+  full.writeUInt32LE(crc, 22);
+  return full;
+}
+
+/**
+ * Varia naturalmente a duração do Ogg Opus (`short`, `normal` ou `extended`) preservando
+ * páginas `OpusHead`/`OpusTags` intactas, `granule_position` monotônico, `seqNum`,
+ * bit EOS somente na última página e CRC-32 RFC 3533 válido em todas as páginas.
+ */
+export function varyOggOpusDuration(
+  source: Buffer,
+  opts?: { mode?: OggOpusDurationMode; seed?: string }
+): Buffer {
+  const uniquified = uniquifyOggOpusBuffer(source, opts?.seed);
+  const mode = opts?.mode || "normal";
+  if (mode === "normal") return uniquified;
+
+  const pages = parseOggPages(uniquified);
+  if (!pages || pages.length < 3) return uniquified;
+
+  try {
+    const head = pages[0];
+    const tags = pages[1];
+    const audioPages = pages.slice(2);
+    if (audioPages.length === 0) return uniquified;
+
+    let selectedAudio: ParsedOggPage[];
+    if (mode === "short") {
+      if (audioPages.length >= 2) {
+        const keepCount = Math.max(1, Math.ceil(audioPages.length * 0.55));
+        selectedAudio = audioPages.slice(0, keepCount);
+      } else {
+        // Caso o arquivo tenha apenas 1 página de áudio, corta metade dos pacotes Opus da tabela de segmentos
+        const single = audioPages[0];
+        const segCount = single.segmentTable.length;
+        if (segCount >= 4) {
+          const halfSegs = Math.max(2, Math.floor(segCount * 0.55));
+          let cutBytes = 0;
+          for (let i = 0; i < halfSegs; i++) cutBytes += single.segmentTable[i];
+          const trimmedGranule =
+            single.granulePos > BigInt(0)
+              ? BigInt(Math.max(960, Math.round(Number(single.granulePos) * (halfSegs / segCount))))
+              : single.granulePos;
+          selectedAudio = [
+            {
+              ...single,
+              segmentTable: single.segmentTable.subarray(0, halfSegs),
+              payload: single.payload.subarray(0, cutBytes),
+              granulePos: trimmedGranule,
+            },
+          ];
+        } else {
+          selectedAudio = audioPages;
+        }
+      }
+    } else {
+      // extended: duplica segmentos finais de áudio de forma contígua para estender a duração
+      selectedAudio = audioPages.map((p) => ({ ...p }));
+      if (audioPages.length >= 2) {
+        const extra = audioPages.slice(0, Math.min(2, audioPages.length)).map((p) => ({ ...p }));
+        selectedAudio.push(...extra);
+      } else {
+        const single = audioPages[0];
+        const secondHalfStart = Math.floor(single.segmentTable.length / 2);
+        let prefixBytes = 0;
+        for (let i = 0; i < secondHalfStart; i++) prefixBytes += single.segmentTable[i];
+        if (secondHalfStart >= 1 && single.segmentTable.length + (single.segmentTable.length - secondHalfStart) <= 255) {
+          selectedAudio.push({
+            ...single,
+            segmentTable: single.segmentTable.subarray(secondHalfStart),
+            payload: single.payload.subarray(prefixBytes),
+          });
+        }
+      }
+    }
+
+    const rebuilt: ParsedOggPage[] = [
+      { ...head, headerType: head.headerType & ~0x04, seqNum: 0 },
+      { ...tags, headerType: tags.headerType & ~0x04, seqNum: 1 },
+    ];
+
+    let curGranule = BigInt(0);
+    for (let i = 0; i < selectedAudio.length; i++) {
+      const srcPage = selectedAudio[i];
+      const prevGranule =
+        i > 0 && selectedAudio[i - 1].granulePos <= srcPage.granulePos
+          ? selectedAudio[i - 1].granulePos
+          : BigInt(0);
+      const delta =
+        srcPage.granulePos > prevGranule
+          ? srcPage.granulePos - prevGranule
+          : srcPage.granulePos > BigInt(0)
+            ? srcPage.granulePos
+            : BigInt(48000);
+      curGranule += delta;
+      const isLast = i === selectedAudio.length - 1;
+      rebuilt.push({
+        ...srcPage,
+        headerType: (srcPage.headerType & ~0x04) | (isLast ? 0x04 : 0),
+        granulePos: curGranule,
+        seqNum: i + 2,
+      });
+    }
+
+    const outBuf = Buffer.concat(rebuilt.map(encodeOggPage));
+
+    // Validação estrita RFC 3533 de todas as páginas geradas antes de retornar
+    let pos = 0;
+    while (pos < outBuf.length) {
+      if (!verifyOggPageCrc(outBuf, pos)) return uniquified;
+      const segs = outBuf[pos + 26];
+      let dLen = 0;
+      for (let i = 0; i < segs; i++) dLen += outBuf[pos + 27 + i];
+      pos += 27 + segs + dLen;
+    }
+    return pos === outBuf.length ? outBuf : uniquified;
+  } catch {
+    return uniquified;
+  }
+}
+
 export function getWarmupVoiceSampleCount(): number {
   if (_cachedSamples.length === 0) {
     getRandomWarmupVoiceBase64();
@@ -128,7 +299,7 @@ export function getWarmupVoiceSampleCount(): number {
 
 /**
  * Retorna uma nota de voz Opus real (base64) com áudio e waveform autênticos para WhatsApp PTT,
- * evitando repetir o mesmo sample em envios consecutivos e garantindo hash SHA-256 único por envio.
+ * alternando samples, variando duração natural (`short` | `normal` | `extended`) e garantindo SHA-256 único.
  */
 export function getRandomWarmupVoiceBase64(uniqueSeed?: string): string {
   if (_cachedSamples.length === 0) {
@@ -156,7 +327,12 @@ export function getRandomWarmupVoiceBase64(uniqueSeed?: string): string {
       idx = (idx + 1 + Math.floor(Math.random() * (_cachedSamples.length - 1))) % _cachedSamples.length;
     }
     _lastSampleIndex = idx;
-    const uniqueBuf = uniquifyOggOpusBuffer(_cachedSamples[idx], uniqueSeed);
+    const modes: OggOpusDurationMode[] = ["short", "normal", "extended"];
+    const pickedMode = modes[Math.floor(Math.random() * modes.length)];
+    const uniqueBuf = varyOggOpusDuration(_cachedSamples[idx], {
+      mode: pickedMode,
+      seed: uniqueSeed,
+    });
     return uniqueBuf.toString("base64");
   }
 

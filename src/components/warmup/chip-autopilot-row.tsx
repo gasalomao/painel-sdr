@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   ChevronDown,
   Globe,
+  LogOut,
   Monitor,
   Pause,
   Play,
@@ -132,10 +133,11 @@ export interface ChipAutopilotRowProps {
   onOpenMmzapPairModal?: (instanceName: string, mode?: "pair" | "setup") => void;
   onMmzapBrowserAction?: (
     instanceName: string,
-    action: "start_shift" | "stop_shift" | "toggle_enabled" | "reset_profile",
+    action: "start_shift" | "stop_shift" | "toggle_enabled" | "reset_profile" | "logout",
     extra?: Record<string, unknown>
   ) => Promise<void>;
   onReleaseQuarantine?: (instanceName: string) => Promise<void>;
+  onOpenHotswap?: (instanceName: string) => void;
   onReauditDay0: (instanceName: string) => void;
   onOpenPairModal: (instanceName: string) => void;
   onOpenTestModal: (instanceName: string) => void;
@@ -157,12 +159,14 @@ export function ChipAutopilotRow({
   onOpenMmzapPairModal,
   onMmzapBrowserAction,
   onReleaseQuarantine,
+  onOpenHotswap,
   onReauditDay0,
   onOpenPairModal,
   onOpenTestModal,
 }: ChipAutopilotRowProps) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [mmzapBusy, setMmzapBusy] = useState(false);
+  const [confirmLogout, setConfirmLogout] = useState(false);
 
   const cfg = item.config;
   const instName = item.instance_name;
@@ -184,6 +188,13 @@ export function ChipAutopilotRow({
   const lastWatchdogTime = formatWatchdogTime(workerSession?.lastWatchdogCheckAt);
 
   const isQuarantined = Boolean(cfg.is_quarantined);
+  const coldLockMs = cfg.cold_outreach_locked_until
+    ? Date.parse(cfg.cold_outreach_locked_until)
+    : Number.NaN;
+  const isRehab =
+    cfg.career_mode === "rehab" ||
+    (Number.isFinite(coldLockMs) && coldLockMs > Date.now());
+  const canHotswap = !isConnected || isQuarantined || isRehab || (cfg.health_score ?? 100) < 40;
   const hasDay0Warnings = Boolean(item.day0_warnings && item.day0_warnings.length > 0);
   const hasNetworkWarnings = Boolean(
     item.network_warnings && item.network_warnings.length > 0
@@ -193,6 +204,7 @@ export function ChipAutopilotRow({
   const needsAttention =
     !isConnected ||
     isQuarantined ||
+    isRehab ||
     hasDay0Warnings ||
     hasNetworkWarnings ||
     needsMmzapQrAttention;
@@ -560,6 +572,52 @@ export function ChipAutopilotRow({
                 )}
             </>
           )}
+
+          {mmzapBrowserStatus !== "unpaired" && onMmzapBrowserAction && (
+            confirmLogout ? (
+              <div
+                role="group"
+                aria-label={`Confirmar logout MMZap de ${instName}`}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-red-500/35 bg-red-500/10 px-2.5 py-1 text-[11px] text-red-100"
+              >
+                <span>Deslogar e apagar perfil?</span>
+                <button
+                  type="button"
+                  disabled={mmzapBusy}
+                  onClick={async () => {
+                    setMmzapBusy(true);
+                    try {
+                      await onMmzapBrowserAction(instName, "logout");
+                      setConfirmLogout(false);
+                    } finally {
+                      setMmzapBusy(false);
+                    }
+                  }}
+                  className="rounded border border-red-400/40 bg-red-500/20 px-2 py-0.5 font-medium text-red-100 hover:bg-red-500/30 transition-colors"
+                >
+                  {mmzapBusy ? "Saindo..." : "Confirmar"}
+                </button>
+                <button
+                  type="button"
+                  disabled={mmzapBusy}
+                  onClick={() => setConfirmLogout(false)}
+                  className="rounded border border-[#303a32] bg-[#141a15] px-2 py-0.5 text-[#c2cfc6] hover:text-white transition-colors"
+                >
+                  Cancelar
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                disabled={mmzapBusy}
+                onClick={() => setConfirmLogout(true)}
+                className={styles.secondaryAction}
+              >
+                <LogOut className="w-3 h-3 text-red-300" />
+                Deslogar MMZap
+              </button>
+            )
+          )}
         </div>
       </div>
 
@@ -579,6 +637,11 @@ export function ChipAutopilotRow({
                   Em quarentena preventiva (turnos MMZap e colmeia pausados){cfg.quarantine_reason ? `: ${cfg.quarantine_reason}` : "."}
                 </p>
               )}
+              {isRehab && !isQuarantined && (
+                <p>
+                  Em modo reabilitação pós-incidente (disparos frios bloqueados; siga aquecendo em baixo volume ou libere se foi falso positivo).
+                </p>
+              )}
               {needsMmzapQrAttention && (
                 <p>
                   Sessão MMZap deslogada · re-escaneie o QR Code no navegador isolado para retomar os turnos automáticos.
@@ -593,8 +656,8 @@ export function ChipAutopilotRow({
             </div>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
-            {isQuarantined && onReleaseQuarantine && (
+          <div className="flex items-center flex-wrap gap-2 shrink-0">
+            {(isQuarantined || isRehab) && onReleaseQuarantine && (
               <button
                 type="button"
                 disabled={mmzapBusy}
@@ -609,7 +672,22 @@ export function ChipAutopilotRow({
                 className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-[#142018] px-2.5 py-1 text-[11px] font-medium text-emerald-200 hover:bg-emerald-500/20"
               >
                 <Unlock className="w-3 h-3" />
-                Liberar quarentena agora
+                {isQuarantined && isRehab
+                  ? "Liberar quarentena e reabilitação"
+                  : isRehab
+                    ? "Liberar reabilitação agora"
+                    : "Liberar quarentena agora"}
+              </button>
+            )}
+            {canHotswap && onOpenHotswap && !item.orphan && (
+              <button
+                type="button"
+                disabled={mmzapBusy}
+                onClick={() => onOpenHotswap(instName)}
+                className="inline-flex items-center gap-1 rounded-md border border-cyan-500/40 bg-[#102026] px-2.5 py-1 text-[11px] font-medium text-cyan-200 hover:bg-cyan-500/20"
+              >
+                <ArrowRightLeft className="w-3 h-3" />
+                Substituir (Hotswap)
               </button>
             )}
             {needsMmzapQrAttention && onOpenMmzapPairModal && (

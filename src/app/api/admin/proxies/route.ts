@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireClientId } from "@/lib/tenant";
 import {
+  auditProxyPoolGeoAsn,
   getAdminProxyPoolSnapshot,
   importProxyPoolBatch,
   manageProxyBlacklist,
@@ -144,6 +145,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         return NextResponse.json({ success: true, testResult: testRes, ...snapshot });
       }
 
+      case "audit_geo_asn": {
+        const auditResult = await auditProxyPoolGeoAsn({
+          limit: typeof bodyJson.limit === "number" ? bodyJson.limit : 40,
+        });
+        const snapshot = await getAdminProxyPoolSnapshot();
+        return NextResponse.json({ success: true, auditResult, ...snapshot });
+      }
+
       case "rotate_instance": {
         const instanceName = typeof bodyJson.instanceName === "string" ? bodyJson.instanceName.trim() : "";
         if (!instanceName) {
@@ -157,6 +166,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       case "unblacklist":
       case "clear_used":
       case "clear_failed":
+      case "clear_false_428":
       case "clear_all": {
         const proxyId = typeof bodyJson.proxyId === "string" ? bodyJson.proxyId.trim() : undefined;
         const blAction = action === "unblacklist" ? "unblacklist_id" : action;
@@ -176,6 +186,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             bodyJson.allowVpsFallback !== undefined ? Boolean(bodyJson.allowVpsFallback) : undefined,
           verifyBeforeAssign:
             bodyJson.verifyBeforeAssign !== undefined ? Boolean(bodyJson.verifyBeforeAssign) : undefined,
+          blockSharedVpsDomino:
+            bodyJson.blockSharedVpsDomino !== undefined ? Boolean(bodyJson.blockSharedVpsDomino) : undefined,
         });
         const snapshot = await getAdminProxyPoolSnapshot();
         return NextResponse.json({ success: true, ...snapshot, settings: updatedSettings });

@@ -7,6 +7,7 @@ import {
   getSessionScreenshot,
   getSessionStatus,
   installExtensionZipBase64,
+  logoutSession,
   markSetupDone,
   openSetupSession,
   sendSessionInput,
@@ -128,6 +129,7 @@ const server = http.createServer(async (req, res) => {
         clientId: body.clientId,
         proxy: body.proxy || null,
         shiftDurationMinutes: body.shiftDurationMinutes,
+        resetProfile: Boolean(body.resetProfile),
       });
       return sendJson(res, out.statusCode, out.body);
     }
@@ -185,6 +187,12 @@ const server = http.createServer(async (req, res) => {
     if (method === "POST" && stopMatch) {
       const body = await readJsonBody(req).catch(() => ({}));
       const out = await stopSession(decodeURIComponent(stopMatch[1]), body.reason || "manual_stop");
+      return sendJson(res, out.statusCode, out.body);
+    }
+
+    const logoutMatch = url.pathname.match(/^\/sessions\/([^/]+)\/logout$/);
+    if (method === "POST" && logoutMatch) {
+      const out = await logoutSession(decodeURIComponent(logoutMatch[1]));
       return sendJson(res, out.statusCode, out.body);
     }
 

@@ -137,10 +137,11 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       return NextResponse.json({ success: false, error: "Falha ao atualizar follow-up" }, { status: 500 });
     }
     if ("weekend_guard" in body) {
+      const { serializeWeekendB2BGuardMode } = await import("@/lib/campaign-pool");
       await supabase
         .from("app_settings")
         .upsert(
-          { key: `followup_weekend_guard:${id}`, value: body.weekend_guard === true ? "true" : "false" },
+          { key: `followup_weekend_guard:${id}`, value: serializeWeekendB2BGuardMode(body.weekend_guard) },
           { onConflict: "key" }
         )
         .then(() => undefined, () => undefined);

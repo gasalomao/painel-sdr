@@ -21,7 +21,15 @@ import {
   ShieldCheck, Workflow,
 } from "lucide-react";
 import { renderTemplate, type TemplateContext } from "@/lib/template-vars";
-import { AUTO_POOL_INSTANCE, formatInstanceLabel } from "@/lib/campaign-pool";
+import {
+  AUTO_POOL_INSTANCE,
+  formatInstanceLabel,
+  type WeekendB2BGuardMode,
+} from "@/lib/campaign-pool";
+import {
+  MENTOR_2STEP_TEMPLATE,
+  MENTOR_VIDEO_PRAISE_TEMPLATE,
+} from "@/lib/mentor-presets";
 import { supabase } from "@/lib/supabase";
 import { mergeRealtimeLog } from "@/lib/realtime-logs";
 import { useClientSession } from "@/lib/use-session";
@@ -603,7 +611,7 @@ export default function ProspeccaoSitesPage() {
   const [personalizeWithAi, setPersonalizeWithAi] = useState(false);
   const [humanizeMessages, setHumanizeMessages] = useState(false);
   const [antibanMixer, setAntibanMixer] = useState(true);
-  const [weekendGuard, setWeekendGuard] = useState(false);
+  const [weekendGuard, setWeekendGuard] = useState<WeekendB2BGuardMode>(false);
   const [coldShield, setColdShield] = useState(true);
   const [spintaxSeed, setSpintaxSeed] = useState(0);
   const [aiModels, setAiModels] = useState<{ id: string; name?: string; provider?: string }[]>([]);
@@ -673,7 +681,7 @@ export default function ProspeccaoSitesPage() {
   const [autoPersonalize, setAutoPersonalize] = useState(false);
   const [autoHumanize, setAutoHumanize] = useState(false);
   const [autoAntibanMixer, setAutoAntibanMixer] = useState(true);
-  const [autoWeekendGuard, setAutoWeekendGuard] = useState(false);
+  const [autoWeekendGuard, setAutoWeekendGuard] = useState<WeekendB2BGuardMode>(false);
   const [autoColdShield, setAutoColdShield] = useState(true);
   const [autoAiModel, setAutoAiModel] = useState("");
   const [autoAiPrompt, setAutoAiPrompt] = useState("");
@@ -2307,6 +2315,23 @@ export default function ProspeccaoSitesPage() {
                       </div>
                     ))}
                   </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-[#a5b1a8]">Modelos prontos:</span>
+                    <button
+                      type="button"
+                      onClick={() => setTemplate(MENTOR_2STEP_TEMPLATE)}
+                      className={styles.pillChoice}
+                    >
+                      Abridor 2-Step (Mentor)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTemplate(MENTOR_VIDEO_PRAISE_TEMPLATE)}
+                      className={styles.pillChoice}
+                    >
+                      Abridor Vídeo (Nota Google + Site/Insta)
+                    </button>
+                  </div>
                   <Textarea aria-label="Mensagem-base da campanha" value={template} onChange={(e) => setTemplate(e.target.value)} rows={5} className="text-sm font-mono" />
                   <div className="flex items-center gap-3 flex-wrap">
                     <span className="text-xs text-[#a5b1a8]">Vendedor:</span>
@@ -2486,12 +2511,40 @@ export default function ProspeccaoSitesPage() {
                       <Switch id="ps-disparo-mixer" aria-label="Misturador Anti-Ban" checked={antibanMixer} onCheckedChange={(v) => applyDisparoFilterSync({ type: "antibanMixer", value: v })} />
                     </div>
 
-                    <div className={styles.optionRow}>
+                    <div className="py-2 space-y-2">
                       <div className={styles.optionCopy}>
-                        <label htmlFor="ps-disparo-weekend" className={styles.optionTitle}>Modo Comercial B2B (Proteção Fim de Semana)</label>
-                        <p className={styles.optionDesc}>Pausa disparos frios aos domingos e reduz o ritmo pela metade aos sábados.</p>
+                        <span id="ps-disparo-weekend-label" className={styles.optionTitle}>Modo Comercial B2B (Proteção Fim de Semana)</span>
+                        <p className={styles.optionDesc}>Pausa disparos frios aos domingos; sábado pode operar em 100% ou 50%.</p>
                       </div>
-                      <Switch id="ps-disparo-weekend" aria-label="Modo Comercial B2B" checked={weekendGuard} onCheckedChange={setWeekendGuard} />
+                      <div className={styles.segmentedPills} role="group" aria-labelledby="ps-disparo-weekend-label">
+                        <button
+                          type="button"
+                          data-active={!weekendGuard ? "true" : undefined}
+                          aria-pressed={!weekendGuard}
+                          onClick={() => setWeekendGuard(false)}
+                          className={styles.pillChoice}
+                        >
+                          Desligado
+                        </button>
+                        <button
+                          type="button"
+                          data-active={weekendGuard === "sunday_only" ? "true" : undefined}
+                          aria-pressed={weekendGuard === "sunday_only"}
+                          onClick={() => setWeekendGuard("sunday_only")}
+                          className={styles.pillChoice}
+                        >
+                          Pausar só Domingo (Sábado 100%)
+                        </button>
+                        <button
+                          type="button"
+                          data-active={weekendGuard === "full" || weekendGuard === true ? "true" : undefined}
+                          aria-pressed={weekendGuard === "full" || weekendGuard === true}
+                          onClick={() => setWeekendGuard("full")}
+                          className={styles.pillChoice}
+                        >
+                          Domingo + 50% Sábado
+                        </button>
+                      </div>
                     </div>
 
                     <div className={styles.optionRow}>
@@ -3297,7 +3350,25 @@ export default function ProspeccaoSitesPage() {
                   </div>
 
                   <div>
-                    <label htmlFor="ps-auto-template">Mensagem-base (template de disparo)</label>
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                      <label htmlFor="ps-auto-template">Mensagem-base (template de disparo)</label>
+                      <div className="flex flex-wrap gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setAutoTemplate(MENTOR_2STEP_TEMPLATE)}
+                          className={styles.pillChoice}
+                        >
+                          Abridor 2-Step (Mentor)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setAutoTemplate(MENTOR_VIDEO_PRAISE_TEMPLATE)}
+                          className={styles.pillChoice}
+                        >
+                          Abridor Vídeo (Nota Google + Site/Insta)
+                        </button>
+                      </div>
+                    </div>
                     <Textarea id="ps-auto-template" aria-label="Mensagem-base da automação" value={autoTemplate} onChange={(e) => setAutoTemplate(e.target.value)} rows={3}
                       placeholder="Ex: {{saudacao}} {{nome_empresa}}! Vi vocês no Maps…" />
                   </div>
@@ -3490,12 +3561,40 @@ export default function ProspeccaoSitesPage() {
                         <Switch id="ps-auto-mixer" aria-label="Misturador Anti-Ban na automação" checked={autoAntibanMixer} onCheckedChange={(v) => applyAutoFilterSync({ type: "antibanMixer", value: v })} />
                       </div>
 
-                      <div className={styles.optionRow}>
+                      <div className="py-2 space-y-2">
                         <div className={styles.optionCopy}>
-                          <label htmlFor="ps-auto-weekend" className={styles.optionTitle}>Modo Comercial B2B (Proteção Fim de Semana)</label>
-                          <p className={styles.optionDesc}>Pausa disparos frios aos domingos e reduz o teto por hora pela metade aos sábados.</p>
+                          <span id="ps-auto-weekend-label" className={styles.optionTitle}>Modo Comercial B2B (Proteção Fim de Semana)</span>
+                          <p className={styles.optionDesc}>Pausa disparos frios aos domingos; sábado pode operar em 100% ou 50%.</p>
                         </div>
-                        <Switch id="ps-auto-weekend" aria-label="Modo Comercial B2B na automação" checked={autoWeekendGuard} onCheckedChange={setAutoWeekendGuard} />
+                        <div className={styles.segmentedPills} role="group" aria-labelledby="ps-auto-weekend-label">
+                          <button
+                            type="button"
+                            data-active={!autoWeekendGuard ? "true" : undefined}
+                            aria-pressed={!autoWeekendGuard}
+                            onClick={() => setAutoWeekendGuard(false)}
+                            className={styles.pillChoice}
+                          >
+                            Desligado
+                          </button>
+                          <button
+                            type="button"
+                            data-active={autoWeekendGuard === "sunday_only" ? "true" : undefined}
+                            aria-pressed={autoWeekendGuard === "sunday_only"}
+                            onClick={() => setAutoWeekendGuard("sunday_only")}
+                            className={styles.pillChoice}
+                          >
+                            Pausar só Domingo (Sábado 100%)
+                          </button>
+                          <button
+                            type="button"
+                            data-active={autoWeekendGuard === "full" || autoWeekendGuard === true ? "true" : undefined}
+                            aria-pressed={autoWeekendGuard === "full" || autoWeekendGuard === true}
+                            onClick={() => setAutoWeekendGuard("full")}
+                            className={styles.pillChoice}
+                          >
+                            Domingo + 50% Sábado
+                          </button>
+                        </div>
                       </div>
 
                       <div className={styles.optionRow}>

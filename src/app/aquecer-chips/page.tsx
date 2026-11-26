@@ -105,6 +105,9 @@ const DEFAULT_GLOBAL_SETTINGS: GlobalSettings = {
   continuous_warmup: true,
   auto_warmup_new_chips: true,
   custom_prompt: "",
+  daily_owner_summary_enabled: false,
+  daily_owner_summary_phone: "",
+  default_profile_avatar_urls: "",
 };
 
 const STAGE_UI: Record<WarmupStage, { name: string; text: string }> = {
@@ -237,6 +240,11 @@ export default function AquecerChipsPage() {
   const [mmzapModalOpen, setMmzapModalOpen] = useState(false);
   const [mmzapModalInstance, setMmzapModalInstance] = useState<string | null>(null);
   const [mmzapModalMode, setMmzapModalMode] = useState<"pair" | "setup">("pair");
+
+  const [hotswapModalOpen, setHotswapModalOpen] = useState(false);
+  const [hotswapOldChip, setHotswapOldChip] = useState("");
+  const [hotswapNewChip, setHotswapNewChip] = useState("");
+  const [hotswapBusy, setHotswapBusy] = useState(false);
 
   const loadMmzapWorkerState = useCallback(async () => {
     try {
@@ -384,7 +392,7 @@ export default function AquecerChipsPage() {
 
   const handleMmzapBrowserAction = async (
     instanceName: string,
-    action: "start_shift" | "stop_shift" | "toggle_enabled" | "reset_profile",
+    action: "start_shift" | "stop_shift" | "toggle_enabled" | "reset_profile" | "logout",
     extra?: Record<string, unknown>
   ) => {
     const res = await fetch("/api/warmup/mmzap-browser", {
@@ -401,7 +409,11 @@ export default function AquecerChipsPage() {
       await handleRefreshAll();
       return;
     }
-    toast.success("Estado MMZap atualizado.");
+    if (action === "logout" || action === "reset_profile") {
+      toast.success(`Sessão MMZap de ${instanceName} desconectada e perfil apagado.`);
+    } else {
+      toast.success("Estado MMZap atualizado.");
+    }
     await handleRefreshAll();
   };
 
@@ -730,6 +742,49 @@ export default function AquecerChipsPage() {
     setTestModalOpen(true);
   };
 
+  const openHotswapModal = (oldInst: string) => {
+    setHotswapOldChip(oldInst);
+    const cand = instances.find(
+      (i) =>
+        !i.orphan &&
+        i.instance_name !== oldInst &&
+        (i.connection_status === "open" || i.connection_status === "connected") &&
+        !i.config?.is_quarantined
+    );
+    setHotswapNewChip(cand?.instance_name || "");
+    setHotswapModalOpen(true);
+  };
+
+  const handleConfirmHotswap = async () => {
+    if (!hotswapOldChip || !hotswapNewChip || hotswapOldChip === hotswapNewChip) {
+      toast.error("Escolha um chip substituto conectado diferente.");
+      return;
+    }
+    setHotswapBusy(true);
+    try {
+      const res = await fetch("/api/whatsapp/hotswap", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          old_instance_name: hotswapOldChip,
+          new_instance_name: hotswapNewChip,
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.ok) {
+        toast.error(json?.error || "Falha ao executar Hotswap.");
+        return;
+      }
+      toast.success(
+        `Hotswap concluído: ${json.movedCampaigns || 0} campanha(s), ${json.movedFollowups || 0} follow-up(s) e ${json.movedLeads || 0} lead(s) migrados para ${hotswapNewChip}.`
+      );
+      setHotswapModalOpen(false);
+      await loadData(true);
+    } finally {
+      setHotswapBusy(false);
+    }
+  };
+
   const handleRunTest = async () => {
     if (!testSender || !testReceiver || testSender === testReceiver) {
       toast.error("Escolha dois chips diferentes.");
@@ -871,6 +926,10 @@ export default function AquecerChipsPage() {
   );
   const mmzapModalWorkerSession = mmzapModalInstance
     ? workerSessions.find((s) => s.instanceName === mmzapModalInstance) ?? null
+    : null;
+  const mmzapModalChipStatus = mmzapModalInstance
+    ? instances.find((i) => i.instance_name === mmzapModalInstance)?.config?.mmzap_browser_status ??
+      null
     : null;
   const mmzapInboundToday =
     stats.mmzapInboundToday ??
@@ -1413,6 +1472,7 @@ export default function AquecerChipsPage() {
                         onOpenMmzapPairModal={handleOpenMmzapPairModal}
                         onMmzapBrowserAction={handleMmzapBrowserAction}
                         onReleaseQuarantine={handleReleaseQuarantine}
+                        onOpenHotswap={openHotswapModal}
                         onReauditDay0={(name) => void handleReauditDay0(name)}
                         onOpenPairModal={openPairModal}
                         onOpenTestModal={openTestModal}
@@ -1437,6 +1497,7 @@ export default function AquecerChipsPage() {
               onRunSelfHealing={handleRunSelfHealing}
               onRefreshAll={handleRefreshAll}
               onOpenMmzapPairModal={handleOpenMmzapPairModal}
+              onMmzapBrowserAction={handleMmzapBrowserAction}
             />
           )}
 
@@ -1861,6 +1922,61 @@ export default function AquecerChipsPage() {
                 </div>
 
                 <label className="flex items-center justify-between gap-3 rounded-lg border border-[#303a32] px-3.5 py-2.5 text-xs text-[#d3ded6] cursor-pointer">
+                  <div>
+                    <p className="font-medium text-[#edf2ee]">Resumo diário às 20h no WhatsApp</p>
+                    <p className="text-[11px] text-[#a5b1a8]">
+                      Envia relatório automático às 20h BRT (disparos, respostas, prévias aceitas e alertas). Zero tokens de IA.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={Boolean(globalSettings.daily_owner_summary_enabled)}
+                    onCheckedChange={(val) =>
+                      setGlobalSettings((p) => ({ ...p, daily_owner_summary_enabled: val }))
+                    }
+                    aria-label="Ativar resumo diário às 20h"
+                  />
+                </label>
+
+                {globalSettings.daily_owner_summary_enabled && (
+                  <div className={styles.fieldGroup}>
+                    <label htmlFor="g-owner-phone" className={styles.fieldLabel}>
+                      WhatsApp do gestor para o resumo 20h (opcional — usa o do Agente se vazio)
+                    </label>
+                    <Input
+                      id="g-owner-phone"
+                      value={globalSettings.daily_owner_summary_phone || ""}
+                      onChange={(e) =>
+                        setGlobalSettings((p) => ({
+                          ...p,
+                          daily_owner_summary_phone: e.target.value,
+                        }))
+                      }
+                      placeholder="Ex: 5511999999999"
+                      className={styles.fieldInput}
+                    />
+                  </div>
+                )}
+
+                <div className={styles.fieldGroup}>
+                  <label htmlFor="g-avatar-pool" className={styles.fieldLabel}>
+                    Pool de fotos de perfil Dia-0 (opcional, 1 URL https:// por linha)
+                  </label>
+                  <textarea
+                    id="g-avatar-pool"
+                    rows={2}
+                    value={globalSettings.default_profile_avatar_urls || ""}
+                    onChange={(e) =>
+                      setGlobalSettings((p) => ({
+                        ...p,
+                        default_profile_avatar_urls: e.target.value,
+                      }))
+                    }
+                    placeholder="https://exemplo.com/foto-atendimento.jpg"
+                    className={styles.fieldInput}
+                  />
+                </div>
+
+                <label className="flex items-center justify-between gap-3 rounded-lg border border-[#303a32] px-3.5 py-2.5 text-xs text-[#d3ded6] cursor-pointer">
                   <span>Aplicar também aos chips ADM já configurados</span>
                   <Switch
                     checked={applyGlobalToAll}
@@ -2087,11 +2203,75 @@ export default function AquecerChipsPage() {
             open={mmzapModalOpen}
             instanceName={mmzapModalInstance}
             initialMode={mmzapModalMode}
+            mmzapBrowserStatus={mmzapModalChipStatus}
             workerSession={mmzapModalWorkerSession}
             styles={styles}
             onOpenChange={setMmzapModalOpen}
             onCompleted={handleRefreshAll}
           />
+
+          {/* DIALOG: Substituição rápida (Hotswap) */}
+          <Dialog open={hotswapModalOpen} onOpenChange={(o) => !hotswapBusy && setHotswapModalOpen(o)}>
+            <DialogContent className={styles.dialog}>
+              <div className={styles.dialogHeader}>
+                <ArrowRightLeft className="w-5 h-5 text-cyan-400 shrink-0 mt-0.5" />
+                <div>
+                  <DialogTitle className="text-base font-semibold text-[#edf2ee]">
+                    Substituir chip (Hotswap)
+                  </DialogTitle>
+                  <DialogDescription className="text-xs text-[#a5b1a8] mt-1">
+                    Migra campanhas, follow-ups e leads de <strong>{hotswapOldChip}</strong> para um chip estepe saudável.
+                  </DialogDescription>
+                </div>
+              </div>
+              <div className={styles.dialogBody}>
+                <div className={styles.fieldGroup}>
+                  <label htmlFor="hotswap-target-chip" className={styles.fieldLabel}>
+                    Chip reserva conectado (destino)
+                  </label>
+                  <select
+                    id="hotswap-target-chip"
+                    value={hotswapNewChip}
+                    onChange={(e) => setHotswapNewChip(e.target.value)}
+                    className={styles.fieldSelect}
+                  >
+                    <option value="">Selecione um chip saudável</option>
+                    {instances
+                      .filter(
+                        (i) =>
+                          !i.orphan &&
+                          i.instance_name !== hotswapOldChip &&
+                          (i.connection_status === "open" || i.connection_status === "connected") &&
+                          !i.config?.is_quarantined
+                      )
+                      .map((i) => (
+                        <option key={i.instance_name} value={i.instance_name}>
+                          {i.instance_name} · Dia {i.config?.days_active || 1} · Saúde {i.config?.health_score ?? 100}%
+                        </option>
+                      ))}
+                  </select>
+                </div>
+                <div className={styles.dialogActions}>
+                  <button
+                    type="button"
+                    disabled={hotswapBusy}
+                    onClick={() => setHotswapModalOpen(false)}
+                    className={styles.secondaryAction}
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    disabled={hotswapBusy || !hotswapNewChip}
+                    onClick={() => void handleConfirmHotswap()}
+                    className={styles.primaryAction}
+                  >
+                    {hotswapBusy ? "Migrando..." : "Confirmar Hotswap"}
+                  </button>
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
         </div>
       </main>
     </div>

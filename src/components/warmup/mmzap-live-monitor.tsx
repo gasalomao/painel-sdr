@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   FlaskConical,
   Globe,
+  LogOut,
   QrCode,
   RefreshCw,
   ShieldCheck,
@@ -132,6 +133,11 @@ export interface MmzapLiveMonitorProps {
   onRunSelfHealing: () => Promise<void>;
   onRefreshAll: () => Promise<void>;
   onOpenMmzapPairModal?: (instanceName: string, mode?: "pair" | "setup") => void;
+  onMmzapBrowserAction?: (
+    instanceName: string,
+    action: "start_shift" | "stop_shift" | "toggle_enabled" | "reset_profile" | "logout",
+    extra?: Record<string, unknown>
+  ) => Promise<void>;
 }
 
 export function MmzapLiveMonitor({
@@ -145,10 +151,13 @@ export function MmzapLiveMonitor({
   onRunSelfHealing,
   onRefreshAll,
   onOpenMmzapPairModal,
+  onMmzapBrowserAction,
 }: MmzapLiveMonitorProps) {
   const [quarantine, setQuarantine] = useState<QuarantineEntry[]>([]);
   const [loadingQuarantine, setLoadingQuarantine] = useState(false);
   const [simulatingChip, setSimulatingChip] = useState<string | null>(null);
+  const [confirmLogoutChip, setConfirmLogoutChip] = useState<string | null>(null);
+  const [loggingOutChip, setLoggingOutChip] = useState<string | null>(null);
   const [lastSimulation, setLastSimulation] = useState<{
     instance_name: string;
     intercepted: boolean;
@@ -294,6 +303,38 @@ export function MmzapLiveMonitor({
       await Promise.all([loadQuarantine(), onRefreshAll()]);
     } finally {
       setSimulatingChip(null);
+    }
+  };
+
+  const handleLogoutMmzap = async (instanceName: string) => {
+    setLoggingOutChip(instanceName);
+    try {
+      if (onMmzapBrowserAction) {
+        await onMmzapBrowserAction(instanceName, "logout");
+      } else {
+        const res = await fetch("/api/warmup/mmzap-browser", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "logout",
+            instance_name: instanceName,
+          }),
+        });
+        const json = (await res.json().catch(() => null)) as {
+          success?: boolean;
+          error?: string;
+        } | null;
+        if (!res.ok || !json?.success) {
+          toast.error(json?.error || "Falha ao desconectar sessão MMZap.");
+          await onRefreshAll();
+          return;
+        }
+        toast.success(`Sessão MMZap de ${instanceName} desconectada e perfil apagado.`);
+        await onRefreshAll();
+      }
+      setConfirmLogoutChip(null);
+    } finally {
+      setLoggingOutChip(null);
     }
   };
 
@@ -514,7 +555,7 @@ export function MmzapLiveMonitor({
                           {today} rec · {sentToday} env ({total} total)
                         </td>
                         <td className="text-right">
-                          <div className="inline-flex items-center gap-1.5">
+                          <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
                             {watchdogInfo.needsQr && onOpenMmzapPairModal && (
                               <button
                                 type="button"
@@ -524,6 +565,45 @@ export function MmzapLiveMonitor({
                                 <QrCode className="w-3.5 h-3.5 text-red-300" />
                                 Re-escanear QR
                               </button>
+                            )}
+                            {((chip.config?.mmzap_browser_status &&
+                              chip.config.mmzap_browser_status !== "unpaired") ||
+                              Boolean(liveSess)) && (
+                              confirmLogoutChip === chip.instance_name ? (
+                                <div
+                                  role="group"
+                                  aria-label={`Confirmar logout MMZap de ${chip.instance_name}`}
+                                  className="inline-flex items-center gap-1.5 rounded-lg border border-red-500/35 bg-red-500/10 px-2 py-1 text-[11px] text-red-100"
+                                >
+                                  <span>Apagar sessão?</span>
+                                  <button
+                                    type="button"
+                                    disabled={loggingOutChip === chip.instance_name}
+                                    onClick={() => void handleLogoutMmzap(chip.instance_name)}
+                                    className="rounded border border-red-400/40 bg-red-500/20 px-2 py-0.5 font-medium text-red-100 hover:bg-red-500/30 transition-colors"
+                                  >
+                                    {loggingOutChip === chip.instance_name ? "Saindo..." : "Confirmar"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={loggingOutChip === chip.instance_name}
+                                    onClick={() => setConfirmLogoutChip(null)}
+                                    className="rounded border border-[#303a32] bg-[#141a15] px-2 py-0.5 text-[#c2cfc6] hover:text-white transition-colors"
+                                  >
+                                    Cancelar
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled={busy || loggingOutChip === chip.instance_name}
+                                  onClick={() => setConfirmLogoutChip(chip.instance_name)}
+                                  className={styles.secondaryAction}
+                                >
+                                  <LogOut className="w-3.5 h-3.5 text-red-300" />
+                                  Deslogar MMZap
+                                </button>
+                              )
                             )}
                             <button
                               type="button"

@@ -74,6 +74,9 @@ export interface GlobalWarmupSettings {
   continuous_warmup: boolean;
   auto_warmup_new_chips: boolean;
   custom_prompt: string;
+  daily_owner_summary_enabled: boolean;
+  daily_owner_summary_phone: string;
+  default_profile_avatar_urls: string;
 }
 
 export const DEFAULT_GLOBAL_WARMUP_SETTINGS: GlobalWarmupSettings = {
@@ -95,6 +98,9 @@ export const DEFAULT_GLOBAL_WARMUP_SETTINGS: GlobalWarmupSettings = {
   continuous_warmup: true,
   auto_warmup_new_chips: true,
   custom_prompt: "",
+  daily_owner_summary_enabled: false,
+  daily_owner_summary_phone: "",
+  default_profile_avatar_urls: "",
 };
 
 /**

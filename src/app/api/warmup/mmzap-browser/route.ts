@@ -3,12 +3,12 @@ import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
 import { requireWarmupAdminAccess } from "@/lib/warmup/warmup-admin-guard";
 import {
-  deleteMmzapWorkerSession,
   getMmzapWorkerHealth,
   getMmzapWorkerPairingQr,
   getMmzapWorkerScreenshot,
   getMmzapWorkerSessionStatus,
   isMmzapWorkerConfigured,
+  logoutMmzapWorkerSession,
   markMmzapWorkerSetupDone,
   openMmzapWorkerSetupWindow,
   sendMmzapWorkerInput,
@@ -26,6 +26,7 @@ import {
   saveMmzapGovernorSettings,
 } from "@/lib/warmup/warmup-config-service";
 import { invalidateExternalShieldCache } from "@/lib/warmup/warmup-external-shield";
+import { clearPhonePostBanRehab } from "@/lib/warmup/warmup-phone-memory";
 import { logWarmupAction } from "@/lib/warmup/warmup-engine";
 import type { MmzapBrowserStatus } from "@/lib/warmup/warmup-types";
 
@@ -41,11 +42,12 @@ async function readInstanceWarmupRow(
   external_warmup_mode?: string;
   mmzap_shifts_today?: number;
   mmzap_browser_status?: string;
+  mmzap_last_error?: string | null;
 } | null> {
   try {
     const { data } = await supabaseAdmin
       .from("whatsapp_warmup_configs")
-      .select("external_warmup_mode, mmzap_shifts_today, mmzap_browser_status")
+      .select("external_warmup_mode, mmzap_shifts_today, mmzap_browser_status, mmzap_last_error")
       .eq("client_id", clientId)
       .eq("instance_name", instanceName)
       .maybeSingle();
@@ -53,6 +55,7 @@ async function readInstanceWarmupRow(
       external_warmup_mode?: string;
       mmzap_shifts_today?: number;
       mmzap_browser_status?: string;
+      mmzap_last_error?: string | null;
     } | null) ?? null;
   } catch {
     return null;
@@ -247,11 +250,18 @@ export async function POST(req: NextRequest) {
       readInstanceWarmupRow(clientId, instanceName),
       resolveMmzapProxyForInstance(clientId, instanceName),
     ]);
+    const shouldResetProfile = Boolean(
+      body.resetProfile === true ||
+        row?.mmzap_browser_status === "error" ||
+        row?.mmzap_browser_status === "qr_pending" ||
+        row?.mmzap_last_error === "qr_required"
+    );
     const res = await startMmzapWorkerPairing({
       instanceName,
       clientId,
       proxy,
       shiftDurationMinutes: governor.shift_duration_minutes,
+      resetProfile: shouldResetProfile,
     });
     if (!res.ok) {
       return NextResponse.json(
@@ -492,46 +502,118 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: true, enabled });
   }
 
-  if (action === "reset_profile") {
-    await deleteMmzapWorkerSession(instanceName).catch(() => null);
+  if (action === "logout" || action === "reset_profile") {
+    const ownedRow = await readInstanceWarmupRow(clientId, instanceName);
+    if (!ownedRow) {
+      return NextResponse.json(
+        { success: false, error: "Instância não encontrada para esta conta." },
+        { status: 404 }
+      );
+    }
+
+    const workerRes = await logoutMmzapWorkerSession(instanceName).catch(() => null);
+    const nowIso = new Date().toISOString();
+
     await updateMmzapConfigFields(clientId, instanceName, {
       mmzap_browser_status: "unpaired",
       mmzap_browser_enabled: false,
       mmzap_shift_started_at: null,
       mmzap_last_error: null,
       mmzap_proxy_endpoint: null,
-      updated_at: new Date().toISOString(),
+      updated_at: nowIso,
     });
-    return NextResponse.json({ success: true });
+
+    invalidateExternalShieldCache(clientId, instanceName);
+
+    await logWarmupAction({
+      client_id: clientId,
+      sender_instance: instanceName,
+      receiver_instance: "mmzap_browser",
+      message_text: "🚪 Sessão MMZap desconectada e perfil apagado automaticamente",
+      action_type: "system",
+      details: {
+        action,
+        logged_out_from_whatsapp: Boolean(workerRes?.data?.loggedOutFromWhatsApp),
+        profile_wiped: Boolean(workerRes?.data?.profileWiped),
+        used_fallback_delete: Boolean(workerRes?.data?.usedFallbackDelete),
+      },
+    }).catch(() => {});
+
+    return NextResponse.json({
+      success: true,
+      data: {
+        instanceName,
+        status: "unpaired",
+        loggedOutFromWhatsApp: Boolean(workerRes?.data?.loggedOutFromWhatsApp),
+        profileWiped: workerRes?.configured ? Boolean(workerRes?.data?.profileWiped) : false,
+        profileDirExisted: workerRes?.data?.profileDirExisted ?? false,
+        usedFallbackDelete: Boolean(workerRes?.data?.usedFallbackDelete),
+        workerOk: Boolean(workerRes?.ok),
+        workerError: workerRes?.ok ? null : workerRes?.error || null,
+      },
+    });
   }
 
   if (action === "release_quarantine") {
     const nowIso = new Date().toISOString();
     let existingHealth = 0;
+    let existingPhone: string | null = null;
     try {
       const { data: row } = await supabaseAdmin
         .from("whatsapp_warmup_configs")
-        .select("health_score")
+        .select("health_score, phone_number")
         .eq("client_id", clientId)
         .eq("instance_name", instanceName)
         .maybeSingle();
       existingHealth = Number((row as { health_score?: number } | null)?.health_score || 0);
+      existingPhone = (row as { phone_number?: string | null } | null)?.phone_number || null;
     } catch {
       /* ignore */
     }
     const nextHealth = Math.max(65, existingHealth);
-    await supabaseAdmin
+    const fullUpdate = {
+      is_quarantined: false,
+      quarantine_reason: null,
+      quarantine_until: null,
+      health_score: nextHealth,
+      error_count_today: 0,
+      career_mode: "maturing",
+      rehab_until: null,
+      cold_outreach_locked_until: null,
+      updated_at: nowIso,
+    };
+
+    const updRes = await supabaseAdmin
       .from("whatsapp_warmup_configs")
-      .update({
-        is_quarantined: false,
-        quarantine_reason: null,
-        quarantine_until: null,
-        health_score: nextHealth,
-        error_count_today: 0,
-        updated_at: nowIso,
-      })
+      .update(fullUpdate)
       .eq("client_id", clientId)
       .eq("instance_name", instanceName);
+
+    const updCode = String((updRes?.error as { code?: string } | null)?.code || "");
+    const updMsg = String((updRes?.error as { message?: string } | null)?.message || "");
+    if (
+      updRes?.error &&
+      (updCode === "42703" || updCode === "PGRST204" || /career_mode|rehab_until|cold_outreach_locked_until/i.test(updMsg))
+    ) {
+      await supabaseAdmin
+        .from("whatsapp_warmup_configs")
+        .update({
+          is_quarantined: false,
+          quarantine_reason: null,
+          quarantine_until: null,
+          health_score: nextHealth,
+          error_count_today: 0,
+          updated_at: nowIso,
+        })
+        .eq("client_id", clientId)
+        .eq("instance_name", instanceName);
+    }
+
+    await clearPhonePostBanRehab({
+      clientId,
+      instanceName,
+      phone: existingPhone,
+    }).catch(() => null);
 
     invalidateExternalShieldCache(clientId, instanceName);
 
@@ -539,11 +621,11 @@ export async function POST(req: NextRequest) {
       client_id: clientId,
       sender_instance: instanceName,
       receiver_instance: "admin_override",
-      message_text: `🔓 Quarentena liberada manualmente pelo Admin para ${instanceName} (saúde ajustada para ${nextHealth}%).`,
+      message_text: `🔓 Quarentena e reabilitação liberadas manualmente pelo Admin para ${instanceName} (saúde ajustada para ${nextHealth}%).`,
       action_type: "system",
     }).catch(() => {});
 
-    return NextResponse.json({ success: true, health_score: nextHealth });
+    return NextResponse.json({ success: true, health_score: nextHealth, rehab_cleared: true });
   }
 
   return NextResponse.json(

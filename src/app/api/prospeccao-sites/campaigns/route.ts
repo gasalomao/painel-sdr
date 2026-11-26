@@ -5,6 +5,8 @@ import { requireFeatureAccess } from "@/lib/saas-limits";
 import { validateCampaignInstanceAccess } from "@/lib/campaign-instance-access";
 import { enforceClientDefaultModel } from "@/lib/enforce-model";
 import { computePriority, passesFilters, type ProspecOrderBy, type ProspecOrderDir } from "@/lib/prospeccao-priority";
+import { parseWeekendB2BGuardMode, serializeWeekendB2BGuardMode } from "@/lib/campaign-pool";
+import { saveCampaignAbConfig } from "@/lib/campaign-ab-testing";
 
 export const dynamic = "force-dynamic";
 
@@ -23,7 +25,46 @@ export async function GET(req: NextRequest) {
     .order("created_at", { ascending: false });
 
   if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
-  return NextResponse.json({ success: true, campaigns: data || [] });
+
+  const campaigns = (data || []) as Array<Record<string, any>>;
+  const ids = campaigns.map((c) => c?.id).filter(Boolean);
+  const flagMap = new Map<string, string>();
+  if (ids.length > 0) {
+    const keys = ids.flatMap((id: string) => [
+      `campaign_antiban:${id}`,
+      `campaign_weekend_guard:${id}`,
+      `campaign_cold_shield:${id}`,
+      `campaign_ab_config:${id}`,
+    ]);
+    try {
+      const { data: cfgRows } = await supabase
+        .from("app_settings")
+        .select("key, value")
+        .in("key", keys);
+      for (const row of cfgRows || []) {
+        if (row?.key) flagMap.set(String(row.key), String(row.value ?? ""));
+      }
+    } catch {}
+  }
+  const readFlag = (id: string, name: string, fallback: boolean): boolean => {
+    const raw = flagMap.get(`${name}:${id}`);
+    if (raw === undefined) return fallback;
+    return raw === "true" || raw === "1";
+  };
+  for (const c of campaigns) {
+    if (!c?.id) continue;
+    c.antiban_mixer = readFlag(c.id, "campaign_antiban", true);
+    const rawWg = flagMap.get(`campaign_weekend_guard:${c.id}`);
+    c.weekend_guard = rawWg !== undefined ? parseWeekendB2BGuardMode(rawWg) : false;
+    c.cold_shield = readFlag(c.id, "campaign_cold_shield", true);
+    const rawAb = flagMap.get(`campaign_ab_config:${c.id}`);
+    if (rawAb) {
+      try {
+        c.ab_test = JSON.parse(rawAb);
+      } catch {}
+    }
+  }
+  return NextResponse.json({ success: true, campaigns });
 }
 
 /** POST /api/prospeccao-sites/campaigns — cria campanha + targets a partir de lead_ids */
@@ -126,11 +167,24 @@ export async function POST(req: NextRequest) {
           { key: `campaign_antiban:${camp.id}`, value: String(Boolean(antiban_mixer)) },
           {
             key: `campaign_weekend_guard:${camp.id}`,
-            value: weekend_guard === "sunday_only" ? "sunday_only" : String(Boolean(weekend_guard)),
+            value: serializeWeekendB2BGuardMode(weekend_guard),
           },
           { key: `campaign_cold_shield:${camp.id}`, value: String(cold_shield !== false) },
         ], { onConflict: "key" });
     } catch {}
+
+    if (body.ab_test && typeof body.ab_test === "object") {
+      try {
+        const abObj = body.ab_test as Record<string, unknown>;
+        await saveCampaignAbConfig(camp.id, {
+          enabled: Boolean(abObj.enabled),
+          variantA_label: typeof abObj.variantA_label === "string" ? abObj.variantA_label : undefined,
+          variantA_template: String(message_template),
+          variantB_label: typeof abObj.variantB_label === "string" ? abObj.variantB_label : undefined,
+          variantB_template: typeof abObj.variantB_template === "string" ? abObj.variantB_template : "",
+        });
+      } catch {}
+    }
 
     // Resolve leads → targets (filtra tenant p/ evitar cross-tenant injection)
     const numericLeadIds = (lead_ids || []).map((id: any) => Number(id)).filter((n: number) => !isNaN(n) && n > 0);
@@ -160,6 +214,7 @@ export async function POST(req: NextRequest) {
       .sort((a: any, b: any) => (b.priority || 0) - (a.priority || 0));
 
     if (targetsRows.length === 0) {
+      await supabase.from("campaigns").delete().eq("id", camp.id).eq("client_id", ctx.clientId);
       return NextResponse.json({ success: false, error: "Nenhum lead válido (todos opt-out ou sem JID)" }, { status: 400 });
     }
 

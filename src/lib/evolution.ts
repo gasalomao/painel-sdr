@@ -12,6 +12,7 @@
 import axios from "axios";
 import https from "https";
 import { createClient } from "@supabase/supabase-js";
+import { isPrivateOrLocalHost } from "@/lib/url-guard";
 
 let EVO_URL  = process.env.EVOLUTION_API_URL  || "";
 let EVO_KEY  = process.env.EVOLUTION_API_KEY  || "";
@@ -1208,6 +1209,26 @@ export const evolution = {
     if (!instance || !status) return false;
     try {
       await evoFetch(`/chat/updateProfileStatus/${instance}`, "POST", { status }, 10000);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
+  /**
+   * Atualiza a foto de perfil da instância no WhatsApp (apenas URLs https públicas).
+   * POST /chat/updateProfilePicture/:instance
+   */
+  async updateProfilePicture(pictureUrl: string, instance?: string): Promise<boolean> {
+    instance = await resolveInstance(instance).catch(() => "");
+    const clean = String(pictureUrl || "").trim();
+    if (!instance || !clean) return false;
+    try {
+      const parsed = new URL(clean);
+      if (parsed.protocol !== "https:" || isPrivateOrLocalHost(parsed.hostname)) {
+        return false;
+      }
+      await evoFetch(`/chat/updateProfilePicture/${instance}`, "POST", { picture: clean }, 15000);
       return true;
     } catch {
       return false;

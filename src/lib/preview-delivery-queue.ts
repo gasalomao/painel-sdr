@@ -1,6 +1,6 @@
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import * as channel from "@/lib/channel";
-import { registerPendingAutomatedSend } from "@/lib/manual-send-registry";
+import { registerAiSend, registerPendingAutomatedSend } from "@/lib/manual-send-registry";
 import { findOrCreateContactSession, persistOutgoingMessage } from "@/lib/campaign-worker";
 
 export type NaturalDeliverySlot = "now" | "plus_3h" | "evening_18h" | "next_morning_09h" | "custom";
@@ -254,6 +254,9 @@ async function deliverSinglePreviewItem(item: ScheduledPreviewDelivery, nowIso: 
       throw new Error(sendRes?.error || "Falha no envio da prévia via WhatsApp");
     }
     const sentId = sendRes.messageId || `prev-${Date.now()}`;
+    if (typeof registerAiSend === "function") {
+      registerAiSend(sentId);
+    }
 
     // Garante contato/sessão e MANTÉM IA pausada em `paused_manual` para fechamento X1 pelo dono
     const ensured = await findOrCreateContactSession(
@@ -332,13 +335,17 @@ export async function tickScheduledPreviewDeliveries(nowMs = Date.now()): Promis
 
     if (!error && Array.isArray(dueRows)) {
       for (const item of dueRows as ScheduledPreviewDelivery[]) {
-        processed += 1;
-        await supabaseAdmin
+        // Claim atômico CAS: evita envio duplicado se 2 ticks concorrerem pela mesma prévia
+        const { data: claimed } = await supabaseAdmin
           .from("scheduled_preview_deliveries")
           .update({ status: "processing", updated_at: nowIso })
           .eq("id", item.id)
-          .eq("status", "pending");
+          .eq("status", "pending")
+          .select("id")
+          .maybeSingle();
+        if (!claimed) continue;
 
+        processed += 1;
         const ok = await deliverSinglePreviewItem(item, nowIso);
         if (ok) {
           sent += 1;

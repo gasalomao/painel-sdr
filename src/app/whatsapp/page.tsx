@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import {
   Smartphone, QrCode, RefreshCw, Plus, Bot, Trash2, Link2, Loader2,
   WifiOff, User, CheckCircle2, XCircle, Copy, Sparkles, Stethoscope,
-  Shield, ShieldCheck, ShieldOff, X, ChevronDown, Settings2,
+  Shield, ShieldCheck, ShieldOff, X, ChevronDown, Settings2, ArrowRightLeft,
 } from "lucide-react";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import styles from "./whatsapp.module.css";
@@ -64,6 +64,9 @@ export default function WhatsAppPage() {
   const [statusMap, setStatusMap] = useState<Record<string, { state: string; owner?: string; profileName?: string }>>({});
   const [novaInstancia, setNovaInstancia] = useState("");
   const [createAutoProxy, setCreateAutoProxy] = useState(true);
+  const [hotswapOld, setHotswapOld] = useState<string | null>(null);
+  const [hotswapNew, setHotswapNew] = useState("");
+  const [hotswapBusy, setHotswapBusy] = useState(false);
   const connectionsRef = useRef(connections);
 
   // === WHATSAPP CLOUD API (Meta oficial) ===
@@ -752,6 +755,44 @@ export default function WhatsAppPage() {
     }
   };
 
+  const openHotswapDialog = (oldInstance: string) => {
+    setHotswapOld(oldInstance);
+    const candidate = qrConnections.find(
+      (c) => c.instance_name !== oldInstance && statusMap[c.instance_name]?.state === "open"
+    );
+    setHotswapNew(candidate?.instance_name || "");
+  };
+
+  const confirmWhatsAppHotswap = async () => {
+    if (!hotswapOld || !hotswapNew || hotswapOld === hotswapNew) return;
+    setHotswapBusy(true);
+    try {
+      const res = await fetch("/api/whatsapp/hotswap", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          old_instance_name: hotswapOld,
+          new_instance_name: hotswapNew,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.ok) {
+        setToast({ kind: "err", text: data?.error || "Falha no hotswap." });
+        return;
+      }
+      setToast({
+        kind: "ok",
+        text: `Hotswap concluído: ${data.movedCampaigns || 0} campanha(s), ${data.movedFollowups || 0} follow-up(s) e ${data.movedLeads || 0} lead(s) movidos para "${hotswapNew}".`,
+      });
+      setHotswapOld(null);
+      loadData();
+    } catch (err: any) {
+      setToast({ kind: "err", text: err?.message || "Erro de rede no hotswap." });
+    } finally {
+      setHotswapBusy(false);
+    }
+  };
+
   const qrConnections = connections.filter(c => !c.provider || c.provider === "evolution" || c.provider === "evolution_go");
   const onlineCount = qrConnections.filter(c => statusMap[c.instance_name]?.state === "open").length;
 
@@ -1108,6 +1149,11 @@ export default function WhatsAppPage() {
                            <RefreshCw className={cn("w-4 h-4", isLoadingRestart && "animate-spin")} aria-hidden="true" /> Reiniciar instância
                          </Button>
                        )}
+                       {qrConnections.length >= 2 && (
+                         <Button onClick={() => openHotswapDialog(conn.instance_name)} variant="outline" className={styles.secondaryAction}>
+                           <ArrowRightLeft className="w-4 h-4" aria-hidden="true" /> Substituir chip (Hotswap)
+                         </Button>
+                       )}
                        <Button onClick={() => handleLogout(conn.instance_name)} variant="outline" disabled={actionLoading[conn.instance_name]} className={styles.dangerAction}>
                          <WifiOff className="w-4 h-4" aria-hidden="true" /> Desconectar
                        </Button>
@@ -1425,6 +1471,52 @@ export default function WhatsAppPage() {
                 className="text-muted-foreground gap-2"
               >
                 <X className="w-4 h-4" /> Fechar
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* MODAL: Hotswap de chip */}
+      <Dialog open={hotswapOld !== null} onOpenChange={(o) => !o && !hotswapBusy && setHotswapOld(null)}>
+        <DialogContent className={styles.dialog}>
+          <div className={styles.dialogHeader}>
+            <ArrowRightLeft className="w-5 h-5" aria-hidden="true" />
+            <div>
+              <DialogTitle>Substituir chip (Hotswap)</DialogTitle>
+              <DialogDescription>
+                Transfere campanhas, follow-ups e histórico de <strong>{hotswapOld}</strong> para outra instância conectada.
+              </DialogDescription>
+            </div>
+          </div>
+          <div className={styles.dialogBody}>
+            <div>
+              <label htmlFor="wa-hotswap-new" className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">
+                Instância de destino
+              </label>
+              <select
+                id="wa-hotswap-new"
+                value={hotswapNew}
+                onChange={(e) => setHotswapNew(e.target.value)}
+                className={styles.field}
+              >
+                <option value="">Selecione uma instância</option>
+                {qrConnections
+                  .filter((c) => c.instance_name !== hotswapOld)
+                  .map((c) => (
+                    <option key={c.instance_name} value={c.instance_name}>
+                      {c.instance_name} ({statusMap[c.instance_name]?.state === "open" ? "Conectado" : "Offline"})
+                    </option>
+                  ))}
+              </select>
+            </div>
+            <div className={styles.formActions}>
+              <Button onClick={() => setHotswapOld(null)} variant="ghost" disabled={hotswapBusy}>
+                Cancelar
+              </Button>
+              <Button onClick={confirmWhatsAppHotswap} disabled={hotswapBusy || !hotswapNew}>
+                {hotswapBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRightLeft className="w-4 h-4" />}
+                Confirmar Hotswap
               </Button>
             </div>
           </div>

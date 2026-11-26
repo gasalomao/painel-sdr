@@ -667,10 +667,11 @@ async function startDispatchPhase(
 
   if (a.scrape_filters?.weekend_guard !== undefined) {
     try {
+      const { serializeWeekendB2BGuardMode } = await import("@/lib/campaign-pool");
       await supabase
         .from("app_settings")
         .upsert(
-          { key: `campaign_weekend_guard:${camp.id}`, value: String(Boolean(a.scrape_filters.weekend_guard)) },
+          { key: `campaign_weekend_guard:${camp.id}`, value: serializeWeekendB2BGuardMode(a.scrape_filters.weekend_guard) },
           { onConflict: "key" }
         );
     } catch {}
@@ -1044,14 +1045,25 @@ async function startFollowupPhase(a: AutomationRow): Promise<void> {
     .single();
   if (fcErr || !fcamp?.id) return markError(a.id, `Falha criando follow-up: ${fcErr?.message}`);
 
-  // O liga/desliga da Proteção Anti-Ban da automação cobre também o follow-up
-  // que ela mesma cria (fluxo completo: disparo + cadência de retorno).
+  // O liga/desliga da Proteção Anti-Ban e a guarda de fim de semana da automação
+  // viajam também para o follow-up que ela mesma cria (fluxo completo: disparo + cadência de retorno).
   if (a.scrape_filters?.cold_shield !== undefined) {
     try {
       await supabase
         .from("app_settings")
         .upsert(
           { key: `followup_cold_shield:${fcamp.id}`, value: String(a.scrape_filters.cold_shield !== false) },
+          { onConflict: "key" }
+        );
+    } catch {}
+  }
+  if (a.scrape_filters?.weekend_guard !== undefined) {
+    try {
+      const { serializeWeekendB2BGuardMode } = await import("@/lib/campaign-pool");
+      await supabase
+        .from("app_settings")
+        .upsert(
+          { key: `followup_weekend_guard:${fcamp.id}`, value: serializeWeekendB2BGuardMode(a.scrape_filters.weekend_guard) },
           { onConflict: "key" }
         );
     } catch {}

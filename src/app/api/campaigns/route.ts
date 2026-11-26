@@ -5,6 +5,8 @@ import { requireClientId } from "@/lib/tenant";
 import { requireFeatureAccess } from "@/lib/saas-limits";
 import { validateCampaignInstanceAccess, validateClientAgentAccess } from "@/lib/campaign-instance-access";
 import { computePriority } from "@/lib/prospeccao-priority";
+import { parseWeekendB2BGuardMode, serializeWeekendB2BGuardMode } from "@/lib/campaign-pool";
+import { saveCampaignAbConfig } from "@/lib/campaign-ab-testing";
 
 export const dynamic = "force-dynamic";
 
@@ -39,6 +41,7 @@ export async function GET(req: NextRequest) {
       `campaign_antiban:${id}`,
       `campaign_weekend_guard:${id}`,
       `campaign_cold_shield:${id}`,
+      `campaign_ab_config:${id}`,
     ]);
     try {
       const { data: cfgRows } = await supabase
@@ -58,8 +61,15 @@ export async function GET(req: NextRequest) {
   for (const c of campaigns) {
     if (!c?.id) continue;
     c.antiban_mixer = readFlag(c.id, "campaign_antiban", true);
-    c.weekend_guard = readFlag(c.id, "campaign_weekend_guard", false);
+    const rawWg = flagMap.get(`campaign_weekend_guard:${c.id}`);
+    c.weekend_guard = rawWg !== undefined ? parseWeekendB2BGuardMode(rawWg) : false;
     c.cold_shield = readFlag(c.id, "campaign_cold_shield", true);
+    const rawAb = flagMap.get(`campaign_ab_config:${c.id}`);
+    if (rawAb) {
+      try {
+        c.ab_test = JSON.parse(rawAb);
+      } catch {}
+    }
   }
 
   return NextResponse.json({ success: true, campaigns });
@@ -105,6 +115,7 @@ export async function POST(req: NextRequest) {
       media_mimetype = null,
       max_daily_previews = 0,
       approach_strategy = "mentor_2step",
+      ab_test = null,
     } = body;
 
     if (!name || !instance_name || !message_template) {
@@ -214,11 +225,24 @@ export async function POST(req: NextRequest) {
           { key: `campaign_antiban:${camp.id}`, value: String(Boolean(antiban_mixer)) },
           {
             key: `campaign_weekend_guard:${camp.id}`,
-            value: weekend_guard === "sunday_only" ? "sunday_only" : String(Boolean(weekend_guard)),
+            value: serializeWeekendB2BGuardMode(weekend_guard),
           },
           { key: `campaign_cold_shield:${camp.id}`, value: String(cold_shield !== false) },
         ], { onConflict: "key" });
     } catch {}
+
+    if (ab_test && typeof ab_test === "object") {
+      try {
+        const abObj = ab_test as Record<string, unknown>;
+        await saveCampaignAbConfig(camp.id, {
+          enabled: Boolean(abObj.enabled),
+          variantA_label: typeof abObj.variantA_label === "string" ? abObj.variantA_label : undefined,
+          variantA_template: String(message_template),
+          variantB_label: typeof abObj.variantB_label === "string" ? abObj.variantB_label : undefined,
+          variantB_template: typeof abObj.variantB_template === "string" ? abObj.variantB_template : "",
+        });
+      } catch {}
+    }
 
     // Resolve leads → targets (priorizados por Score ICP quando habilitado)
     const targetsRows: Array<Record<string, unknown>> = selectedLeads

@@ -27,6 +27,13 @@ export function parseWeekendB2BGuardMode(raw: unknown): WeekendB2BGuardMode {
   return false;
 }
 
+export function serializeWeekendB2BGuardMode(raw: unknown): "false" | "true" | "sunday_only" {
+  const mode = parseWeekendB2BGuardMode(raw);
+  if (mode === "sunday_only") return "sunday_only";
+  if (mode === "full" || mode === true) return "true";
+  return "false";
+}
+
 export type WeekendB2BGuardResult = {
   allowed: boolean;
   hourlyFactor: number;

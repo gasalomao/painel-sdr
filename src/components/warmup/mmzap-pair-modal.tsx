@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   CornerDownLeft,
+  LogOut,
   Monitor,
   QrCode,
   RefreshCw,
@@ -34,6 +35,7 @@ export interface MmzapPairModalProps {
   open: boolean;
   instanceName: string | null;
   initialMode: "pair" | "setup";
+  mmzapBrowserStatus?: string | null;
   workerSession?: MmzapWorkerSessionView | null;
   styles: Record<string, string>;
   onOpenChange: (open: boolean) => void;
@@ -44,6 +46,7 @@ export function MmzapPairModal({
   open,
   instanceName,
   initialMode,
+  mmzapBrowserStatus = null,
   workerSession = null,
   styles,
   onOpenChange,
@@ -55,12 +58,15 @@ export function MmzapPairModal({
   const [qrCodeBase64, setQrCodeBase64] = useState<string | null>(null);
   const [screenshotBase64, setScreenshotBase64] = useState<string | null>(null);
   const [proxyIp, setProxyIp] = useState<string | null>(null);
-  const [sessionStatus, setSessionStatus] = useState<string>("idle");
+  const [sessionStatus, setSessionStatus] = useState<string>(mmzapBrowserStatus || "unpaired");
   const [mmzapUiDetected, setMmzapUiDetected] = useState<boolean | null>(null);
   const [mmzapChipState, setMmzapChipState] = useState<string | null>(null);
   const [mmzapStatusLabel, setMmzapStatusLabel] = useState<string | null>(null);
   const [sessionLoggedOut, setSessionLoggedOut] = useState<boolean>(false);
   const [watchdogRecoveries, setWatchdogRecoveries] = useState<number>(0);
+  const [confirmLogout, setConfirmLogout] = useState<boolean>(false);
+  const [loggingOut, setLoggingOut] = useState<boolean>(false);
+  const [loggedOutFresh, setLoggedOutFresh] = useState<boolean>(false);
   const [textInput, setTextInput] = useState("");
   const imgRef = useRef<HTMLImageElement>(null);
 
@@ -83,16 +89,22 @@ export function MmzapPairModal({
     }
   }, []);
 
-  const startPairing = useCallback(async (inst: string) => {
+  const startPairing = useCallback(async (inst: string, resetProfile = false) => {
     setBusy(true);
     setErrorMsg(null);
     setQrCodeBase64(null);
     setSessionLoggedOut(false);
+    setLoggedOutFresh(false);
+    setConfirmLogout(false);
     try {
       const res = await fetch("/api/warmup/mmzap-browser", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "pair", instance_name: inst }),
+        body: JSON.stringify({
+          action: "pair",
+          instance_name: inst,
+          resetProfile,
+        }),
       });
       const json = (await res.json().catch(() => null)) as {
         success?: boolean;
@@ -147,17 +159,21 @@ export function MmzapPairModal({
     if (!open || !instanceName) return;
     setMode(initialMode);
     setErrorMsg(null);
+    setSessionStatus(mmzapBrowserStatus || "unpaired");
     setMmzapUiDetected(null);
     setMmzapChipState(null);
     setMmzapStatusLabel(null);
     setSessionLoggedOut(false);
     setWatchdogRecoveries(0);
+    setConfirmLogout(false);
+    setLoggingOut(false);
+    setLoggedOutFresh(false);
     if (initialMode === "pair") {
       void startPairing(instanceName);
     } else {
       void openSetup(instanceName);
     }
-  }, [open, instanceName, initialMode, startPairing, openSetup]);
+  }, [open, instanceName, initialMode, mmzapBrowserStatus, startPairing, openSetup]);
 
   useEffect(() => {
     if (!open || !instanceName || !workerSession || mode !== "setup") return;
@@ -313,8 +329,57 @@ export function MmzapPairModal({
   const handleSwitchToRepair = () => {
     if (!instanceName) return;
     setMode("pair");
-    void startPairing(instanceName);
+    void startPairing(instanceName, true);
   };
+
+  const handleLogoutSession = async () => {
+    if (!instanceName) return;
+    setLoggingOut(true);
+    setErrorMsg(null);
+    try {
+      const res = await fetch("/api/warmup/mmzap-browser", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "logout",
+          instance_name: instanceName,
+        }),
+      });
+      const json = (await res.json().catch(() => null)) as {
+        success?: boolean;
+        error?: string;
+      } | null;
+      if (!res.ok || !json?.success) {
+        const msg = json?.error || "Falha ao desconectar sessão MMZap.";
+        setErrorMsg(msg);
+        toast.error(msg);
+        return;
+      }
+      setQrCodeBase64(null);
+      setScreenshotBase64(null);
+      setMmzapUiDetected(null);
+      setMmzapChipState(null);
+      setMmzapStatusLabel(null);
+      setSessionLoggedOut(false);
+      setSessionStatus("unpaired");
+      setConfirmLogout(false);
+      setLoggedOutFresh(true);
+      setMode("pair");
+      toast.success(`Sessão MMZap de ${instanceName} desconectada e perfil apagado.`);
+      await onCompleted();
+    } finally {
+      setLoggingOut(false);
+    }
+  };
+
+  const canLogoutSession = Boolean(
+    instanceName &&
+      !loggedOutFresh &&
+      (sessionStatus !== "unpaired" ||
+        mode === "setup" ||
+        Boolean(mmzapBrowserStatus && mmzapBrowserStatus !== "unpaired") ||
+        Boolean(workerSession && workerSession.status !== "unpaired"))
+  );
 
   const handleCompleteSetup = async () => {
     if (!instanceName) return;
@@ -418,31 +483,59 @@ export function MmzapPairModal({
 
           {mode === "pair" ? (
             <div className="flex flex-col items-center gap-3 py-2">
-              {qrCodeBase64 ? (
-                <div className="rounded-lg border border-[#303a32] bg-white p-3">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={qrCodeBase64}
-                    alt={`QR Code MMZap de ${instanceName || "chip"}`}
-                    className="w-60 h-60 object-contain"
-                  />
+              {loggedOutFresh && !qrCodeBase64 ? (
+                <div
+                  role="status"
+                  className="w-full rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-4 py-5 text-center space-y-3"
+                >
+                  <CheckCircle2 className="w-6 h-6 text-emerald-400 mx-auto" />
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-[#edf2ee]">
+                      Sessão MMZap desconectada e perfil apagado
+                    </p>
+                    <p className="text-xs text-[#a5b1a8]">
+                      Você pode gerar um novo QR Code limpo agora para parear do zero sem cookies antigos.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={busy || loggingOut || !instanceName}
+                    onClick={() => instanceName && void startPairing(instanceName, true)}
+                    className={styles.primaryAction}
+                  >
+                    <QrCode className="w-3.5 h-3.5" />
+                    Parear do zero
+                  </button>
                 </div>
               ) : (
-                <div className="w-60 h-60 rounded-lg border border-[#303a32] bg-[#101411] flex flex-col items-center justify-center gap-2 text-xs text-[#a5b1a8]">
-                  <RefreshCw className={cn("w-5 h-5 text-emerald-400", busy && "animate-spin")} />
-                  <span>{busy ? "Abrindo Chromium com proxy..." : "Aguardando QR Code..."}</span>
-                </div>
-              )}
+                <>
+                  {qrCodeBase64 ? (
+                    <div className="rounded-lg border border-[#303a32] bg-white p-3">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={qrCodeBase64}
+                        alt={`QR Code MMZap de ${instanceName || "chip"}`}
+                        className="w-60 h-60 object-contain"
+                      />
+                    </div>
+                  ) : (
+                    <div className="w-60 h-60 rounded-lg border border-[#303a32] bg-[#101411] flex flex-col items-center justify-center gap-2 text-xs text-[#a5b1a8]">
+                      <RefreshCw className={cn("w-5 h-5 text-emerald-400", busy && "animate-spin")} />
+                      <span>{busy ? "Abrindo Chromium com proxy..." : "Aguardando QR Code..."}</span>
+                    </div>
+                  )}
 
-              <button
-                type="button"
-                disabled={busy || !instanceName}
-                onClick={() => instanceName && void startPairing(instanceName)}
-                className={styles.secondaryAction}
-              >
-                <RefreshCw className={cn("w-3.5 h-3.5", busy && "animate-spin")} />
-                Gerar novo QR
-              </button>
+                  <button
+                    type="button"
+                    disabled={busy || loggingOut || !instanceName}
+                    onClick={() => instanceName && void startPairing(instanceName, true)}
+                    className={styles.secondaryAction}
+                  >
+                    <RefreshCw className={cn("w-3.5 h-3.5", busy && "animate-spin")} />
+                    Gerar novo QR
+                  </button>
+                </>
+              )}
             </div>
           ) : (
             <div className="space-y-3">
@@ -580,25 +673,67 @@ export function MmzapPairModal({
             </div>
           )}
 
-          <div className={styles.dialogActions}>
-            <button
-              type="button"
-              onClick={() => onOpenChange(false)}
-              className={styles.secondaryAction}
-            >
-              Fechar
-            </button>
-            {mode === "setup" && !sessionLoggedOut && sessionStatus !== "running" && (
+          <div className={cn(styles.dialogActions, "flex-wrap justify-between")}>
+            <div className="flex flex-wrap items-center gap-2">
+              {canLogoutSession && (
+                confirmLogout ? (
+                  <div
+                    role="group"
+                    aria-label={`Confirmar logout MMZap de ${instanceName || "chip"}`}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-red-500/35 bg-red-500/10 px-2.5 py-1.5 text-xs text-red-100"
+                  >
+                    <span>Deslogar e apagar perfil?</span>
+                    <button
+                      type="button"
+                      disabled={busy || loggingOut}
+                      onClick={() => void handleLogoutSession()}
+                      className="rounded border border-red-400/40 bg-red-500/20 px-2 py-0.5 text-[11px] font-medium text-red-100 hover:bg-red-500/30 transition-colors"
+                    >
+                      {loggingOut ? "Deslogando..." : "Confirmar"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy || loggingOut}
+                      onClick={() => setConfirmLogout(false)}
+                      className="rounded border border-[#303a32] bg-[#141a15] px-2 py-0.5 text-[11px] text-[#c2cfc6] hover:text-white transition-colors"
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={busy || loggingOut}
+                    onClick={() => setConfirmLogout(true)}
+                    className={styles.secondaryAction}
+                  >
+                    <LogOut className="w-3.5 h-3.5 text-red-300" />
+                    Deslogar MMZap
+                  </button>
+                )
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
               <button
                 type="button"
-                disabled={busy}
-                onClick={() => void handleCompleteSetup()}
-                className={styles.primaryAction}
+                onClick={() => onOpenChange(false)}
+                className={styles.secondaryAction}
               >
-                <CheckCircle2 className="w-4 h-4" />
-                Concluir configuração
+                Fechar
               </button>
-            )}
+              {mode === "setup" && !sessionLoggedOut && sessionStatus !== "running" && (
+                <button
+                  type="button"
+                  disabled={busy || loggingOut}
+                  onClick={() => void handleCompleteSetup()}
+                  className={styles.primaryAction}
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                  Concluir configuração
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </DialogContent>
