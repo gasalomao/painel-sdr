@@ -19,6 +19,12 @@ const MAX_CONCURRENT = Math.max(
 );
 const MAX_RSS_MB = Math.max(256, Number(process.env.MAX_RSS_MB || 550) || 550);
 const QR_TIMEOUT_MS = 3 * 60 * 1000;
+const LOGOUT_GRACE_MS = 5 * 60 * 1000;
+const WATCHDOG_INTERVAL_MS = Math.max(
+  15_000,
+  Number(process.env.MMZAP_WATCHDOG_INTERVAL_MS || 50_000) || 50_000
+);
+const WATCHDOG_RECOVERY_COOLDOWN_MS = 15 * 60 * 1000;
 
 const sessions = new Map();
 
@@ -90,6 +96,12 @@ async function isSetupDone(profileDir) {
   return fileExists(path.join(profileDir, ".mmzap-setup-done"));
 }
 
+async function clearSavedLogoutMarker(profileDir) {
+  try {
+    await fs.rm(path.join(profileDir, ".mmzap-logged-out"), { force: true });
+  } catch {}
+}
+
 export async function markSetupDone(instanceName) {
   const safe = sanitizeInstanceName(instanceName);
   const profileDir = path.join(PROFILES_DIR, safe);
@@ -103,64 +115,444 @@ export async function markSetupDone(instanceName) {
   return { ok: true, instanceName: safe, needsExtensionSetup: false };
 }
 
-async function readLinuxProcessTreeRssMb(pid) {
-  if (!pid || process.platform !== "linux") return null;
+async function withTimeout(promise, timeoutMs, fallbackValue) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(fallbackValue), timeoutMs);
+        if (typeof timer.unref === "function") timer.unref();
+      }),
+    ]);
+  } catch {
+    return fallbackValue;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function readSinglePidRssKb(pid) {
   try {
     const raw = await fs.readFile(`/proc/${pid}/status`, "utf8");
     const match = raw.match(/^VmRSS:\s+(\d+)\s+kB/m);
-    if (!match) return null;
-    return Math.round((Number(match[1]) / 1024) * 10) / 10;
+    return match ? Number(match[1]) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function collectDescendantPids(rootPid, visited = new Set(), depth = 0) {
+  if (!rootPid || visited.has(rootPid) || depth > 4) return visited;
+  visited.add(rootPid);
+  try {
+    const tasksDir = `/proc/${rootPid}/task`;
+    const tids = await fs.readdir(tasksDir);
+    for (const tid of tids) {
+      try {
+        const raw = await fs.readFile(`${tasksDir}/${tid}/children`, "utf8");
+        const childPids = raw
+          .trim()
+          .split(/\s+/)
+          .map((s) => Number(s))
+          .filter((n) => Number.isFinite(n) && n > 0 && !visited.has(n));
+        for (const childPid of childPids) {
+          await collectDescendantPids(childPid, visited, depth + 1);
+        }
+      } catch {
+        /* thread encerrada */
+      }
+    }
+  } catch {
+    /* processo encerrado ou sem acesso */
+  }
+  return visited;
+}
+
+async function readLinuxProcessTreeRssMb(pid) {
+  if (!pid || process.platform !== "linux") return null;
+  try {
+    const pids = await collectDescendantPids(Number(pid));
+    if (pids.size === 0) return null;
+    let totalKb = 0;
+    for (const p of pids) {
+      totalKb += await readSinglePidRssKb(p);
+    }
+    if (totalKb <= 0) return null;
+    return Math.round((totalKb / 1024) * 10) / 10;
   } catch {
     return null;
   }
 }
 
-async function detectWhatsAppLoggedIn(page) {
+async function detectWhatsAppLoggedIn(page, timeoutMs = 4_000) {
+  if (!page || page.isClosed()) return false;
+  return withTimeout(
+    page
+      .evaluate(() => {
+        return Boolean(
+          document.querySelector('[data-testid="chat-list"]') ||
+            document.querySelector("#pane-side") ||
+            document.querySelector('[aria-label="Lista de conversas"]') ||
+            document.querySelector('[aria-label="Chat list"]')
+        );
+      })
+      .then((res) => Boolean(res))
+      .catch(() => false),
+    timeoutMs,
+    false
+  );
+}
+
+async function detectWhatsAppLoggedOut(page, timeoutMs = 4_000) {
+  if (!page || page.isClosed()) return false;
+  return withTimeout(
+    page
+      .evaluate(() => {
+        const hasAuthenticatedUi = Boolean(
+          document.querySelector('[data-testid="chat-list"]') ||
+            document.querySelector("#pane-side") ||
+            document.querySelector('[aria-label="Lista de conversas"]') ||
+            document.querySelector('[aria-label="Chat list"]')
+        );
+        if (hasAuthenticatedUi) return false;
+
+        const hasQrCanvas = Boolean(
+          document.querySelector('[data-ref] canvas') ||
+            document.querySelector('[data-testid="qrcode"] canvas') ||
+            document.querySelector('canvas[aria-label*="Scan"]') ||
+            document.querySelector('canvas[aria-label*="QR"]') ||
+            document.querySelector('canvas[aria-label*="código"]')
+        );
+        if (hasQrCanvas) return true;
+
+        const hasLandingDom = Boolean(
+          document.querySelector(".landing-wrapper") ||
+            document.querySelector('[data-testid="intro-md-beta-logo-dark"]') ||
+            document.querySelector('[data-testid="intro-md-beta-logo-light"]') ||
+            document.querySelector('[data-testid="link-device-qrcode-alt-linking-hint"]')
+        );
+        if (hasLandingDom) return true;
+
+        const bodyText = String(document.body?.innerText || "").toLowerCase();
+        return (
+          bodyText.includes("vincule com número de telefone") ||
+          bodyText.includes("link with phone number") ||
+          bodyText.includes("use o whatsapp no seu computador") ||
+          bodyText.includes("use whatsapp on your computer") ||
+          bodyText.includes("etapas para conectar") ||
+          bodyText.includes("steps to log in")
+        );
+      })
+      .then((res) => Boolean(res))
+      .catch(() => false),
+    timeoutMs,
+    false
+  );
+}
+
+async function inspectMmzapDom(page, timeoutMs = 3_000) {
+  const empty = { mmzapUiDetected: false, mmzapChipState: null, mmzapStatusLabel: null };
+  if (!page || page.isClosed()) {
+    return empty;
+  }
+  return withTimeout(
+    page
+      .evaluate(() => {
+        const chip = document.querySelector("#mmzap-chip");
+        if (!chip) {
+          return { mmzapUiDetected: false, mmzapChipState: null, mmzapStatusLabel: null };
+        }
+        const cls = chip.className || "";
+        const chipState = cls.includes("is-error")
+          ? "is-error"
+          : cls.includes("is-off")
+            ? "is-off"
+            : cls.includes("is-on")
+              ? "is-on"
+              : "connecting";
+        const labelEl = chip.querySelector(".mmzap-chip-label");
+        const label = labelEl ? String(labelEl.textContent || "").trim() : "";
+        return {
+          mmzapUiDetected: true,
+          mmzapChipState: chipState,
+          mmzapStatusLabel: label || null,
+        };
+      })
+      .catch(() => empty),
+    timeoutMs,
+    empty
+  );
+}
+
+function isChipStateOff(state) {
+  return state === "is-off" || state === "off";
+}
+
+function isChipStateError(state) {
+  return state === "is-error" || state === "error";
+}
+
+function readTunnelTelemetry(session) {
+  const health = session?.tunnel?.getHealth?.() || null;
+  if (!health) {
+    return {
+      proxyLatencyMs: session?.proxyLatencyMs ?? null,
+      proxyErrorCount: 0,
+      proxyHealthy: true,
+      consecutiveErrors: 0,
+      lastError: null,
+    };
+  }
+  if (typeof health.lastLatencyMs === "number") {
+    session.proxyLatencyMs = health.lastLatencyMs;
+  }
+  return {
+    proxyLatencyMs: health.lastLatencyMs ?? session?.proxyLatencyMs ?? null,
+    proxyErrorCount: Number(health.errorCount || 0),
+    proxyHealthy: Boolean(health.healthy),
+    consecutiveErrors: Number(health.consecutiveErrors || 0),
+    lastError: health.lastError || null,
+  };
+}
+
+function serializeSessionStatus(sess, rssMb = null) {
+  const tunnel = readTunnelTelemetry(sess);
+  return {
+    instanceName: sess.instanceName,
+    status: sess.status,
+    needsExtensionSetup: Boolean(sess.needsExtensionSetup),
+    mmzapUiDetected: Boolean(sess.mmzapUiDetected),
+    mmzapChipState: sess.mmzapChipState ?? null,
+    mmzapStatusLabel: sess.mmzapStatusLabel ?? null,
+    sessionLoggedOut: Boolean(sess.sessionLoggedOut),
+    mmzapWatchdogRecoveries: Number(sess.mmzapWatchdogRecoveries || 0),
+    lastWatchdogCheckAt: sess.lastWatchdogCheckAt ?? null,
+    proxyIp: sess.proxyIp ?? null,
+    proxyLatencyMs: tunnel.proxyLatencyMs,
+    proxyErrorCount: tunnel.proxyErrorCount,
+    proxyHealthy: tunnel.proxyHealthy,
+    rssMb,
+    lastError: sess.lastError ?? null,
+    uptimeSeconds: Math.round((Date.now() - sess.startedAtMs) / 1000),
+    updatedAt: sess.updatedAt,
+  };
+}
+
+function closeExtraPages(session) {
+  if (!session?.context) return;
   try {
-    const loggedIn = await page.evaluate(() => {
-      return Boolean(
-        document.querySelector('[data-testid="chat-list"]') ||
-          document.querySelector("#pane-side") ||
-          document.querySelector('[aria-label="Lista de conversas"]') ||
-          document.querySelector('[aria-label="Chat list"]')
-      );
-    });
-    return Boolean(loggedIn);
+    for (const extraPage of session.context.pages()) {
+      if (extraPage !== session.page) {
+        void extraPage.close().catch(() => {});
+      }
+    }
   } catch {
-    return false;
+    /* ignore */
   }
 }
 
-async function inspectMmzapDom(page) {
+function clearSessionWatchdog(session) {
+  if (!session) return;
+  if (session.watchdogTimer) {
+    clearInterval(session.watchdogTimer);
+    session.watchdogTimer = null;
+  }
+}
+
+function clearSessionTimers(session) {
+  if (!session) return;
+  if (session.timer) {
+    clearTimeout(session.timer);
+    session.timer = null;
+  }
+  clearSessionWatchdog(session);
+}
+
+async function runSessionWatchdogTick(session) {
+  if (
+    !session ||
+    session.closing ||
+    session.watchdogRunning ||
+    session.ensuringMmzap ||
+    session.status !== "running" ||
+    sessions.get(session.instanceName) !== session
+  ) {
+    return;
+  }
+
+  session.watchdogRunning = true;
   try {
-    return await page.evaluate(() => {
-      const chip = document.querySelector("#mmzap-chip");
-      if (!chip) {
-        return { mmzapUiDetected: false, mmzapChipState: null, mmzapStatusLabel: null };
+    closeExtraPages(session);
+
+    if (!session.page || session.page.isClosed()) {
+      session.lastError = "page_closed";
+      await stopSession(session.instanceName, "page_closed");
+      return;
+    }
+
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    session.lastWatchdogCheckAt = nowIso;
+
+    // Atualiza saúde do túnel proxy e sinaliza falhas persistentes sem derrubar o worker
+    const tunnel = readTunnelTelemetry(session);
+    if (!tunnel.proxyHealthy && tunnel.consecutiveErrors >= 5) {
+      if (!session.lastError || String(session.lastError).startsWith("proxy_")) {
+        session.lastError = tunnel.lastError ? `proxy_error: ${tunnel.lastError}` : "proxy_unreachable";
       }
-      const cls = chip.className || "";
-      const chipState = cls.includes("is-error")
-        ? "is-error"
-        : cls.includes("is-off")
-          ? "is-off"
-          : cls.includes("is-on")
-            ? "is-on"
-            : "connecting";
-      const labelEl = chip.querySelector(".mmzap-chip-label");
-      const label = labelEl ? String(labelEl.textContent || "").trim() : "";
-      return {
-        mmzapUiDetected: true,
-        mmzapChipState: chipState,
-        mmzapStatusLabel: label || null,
-      };
-    });
-  } catch {
-    return { mmzapUiDetected: false, mmzapChipState: null, mmzapStatusLabel: null };
+    } else if (tunnel.proxyHealthy && session.lastError && String(session.lastError).startsWith("proxy_")) {
+      session.lastError = null;
+    }
+
+    const isAuthenticated = await detectWhatsAppLoggedIn(session.page);
+    if (!isAuthenticated) {
+      const isLoggedOutScreen = await detectWhatsAppLoggedOut(session.page);
+      if (isLoggedOutScreen) {
+        session.loggedOutStreak = (session.loggedOutStreak || 0) + 1;
+        session.unhealthyDomStreak = 0;
+
+        if (session.loggedOutStreak >= 2) {
+          session.sessionLoggedOut = true;
+          session.status = "qr_pending";
+          session.lastError = "qr_required";
+          session.qrCodeBase64 = null;
+          session.mmzapUiDetected = false;
+          session.mmzapChipState = null;
+          session.mmzapStatusLabel = null;
+          session.loggedOutStreak = 0;
+          session.unhealthyDomStreak = 0;
+          session.updatedAt = nowIso;
+
+          await clearSavedLogoutMarker(path.join(PROFILES_DIR, session.instanceName));
+          clearSessionWatchdog(session);
+          if (session.timer) clearTimeout(session.timer);
+          session.timer = setTimeout(() => {
+            void stopSession(session.instanceName, "whatsapp_web_logged_out");
+          }, LOGOUT_GRACE_MS);
+          if (typeof session.timer.unref === "function") session.timer.unref();
+
+          console.warn(
+            `[mmzap-worker] Watchdog detectou logout do WhatsApp Web em ${session.instanceName} (2 checks consecutivos) -> qr_pending / qr_required`
+          );
+        }
+      }
+      return;
+    }
+
+    // Sessão autenticada no WhatsApp Web
+    session.loggedOutStreak = 0;
+    session.sessionLoggedOut = false;
+    if (session.lastError === "qr_required") {
+      session.lastError = null;
+    }
+
+    const info = await inspectMmzapDom(session.page);
+    session.mmzapUiDetected = info.mmzapUiDetected;
+    session.mmzapChipState = info.mmzapChipState;
+    session.mmzapStatusLabel = info.mmzapStatusLabel;
+    session.updatedAt = nowIso;
+
+    const chipOff = isChipStateOff(info.mmzapChipState);
+    const chipError = isChipStateError(info.mmzapChipState);
+    const isUnhealthy = !info.mmzapUiDetected || chipOff || chipError;
+
+    if (!isUnhealthy) {
+      session.unhealthyDomStreak = 0;
+      return;
+    }
+
+    session.unhealthyDomStreak = (session.unhealthyDomStreak || 0) + 1;
+    if (session.unhealthyDomStreak < 2) {
+      return;
+    }
+
+    const canRecover =
+      !session.lastWatchdogRecoveryAtMs ||
+      nowMs - session.lastWatchdogRecoveryAtMs >= WATCHDOG_RECOVERY_COOLDOWN_MS;
+    if (!canRecover) {
+      return;
+    }
+
+    session.lastWatchdogRecoveryAtMs = nowMs;
+    session.unhealthyDomStreak = 0;
+
+    if (chipOff && info.mmzapUiDetected) {
+      const chipLoc = session.page.locator("#mmzap-chip").first();
+      const visible = await chipLoc.isVisible().catch(() => false);
+      if (visible) {
+        await chipLoc.click({ timeout: 5_000 }).catch(() => {});
+        await new Promise((r) => setTimeout(r, 3_000));
+      }
+
+      const afterClick = await inspectMmzapDom(session.page);
+      session.mmzapUiDetected = afterClick.mmzapUiDetected;
+      session.mmzapChipState = afterClick.mmzapChipState;
+      session.mmzapStatusLabel = afterClick.mmzapStatusLabel;
+      session.mmzapWatchdogRecoveries = (session.mmzapWatchdogRecoveries || 0) + 1;
+      session.lastWatchdogCheckAt = new Date().toISOString();
+      session.updatedAt = session.lastWatchdogCheckAt;
+
+      console.log(
+        `[mmzap-worker] Watchdog reativou #mmzap-chip em ${session.instanceName} via clique (estado=${afterClick.mmzapChipState}, recuperações=${session.mmzapWatchdogRecoveries})`
+      );
+      return;
+    }
+
+    // !mmzapUiDetected ou is-error: recarrega WhatsApp Web uma vez e aguarda até 15s por #mmzap-chip
+    await session.page
+      .reload({ waitUntil: "domcontentloaded", timeout: 35_000 })
+      .catch(() => {});
+
+    let recovered = await inspectMmzapDom(session.page);
+    for (let i = 0; i < 15; i++) {
+      if (
+        session.closing ||
+        sessions.get(session.instanceName) !== session ||
+        session.status !== "running"
+      ) {
+        break;
+      }
+      if (recovered.mmzapUiDetected && !isChipStateError(recovered.mmzapChipState)) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 1_000));
+      recovered = await inspectMmzapDom(session.page);
+    }
+
+    session.mmzapUiDetected = recovered.mmzapUiDetected;
+    session.mmzapChipState = recovered.mmzapChipState;
+    session.mmzapStatusLabel = recovered.mmzapStatusLabel;
+    session.mmzapWatchdogRecoveries = (session.mmzapWatchdogRecoveries || 0) + 1;
+    session.lastWatchdogCheckAt = new Date().toISOString();
+    session.updatedAt = session.lastWatchdogCheckAt;
+
+    console.log(
+      `[mmzap-worker] Watchdog recarregou WhatsApp Web em ${session.instanceName} (mmzapUiDetected=${recovered.mmzapUiDetected}, estado=${recovered.mmzapChipState}, recuperações=${session.mmzapWatchdogRecoveries})`
+    );
+  } catch (err) {
+    console.warn(
+      `[mmzap-worker] Erro transitório no watchdog de ${session.instanceName}:`,
+      err instanceof Error ? err.message : String(err)
+    );
+  } finally {
+    session.watchdogRunning = false;
+  }
+}
+
+function startSessionWatchdog(session) {
+  if (!session || session.closing) return;
+  clearSessionWatchdog(session);
+  session.watchdogTimer = setInterval(() => {
+    void runSessionWatchdogTick(session);
+  }, WATCHDOG_INTERVAL_MS);
+  if (typeof session.watchdogTimer.unref === "function") {
+    session.watchdogTimer.unref();
   }
 }
 
 async function ensureMmzapInjected(session) {
-  if (!session || session.ensuringMmzap) return;
+  if (!session || session.ensuringMmzap || session.closing) return;
   session.ensuringMmzap = true;
   try {
     let info = await inspectMmzapDom(session.page);
@@ -172,12 +564,13 @@ async function ensureMmzapInjected(session) {
       return;
     }
 
-    // Countera o limite de 10x2s (20s) do content.js da MMZap quando veio da tela de QR ou proxy lenta
+    // Contorna o limite de 10x2s (20s) do content.js da MMZap quando veio da tela de QR ou proxy lenta
     await session.page
       .reload({ waitUntil: "domcontentloaded", timeout: 35_000 })
       .catch(() => {});
 
     for (let i = 0; i < 15; i++) {
+      if (session.closing || sessions.get(session.instanceName) !== session) break;
       await new Promise((r) => setTimeout(r, 1000));
       info = await inspectMmzapDom(session.page);
       if (info.mmzapUiDetected) {
@@ -196,6 +589,7 @@ async function ensureMmzapInjected(session) {
 
 async function captureQrDataUrl(page) {
   try {
+    if (!page || page.isClosed()) return null;
     const qrLoc = page
       .locator('[data-ref] canvas, canvas[aria-label*="Scan"], [data-testid="qrcode"] canvas, canvas')
       .first();
@@ -219,6 +613,7 @@ async function launchBrowserSession({ safeName, clientId, mode, proxy, shiftDura
   const profileDir = path.join(PROFILES_DIR, safeName);
   await fs.mkdir(profileDir, { recursive: true });
   await cleanStaleLocks(profileDir);
+  await clearSavedLogoutMarker(profileDir);
 
   const extStatus = await getExtensionStatus();
   const setupCompleted = await isSetupDone(profileDir);
@@ -242,6 +637,12 @@ async function launchBrowserSession({ safeName, clientId, mode, proxy, shiftDura
     "--disable-setuid-sandbox",
     "--disable-dev-shm-usage",
     "--disable-gpu",
+    "--mute-audio",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-features=TranslateUI",
+    "--disk-cache-size=33554432",
+    "--media-cache-size=16777216",
     "--lang=pt-BR",
     "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding",
@@ -287,11 +688,19 @@ async function launchBrowserSession({ safeName, clientId, mode, proxy, shiftDura
     await existingPages[i].close().catch(() => {});
   }
 
-  // Evita aba duplicada aberta pelo chrome.runtime.onInstalled do MMZap (poupa RAM)
+  // Evita aba duplicada ou popups abertos pelo chrome.runtime.onInstalled/window.open (poupa RAM)
   context.on("page", (extraPage) => {
     if (extraPage !== page) {
       void extraPage.close().catch(() => {});
     }
+  });
+  page.on("popup", (popupPage) => {
+    if (popupPage !== page) {
+      void popupPage.close().catch(() => {});
+    }
+  });
+  page.on("dialog", (dialog) => {
+    void dialog.dismiss().catch(() => {});
   });
 
   const session = {
@@ -302,13 +711,23 @@ async function launchBrowserSession({ safeName, clientId, mode, proxy, shiftDura
     page,
     tunnel,
     proxyIp: proxy?.sourceHost || tunnel?.upstreamHost || null,
+    proxyLatencyMs: null,
     qrCodeBase64: null,
     needsExtensionSetup: requiresManualSetup,
     shiftDurationMinutes: Math.max(5, Number(shiftDurationMinutes || 40)),
     mmzapUiDetected: false,
     mmzapChipState: null,
     mmzapStatusLabel: null,
+    sessionLoggedOut: false,
+    mmzapWatchdogRecoveries: 0,
+    lastWatchdogCheckAt: null,
+    lastWatchdogRecoveryAtMs: null,
+    loggedOutStreak: 0,
+    unhealthyDomStreak: 0,
     ensuringMmzap: false,
+    watchdogTimer: null,
+    watchdogRunning: false,
+    closing: false,
     startedAtMs: Date.now(),
     updatedAt: new Date().toISOString(),
     lastError: null,
@@ -328,15 +747,35 @@ async function launchBrowserSession({ safeName, clientId, mode, proxy, shiftDura
   session.timer = setTimeout(() => {
     void stopSession(safeName, mode === "pair" ? "qr_timeout" : "shift_timeout");
   }, timeoutMs);
+  if (typeof session.timer.unref === "function") session.timer.unref();
 
-  context.on("close", () => {
-    if (sessions.get(safeName) === session) {
-      if (session.timer) clearTimeout(session.timer);
-      sessions.delete(safeName);
-      if (session.tunnel) {
-        void session.tunnel.close().catch(() => {});
-      }
+  const cleanupOnUnexpectedExit = (reason) => {
+    if (sessions.get(safeName) !== session) return;
+    session.lastError = session.lastError || reason;
+    clearSessionTimers(session);
+    sessions.delete(safeName);
+    if (session.tunnel) {
+      void session.tunnel.close().catch(() => {});
     }
+  };
+
+  context.on("close", () => cleanupOnUnexpectedExit("context_closed"));
+  const browser = context.browser?.();
+  if (browser && typeof browser.on === "function") {
+    browser.on("disconnected", () => cleanupOnUnexpectedExit("browser_disconnected"));
+  }
+
+  page.on("crash", () => {
+    if (sessions.get(safeName) !== session || session.closing) return;
+    console.warn(`[mmzap-worker] Aba do Chromium travou (crash) em ${safeName}; encerrando para liberar RAM.`);
+    session.lastError = "page_crashed";
+    void stopSession(safeName, "page_crashed");
+  });
+
+  page.on("close", () => {
+    if (sessions.get(safeName) !== session || session.closing) return;
+    session.lastError = session.lastError || "page_closed";
+    void stopSession(safeName, "page_closed");
   });
 
   try {
@@ -345,7 +784,9 @@ async function launchBrowserSession({ safeName, clientId, mode, proxy, shiftDura
       timeout: 35_000,
     });
   } catch (err) {
-    session.lastError = err instanceof Error ? err.message : String(err);
+    const msg = err instanceof Error ? err.message : String(err);
+    session.lastError = msg;
+    session.gotoError = msg;
   }
 
   return { ok: true, session };
@@ -362,6 +803,11 @@ export async function startPairingSession({
   if (existing && existing.status !== "qr_pending") {
     await stopSession(safeName, "re_pair");
   } else if (existing) {
+    if (existing.timer) clearTimeout(existing.timer);
+    existing.timer = setTimeout(() => {
+      void stopSession(safeName, "qr_timeout");
+    }, QR_TIMEOUT_MS);
+    if (typeof existing.timer.unref === "function") existing.timer.unref();
     return getPairingQr(safeName);
   }
 
@@ -401,28 +847,28 @@ export async function getPairingQr(instanceName) {
         instanceName: safeName,
         status: "idle",
         qrCodeBase64: null,
+        sessionLoggedOut: false,
+        mmzapWatchdogRecoveries: 0,
+        lastWatchdogCheckAt: null,
+        proxyLatencyMs: null,
         updatedAt: new Date().toISOString(),
       },
     };
   }
 
   if (session.status === "running") {
-    const info = await inspectMmzapDom(session.page);
-    session.mmzapUiDetected = info.mmzapUiDetected;
-    session.mmzapChipState = info.mmzapChipState;
-    session.mmzapStatusLabel = info.mmzapStatusLabel;
+    if (!session.ensuringMmzap && !session.watchdogRunning) {
+      const info = await inspectMmzapDom(session.page);
+      session.mmzapUiDetected = info.mmzapUiDetected;
+      session.mmzapChipState = info.mmzapChipState;
+      session.mmzapStatusLabel = info.mmzapStatusLabel;
+    }
     return {
       statusCode: 200,
       body: {
-        instanceName: safeName,
-        status: "running",
+        ...serializeSessionStatus(session),
         needsExtensionSetup: false,
-        mmzapUiDetected: session.mmzapUiDetected,
-        mmzapChipState: session.mmzapChipState,
-        mmzapStatusLabel: session.mmzapStatusLabel,
-        proxyIp: session.proxyIp,
         qrCodeBase64: null,
-        updatedAt: session.updatedAt,
       },
     };
   }
@@ -430,14 +876,23 @@ export async function getPairingQr(instanceName) {
   const loggedIn = await detectWhatsAppLoggedIn(session.page);
   if (loggedIn) {
     session.qrCodeBase64 = null;
+    session.sessionLoggedOut = false;
+    session.loggedOutStreak = 0;
+    session.unhealthyDomStreak = 0;
+    if (session.lastError === "qr_required") {
+      session.lastError = null;
+    }
     session.updatedAt = new Date().toISOString();
+
     if (session.needsExtensionSetup) {
       session.status = "needs_extension_setup";
       session.mode = "setup";
+      clearSessionWatchdog(session);
       if (session.timer) clearTimeout(session.timer);
       session.timer = setTimeout(() => {
         void stopSession(safeName, "setup_timeout");
       }, 10 * 60 * 1000);
+      if (typeof session.timer.unref === "function") session.timer.unref();
     } else {
       // Mantém o Chromium logado aberto e inicia o 1º turno MMZap automaticamente,
       // recarregando a aba para garantir que o content.js da extensão injete (janela de 20s).
@@ -447,20 +902,16 @@ export async function getPairingQr(instanceName) {
       session.timer = setTimeout(() => {
         void stopSession(safeName, "shift_timeout");
       }, Math.max(5, session.shiftDurationMinutes || 40) * 60 * 1000);
+      if (typeof session.timer.unref === "function") session.timer.unref();
       await ensureMmzapInjected(session);
+      startSessionWatchdog(session);
     }
+
     return {
       statusCode: 200,
       body: {
-        instanceName: safeName,
-        status: session.status,
-        needsExtensionSetup: session.needsExtensionSetup,
-        mmzapUiDetected: session.mmzapUiDetected,
-        mmzapChipState: session.mmzapChipState,
-        mmzapStatusLabel: session.mmzapStatusLabel,
-        proxyIp: session.proxyIp,
+        ...serializeSessionStatus(session),
         qrCodeBase64: null,
-        updatedAt: session.updatedAt,
       },
     };
   }
@@ -472,12 +923,9 @@ export async function getPairingQr(instanceName) {
   return {
     statusCode: 200,
     body: {
-      instanceName: safeName,
+      ...serializeSessionStatus(session),
       status: "qr_pending",
-      needsExtensionSetup: session.needsExtensionSetup,
-      proxyIp: session.proxyIp,
       qrCodeBase64: qr,
-      updatedAt: session.updatedAt,
     },
   };
 }
@@ -522,6 +970,7 @@ export async function openSetupSession({ instanceName, clientId, proxy, setupUrl
   if (!keepRunning) {
     session.status = "setup";
     session.mode = "setup";
+    clearSessionWatchdog(session);
   }
   session.updatedAt = new Date().toISOString();
 
@@ -548,21 +997,24 @@ export async function openSetupSession({ instanceName, clientId, proxy, setupUrl
     }
   }
 
-  const info = await inspectMmzapDom(session.page);
-  session.mmzapUiDetected = info.mmzapUiDetected;
-  session.mmzapChipState = info.mmzapChipState;
-  session.mmzapStatusLabel = info.mmzapStatusLabel;
+  if (!session.ensuringMmzap && !session.watchdogRunning) {
+    const info = await inspectMmzapDom(session.page);
+    session.mmzapUiDetected = info.mmzapUiDetected;
+    session.mmzapChipState = info.mmzapChipState;
+    session.mmzapStatusLabel = info.mmzapStatusLabel;
+    const isLoggedOut = await detectWhatsAppLoggedOut(session.page);
+    if (isLoggedOut) {
+      session.sessionLoggedOut = true;
+    } else if (await detectWhatsAppLoggedIn(session.page)) {
+      session.sessionLoggedOut = false;
+    }
+  }
 
   const shot = await session.page.screenshot({ type: "png" }).catch(() => null);
   return {
     statusCode: 200,
     body: {
-      instanceName: safeName,
-      status: session.status,
-      mmzapUiDetected: session.mmzapUiDetected,
-      mmzapChipState: session.mmzapChipState,
-      mmzapStatusLabel: session.mmzapStatusLabel,
-      proxyIp: session.proxyIp,
+      ...serializeSessionStatus(session),
       screenshotBase64: shot ? `data:image/png;base64,${shot.toString("base64")}` : null,
       updatedAt: new Date().toISOString(),
     },
@@ -575,12 +1027,25 @@ export async function getSessionScreenshot(instanceName) {
   if (!session) {
     return { statusCode: 404, body: { error: "Sessão não está aberta" } };
   }
+
+  if (!session.ensuringMmzap && !session.watchdogRunning) {
+    const info = await inspectMmzapDom(session.page);
+    session.mmzapUiDetected = info.mmzapUiDetected;
+    session.mmzapChipState = info.mmzapChipState;
+    session.mmzapStatusLabel = info.mmzapStatusLabel;
+    const isLoggedOut = await detectWhatsAppLoggedOut(session.page);
+    if (isLoggedOut) {
+      session.sessionLoggedOut = true;
+    } else if (await detectWhatsAppLoggedIn(session.page)) {
+      session.sessionLoggedOut = false;
+    }
+  }
+
   const shot = await session.page.screenshot({ type: "png" }).catch(() => null);
   return {
     statusCode: 200,
     body: {
-      instanceName: safeName,
-      status: session.status,
+      ...serializeSessionStatus(session),
       screenshotBase64: shot ? `data:image/png;base64,${shot.toString("base64")}` : null,
       updatedAt: new Date().toISOString(),
     },
@@ -611,15 +1076,11 @@ export async function sendSessionInput(instanceName, input) {
 export async function startShiftSession({ instanceName, clientId, proxy, shiftDurationMinutes }) {
   const safeName = sanitizeInstanceName(instanceName);
   const existing = sessions.get(safeName);
-  if (existing && existing.status === "running") {
+  if (existing && existing.status === "running" && !existing.sessionLoggedOut) {
+    startSessionWatchdog(existing);
     return {
       statusCode: 200,
-      body: {
-        instanceName: safeName,
-        status: "running",
-        proxyIp: existing.proxyIp,
-        updatedAt: existing.updatedAt,
-      },
+      body: serializeSessionStatus(existing),
     };
   }
   if (existing) {
@@ -653,49 +1114,139 @@ export async function startShiftSession({ instanceName, clientId, proxy, shiftDu
 
   const session = launched.session;
 
-  // Poll de hidratação (até 15s) para distinguir proxy lento de sessão realmente deslogada (QR visível)
+  // Poll de hidratação (até 20s) para distinguir proxy lento de sessão deslogada ou aba morta (chrome-error://)
   let loggedIn = false;
   let qrVisible = false;
-  for (let attempt = 0; attempt < 15; attempt++) {
-    await new Promise((r) => setTimeout(r, 1000));
-    loggedIn = await detectWhatsAppLoggedIn(session.page);
-    if (loggedIn) break;
+  let navigationFailed = Boolean(session.gotoError);
 
-    qrVisible = await session.page
-      .locator('[data-ref] canvas, [data-testid="qrcode"] canvas')
-      .first()
-      .isVisible()
-      .catch(() => false);
-    if (qrVisible) break;
+  if (!navigationFailed) {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      if (session.closing || sessions.get(safeName) !== session) {
+        return {
+          statusCode: 500,
+          body: {
+            instanceName: safeName,
+            status: "error",
+            error: "Sessão do Chromium encerrou durante a inicialização do turno.",
+          },
+        };
+      }
+
+      const currentUrl = session.page.url() || "";
+      if (currentUrl.startsWith("chrome-error://")) {
+        navigationFailed = true;
+        break;
+      }
+
+      loggedIn = await detectWhatsAppLoggedIn(session.page);
+      if (loggedIn) break;
+
+      qrVisible = await detectWhatsAppLoggedOut(session.page);
+      if (qrVisible) break;
+
+      await new Promise((r) => setTimeout(r, 1000));
+    }
   }
 
   if (qrVisible && !loggedIn) {
+    const tunnel = readTunnelTelemetry(session);
     await stopSession(safeName, "whatsapp_web_logged_out");
     return {
       statusCode: 409,
       body: {
         instanceName: safeName,
         status: "qr_pending",
+        sessionLoggedOut: true,
+        mmzapWatchdogRecoveries: 0,
+        lastWatchdogCheckAt: new Date().toISOString(),
+        proxyIp: session.proxyIp,
+        proxyLatencyMs: tunnel.proxyLatencyMs,
+        lastError: "qr_required",
         error: "Sessão do WhatsApp Web desconectada; escaneie o QR Code novamente.",
       },
     };
   }
 
-  if (loggedIn) {
-    await ensureMmzapInjected(session);
+  if (!loggedIn) {
+    const tunnel = readTunnelTelemetry(session);
+    const currentUrl = session.page && !session.page.isClosed() ? session.page.url() || "" : "";
+    const isProxyOrNavErr =
+      navigationFailed ||
+      currentUrl.startsWith("chrome-error://") ||
+      currentUrl === "about:blank" ||
+      tunnel.consecutiveErrors > 0;
+    const reason = isProxyOrNavErr ? "whatsapp_web_proxy_error" : "whatsapp_web_hydration_timeout";
+    const errDetail = session.gotoError || tunnel.lastError || null;
+    await stopSession(safeName, reason);
+    return {
+      statusCode: isProxyOrNavErr ? 502 : 503,
+      body: {
+        instanceName: safeName,
+        status: "error",
+        sessionLoggedOut: false,
+        mmzapWatchdogRecoveries: 0,
+        lastWatchdogCheckAt: new Date().toISOString(),
+        proxyIp: session.proxyIp,
+        proxyLatencyMs: tunnel.proxyLatencyMs,
+        lastError: reason,
+        error: isProxyOrNavErr
+          ? `Falha ao abrir WhatsApp Web pelo proxy${errDetail ? ` (${errDetail})` : ""}.`
+          : "WhatsApp Web não concluiu o carregamento em 20s (proxy lento ou página travada).",
+      },
+    };
+  }
+
+  session.sessionLoggedOut = false;
+  session.loggedOutStreak = 0;
+  session.lastError = null;
+  await ensureMmzapInjected(session);
+
+  startSessionWatchdog(session);
+
+  return {
+    statusCode: 200,
+    body: serializeSessionStatus(session),
+  };
+}
+
+export async function getSessionStatus(instanceName) {
+  const safeName = sanitizeInstanceName(instanceName);
+  const sess = sessions.get(safeName);
+  if (!sess) {
+    return {
+      statusCode: 200,
+      body: {
+        instanceName: safeName,
+        status: "idle",
+        needsExtensionSetup: false,
+        mmzapUiDetected: false,
+        mmzapChipState: null,
+        mmzapStatusLabel: null,
+        sessionLoggedOut: false,
+        mmzapWatchdogRecoveries: 0,
+        lastWatchdogCheckAt: null,
+        proxyIp: null,
+        proxyLatencyMs: null,
+        rssMb: null,
+        lastError: null,
+        uptimeSeconds: 0,
+        updatedAt: new Date().toISOString(),
+      },
+    };
+  }
+
+  const pid = sess.context?.browser?.()?.process?.()?.pid;
+  const rssMb = await readLinuxProcessTreeRssMb(pid);
+  if (sess.status === "running" && !sess.ensuringMmzap && !sess.watchdogRunning) {
+    const info = await inspectMmzapDom(sess.page);
+    sess.mmzapUiDetected = info.mmzapUiDetected;
+    sess.mmzapChipState = info.mmzapChipState;
+    sess.mmzapStatusLabel = info.mmzapStatusLabel;
   }
 
   return {
     statusCode: 200,
-    body: {
-      instanceName: safeName,
-      status: "running",
-      mmzapUiDetected: session.mmzapUiDetected,
-      mmzapChipState: session.mmzapChipState,
-      mmzapStatusLabel: session.mmzapStatusLabel,
-      proxyIp: session.proxyIp,
-      updatedAt: session.updatedAt,
-    },
+    body: serializeSessionStatus(sess, rssMb),
   };
 }
 
@@ -706,7 +1257,8 @@ export async function stopSession(instanceName, reason = "manual_stop") {
     return { statusCode: 200, body: { instanceName: safeName, status: "idle", reason } };
   }
 
-  if (session.timer) clearTimeout(session.timer);
+  session.closing = true;
+  clearSessionTimers(session);
   sessions.delete(safeName);
 
   try {
@@ -727,6 +1279,11 @@ export async function stopSession(instanceName, reason = "manual_stop") {
       updatedAt: new Date().toISOString(),
     },
   };
+}
+
+export async function stopAllSessions(reason = "worker_shutdown") {
+  const names = Array.from(sessions.keys());
+  await Promise.allSettled(names.map((name) => stopSession(name, reason)));
 }
 
 export async function deleteSessionProfile(instanceName) {
@@ -782,25 +1339,13 @@ export async function getHealthSnapshot() {
   for (const sess of sessions.values()) {
     const pid = sess.context?.browser?.()?.process?.()?.pid;
     const rssMb = await readLinuxProcessTreeRssMb(pid);
-    if (sess.status === "running") {
+    if (sess.status === "running" && !sess.ensuringMmzap && !sess.watchdogRunning) {
       const info = await inspectMmzapDom(sess.page);
       sess.mmzapUiDetected = info.mmzapUiDetected;
       sess.mmzapChipState = info.mmzapChipState;
       sess.mmzapStatusLabel = info.mmzapStatusLabel;
     }
-    list.push({
-      instanceName: sess.instanceName,
-      status: sess.status,
-      needsExtensionSetup: sess.needsExtensionSetup,
-      mmzapUiDetected: sess.mmzapUiDetected,
-      mmzapChipState: sess.mmzapChipState,
-      mmzapStatusLabel: sess.mmzapStatusLabel,
-      proxyIp: sess.proxyIp,
-      rssMb,
-      lastError: sess.lastError,
-      uptimeSeconds: Math.round((Date.now() - sess.startedAtMs) / 1000),
-      updatedAt: sess.updatedAt,
-    });
+    list.push(serializeSessionStatus(sess, rssMb));
   }
 
   return {

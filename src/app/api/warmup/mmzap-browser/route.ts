@@ -7,6 +7,7 @@ import {
   getMmzapWorkerHealth,
   getMmzapWorkerPairingQr,
   getMmzapWorkerScreenshot,
+  getMmzapWorkerSessionStatus,
   isMmzapWorkerConfigured,
   markMmzapWorkerSetupDone,
   openMmzapWorkerSetupWindow,
@@ -29,6 +30,9 @@ import { logWarmupAction } from "@/lib/warmup/warmup-engine";
 import type { MmzapBrowserStatus } from "@/lib/warmup/warmup-types";
 
 export const dynamic = "force-dynamic";
+
+const QR_REQUIRED_ERROR_MSG =
+  "Sessão do WhatsApp Web no MMZap foi deslogada. Escaneie o QR Code novamente para reconectar.";
 
 async function readInstanceWarmupRow(
   clientId: string,
@@ -53,6 +57,23 @@ async function readInstanceWarmupRow(
   } catch {
     return null;
   }
+}
+
+async function ensureReceiveOnlyIfOff(
+  clientId: string,
+  instanceName: string,
+  currentMode?: string
+): Promise<boolean> {
+  if (currentMode && currentMode !== "off") {
+    return false;
+  }
+  await supabaseAdmin
+    .from("whatsapp_warmup_configs")
+    .update({ external_warmup_mode: "receive_only", updated_at: new Date().toISOString() })
+    .eq("client_id", clientId)
+    .eq("instance_name", instanceName);
+  invalidateExternalShieldCache(clientId, instanceName);
+  return true;
 }
 
 export async function GET(req: NextRequest) {
@@ -82,9 +103,10 @@ export async function GET(req: NextRequest) {
     }
 
     const nextStatus = res.data.status as MmzapBrowserStatus;
+    const nowIso = new Date().toISOString();
+
     if (nextStatus === "running") {
       const row = await readInstanceWarmupRow(clientId, instanceName);
-      const nowIso = new Date().toISOString();
       const fields: Record<string, unknown> = {
         mmzap_browser_status: "running",
         mmzap_browser_enabled: true,
@@ -92,6 +114,9 @@ export async function GET(req: NextRequest) {
         mmzap_last_error: null,
         updated_at: nowIso,
       };
+      if (res.data.proxyIp) {
+        fields.mmzap_proxy_endpoint = res.data.proxyIp;
+      }
       if (!row?.external_warmup_mode || row.external_warmup_mode === "off") {
         fields.external_warmup_mode = "receive_only";
       }
@@ -100,13 +125,43 @@ export async function GET(req: NextRequest) {
       }
       await updateMmzapConfigFields(clientId, instanceName, fields);
     } else if (nextStatus === "idle" || nextStatus === "needs_extension_setup") {
-      await updateMmzapConfigFields(clientId, instanceName, {
+      const row = await readInstanceWarmupRow(clientId, instanceName);
+      const fields: Record<string, unknown> = {
         mmzap_browser_status: nextStatus,
+        mmzap_browser_enabled: true,
         mmzap_last_error: null,
-        updated_at: new Date().toISOString(),
+        updated_at: nowIso,
+      };
+      if (!row?.external_warmup_mode || row.external_warmup_mode === "off") {
+        fields.external_warmup_mode = "receive_only";
+      }
+      await updateMmzapConfigFields(clientId, instanceName, fields);
+    } else if (nextStatus === "qr_pending" && res.data.sessionLoggedOut) {
+      await updateMmzapConfigFields(clientId, instanceName, {
+        mmzap_browser_status: "qr_pending",
+        mmzap_last_error: res.data.lastError || "qr_required",
+        mmzap_shift_started_at: null,
+        updated_at: nowIso,
       });
     }
 
+    return NextResponse.json({ success: true, data: res.data });
+  }
+
+  if (action === "session_status") {
+    if (!instanceName) {
+      return NextResponse.json(
+        { success: false, error: "Parâmetro 'instance' obrigatório." },
+        { status: 400 }
+      );
+    }
+    const res = await getMmzapWorkerSessionStatus(instanceName);
+    if (!res.ok || !res.data) {
+      return NextResponse.json(
+        { success: false, error: res.error || "Falha ao consultar status da sessão MMZap." },
+        { status: res.statusCode || 502 }
+      );
+    }
     return NextResponse.json({ success: true, data: res.data });
   }
 
@@ -187,8 +242,9 @@ export async function POST(req: NextRequest) {
   }
 
   if (action === "pair") {
-    const [governor, proxy] = await Promise.all([
+    const [governor, row, proxy] = await Promise.all([
       getMmzapGovernorSettings(clientId),
+      readInstanceWarmupRow(clientId, instanceName),
       resolveMmzapProxyForInstance(clientId, instanceName),
     ]);
     const res = await startMmzapWorkerPairing({
@@ -204,12 +260,24 @@ export async function POST(req: NextRequest) {
       );
     }
     const status = (res.data?.status || "qr_pending") as MmzapBrowserStatus;
-    await updateMmzapConfigFields(clientId, instanceName, {
+    const nowIso = new Date().toISOString();
+    const fields: Record<string, unknown> = {
       mmzap_browser_status: status,
+      mmzap_browser_enabled: true,
       mmzap_proxy_endpoint: proxy?.sourceHost || res.data?.proxyIp || null,
       mmzap_last_error: null,
-      updated_at: new Date().toISOString(),
-    });
+      updated_at: nowIso,
+    };
+    if (!row?.external_warmup_mode || row.external_warmup_mode === "off") {
+      fields.external_warmup_mode = "receive_only";
+    }
+    if (status === "running") {
+      fields.mmzap_shift_started_at = nowIso;
+      if (row?.mmzap_browser_status !== "running") {
+        fields.mmzap_shifts_today = Number(row?.mmzap_shifts_today || 0) + 1;
+      }
+    }
+    await updateMmzapConfigFields(clientId, instanceName, fields);
     return NextResponse.json({ success: true, data: res.data });
   }
 
@@ -274,13 +342,18 @@ export async function POST(req: NextRequest) {
     ]);
 
     // Garante Escudo Receive-Only ativo antes de abrir turno MMZap
-    if (!row?.external_warmup_mode || row.external_warmup_mode === "off") {
-      await supabaseAdmin
-        .from("whatsapp_warmup_configs")
-        .update({ external_warmup_mode: "receive_only", updated_at: new Date().toISOString() })
-        .eq("client_id", clientId)
-        .eq("instance_name", instanceName);
-      invalidateExternalShieldCache(clientId, instanceName);
+    await ensureReceiveOnlyIfOff(clientId, instanceName, row?.external_warmup_mode);
+
+    // Reseta limpo estados travados de pausa preventiva ou erro anterior ao iniciar turno
+    if (
+      row?.mmzap_browser_status === "paused_safety" ||
+      row?.mmzap_browser_status === "error"
+    ) {
+      await updateMmzapConfigFields(clientId, instanceName, {
+        mmzap_browser_status: "idle",
+        mmzap_last_error: null,
+        updated_at: new Date().toISOString(),
+      });
     }
 
     const res = await startMmzapWorkerShift({
@@ -291,28 +364,100 @@ export async function POST(req: NextRequest) {
       slowMode: true,
     });
 
-    if (!res.ok) {
-      const nextStatus: MmzapBrowserStatus = res.data?.needsExtensionSetup
-        ? "needs_extension_setup"
-        : res.statusCode === 409
-          ? "qr_pending"
-          : "error";
+    const isQrRequired = Boolean(
+      res.data?.sessionLoggedOut ||
+        res.data?.lastError === "qr_required" ||
+        res.data?.status === "qr_pending" ||
+        (!res.ok && !res.data?.needsExtensionSetup && res.statusCode === 409) ||
+        (!res.ok && /qr_required|qr code|desconectada/i.test(String(res.error || "")))
+    );
+
+    if (!res.ok || isQrRequired) {
+      const nowIso = new Date().toISOString();
+
+      if (res.data?.needsExtensionSetup) {
+        await updateMmzapConfigFields(clientId, instanceName, {
+          mmzap_browser_status: "needs_extension_setup",
+          mmzap_last_error: "needs_extension_setup",
+          updated_at: nowIso,
+        });
+        return NextResponse.json(
+          {
+            success: false,
+            code: "needs_extension_setup",
+            error:
+              res.error ||
+              "Configure a extensão MMZap pela 1ª vez antes de iniciar o turno.",
+            data: res.data,
+          },
+          { status: 409 }
+        );
+      }
+
+      if (isQrRequired) {
+        await updateMmzapConfigFields(clientId, instanceName, {
+          mmzap_browser_status: "qr_pending",
+          mmzap_last_error: "qr_required",
+          mmzap_shift_started_at: null,
+          updated_at: nowIso,
+        });
+        return NextResponse.json(
+          {
+            success: false,
+            code: "qr_required",
+            error: res.error || QR_REQUIRED_ERROR_MSG,
+            data: {
+              ...(res.data || {}),
+              instanceName,
+              status: "qr_pending",
+              sessionLoggedOut: true,
+              lastError: "qr_required",
+            },
+          },
+          { status: 409 }
+        );
+      }
+
+      if (res.statusCode === 429) {
+        return NextResponse.json(
+          {
+            success: false,
+            code: "max_concurrent_browsers",
+            error:
+              res.error ||
+              "Limite de browsers simultâneos na VPS atingido. Aguarde um turno encerrar.",
+            data: res.data,
+          },
+          { status: 429 }
+        );
+      }
+
       await updateMmzapConfigFields(clientId, instanceName, {
-        mmzap_browser_status: nextStatus,
-        mmzap_last_error: res.error || nextStatus,
-        updated_at: new Date().toISOString(),
+        mmzap_browser_status: "error",
+        mmzap_last_error: res.error || "worker_start_error",
+        updated_at: nowIso,
       });
       return NextResponse.json(
-        { success: false, error: res.error || "Falha ao iniciar turno MMZap.", data: res.data },
-        { status: res.statusCode || 409 }
+        {
+          success: false,
+          error: res.error || "Falha ao iniciar turno MMZap.",
+          data: res.data,
+        },
+        { status: res.statusCode || 502 }
       );
     }
 
     const nowIso = new Date().toISOString();
+    const nextShifts =
+      row?.mmzap_browser_status === "running"
+        ? Number(row?.mmzap_shifts_today || 0)
+        : Number(row?.mmzap_shifts_today || 0) + 1;
+
     await updateMmzapConfigFields(clientId, instanceName, {
       mmzap_browser_status: "running",
+      mmzap_browser_enabled: true,
       mmzap_shift_started_at: nowIso,
-      mmzap_shifts_today: Number(row?.mmzap_shifts_today || 0) + 1,
+      mmzap_shifts_today: nextShifts,
       mmzap_last_error: null,
       mmzap_proxy_endpoint: proxy?.sourceHost || res.data?.proxyIp || null,
       updated_at: nowIso,

@@ -5,25 +5,60 @@ import {
   getHealthSnapshot,
   getPairingQr,
   getSessionScreenshot,
+  getSessionStatus,
   installExtensionZipBase64,
   markSetupDone,
   openSetupSession,
   sendSessionInput,
   startPairingSession,
   startShiftSession,
+  stopAllSessions,
   stopSession,
 } from "./session-manager.mjs";
 
 const PORT = Number(process.env.PORT || 3099);
-const SECRET = String(process.env.MMZAP_WORKER_SECRET || process.env.INTERNAL_SECRET || "").trim();
+const SECRET = String(
+  process.env.MMZAP_WORKER_SECRET ||
+    process.env.MMZAP_BROWSER_WORKER_SECRET ||
+    process.env.INTERNAL_SECRET ||
+    ""
+).trim();
+
+const IGNORABLE_PROCESS_ERROR_CODES = new Set([
+  "EPIPE",
+  "ECONNRESET",
+  "ECONNABORTED",
+  "ERR_STREAM_DESTROYED",
+  "ERR_STREAM_WRITE_AFTER_END",
+  "ERR_STREAM_PREMATURE_CLOSE",
+]);
+
+process.on("unhandledRejection", (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  console.warn(`[mmzap-browser-worker] unhandledRejection ignorada para manter serviço ativo: ${msg}`);
+});
+
+process.on("uncaughtException", (err) => {
+  const code = err && typeof err === "object" ? String(err.code || "") : "";
+  if (IGNORABLE_PROCESS_ERROR_CODES.has(code)) {
+    console.warn(`[mmzap-browser-worker] Erro de stream transitório interceptado (${code}): ${err.message}`);
+    return;
+  }
+  console.error("[mmzap-browser-worker] uncaughtException:", err);
+});
 
 function sendJson(res, statusCode, payload) {
-  const body = JSON.stringify(payload);
-  res.writeHead(statusCode, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Cache-Control": "no-store",
-  });
-  res.end(body);
+  if (!res || res.destroyed || res.writableEnded) return;
+  try {
+    const body = JSON.stringify(payload);
+    res.writeHead(statusCode, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+    });
+    res.end(body);
+  } catch {
+    /* cliente desconectou antes da resposta */
+  }
 }
 
 async function readJsonBody(req) {
@@ -52,8 +87,15 @@ const server = http.createServer(async (req, res) => {
   const method = (req.method || "GET").toUpperCase();
 
   if (method === "GET" && url.pathname === "/health") {
-    const snap = await getHealthSnapshot();
-    return sendJson(res, 200, snap);
+    try {
+      const snap = await getHealthSnapshot();
+      return sendJson(res, 200, snap);
+    } catch (err) {
+      return sendJson(res, 500, {
+        ok: false,
+        error: err instanceof Error ? err.message : "Erro ao coletar health snapshot",
+      });
+    }
   }
 
   if (!isAuthorized(req)) {
@@ -69,6 +111,12 @@ const server = http.createServer(async (req, res) => {
     if (method === "POST" && url.pathname === "/extensions/upload") {
       const body = await readJsonBody(req);
       const out = await installExtensionZipBase64(body.zipBase64);
+      return sendJson(res, out.statusCode, out.body);
+    }
+
+    const statusMatch = url.pathname.match(/^\/sessions\/([^/]+)\/status$/);
+    if (method === "GET" && statusMatch) {
+      const out = await getSessionStatus(decodeURIComponent(statusMatch[1]));
       return sendJson(res, out.statusCode, out.body);
     }
 
@@ -153,6 +201,21 @@ const server = http.createServer(async (req, res) => {
     });
   }
 });
+
+let shuttingDown = false;
+async function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[mmzap-browser-worker] Recebido ${signal}; encerrando sessões Chromium e túneis proxy...`);
+  try {
+    await stopAllSessions(`signal_${signal}`);
+  } catch {}
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 5_000).unref();
+}
+
+process.on("SIGTERM", () => void gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => void gracefulShutdown("SIGINT"));
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`[mmzap-browser-worker] Ouvindo na porta ${PORT}`);

@@ -11,10 +11,15 @@ export interface MmzapWorkerSessionStatus {
   instanceName: string;
   status: string;
   qrCodeBase64?: string | null;
+  screenshotBase64?: string | null;
   needsExtensionSetup?: boolean;
   mmzapUiDetected?: boolean;
   mmzapChipState?: string | null;
   mmzapStatusLabel?: string | null;
+  sessionLoggedOut?: boolean;
+  mmzapWatchdogRecoveries?: number;
+  lastWatchdogCheckAt?: string | null;
+  proxyLatencyMs?: number | null;
   proxyIp?: string | null;
   rssMb?: number | null;
   lastError?: string | null;
@@ -49,13 +54,17 @@ export interface MmzapWorkerCallResult<T> {
 }
 
 function getWorkerBaseUrl(): string | null {
-  const raw = String(process.env.MMZAP_WORKER_URL || "").trim();
+  const raw = String(
+    process.env.MMZAP_WORKER_URL || process.env.MMZAP_BROWSER_WORKER_URL || ""
+  ).trim();
   if (!raw) return null;
   return raw.replace(/\/+$/, "");
 }
 
 function getWorkerSecret(): string {
-  const explicit = String(process.env.MMZAP_WORKER_SECRET || "").trim();
+  const explicit = String(
+    process.env.MMZAP_WORKER_SECRET || process.env.MMZAP_BROWSER_WORKER_SECRET || ""
+  ).trim();
   if (explicit) return explicit;
   return getInternalSecret() || "";
 }
@@ -263,10 +272,27 @@ export async function markMmzapWorkerSetupDone(
   );
 }
 
+export async function getMmzapWorkerSessionStatus(
+  instanceName: string
+): Promise<MmzapWorkerCallResult<MmzapWorkerSessionStatus>> {
+  return callMmzapWorker<MmzapWorkerSessionStatus>(
+    `/sessions/${encodeURIComponent(instanceName)}/status`,
+    "GET",
+    undefined,
+    10_000
+  );
+}
+
 export async function getMmzapWorkerScreenshot(
   instanceName: string
-): Promise<MmzapWorkerCallResult<{ screenshotBase64?: string | null; status?: string }>> {
-  return callMmzapWorker<{ screenshotBase64?: string | null; status?: string }>(
+): Promise<
+  MmzapWorkerCallResult<
+    Partial<MmzapWorkerSessionStatus> & { screenshotBase64?: string | null; status?: string }
+  >
+> {
+  return callMmzapWorker<
+    Partial<MmzapWorkerSessionStatus> & { screenshotBase64?: string | null; status?: string }
+  >(
     `/sessions/${encodeURIComponent(instanceName)}/screenshot`,
     "GET",
     undefined,
@@ -277,8 +303,14 @@ export async function getMmzapWorkerScreenshot(
 export async function sendMmzapWorkerInput(
   instanceName: string,
   input: { type: "click" | "text" | "key" | "goto"; x?: number; y?: number; text?: string; key?: string; url?: string }
-): Promise<MmzapWorkerCallResult<{ screenshotBase64?: string | null; status?: string }>> {
-  return callMmzapWorker<{ screenshotBase64?: string | null; status?: string }>(
+): Promise<
+  MmzapWorkerCallResult<
+    Partial<MmzapWorkerSessionStatus> & { screenshotBase64?: string | null; status?: string }
+  >
+> {
+  return callMmzapWorker<
+    Partial<MmzapWorkerSessionStatus> & { screenshotBase64?: string | null; status?: string }
+  >(
     `/sessions/${encodeURIComponent(instanceName)}/input`,
     "POST",
     input as Record<string, unknown>,
