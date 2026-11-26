@@ -79,6 +79,7 @@ const server = http.createServer(async (req, res) => {
         instanceName: decodeURIComponent(pairMatch[1]),
         clientId: body.clientId,
         proxy: body.proxy || null,
+        shiftDurationMinutes: body.shiftDurationMinutes,
       });
       return sendJson(res, out.statusCode, out.body);
     }

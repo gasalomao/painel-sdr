@@ -398,6 +398,24 @@ export default function AquecerChipsPage() {
     await handleRefreshAll();
   };
 
+  const handleReleaseQuarantine = async (instanceName: string) => {
+    const res = await fetch("/api/warmup/mmzap-browser", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "release_quarantine", instance_name: instanceName }),
+    });
+    const json = (await res.json().catch(() => null)) as {
+      success?: boolean;
+      error?: string;
+    } | null;
+    if (!res.ok || !json?.success) {
+      toast.error(json?.error || "Falha ao liberar quarentena.");
+      return;
+    }
+    toast.success(`Quarentena liberada para ${instanceName}.`);
+    await handleRefreshAll();
+  };
+
   const handleRunSelfHealing = async () => {
     setSelfHealingBusy(true);
     try {
@@ -1155,6 +1173,10 @@ export default function AquecerChipsPage() {
                         isSaving={Boolean(savingMap[instName])}
                         isReauditing={Boolean(reauditLoadingMap[instName])}
                         workerConfigured={Boolean(mmzapWorkerHealth?.configured)}
+                        workerSession={
+                          mmzapWorkerHealth?.sessions?.find((s) => s.instanceName === instName) ??
+                          null
+                        }
                         styles={styles}
                         onToggleEnabled={(name, next) =>
                           void handleToggleChipEnabled(name, next)
@@ -1164,6 +1186,7 @@ export default function AquecerChipsPage() {
                         onChangeMmzapMode={handleChangeMmzapMode}
                         onOpenMmzapPairModal={handleOpenMmzapPairModal}
                         onMmzapBrowserAction={handleMmzapBrowserAction}
+                        onReleaseQuarantine={handleReleaseQuarantine}
                         onReauditDay0={(name) => void handleReauditDay0(name)}
                         onOpenPairModal={openPairModal}
                         onOpenTestModal={openTestModal}

@@ -4,6 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV NODE_ENV=production
 ENV PORT=3099
 ENV DATA_DIR=/data
+ENV DEFAULT_EXTENSION_DIR=/opt/mmzap-extension
 ENV MAX_CONCURRENT_BROWSERS=2
 ENV MAX_RSS_MB=550
 
@@ -22,7 +23,8 @@ RUN npx playwright install chromium
 COPY src ./src
 COPY README-EASYPANEL.md ./
 
-RUN mkdir -p /data/profiles /data/extensions/mmzap
+RUN mkdir -p /data/profiles /data/extensions/mmzap /opt/mmzap-extension \
+  && node src/install-default-mmzap.mjs
 
 EXPOSE 3099
 

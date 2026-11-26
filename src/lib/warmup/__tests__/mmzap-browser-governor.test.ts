@@ -548,6 +548,70 @@ describe("MMZap Browser Governor & Orchestrator", () => {
     expect(body.data.configured).toBe(false);
   });
 
+  it("release_quarantine libera chip em quarentena e GET ?action=qr ativa turno automático após parear", async () => {
+    process.env.MMZAP_WORKER_URL = "http://worker.internal:3099";
+    process.env.MMZAP_WORKER_SECRET = "secret-test";
+
+    state.whatsapp_warmup_configs.push(
+      makeChipConfig({
+        instance_name: "00000_DD_11",
+        is_quarantined: true,
+        quarantine_reason: "Desconexão 428",
+        health_score: 0,
+        external_warmup_mode: "off",
+        mmzap_browser_enabled: false,
+        mmzap_browser_status: "qr_pending",
+        mmzap_shifts_today: 0,
+      })
+    );
+
+    const relRes = await postMmzapBrowserRoute(
+      new NextRequest("http://localhost/api/warmup/mmzap-browser", {
+        method: "POST",
+        body: JSON.stringify({ action: "release_quarantine", instance_name: "00000_DD_11" }),
+      })
+    );
+    expect(relRes.status).toBe(200);
+    const chipRow = state.whatsapp_warmup_configs[0];
+    expect(chipRow.is_quarantined).toBe(false);
+    expect(chipRow.health_score).toBe(65);
+
+    globalThis.fetch = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          instanceName: "00000_DD_11",
+          status: "running",
+          mmzapUiDetected: true,
+          mmzapChipState: "is-on",
+          mmzapStatusLabel: "Ativo",
+          proxyIp: "185.72.242.164",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    ) as unknown as typeof fetch;
+
+    const qrRes = await getMmzapBrowserRoute(
+      new NextRequest(
+        "http://localhost/api/warmup/mmzap-browser?action=qr&instance=00000_DD_11",
+        { method: "GET" }
+      )
+    );
+    expect(qrRes.status).toBe(200);
+    expect(chipRow.mmzap_browser_status).toBe("running");
+    expect(chipRow.mmzap_browser_enabled).toBe(true);
+    expect(chipRow.external_warmup_mode).toBe("receive_only");
+    expect(chipRow.mmzap_shifts_today).toBe(1);
+
+    authMock.isAdmin = false;
+    const deniedRes = await postMmzapBrowserRoute(
+      new NextRequest("http://localhost/api/warmup/mmzap-browser", {
+        method: "POST",
+        body: JSON.stringify({ action: "release_quarantine", instance_name: "00000_DD_11" }),
+      })
+    );
+    expect(deniedRes.status).toBe(403);
+  });
+
   it("proxy-tunnel.mjs injeta Proxy-Authorization Basic em HTTP GET e CONNECT sobre socket TCP real", async () => {
     const mod = await import("../../../../services/mmzap-browser-worker/src/proxy-tunnel.mjs");
     const createAuthenticatedProxyTunnel = mod.createAuthenticatedProxyTunnel as (cfg: {

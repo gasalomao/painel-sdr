@@ -12,6 +12,9 @@ export interface MmzapWorkerSessionStatus {
   status: string;
   qrCodeBase64?: string | null;
   needsExtensionSetup?: boolean;
+  mmzapUiDetected?: boolean;
+  mmzapChipState?: string | null;
+  mmzapStatusLabel?: string | null;
   proxyIp?: string | null;
   rssMb?: number | null;
   lastError?: string | null;
@@ -23,6 +26,7 @@ export interface MmzapWorkerExtensionInfo {
   installed: boolean;
   name: string | null;
   version: string | null;
+  source?: "builtin" | "override" | null;
 }
 
 export interface MmzapWorkerHealth {
@@ -162,6 +166,7 @@ export async function startMmzapWorkerPairing(params: {
   instanceName: string;
   clientId: string;
   proxy?: MmzapWorkerProxyInput | null;
+  shiftDurationMinutes?: number;
 }): Promise<MmzapWorkerCallResult<MmzapWorkerSessionStatus>> {
   return callMmzapWorker<MmzapWorkerSessionStatus>(
     `/sessions/${encodeURIComponent(params.instanceName)}/pair`,
@@ -169,6 +174,7 @@ export async function startMmzapWorkerPairing(params: {
     {
       clientId: params.clientId,
       proxy: params.proxy || null,
+      shiftDurationMinutes: params.shiftDurationMinutes,
     },
     25_000
   );

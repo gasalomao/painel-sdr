@@ -448,7 +448,7 @@ export function MmzapLiveMonitor({
                     {uploadingExt
                       ? "Enviando..."
                       : workerHealth.extension?.installed
-                        ? `Extensão v${workerHealth.extension.version || "ok"}`
+                        ? `Extensão v${workerHealth.extension.version || "ok"}${workerHealth.extension.source === "builtin" ? " (padrão)" : ""}`
                         : "Enviar extensão (.zip)"}
                   </span>
                   <input

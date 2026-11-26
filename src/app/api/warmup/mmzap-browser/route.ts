@@ -25,6 +25,7 @@ import {
   saveMmzapGovernorSettings,
 } from "@/lib/warmup/warmup-config-service";
 import { invalidateExternalShieldCache } from "@/lib/warmup/warmup-external-shield";
+import { logWarmupAction } from "@/lib/warmup/warmup-engine";
 import type { MmzapBrowserStatus } from "@/lib/warmup/warmup-types";
 
 export const dynamic = "force-dynamic";
@@ -81,7 +82,24 @@ export async function GET(req: NextRequest) {
     }
 
     const nextStatus = res.data.status as MmzapBrowserStatus;
-    if (nextStatus === "idle" || nextStatus === "needs_extension_setup") {
+    if (nextStatus === "running") {
+      const row = await readInstanceWarmupRow(clientId, instanceName);
+      const nowIso = new Date().toISOString();
+      const fields: Record<string, unknown> = {
+        mmzap_browser_status: "running",
+        mmzap_browser_enabled: true,
+        mmzap_shift_started_at: nowIso,
+        mmzap_last_error: null,
+        updated_at: nowIso,
+      };
+      if (!row?.external_warmup_mode || row.external_warmup_mode === "off") {
+        fields.external_warmup_mode = "receive_only";
+      }
+      if (row?.mmzap_browser_status !== "running") {
+        fields.mmzap_shifts_today = Number(row?.mmzap_shifts_today || 0) + 1;
+      }
+      await updateMmzapConfigFields(clientId, instanceName, fields);
+    } else if (nextStatus === "idle" || nextStatus === "needs_extension_setup") {
       await updateMmzapConfigFields(clientId, instanceName, {
         mmzap_browser_status: nextStatus,
         mmzap_last_error: null,
@@ -169,11 +187,15 @@ export async function POST(req: NextRequest) {
   }
 
   if (action === "pair") {
-    const proxy = await resolveMmzapProxyForInstance(clientId, instanceName);
+    const [governor, proxy] = await Promise.all([
+      getMmzapGovernorSettings(clientId),
+      resolveMmzapProxyForInstance(clientId, instanceName),
+    ]);
     const res = await startMmzapWorkerPairing({
       instanceName,
       clientId,
       proxy,
+      shiftDurationMinutes: governor.shift_duration_minutes,
     });
     if (!res.ok) {
       return NextResponse.json(
@@ -336,6 +358,47 @@ export async function POST(req: NextRequest) {
       updated_at: new Date().toISOString(),
     });
     return NextResponse.json({ success: true });
+  }
+
+  if (action === "release_quarantine") {
+    const nowIso = new Date().toISOString();
+    let existingHealth = 0;
+    try {
+      const { data: row } = await supabaseAdmin
+        .from("whatsapp_warmup_configs")
+        .select("health_score")
+        .eq("client_id", clientId)
+        .eq("instance_name", instanceName)
+        .maybeSingle();
+      existingHealth = Number((row as { health_score?: number } | null)?.health_score || 0);
+    } catch {
+      /* ignore */
+    }
+    const nextHealth = Math.max(65, existingHealth);
+    await supabaseAdmin
+      .from("whatsapp_warmup_configs")
+      .update({
+        is_quarantined: false,
+        quarantine_reason: null,
+        quarantine_until: null,
+        health_score: nextHealth,
+        error_count_today: 0,
+        updated_at: nowIso,
+      })
+      .eq("client_id", clientId)
+      .eq("instance_name", instanceName);
+
+    invalidateExternalShieldCache(clientId, instanceName);
+
+    await logWarmupAction({
+      client_id: clientId,
+      sender_instance: instanceName,
+      receiver_instance: "admin_override",
+      message_text: `🔓 Quarentena liberada manualmente pelo Admin para ${instanceName} (saúde ajustada para ${nextHealth}%).`,
+      action_type: "system",
+    }).catch(() => {});
+
+    return NextResponse.json({ success: true, health_score: nextHealth });
   }
 
   return NextResponse.json(

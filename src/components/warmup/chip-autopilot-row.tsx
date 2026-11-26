@@ -7,17 +7,20 @@ import {
   CheckCircle2,
   ChevronDown,
   Globe,
+  Monitor,
   Pause,
   Play,
   QrCode,
   RefreshCw,
   Send,
   ShieldCheck,
+  Unlock,
   Wrench,
   WifiOff,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
+import type { MmzapWorkerSessionStatus } from "@/lib/warmup/mmzap-browser-client";
 import {
   PURPOSE_METADATA,
   STAGE_DEFAULTS,
@@ -89,6 +92,7 @@ export interface ChipAutopilotRowProps {
   isSaving: boolean;
   isReauditing: boolean;
   workerConfigured?: boolean;
+  workerSession?: MmzapWorkerSessionStatus | null;
   styles: Record<string, string>;
   onToggleEnabled: (instanceName: string, nextEnabled: boolean) => void;
   onChangeField: (
@@ -104,6 +108,7 @@ export interface ChipAutopilotRowProps {
     action: "start_shift" | "stop_shift" | "toggle_enabled" | "reset_profile",
     extra?: Record<string, unknown>
   ) => Promise<void>;
+  onReleaseQuarantine?: (instanceName: string) => Promise<void>;
   onReauditDay0: (instanceName: string) => void;
   onOpenPairModal: (instanceName: string) => void;
   onOpenTestModal: (instanceName: string) => void;
@@ -116,6 +121,7 @@ export function ChipAutopilotRow({
   isSaving,
   isReauditing,
   workerConfigured = false,
+  workerSession = null,
   styles,
   onToggleEnabled,
   onChangeField,
@@ -123,6 +129,7 @@ export function ChipAutopilotRow({
   onChangeMmzapMode,
   onOpenMmzapPairModal,
   onMmzapBrowserAction,
+  onReleaseQuarantine,
   onReauditDay0,
   onOpenPairModal,
   onOpenTestModal,
@@ -349,8 +356,24 @@ export function ChipAutopilotRow({
                 )}
               >
                 <Globe className="w-3 h-3 shrink-0" />
-                {mmzapStatusUi.label}
+                {mmzapBrowserStatus === "running" && workerSession
+                  ? workerSession.mmzapUiDetected
+                    ? workerSession.mmzapStatusLabel || "MMZap ativo"
+                    : "Carregando MMZap..."
+                  : mmzapStatusUi.label}
               </span>
+
+              {mmzapBrowserStatus === "running" && onOpenMmzapPairModal && (
+                <button
+                  type="button"
+                  disabled={mmzapBusy}
+                  onClick={() => onOpenMmzapPairModal(instName, "setup")}
+                  className={styles.secondaryAction}
+                >
+                  <Monitor className="w-3 h-3 text-emerald-400" />
+                  Ver tela ao vivo
+                </button>
+              )}
 
               {mmzapBrowserStatus === "running" && onMmzapBrowserAction ? (
                 <button
@@ -454,7 +477,7 @@ export function ChipAutopilotRow({
               )}
               {isQuarantined && (
                 <p>
-                  Em quarentena preventiva{cfg.quarantine_reason ? `: ${cfg.quarantine_reason}` : "."}
+                  Em quarentena preventiva (turnos MMZap e colmeia pausados){cfg.quarantine_reason ? `: ${cfg.quarantine_reason}` : "."}
                 </p>
               )}
               {item.day0_warnings?.slice(0, 2).map((warn, idx) => (
@@ -467,6 +490,24 @@ export function ChipAutopilotRow({
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            {isQuarantined && onReleaseQuarantine && (
+              <button
+                type="button"
+                disabled={mmzapBusy}
+                onClick={async () => {
+                  setMmzapBusy(true);
+                  try {
+                    await onReleaseQuarantine(instName);
+                  } finally {
+                    setMmzapBusy(false);
+                  }
+                }}
+                className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-[#142018] px-2.5 py-1 text-[11px] font-medium text-emerald-200 hover:bg-emerald-500/20"
+              >
+                <Unlock className="w-3 h-3" />
+                Liberar quarentena agora
+              </button>
+            )}
             {!isConnected && (
               <a
                 href="/whatsapp"

@@ -10,6 +10,9 @@ const execFileAsync = promisify(execFile);
 const DATA_DIR = path.resolve(process.env.DATA_DIR || "/data");
 const PROFILES_DIR = path.join(DATA_DIR, "profiles");
 const EXTENSION_DIR = path.join(DATA_DIR, "extensions", "mmzap");
+const DEFAULT_EXTENSION_DIR = path.resolve(
+  process.env.DEFAULT_EXTENSION_DIR || "/opt/mmzap-extension"
+);
 const MAX_CONCURRENT = Math.max(
   1,
   Math.min(3, Number(process.env.MAX_CONCURRENT_BROWSERS || 2) || 2)
@@ -39,25 +42,40 @@ async function fileExists(targetPath) {
 }
 
 export async function getExtensionStatus() {
-  const manifestPath = path.join(EXTENSION_DIR, "manifest.json");
-  if (!(await fileExists(manifestPath))) {
-    return { installed: false, name: null, version: null, dir: EXTENSION_DIR };
+  const candidates = [
+    { dir: EXTENSION_DIR, source: "override" },
+    { dir: DEFAULT_EXTENSION_DIR, source: "builtin" },
+  ];
+
+  for (const cand of candidates) {
+    const manifestPath = path.join(cand.dir, "manifest.json");
+    if (!(await fileExists(manifestPath))) continue;
+    try {
+      const raw = await fs.readFile(manifestPath, "utf8");
+      const manifest = JSON.parse(raw);
+      const defaultPopup =
+        manifest.action?.default_popup || manifest.browser_action?.default_popup || null;
+      return {
+        installed: true,
+        name: String(manifest.name || "MMZap"),
+        version: String(manifest.version || ""),
+        defaultPopup: defaultPopup ? String(defaultPopup).replace(/^\/+/, "") : null,
+        dir: cand.dir,
+        source: cand.source,
+      };
+    } catch {
+      /* tenta próximo candidato */
+    }
   }
-  try {
-    const raw = await fs.readFile(manifestPath, "utf8");
-    const manifest = JSON.parse(raw);
-    const defaultPopup =
-      manifest.action?.default_popup || manifest.browser_action?.default_popup || null;
-    return {
-      installed: true,
-      name: String(manifest.name || "MMZap"),
-      version: String(manifest.version || ""),
-      defaultPopup: defaultPopup ? String(defaultPopup).replace(/^\/+/, "") : null,
-      dir: EXTENSION_DIR,
-    };
-  } catch {
-    return { installed: false, name: null, version: null, defaultPopup: null, dir: EXTENSION_DIR };
-  }
+
+  return {
+    installed: false,
+    name: null,
+    version: null,
+    defaultPopup: null,
+    dir: EXTENSION_DIR,
+    source: null,
+  };
 }
 
 async function cleanStaleLocks(profileDir) {
@@ -113,6 +131,69 @@ async function detectWhatsAppLoggedIn(page) {
   }
 }
 
+async function inspectMmzapDom(page) {
+  try {
+    return await page.evaluate(() => {
+      const chip = document.querySelector("#mmzap-chip");
+      if (!chip) {
+        return { mmzapUiDetected: false, mmzapChipState: null, mmzapStatusLabel: null };
+      }
+      const cls = chip.className || "";
+      const chipState = cls.includes("is-error")
+        ? "is-error"
+        : cls.includes("is-off")
+          ? "is-off"
+          : cls.includes("is-on")
+            ? "is-on"
+            : "connecting";
+      const labelEl = chip.querySelector(".mmzap-chip-label");
+      const label = labelEl ? String(labelEl.textContent || "").trim() : "";
+      return {
+        mmzapUiDetected: true,
+        mmzapChipState: chipState,
+        mmzapStatusLabel: label || null,
+      };
+    });
+  } catch {
+    return { mmzapUiDetected: false, mmzapChipState: null, mmzapStatusLabel: null };
+  }
+}
+
+async function ensureMmzapInjected(session) {
+  if (!session || session.ensuringMmzap) return;
+  session.ensuringMmzap = true;
+  try {
+    let info = await inspectMmzapDom(session.page);
+    if (info.mmzapUiDetected) {
+      session.mmzapUiDetected = true;
+      session.mmzapChipState = info.mmzapChipState;
+      session.mmzapStatusLabel = info.mmzapStatusLabel;
+      session.updatedAt = new Date().toISOString();
+      return;
+    }
+
+    // Countera o limite de 10x2s (20s) do content.js da MMZap quando veio da tela de QR ou proxy lenta
+    await session.page
+      .reload({ waitUntil: "domcontentloaded", timeout: 35_000 })
+      .catch(() => {});
+
+    for (let i = 0; i < 15; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      info = await inspectMmzapDom(session.page);
+      if (info.mmzapUiDetected) {
+        break;
+      }
+    }
+
+    session.mmzapUiDetected = info.mmzapUiDetected;
+    session.mmzapChipState = info.mmzapChipState;
+    session.mmzapStatusLabel = info.mmzapStatusLabel;
+    session.updatedAt = new Date().toISOString();
+  } finally {
+    session.ensuringMmzap = false;
+  }
+}
+
 async function captureQrDataUrl(page) {
   try {
     const qrLoc = page
@@ -141,8 +222,9 @@ async function launchBrowserSession({ safeName, clientId, mode, proxy, shiftDura
 
   const extStatus = await getExtensionStatus();
   const setupCompleted = await isSetupDone(profileDir);
+  const requiresManualSetup = Boolean(extStatus.installed && extStatus.defaultPopup && !setupCompleted);
 
-  if (mode === "start" && extStatus.installed && !setupCompleted) {
+  if (mode === "start" && requiresManualSetup) {
     return {
       ok: false,
       needsExtensionSetup: true,
@@ -160,15 +242,16 @@ async function launchBrowserSession({ safeName, clientId, mode, proxy, shiftDura
     "--disable-setuid-sandbox",
     "--disable-dev-shm-usage",
     "--disable-gpu",
+    "--lang=pt-BR",
     "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding",
     "--disable-backgrounding-occluded-windows",
     "--js-flags=--max-old-space-size=256",
   ];
 
-  if (extStatus.installed) {
-    launchArgs.push(`--disable-extensions-except=${EXTENSION_DIR}`);
-    launchArgs.push(`--load-extension=${EXTENSION_DIR}`);
+  if (extStatus.installed && extStatus.dir) {
+    launchArgs.push(`--disable-extensions-except=${extStatus.dir}`);
+    launchArgs.push(`--load-extension=${extStatus.dir}`);
   }
 
   let context;
@@ -177,6 +260,8 @@ async function launchBrowserSession({ safeName, clientId, mode, proxy, shiftDura
       headless: false,
       args: launchArgs,
       viewport: { width: 1024, height: 720 },
+      locale: "pt-BR",
+      timezoneId: "America/Sao_Paulo",
       proxy: tunnel ? { server: tunnel.localUrl } : undefined,
       ignoreDefaultArgs: ["--disable-extensions"],
     });
@@ -196,7 +281,19 @@ async function launchBrowserSession({ safeName, clientId, mode, proxy, shiftDura
     return route.continue().catch(() => {});
   });
 
-  const page = context.pages()[0] || (await context.newPage());
+  const existingPages = context.pages();
+  const page = existingPages[0] || (await context.newPage());
+  for (let i = 1; i < existingPages.length; i++) {
+    await existingPages[i].close().catch(() => {});
+  }
+
+  // Evita aba duplicada aberta pelo chrome.runtime.onInstalled do MMZap (poupa RAM)
+  context.on("page", (extraPage) => {
+    if (extraPage !== page) {
+      void extraPage.close().catch(() => {});
+    }
+  });
+
   const session = {
     instanceName: safeName,
     clientId: String(clientId || ""),
@@ -206,7 +303,12 @@ async function launchBrowserSession({ safeName, clientId, mode, proxy, shiftDura
     tunnel,
     proxyIp: proxy?.sourceHost || tunnel?.upstreamHost || null,
     qrCodeBase64: null,
-    needsExtensionSetup: extStatus.installed ? !setupCompleted : false,
+    needsExtensionSetup: requiresManualSetup,
+    shiftDurationMinutes: Math.max(5, Number(shiftDurationMinutes || 40)),
+    mmzapUiDetected: false,
+    mmzapChipState: null,
+    mmzapStatusLabel: null,
+    ensuringMmzap: false,
     startedAtMs: Date.now(),
     updatedAt: new Date().toISOString(),
     lastError: null,
@@ -249,7 +351,12 @@ async function launchBrowserSession({ safeName, clientId, mode, proxy, shiftDura
   return { ok: true, session };
 }
 
-export async function startPairingSession({ instanceName, clientId, proxy }) {
+export async function startPairingSession({
+  instanceName,
+  clientId,
+  proxy,
+  shiftDurationMinutes,
+}) {
   const safeName = sanitizeInstanceName(instanceName);
   const existing = sessions.get(safeName);
   if (existing && existing.status !== "qr_pending") {
@@ -273,7 +380,7 @@ export async function startPairingSession({ instanceName, clientId, proxy }) {
     clientId,
     mode: "pair",
     proxy,
-    shiftDurationMinutes: 3,
+    shiftDurationMinutes: Number(shiftDurationMinutes || 40),
   });
 
   if (!launched.ok) {
@@ -299,21 +406,48 @@ export async function getPairingQr(instanceName) {
     };
   }
 
+  if (session.status === "running") {
+    const info = await inspectMmzapDom(session.page);
+    session.mmzapUiDetected = info.mmzapUiDetected;
+    session.mmzapChipState = info.mmzapChipState;
+    session.mmzapStatusLabel = info.mmzapStatusLabel;
+    return {
+      statusCode: 200,
+      body: {
+        instanceName: safeName,
+        status: "running",
+        needsExtensionSetup: false,
+        mmzapUiDetected: session.mmzapUiDetected,
+        mmzapChipState: session.mmzapChipState,
+        mmzapStatusLabel: session.mmzapStatusLabel,
+        proxyIp: session.proxyIp,
+        qrCodeBase64: null,
+        updatedAt: session.updatedAt,
+      },
+    };
+  }
+
   const loggedIn = await detectWhatsAppLoggedIn(session.page);
   if (loggedIn) {
     session.qrCodeBase64 = null;
-    session.status = session.needsExtensionSetup ? "needs_extension_setup" : "idle";
     session.updatedAt = new Date().toISOString();
     if (session.needsExtensionSetup) {
-      // Mantém o Chromium logado aberto para o admin concluir a 1ª configuração da extensão no modal
+      session.status = "needs_extension_setup";
       session.mode = "setup";
       if (session.timer) clearTimeout(session.timer);
       session.timer = setTimeout(() => {
         void stopSession(safeName, "setup_timeout");
       }, 10 * 60 * 1000);
-    } else if (session.mode === "pair") {
-      // Pareamento concluído: fecha o Chromium para liberar RAM imediatamente até o próximo turno agendado
-      setTimeout(() => void stopSession(safeName, "paired_complete"), 1500);
+    } else {
+      // Mantém o Chromium logado aberto e inicia o 1º turno MMZap automaticamente,
+      // recarregando a aba para garantir que o content.js da extensão injete (janela de 20s).
+      session.mode = "start";
+      session.status = "running";
+      if (session.timer) clearTimeout(session.timer);
+      session.timer = setTimeout(() => {
+        void stopSession(safeName, "shift_timeout");
+      }, Math.max(5, session.shiftDurationMinutes || 40) * 60 * 1000);
+      await ensureMmzapInjected(session);
     }
     return {
       statusCode: 200,
@@ -321,6 +455,9 @@ export async function getPairingQr(instanceName) {
         instanceName: safeName,
         status: session.status,
         needsExtensionSetup: session.needsExtensionSetup,
+        mmzapUiDetected: session.mmzapUiDetected,
+        mmzapChipState: session.mmzapChipState,
+        mmzapStatusLabel: session.mmzapStatusLabel,
         proxyIp: session.proxyIp,
         qrCodeBase64: null,
         updatedAt: session.updatedAt,
@@ -350,6 +487,7 @@ export async function openSetupSession({ instanceName, clientId, proxy, setupUrl
   const existing = sessions.get(safeName);
   if (
     existing &&
+    existing.status !== "running" &&
     existing.status !== "setup" &&
     existing.status !== "needs_extension_setup"
   ) {
@@ -380,13 +518,16 @@ export async function openSetupSession({ instanceName, clientId, proxy, setupUrl
   }
 
   const session = sessions.get(safeName);
-  session.status = "setup";
-  session.mode = "setup";
+  const keepRunning = session.status === "running";
+  if (!keepRunning) {
+    session.status = "setup";
+    session.mode = "setup";
+  }
   session.updatedAt = new Date().toISOString();
 
   if (setupUrl) {
     await session.page.goto(setupUrl, { waitUntil: "domcontentloaded", timeout: 20_000 }).catch(() => {});
-  } else {
+  } else if (!keepRunning) {
     const extStatus = await getExtensionStatus();
     const serviceWorkers = session.context.serviceWorkers();
     const bgPages = session.context.backgroundPages();
@@ -399,21 +540,28 @@ export async function openSetupSession({ instanceName, clientId, proxy, setupUrl
         await session.page.goto("https://web.whatsapp.com", { waitUntil: "domcontentloaded", timeout: 20_000 }).catch(() => {});
       });
     } else {
-      // MMZap v2.0.5 injeta a interface diretamente no DOM do WhatsApp Web via content_script
       const curUrl = session.page.url() || "";
       if (!curUrl.startsWith("https://web.whatsapp.com")) {
         await session.page.goto("https://web.whatsapp.com", { waitUntil: "domcontentloaded", timeout: 25_000 }).catch(() => {});
       }
-      await new Promise((r) => setTimeout(r, 3000));
+      await new Promise((r) => setTimeout(r, 2000));
     }
   }
+
+  const info = await inspectMmzapDom(session.page);
+  session.mmzapUiDetected = info.mmzapUiDetected;
+  session.mmzapChipState = info.mmzapChipState;
+  session.mmzapStatusLabel = info.mmzapStatusLabel;
 
   const shot = await session.page.screenshot({ type: "png" }).catch(() => null);
   return {
     statusCode: 200,
     body: {
       instanceName: safeName,
-      status: "setup",
+      status: session.status,
+      mmzapUiDetected: session.mmzapUiDetected,
+      mmzapChipState: session.mmzapChipState,
+      mmzapStatusLabel: session.mmzapStatusLabel,
       proxyIp: session.proxyIp,
       screenshotBase64: shot ? `data:image/png;base64,${shot.toString("base64")}` : null,
       updatedAt: new Date().toISOString(),
@@ -533,11 +681,18 @@ export async function startShiftSession({ instanceName, clientId, proxy, shiftDu
     };
   }
 
+  if (loggedIn) {
+    await ensureMmzapInjected(session);
+  }
+
   return {
     statusCode: 200,
     body: {
       instanceName: safeName,
       status: "running",
+      mmzapUiDetected: session.mmzapUiDetected,
+      mmzapChipState: session.mmzapChipState,
+      mmzapStatusLabel: session.mmzapStatusLabel,
       proxyIp: session.proxyIp,
       updatedAt: session.updatedAt,
     },
@@ -627,10 +782,19 @@ export async function getHealthSnapshot() {
   for (const sess of sessions.values()) {
     const pid = sess.context?.browser?.()?.process?.()?.pid;
     const rssMb = await readLinuxProcessTreeRssMb(pid);
+    if (sess.status === "running") {
+      const info = await inspectMmzapDom(sess.page);
+      sess.mmzapUiDetected = info.mmzapUiDetected;
+      sess.mmzapChipState = info.mmzapChipState;
+      sess.mmzapStatusLabel = info.mmzapStatusLabel;
+    }
     list.push({
       instanceName: sess.instanceName,
       status: sess.status,
       needsExtensionSetup: sess.needsExtensionSetup,
+      mmzapUiDetected: sess.mmzapUiDetected,
+      mmzapChipState: sess.mmzapChipState,
+      mmzapStatusLabel: sess.mmzapStatusLabel,
       proxyIp: sess.proxyIp,
       rssMb,
       lastError: sess.lastError,

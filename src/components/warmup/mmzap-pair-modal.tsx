@@ -144,7 +144,12 @@ export function MmzapPairModal({
           if (json.data.proxyIp) setProxyIp(json.data.proxyIp);
           if (json.data.status) setSessionStatus(json.data.status);
 
-          if (json.data.status === "idle") {
+          if (json.data.status === "running") {
+            toast.success(`MMZap conectado e turno iniciado em ${instanceName}.`);
+            await onCompleted();
+            setMode("setup");
+            await openSetup(instanceName);
+          } else if (json.data.status === "idle") {
             toast.success(`MMZap Web pareado em ${instanceName}.`);
             await onCompleted();
             onOpenChange(false);
@@ -256,12 +261,12 @@ export function MmzapPairModal({
             <DialogTitle className="text-base font-semibold text-[#edf2ee]">
               {mode === "pair"
                 ? `Parear MMZap Web · ${instanceName || ""}`
-                : `Configurar extensão MMZap · ${instanceName || ""}`}
+                : `Tela ao vivo MMZap · ${instanceName || ""}`}
             </DialogTitle>
             <DialogDescription className="text-xs text-[#a5b1a8] mt-1">
               {mode === "pair"
                 ? "Escaneie em Dispositivos Conectados usando o mesmo IP exclusivo da Evolution."
-                : "Clique na tela abaixo para logar na sua conta MMZap e selecionar o modo Lento (1x)."}
+                : "Visualize ou clique no WhatsApp Web com o MMZap na VPS. Fechar mantém o turno rodando."}
             </DialogDescription>
           </div>
         </div>
@@ -303,7 +308,7 @@ export function MmzapPairModal({
                     : "text-[#a5b1a8] hover:text-white border border-transparent"
                 )}
               >
-                Configurar MMZap
+                Tela ao vivo
               </button>
             </div>
           </div>
@@ -421,7 +426,7 @@ export function MmzapPairModal({
             >
               Fechar
             </button>
-            {mode === "setup" && (
+            {mode === "setup" && sessionStatus !== "running" && (
               <button
                 type="button"
                 disabled={busy}
@@ -429,7 +434,7 @@ export function MmzapPairModal({
                 className={styles.primaryAction}
               >
                 <CheckCircle2 className="w-4 h-4" />
-                Concluir configuração (Modo Lento ativo)
+                Concluir configuração
               </button>
             )}
           </div>
