@@ -63,7 +63,7 @@ export default function WhatsAppPage() {
   const [qrCodes, setQrCodes] = useState<Record<string, string>>({});
   const [statusMap, setStatusMap] = useState<Record<string, { state: string; owner?: string; profileName?: string }>>({});
   const [novaInstancia, setNovaInstancia] = useState("");
-  const [createAutoProxy, setCreateAutoProxy] = useState(false);
+  const [createAutoProxy, setCreateAutoProxy] = useState(true);
   const connectionsRef = useRef(connections);
 
   // === WHATSAPP CLOUD API (Meta oficial) ===
@@ -498,7 +498,7 @@ export default function WhatsAppPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         raw_name: novaInstancia,
-        ...(createAutoProxy ? { auto_proxy: true } : {}),
+        auto_proxy: createAutoProxy,
       }),
     });
     const data = await res.json().catch(() => null);
@@ -507,7 +507,7 @@ export default function WhatsAppPage() {
     }
 
     setNovaInstancia("");
-    setCreateAutoProxy(false);
+    setCreateAutoProxy(true);
     loadData();
   };
 
@@ -966,14 +966,26 @@ export default function WhatsAppPage() {
               <Button type="submit" className={styles.primaryAction}><Plus className="w-4 h-4" aria-hidden="true" /> Criar conexão</Button>
             </div>
             <p id="connection-name-help">Use um nome sem espaços para identificar este número.</p>
-            <label className="mt-2 inline-flex items-center gap-2 text-xs text-muted-foreground cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={createAutoProxy}
-                onChange={e => setCreateAutoProxy(e.target.checked)}
-              />
-              <span>Vincular proxy automático do pool ao conectar (opcional · 1 IP dedicado se disponível)</span>
-            </label>
+            <div className="mt-3 rounded-lg border border-[#303a32] bg-[#141d17] px-3 py-2.5">
+              <label htmlFor="create-auto-proxy" className="cursor-pointer select-none">
+                <input
+                  id="create-auto-proxy"
+                  type="checkbox"
+                  checked={createAutoProxy}
+                  onChange={e => setCreateAutoProxy(e.target.checked)}
+                  className="h-4 w-4 shrink-0 accent-emerald-400 cursor-pointer"
+                />
+                <span className="text-xs text-[#edf2ee]">
+                  Nascer com proxy dedicado do pool{" "}
+                  <strong className="font-semibold text-emerald-300">(recomendado)</strong>
+                </span>
+              </label>
+              <p className="text-[11px] leading-relaxed text-[#a5b1a8]">
+                {createAutoProxy
+                  ? "O chip já nasce no seu IP dedicado antes da 1ª leitura do QR Code, evitando saltos de IP e alertas da Meta. Prefira proxies BR residenciais/ISP ou 4G antes de escalar acima de 40 envios/dia (se o pool estiver vazio, usa o IP da VPS)."
+                  : "Desativado: o chip conectará direto pelo IP da VPS. Para evitar troca de IP depois, recomenda-se manter o proxy dedicado ligado desde o 1º QR."}
+              </p>
+            </div>
           </form>
         </section>
 

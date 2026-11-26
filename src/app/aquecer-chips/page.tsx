@@ -19,6 +19,7 @@ import {
   MoreHorizontal,
   Pause,
   Play,
+  QrCode,
   Radio,
   RefreshCw,
   Send,
@@ -45,12 +46,18 @@ import { ChipAutopilotRow } from "@/components/warmup/chip-autopilot-row";
 import { MmzapLiveMonitor } from "@/components/warmup/mmzap-live-monitor";
 import { MmzapPairModal } from "@/components/warmup/mmzap-pair-modal";
 import type { MmzapWorkerHealth } from "@/lib/warmup/mmzap-browser-client";
-import type {
-  ExternalDiagnostic,
-  GlobalSettings,
-  InstanceItem,
-  SelfHealingActionRecord,
-  WarmupStats,
+import {
+  computeFleetColdReadiness,
+  hasChipDatacenterWarning,
+  isChipMmzapNeedsPairing,
+  isChipMmzapQrRequired,
+  toMmzapSessionView,
+  type ExternalDiagnostic,
+  type GlobalSettings,
+  type InstanceItem,
+  type MmzapWorkerSessionView,
+  type SelfHealingActionRecord,
+  type WarmupStats,
 } from "@/components/warmup/types";
 import type { GroupableModel } from "@/lib/model-grouping";
 import { useClientSession } from "@/lib/use-session";
@@ -834,12 +841,37 @@ export default function AquecerChipsPage() {
   const activeChipCount = instances.filter(
     (i) => i.config?.enabled && !i.config?.is_quarantined
   ).length;
-  const readyCount = instances.filter(
-    (i) =>
-      (i.connection_status === "open" || i.connection_status === "connected") &&
-      !i.config?.is_quarantined &&
-      ((i.config?.stage || 1) >= 3 || (i.config?.days_active || 1) >= 14)
-  ).length;
+  const workerSessions: MmzapWorkerSessionView[] = (mmzapWorkerHealth?.sessions || [])
+    .map((s) => toMmzapSessionView(s))
+    .filter((s): s is MmzapWorkerSessionView => s !== null);
+  const fleetReadiness = computeFleetColdReadiness(instances);
+  const readyCount = fleetReadiness.readyChipsCount;
+  const capacityProgressPct = Math.min(
+    100,
+    Math.round((fleetReadiness.totalSafeDailyCold / fleetReadiness.benchmarkMax) * 100)
+  );
+  const mmzapOnboardingChips = mmzapWorkerHealth?.configured
+    ? instances.filter((item) => {
+        const sess =
+          workerSessions.find((s) => s.instanceName === item.instance_name) ?? null;
+        return isChipMmzapNeedsPairing(item, sess);
+      })
+    : [];
+  const mmzapLoggedOutChips = mmzapOnboardingChips.filter((item) => {
+    const sess =
+      workerSessions.find((s) => s.instanceName === item.instance_name) ?? null;
+    return isChipMmzapQrRequired(item.config, sess);
+  });
+  const mmzapWatchdogRecoveries = workerSessions.reduce(
+    (acc, s) => acc + Number(s.mmzapWatchdogRecoveries || 0),
+    0
+  );
+  const datacenterWarningChips = instances.filter(
+    (item) => !item.orphan && hasChipDatacenterWarning(item)
+  );
+  const mmzapModalWorkerSession = mmzapModalInstance
+    ? workerSessions.find((s) => s.instanceName === mmzapModalInstance) ?? null
+    : null;
   const mmzapInboundToday =
     stats.mmzapInboundToday ??
     instances.reduce((acc, i) => acc + (i.config?.external_warmup_inbound_today || 0), 0);
@@ -1017,6 +1049,196 @@ export default function AquecerChipsPage() {
             </div>
           )}
 
+          {/* Banner 2-em-1 de Onboarding MMZap (pareamento inicial ou re-scan após logout) */}
+          {mmzapOnboardingChips.length > 0 && (
+            <section
+              aria-label="Pareamento MMZap pendente"
+              className={cn(
+                "mb-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border px-4 py-3 text-xs",
+                mmzapLoggedOutChips.length > 0
+                  ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
+                  : "border-emerald-500/35 bg-[#152019] text-[#edf2ee]"
+              )}
+            >
+              <div className="flex items-start gap-2.5 min-w-0">
+                <QrCode
+                  className={cn(
+                    "w-4 h-4 shrink-0 mt-0.5",
+                    mmzapLoggedOutChips.length > 0 ? "text-amber-300" : "text-emerald-400"
+                  )}
+                />
+                <div className="space-y-0.5 min-w-0">
+                  <p className="font-semibold text-[#edf2ee]">
+                    {mmzapLoggedOutChips.length === mmzapOnboardingChips.length
+                      ? `Sessão MMZap deslogada em ${mmzapLoggedOutChips.length} chip(s) · re-escanear QR`
+                      : `Passo final: parear MMZap em ${mmzapOnboardingChips.length} chip(s)`}
+                  </p>
+                  <p className="text-[#a5b1a8]">
+                    {mmzapLoggedOutChips.length > 0 &&
+                    mmzapLoggedOutChips.length < mmzapOnboardingChips.length
+                      ? `${mmzapLoggedOutChips.length} com sessão deslogada e ${mmzapOnboardingChips.length - mmzapLoggedOutChips.length} aguardando 1º pareamento no navegador isolado.`
+                      : "Escaneie o QR no navegador isolado (mesmo proxy exclusivo) para ativar os turnos automáticos do MMZap."}
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                {mmzapOnboardingChips.slice(0, 3).map((chip) => {
+                  const sess =
+                    workerSessions.find((s) => s.instanceName === chip.instance_name) ?? null;
+                  const needsRescan = isChipMmzapQrRequired(chip.config, sess);
+                  return (
+                    <button
+                      key={chip.instance_name}
+                      type="button"
+                      onClick={() => handleOpenMmzapPairModal(chip.instance_name, "pair")}
+                      className={
+                        mmzapOnboardingChips.length === 1
+                          ? styles.primaryAction
+                          : styles.secondaryAction
+                      }
+                    >
+                      <QrCode
+                        className={cn(
+                          "w-3.5 h-3.5",
+                          mmzapOnboardingChips.length === 1
+                            ? "text-[#10251b]"
+                            : needsRescan
+                              ? "text-amber-300"
+                              : "text-emerald-400"
+                        )}
+                      />
+                      {needsRescan ? "Re-escanear QR" : "Parear MMZap"}
+                      {mmzapOnboardingChips.length > 1 ? ` · ${chip.instance_name}` : ""}
+                    </button>
+                  );
+                })}
+                {mmzapOnboardingChips.length > 3 && (
+                  <span className="text-[11px] text-[#a5b1a8] tabular-nums">
+                    +{mmzapOnboardingChips.length - 3} na lista
+                  </span>
+                )}
+              </div>
+            </section>
+          )}
+
+          {/* Barra operacional de Capacidade Segura de Prospecção Hoje */}
+          {instances.length > 0 && (
+            <section
+              aria-label="Capacidade segura de prospecção hoje"
+              className="mb-4 rounded-xl border border-[#303a32] bg-[#181d19] px-5 py-3.5 space-y-3"
+            >
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                  <span className="text-xs font-medium text-[#a5b1a8]">
+                    Capacidade Segura de Prospecção Hoje
+                  </span>
+                  <span
+                    className={cn(
+                      "text-xl font-semibold tracking-tight tabular-nums",
+                      fleetReadiness.totalSafeDailyCold >= fleetReadiness.benchmarkMin
+                        ? "text-emerald-300"
+                        : "text-[#edf2ee]"
+                    )}
+                  >
+                    {fleetReadiness.totalSafeDailyCold} frios/dia
+                  </span>
+                  <span
+                    className={cn(
+                      "inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-medium tabular-nums",
+                      fleetReadiness.totalSafeDailyCold >= fleetReadiness.benchmarkMin
+                        ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-200"
+                        : "border-[#303a32] bg-[#131914] text-[#a5b1a8]"
+                    )}
+                  >
+                    Meta {fleetReadiness.benchmarkMin}–{fleetReadiness.benchmarkMax}/dia
+                  </span>
+                </div>
+
+                <div className="flex flex-col sm:flex-row sm:items-center gap-3 lg:gap-5 flex-1 lg:max-w-xl">
+                  <div className="flex-1 min-w-[140px] space-y-1">
+                    <div
+                      role="progressbar"
+                      aria-label="Progresso em relação à meta diária de prospecção segura"
+                      aria-valuenow={fleetReadiness.totalSafeDailyCold}
+                      aria-valuemin={0}
+                      aria-valuemax={fleetReadiness.benchmarkMax}
+                      className="h-1.5 w-full rounded-full bg-[#222a24] overflow-hidden"
+                    >
+                      <div
+                        className={cn(
+                          "h-full rounded-full transition-all",
+                          fleetReadiness.totalSafeDailyCold >= fleetReadiness.benchmarkMin
+                            ? "bg-emerald-400"
+                            : fleetReadiness.totalSafeDailyCold > 0
+                              ? "bg-amber-400"
+                              : "bg-[#3b483e]"
+                        )}
+                        style={{ width: `${capacityProgressPct}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs tabular-nums text-[#a5b1a8] shrink-0">
+                    <span>
+                      <strong className="text-emerald-300 font-medium">
+                        {fleetReadiness.readyChipsCount}
+                      </strong>{" "}
+                      pronto(s)
+                      {fleetReadiness.veteranChipsCount > 0
+                        ? ` (${fleetReadiness.veteranChipsCount} vet.)`
+                        : ""}
+                    </span>
+                    <span>
+                      <strong className="text-sky-300 font-medium">
+                        {fleetReadiness.maturingChipsCount}
+                      </strong>{" "}
+                      no berçário
+                    </span>
+                    {fleetReadiness.blockedChipsCount > 0 && (
+                      <span>
+                        <strong className="text-amber-300 font-medium">
+                          {fleetReadiness.blockedChipsCount}
+                        </strong>{" "}
+                        bloqueado(s)
+                      </span>
+                    )}
+                    {fleetReadiness.offlineChipsCount > 0 && (
+                      <span>
+                        <strong className="text-[#c2cfc6] font-medium">
+                          {fleetReadiness.offlineChipsCount}
+                        </strong>{" "}
+                        offline
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {datacenterWarningChips.length > 0 && (
+                <div
+                  role="alert"
+                  className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-t border-[#303a32] pt-2.5 text-xs text-amber-200"
+                >
+                  <div className="flex items-start gap-2">
+                    <ShieldAlert className="w-4 h-4 text-amber-300 shrink-0 mt-0.5" />
+                    <p>
+                      <strong>
+                        {datacenterWarningChips.length} chip(s) em proxy de Datacenter/ASN
+                      </strong>{" "}
+                      ({datacenterWarningChips.map((c) => c.instance_name).join(", ")}). Prefira proxy BR Residencial/ISP ou 4G dedicado antes de escalar acima de 40 envios/dia por chip.
+                    </p>
+                  </div>
+                  <a
+                    href="/whatsapp"
+                    className="inline-flex items-center justify-center rounded-md border border-amber-400/40 bg-[#1a1811] px-2.5 py-1 text-[11px] font-medium text-amber-200 hover:bg-amber-500/20 shrink-0"
+                  >
+                    Revisar proxies
+                  </a>
+                </div>
+              )}
+            </section>
+          )}
+
           {/* Faixa única de resumo operacional (sem 4 cards separados) */}
           <div className={styles.summaryStrip}>
             <div className={styles.summaryCell}>
@@ -1037,7 +1259,7 @@ export default function AquecerChipsPage() {
               <span className={styles.summarySubtext}>
                 {quarantinedCount > 0
                   ? `${quarantinedCount} em quarentena preventiva`
-                  : "Fase 3+ ou 14+ dias de maturidade"}
+                  : `${fleetReadiness.maturingChipsCount} em maturação (Dias 1–6)`}
               </span>
             </div>
 
@@ -1045,7 +1267,12 @@ export default function AquecerChipsPage() {
               <span className={styles.summaryLabel}>MMZap recebido hoje</span>
               <span className={styles.summaryValue}>{mmzapInboundToday}</span>
               <span className={styles.summarySubtext}>
-                {mmzapSentToday} enviadas · blindagem CRM ativa
+                {mmzapSentToday} enviadas ·{" "}
+                {mmzapLoggedOutChips.length > 0
+                  ? `${mmzapLoggedOutChips.length} sessão(ões) deslogada(s)`
+                  : mmzapWatchdogRecoveries > 0
+                    ? `watchdog ${mmzapWatchdogRecoveries}x · CRM blindado`
+                    : "blindagem CRM ativa"}
               </span>
             </div>
 
@@ -1174,8 +1401,7 @@ export default function AquecerChipsPage() {
                         isReauditing={Boolean(reauditLoadingMap[instName])}
                         workerConfigured={Boolean(mmzapWorkerHealth?.configured)}
                         workerSession={
-                          mmzapWorkerHealth?.sessions?.find((s) => s.instanceName === instName) ??
-                          null
+                          workerSessions.find((s) => s.instanceName === instName) ?? null
                         }
                         styles={styles}
                         onToggleEnabled={(name, next) =>
@@ -1210,6 +1436,7 @@ export default function AquecerChipsPage() {
               selfHealingBusy={selfHealingBusy}
               onRunSelfHealing={handleRunSelfHealing}
               onRefreshAll={handleRefreshAll}
+              onOpenMmzapPairModal={handleOpenMmzapPairModal}
             />
           )}
 
@@ -1860,6 +2087,7 @@ export default function AquecerChipsPage() {
             open={mmzapModalOpen}
             instanceName={mmzapModalInstance}
             initialMode={mmzapModalMode}
+            workerSession={mmzapModalWorkerSession}
             styles={styles}
             onOpenChange={setMmzapModalOpen}
             onCompleted={handleRefreshAll}

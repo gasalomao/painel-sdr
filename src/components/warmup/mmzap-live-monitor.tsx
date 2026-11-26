@@ -2,11 +2,14 @@
 
 import { type ChangeEvent, useCallback, useEffect, useState } from "react";
 import {
+  Activity,
+  AlertTriangle,
   ArrowRightLeft,
   ArrowUpRight,
   CheckCircle2,
   FlaskConical,
   Globe,
+  QrCode,
   RefreshCw,
   ShieldCheck,
   Upload,
@@ -21,11 +24,16 @@ import {
   type ExternalWarmupMode,
   type MmzapGovernorSettings,
 } from "@/lib/warmup/warmup-types";
-import type {
-  ExternalDiagnostic,
-  InstanceItem,
-  QuarantineEntry,
-  SelfHealingActionRecord,
+import {
+  computeChipColdReadiness,
+  computeFleetColdReadiness,
+  isChipMmzapQrRequired,
+  toMmzapSessionView,
+  type ExternalDiagnostic,
+  type InstanceItem,
+  type MmzapWorkerSessionView,
+  type QuarantineEntry,
+  type SelfHealingActionRecord,
 } from "./types";
 
 const MODE_LABEL: Record<ExternalWarmupMode, string> = {
@@ -46,6 +54,73 @@ function formatShortDateTime(iso?: string | null): string {
   });
 }
 
+function describeChipWatchdogState(
+  chip: InstanceItem,
+  session: MmzapWorkerSessionView | null
+): { label: string; cls: string; needsQr: boolean } {
+  if (isChipMmzapQrRequired(chip.config, session)) {
+    return {
+      label: "Sessão deslogada · re-escanear QR",
+      cls: "border-red-500/40 bg-red-500/15 text-red-200",
+      needsQr: true,
+    };
+  }
+  if (session?.status === "running") {
+    if (!session.mmzapUiDetected) {
+      return {
+        label: "Carregando extensão",
+        cls: "border-sky-500/35 bg-sky-500/10 text-sky-200",
+        needsQr: false,
+      };
+    }
+    if (session.mmzapChipState === "is-error") {
+      return {
+        label: session.mmzapStatusLabel || "Erro MMZap",
+        cls: "border-red-500/40 bg-red-500/15 text-red-200",
+        needsQr: false,
+      };
+    }
+    if (session.mmzapChipState === "is-off") {
+      return {
+        label: session.mmzapStatusLabel || "MMZap pausado",
+        cls: "border-amber-500/35 bg-amber-500/10 text-amber-200",
+        needsQr: false,
+      };
+    }
+    return {
+      label: session.mmzapStatusLabel || "Ativo (is-on)",
+      cls: "border-emerald-500/35 bg-emerald-500/10 text-emerald-200",
+      needsQr: false,
+    };
+  }
+  if (chip.config?.mmzap_browser_status === "paused_safety") {
+    return {
+      label: "Pausa preventiva · retoma amanhã",
+      cls: "border-amber-500/35 bg-amber-500/10 text-amber-200",
+      needsQr: false,
+    };
+  }
+  if (chip.config?.mmzap_browser_status === "idle") {
+    return {
+      label: "Em descanso",
+      cls: "border-emerald-500/25 bg-emerald-500/10 text-emerald-200",
+      needsQr: false,
+    };
+  }
+  if (chip.config?.mmzap_browser_status === "error") {
+    return {
+      label: "Erro no worker",
+      cls: "border-red-500/35 bg-red-500/10 text-red-200",
+      needsQr: false,
+    };
+  }
+  return {
+    label: "Não pareado",
+    cls: "border-[#303a32] bg-[#131914] text-[#a5b1a8]",
+    needsQr: false,
+  };
+}
+
 export interface MmzapLiveMonitorProps {
   chips: InstanceItem[];
   diagnostics: ExternalDiagnostic[];
@@ -56,6 +131,7 @@ export interface MmzapLiveMonitorProps {
   selfHealingBusy: boolean;
   onRunSelfHealing: () => Promise<void>;
   onRefreshAll: () => Promise<void>;
+  onOpenMmzapPairModal?: (instanceName: string, mode?: "pair" | "setup") => void;
 }
 
 export function MmzapLiveMonitor({
@@ -68,6 +144,7 @@ export function MmzapLiveMonitor({
   selfHealingBusy,
   onRunSelfHealing,
   onRefreshAll,
+  onOpenMmzapPairModal,
 }: MmzapLiveMonitorProps) {
   const [quarantine, setQuarantine] = useState<QuarantineEntry[]>([]);
   const [loadingQuarantine, setLoadingQuarantine] = useState(false);
@@ -283,6 +360,25 @@ export function MmzapLiveMonitor({
       !c.config?.is_quarantined
   );
 
+  const workerSessions: MmzapWorkerSessionView[] = (workerHealth?.sessions || [])
+    .map((s) => toMmzapSessionView(s))
+    .filter((s): s is MmzapWorkerSessionView => s !== null);
+  const fleetReadiness = computeFleetColdReadiness(chips);
+  const totalWatchdogRecoveries = workerSessions.reduce(
+    (acc, s) => acc + Number(s.mmzapWatchdogRecoveries || 0),
+    0
+  );
+  const loggedOutSessions = workerSessions.filter((s) => Boolean(s.sessionLoggedOut));
+  const healthyMmzapSessions = workerSessions.filter(
+    (s) => s.status === "running" && s.mmzapUiDetected && s.mmzapChipState === "is-on" && !s.sessionLoggedOut
+  );
+  const latestWatchdogCheckAt = workerSessions.reduce<string | null>((latest, s) => {
+    const candidate = s.lastWatchdogCheckAt || null;
+    if (!candidate) return latest;
+    if (!latest) return candidate;
+    return Date.parse(candidate) > Date.parse(latest) ? candidate : latest;
+  }, null);
+
   return (
     <div className={styles.panel}>
       <div className="divide-y divide-[#303a32]">
@@ -335,16 +431,17 @@ export function MmzapLiveMonitor({
                 <tr>
                   <th>Chip ADM</th>
                   <th>Webhook Evolution</th>
+                  <th>Watchdog / Sessão MMZap</th>
                   <th>Último evento</th>
                   <th>Modo MMZap</th>
                   <th>Recebidas / Enviadas MMZap</th>
-                  <th className="text-right">Teste real</th>
+                  <th className="text-right">Ação</th>
                 </tr>
               </thead>
               <tbody>
                 {chips.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="text-center text-xs text-[#a5b1a8] py-6">
+                    <td colSpan={7} className="text-center text-xs text-[#a5b1a8] py-6">
                       Nenhum chip administrador conectado ainda.
                     </td>
                   </tr>
@@ -353,6 +450,11 @@ export function MmzapLiveMonitor({
                     const diag = diagnostics.find(
                       (d) => d.instance_name === chip.instance_name
                     );
+                    const liveSess =
+                      workerSessions.find((s) => s.instanceName === chip.instance_name) || null;
+                    const watchdogInfo = describeChipWatchdogState(chip, liveSess);
+                    const readiness = computeChipColdReadiness(chip);
+                    const recoveries = Number(liveSess?.mmzapWatchdogRecoveries || 0);
                     const mode = (diag?.shield_mode ||
                       chip.config?.external_warmup_mode ||
                       "off") as ExternalWarmupMode;
@@ -369,8 +471,11 @@ export function MmzapLiveMonitor({
 
                     return (
                       <tr key={chip.instance_name}>
-                        <td className="font-medium text-[#edf2ee]">
-                          {chip.instance_name}
+                        <td>
+                          <div className="font-medium text-[#edf2ee]">{chip.instance_name}</div>
+                          <div className="text-[11px] text-[#a5b1a8] tabular-nums">
+                            {readiness.pillLabel}
+                          </div>
                         </td>
                         <td>
                           <span
@@ -378,11 +483,28 @@ export function MmzapLiveMonitor({
                               "inline-flex items-center rounded-md border px-2 py-0.5 text-[11px]",
                               diag?.webhook_ok
                                 ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
-                                : "border-amber-500/30 bg-amber-500/10 text-amber-200"
+                                : "border-amber-500/35 bg-amber-500/10 text-amber-200"
                             )}
                           >
                             {diag?.webhook_ok ? "Ativo" : "Pendente"}
                           </span>
+                        </td>
+                        <td>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span
+                              className={cn(
+                                "inline-flex items-center rounded-md border px-2 py-0.5 text-[11px]",
+                                watchdogInfo.cls
+                              )}
+                            >
+                              {watchdogInfo.label}
+                            </span>
+                            {recoveries > 0 && (
+                              <span className="text-[11px] font-mono tabular-nums text-[#a5b1a8]">
+                                {recoveries} recup.
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td className="text-xs text-[#a5b1a8] tabular-nums">
                           {formatShortDateTime(diag?.recent_webhook_upsert_at)}
@@ -392,15 +514,27 @@ export function MmzapLiveMonitor({
                           {today} rec · {sentToday} env ({total} total)
                         </td>
                         <td className="text-right">
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() => void handleSimulateMmzap(chip.instance_name)}
-                            className={styles.secondaryAction}
-                          >
-                            <FlaskConical className="w-3.5 h-3.5 text-emerald-400" />
-                            {busy ? "Testando..." : "Testar recepção"}
-                          </button>
+                          <div className="inline-flex items-center gap-1.5">
+                            {watchdogInfo.needsQr && onOpenMmzapPairModal && (
+                              <button
+                                type="button"
+                                onClick={() => onOpenMmzapPairModal(chip.instance_name, "pair")}
+                                className={styles.secondaryAction}
+                              >
+                                <QrCode className="w-3.5 h-3.5 text-red-300" />
+                                Re-escanear QR
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => void handleSimulateMmzap(chip.instance_name)}
+                              className={styles.secondaryAction}
+                            >
+                              <FlaskConical className="w-3.5 h-3.5 text-emerald-400" />
+                              {busy ? "Testando..." : "Testar recepção"}
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -461,6 +595,65 @@ export function MmzapLiveMonitor({
                 </label>
               )}
             </div>
+          </div>
+
+          {/* Saúde ao vivo do Watchdog MMZap & Prontidão da Frota */}
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 rounded-lg border border-[#303a32] bg-[#131914] px-3.5 py-2.5 text-xs">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[#c2cfc6] tabular-nums">
+              <span className="inline-flex items-center gap-1.5 font-medium text-[#edf2ee]">
+                <Activity className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                Watchdog MMZap
+              </span>
+              <span>
+                Extensão ativa:{" "}
+                <strong className="text-[#edf2ee]">
+                  {healthyMmzapSessions.length}/{workerSessions.length}
+                </strong>
+              </span>
+              <span>
+                Recuperações:{" "}
+                <strong className="text-[#edf2ee]">{totalWatchdogRecoveries}</strong>
+              </span>
+              {latestWatchdogCheckAt && (
+                <span className="text-[#a5b1a8]">
+                  Última checagem: {formatShortDateTime(latestWatchdogCheckAt)}
+                </span>
+              )}
+              <span className="text-[#a5b1a8]">
+                Capacidade segura:{" "}
+                <strong
+                  className={cn(
+                    fleetReadiness.totalSafeDailyCold >= fleetReadiness.benchmarkMin
+                      ? "text-emerald-300"
+                      : "text-[#edf2ee]"
+                  )}
+                >
+                  {fleetReadiness.totalSafeDailyCold} frios/dia
+                </strong>{" "}
+                ({fleetReadiness.readyChipsCount} pronto(s) · {fleetReadiness.maturingChipsCount} berçário)
+              </span>
+            </div>
+
+            {loggedOutSessions.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <span className="inline-flex items-center gap-1 text-red-200 font-medium">
+                  <AlertTriangle className="w-3.5 h-3.5 text-red-300 shrink-0" />
+                  {loggedOutSessions.length} sessão(ões) deslogada(s)
+                </span>
+                {onOpenMmzapPairModal &&
+                  loggedOutSessions.slice(0, 2).map((sess) => (
+                    <button
+                      key={sess.instanceName}
+                      type="button"
+                      onClick={() => onOpenMmzapPairModal(sess.instanceName, "pair")}
+                      className="inline-flex items-center gap-1 rounded-md border border-red-400/40 bg-[#231416] px-2.5 py-1 text-[11px] font-medium text-red-200 hover:bg-red-500/20"
+                    >
+                      <QrCode className="w-3 h-3" />
+                      Re-parear {sess.instanceName}
+                    </button>
+                  ))}
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 items-end">

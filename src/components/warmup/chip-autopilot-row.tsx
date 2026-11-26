@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import {
+  Activity,
   AlertTriangle,
   ArrowRightLeft,
   CheckCircle2,
@@ -20,7 +21,6 @@ import {
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
-import type { MmzapWorkerSessionStatus } from "@/lib/warmup/mmzap-browser-client";
 import {
   PURPOSE_METADATA,
   STAGE_DEFAULTS,
@@ -30,7 +30,34 @@ import {
   type WarmupPurpose,
   type WarmupStage,
 } from "@/lib/warmup/warmup-types";
-import type { ExternalDiagnostic, InstanceItem } from "./types";
+import {
+  computeChipColdReadiness,
+  hasChipDatacenterWarning,
+  isChipMmzapQrRequired,
+  type ColdReadinessTier,
+  type ExternalDiagnostic,
+  type InstanceItem,
+  type MmzapWorkerSessionView,
+} from "./types";
+
+const COLD_READINESS_CLS: Record<ColdReadinessTier, string> = {
+  veteran: "border-emerald-500/45 bg-emerald-500/15 text-emerald-200",
+  ready: "border-emerald-500/30 bg-emerald-500/10 text-emerald-200",
+  reduced: "border-amber-500/35 bg-amber-500/10 text-amber-200",
+  nursery: "border-sky-500/30 bg-sky-500/10 text-sky-200",
+  quarantined: "border-amber-500/40 bg-amber-500/15 text-amber-200",
+  rehab: "border-amber-500/40 bg-amber-500/15 text-amber-200",
+  low_health: "border-red-500/40 bg-red-500/15 text-red-200",
+  cold_locked: "border-amber-500/35 bg-amber-500/10 text-amber-200",
+  offline: "border-[#303a32] bg-[#131914] text-[#95a499]",
+};
+
+function formatWatchdogTime(iso?: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+}
 
 const MMZAP_BROWSER_STATUS_UI: Record<
   MmzapBrowserStatus,
@@ -41,8 +68,8 @@ const MMZAP_BROWSER_STATUS_UI: Record<
     cls: "border-[#303a32] bg-[#131914] text-[#a5b1a8]",
   },
   qr_pending: {
-    label: "QR pendente",
-    cls: "border-amber-500/35 bg-amber-500/10 text-amber-200",
+    label: "Sessão MMZap deslogada · re-escanear QR",
+    cls: "border-red-500/40 bg-red-500/15 text-red-200",
   },
   needs_extension_setup: {
     label: "Configurar 1ª vez",
@@ -57,7 +84,7 @@ const MMZAP_BROWSER_STATUS_UI: Record<
     cls: "border-emerald-500/40 bg-emerald-500/15 text-emerald-200",
   },
   paused_safety: {
-    label: "Freio segurança",
+    label: "Pausa preventiva · retoma amanhã",
     cls: "border-amber-500/40 bg-amber-500/15 text-amber-200",
   },
   error: {
@@ -92,7 +119,7 @@ export interface ChipAutopilotRowProps {
   isSaving: boolean;
   isReauditing: boolean;
   workerConfigured?: boolean;
-  workerSession?: MmzapWorkerSessionStatus | null;
+  workerSession?: MmzapWorkerSessionView | null;
   styles: Record<string, string>;
   onToggleEnabled: (instanceName: string, nextEnabled: boolean) => void;
   onChangeField: (
@@ -151,14 +178,53 @@ export function ChipAutopilotRow({
   const mmzapBrowserStatus = (cfg.mmzap_browser_status || "unpaired") as MmzapBrowserStatus;
   const mmzapStatusUi =
     MMZAP_BROWSER_STATUS_UI[mmzapBrowserStatus] || MMZAP_BROWSER_STATUS_UI.unpaired;
+  const isMmzapQrRequired = isChipMmzapQrRequired(cfg, workerSession);
+  const coldReadiness = computeChipColdReadiness(item);
+  const watchdogRecoveries = Number(workerSession?.mmzapWatchdogRecoveries || 0);
+  const lastWatchdogTime = formatWatchdogTime(workerSession?.lastWatchdogCheckAt);
 
   const isQuarantined = Boolean(cfg.is_quarantined);
   const hasDay0Warnings = Boolean(item.day0_warnings && item.day0_warnings.length > 0);
   const hasNetworkWarnings = Boolean(
     item.network_warnings && item.network_warnings.length > 0
   );
+  const hasDatacenterWarning = hasChipDatacenterWarning(item);
+  const needsMmzapQrAttention = Boolean(isConnected && workerConfigured && isMmzapQrRequired);
   const needsAttention =
-    !isConnected || isQuarantined || hasDay0Warnings || hasNetworkWarnings;
+    !isConnected ||
+    isQuarantined ||
+    hasDay0Warnings ||
+    hasNetworkWarnings ||
+    needsMmzapQrAttention;
+
+  const mmzapBadge = isMmzapQrRequired
+    ? {
+        label: "Sessão MMZap deslogada · re-escanear QR",
+        cls: "border-red-500/40 bg-red-500/15 text-red-200",
+      }
+    : mmzapBrowserStatus === "paused_safety"
+      ? MMZAP_BROWSER_STATUS_UI.paused_safety
+      : mmzapBrowserStatus === "running" && workerSession
+        ? workerSession.mmzapUiDetected
+          ? workerSession.mmzapChipState === "is-error"
+            ? {
+                label: workerSession.mmzapStatusLabel || "MMZap com erro",
+                cls: "border-red-500/40 bg-red-500/15 text-red-200",
+              }
+            : workerSession.mmzapChipState === "is-off"
+              ? {
+                  label: workerSession.mmzapStatusLabel || "MMZap pausado",
+                  cls: "border-amber-500/35 bg-amber-500/10 text-amber-200",
+                }
+              : {
+                  label: workerSession.mmzapStatusLabel || "MMZap ativo",
+                  cls: "border-emerald-500/40 bg-emerald-500/15 text-emerald-200",
+                }
+          : {
+              label: "Carregando MMZap...",
+              cls: "border-sky-500/35 bg-sky-500/10 text-sky-200",
+            }
+        : mmzapStatusUi;
 
   const statusPill = !isConnected
     ? {
@@ -226,6 +292,15 @@ export function ChipAutopilotRow({
             >
               {statusPill.label}
             </span>
+            <span
+              title={coldReadiness.detailLabel}
+              className={cn(
+                "inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-medium tabular-nums",
+                COLD_READINESS_CLS[coldReadiness.tier]
+              )}
+            >
+              {coldReadiness.pillLabel}
+            </span>
             {item.orphan && (
               <span className="inline-flex items-center rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-200">
                 Instância órfã
@@ -275,14 +350,20 @@ export function ChipAutopilotRow({
       <div className="flex flex-wrap items-center justify-between gap-2.5 text-xs">
         <div className="flex flex-wrap items-center gap-2">
           <span
+            title={
+              hasDatacenterWarning
+                ? "ASN de datacenter/hosting detectado. Recomenda-se migrar para proxy BR residencial/ISP ou 4G antes de escalar acima de 40 envios/dia."
+                : undefined
+            }
             className={cn(
               "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 tabular-nums",
-              hasNetworkWarnings
+              hasNetworkWarnings || hasDatacenterWarning
                 ? "border-amber-500/35 bg-amber-500/10 text-amber-200"
                 : "border-[#303a32] bg-[#131914] text-[#c2cfc6]"
             )}
           >
             {proxySummary}
+            {hasDatacenterWarning && " · Datacenter"}
           </span>
 
           <span
@@ -352,18 +433,28 @@ export function ChipAutopilotRow({
               <span
                 className={cn(
                   "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px]",
-                  mmzapStatusUi.cls
+                  mmzapBadge.cls
                 )}
               >
                 <Globe className="w-3 h-3 shrink-0" />
-                {mmzapBrowserStatus === "running" && workerSession
-                  ? workerSession.mmzapUiDetected
-                    ? workerSession.mmzapStatusLabel || "MMZap ativo"
-                    : "Carregando MMZap..."
-                  : mmzapStatusUi.label}
+                {mmzapBadge.label}
               </span>
 
-              {mmzapBrowserStatus === "running" && onOpenMmzapPairModal && (
+              {watchdogRecoveries > 0 && (
+                <span
+                  title={
+                    lastWatchdogTime
+                      ? `Watchdog verificou às ${lastWatchdogTime} · ${watchdogRecoveries} recuperação(ões) automática(s)`
+                      : `Watchdog executou ${watchdogRecoveries} recuperação(ões) automática(s)`
+                  }
+                  className="inline-flex items-center gap-1 rounded-md border border-[#303a32] bg-[#131914] px-2 py-0.5 text-[11px] tabular-nums text-[#c2cfc6]"
+                >
+                  <Activity className="w-3 h-3 text-emerald-400 shrink-0" />
+                  Watchdog {watchdogRecoveries}x
+                </span>
+              )}
+
+              {mmzapBrowserStatus === "running" && !isMmzapQrRequired && onOpenMmzapPairModal && (
                 <button
                   type="button"
                   disabled={mmzapBusy}
@@ -375,7 +466,17 @@ export function ChipAutopilotRow({
                 </button>
               )}
 
-              {mmzapBrowserStatus === "running" && onMmzapBrowserAction ? (
+              {isMmzapQrRequired && onOpenMmzapPairModal ? (
+                <button
+                  type="button"
+                  disabled={mmzapBusy}
+                  onClick={() => onOpenMmzapPairModal(instName, "pair")}
+                  className={styles.secondaryAction}
+                >
+                  <QrCode className="w-3 h-3 text-red-300" />
+                  Re-escanear QR
+                </button>
+              ) : mmzapBrowserStatus === "running" && onMmzapBrowserAction ? (
                 <button
                   type="button"
                   disabled={mmzapBusy}
@@ -402,9 +503,7 @@ export function ChipAutopilotRow({
                   <Wrench className="w-3 h-3 text-amber-300" />
                   Configurar MMZap
                 </button>
-              ) : (mmzapBrowserStatus === "unpaired" ||
-                  mmzapBrowserStatus === "qr_pending" ||
-                  mmzapBrowserStatus === "error") &&
+              ) : (mmzapBrowserStatus === "unpaired" || mmzapBrowserStatus === "error") &&
                 onOpenMmzapPairModal ? (
                 <button
                   type="button"
@@ -431,7 +530,7 @@ export function ChipAutopilotRow({
                     className={styles.secondaryAction}
                   >
                     <Play className="w-3 h-3 text-emerald-400" />
-                    Rodar turno
+                    {mmzapBrowserStatus === "paused_safety" ? "Retomar turno" : "Rodar turno"}
                   </button>
                 )
               )}
@@ -480,6 +579,11 @@ export function ChipAutopilotRow({
                   Em quarentena preventiva (turnos MMZap e colmeia pausados){cfg.quarantine_reason ? `: ${cfg.quarantine_reason}` : "."}
                 </p>
               )}
+              {needsMmzapQrAttention && (
+                <p>
+                  Sessão MMZap deslogada · re-escaneie o QR Code no navegador isolado para retomar os turnos automáticos.
+                </p>
+              )}
               {item.day0_warnings?.slice(0, 2).map((warn, idx) => (
                 <p key={`d0-${idx}`}>{warn}</p>
               ))}
@@ -506,6 +610,17 @@ export function ChipAutopilotRow({
               >
                 <Unlock className="w-3 h-3" />
                 Liberar quarentena agora
+              </button>
+            )}
+            {needsMmzapQrAttention && onOpenMmzapPairModal && (
+              <button
+                type="button"
+                disabled={mmzapBusy}
+                onClick={() => onOpenMmzapPairModal(instName, "pair")}
+                className="inline-flex items-center gap-1 rounded-md border border-red-400/40 bg-[#231416] px-2.5 py-1 text-[11px] font-medium text-red-200 hover:bg-red-500/20"
+              >
+                <QrCode className="w-3 h-3" />
+                Re-escanear QR
               </button>
             )}
             {!isConnected && (

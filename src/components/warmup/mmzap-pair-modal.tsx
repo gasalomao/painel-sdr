@@ -14,11 +14,27 @@ import { toast } from "sonner";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import type { MmzapWorkerSessionView } from "./types";
+
+interface MmzapModalApiPayload {
+  status?: string;
+  qrCodeBase64?: string | null;
+  screenshotBase64?: string | null;
+  needsExtensionSetup?: boolean;
+  proxyIp?: string | null;
+  mmzapUiDetected?: boolean;
+  mmzapChipState?: string | null;
+  mmzapStatusLabel?: string | null;
+  sessionLoggedOut?: boolean;
+  mmzapWatchdogRecoveries?: number;
+  lastWatchdogCheckAt?: string | null;
+}
 
 export interface MmzapPairModalProps {
   open: boolean;
   instanceName: string | null;
   initialMode: "pair" | "setup";
+  workerSession?: MmzapWorkerSessionView | null;
   styles: Record<string, string>;
   onOpenChange: (open: boolean) => void;
   onCompleted: () => Promise<void>;
@@ -28,6 +44,7 @@ export function MmzapPairModal({
   open,
   instanceName,
   initialMode,
+  workerSession = null,
   styles,
   onOpenChange,
   onCompleted,
@@ -39,13 +56,38 @@ export function MmzapPairModal({
   const [screenshotBase64, setScreenshotBase64] = useState<string | null>(null);
   const [proxyIp, setProxyIp] = useState<string | null>(null);
   const [sessionStatus, setSessionStatus] = useState<string>("idle");
+  const [mmzapUiDetected, setMmzapUiDetected] = useState<boolean | null>(null);
+  const [mmzapChipState, setMmzapChipState] = useState<string | null>(null);
+  const [mmzapStatusLabel, setMmzapStatusLabel] = useState<string | null>(null);
+  const [sessionLoggedOut, setSessionLoggedOut] = useState<boolean>(false);
+  const [watchdogRecoveries, setWatchdogRecoveries] = useState<number>(0);
   const [textInput, setTextInput] = useState("");
   const imgRef = useRef<HTMLImageElement>(null);
+
+  const applyTelemetry = useCallback((data?: MmzapModalApiPayload | null) => {
+    if (!data) return;
+    if (typeof data.mmzapUiDetected === "boolean") {
+      setMmzapUiDetected(data.mmzapUiDetected);
+    }
+    if (data.mmzapChipState !== undefined) {
+      setMmzapChipState(data.mmzapChipState ?? null);
+    }
+    if (data.mmzapStatusLabel !== undefined) {
+      setMmzapStatusLabel(data.mmzapStatusLabel ?? null);
+    }
+    if (typeof data.sessionLoggedOut === "boolean") {
+      setSessionLoggedOut(data.sessionLoggedOut);
+    }
+    if (typeof data.mmzapWatchdogRecoveries === "number") {
+      setWatchdogRecoveries(data.mmzapWatchdogRecoveries);
+    }
+  }, []);
 
   const startPairing = useCallback(async (inst: string) => {
     setBusy(true);
     setErrorMsg(null);
     setQrCodeBase64(null);
+    setSessionLoggedOut(false);
     try {
       const res = await fetch("/api/warmup/mmzap-browser", {
         method: "POST",
@@ -55,11 +97,7 @@ export function MmzapPairModal({
       const json = (await res.json().catch(() => null)) as {
         success?: boolean;
         error?: string;
-        data?: {
-          status?: string;
-          qrCodeBase64?: string | null;
-          proxyIp?: string | null;
-        };
+        data?: MmzapModalApiPayload;
       } | null;
 
       if (!res.ok || !json?.success) {
@@ -70,10 +108,11 @@ export function MmzapPairModal({
       setSessionStatus(json.data?.status || "qr_pending");
       setQrCodeBase64(json.data?.qrCodeBase64 || null);
       setProxyIp(json.data?.proxyIp || null);
+      applyTelemetry(json.data);
     } finally {
       setBusy(false);
     }
-  }, []);
+  }, [applyTelemetry]);
 
   const openSetup = useCallback(async (inst: string) => {
     setBusy(true);
@@ -87,11 +126,7 @@ export function MmzapPairModal({
       const json = (await res.json().catch(() => null)) as {
         success?: boolean;
         error?: string;
-        data?: {
-          screenshotBase64?: string | null;
-          proxyIp?: string | null;
-          status?: string;
-        };
+        data?: MmzapModalApiPayload;
       } | null;
 
       if (!res.ok || !json?.success) {
@@ -102,20 +137,34 @@ export function MmzapPairModal({
       setSessionStatus(json.data?.status || "setup");
       setScreenshotBase64(json.data?.screenshotBase64 || null);
       setProxyIp(json.data?.proxyIp || null);
+      applyTelemetry(json.data);
     } finally {
       setBusy(false);
     }
-  }, []);
+  }, [applyTelemetry]);
 
   useEffect(() => {
     if (!open || !instanceName) return;
     setMode(initialMode);
+    setErrorMsg(null);
+    setMmzapUiDetected(null);
+    setMmzapChipState(null);
+    setMmzapStatusLabel(null);
+    setSessionLoggedOut(false);
+    setWatchdogRecoveries(0);
     if (initialMode === "pair") {
       void startPairing(instanceName);
     } else {
       void openSetup(instanceName);
     }
   }, [open, instanceName, initialMode, startPairing, openSetup]);
+
+  useEffect(() => {
+    if (!open || !instanceName || !workerSession || mode !== "setup") return;
+    if (workerSession.instanceName !== instanceName) return;
+    applyTelemetry(workerSession);
+    if (workerSession.proxyIp) setProxyIp(workerSession.proxyIp);
+  }, [open, instanceName, mode, workerSession, applyTelemetry]);
 
   // Poll de QR Code enquanto aguardando leitura no celular
   useEffect(() => {
@@ -132,17 +181,13 @@ export function MmzapPairModal({
           );
           const json = (await res.json().catch(() => null)) as {
             success?: boolean;
-            data?: {
-              status?: string;
-              qrCodeBase64?: string | null;
-              needsExtensionSetup?: boolean;
-              proxyIp?: string | null;
-            };
+            data?: MmzapModalApiPayload;
           } | null;
           if (!json?.success || !json.data) return;
           if (json.data.qrCodeBase64) setQrCodeBase64(json.data.qrCodeBase64);
           if (json.data.proxyIp) setProxyIp(json.data.proxyIp);
           if (json.data.status) setSessionStatus(json.data.status);
+          applyTelemetry(json.data);
 
           if (json.data.status === "running") {
             toast.success(`MMZap conectado e turno iniciado em ${instanceName}.`);
@@ -165,7 +210,50 @@ export function MmzapPairModal({
     }, 3000);
 
     return () => clearInterval(timer);
-  }, [open, instanceName, mode, sessionStatus, onCompleted, onOpenChange, openSetup]);
+  }, [
+    open,
+    instanceName,
+    mode,
+    sessionStatus,
+    onCompleted,
+    onOpenChange,
+    openSetup,
+    applyTelemetry,
+  ]);
+
+  // Poll leve de saúde ao vivo na tela da extensão (detecta mmzapUiDetected e sessionLoggedOut)
+  useEffect(() => {
+    if (!open || !instanceName || mode !== "setup") return;
+
+    const timer = setInterval(() => {
+      void (async () => {
+        try {
+          const res = await fetch("/api/warmup/mmzap-browser?action=status", {
+            cache: "no-store",
+          });
+          const json = (await res.json().catch(() => null)) as {
+            success?: boolean;
+            data?: {
+              worker?: {
+                sessions?: MmzapWorkerSessionView[];
+              };
+            };
+          } | null;
+          const live = json?.data?.worker?.sessions?.find(
+            (s) => s.instanceName === instanceName
+          );
+          if (!live) return;
+          if (live.status) setSessionStatus(live.status);
+          if (live.proxyIp) setProxyIp(live.proxyIp);
+          applyTelemetry(live);
+        } catch {
+          /* ignora erro transitório de poll */
+        }
+      })();
+    }, 6000);
+
+    return () => clearInterval(timer);
+  }, [open, instanceName, mode, applyTelemetry]);
 
   const sendInput = async (input: Record<string, unknown>) => {
     if (!instanceName) return;
@@ -182,10 +270,11 @@ export function MmzapPairModal({
       });
       const json = (await res.json().catch(() => null)) as {
         success?: boolean;
-        data?: { screenshotBase64?: string | null };
+        data?: MmzapModalApiPayload;
       } | null;
-      if (json?.success && json.data?.screenshotBase64) {
-        setScreenshotBase64(json.data.screenshotBase64);
+      if (json?.success && json.data) {
+        if (json.data.screenshotBase64) setScreenshotBase64(json.data.screenshotBase64);
+        applyTelemetry(json.data);
       }
     } finally {
       setBusy(false);
@@ -210,14 +299,21 @@ export function MmzapPairModal({
       );
       const json = (await res.json().catch(() => null)) as {
         success?: boolean;
-        data?: { screenshotBase64?: string | null };
+        data?: MmzapModalApiPayload;
       } | null;
-      if (json?.success && json.data?.screenshotBase64) {
-        setScreenshotBase64(json.data.screenshotBase64);
+      if (json?.success && json.data) {
+        if (json.data.screenshotBase64) setScreenshotBase64(json.data.screenshotBase64);
+        applyTelemetry(json.data);
       }
     } finally {
       setBusy(false);
     }
+  };
+
+  const handleSwitchToRepair = () => {
+    if (!instanceName) return;
+    setMode("pair");
+    void startPairing(instanceName);
   };
 
   const handleCompleteSetup = async () => {
@@ -350,6 +446,72 @@ export function MmzapPairModal({
             </div>
           ) : (
             <div className="space-y-3">
+              {sessionLoggedOut ? (
+                <div
+                  role="alert"
+                  className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 rounded-lg border border-red-500/40 bg-red-500/10 px-3.5 py-2.5 text-xs text-red-100"
+                >
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-red-300 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="font-medium text-red-100">
+                        Sessão do WhatsApp Web deslogada neste navegador
+                      </p>
+                      <p className="text-[11px] text-red-200/80 mt-0.5">
+                        Re-escaneie o QR Code para retomar o aquecimento MMZap mantendo o mesmo proxy exclusivo.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={busy || !instanceName}
+                    onClick={handleSwitchToRepair}
+                    className={styles.primaryAction}
+                  >
+                    <QrCode className="w-3.5 h-3.5" />
+                    Re-parear QR
+                  </button>
+                </div>
+              ) : (
+                <div
+                  role="status"
+                  className={cn(
+                    "flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2 text-xs",
+                    mmzapUiDetected
+                      ? mmzapChipState === "is-error"
+                        ? "border-red-500/35 bg-red-500/10 text-red-200"
+                        : mmzapChipState === "is-off"
+                          ? "border-amber-500/35 bg-amber-500/10 text-amber-200"
+                          : "border-emerald-500/35 bg-emerald-500/10 text-emerald-200"
+                      : "border-[#303a32] bg-[#131914] text-[#c2cfc6]"
+                  )}
+                >
+                  <span className="inline-flex items-center gap-2 font-medium">
+                    {mmzapUiDetected ? (
+                      mmzapChipState === "is-error" || mmzapChipState === "is-off" ? (
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                      ) : (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      )
+                    ) : (
+                      <RefreshCw className="w-3.5 h-3.5 text-emerald-400 animate-spin shrink-0" />
+                    )}
+                    {mmzapUiDetected
+                      ? mmzapChipState === "is-error"
+                        ? `MMZap detectado com erro${mmzapStatusLabel ? ` · ${mmzapStatusLabel}` : ""}`
+                        : mmzapChipState === "is-off"
+                          ? `MMZap detectado (pausado)${mmzapStatusLabel ? ` · ${mmzapStatusLabel}` : ""}`
+                          : `Interface MMZap detectada e ativa${mmzapStatusLabel ? ` · ${mmzapStatusLabel}` : ""}`
+                      : "Carregando interface da extensão MMZap no WhatsApp Web..."}
+                  </span>
+                  {watchdogRecoveries > 0 && (
+                    <span className="text-[11px] font-mono tabular-nums text-[#a5b1a8]">
+                      Watchdog: {watchdogRecoveries} recup.
+                    </span>
+                  )}
+                </div>
+              )}
+
               <div className="overflow-hidden rounded-lg border border-[#303a32] bg-[#101411]">
                 {screenshotBase64 ? (
                   /* eslint-disable-next-line @next/next/no-img-element */
@@ -426,7 +588,7 @@ export function MmzapPairModal({
             >
               Fechar
             </button>
-            {mode === "setup" && sessionStatus !== "running" && (
+            {mode === "setup" && !sessionLoggedOut && sessionStatus !== "running" && (
               <button
                 type="button"
                 disabled={busy}
