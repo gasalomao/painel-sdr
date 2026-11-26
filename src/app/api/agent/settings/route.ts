@@ -3,6 +3,7 @@ import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
 import { assertTenantCanCreateAgent, assertTenantCanCreateInstance, getTenantSaasLimits } from "@/lib/saas-limits";
 import { invalidateAgentConfigCache } from "@/lib/agent-config-cache";
+import { cloneAgentForClient } from "@/lib/agent-clone";
 
 export const dynamic = "force-dynamic";
 
@@ -80,8 +81,7 @@ async function loadAgentBundleForClient(agentId: number, clientId: string) {
       .select("instance_name, created_at")
       .eq("agent_id", agentId)
       .eq("client_id", clientId)
-      .order("created_at", { ascending: true })
-      .limit(1),
+      .order("created_at", { ascending: true }),
     supabaseAdmin
       .from("agent_stages")
       .select("*")
@@ -97,12 +97,16 @@ async function loadAgentBundleForClient(agentId: number, clientId: string) {
     return null;
   }
 
+  const vinculoInstances = ((connRes.data || []) as Array<{ instance_name?: string }>)
+    .map((r) => String(r.instance_name || "").trim())
+    .filter(Boolean);
+
   return {
     agent: sanitizeAgentRow(settingsRes.data as JsonObject),
     knowledge: (kbRes.data || []) as JsonObject[],
     stages: (stagesRes.data || []) as JsonObject[],
-    vinculoInstance:
-      ((connRes.data?.[0] as { instance_name?: string } | undefined)?.instance_name) || "",
+    vinculoInstance: vinculoInstances[0] || "",
+    vinculoInstances,
   };
 }
 
@@ -663,9 +667,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         return NextResponse.json({ error: upsertErr.message }, { status: 500 });
       }
 
+      // Desvincula instâncias anteriores deste agente sem jamais deletar a conexão WhatsApp
       await supabaseAdmin
         .from("channel_connections")
-        .delete()
+        .update({ agent_id: null })
         .eq("agent_id", agentId)
         .eq("client_id", auth.clientId)
         .neq("instance_name", instanceName);
@@ -676,6 +681,43 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
 
       return NextResponse.json({ success: true, instance_name: instanceName });
+    }
+
+    if (action === "clone_agent") {
+      const sourceAgentId = parsePositiveAgentId(body.source_agent_id ?? body.agent_id);
+      const newName = String(body.new_name ?? body.name ?? "").trim();
+      const targetInstanceName = body.target_instance_name ?? body.instance_name;
+      if (!sourceAgentId || !newName) {
+        return NextResponse.json(
+          { error: "source_agent_id e new_name são obrigatórios" },
+          { status: 400 },
+        );
+      }
+
+      const cloned = await cloneAgentForClient({
+        clientId: auth.clientId,
+        sourceAgentId,
+        newName,
+        targetInstanceName: targetInstanceName ? String(targetInstanceName).trim() : null,
+        cloneKnowledge: body.clone_knowledge !== false,
+        cloneStages: body.clone_stages !== false,
+        cloneCalendarConfig: Boolean(body.clone_calendar_config),
+        cloneAutomation: Boolean(body.clone_automation),
+        isAdmin: auth.isAdmin,
+      });
+
+      if (!cloned.ok) {
+        return NextResponse.json({ error: cloned.error || "Falha ao duplicar agente" }, { status: cloned.status });
+      }
+
+      return NextResponse.json({
+        success: true,
+        agent: sanitizeAgentRow(cloned.agent),
+        cloned_knowledge_count: cloned.clonedKnowledgeCount,
+        cloned_stages_count: cloned.clonedStagesCount,
+        cloned_automations_count: cloned.clonedAutomationsCount,
+        bound_instance: cloned.boundInstance,
+      });
     }
 
     if (action === "create_stage") {

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { requireClientId } from "@/lib/tenant";
 import { isTerminalColumn } from "@/lib/organizer-prompt";
+import { MENTOR_KANBAN_PRESET } from "@/lib/mentor-presets";
 
 export const dynamic = "force-dynamic";
 
@@ -105,6 +106,47 @@ export async function POST(req: NextRequest) {
   if (!supabaseAdmin) return NextResponse.json({ ok: false, error: "DB indisponível" }, { status: 500 });
 
   const body = await req.json().catch(() => ({}));
+
+  if (body.action === "apply_mentor_preset") {
+    const { data: existingCols } = await supabaseAdmin
+      .from("kanban_columns")
+      .select("status_key")
+      .eq("client_id", ctx.clientId);
+    const existingKeys = new Set(
+      ((existingCols || []) as Array<{ status_key?: string }>).map((c) => String(c.status_key || "").toLowerCase())
+    );
+    const missing = MENTOR_KANBAN_PRESET.filter((col) => !existingKeys.has(col.status_key));
+    let createdCount = 0;
+    for (const col of missing) {
+      const insertRow = {
+        client_id: ctx.clientId,
+        status_key: col.status_key,
+        label: col.label,
+        color: col.color,
+        order_index: col.order_index,
+        is_system: false,
+      };
+      let { error: insErr } = await supabaseAdmin
+        .from("kanban_columns")
+        .insert({ ...insertRow, is_terminal: !!col.is_terminal });
+      if (insErr && /is_terminal/i.test(insErr.message || "")) {
+        const retry = await supabaseAdmin.from("kanban_columns").insert(insertRow);
+        insErr = retry.error;
+      }
+      if (!insErr) createdCount += 1;
+    }
+    const { data: allCols } = await supabaseAdmin
+      .from("kanban_columns")
+      .select("*")
+      .eq("client_id", ctx.clientId)
+      .order("order_index", { ascending: true });
+    return NextResponse.json({
+      ok: true,
+      created: createdCount,
+      columns: (allCols || []).map(normalizeColumnRow),
+    });
+  }
+
   const status_key = String(body.status_key || "").trim().toLowerCase().replace(/[^a-z0-9_-]/g, "_");
   const label      = String(body.label || "").trim();
   if (!status_key || !label) {

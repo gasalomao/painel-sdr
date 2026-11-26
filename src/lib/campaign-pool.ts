@@ -11,6 +11,8 @@ export function formatInstanceLabel(name?: string | null): string {
   return String(name || "");
 }
 
+export type WeekendB2BGuardMode = boolean | "full" | "sunday_only";
+
 export type WeekendB2BGuardResult = {
   allowed: boolean;
   hourlyFactor: number;
@@ -21,24 +23,27 @@ export type WeekendB2BGuardResult = {
 /**
  * Modo Comercial B2B (opt-in por campanha/follow-up):
  * - Domingo: pausa disparos frios automaticamente (alta taxa de denúncia B2B).
- * - Sábado: reduz o teto por hora pela metade (hourlyFactor = 0.5).
+ * - Sábado: `true`/`"full"` reduz pela metade (`hourlyFactor = 0.5`), `"sunday_only"` libera 100% (`hourlyFactor = 1`).
  * - Seg–Sex (ou quando desabilitado): operação normal (hourlyFactor = 1).
  */
 export function evaluateWeekendB2BGuard(
-  weekendGuardEnabled: boolean,
+  weekendGuardMode: WeekendB2BGuardMode,
   now: Date = new Date()
 ): WeekendB2BGuardResult {
   const weekday = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Sao_Paulo",
     weekday: "short",
   }).format(now);
-  if (!weekendGuardEnabled) {
+  if (!weekendGuardMode) {
     return { allowed: true, hourlyFactor: 1, weekday };
   }
   if (weekday === "Sun") {
     return { allowed: false, hourlyFactor: 0, weekday, reason: "weekend_b2b_sunday" };
   }
   if (weekday === "Sat") {
+    if (weekendGuardMode === "sunday_only") {
+      return { allowed: true, hourlyFactor: 1, weekday, reason: "weekend_b2b_saturday_full" };
+    }
     return { allowed: true, hourlyFactor: 0.5, weekday, reason: "weekend_b2b_saturday" };
   }
   return { allowed: true, hourlyFactor: 1, weekday };

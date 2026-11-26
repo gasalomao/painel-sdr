@@ -100,16 +100,18 @@ export async function POST(req: NextRequest) {
       humanize_messages: !!humanize_messages,
       ai_prompt: ai_prompt || null,
       campaign_type: "prospeccao_sites",
+      max_daily_previews: Math.max(0, Math.floor(Number(body.max_daily_previews) || 0)),
+      approach_strategy: String(body.approach_strategy || "mentor_2step"),
       status: "draft",
     };
     if (ai_model) insertPayload.ai_model = ai_model;
 
     let { data: camp, error: cErr } = await supabase.from("campaigns").insert(insertPayload).select().single();
-    // Fallback: se coluna nova (ai_model/humanize_messages) não existir ainda,
-    // remove e tenta de novo. Mesmo padrão que já tínhamos para ai_model.
-    if (cErr && (cErr as any).code === "PGRST204") {
-      if ("ai_model" in insertPayload) delete insertPayload.ai_model;
-      if ("humanize_messages" in insertPayload) delete insertPayload.humanize_messages;
+    if (cErr && ((cErr as any).code === "PGRST204" || (cErr as any).code === "42703")) {
+      delete insertPayload.ai_model;
+      delete insertPayload.humanize_messages;
+      delete insertPayload.max_daily_previews;
+      delete insertPayload.approach_strategy;
       const retry = await supabase.from("campaigns").insert(insertPayload).select().single();
       camp = retry.data as any;
       cErr = retry.error as any;
@@ -122,7 +124,10 @@ export async function POST(req: NextRequest) {
         .from("app_settings")
         .upsert([
           { key: `campaign_antiban:${camp.id}`, value: String(Boolean(antiban_mixer)) },
-          { key: `campaign_weekend_guard:${camp.id}`, value: String(Boolean(weekend_guard)) },
+          {
+            key: `campaign_weekend_guard:${camp.id}`,
+            value: weekend_guard === "sunday_only" ? "sunday_only" : String(Boolean(weekend_guard)),
+          },
           { key: `campaign_cold_shield:${camp.id}`, value: String(cold_shield !== false) },
         ], { onConflict: "key" });
     } catch {}

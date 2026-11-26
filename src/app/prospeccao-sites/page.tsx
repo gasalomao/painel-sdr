@@ -44,6 +44,7 @@ import {
 } from "@/lib/scraper-lead-filters";
 import type { LeadEnrichmentData, SiteFilterMode } from "@/lib/scraper-lead-enrichment";
 import { AutomationLogs } from "../automacao/AutomationLogs";
+import { MentorPreviewQueuePanel } from "@/components/mentor-preview-queue-panel";
 import styles from "./prospeccao-sites.module.css";
 
 type Lead = {
@@ -110,6 +111,7 @@ const TABS = [
   { key: "disparo",   label: "Disparo",   icon: Send },
   { key: "historico", label: "Histórico", icon: BarChart3 },
   { key: "automacao", label: "Automação", icon: Zap },
+  { key: "mentor",    label: "Mentor & X1", icon: Sparkles },
 ] as const;
 type TabKey = typeof TABS[number]["key"];
 
@@ -120,6 +122,7 @@ const TAB_CONTEXT: Record<TabKey, { title: string; description: string }> = {
   disparo: { title: "Prepare sua campanha", description: "Escolha o WhatsApp, os intervalos e o horário de envio. A campanha será criada antes de iniciar." },
   historico: { title: "Acompanhe suas campanhas", description: "Consulte o progresso, as mensagens e os registros de execução em um só lugar." },
   automacao: { title: "Organize a prospecção automática", description: "Configure a captura, a primeira mensagem e os retornos. Você controla quando a automação começa." },
+  mentor: { title: "Método Mentor & Fila X1", description: "Acompanhe as 4 taxas do funil e agende entregas naturais de prévias mantendo a IA pausada para fechamento manual." },
 };
 
 const DEFAULT_TEMPLATE = `{{saudacao}}! Tudo bem? {{nome_empresa}}?`;
@@ -3762,6 +3765,12 @@ export default function ProspeccaoSitesPage() {
               </div>
             )}
           </div>
+        )}
+
+        {tab === "mentor" && (
+          <MentorPreviewQueuePanel
+            instances={instances.map((i) => i.instance_name).filter(Boolean)}
+          />
         )}
 
         </section>

@@ -6,7 +6,11 @@ import { getAiKeys } from "@/lib/ai-keys";
 import { registerWarmupSend } from "@/lib/manual-send-registry";
 import { checkTenantAiQuota } from "@/lib/saas-limits";
 import { getRandomWarmupVoiceBase64 } from "./warmup-audio";
-import { getProxyPoolOverviewCache, recordInstanceProxyStrike } from "@/lib/proxy-pool";
+import {
+  blacklistInstanceProxy,
+  getProxyPoolOverviewCache,
+  recordInstanceProxyStrike,
+} from "@/lib/proxy-pool";
 import {
   claimAndRunPendingWarmupAction,
   enqueuePendingWarmupAction,
@@ -19,6 +23,7 @@ import {
 } from "./warmup-media";
 import {
   markPhoneDisconnected,
+  markPhonePostBanRehab,
   pruneMapToLimit,
   savePhoneMemoryFromConfig,
 } from "./warmup-phone-memory";
@@ -793,6 +798,52 @@ export async function handleWebhookConnectionClosed(params: {
 
   let pausedCampaigns = 0;
   if (severe) {
+    let resolvedPhone: string | null = null;
+    try {
+      const { data: wRow } = await supabaseAdmin
+        .from("whatsapp_warmup_configs")
+        .select("phone_number")
+        .eq("client_id", clientId)
+        .eq("instance_name", instanceName)
+        .maybeSingle();
+      resolvedPhone = (wRow as { phone_number?: string | null } | null)?.phone_number || null;
+      if (!resolvedPhone) {
+        const { data: connRow } = await supabaseAdmin
+          .from("channel_connections")
+          .select("provider_config")
+          .eq("client_id", clientId)
+          .eq("instance_name", instanceName)
+          .maybeSingle();
+        const pCfg = (connRow as { provider_config?: Record<string, unknown> | null } | null)?.provider_config;
+        const owner = pCfg?.owner_phone || pCfg?.owner_jid;
+        if (owner) resolvedPhone = String(owner);
+      }
+    } catch { /* ignore */ }
+
+    const rehabEntry = await markPhonePostBanRehab({
+      clientId,
+      instanceName,
+      phone: resolvedPhone,
+      reason: reasonStr,
+      nowMs,
+    }).catch(() => null);
+
+    try {
+      await supabaseAdmin
+        .from("whatsapp_warmup_configs")
+        .update({
+          career_mode: "rehab",
+          rehab_until: rehabEntry?.rehabUntil || new Date(nowMs + 72 * 60 * 60 * 1000).toISOString(),
+          cold_outreach_locked_until:
+            rehabEntry?.coldOutreachLockedUntil || new Date(nowMs + 96 * 60 * 60 * 1000).toISOString(),
+          updated_at: new Date(nowMs).toISOString(),
+        })
+        .eq("client_id", clientId)
+        .eq("instance_name", instanceName);
+    } catch {
+      /* schema sem 031 segue com passaporte em app_settings */
+    }
+
     try {
       const { data: paused } = await supabaseAdmin
         .from("campaigns")
@@ -825,6 +876,7 @@ export async function handleWebhookConnectionClosed(params: {
         errorMessage: reasonStr,
         isBan401Or403: true,
       }).catch(() => null);
+      await blacklistInstanceProxy(instanceName, "banned", reasonStr).catch(() => null);
     }
   }
 
@@ -1068,6 +1120,29 @@ export function evaluateDailyAutoProgress(
         : cfg.daily_target || stageInfo.dailyTarget,
     stageInfo,
   };
+}
+
+/**
+ * Avalia se um chip em `rehab` pós-banimento já cumpriu a janela mínima de 72h,
+ * recuperou saúde (>= 75%) e acumulou >= 3 dias consecutivos limpos para voltar a `maturing`.
+ */
+export function evaluateRehabGraduation(
+  cfg: WarmupConfig,
+  nowIso: string = new Date().toISOString()
+): { graduated: boolean; nextCareerMode: "maturing" | "rehab" } {
+  if (cfg.career_mode !== "rehab") {
+    return { graduated: false, nextCareerMode: "maturing" };
+  }
+  const nowMs = new Date(nowIso).getTime();
+  const rehabUntilMs = cfg.rehab_until ? new Date(cfg.rehab_until).getTime() : 0;
+  const healthOk = (cfg.health_score ?? 100) >= 75;
+  const daysOk = (cfg.consecutive_successful_days ?? 0) >= 3;
+  const windowElapsed = !rehabUntilMs || nowMs >= rehabUntilMs;
+
+  if (windowElapsed && healthOk && daysOk) {
+    return { graduated: true, nextCareerMode: "maturing" };
+  }
+  return { graduated: false, nextCareerMode: "rehab" };
 }
 
 /**

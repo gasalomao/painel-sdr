@@ -24,7 +24,7 @@ describe("GET /api/warmup/vcf", () => {
     mocks.auth.mockResolvedValue({
       ok: true,
       clientId: "tenant-vcf",
-      isAdmin: false,
+      isAdmin: true,
       impersonating: false,
       claims: { features: { aquecer_chips: true } },
     });
@@ -68,13 +68,13 @@ describe("GET /api/warmup/vcf", () => {
     expect(body).toContain("TEL;TYPE=CELL:+557391810230");
   });
 
-  it("bloqueia com 403 quando módulo aquecer_chips não está liberado", async () => {
+  it("bloqueia com 403 quando conta não é administradora", async () => {
     mocks.auth.mockResolvedValue({
       ok: true,
       clientId: "tenant-vcf",
       isAdmin: false,
       impersonating: false,
-      claims: { features: { aquecer_chips: false } },
+      claims: { features: { aquecer_chips: true } },
     });
 
     const req = new NextRequest("http://localhost/api/warmup/vcf");

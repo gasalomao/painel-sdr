@@ -1,7 +1,12 @@
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { evolution } from "@/lib/evolution";
+import { registerWarmupSend } from "@/lib/manual-send-registry";
 import { getBrazilDayKey, logWarmupAction } from "./warmup-engine";
 import { getRandomStatusQuote } from "./warmup-dialogues";
+import {
+  claimAndRunPendingWarmupAction,
+  enqueuePendingWarmupAction,
+} from "./warmup-pending-actions";
 import {
   canonicalBrazilPhoneKey,
   getPersistedFlapCount24h,
@@ -13,14 +18,18 @@ import {
 import type { WarmupConfig, WarmupGroup } from "./warmup-types";
 import { getProxyPoolOverviewCache } from "@/lib/proxy-pool";
 
-// Anti-flood para grupos orgânicos passivos
+// Anti-flood para grupos orgânicos passivos e de aquecimento
 const _organicGroupChipCache = new Map<
   string,
   { eligible: boolean; cachedAt: number }
 >();
 const _lastPassiveReadPerGroup = new Map<string, number>();
+const _lastWarmupGroupReadAt = new Map<string, number>();
+const _lastInternalSwarmGroupPostAt = new Map<string, number>();
 const _lastPassiveTouchPerChip = new Map<string, number>();
 const PASSIVE_GROUP_READ_COOLDOWN_MS = 45 * 1000;
+const WARMUP_GROUP_READ_COOLDOWN_MS = 120 * 1000;
+const INTERNAL_SWARM_GROUP_POST_COOLDOWN_MS = 4 * 60 * 60 * 1000;
 const PASSIVE_CHIP_TOUCH_COOLDOWN_MS = 3 * 60 * 1000;
 const GROUP_RECEIVE_FLUSH_MS = 12 * 1000;
 
@@ -40,6 +49,8 @@ export function resetGroupReceiveBufferForTests(): void {
   _organicGroupChipCache.clear();
   _groupJidCache.clear();
   _lastPassiveReadPerGroup.clear();
+  _lastWarmupGroupReadAt.clear();
+  _lastInternalSwarmGroupPostAt.clear();
   _lastPassiveTouchPerChip.clear();
   _lastReactionPerChipGroup.clear();
 }
@@ -448,13 +459,42 @@ export async function processIncomingGroupMessage(params: {
 
   await recordChipGroupMessageReceived(clientId, instanceName, messageId);
 
-  // 2. Leitura com marcação de tique azul humana (atraso orgânico de 2 a 8s)
-  const readDelayMs = 2000 + Math.floor(Math.random() * 6000);
-  setTimeout(() => {
-    evolution
-      .markMessageAsRead([{ remoteJid: groupJid, id: messageId, fromMe: false }], instanceName)
-      .catch(() => {});
-  }, readDelayMs);
+  // 2. Leitura com marcação de tique azul humana (atraso orgânico + cooldown de 120s + fila persistente)
+  const nowMs = Date.now();
+  const readKey = `${instanceName}:${groupJid}`;
+  const lastReadAt = _lastWarmupGroupReadAt.get(readKey) || 0;
+  if (nowMs - lastReadAt >= WARMUP_GROUP_READ_COOLDOWN_MS) {
+    _lastWarmupGroupReadAt.set(readKey, nowMs);
+    pruneMapToLimit(_lastWarmupGroupReadAt, 3000);
+    const readDelayMs =
+      process.env.VITEST === "true" || process.env.NODE_ENV === "test"
+        ? 10
+        : 2000 + Math.floor(Math.random() * 6000);
+    const readAction = await enqueuePendingWarmupAction(clientId, {
+      type: "read",
+      dueAt: nowMs + readDelayMs,
+      actorInstance: instanceName,
+      peerInstance: groupJid,
+      actorPhone: "",
+      peerPhone: groupJid,
+      targetJid: groupJid,
+      messageId,
+      delayMs: readDelayMs,
+    }).catch(() => null);
+    if (readAction?.id) {
+      const t = setTimeout(() => {
+        void claimAndRunPendingWarmupAction(clientId, readAction.id);
+      }, readDelayMs);
+      if (typeof (t as { unref?: () => void }).unref === "function") (t as { unref: () => void }).unref();
+    } else {
+      const t = setTimeout(() => {
+        evolution
+          .markMessageAsRead([{ remoteJid: groupJid, id: messageId, fromMe: false }], instanceName)
+          .catch(() => {});
+      }, readDelayMs);
+      if (typeof (t as { unref?: () => void }).unref === "function") (t as { unref: () => void }).unref();
+    }
+  }
 
   // 3. Carência de 72h pós-entrada em grupos recém-ingressados (apenas leitura passiva nos 3 primeiros dias)
   let inNewJoinGrace = false;
@@ -506,27 +546,48 @@ export async function processIncomingGroupMessage(params: {
       cachedEntry.totalReactions = nextReactionsCount;
     }
 
-    // Dispara reação com delay orgânico de 3 a 9 segundos
-    const delayMs = Math.floor(Math.random() * 6000) + 3000;
-    setTimeout(async () => {
-      try {
-        await evolution.sendReaction(
-          groupJid,
-          messageId,
-          reactionChosen!,
-          instanceName,
-          false,
-          participant
-        );
+    // Dispara reação com delay orgânico persistida em fila de ações pendentes
+    const delayMs =
+      process.env.VITEST === "true" || process.env.NODE_ENV === "test"
+        ? 15
+        : Math.floor(Math.random() * 6000) + 3000;
+    const reactAction = await enqueuePendingWarmupAction(clientId, {
+      type: "react",
+      dueAt: Date.now() + delayMs,
+      actorInstance: instanceName,
+      peerInstance: groupJid,
+      actorPhone: "",
+      peerPhone: groupJid,
+      targetJid: groupJid,
+      messageId,
+      delayMs,
+      emoji: reactionChosen,
+      participant,
+    }).catch(() => null);
 
-        await logWarmupAction({
-          client_id: clientId,
-          sender_instance: instanceName,
-          receiver_instance: groupJid,
-          message_text: `Reagiu com ${reactionChosen} a mensagem no grupo de aquecimento`,
-          action_type: "reaction",
-          details: { groupJid, participant, emoji: reactionChosen },
-        });
+    const reactTimer = setTimeout(async () => {
+      try {
+        if (reactAction?.id) {
+          const ran = await claimAndRunPendingWarmupAction(clientId, reactAction.id);
+          if (!ran) return;
+        } else {
+          await evolution.sendReaction(
+            groupJid,
+            messageId,
+            reactionChosen!,
+            instanceName,
+            false,
+            participant
+          );
+          await logWarmupAction({
+            client_id: clientId,
+            sender_instance: instanceName,
+            receiver_instance: groupJid,
+            message_text: `Reagiu com ${reactionChosen} a mensagem no grupo de aquecimento`,
+            action_type: "reaction",
+            details: { groupJid, participant, emoji: reactionChosen },
+          });
+        }
 
         let syncedReactionCount = nextReactionsCount;
         try {
@@ -549,6 +610,9 @@ export async function processIncomingGroupMessage(params: {
           .eq("group_jid", groupJid);
       } catch {}
     }, delayMs);
+    if (typeof (reactTimer as { unref?: () => void }).unref === "function") {
+      (reactTimer as { unref: () => void }).unref();
+    }
 
     return { handled: true, action: "reacted", reaction: reactionChosen };
   }
@@ -1076,10 +1140,11 @@ export async function checkProxyIpIntel(
  */
 export function isWarmupGroupDead(
   group: Pick<WarmupGroup, "status" | "last_activity_at" | "created_at" | "total_messages_received">,
-  nowMs = Date.now()
+  nowMs = Date.now(),
+  deadHours = 72
 ): boolean {
   if (!group || group.status !== "active") return false;
-  const thresholdMs = 72 * 60 * 60 * 1000;
+  const thresholdMs = Math.max(1, deadHours) * 60 * 60 * 1000;
   if (group.last_activity_at) {
     const lastMs = new Date(group.last_activity_at).getTime();
     return Number.isFinite(lastMs) && nowMs - lastMs > thresholdMs;
@@ -1089,6 +1154,324 @@ export function isWarmupGroupDead(
     return Number.isFinite(createdMs) && nowMs - createdMs > thresholdMs;
   }
   return false;
+}
+
+const INTERNAL_GROUP_SUBJECTS = [
+  "Comunidade Empreendedores BR",
+  "Networking & Negócios Locais",
+  "Grupo Dicas do Dia",
+  "Troca de Ideias & Café",
+  "Rotina & Produtividade",
+];
+
+const INTERNAL_GROUP_CASUAL_LINES = [
+  "Bom dia pessoal! Tudo tranquilo por aí hoje?",
+  "Boa tarde galera, semana corrida mas produtiva!",
+  "Alguém aí acompanhou as novidades de hoje?",
+  "Ótimo dia para todos, foco total por aqui 💪",
+  "Passando só pra desejar uma excelente tarde pra turma!",
+];
+
+/**
+ * Descobre grupos em que o chip já participa via Evolution `fetchAllGroups`,
+ * registrando-os como grupos de aquecimento para leitura/reação sem depender de links manuais.
+ */
+export async function discoverExistingGroupsForChip(
+  clientId: string,
+  instanceName: string
+): Promise<{ discovered: number; errors: string[] }> {
+  const errors: string[] = [];
+  let discovered = 0;
+  if (!clientId || !instanceName) return { discovered: 0, errors };
+
+  try {
+    const fetched = await evolution.fetchAllGroups(instanceName, false);
+    if (!Array.isArray(fetched) || fetched.length === 0) return { discovered: 0, errors };
+
+    const { data: existingGroups } = await supabaseAdmin
+      .from("whatsapp_warmup_groups")
+      .select("id, group_jid")
+      .eq("client_id", clientId);
+
+    const groupIdByJid = new Map<string, string>();
+    for (const row of existingGroups || []) {
+      if (row?.group_jid && row?.id) groupIdByJid.set(String(row.group_jid), String(row.id));
+    }
+
+    const nowIso = new Date().toISOString();
+    for (const g of fetched.slice(0, 15)) {
+      if (!g?.id || !g.id.includes("@g.us")) continue;
+      if (g.restrict || g.announce) continue;
+
+      let groupId = groupIdByJid.get(g.id);
+      if (!groupId) {
+        const pseudoCode = `discovered_${g.id.replace(/[^a-z0-9]/gi, "").slice(0, 24)}`;
+        const insertPayload: Record<string, unknown> = {
+          client_id: clientId,
+          invite_url: `https://chat.whatsapp.com/${pseudoCode}`,
+          invite_code: pseudoCode,
+          group_jid: g.id,
+          name: g.subject || "Grupo Descoberto",
+          member_count: g.size || 2,
+          status: "active",
+          origin: "external",
+          last_activity_at: nowIso,
+          updated_at: nowIso,
+        };
+        let { data: inserted, error: insErr } = await supabaseAdmin
+          .from("whatsapp_warmup_groups")
+          .insert(insertPayload)
+          .select("id")
+          .maybeSingle();
+        if (insErr && (String(insErr.code || "") === "42703" || String(insErr.code || "") === "PGRST204")) {
+          const { origin: _orig, ...legacyPayload } = insertPayload;
+          const retry = await supabaseAdmin
+            .from("whatsapp_warmup_groups")
+            .insert(legacyPayload)
+            .select("id")
+            .maybeSingle();
+          inserted = retry.data;
+          insErr = retry.error;
+        }
+        if (insErr) {
+          errors.push(`Falha ao importar ${g.id}: ${insErr.message}`);
+          continue;
+        }
+        groupId = (inserted as { id?: string } | null)?.id;
+        if (groupId) {
+          groupIdByJid.set(g.id, groupId);
+          discovered += 1;
+        }
+      }
+
+      if (groupId) {
+        await supabaseAdmin
+          .from("whatsapp_warmup_group_members")
+          .upsert(
+            {
+              client_id: clientId,
+              group_id: groupId,
+              instance_name: instanceName,
+              status: "joined",
+              joined_at: nowIso,
+            },
+            { onConflict: "group_id,instance_name" }
+          );
+      }
+    }
+  } catch (err: unknown) {
+    errors.push(err instanceof Error ? err.message : String(err));
+  }
+  return { discovered, errors };
+}
+
+/**
+ * Remove chips de grupos ativos silenciosos há mais de `deadHours` (padrão 5 dias = 120h)
+ * e marca o grupo como `left` para não manter peso morto na sessão.
+ */
+export async function cleanupDeadWarmupGroups(
+  clientId: string,
+  nowMs = Date.now(),
+  deadHours = 120
+): Promise<{ leftGroups: number }> {
+  let leftGroups = 0;
+  try {
+    const { data: activeGroups } = await supabaseAdmin
+      .from("whatsapp_warmup_groups")
+      .select("*")
+      .eq("client_id", clientId)
+      .eq("status", "active");
+
+    if (!Array.isArray(activeGroups) || activeGroups.length === 0) return { leftGroups: 0 };
+
+    const nowIso = new Date(nowMs).toISOString();
+    for (const g of activeGroups as WarmupGroup[]) {
+      if (!isWarmupGroupDead(g, nowMs, deadHours)) continue;
+
+      if (g.group_jid) {
+        const { data: members } = await supabaseAdmin
+          .from("whatsapp_warmup_group_members")
+          .select("instance_name")
+          .eq("client_id", clientId)
+          .eq("group_id", g.id)
+          .eq("status", "joined");
+
+        for (const m of members || []) {
+          if (m?.instance_name) {
+            await evolution.leaveGroup(g.group_jid, m.instance_name).catch(() => false);
+          }
+        }
+      }
+
+      await supabaseAdmin
+        .from("whatsapp_warmup_groups")
+        .update({
+          status: "left",
+          last_error: `auto_cleanup_dead_group_${deadHours}h`,
+          updated_at: nowIso,
+        })
+        .eq("id", g.id);
+
+      await supabaseAdmin
+        .from("whatsapp_warmup_group_members")
+        .update({ status: "left" })
+        .eq("group_id", g.id)
+        .eq("client_id", clientId);
+
+      if (g.group_jid) _groupJidCache.delete(g.group_jid);
+      leftGroups += 1;
+    }
+  } catch { /* best-effort */ }
+  return { leftGroups };
+}
+
+/**
+ * Ciclo autônomo de grupos internos da Colmeia:
+ * - Com >= 3 chips ativos com telefone conhecido, cria até 2 grupos internos orgânicos
+ * - Posta no máximo 1 mensagem casual a cada 4h por grupo ativo interno.
+ */
+export async function runInternalSwarmGroupCycle(
+  clientId: string,
+  nowMs = Date.now()
+): Promise<{ created: number; posted: number }> {
+  let created = 0;
+  let posted = 0;
+
+  try {
+    const { data: rawConfigs } = await supabaseAdmin
+      .from("whatsapp_warmup_configs")
+      .select("*")
+      .eq("client_id", clientId)
+      .eq("enabled", true)
+      .eq("is_quarantined", false);
+
+    const eligible = ((rawConfigs || []) as WarmupConfig[]).filter(
+      (c) => c.internal_groups_enabled !== false && Boolean(c.phone_number)
+    );
+    if (eligible.length < 3) return { created: 0, posted: 0 };
+
+    const { data: activeGroups } = await supabaseAdmin
+      .from("whatsapp_warmup_groups")
+      .select("*")
+      .eq("client_id", clientId)
+      .eq("status", "active");
+
+    const allActive = (activeGroups || []) as WarmupGroup[];
+    const internalGroups = allActive.filter(
+      (g) => g.origin === "internal_swarm" || String(g.invite_code || "").startsWith("internal_")
+    );
+
+    const nowIso = new Date(nowMs).toISOString();
+
+    if (internalGroups.length < 2) {
+      const sorted = [...eligible].sort(
+        (a, b) => (b.stage || 1) - (a.stage || 1) || (b.days_active || 1) - (a.days_active || 1)
+      );
+      const creator = sorted[0];
+      const peers = sorted.slice(1, Math.min(4, sorted.length));
+      const participantPhones = peers
+        .map((p) => String(p.phone_number || "").replace(/\D/g, ""))
+        .filter(Boolean);
+
+      if (creator && participantPhones.length >= 2) {
+        const subject =
+          INTERNAL_GROUP_SUBJECTS[Math.floor(Math.random() * INTERNAL_GROUP_SUBJECTS.length)];
+        const createdRes = await evolution.createGroup({
+          subject,
+          participants: participantPhones,
+          description: "Troca diária saudável",
+          instance: creator.instance_name,
+        });
+
+        if (createdRes.success && createdRes.groupJid) {
+          const code =
+            (await evolution.getGroupInviteCode(createdRes.groupJid, creator.instance_name)) ||
+            `internal_${Date.now().toString(36)}`;
+          const inviteCode = code.startsWith("internal_") ? code : `internal_${code}`;
+
+          const insertPayload: Record<string, unknown> = {
+            client_id: clientId,
+            invite_url: `https://chat.whatsapp.com/${code}`,
+            invite_code: inviteCode,
+            group_jid: createdRes.groupJid,
+            name: createdRes.subject || subject,
+            member_count: 1 + peers.length,
+            status: "active",
+            origin: "internal_swarm",
+            last_activity_at: nowIso,
+            updated_at: nowIso,
+          };
+          let { data: insertedGrp, error: insErr } = await supabaseAdmin
+            .from("whatsapp_warmup_groups")
+            .insert(insertPayload)
+            .select("*")
+            .maybeSingle();
+          if (insErr && (String(insErr.code || "") === "42703" || String(insErr.code || "") === "PGRST204")) {
+            const { origin: _orig, ...legacyPayload } = insertPayload;
+            const retry = await supabaseAdmin
+              .from("whatsapp_warmup_groups")
+              .insert(legacyPayload)
+              .select("*")
+              .maybeSingle();
+            insertedGrp = retry.data;
+            insErr = retry.error;
+          }
+
+          if (!insErr && insertedGrp?.id) {
+            created += 1;
+            const groupId = String(insertedGrp.id);
+            for (const memberChip of [creator, ...peers]) {
+              await supabaseAdmin.from("whatsapp_warmup_group_members").upsert(
+                {
+                  client_id: clientId,
+                  group_id: groupId,
+                  instance_name: memberChip.instance_name,
+                  status: "joined",
+                  joined_at: nowIso,
+                },
+                { onConflict: "group_id,instance_name" }
+              );
+            }
+            internalGroups.push(insertedGrp as WarmupGroup);
+          }
+        }
+      }
+    }
+
+    for (const grp of internalGroups) {
+      if (!grp.group_jid) continue;
+      const lastPost = _lastInternalSwarmGroupPostAt.get(grp.group_jid) || 0;
+      if (nowMs - lastPost < INTERNAL_SWARM_GROUP_POST_COOLDOWN_MS) continue;
+
+      const poster = eligible.find((c) => c.career_mode !== "rehab") || eligible[0];
+      if (!poster) continue;
+      const line =
+        INTERNAL_GROUP_CASUAL_LINES[Math.floor(Math.random() * INTERNAL_GROUP_CASUAL_LINES.length)];
+      try {
+        const sentRes = (await evolution.sendTextMessage(
+          grp.group_jid,
+          line,
+          poster.instance_name
+        )) as { key?: { id?: string }; id?: string; data?: { key?: { id?: string } } } | null;
+        registerWarmupSend(sentRes?.key?.id || sentRes?.data?.key?.id || sentRes?.id);
+        _lastInternalSwarmGroupPostAt.set(grp.group_jid, nowMs);
+        pruneMapToLimit(_lastInternalSwarmGroupPostAt, 1000);
+        posted += 1;
+
+        await logWarmupAction({
+          client_id: clientId,
+          sender_instance: poster.instance_name,
+          receiver_instance: grp.group_jid,
+          message_text: line,
+          action_type: "text",
+          details: { internal_swarm_group: true, group_name: grp.name },
+        });
+      } catch { /* non-fatal */ }
+      break; // Máximo 1 post interno por ciclo para naturalidade
+    }
+  } catch { /* best-effort */ }
+
+  return { created, posted };
 }
 
 export interface ClusterNetworkAnalysis {

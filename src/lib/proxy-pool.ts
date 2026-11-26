@@ -1807,3 +1807,89 @@ export async function rotateSingleInstanceProxy(
     probeFn,
   });
 }
+
+/**
+ * Watchdog preventivo de saúde de proxies ativos:
+ * testa periodicamente proxies com status `assigned`; se algum estiver offline/407,
+ * coloca na blacklist ('failed') e rotaciona automaticamente para o próximo proxy limpo
+ * antes que a instância caia ou tome erro na Evolution.
+ */
+export async function runAssignedProxyHealthWatchdog(opts?: {
+  probeFn?: ProxyConnectivityProbe;
+  maxChecks?: number;
+}): Promise<{
+  checked: number;
+  healthy: number;
+  rotated: number;
+  fallbackVps: number;
+  errors: string[];
+}> {
+  const probe = opts?.probeFn ?? testProxyEndpointConnectivity;
+  const maxChecks = Math.max(1, Math.min(50, opts?.maxChecks ?? 20));
+  const summary = { checked: 0, healthy: 0, rotated: 0, fallbackVps: 0, errors: [] as string[] };
+
+  try {
+    const { data: rows, error } = await supabaseAdmin
+      .from("proxy_pool")
+      .select("id, host, port, protocol, username, password, assigned_instance, assigned_client_id, fail_count")
+      .eq("status", "assigned")
+      .not("assigned_instance", "is", null)
+      .order("last_checked_at", { ascending: true })
+      .limit(maxChecks);
+
+    if (error || !Array.isArray(rows) || rows.length === 0) {
+      return summary;
+    }
+
+    const nowIso = new Date().toISOString();
+    for (const row of rows as Array<Record<string, unknown>>) {
+      const instanceName = String(row.assigned_instance || "").trim();
+      if (!instanceName) continue;
+      summary.checked += 1;
+
+      const parsed: ParsedProxyEntry = {
+        host: String(row.host || ""),
+        port: Number(row.port || 0),
+        protocol: (String(row.protocol || "http") as ParsedProxyEntry["protocol"]),
+        username: String(row.username || ""),
+        password: String(row.password || ""),
+      };
+
+      const check = await probe(parsed, 2500).catch((err: unknown) => ({
+        ok: false,
+        error: err instanceof Error ? err.message : "Probe falhou",
+      }));
+
+      if (check.ok) {
+        summary.healthy += 1;
+        await supabaseAdmin
+          .from("proxy_pool")
+          .update({ last_checked_at: nowIso, updated_at: nowIso })
+          .eq("id", row.id);
+        continue;
+      }
+
+      const reason = check.error || "Proxy offline no watchdog preventivo";
+      summary.errors.push(`${instanceName}: ${reason}`);
+      await blacklistInstanceProxy(instanceName, "failed", reason);
+      const clientId = row.assigned_client_id ? String(row.assigned_client_id) : null;
+      const rotated = await ensureProxyForInstance({
+        instanceName,
+        clientId,
+        reason: "rotation",
+        forWarmup: true,
+        probeFn: probe,
+      });
+
+      if (rotated.mode === "pool_assigned") {
+        summary.rotated += 1;
+      } else {
+        summary.fallbackVps += 1;
+      }
+    }
+  } catch (err: unknown) {
+    summary.errors.push(err instanceof Error ? err.message : String(err));
+  }
+
+  return summary;
+}

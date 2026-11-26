@@ -69,7 +69,7 @@ const navItems: NavItem[] = [
   { href: "/follow-up",      label: "Follow-up",        icon: Repeat,          feature: "followup" },
   { href: "/captador",       label: "Captador Maps",    icon: MapPin,          feature: "captador" },
   { href: "/whatsapp",       label: "WhatsApp",         icon: Smartphone,      feature: "whatsapp" },
-  { href: "/aquecer-chips",   label: "Aquecer Chips",    icon: Flame,           feature: "aquecer_chips" },
+  { href: "/aquecer-chips",   label: "Aquecer Chips",    icon: Flame,           feature: "aquecer_chips", adminOnly: true },
   { href: "/tokens",         label: "Tokens IA",        icon: Coins,           feature: "tokens" },
   { href: "/organizador",    label: "Organizador IA",   icon: BookOpen,        feature: "organizador" },
   { href: "/configuracoes",  label: "Configurações",    icon: Settings2,       feature: "configuracoes" },

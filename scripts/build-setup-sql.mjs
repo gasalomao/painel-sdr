@@ -30,6 +30,7 @@ const APPENDED_MIGRATIONS = [
   "028_whatsapp_warmup_swarm_groups.sql",
   "029_followup_reschedule.sql",
   "030_proxy_pool.sql",
+  "031_warmup_passport_and_mentor.sql",
 ];
 
 let sql = readFileSync(sqlPath, "utf8");

@@ -49,6 +49,19 @@ vi.mock("../warmup-engine", async (importOriginal) => {
 vi.mock("../warmup-groups", () => ({
   syncGroupMembershipForChips: mocks.syncGroups,
   hydrateChipProfile: mocks.hydrate,
+  cleanupDeadWarmupGroups: vi.fn(async () => 0),
+}));
+
+vi.mock("../warmup-admin-guard", () => ({
+  isTenantWarmupAdmin: vi.fn(async () => true),
+}));
+
+vi.mock("../warmup-self-healing", () => ({
+  runWarmupSelfHealingForTenant: vi.fn(async () => ({
+    checkedChips: 0,
+    actions: [],
+    issuesRemaining: 0,
+  })),
 }));
 
 vi.mock("@/lib/supabase_admin", () => ({

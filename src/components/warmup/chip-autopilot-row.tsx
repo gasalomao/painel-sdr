@@ -1,0 +1,476 @@
+"use client";
+
+import { useState } from "react";
+import {
+  AlertTriangle,
+  ArrowRightLeft,
+  CheckCircle2,
+  ChevronDown,
+  RefreshCw,
+  Send,
+  ShieldCheck,
+  WifiOff,
+} from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import { cn } from "@/lib/utils";
+import {
+  PURPOSE_METADATA,
+  STAGE_DEFAULTS,
+  type ExternalWarmupMode,
+  type WarmupConfig,
+  type WarmupPurpose,
+  type WarmupStage,
+} from "@/lib/warmup/warmup-types";
+import type { ExternalDiagnostic, InstanceItem } from "./types";
+
+const STAGE_LABEL: Record<WarmupStage, string> = {
+  1: "Fase 1 · Frio",
+  2: "Fase 2 · Morno",
+  3: "Fase 3 · Quente",
+  4: "Fase 4 · Blindado",
+};
+
+const PURPOSE_LABEL: Record<WarmupPurpose, string> = {
+  contingency: "Reserva",
+  inbound: "Receber leads",
+  outbound: "Prospecção",
+};
+
+const MMZAP_OPTIONS: Array<{ value: ExternalWarmupMode; label: string }> = [
+  { value: "off", label: "Off" },
+  { value: "receive_only", label: "Só receber" },
+  { value: "hybrid_quarantine", label: "Híbrido" },
+];
+
+export interface ChipAutopilotRowProps {
+  item: InstanceItem;
+  diagnostic?: ExternalDiagnostic;
+  isDirty: boolean;
+  isSaving: boolean;
+  isReauditing: boolean;
+  styles: Record<string, string>;
+  onToggleEnabled: (instanceName: string, nextEnabled: boolean) => void;
+  onChangeField: (
+    instanceName: string,
+    field: keyof WarmupConfig,
+    value: WarmupConfig[keyof WarmupConfig]
+  ) => void;
+  onSaveConfig: (instanceName: string) => void;
+  onChangeMmzapMode: (instanceName: string, mode: ExternalWarmupMode) => Promise<void>;
+  onReauditDay0: (instanceName: string) => void;
+  onOpenPairModal: (instanceName: string) => void;
+  onOpenTestModal: (instanceName: string) => void;
+}
+
+export function ChipAutopilotRow({
+  item,
+  diagnostic,
+  isDirty,
+  isSaving,
+  isReauditing,
+  styles,
+  onToggleEnabled,
+  onChangeField,
+  onSaveConfig,
+  onChangeMmzapMode,
+  onReauditDay0,
+  onOpenPairModal,
+  onOpenTestModal,
+}: ChipAutopilotRowProps) {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [mmzapBusy, setMmzapBusy] = useState(false);
+
+  const cfg = item.config;
+  const instName = item.instance_name;
+  const isConnected =
+    item.connection_status === "open" || item.connection_status === "connected";
+  const stage = (cfg.stage || 1) as WarmupStage;
+  const purpose = (cfg.purpose || "outbound") as WarmupPurpose;
+  const purposeMeta = PURPOSE_METADATA[purpose] || PURPOSE_METADATA.outbound;
+  const mmzapMode = (cfg.external_warmup_mode || "off") as ExternalWarmupMode;
+  const mmzapToday =
+    diagnostic?.inbound_today ?? cfg.external_warmup_inbound_today ?? 0;
+
+  const isQuarantined = Boolean(cfg.is_quarantined);
+  const hasDay0Warnings = Boolean(item.day0_warnings && item.day0_warnings.length > 0);
+  const hasNetworkWarnings = Boolean(
+    item.network_warnings && item.network_warnings.length > 0
+  );
+  const needsAttention =
+    !isConnected || isQuarantined || hasDay0Warnings || hasNetworkWarnings;
+
+  const statusPill = !isConnected
+    ? {
+        label: "Reconectar QR",
+        cls: "border-red-500/40 bg-red-500/15 text-red-200",
+        dot: "bg-red-400",
+      }
+    : isQuarantined
+      ? {
+          label: "Quarentena",
+          cls: "border-amber-500/40 bg-amber-500/15 text-amber-200",
+          dot: "bg-amber-400",
+        }
+      : cfg.enabled
+        ? {
+            label: "Aquecendo",
+            cls: "border-emerald-500/35 bg-emerald-500/15 text-emerald-200",
+            dot: "bg-emerald-400",
+          }
+        : {
+            label: "Pausado",
+            cls: "border-[#3b483e] bg-[#141a15] text-neutral-300",
+            dot: "bg-neutral-500",
+          };
+
+  const proxySummary = item.proxy?.enabled && item.proxy?.host
+    ? `Proxy ${item.proxy.host}`
+    : "VPS direta";
+
+  const webhookOk = diagnostic ? diagnostic.webhook_ok : isConnected;
+
+  const handleMmzapClick = async (mode: ExternalWarmupMode) => {
+    if (mode === mmzapMode || mmzapBusy) return;
+    setMmzapBusy(true);
+    try {
+      await onChangeMmzapMode(instName, mode);
+    } finally {
+      setMmzapBusy(false);
+    }
+  };
+
+  return (
+    <article className="px-5 py-4 space-y-3">
+      {/* Linha principal: Identificação + Status + Toggle */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0 space-y-1">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <span
+              className={cn("h-2.5 w-2.5 rounded-full shrink-0", statusPill.dot)}
+              aria-hidden="true"
+            />
+            <span className="text-base font-semibold text-[#edf2ee] truncate">
+              {instName}
+            </span>
+            {item.phone_number && (
+              <span className="text-xs font-mono tabular-nums text-[#a5b1a8]">
+                +{item.phone_number}
+              </span>
+            )}
+            <span
+              className={cn(
+                "inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-medium",
+                statusPill.cls
+              )}
+            >
+              {statusPill.label}
+            </span>
+            {item.orphan && (
+              <span className="inline-flex items-center rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-200">
+                Instância órfã
+              </span>
+            )}
+          </div>
+
+          <p className="text-xs text-[#a5b1a8] tabular-nums">
+            Dia {cfg.days_active || 1} · {STAGE_LABEL[stage]} · Saúde{" "}
+            <span className="text-[#edf2ee] font-medium">{cfg.health_score ?? 100}%</span> ·{" "}
+            <span className="text-[#edf2ee] font-medium">
+              {cfg.sent_today || 0}/{cfg.daily_target || STAGE_DEFAULTS[stage].dailyTarget}
+            </span>{" "}
+            enviadas · {cfg.received_today || 0} recebidas
+            {cfg.career_mode === "rehab" && " · Modo Reabilitação"}
+          </p>
+        </div>
+
+        <div className="flex items-center gap-3 shrink-0">
+          <label className="inline-flex items-center gap-2 text-xs text-[#cedbd1] cursor-pointer min-h-[38px]">
+            <span>{cfg.enabled ? "Ligado" : "Pausado"}</span>
+            <Switch
+              checked={Boolean(cfg.enabled)}
+              onCheckedChange={(val) => onToggleEnabled(instName, val)}
+              aria-label={`Alternar aquecimento de ${instName}`}
+            />
+          </label>
+
+          <button
+            type="button"
+            onClick={() => setAdvancedOpen((prev) => !prev)}
+            aria-expanded={advancedOpen}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[#303a32] bg-[#141a15] px-3 py-2 text-xs font-medium text-[#d3ded6] hover:border-[#4c5c50] hover:text-white transition-colors min-h-[38px]"
+          >
+            <span>Ajustes</span>
+            <ChevronDown
+              className={cn(
+                "w-3.5 h-3.5 transition-transform",
+                advancedOpen && "rotate-180"
+              )}
+            />
+          </button>
+        </div>
+      </div>
+
+      {/* Linha de sinais operacionais + Escudo MMZap */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5 text-xs">
+        <div className="flex flex-wrap items-center gap-2">
+          <span
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 tabular-nums",
+              hasNetworkWarnings
+                ? "border-amber-500/35 bg-amber-500/10 text-amber-200"
+                : "border-[#303a32] bg-[#131914] text-[#c2cfc6]"
+            )}
+          >
+            {proxySummary}
+          </span>
+
+          <span
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1",
+              webhookOk
+                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
+                : "border-amber-500/35 bg-amber-500/10 text-amber-200"
+            )}
+          >
+            {webhookOk ? (
+              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+            ) : (
+              <WifiOff className="w-3.5 h-3.5 shrink-0" />
+            )}
+            {webhookOk ? "Webhook ativo" : "Webhook pendente"}
+          </span>
+
+          <span className="inline-flex items-center rounded-md border border-[#303a32] bg-[#131914] px-2.5 py-1 text-[#c2cfc6]">
+            Uso: {PURPOSE_LABEL[purpose]}
+          </span>
+
+          {(item.passport?.ban_count || 0) > 0 && (
+            <span className="inline-flex items-center rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-amber-200 tabular-nums">
+              {item.passport?.ban_count} queda(s) no histórico
+            </span>
+          )}
+        </div>
+
+        {/* Controle MMZap Receive-Only */}
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center gap-1 text-[11px] text-[#a5b1a8]">
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+            MMZap:
+          </span>
+          <div
+            role="group"
+            aria-label={`Modo MMZap para ${instName}`}
+            className="inline-flex rounded-lg border border-[#303a32] bg-[#111712] p-0.5"
+          >
+            {MMZAP_OPTIONS.map((opt) => {
+              const active = mmzapMode === opt.value;
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  disabled={mmzapBusy}
+                  onClick={() => void handleMmzapClick(opt.value)}
+                  className={cn(
+                    "px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors",
+                    active
+                      ? "bg-[#223528] text-emerald-200 border border-emerald-500/40"
+                      : "text-[#a5b1a8] hover:text-white border border-transparent"
+                  )}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
+          <span className="text-[11px] font-mono tabular-nums text-[#a5b1a8]">
+            {mmzapToday} hoje
+          </span>
+        </div>
+      </div>
+
+      {/* Barra condicional de atenção — só aparece se exigir ação humana */}
+      {needsAttention && (
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-lg border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-300 shrink-0 mt-0.5" />
+            <div className="space-y-0.5">
+              {!isConnected && (
+                <p>
+                  Chip desconectado no WhatsApp ({item.connection_status}). Escaneie o QR Code para retomar automaticamente.
+                </p>
+              )}
+              {isQuarantined && (
+                <p>
+                  Em quarentena preventiva{cfg.quarantine_reason ? `: ${cfg.quarantine_reason}` : "."}
+                </p>
+              )}
+              {item.day0_warnings?.slice(0, 2).map((warn, idx) => (
+                <p key={`d0-${idx}`}>{warn}</p>
+              ))}
+              {item.network_warnings?.slice(0, 2).map((warn, idx) => (
+                <p key={`net-${idx}`}>{warn}</p>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            {!isConnected && (
+              <a
+                href="/whatsapp"
+                className="inline-flex items-center rounded-md border border-amber-400/40 bg-[#1a1811] px-2.5 py-1 text-[11px] font-medium text-amber-200 hover:bg-amber-500/20"
+              >
+                Abrir WhatsApp / QR
+              </a>
+            )}
+            {hasDay0Warnings && (
+              <button
+                type="button"
+                disabled={isReauditing}
+                onClick={() => onReauditDay0(instName)}
+                className="inline-flex items-center gap-1 rounded-md border border-amber-400/40 bg-[#1a1811] px-2.5 py-1 text-[11px] font-medium text-amber-200 hover:bg-amber-500/20"
+              >
+                <RefreshCw
+                  className={cn("w-3 h-3", isReauditing && "animate-spin")}
+                />
+                {isReauditing ? "Auditando..." : "Reauditar"}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Gaveta progressiva: Ajustes avançados */}
+      {advancedOpen && (
+        <div className="pt-3 border-t border-[#303a32] space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className={styles.fieldGroup}>
+              <label htmlFor={`purpose-${instName}`} className={styles.fieldLabel}>
+                Finalidade
+              </label>
+              <select
+                id={`purpose-${instName}`}
+                value={purpose}
+                onChange={(e) =>
+                  onChangeField(instName, "purpose", e.target.value as WarmupPurpose)
+                }
+                className={styles.fieldSelect}
+              >
+                <option value="outbound">Prospecção (teto 70/dia)</option>
+                <option value="inbound">Receber leads (teto 40/dia)</option>
+                <option value="contingency">Reserva (teto 20/dia)</option>
+              </select>
+              <span className="text-[11px] text-[#95a499]">{purposeMeta.description}</span>
+            </div>
+
+            <div className={styles.fieldGroup}>
+              <label htmlFor={`stage-${instName}`} className={styles.fieldLabel}>
+                Fase de aquecimento
+              </label>
+              <select
+                id={`stage-${instName}`}
+                value={stage}
+                onChange={(e) =>
+                  onChangeField(instName, "stage", Number(e.target.value) as WarmupStage)
+                }
+                className={styles.fieldSelect}
+              >
+                <option value={1}>Fase 1 · Frio (10/dia)</option>
+                <option value={2}>Fase 2 · Morno (25/dia)</option>
+                <option value={3}>Fase 3 · Quente (50/dia)</option>
+                <option value={4}>Fase 4 · Blindado (80/dia)</option>
+              </select>
+            </div>
+
+            <div className={styles.fieldGroup}>
+              <label htmlFor={`target-${instName}`} className={styles.fieldLabel}>
+                Meta diária
+              </label>
+              <input
+                id={`target-${instName}`}
+                type="number"
+                min={1}
+                max={200}
+                value={cfg.daily_target || 10}
+                onChange={(e) =>
+                  onChangeField(instName, "daily_target", Number(e.target.value) || 10)
+                }
+                className={styles.fieldInput}
+              />
+            </div>
+
+            <div className={styles.fieldGroup}>
+              <label htmlFor={`hours-${instName}`} className={styles.fieldLabel}>
+                Janela (início / fim)
+              </label>
+              <div id={`hours-${instName}`} className="grid grid-cols-2 gap-2">
+                <input
+                  type="number"
+                  min={0}
+                  max={23}
+                  aria-label={`Hora inicial de ${instName}`}
+                  value={cfg.allowed_start_hour ?? 8}
+                  onChange={(e) =>
+                    onChangeField(instName, "allowed_start_hour", Number(e.target.value))
+                  }
+                  className={styles.fieldInput}
+                />
+                <input
+                  type="number"
+                  min={1}
+                  max={24}
+                  aria-label={`Hora final de ${instName}`}
+                  value={cfg.allowed_end_hour ?? 21}
+                  onChange={(e) =>
+                    onChangeField(instName, "allowed_end_hour", Number(e.target.value))
+                  }
+                  className={styles.fieldInput}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => onOpenPairModal(instName)}
+                className={styles.secondaryAction}
+              >
+                <ArrowRightLeft className="w-3.5 h-3.5 text-emerald-400" />
+                Aquecer em par
+              </button>
+              <button
+                type="button"
+                onClick={() => onOpenTestModal(instName)}
+                className={styles.secondaryAction}
+              >
+                <Send className="w-3.5 h-3.5" />
+                Testar conversa
+              </button>
+              <a
+                href="/whatsapp"
+                className="text-xs text-[#a5b1a8] hover:text-emerald-300 underline px-2"
+              >
+                Configurar proxy
+              </a>
+            </div>
+
+            <div className="flex items-center gap-3">
+              {isDirty && (
+                <span className="text-xs text-amber-300">Alterações pendentes</span>
+              )}
+              <button
+                type="button"
+                disabled={isSaving || !isDirty}
+                onClick={() => onSaveConfig(instName)}
+                className={isDirty ? styles.primaryAction : styles.secondaryAction}
+              >
+                {isSaving ? "Salvando..." : isDirty ? "Salvar ajustes" : "Salvo"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </article>
+  );
+}

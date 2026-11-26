@@ -156,45 +156,95 @@
   color: #edf2ee;
 }
 
-/* Resumo / Métricas Rápidas */
-.overviewGrid {
+/* Faixa Única de Resumo Operacional (sem cards repetidos) */
+.summaryStrip {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 16px;
-  margin-bottom: 28px;
-}
-
-.overviewCard {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 18px 20px;
-  background: #181d19;
   border: 1px solid #303a32;
   border-radius: 12px;
+  background: #181d19;
+  margin-bottom: 24px;
+  overflow: hidden;
 }
 
-.overviewLabel {
+.summaryCell {
   display: flex;
-  align-items: center;
-  gap: 7px;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px 18px;
+  border-right: 1px solid #303a32;
+}
+
+.summaryCell:last-child {
+  border-right: none;
+}
+
+.summaryLabel {
   font-size: 12px;
   font-weight: 500;
   color: #a5b1a8;
 }
 
-.overviewValue {
-  font-size: 26px;
-  line-height: 1.1;
+.summaryValue {
+  font-size: 24px;
+  line-height: 1.15;
   font-weight: 600;
   color: #edf2ee;
   font-variant-numeric: tabular-nums;
-  letter-spacing: -0.025em;
+  letter-spacing: -0.02em;
 }
 
-.overviewSubtext {
+.summarySubtext {
   font-size: 11px;
-  color: #87958b;
+  color: #95a499;
+  font-variant-numeric: tabular-nums;
+}
+
+.moreMenu {
+  position: relative;
+}
+
+.moreDropdown {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 30;
+  min-width: 220px;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid #3b483e;
+  background: #181d19;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.moreMenuItem {
+  width: 100%;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  border: none;
+  background: transparent;
+  color: #d3ded6;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.moreMenuItem:hover:not(:disabled) {
+  background: #262e28;
+  color: #edf2ee;
+}
+
+.moreMenuItem:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* Painel / Card Base */
@@ -792,12 +842,21 @@
     padding-right: 10px;
     justify-content: center;
   }
-  .overviewGrid {
+  .summaryStrip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 12px;
   }
-  .overviewValue {
-    font-size: 22px;
+  .summaryCell:nth-child(odd) {
+    border-right: 1px solid #303a32;
+  }
+  .summaryCell:nth-child(even) {
+    border-right: none;
+  }
+  .summaryCell:nth-child(1),
+  .summaryCell:nth-child(2) {
+    border-bottom: 1px solid #303a32;
+  }
+  .summaryValue {
+    font-size: 20px;
   }
   .explainerHeader {
     flex-direction: column;

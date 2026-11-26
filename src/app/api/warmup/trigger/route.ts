@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireClientId } from "@/lib/tenant";
-import { requireFeatureAccess } from "@/lib/saas-limits";
+import { requireWarmupAdminAccess } from "@/lib/warmup/warmup-admin-guard";
 import {
   triggerManualWarmup,
   triggerMutualWarmup,
@@ -14,7 +14,7 @@ export const dynamic = "force-dynamic";
 export async function POST(req: NextRequest) {
   const auth = await requireClientId(req);
   if (!auth.ok) return auth.response;
-  const denied = requireFeatureAccess(auth, "aquecer_chips");
+  const denied = requireWarmupAdminAccess(auth);
   if (denied) return denied;
 
   const clientId = auth.clientId;

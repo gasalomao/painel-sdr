@@ -26,6 +26,7 @@ import { checkTenantAiQuota, isClientActiveCached, isClientAdminCached } from "@
 import {
   evaluateWeekendB2BGuard,
   isAutoPoolInstance,
+  type WeekendB2BGuardMode,
   type WeekendB2BGuardResult,
 } from "@/lib/campaign-pool";
 import { getBrazilPhoneVariants } from "@/lib/jid-utils";
@@ -75,8 +76,43 @@ export function extractBrazilDdd(phoneOrJid?: string | null): string | null {
  * - Saúde < 40: BLOQUEADO até se recuperar no aquecimento.
  * - Saúde 40..74: Freio Dinâmico (cota diária/horária reduzida pela metade e mais pulsos simbióticos).
  */
-export function getColdOutreachPolicyForStage(stage: number, healthScore = 100): ColdOutreachPolicy {
+export type ColdOutreachPolicyOptions = {
+  daysActive?: number;
+  careerMode?: string | null;
+  coldOutreachLockedUntil?: string | null;
+  nowMs?: number;
+};
+
+export function getColdOutreachPolicyForStage(
+  stage: number,
+  healthScore = 100,
+  opts?: ColdOutreachPolicyOptions
+): ColdOutreachPolicy {
   const normalizedStage = Math.max(1, Math.min(4, Math.floor(Number(stage) || 1)));
+  const nowMs = opts?.nowMs ?? Date.now();
+  if (opts?.careerMode === "rehab") {
+    return {
+      allowed: false,
+      dailyColdCap: 0,
+      hourlyColdCap: 0,
+      minSafeIntervalSec: 300,
+      symbioticEveryN: 2,
+      reason: "post_ban_rehab",
+    };
+  }
+  if (opts?.coldOutreachLockedUntil) {
+    const lockMs = new Date(opts.coldOutreachLockedUntil).getTime();
+    if (Number.isFinite(lockMs) && lockMs > nowMs) {
+      return {
+        allowed: false,
+        dailyColdCap: 0,
+        hourlyColdCap: 0,
+        minSafeIntervalSec: 300,
+        symbioticEveryN: 2,
+        reason: "post_ban_rehab",
+      };
+    }
+  }
   if (normalizedStage <= 1) {
     return {
       allowed: false,
@@ -85,6 +121,16 @@ export function getColdOutreachPolicyForStage(stage: number, healthScore = 100):
       minSafeIntervalSec: 300,
       symbioticEveryN: 2,
       reason: "nursery_stage_1",
+    };
+  }
+  if (normalizedStage === 2 && opts?.daysActive !== undefined && opts.daysActive < 4) {
+    return {
+      allowed: false,
+      dailyColdCap: 0,
+      hourlyColdCap: 0,
+      minSafeIntervalSec: 300,
+      symbioticEveryN: 2,
+      reason: "insufficient_active_days",
     };
   }
   if (healthScore < 40) {
@@ -415,6 +461,74 @@ export function getColdSendCounts(
   _coldSendTimestampsByInstance.set(instanceName, list);
   const hourlyCount = list.filter((ts) => ts > oneHourAgo).length;
   return { hourlyCount, dailyCount: list.length };
+}
+
+/**
+ * Freio Diário de Capacidade de Prévias (Método Mentor):
+ * pausa o disparo frio assim que a equipe atinge a cota máxima diária de prévias aceitas/agendadas,
+ * impedindo acúmulo de promessas que o operador não conseguirá produzir no mesmo ciclo.
+ */
+export async function checkDailyPreviewCapacityBrake(
+  clientId: string,
+  maxDailyPreviews: number,
+  now: Date = new Date()
+): Promise<{ blocked: boolean; todayCount: number; limit: number; reason?: string }> {
+  const limit = Math.max(0, Math.floor(Number(maxDailyPreviews) || 0));
+  if (!clientId || limit <= 0) {
+    return { blocked: false, todayCount: 0, limit };
+  }
+
+  const spDay = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(now);
+  const startOfDayIso = new Date(`${spDay}T00:00:00-03:00`).toISOString();
+
+  let contactsCount = 0;
+  let leadsCount = 0;
+  let queuedCount = 0;
+
+  try {
+    const { data: cRows } = await supabase
+      .from("contacts")
+      .select("id")
+      .eq("client_id", clientId)
+      .gte("preview_accepted_at", startOfDayIso);
+    if (Array.isArray(cRows)) contactsCount = cRows.length;
+  } catch { /* col opcional sem 031 */ }
+
+  try {
+    const { data: lRows } = await supabase
+      .from("leads_extraidos")
+      .select("id")
+      .eq("client_id", clientId)
+      .gte("previa_solicitada_em", startOfDayIso);
+    if (Array.isArray(lRows)) leadsCount = lRows.length;
+  } catch { /* opcional */ }
+
+  try {
+    const { data: qRows } = await supabase
+      .from("scheduled_preview_deliveries")
+      .select("id, status")
+      .eq("client_id", clientId)
+      .gte("created_at", startOfDayIso);
+    if (Array.isArray(qRows)) {
+      queuedCount = qRows.filter((r) => (r as { status?: string }).status !== "cancelled").length;
+    }
+  } catch { /* opcional */ }
+
+  const todayCount = Math.max(contactsCount, leadsCount, queuedCount);
+  if (todayCount >= limit) {
+    return {
+      blocked: true,
+      todayCount,
+      limit,
+      reason: "daily_preview_capacity_reached",
+    };
+  }
+  return { blocked: false, todayCount, limit };
 }
 
 export function recordColdOutreachSend(
@@ -1074,10 +1188,24 @@ export async function resolveHealthyCampaignChip(
       hydrateZeroReplyAndMixerIfNeeded(clientId, nowMs),
     ]);
 
-    const { data: warmupRows, error } = await supabase
+    let { data: warmupRows, error } = await supabase
       .from("whatsapp_warmup_configs")
-      .select("instance_name, phone_number, enabled, stage, health_score, is_quarantined, quarantine_until, purpose, sent_today")
+      .select("instance_name, phone_number, enabled, stage, days_active, health_score, is_quarantined, quarantine_until, purpose, sent_today, career_mode, cold_outreach_locked_until")
       .eq("client_id", clientId);
+
+    if (
+      error &&
+      (String(error.code || "") === "42703" ||
+        String(error.code || "") === "PGRST204" ||
+        /column/i.test(String(error.message || "")))
+    ) {
+      const legacyRes = await supabase
+        .from("whatsapp_warmup_configs")
+        .select("instance_name, phone_number, enabled, stage, health_score, is_quarantined, quarantine_until, purpose, sent_today")
+        .eq("client_id", clientId);
+      warmupRows = legacyRes.data as typeof warmupRows;
+      error = legacyRes.error;
+    }
 
     const { data: connRows } = await supabase
       .from("channel_connections")
@@ -1119,7 +1247,12 @@ export async function resolveHealthyCampaignChip(
         new Date(String(row.quarantine_until)).getTime() > nowMs;
       const zeroReplyUntil = _zeroReplyBrakeUntil.get(inst) || 0;
       const normalizedStage = Math.max(1, Math.min(4, Math.floor(Number(row.stage || 1))));
-      const policy = getColdOutreachPolicyForStage(normalizedStage, Number(row.health_score ?? 100));
+      const policy = getColdOutreachPolicyForStage(normalizedStage, Number(row.health_score ?? 100), {
+        daysActive: row.days_active !== undefined ? Number(row.days_active) : undefined,
+        careerMode: row.career_mode ?? null,
+        coldOutreachLockedUntil: row.cold_outreach_locked_until ?? null,
+        nowMs,
+      });
       const { hourlyCount, dailyCount } = getColdSendCounts(inst, nowMs);
       const warmupSentToday = Math.max(0, Number(row.sent_today || 0));
       const combinedCeiling = STAGE_COMBINED_DAILY_CAP[normalizedStage] ?? 90;
@@ -1462,28 +1595,33 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
     return "out_of_hours";
   }
 
-  let weekendGuardEnabled = Boolean((c as any).weekend_guard);
-  if (!weekendGuardEnabled && (c as any).automation_id) {
+  let weekendGuardMode: WeekendB2BGuardMode = Boolean((c as any).weekend_guard);
+  if (!weekendGuardMode && (c as any).automation_id) {
     try {
       const { data: autoRow } = await supabase
         .from("automations")
         .select("scrape_filters")
         .eq("id", (c as any).automation_id)
         .maybeSingle();
-      weekendGuardEnabled = Boolean(autoRow?.scrape_filters?.weekend_guard);
+      const rawWg = autoRow?.scrape_filters?.weekend_guard;
+      weekendGuardMode = rawWg === "sunday_only" ? "sunday_only" : Boolean(rawWg);
     } catch {}
   }
-  if (!weekendGuardEnabled) {
+  if (!weekendGuardMode) {
     try {
       const { data: wgCfg } = await supabase
         .from("app_settings")
         .select("value")
         .eq("key", `campaign_weekend_guard:${c.id}`)
         .maybeSingle();
-      weekendGuardEnabled = wgCfg?.value === "true" || wgCfg?.value === "1";
+      if (wgCfg?.value === "sunday_only") {
+        weekendGuardMode = "sunday_only";
+      } else {
+        weekendGuardMode = wgCfg?.value === "true" || wgCfg?.value === "1";
+      }
     } catch {}
   }
-  const weekendGuard = evaluateWeekendB2BGuard(weekendGuardEnabled);
+  const weekendGuard = evaluateWeekendB2BGuard(weekendGuardMode);
   if (!weekendGuard.allowed) {
     const msg = "📅 Modo Comercial B2B ativo — disparos frios pausados aos domingos para preservar reputação; retoma na segunda-feira.";
     if (shouldEmitCampaignWarning(campaignId, "weekend_b2b", msg)) {
@@ -1491,6 +1629,18 @@ async function processNextTarget(campaignId: string): Promise<"continue" | "done
       await addCampaignLog(campaignId, msg, "warning");
     }
     return "out_of_hours";
+  }
+
+  const maxDailyPreviews = Number((c as any).max_daily_previews || 0);
+  if (maxDailyPreviews > 0) {
+    const previewBrake = await checkDailyPreviewCapacityBrake(clientId, maxDailyPreviews);
+    if (previewBrake.blocked) {
+      const msg = `🛑 Freio Diário de Prévias atingido (${previewBrake.todayCount}/${previewBrake.limit} prévias hoje) — disparos pausados até amanhã para garantir entrega no X1.`;
+      if (shouldEmitCampaignWarning(campaignId, "daily_preview_capacity_reached", msg)) {
+        await addCampaignLog(campaignId, msg, "warning");
+      }
+      return "out_of_hours";
+    }
   }
 
   // ───────── GATE ATÔMICO DE INTERVALO (anti-burst) ─────────

@@ -17,6 +17,7 @@ import {
 } from "@/lib/warmup/warmup-groups";
 import { handleIncomingOptOutIfDetected } from "@/lib/opt-out";
 import { detectWarmupPeerTraffic } from "@/lib/warmup/warmup-firewall";
+import { checkExternalWarmupInbound } from "@/lib/warmup/warmup-external-shield";
 
 export const dynamic = 'force-dynamic';
 
@@ -685,6 +686,35 @@ export async function POST(req: NextRequest) {
             reason: warmupCheck.reason || "warmup_peer_traffic",
             peer_instance: warmupCheck.peerInstance || null,
           });
+        }
+
+        // 2b. Escudo de Aquecimento Externo (MMZap receive_only / hybrid_quarantine):
+        // Bloqueia mensagens de desconhecidos do aquecimento externo antes de criar contato/sessão ou acionar IA,
+        // preservando 100% dos leads reais do CRM/campanha e nunca enviando resposta automática de volta.
+        try {
+          const extShield = await checkExternalWarmupInbound({
+            clientId,
+            instanceName,
+            remoteJid,
+            remoteJidAlt,
+            senderName: pushName,
+            messageId: finalId,
+            messageText: text,
+            fromMe,
+          });
+          if (extShield.blocked) {
+            console.log(
+              `[WARMUP] 🛡️ Escudo Externo (${extShield.mode}) interceptou ${extShield.classification} -> CRM/SDR blindados.`
+            );
+            return NextResponse.json({
+              success: true,
+              ignored: true,
+              reason: extShield.reason || "external_warmup_shield",
+              classification: extShield.classification,
+            });
+          }
+        } catch (extErr) {
+          console.error("[WARMUP] Erro no Escudo Externo (fail-open):", extErr);
         }
       }
 
@@ -1418,6 +1448,13 @@ export async function POST(req: NextRequest) {
                       instanceName,
                       phone,
                     })
+                  )
+                  .catch(() => { });
+
+                // Se for chip ADM, auto-cadastra e executa auto-cura (webhook/proxy/MMZap) assim que conecta
+                import("@/lib/warmup/warmup-self-healing")
+                  .then((m) =>
+                    m.runWarmupSelfHealingForTenant(connData.client_id, { force: true })
                   )
                   .catch(() => { });
               }

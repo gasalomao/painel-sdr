@@ -812,6 +812,21 @@ export const evolution = {
     return evoFetch(`/webhook/set/${instance}`, "POST", payload);
   },
 
+  async findWebhook(instance?: string): Promise<{
+    enabled?: boolean;
+    url?: string;
+    events?: string[];
+  } | null> {
+    instance = await resolveInstance(instance).catch(() => "");
+    if (!instance) return null;
+    try {
+      const res = await evoFetch(`/webhook/find/${instance}`, "GET", undefined, 10000);
+      return (res?.webhook || res || null) as { enabled?: boolean; url?: string; events?: string[] } | null;
+    } catch {
+      return null;
+    }
+  },
+
   async findMessages(remoteJid: string, count: number = 20, instance?: string) {
     instance = await resolveInstance(instance);
     return evoFetch(`/chat/findMessages/${instance}`, "POST", {
@@ -1041,6 +1056,131 @@ export const evolution = {
       return true;
     } catch {
       return false;
+    }
+  },
+
+  /**
+   * Cria um grupo interno do WhatsApp via Evolution API v2.
+   * POST /group/create/:instance
+   */
+  async createGroup(params: {
+    subject: string;
+    participants: string[];
+    description?: string;
+    instance?: string;
+  }): Promise<{ success: boolean; groupJid?: string; subject?: string; error?: string }> {
+    const instance = await resolveInstance(params.instance).catch(() => "");
+    if (!instance || !params.subject || !params.participants?.length) {
+      return { success: false, error: "Parâmetros inválidos para criar grupo" };
+    }
+    try {
+      const cleanParticipants = params.participants
+        .map((p) => String(p || "").replace(/@.*$/, "").replace(/\D/g, ""))
+        .filter(Boolean);
+      const res: any = await evoFetch(
+        `/group/create/${instance}`,
+        "POST",
+        {
+          subject: params.subject.slice(0, 60),
+          description: params.description || "",
+          participants: cleanParticipants,
+        },
+        20000
+      );
+      const groupJid = res?.id || res?.groupJid || res?.jid || res?.group?.id || undefined;
+      return { success: Boolean(groupJid), groupJid, subject: res?.subject || params.subject };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.response?.data?.message || err?.message || "Falha ao criar grupo",
+      };
+    }
+  },
+
+  /**
+   * Lista grupos existentes de uma instância na Evolution API v2.
+   * GET /group/fetchAllGroups/:instance?getParticipants=false
+   */
+  async fetchAllGroups(
+    instance?: string,
+    getParticipants = false
+  ): Promise<Array<{ id: string; subject?: string; size?: number; desc?: string; restrict?: boolean; announce?: boolean }>> {
+    const resolved = await resolveInstance(instance).catch(() => "");
+    if (!resolved) return [];
+    try {
+      const res: any = await evoFetch(
+        `/group/fetchAllGroups/${resolved}?getParticipants=${getParticipants ? "true" : "false"}`,
+        "GET",
+        undefined,
+        18000
+      );
+      const list = Array.isArray(res) ? res : Array.isArray(res?.groups) ? res.groups : [];
+      return list
+        .filter((g: any) => Boolean(g?.id))
+        .map((g: any) => ({
+          id: String(g.id),
+          subject: g.subject ? String(g.subject) : undefined,
+          size: typeof g.size === "number" ? g.size : Array.isArray(g.participants) ? g.participants.length : undefined,
+          desc: g.desc ? String(g.desc) : undefined,
+          restrict: typeof g.restrict === "boolean" ? g.restrict : undefined,
+          announce: typeof g.announce === "boolean" ? g.announce : undefined,
+        }));
+    } catch {
+      return [];
+    }
+  },
+
+  /**
+   * Adiciona/remove/promove participantes em um grupo via Evolution API v2.
+   * POST /group/updateParticipant/:instance?groupJid=...
+   */
+  async updateGroupParticipants(params: {
+    groupJid: string;
+    action: "add" | "remove" | "promote" | "demote";
+    participants: string[];
+    instance?: string;
+  }): Promise<{ success: boolean; error?: string }> {
+    const resolved = await resolveInstance(params.instance).catch(() => "");
+    if (!resolved || !params.groupJid || !params.participants?.length) {
+      return { success: false, error: "Parâmetros inválidos" };
+    }
+    try {
+      const clean = params.participants
+        .map((p) => String(p || "").replace(/@.*$/, "").replace(/\D/g, ""))
+        .filter(Boolean);
+      await evoFetch(
+        `/group/updateParticipant/${resolved}?groupJid=${encodeURIComponent(params.groupJid)}`,
+        "POST",
+        { action: params.action, participants: clean },
+        15000
+      );
+      return { success: true };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.response?.data?.message || err?.message || "Falha ao atualizar participantes",
+      };
+    }
+  },
+
+  /**
+   * Busca o código de convite de um grupo criado pela própria instância.
+   * GET /group/inviteCode/:instance?groupJid=...
+   */
+  async getGroupInviteCode(groupJid: string, instance?: string): Promise<string | null> {
+    const resolved = await resolveInstance(instance).catch(() => "");
+    if (!resolved || !groupJid) return null;
+    try {
+      const res: any = await evoFetch(
+        `/group/inviteCode/${resolved}?groupJid=${encodeURIComponent(groupJid)}`,
+        "GET",
+        undefined,
+        12000
+      );
+      const code = res?.inviteCode || res?.code || (typeof res === "string" ? res : null);
+      return code ? String(code).trim() : null;
+    } catch {
+      return null;
     }
   },
 

@@ -12,12 +12,20 @@
 
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { extractDigits, getBrazilPhoneVariants } from "@/lib/jid-utils";
-import type { WarmupConfig, WarmupPurpose, WarmupStage } from "./warmup-types";
+import type {
+  ExternalWarmupMode,
+  WarmupCareerMode,
+  WarmupConfig,
+  WarmupPurpose,
+  WarmupStage,
+} from "./warmup-types";
 import { STAGE_DEFAULTS } from "./warmup-types";
 
 const PHONE_MEMORY_PREFIX = "warmup_phone_memory_";
 const PHONE_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const OFFLINE_SOFT_RECOVERY_THRESHOLD_MS = 48 * 60 * 60 * 1000;
+export const POST_BAN_REHAB_HOURS = 72;
+export const POST_BAN_COLD_LOCK_HOURS = 96;
 
 export interface WarmupPhoneMemoryEntry {
   canonicalPhone: string;
@@ -60,6 +68,17 @@ export interface WarmupPhoneMemoryEntry {
   disconnectCount24h: number;
   flapTimestamps?: number[];
   lastDisconnectReason: string | null;
+  careerMode?: WarmupCareerMode;
+  banCount?: number;
+  lastBanAt?: string | null;
+  lastBanReason?: string | null;
+  rehabUntil?: string | null;
+  coldOutreachLockedUntil?: string | null;
+  externalWarmupMode?: ExternalWarmupMode;
+  externalWarmupInboundTotal?: number;
+  externalWarmupInboundToday?: number;
+  externalWarmupLastAt?: string | null;
+  previousInstances?: string[];
   updatedAt: string;
 }
 
@@ -307,8 +326,84 @@ function buildEntryFromConfig(
     softRecoveryUntil: extra?.softRecoveryUntil !== undefined ? extra.softRecoveryUntil : (prev?.softRecoveryUntil ?? null),
     disconnectCount24h: extra?.disconnectCount24h !== undefined ? extra.disconnectCount24h : (prev?.disconnectCount24h ?? 0),
     lastDisconnectReason: extra?.lastDisconnectReason !== undefined ? extra.lastDisconnectReason : (prev?.lastDisconnectReason ?? null),
+    careerMode: (extra?.careerMode ?? cfg.career_mode ?? prev?.careerMode ?? "maturing") as WarmupCareerMode,
+    banCount: extra?.banCount !== undefined ? extra.banCount : (prev?.banCount ?? 0),
+    lastBanAt: extra?.lastBanAt !== undefined ? extra.lastBanAt : (prev?.lastBanAt ?? null),
+    lastBanReason: extra?.lastBanReason !== undefined ? extra.lastBanReason : (prev?.lastBanReason ?? null),
+    rehabUntil: extra?.rehabUntil !== undefined ? extra.rehabUntil : (cfg.rehab_until ?? prev?.rehabUntil ?? null),
+    coldOutreachLockedUntil:
+      extra?.coldOutreachLockedUntil !== undefined
+        ? extra.coldOutreachLockedUntil
+        : (cfg.cold_outreach_locked_until ?? prev?.coldOutreachLockedUntil ?? null),
+    externalWarmupMode: (
+      extra?.externalWarmupMode ??
+      cfg.external_warmup_mode ??
+      prev?.externalWarmupMode ??
+      "off"
+    ) as ExternalWarmupMode,
+    externalWarmupInboundTotal:
+      extra?.externalWarmupInboundTotal !== undefined
+        ? extra.externalWarmupInboundTotal
+        : Math.max(Number(cfg.external_warmup_inbound_total || 0), Number(prev?.externalWarmupInboundTotal || 0)),
+    externalWarmupInboundToday:
+      extra?.externalWarmupInboundToday !== undefined
+        ? extra.externalWarmupInboundToday
+        : Number(cfg.external_warmup_inbound_today ?? prev?.externalWarmupInboundToday ?? 0),
+    externalWarmupLastAt:
+      extra?.externalWarmupLastAt !== undefined
+        ? extra.externalWarmupLastAt
+        : (cfg.external_warmup_last_at ?? prev?.externalWarmupLastAt ?? null),
+    previousInstances: Array.from(
+      new Set(
+        [
+          ...(prev?.previousInstances || []),
+          prev?.lastInstanceName || "",
+          cfg.instance_name || "",
+        ].filter(Boolean)
+      )
+    ).slice(-15),
     updatedAt: nowIso,
   };
+}
+
+/**
+ * Persiste o passaporte vitalício do número na tabela `whatsapp_phone_passports` (Migration 031).
+ * Falha silenciosamente caso a migration ainda não tenha sido aplicada no banco.
+ */
+export async function syncPhonePassportRow(
+  clientId: string,
+  entry: WarmupPhoneMemoryEntry
+): Promise<void> {
+  if (!clientId || !entry?.canonicalPhone) return;
+  try {
+    await supabaseAdmin
+      .from("whatsapp_phone_passports")
+      .upsert(
+        {
+          client_id: clientId,
+          canonical_phone: entry.canonicalPhone,
+          current_instance_name: entry.lastInstanceName || null,
+          previous_instances: entry.previousInstances || [],
+          stage: entry.stage,
+          days_active: entry.daysActive,
+          health_score: entry.healthScore,
+          career_mode: entry.careerMode || "maturing",
+          ban_count: entry.banCount || 0,
+          last_ban_at: entry.lastBanAt || null,
+          last_ban_reason: entry.lastBanReason || null,
+          rehab_until: entry.rehabUntil || null,
+          cold_outreach_locked_until: entry.coldOutreachLockedUntil || null,
+          external_warmup_mode: entry.externalWarmupMode || "off",
+          external_warmup_inbound_total: entry.externalWarmupInboundTotal || 0,
+          external_warmup_inbound_today: entry.externalWarmupInboundToday || 0,
+          external_warmup_last_at: entry.externalWarmupLastAt || null,
+          updated_at: entry.updatedAt || new Date().toISOString(),
+        },
+        { onConflict: "client_id,canonical_phone" }
+      );
+  } catch {
+    /* fail-open antes da migration 031 */
+  }
 }
 
 export async function savePhoneMemoryFromConfig(
@@ -325,6 +420,7 @@ export async function savePhoneMemoryFromConfig(
     const entry = buildEntryFromConfig(cfg, cfg.phone_number!, prev, extra);
     map[canonical] = entry;
     await writePhoneMemoryMap(clientId, map);
+    await syncPhonePassportRow(clientId, entry);
     return entry;
   });
 }
@@ -343,6 +439,48 @@ export async function findPhoneMemory(
     const varKey = canonicalBrazilPhoneKey(variant);
     if (varKey && map[varKey]) return map[varKey];
     if (map[variant]) return map[variant];
+  }
+
+  // Fallback Passaporte SQL (Migration 031): preserva histórico mesmo se app_settings falhar
+  try {
+    const { data: passportRow } = await supabaseAdmin
+      .from("whatsapp_phone_passports")
+      .select("*")
+      .eq("client_id", clientId)
+      .eq("canonical_phone", canonical)
+      .maybeSingle();
+
+    if (passportRow) {
+      const p = passportRow as Record<string, unknown>;
+      return buildEntryFromConfig(
+        {
+          instance_name: String(p.current_instance_name || ""),
+          phone_number: canonical,
+          stage: (Number(p.stage || 1) as WarmupStage),
+          days_active: Number(p.days_active || 1),
+          health_score: Number(p.health_score ?? 100),
+          career_mode: (p.career_mode as WarmupCareerMode) || "maturing",
+          rehab_until: (p.rehab_until as string | null) ?? null,
+          cold_outreach_locked_until: (p.cold_outreach_locked_until as string | null) ?? null,
+          external_warmup_mode: (p.external_warmup_mode as ExternalWarmupMode) || "off",
+          external_warmup_inbound_today: Number(p.external_warmup_inbound_today || 0),
+          external_warmup_inbound_total: Number(p.external_warmup_inbound_total || 0),
+          external_warmup_last_at: (p.external_warmup_last_at as string | null) ?? null,
+        },
+        phone!,
+        null,
+        {
+          banCount: Number(p.ban_count || 0),
+          lastBanAt: (p.last_ban_at as string | null) ?? null,
+          lastBanReason: (p.last_ban_reason as string | null) ?? null,
+          previousInstances: Array.isArray(p.previous_instances)
+            ? (p.previous_instances as string[])
+            : [],
+        }
+      );
+    }
+  } catch {
+    /* tabela ainda não criada antes da migration 031 */
   }
 
   // Fallback legado: procura diretamente em linhas antigas de whatsapp_warmup_configs
@@ -502,6 +640,11 @@ export function applyPhoneMemoryToNewConfig(
   );
   const softRecoveryActivated = offlineMs >= OFFLINE_SOFT_RECOVERY_THRESHOLD_MS || existingRecoveryActive;
 
+  const rehabActive = Boolean(memory.rehabUntil && new Date(memory.rehabUntil).getTime() > nowMs);
+  const restoredCareerMode: WarmupCareerMode = rehabActive
+    ? "rehab"
+    : ((memory.careerMode || base.career_mode || "maturing") as WarmupCareerMode);
+
   const restored: WarmupConfig = {
     ...base,
     phone_number: extractDigits(base.phone_number || memory.phoneNumber) || memory.phoneNumber,
@@ -509,7 +652,7 @@ export function applyPhoneMemoryToNewConfig(
     stage,
     days_active: Math.max(1, Number(memory.daysActive || 1)),
     consecutive_successful_days: Math.max(0, Number(memory.consecutiveSuccessfulDays || 0)),
-    health_score: Math.max(60, Math.min(100, Number(memory.healthScore || 85))),
+    health_score: Math.max(rehabActive ? 35 : 60, Math.min(100, Number(memory.healthScore || 85))),
     purpose: (memory.purpose || "contingency") as WarmupPurpose,
     daily_target: Number(memory.dailyTarget || stageDefaults.dailyTarget),
     min_interval_seconds: Number(memory.minIntervalSeconds || stageDefaults.minInterval),
@@ -534,6 +677,11 @@ export function applyPhoneMemoryToNewConfig(
     vcard_exchanged_peers: Array.isArray(memory.vcardExchangedPeers) ? memory.vcardExchangedPeers : [],
     last_status_post_at: memory.lastStatusPostAt || null,
     profile_hydrated: Boolean(memory.profileHydrated),
+    career_mode: restoredCareerMode,
+    rehab_until: memory.rehabUntil ?? base.rehab_until ?? null,
+    cold_outreach_locked_until: memory.coldOutreachLockedUntil ?? base.cold_outreach_locked_until ?? null,
+    external_warmup_mode: (memory.externalWarmupMode || base.external_warmup_mode || "off") as ExternalWarmupMode,
+    external_warmup_inbound_total: Number(memory.externalWarmupInboundTotal || 0),
     created_at: memory.firstSeenAt || nowIso,
     updated_at: nowIso,
   };
@@ -650,31 +798,50 @@ export async function reconcileWarmupIdentityByPhone(params: {
       softRecovery = softRecovery || applied.softRecoveryActivated;
 
       try {
-        await supabaseAdmin
+        const restorePayload: Record<string, unknown> = {
+          phone_number: applied.config.phone_number,
+          stage: applied.config.stage,
+          days_active: applied.config.days_active,
+          consecutive_successful_days: applied.config.consecutive_successful_days,
+          health_score: applied.config.health_score,
+          purpose: applied.config.purpose,
+          daily_target: applied.config.daily_target,
+          min_interval_seconds: applied.config.min_interval_seconds,
+          max_interval_seconds: applied.config.max_interval_seconds,
+          ai_model: applied.config.ai_model,
+          ai_theme: applied.config.ai_theme,
+          custom_prompt: applied.config.custom_prompt,
+          allowed_start_hour: applied.config.allowed_start_hour,
+          allowed_end_hour: applied.config.allowed_end_hour,
+          vcard_exchanged_peers: applied.config.vcard_exchanged_peers,
+          last_status_post_at: applied.config.last_status_post_at,
+          profile_hydrated: applied.config.profile_hydrated,
+          career_mode: applied.config.career_mode || "maturing",
+          rehab_until: applied.config.rehab_until ?? null,
+          cold_outreach_locked_until: applied.config.cold_outreach_locked_until ?? null,
+          external_warmup_mode: applied.config.external_warmup_mode || "off",
+          created_at: applied.config.created_at,
+          updated_at: nowIso,
+        };
+        const { error: updErr } = await supabaseAdmin
           .from("whatsapp_warmup_configs")
-          .update({
-            phone_number: applied.config.phone_number,
-            stage: applied.config.stage,
-            days_active: applied.config.days_active,
-            consecutive_successful_days: applied.config.consecutive_successful_days,
-            health_score: applied.config.health_score,
-            purpose: applied.config.purpose,
-            daily_target: applied.config.daily_target,
-            min_interval_seconds: applied.config.min_interval_seconds,
-            max_interval_seconds: applied.config.max_interval_seconds,
-            ai_model: applied.config.ai_model,
-            ai_theme: applied.config.ai_theme,
-            custom_prompt: applied.config.custom_prompt,
-            allowed_start_hour: applied.config.allowed_start_hour,
-            allowed_end_hour: applied.config.allowed_end_hour,
-            vcard_exchanged_peers: applied.config.vcard_exchanged_peers,
-            last_status_post_at: applied.config.last_status_post_at,
-            profile_hydrated: applied.config.profile_hydrated,
-            created_at: applied.config.created_at,
-            updated_at: nowIso,
-          })
+          .update(restorePayload)
           .eq("client_id", clientId)
           .eq("instance_name", instanceName);
+        if (updErr && (String(updErr.code || "") === "42703" || String(updErr.code || "") === "PGRST204")) {
+          const {
+            career_mode: _cm,
+            rehab_until: _ru,
+            cold_outreach_locked_until: _cl,
+            external_warmup_mode: _ew,
+            ...legacyPayload
+          } = restorePayload;
+          await supabaseAdmin
+            .from("whatsapp_warmup_configs")
+            .update(legacyPayload)
+            .eq("client_id", clientId)
+            .eq("instance_name", instanceName);
+        }
         restored = true;
       } catch {
         /* ignore */
@@ -723,6 +890,7 @@ export async function reconcileWarmupIdentityByPhone(params: {
     updatedEntry.lastInstanceName = instanceName;
     map[canonical] = updatedEntry;
     await writePhoneMemoryMap(clientId, map);
+    await syncPhonePassportRow(clientId, updatedEntry);
 
     return {
       restored: restored || (Boolean(previousInstance) && previousInstance !== instanceName),
@@ -731,5 +899,91 @@ export async function reconcileWarmupIdentityByPhone(params: {
       daysActive: updatedEntry.daysActive,
       softRecovery,
     };
+  });
+}
+
+/**
+ * Registra banimento/logout 401/403 no passaporte permanente do telefone:
+ * - Preserva `daysActive` e `stage` acumulados;
+ * - Ativa modo `rehab` por 72h + trava disparo frio por 96h;
+ * - Incrementa `banCount` para memória vitalícia mesmo se a instância for recriada.
+ */
+export async function markPhonePostBanRehab(params: {
+  clientId: string;
+  instanceName: string;
+  phone?: string | null;
+  reason?: string | null;
+  nowMs?: number;
+}): Promise<WarmupPhoneMemoryEntry | null> {
+  const { clientId, instanceName, phone, reason, nowMs = Date.now() } = params;
+  if (!clientId || !instanceName) return null;
+
+  return enqueueTenantMemoryOp(clientId, async () => {
+    const map = await readPhoneMemoryMap(clientId);
+    const canonicalFromPhone = canonicalBrazilPhoneKey(phone);
+    let entry: WarmupPhoneMemoryEntry | null =
+      (canonicalFromPhone && map[canonicalFromPhone]) ||
+      Object.values(map).find((e) => e.lastInstanceName === instanceName) ||
+      null;
+
+    if (!entry && !canonicalFromPhone) {
+      return null;
+    }
+
+    const nowIso = new Date(nowMs).toISOString();
+    const rehabUntil = new Date(nowMs + POST_BAN_REHAB_HOURS * 60 * 60 * 1000).toISOString();
+    const coldLockUntil = new Date(nowMs + POST_BAN_COLD_LOCK_HOURS * 60 * 60 * 1000).toISOString();
+    const cleanReason = reason ? String(reason).slice(0, 200) : "ban_or_401_403";
+
+    if (!entry) {
+      let existingCfg: Partial<WarmupConfig> | null = null;
+      try {
+        const { data: cfgRow } = await supabaseAdmin
+          .from("whatsapp_warmup_configs")
+          .select("*")
+          .eq("client_id", clientId)
+          .eq("instance_name", instanceName)
+          .maybeSingle();
+        if (cfgRow) existingCfg = cfgRow as Partial<WarmupConfig>;
+      } catch { /* ignore */ }
+
+      entry = buildEntryFromConfig(
+        {
+          ...(existingCfg || {}),
+          instance_name: instanceName,
+          phone_number: extractDigits(phone || existingCfg?.phone_number),
+          stage: (existingCfg?.stage || 1) as WarmupStage,
+          days_active: Number(existingCfg?.days_active || 1),
+          health_score: 35,
+          career_mode: "rehab",
+          rehab_until: rehabUntil,
+          cold_outreach_locked_until: coldLockUntil,
+        },
+        phone || canonicalFromPhone
+      );
+    }
+
+    const updated: WarmupPhoneMemoryEntry = {
+      ...entry,
+      lastInstanceName: instanceName,
+      healthScore: Math.min(entry.healthScore ?? 100, 35),
+      consecutiveSuccessfulDays: 0,
+      careerMode: "rehab",
+      banCount: Number(entry.banCount || 0) + 1,
+      lastBanAt: nowIso,
+      lastBanReason: cleanReason,
+      rehabUntil,
+      coldOutreachLockedUntil: coldLockUntil,
+      softRecoveryUntil: rehabUntil,
+      lastDisconnectedAt: nowIso,
+      lastDisconnectReason: cleanReason,
+      previousInstances: Array.from(new Set([...(entry.previousInstances || []), instanceName])).slice(-15),
+      updatedAt: nowIso,
+    };
+
+    map[updated.canonicalPhone] = updated;
+    await writePhoneMemoryMap(clientId, map);
+    await syncPhonePassportRow(clientId, updated);
+    return updated;
   });
 }

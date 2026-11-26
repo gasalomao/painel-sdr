@@ -13,6 +13,8 @@ import { supabaseAdmin } from "@/lib/supabase_admin";
 import {
   PURPOSE_METADATA,
   STAGE_DEFAULTS,
+  type ExternalWarmupMode,
+  type WarmupCareerMode,
   type WarmupConfig,
   type WarmupPurpose,
   type WarmupStage,
@@ -26,6 +28,7 @@ import {
   savePhoneMemoryFromConfig,
 } from "./warmup-phone-memory";
 import { ensureProxyForInstance, getProxyPoolOverviewCache } from "@/lib/proxy-pool";
+import { isTenantWarmupAdmin, listAdminClientIds } from "./warmup-admin-guard";
 
 async function ensureWarmupProxyBestEffort(clientId: string, instanceName: string): Promise<void> {
   try {
@@ -72,7 +75,7 @@ export interface GlobalWarmupSettings {
 }
 
 export const DEFAULT_GLOBAL_WARMUP_SETTINGS: GlobalWarmupSettings = {
-  ai_model: "fallback",
+  ai_model: "auto:free",
   ai_theme: "dia_a_dia",
   allowed_start_hour: 8,
   allowed_end_hour: 21,
@@ -122,6 +125,9 @@ export const WARMUP_EDITABLE_FIELDS = [
   "group_auto_join",
   "swarm_active",
   "max_groups_per_chip",
+  "career_mode",
+  "external_warmup_mode",
+  "internal_groups_enabled",
 ] as const;
 
 type WarmupEditableField = (typeof WARMUP_EDITABLE_FIELDS)[number];
@@ -163,6 +169,20 @@ export function sanitizeWarmupPatch(input: Record<string, unknown>): WarmupConfi
         ) as WarmupPurpose;
         break;
       }
+      case "career_mode": {
+        const value = String(raw ?? "");
+        if (["maturing", "production_light", "maintenance", "rehab"].includes(value)) {
+          patch.career_mode = value as WarmupCareerMode;
+        }
+        break;
+      }
+      case "external_warmup_mode": {
+        const value = String(raw ?? "");
+        if (["off", "receive_only", "hybrid_quarantine"].includes(value)) {
+          patch.external_warmup_mode = value as ExternalWarmupMode;
+        }
+        break;
+      }
       case "daily_target":
         patch.daily_target = clampInt(raw, 1, 200, 10);
         break;
@@ -201,7 +221,7 @@ export function sanitizeWarmupPatch(input: Record<string, unknown>): WarmupConfi
         if (field === "enabled" || field === "stage_auto_progress" || field === "continuous_warmup" ||
           field === "enable_typing" || field === "enable_blue_ticks" || field === "enable_reactions" ||
           field === "enable_audio" || field === "enable_vcard" || field === "enable_status_posts" ||
-          field === "group_auto_join" || field === "swarm_active") {
+          field === "group_auto_join" || field === "swarm_active" || field === "internal_groups_enabled") {
           (patch as Record<string, unknown>)[field] = Boolean(raw);
         }
         break;
@@ -224,9 +244,38 @@ export function sanitizeWarmupPatch(input: Record<string, unknown>): WarmupConfi
 
 function isMissingTableError(error: unknown): boolean {
   const code = String((error as { code?: string } | null)?.code || "");
-  if (["42P01", "PGRST205", "PGRST204"].includes(code)) return true;
+  if (["42P01", "PGRST205"].includes(code)) return true;
   const message = String((error as { message?: string } | null)?.message || "").toLowerCase();
-  return message.includes("does not exist") || message.includes("could not find the table");
+  return (
+    (message.includes("relation") && message.includes("does not exist")) ||
+    message.includes("could not find the table")
+  );
+}
+
+function isMissingColumnError(error: unknown): boolean {
+  const code = String((error as { code?: string } | null)?.code || "");
+  if (["42703", "PGRST204"].includes(code)) return true;
+  const message = String((error as { message?: string } | null)?.message || "").toLowerCase();
+  return message.includes("column") && (message.includes("does not exist") || message.includes("could not find"));
+}
+
+const MIGRATION_031_WARMUP_COLS = new Set([
+  "career_mode",
+  "rehab_until",
+  "cold_outreach_locked_until",
+  "external_warmup_mode",
+  "external_warmup_inbound_today",
+  "external_warmup_inbound_total",
+  "external_warmup_last_at",
+  "internal_groups_enabled",
+]);
+
+function stripMigration031Cols<T extends Record<string, unknown>>(obj: T): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (!MIGRATION_031_WARMUP_COLS.has(k)) out[k] = v;
+  }
+  return out;
 }
 
 async function readSettingsConfigs(clientId: string): Promise<Record<string, WarmupConfig>> {
@@ -478,7 +527,7 @@ export async function saveWarmupConfig(
   const nowIso = new Date().toISOString();
 
   try {
-    const { error } = await supabaseAdmin
+    let { error } = await supabaseAdmin
       .from("whatsapp_warmup_configs")
       .upsert(
         {
@@ -490,6 +539,21 @@ export async function saveWarmupConfig(
         { onConflict: "client_id,instance_name" }
       );
 
+    if (error && isMissingColumnError(error)) {
+      const retryRes = await supabaseAdmin
+        .from("whatsapp_warmup_configs")
+        .upsert(
+          {
+            ...stripMigration031Cols(patch as Record<string, unknown>),
+            client_id: clientId,
+            instance_name: name,
+            updated_at: nowIso,
+          },
+          { onConflict: "client_id,instance_name" }
+        );
+      error = retryRes.error;
+    }
+
     if (!error) {
       const savedCfg = { client_id: clientId, instance_name: name, ...patch } as WarmupConfig;
       try {
@@ -499,8 +563,12 @@ export async function saveWarmupConfig(
           .eq("client_id", clientId)
           .eq("instance_name", name)
           .maybeSingle();
-        if (fullRow && (fullRow as WarmupConfig).phone_number) {
-          await savePhoneMemoryFromConfig(clientId, fullRow as WarmupConfig);
+        const phone = (fullRow as WarmupConfig | null)?.phone_number;
+        if (fullRow && phone) {
+          await savePhoneMemoryFromConfig(
+            clientId,
+            { ...(fullRow as WarmupConfig), ...patch } as WarmupConfig
+          );
         }
       } catch { /* best-effort */ }
       if (patch.enabled === true) {
@@ -629,6 +697,8 @@ function buildNewWarmupConfig(
     enable_vcard: global.enable_vcard,
     enable_status_posts: global.enable_status_posts,
     continuous_warmup: global.continuous_warmup,
+    external_warmup_mode: "receive_only",
+    internal_groups_enabled: true,
     custom_prompt: global.custom_prompt || null,
   };
 }
@@ -647,6 +717,10 @@ export async function ensureWarmupConfigsForTenant(
   source: WarmupConfigSource;
   connections: TenantConnection[];
 }> {
+  if (!(await isTenantWarmupAdmin(clientId))) {
+    return { created: [], enabledNew: [], restored: [], source: "table", connections: [] };
+  }
+
   const connections = opts?.connections ?? (await readTenantConnections(clientId));
   const { source, configs } = await readTenantWarmupConfigs(clientId);
 
@@ -763,6 +837,13 @@ export async function ensureWarmupConfigsForTenant(
  */
 export async function listWarmupTenantIds(): Promise<string[]> {
   const ids = new Set<string>();
+  const { adminIds, hasClientsTable } = await listAdminClientIds();
+
+  if (hasClientsTable) {
+    // Regra absoluta: apenas contas Administradoras ativas aquecem chips;
+    // nenhum número de cliente comum pode entrar na colmeia ou no worker.
+    return Array.from(adminIds);
+  }
 
   try {
     const { data } = await supabaseAdmin.from("whatsapp_warmup_configs").select("client_id");
@@ -793,7 +874,18 @@ export function getEffectiveDailyTarget(config: WarmupConfig): number {
   const stageTarget =
     config.daily_target || STAGE_DEFAULTS[(config.stage || 1) as WarmupStage].dailyTarget;
   const purposeCap = PURPOSE_METADATA[config.purpose || "outbound"]?.dailyCap ?? stageTarget;
-  return Math.max(1, Math.min(stageTarget, purposeCap));
+  const base = Math.max(1, Math.min(stageTarget, purposeCap));
+
+  switch (config.career_mode) {
+    case "rehab":
+      return Math.max(4, Math.floor(base * 0.4));
+    case "production_light":
+      return Math.min(base, 12);
+    case "maintenance":
+      return Math.min(base, 8);
+    default:
+      return base;
+  }
 }
 
 const DAILY_STATE_PREFIX = "warmup_daily_state_";

@@ -1,8 +1,11 @@
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { isClientActiveCached } from "@/lib/saas-limits";
+import { isTenantWarmupAdmin } from "./warmup-admin-guard";
+import { runWarmupSelfHealingForTenant } from "./warmup-self-healing";
 import {
   calculateElapsedDaysFromCreatedAt,
   evaluateDailyAutoProgress,
+  evaluateRehabGraduation,
   executeWarmupTurn,
   getAutoCareerPurpose,
   getBrazilDayKey,
@@ -19,7 +22,12 @@ import {
   pickEffectiveConversationTheme,
 } from "./warmup-dialogues";
 import { STAGE_DEFAULTS, type WarmupConfig, type WarmupConversation, type WarmupStage } from "./warmup-types";
-import { syncGroupMembershipForChips, hydrateChipProfile } from "./warmup-groups";
+import {
+  cleanupDeadWarmupGroups,
+  hydrateChipProfile,
+  runInternalSwarmGroupCycle,
+  syncGroupMembershipForChips,
+} from "./warmup-groups";
 import { ensureProxyForInstance, getProxyPoolOverviewCache } from "@/lib/proxy-pool";
 import {
   ensureWarmupConfigsForTenant,
@@ -126,7 +134,8 @@ export function selectAsymmetricWarmupPairs(
     const healthScore = Math.round((c.health_score ?? 100) * 0.5);
     const inboundSurplus = ((c.received_today || 0) - (c.sent_today || 0)) * 4;
     const purposeBias = c.purpose === "inbound" ? -35 : c.purpose === "outbound" ? 15 : 0;
-    return stageScore + daysScore + healthScore + inboundSurplus + purposeBias;
+    const rehabBias = c.career_mode === "rehab" ? -180 : 0;
+    return stageScore + daysScore + healthScore + inboundSurplus + purposeBias + rehabBias;
   };
 
   const sortedForInitiator = [...idleChips].sort(
@@ -150,8 +159,11 @@ export function selectAsymmetricWarmupPairs(
 
     if (candidates.length === 0) continue;
 
-    // Prefere parceiro que mais precisa de mensagens recebidas (menor fase ou menor received_today)
+    // Prefere parceiro em reabilitação (70%+ inbound) ou que mais precisa de mensagens recebidas
     const partnerSorted = [...candidates].sort((a, b) => {
+      const aRehab = a.career_mode === "rehab" ? 1 : 0;
+      const bRehab = b.career_mode === "rehab" ? 1 : 0;
+      if (bRehab !== aRehab) return bRehab - aRehab;
       const recDiff = (a.received_today || 0) - (b.received_today || 0);
       if (recDiff !== 0) return recDiff;
       return (a.stage || 1) - (b.stage || 1);
@@ -205,7 +217,11 @@ function scheduleGroupSync(clientId: string): void {
 
   _lastGroupSyncAt[clientId] = Date.now();
   _groupSyncInFlight.add(clientId);
-  syncGroupMembershipForChips(clientId)
+  Promise.all([
+    syncGroupMembershipForChips(clientId),
+    cleanupDeadWarmupGroups(clientId),
+    runInternalSwarmGroupCycle(clientId),
+  ])
     .catch(() => {})
     .finally(() => _groupSyncInFlight.delete(clientId));
 }
@@ -324,6 +340,9 @@ export async function tickWarmupWorker(): Promise<{
     const lockOwner = `warmup-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
 
     for (const clientId of tenantIds) {
+      if (!(await isTenantWarmupAdmin(clientId))) {
+        continue;
+      }
       processedTenants++;
 
       // Lock por tenant: evita dois processos enviando no mesmo minuto.
@@ -334,6 +353,9 @@ export async function tickWarmupWorker(): Promise<{
       }
 
       try {
+        // 1.9 Ciclo autônomo de Auto-Cura (throttled 10min): repara webhook, proxy e status preso
+        await runWarmupSelfHealingForTenant(clientId).catch(() => null);
+
         // 2. Cadastro automático de chip conectado + leitura com precedência tabela > settings
         const ensured = await ensureWarmupConfigsForTenant(clientId);
         const connections: TenantConnection[] = ensured.connections;
@@ -514,11 +536,27 @@ export async function tickWarmupWorker(): Promise<{
             cfg.purpose = newPurpose;
           }
 
-          await supabaseAdmin
+          const rehabCheck = evaluateRehabGraduation(cfg, nowIso);
+          if (rehabCheck.graduated) {
+            update.career_mode = rehabCheck.nextCareerMode;
+            update.rehab_until = null;
+            cfg.career_mode = rehabCheck.nextCareerMode;
+            cfg.rehab_until = null;
+          }
+
+          const { error: updErr } = await supabaseAdmin
             .from("whatsapp_warmup_configs")
             .update(update)
             .eq("id", cfg.id)
             .eq("client_id", clientId);
+          if (updErr && "career_mode" in update) {
+            const { career_mode: _c, rehab_until: _r, ...fallbackUpd } = update;
+            await supabaseAdmin
+              .from("whatsapp_warmup_configs")
+              .update(fallbackUpd)
+              .eq("id", cfg.id)
+              .eq("client_id", clientId);
+          }
 
           nextDailyState[cfg.instance_name] = getBrazilDayKey(nowIso);
           dailyStateDirty = true;

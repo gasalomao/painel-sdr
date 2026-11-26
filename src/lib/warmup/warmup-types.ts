@@ -1,5 +1,7 @@
 export type WarmupStage = 1 | 2 | 3 | 4;
 export type WarmupPurpose = "contingency" | "inbound" | "outbound";
+export type WarmupCareerMode = "maturing" | "production_light" | "maintenance" | "rehab";
+export type ExternalWarmupMode = "off" | "receive_only" | "hybrid_quarantine";
 
 export interface WarmupConfig {
   id?: string;
@@ -42,6 +44,14 @@ export interface WarmupConfig {
   enable_vcard: boolean;
   enable_status_posts: boolean;
   continuous_warmup: boolean; // Continua rodando em segundo plano mesmo durante disparos comerciais
+  career_mode?: WarmupCareerMode;
+  rehab_until?: string | null;
+  cold_outreach_locked_until?: string | null;
+  external_warmup_mode?: ExternalWarmupMode;
+  external_warmup_inbound_today?: number;
+  external_warmup_inbound_total?: number;
+  external_warmup_last_at?: string | null;
+  internal_groups_enabled?: boolean;
   custom_prompt?: string | null;
   created_at?: string;
   updated_at?: string;
@@ -55,6 +65,7 @@ export interface WarmupGroup {
   group_jid?: string | null;
   name?: string | null;
   description?: string | null;
+  origin?: "external" | "internal_swarm";
   member_count: number;
   status: "pending" | "active" | "invalid" | "full" | "restricted" | "left";
   last_error?: string | null;

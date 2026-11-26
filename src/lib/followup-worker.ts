@@ -177,6 +177,31 @@ async function clientRespondedSince(remoteJid: string, sinceIso: string, clientI
   return Array.isArray(data) && data.some((row) => isChatRowInbound(row as any));
 }
 
+/**
+ * Detecta se um operador humano assumiu a conversa manualmente no X1 (`sender_type = 'human'`)
+ * após o último disparo de follow-up, evitando envio automático por cima do fechamento humano.
+ */
+export async function hasHumanRepliedSince(
+  remoteJid: string,
+  sinceIso: string,
+  clientId: string
+): Promise<boolean> {
+  const jidVariants = expandBrazilJidVariants(remoteJid);
+  try {
+    const { data } = await supabase
+      .from("chats_dashboard")
+      .select("id, sender_type")
+      .in("remote_jid", jidVariants)
+      .eq("client_id", clientId)
+      .eq("sender_type", "human")
+      .gt("created_at", sinceIso)
+      .limit(1);
+    return Array.isArray(data) && data.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 export async function getConversationHistory(remoteJid: string, clientId: string, limit = 80): Promise<string> {
   // Limit DEFAULT 80 (era 20). Usa variantes BR (8/9 dígitos) para não perder
   // o histórico quando o disparo inicial salvou o JID canônico diferente.
@@ -522,6 +547,22 @@ async function processTarget(
         .eq("client_id", camp.client_id);
       await addFollowupLog(camp.id, camp.client_id, `🎉 ${nomeLead} RESPONDEU ao follow-up — lead movido p/ "interessado" no CRM.`, "success");
       return "responded";
+    }
+
+    const humanTookOver = await hasHumanRepliedSince(target.remote_jid, target.last_sent_at, camp.client_id);
+    if (humanTookOver) {
+      await supabase
+        .from("followup_targets")
+        .update({ status: "cancelled", updated_at: new Date().toISOString() })
+        .eq("id", target.id)
+        .eq("client_id", camp.client_id);
+      await addFollowupLog(
+        camp.id,
+        camp.client_id,
+        `🛑 Operador humano assumiu X1 manualmente com ${nomeLead} — follow-up automático cancelado.`,
+        "info"
+      );
+      return "skipped";
     }
   }
 

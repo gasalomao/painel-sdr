@@ -2351,6 +2351,23 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // Handoff Método Mentor: notifica o dono via WhatsApp e marca aceite de prévia + pausa X1
+    if (!isTestMode && !anySendError && previaSiteRequestedInTurn && clientId && remoteJid) {
+      import("@/lib/mentor-handoff")
+        .then(({ notifyOwnerPreviewAccepted }) =>
+          notifyOwnerPreviewAccepted({
+            clientId,
+            contactId: contactRow?.id ?? null,
+            remoteJid,
+            companyName: leadRow?.nome_negocio ?? contactRow?.nome_negocio ?? contactRow?.push_name ?? null,
+            instanceName,
+            summary: `Prévia aceita durante atendimento (${agentConfig?.name || "Sarah"}).`,
+            sessionId: sessionId ?? null,
+          })
+        )
+        .catch(() => {});
+    }
+
     // Avaliação automática em tempo real (debounce de 45s após a conversa estabilizar)
     if (!isTestMode && !anySendError && clientId && remoteJid && !customGoalAchievedInTurn && !previaSiteRequestedInTurn) {
       scheduleRealtimeLeadEvaluation(clientId, remoteJid);

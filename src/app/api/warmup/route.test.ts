@@ -52,7 +52,7 @@ beforeEach(() => {
   mocks.auth.mockResolvedValue({
     ok: true,
     clientId: "tenant-1",
-    isAdmin: false,
+    isAdmin: true,
     impersonating: false,
     claims: { features: { aquecer_chips: true } },
   });
@@ -77,16 +77,26 @@ beforeEach(() => {
 });
 
 describe("GET /api/warmup", () => {
-  it("bloqueia com 403 quando módulo aquecer_chips não está liberado para o tenant", async () => {
+  it("bloqueia com 403 quando conta não é administradora ou está impersonando cliente", async () => {
     mocks.auth.mockResolvedValueOnce({
       ok: true,
       clientId: "tenant-1",
       isAdmin: false,
       impersonating: false,
-      claims: { features: { aquecer_chips: false } },
+      claims: { features: { aquecer_chips: true } },
     });
     const res = await GET(new NextRequest("http://localhost/api/warmup"));
     expect(res.status).toBe(403);
+
+    mocks.auth.mockResolvedValueOnce({
+      ok: true,
+      clientId: "tenant-1",
+      isAdmin: true,
+      impersonating: true,
+      claims: { features: { aquecer_chips: true } },
+    });
+    const resImp = await GET(new NextRequest("http://localhost/api/warmup"));
+    expect(resImp.status).toBe(403);
   });
 
   it("lista chips do tenant e marca instância órfã da Evolution", async () => {

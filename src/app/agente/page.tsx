@@ -27,6 +27,7 @@ import type { Stage } from "./_components/sortable-stage";
 import { toast } from "sonner";
 
 import { AgentSwitcher } from "./_components/agent-switcher";
+import { SARAH_MENTOR_2STEP_PROMPT } from "@/lib/mentor-presets";
 import { DEFAULT_PREVIEW_SAMPLE, leadToPreviewSample, type PreviewLead, type PreviewSample } from "./_components/lead-selector";
 import dynamic from "next/dynamic";
 import { AjustesTab, type ScheduleRow } from "./_tabs/ajustes-tab";
@@ -1346,6 +1347,12 @@ export default function AgentePage() {
           setActiveAgentId={setActiveAgentId}
           loadAgent={loadAgent}
           clientId={clientId}
+          allInstances={allInstances}
+          onApplyMentorPreset={() => {
+            setPrompt(SARAH_MENTOR_2STEP_PROMPT);
+            setActiveTab("info");
+            toast.success("Prompt oficial Método Mentor (Fase 1) carregado no editor. Clique em Salvar para aplicar.");
+          }}
         />
 
         <div className={cn(styles.content, "max-w-6xl mx-auto px-4 py-6 sm:px-8 sm:py-8 space-y-6")}>

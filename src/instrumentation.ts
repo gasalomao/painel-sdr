@@ -21,6 +21,10 @@ declare global {
   var autonomousSiteWorkerStarted: boolean | undefined;
   var warmupTickerId: NodeJS.Timeout | undefined;
   var warmupTicking: boolean | undefined;
+  var proxyWatchdogTickerId: NodeJS.Timeout | undefined;
+  var proxyWatchdogTicking: boolean | undefined;
+  var previewQueueTickerId: NodeJS.Timeout | undefined;
+  var previewQueueTicking: boolean | undefined;
 }
 
 /**
@@ -481,6 +485,51 @@ export async function register() {
     }
   }, 1000 * 60); // 1 minuto
 
+  // ============================================================
+  // WATCHDOG PREVENTIVO DE PROXIES — A cada 60 minutos
+  // ============================================================
+  if (globalThis.proxyWatchdogTickerId) clearInterval(globalThis.proxyWatchdogTickerId);
+  globalThis.proxyWatchdogTickerId = setInterval(async () => {
+    if (globalThis.proxyWatchdogTicking) return;
+    globalThis.proxyWatchdogTicking = true;
+    try {
+      const { runAssignedProxyHealthWatchdog } = await import("@/lib/proxy-pool");
+      const summary = await runAssignedProxyHealthWatchdog();
+      if (summary.rotated > 0 || summary.fallbackVps > 0) {
+        console.log(
+          `[PROXY WATCHDOG] verificados=${summary.checked} ok=${summary.healthy} rotacionados=${summary.rotated} fallbackVps=${summary.fallbackVps}`
+        );
+      }
+    } catch (e) {
+      console.error("[PROXY WATCHDOG] falhou:", (e as Error).message);
+    } finally {
+      globalThis.proxyWatchdogTicking = false;
+    }
+  }, 60 * 60 * 1000);
+  if (typeof globalThis.proxyWatchdogTickerId.unref === "function") {
+    globalThis.proxyWatchdogTickerId.unref();
+  }
+
+  // ============================================================
+  // FILA DE ENTREGA NATURAL DE PRÉVIAS (MÉTODO MENTOR) — A cada 1 min
+  // ============================================================
+  if (globalThis.previewQueueTickerId) clearInterval(globalThis.previewQueueTickerId);
+  globalThis.previewQueueTickerId = setInterval(async () => {
+    if (globalThis.previewQueueTicking) return;
+    globalThis.previewQueueTicking = true;
+    try {
+      const { tickScheduledPreviewDeliveries } = await import("@/lib/preview-delivery-queue");
+      await tickScheduledPreviewDeliveries();
+    } catch (e) {
+      console.error("[PREVIEW QUEUE] tick falhou:", (e as Error).message);
+    } finally {
+      globalThis.previewQueueTicking = false;
+    }
+  }, 60 * 1000);
+  if (typeof globalThis.previewQueueTickerId.unref === "function") {
+    globalThis.previewQueueTickerId.unref();
+  }
+
   const stopBackgroundWorkers = () => {
     for (const timer of [
       globalThis.organizerWatcherId,
@@ -491,6 +540,8 @@ export async function register() {
       globalThis.appointmentTickerId,
       globalThis.backupTickerId,
       globalThis.warmupTickerId,
+      globalThis.proxyWatchdogTickerId,
+      globalThis.previewQueueTickerId,
     ]) {
       if (timer) clearInterval(timer);
     }

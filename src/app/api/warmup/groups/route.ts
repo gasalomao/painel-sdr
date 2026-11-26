@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireClientId } from "@/lib/tenant";
-import { requireFeatureAccess } from "@/lib/saas-limits";
+import { requireWarmupAdminAccess } from "@/lib/warmup/warmup-admin-guard";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { evolution } from "@/lib/evolution";
 import {
+  cleanupDeadWarmupGroups,
+  discoverExistingGroupsForChip,
   importWarmupGroups,
   isWarmupGroupDead,
+  runInternalSwarmGroupCycle,
   syncGroupMembershipForChips,
 } from "@/lib/warmup/warmup-groups";
 import type { WarmupGroupMember } from "@/lib/warmup/warmup-types";
@@ -19,7 +22,7 @@ export const dynamic = "force-dynamic";
 export async function GET(req: NextRequest) {
   const auth = await requireClientId(req);
   if (!auth.ok) return auth.response;
-  const denied = requireFeatureAccess(auth, "aquecer_chips");
+  const denied = requireWarmupAdminAccess(auth);
   if (denied) return denied;
   const clientId = auth.clientId;
 
@@ -68,7 +71,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const auth = await requireClientId(req);
   if (!auth.ok) return auth.response;
-  const denied = requireFeatureAccess(auth, "aquecer_chips");
+  const denied = requireWarmupAdminAccess(auth);
   if (denied) return denied;
   const clientId = auth.clientId;
 
@@ -81,6 +84,40 @@ export async function POST(req: NextRequest) {
         success: true,
         message: `Sincronização concluída. ${syncRes.joinedCount} conexões realizadas com sucesso.`,
         errors: syncRes.errors,
+      });
+    }
+
+    if (body.action === "discover_existing") {
+      const instanceName = String(body.instance_name || body.preferredInstance || "").trim();
+      if (!instanceName) {
+        return NextResponse.json({ success: false, error: "instance_name é obrigatório." }, { status: 400 });
+      }
+      const res = await discoverExistingGroupsForChip(clientId, instanceName);
+      return NextResponse.json({
+        success: true,
+        discovered: res.discovered,
+        errors: res.errors,
+        message: `${res.discovered} grupo(s) existente(s) importado(s) do chip ${instanceName}.`,
+      });
+    }
+
+    if (body.action === "create_internal_swarm") {
+      const res = await runInternalSwarmGroupCycle(clientId);
+      return NextResponse.json({
+        success: true,
+        created: res.created,
+        posted: res.posted,
+        message: `Grupos internos da colmeia: ${res.created} criado(s), ${res.posted} interação(ões).`,
+      });
+    }
+
+    if (body.action === "cleanup_dead") {
+      const deadHours = Number(body.dead_hours || 120);
+      const res = await cleanupDeadWarmupGroups(clientId, Date.now(), deadHours);
+      return NextResponse.json({
+        success: true,
+        leftGroups: res.leftGroups,
+        message: `${res.leftGroups} grupo(s) inativo(s) removido(s) automaticamente.`,
       });
     }
 
@@ -123,7 +160,7 @@ export async function POST(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
   const auth = await requireClientId(req);
   if (!auth.ok) return auth.response;
-  const denied = requireFeatureAccess(auth, "aquecer_chips");
+  const denied = requireWarmupAdminAccess(auth);
   if (denied) return denied;
   const clientId = auth.clientId;
 

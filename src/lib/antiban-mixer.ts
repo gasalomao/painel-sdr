@@ -12,6 +12,7 @@
  */
 
 import { greetingFor } from "./template-vars";
+import { cleanShortCompanyName } from "./lead-name-hygiene";
 
 /** Histórico recente por escopo (campanha/instância) para não repetir a mesma estrutura seguida. */
 const recentPatternHistory = new Map<string, number[]>();
@@ -127,7 +128,8 @@ export function syncGreetingToCurrentHour(text: string, now: Date = new Date()):
  */
 export function cleanCompanyNameForApproach(rawName: string | null | undefined): string {
   if (!rawName) return "";
-  let name = String(rawName).trim();
+  let name = cleanShortCompanyName(rawName);
+  if (!name) name = String(rawName).trim();
   if (!name) return "";
 
   // 1. Corta slogans/caudas de SEO após separadores comuns (" - ", " | ", " — ", " – ", " • ")

@@ -103,6 +103,8 @@ export async function POST(req: NextRequest) {
       media_caption = null,
       media_file_name = null,
       media_mimetype = null,
+      max_daily_previews = 0,
+      approach_strategy = "mentor_2step",
     } = body;
 
     if (!name || !instance_name || !message_template) {
@@ -186,17 +188,19 @@ export async function POST(req: NextRequest) {
       media_caption: media_caption || null,
       media_file_name: media_file_name || null,
       media_mimetype: media_mimetype || null,
+      max_daily_previews: Math.max(0, Math.floor(Number(max_daily_previews) || 0)),
+      approach_strategy: String(approach_strategy || "mentor_2step"),
       status: "draft",
     };
     if (ai_model) insertPayload.ai_model = ai_model;
 
     let { data: camp, error: cErr } = await supabase.from("campaigns").insert(insertPayload).select().single();
-    // Se a coluna ai_model ainda não existe, tenta sem ela
-    if (cErr && (cErr as any).code === "PGRST204" && "ai_model" in insertPayload) {
+    if (cErr && ((cErr as any).code === "PGRST204" || (cErr as any).code === "42703")) {
       delete insertPayload.ai_model;
+      delete insertPayload.max_daily_previews;
+      delete insertPayload.approach_strategy;
       const retry = await supabase.from("campaigns").insert(insertPayload).select().single();
       camp = retry.data as any; cErr = retry.error as any;
-      console.warn("[campaigns] coluna ai_model não existe. Rode criar_campaign_logs.sql pra habilitar escolha de modelo por campanha.");
     }
     if (cErr || !camp) {
       console.error("[campaigns/POST] Erro ao criar:", cErr?.message);
@@ -208,7 +212,10 @@ export async function POST(req: NextRequest) {
         .from("app_settings")
         .upsert([
           { key: `campaign_antiban:${camp.id}`, value: String(Boolean(antiban_mixer)) },
-          { key: `campaign_weekend_guard:${camp.id}`, value: String(Boolean(weekend_guard)) },
+          {
+            key: `campaign_weekend_guard:${camp.id}`,
+            value: weekend_guard === "sunday_only" ? "sunday_only" : String(Boolean(weekend_guard)),
+          },
           { key: `campaign_cold_shield:${camp.id}`, value: String(cold_shield !== false) },
         ], { onConflict: "key" });
     } catch {}

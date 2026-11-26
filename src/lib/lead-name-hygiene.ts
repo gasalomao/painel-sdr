@@ -337,9 +337,9 @@ export function cleanShortCompanyName(
     core = withoutSeoPrefix;
   }
 
-  // Remove sufixos societários comuns em razão social (LTDA, EIRELI, EPP, MEI, S/A, ME no fim)
+  // Remove sufixos societários comuns em razão social (LTDA, EIRELI, EPP, MEI, S/A, S.A., ME no fim)
   core = core
-    .replace(/\b(?:LTDA\.?|EIRELI|MEI|EPP|S\.?\/?A\.?|S\.A\.|COM[ÉE]RCIO(?:\s+DE)?|SERVI[ÇC]OS(?:\s+DE)?)\b/gi, "")
+    .replace(/(?:^|\s)(?:LTDA\.?|EIRELI|MEI|EPP|S\/A|S\.A\.|COM[ÉE]RCIO(?:\s+DE)?|SERVI[ÇC]OS(?:\s+DE)?)(?=$|[\s,.\-])/gi, " ")
     .replace(/\bME\s*$/i, "")
     .replace(/\s+(?:II|III|IV|ll)$/i, "")
     .replace(/\s+/g, " ")

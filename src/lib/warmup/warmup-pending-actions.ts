@@ -30,6 +30,7 @@ export interface PendingWarmupAction {
   messageId: string;
   delayMs: number;
   emoji?: string;
+  participant?: string;
 }
 
 const _tenantPendingQueues = new Map<string, Promise<unknown>>();
@@ -146,7 +147,8 @@ async function executeSinglePendingAction(clientId: string, item: PendingWarmupA
         item.messageId,
         item.emoji,
         item.actorInstance,
-        false
+        false,
+        item.participant
       )) as { key?: { id?: string }; id?: string; data?: { key?: { id?: string } } } | null;
       registerWarmupSend(reactRes?.key?.id || reactRes?.data?.key?.id || reactRes?.id);
       await logWarmupAction({

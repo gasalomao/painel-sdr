@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireClientId } from "@/lib/tenant";
-import { requireFeatureAccess } from "@/lib/saas-limits";
+import { requireWarmupAdminAccess } from "@/lib/warmup/warmup-admin-guard";
 import { supabaseAdmin } from "@/lib/supabase_admin";
 import { evolution } from "@/lib/evolution";
 import { isChatRowInbound, isChatRowOutbound } from "@/lib/chat-direction";
@@ -12,8 +12,10 @@ import {
   type ProxyIpIntel,
 } from "@/lib/warmup/warmup-groups";
 import {
+  canonicalBrazilPhoneKey,
   mapWithConcurrency,
   readPhoneMemoryMap,
+  type WarmupPhoneMemoryEntry,
 } from "@/lib/warmup/warmup-phone-memory";
 import { getProxyPoolOverviewCache } from "@/lib/proxy-pool";
 import {
@@ -22,6 +24,10 @@ import {
   type WarmupLog,
   type WarmupStage,
 } from "@/lib/warmup/warmup-types";
+import {
+  readSelfHealingLog,
+  runWarmupSelfHealingForTenant,
+} from "@/lib/warmup/warmup-self-healing";
 import {
   ensureWarmupConfigsForTenant,
   getGlobalWarmupSettings,
@@ -91,7 +97,7 @@ async function getChipDeliveryMetricsMap(clientId: string): Promise<Map<string, 
         failed: acc.failed,
       });
     }
-  } catch {}
+  } catch { }
   return result;
 }
 
@@ -110,7 +116,7 @@ async function getLogsFromDbOrSettings(clientId: string, limit = 40): Promise<Wa
     if (!error && Array.isArray(data)) {
       return data;
     }
-  } catch {}
+  } catch { }
 
   try {
     const { data } = await supabaseAdmin
@@ -123,7 +129,7 @@ async function getLogsFromDbOrSettings(clientId: string, limit = 40): Promise<Wa
       const parsed = JSON.parse(data.value);
       return Array.isArray(parsed) ? parsed.slice(0, limit) : [];
     }
-  } catch {}
+  } catch { }
 
   return [];
 }
@@ -185,13 +191,21 @@ function buildDisplayConfig(params: {
     group_auto_join: existing?.group_auto_join ?? true,
     swarm_active: existing?.swarm_active ?? true,
     max_groups_per_chip: existing?.max_groups_per_chip ?? 10,
+    career_mode: existing?.career_mode || "maturing",
+    rehab_until: existing?.rehab_until || null,
+    cold_outreach_locked_until: existing?.cold_outreach_locked_until || null,
+    external_warmup_mode: existing?.external_warmup_mode || "off",
+    external_warmup_inbound_today: existing?.external_warmup_inbound_today ?? 0,
+    external_warmup_inbound_total: existing?.external_warmup_inbound_total ?? 0,
+    external_warmup_last_at: existing?.external_warmup_last_at || null,
+    internal_groups_enabled: existing?.internal_groups_enabled ?? true,
   };
 }
 
 export async function GET(req: NextRequest) {
   const auth = await requireClientId(req);
   if (!auth.ok) return auth.response;
-  const denied = requireFeatureAccess(auth, "aquecer_chips");
+  const denied = requireWarmupAdminAccess(auth);
   if (denied) return denied;
 
   const clientId = auth.clientId;
@@ -243,7 +257,7 @@ export async function GET(req: NextRequest) {
         }
         if (!knownNames.has(name)) orphanNames.add(name);
       }
-    } catch {}
+    } catch { }
 
     const proxyByInstance = new Map<
       string,
@@ -261,7 +275,7 @@ export async function GET(req: NextRequest) {
               protocol: p.protocol ? String(p.protocol) : "http",
             });
           }
-        } catch {}
+        } catch { }
       });
     }
 
@@ -307,7 +321,7 @@ export async function GET(req: NextRequest) {
           .update({ status: "open" })
           .eq("client_id", clientId)
           .eq("instance_name", connection.instance_name)
-          .then(() => {}, () => {});
+          .then(() => { }, () => { });
       }
 
       const config = buildDisplayConfig({
@@ -327,10 +341,37 @@ export async function GET(req: NextRequest) {
           ? "warning"
           : "ok";
 
+      const memKey = canonicalBrazilPhoneKey(config.phone_number);
+      const typedPhoneMemory = phoneMemoryMap as Record<string, WarmupPhoneMemoryEntry>;
+      const passportEntry =
+        (memKey && typedPhoneMemory[memKey]) ||
+        Object.values(typedPhoneMemory).find((e) => e.lastInstanceName === connection.instance_name) ||
+        null;
+
+      const mergedConfig: WarmupConfig = {
+        ...config,
+        career_mode: config.career_mode !== "maturing" ? config.career_mode : (passportEntry?.careerMode || config.career_mode),
+        rehab_until: config.rehab_until ?? passportEntry?.rehabUntil ?? null,
+        cold_outreach_locked_until:
+          config.cold_outreach_locked_until ?? passportEntry?.coldOutreachLockedUntil ?? null,
+        external_warmup_mode:
+          config.external_warmup_mode !== "off"
+            ? config.external_warmup_mode
+            : (passportEntry?.externalWarmupMode || config.external_warmup_mode),
+        external_warmup_inbound_today: Math.max(
+          config.external_warmup_inbound_today || 0,
+          passportEntry?.externalWarmupInboundToday || 0
+        ),
+        external_warmup_inbound_total: Math.max(
+          config.external_warmup_inbound_total || 0,
+          passportEntry?.externalWarmupInboundTotal || 0
+        ),
+      };
+
       const netHealth = analyzeChipClusterHealth({
         clientId,
         instanceName: connection.instance_name,
-        config,
+        config: mergedConfig,
         proxyByInstance,
         proxyIntelByHost,
         managedBrPoolHosts: poolOverview.brHosts,
@@ -341,9 +382,17 @@ export async function GET(req: NextRequest) {
       return {
         instance_name: connection.instance_name,
         connection_status: effectiveConnStatus,
-        phone_number: config.phone_number,
+        phone_number: mergedConfig.phone_number,
         orphan: false,
-        config,
+        config: mergedConfig,
+        passport: passportEntry
+          ? {
+            ban_count: passportEntry.banCount || 0,
+            last_ban_at: passportEntry.lastBanAt || null,
+            last_ban_reason: passportEntry.lastBanReason || null,
+            previous_instances: passportEntry.previousInstances || [],
+          }
+          : null,
         day0_warnings: day0Warnings,
         day0_status: day0Status,
         network_warnings: netHealth.warnings,
@@ -367,6 +416,7 @@ export async function GET(req: NextRequest) {
         connection_status: "orphan",
         phone_number: phoneByInstance.get(orphanName) || null,
         orphan: true,
+        passport: null,
         config: buildDisplayConfig({
           clientId,
           instanceName: orphanName,
@@ -399,7 +449,9 @@ export async function GET(req: NextRequest) {
         .select("id", { count: "exact", head: true })
         .eq("client_id", clientId);
       totalGroups = count || 0;
-    } catch {}
+    } catch { }
+
+    const selfHealingLog = await readSelfHealingLog(clientId).catch(() => []);
 
     return NextResponse.json({
       success: true,
@@ -407,6 +459,7 @@ export async function GET(req: NextRequest) {
         instances: instancesList,
         global_settings: globalSettings,
         logs,
+        self_healing_log: selfHealingLog,
         stats: {
           totalChips,
           activeWarmup,
@@ -415,6 +468,10 @@ export async function GET(req: NextRequest) {
           totalSentToday,
           totalReceivedToday,
           totalGroups,
+          mmzapInboundToday: warmable.reduce(
+            (acc, i) => acc + (i.config.external_warmup_inbound_today || 0),
+            0
+          ),
         },
       },
     });
@@ -451,7 +508,7 @@ async function saveSingleConfig(
 export async function POST(req: NextRequest) {
   const auth = await requireClientId(req);
   if (!auth.ok) return auth.response;
-  const denied = requireFeatureAccess(auth, "aquecer_chips");
+  const denied = requireWarmupAdminAccess(auth);
   if (denied) return denied;
 
   const clientId = auth.clientId;
@@ -464,6 +521,17 @@ export async function POST(req: NextRequest) {
       const enabled = body.action === "enable_all";
       const result = await setWarmupEnabledForAll(clientId, enabled);
       return NextResponse.json({ success: true, enabled, updated: result.updated });
+    }
+
+    // Diagnóstico + Auto-Cura autônoma sob demanda
+    if (body.action === "run_self_healing") {
+      const report = await runWarmupSelfHealingForTenant(clientId, { force: true });
+      const selfHealingLog = await readSelfHealingLog(clientId);
+      return NextResponse.json({
+        success: true,
+        report,
+        self_healing_log: selfHealingLog,
+      });
     }
 
     // Reauditoria Dia-0 sob demanda (limpa alertas assim que foto/proxy estiverem OK)
@@ -517,7 +585,7 @@ export async function POST(req: NextRequest) {
 export async function PUT(req: NextRequest) {
   const auth = await requireClientId(req);
   if (!auth.ok) return auth.response;
-  const denied = requireFeatureAccess(auth, "aquecer_chips");
+  const denied = requireWarmupAdminAccess(auth);
   if (denied) return denied;
 
   try {
@@ -531,7 +599,7 @@ export async function PUT(req: NextRequest) {
 export async function PATCH(req: NextRequest) {
   const auth = await requireClientId(req);
   if (!auth.ok) return auth.response;
-  const denied = requireFeatureAccess(auth, "aquecer_chips");
+  const denied = requireWarmupAdminAccess(auth);
   if (denied) return denied;
 
   const clientId = auth.clientId;
