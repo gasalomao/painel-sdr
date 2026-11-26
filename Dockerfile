@@ -99,7 +99,19 @@ RUN mkdir -p /app/.whisper/bin && \
     chown -R nextjs:nodejs /app/.whisper
 
 # OpenCode CLI + Impeccable (geração autônoma de sites com todas as 253 skills):
-RUN npm install -g @opencode/cli && \
+# Instala diretamente o binário Linux x64 de @opencode/cli@2.4.1 em /usr/local/bin/opencode
+# (evita bug do postinstall.mjs do pacote global @opencode/cli@2.4.2 com npm_config_global).
+RUN rm -rf /tmp/oc && mkdir -p /tmp/oc && \
+    (curl -fsSL "https://registry.npmjs.org/@opencode/cli-linux-x64/-/cli-linux-x64-2.4.1.tgz" \
+      | tar -xz -C /tmp/oc && \
+      install -m 755 /tmp/oc/package/bin/opencode /usr/local/bin/opencode && \
+      /usr/local/bin/opencode --version || \
+     (rm -rf /tmp/oc/* && \
+      curl -fsSL "https://registry.npmjs.org/@opencode/cli-linux-x64-baseline/-/cli-linux-x64-baseline-2.4.1.tgz" \
+      | tar -xz -C /tmp/oc && \
+      install -m 755 /tmp/oc/package/bin/opencode /usr/local/bin/opencode && \
+      /usr/local/bin/opencode --version)) && \
+    rm -rf /tmp/oc && \
     mkdir -p /home/nextjs/.config/opencode /root/.config/opencode /app/.opencode
 
 # Copia todo o ecossistema de skills e configurações do OpenCode
